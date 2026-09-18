@@ -659,21 +659,19 @@ the dev box.
 | 1 | **Single tenant — Gruntech only.** G-Core Gruntech serves `gruntech.gcore.tech`. It does not share a deployment or a database with `gasiontech.gcore.tech`, which continues to run as it does today. Company name, logo, address, TIN and numbering prefix still live in **Settings as data**, because the DOCX requires configurable PDF branding — that is a stated requirement, not tenancy work. | 2026-09-19 |
 | 2 | **G-FIN is operations-driven finance only** — AR, AP, Expenses, Payments, Cash Flow, Budget vs Actual, Executive Dashboard. GL, chart of accounts, bank reconciliation, payroll, fixed assets and tax filing are out of scope (§4.6). | 2026-09-19 |
 | 3 | **Billing: VAT 12% + EWT 2% only.** Rates configurable in Settings. Downpayment recoupment and retention are deferred, with the schema shape reserved so either can be switched on later without migrating historical billings (§5.4). | 2026-09-19 |
+| 4 | **Master data starts clean.** No migration from the gasiontech apps. Customers, suppliers, employees and items are entered as work comes in. Phase 2 still ships a **CSV import** for each master, so a bulk load stays possible without a second project. | 2026-09-19 |
 
 ## 14. Still open
 
 Neither blocks the start of the build.
 
-1. **Data migration** — does Gruntech start clean, or do existing customers,
-   projects, inventory and employee records come across from the current apps?
-   Affects Phase 2. Assumed for now: **start clean**, with a CSV import path for
-   customers, suppliers, employees and items.
+1. **Retention / downpayment** — revisit before Phase 4 ships (§5.4). Worth asking
+   whoever handles Gruntech's collections whether customers withhold a percentage
+   of each progress billing until final acceptance; it is cheap to add now and
+   expensive to add later.
 2. **Attendance hardware** — which biometric device is the fallback when face
    recognition fails, and does it push to the app or does the app poll it? Affects
    Phase 6 only.
-3. **Retention / downpayment** — revisit before Phase 4 ships (§5.4). Worth asking
-   whoever handles Gruntech's collections whether customers withhold retention; it is
-   cheap to add now and expensive to add later.
 
 ---
 

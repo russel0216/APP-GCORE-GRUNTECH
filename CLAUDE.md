@@ -82,6 +82,8 @@ exist — those belong to the customer once set.
   `ProgressBilling` so either can be switched on without migrating history.
 - **EWT is withheld at source.** Invoiced ≠ collectible. A/R aging must never
   report withheld EWT as overdue.
+- **Master data starts clean** — nothing migrates from the gasiontech apps.
+  Phase 2 still ships a CSV import per master so a bulk load stays possible.
 
 ## Deployment — the hard constraint
 
