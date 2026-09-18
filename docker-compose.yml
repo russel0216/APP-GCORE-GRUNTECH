@@ -1,0 +1,26 @@
+# Local PostgreSQL for G-Core development.
+#
+# The production server is SHARED with a safety-critical system — see
+# docs/BUSINESS-OPERATIONS-MODEL.md §12. This compose file is for THIS LAPTOP
+# only and must never be run on that server.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: gcore-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gcore
+      POSTGRES_PASSWORD: gcore
+      POSTGRES_DB: gcore
+    ports:
+      - "5433:5432"   # 5433 on the host so we never collide with an existing local Postgres
+    volumes:
+      - gcore-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gcore -d gcore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gcore-pgdata:

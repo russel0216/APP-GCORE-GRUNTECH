@@ -1,0 +1,157 @@
+# G-CORE — Gruntechnology Corp
+
+Integrated business operations platform for `gruntech.gcore.tech`.
+
+One codebase, one database, one API. Not four apps behind a launcher — that is
+the architecture this replaces.
+
+- **[docs/BUSINESS-OPERATIONS-MODEL.md](docs/BUSINESS-OPERATIONS-MODEL.md)** — the
+  operating model. Read this first; it is the specification.
+- **[docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md)** — what the source documents got
+  right, missed, or got wrong.
+
+## What is built
+
+**Phase 1 — Foundation.** Everything else depends on it, and every defect in the
+previous implementation traces back to its absence.
+
+| Capability | Where |
+|---|---|
+| Authentication (JWT) | `api/src/auth`, `web/src/pages/Login.tsx` |
+| Users, supervisors, departments | `/admin/users` |
+| Roles + granular permissions + per-person overrides | `/admin/roles` |
+| Company settings (drives every PDF) | `/admin/company` |
+| Document numbering, 22 document types | `/admin/numbering` |
+| Approval engine, one for every document type | `/admin/workflows` |
+| Audit log | `/admin/audit` |
+| Notification centre with deep links | bell in the top bar |
+| Global search / command palette | Ctrl+K |
+| Shared list pattern | `web/src/components/DataList.tsx` |
+| PDF document engine | `api/src/shared/pdf.ts`, specimen at `/admin/company` |
+| Attachments | `api/src/shared/attachments.ts` |
+| My Work | `/` and `/my-work` |
+
+Screens from Phases 2–9 appear in the menu marked with their phase. Their
+**access and numbering are already configurable**, so the surrounding
+configuration is in place before the screen arrives.
+
+## Running it locally
+
+Needs Node 22+ and Docker Desktop.
+
+```bash
+docker compose up -d
+```
+
+```bash
+cd api && cp .env.example .env && npm install && npm run setup && npm run dev
+```
+
+```bash
+cd web && npm install && npm run dev
+```
+
+Then open http://localhost:5173.
+
+| | |
+|---|---|
+| Web (dev) | http://localhost:5173 |
+| API | http://localhost:5100 |
+| Health | http://localhost:5100/api/health |
+| Postgres | localhost:**5433** (5433, not 5432, so it cannot collide with an existing local Postgres) |
+
+First sign-in: `admin@gruntech.com` / `ChangeMe!2026` — **change it immediately**
+under Account. Override the defaults with `SEED_ADMIN_EMAIL` and
+`SEED_ADMIN_PASSWORD` before running the seed if you prefer.
+
+### Verifying the foundation
+
+Phase 1 ships services rather than screens — the approval engine, numbering,
+permission resolution, the PDF engine. Those are exercised by *modules*, which
+do not exist yet, so there is no click-path that proves they work. This script
+drives them the way a Phase 3 module will:
+
+```bash
+cd api && npx tsx scripts/verify-foundation.ts
+```
+
+40 assertions: role inheritance and per-person overrides, record ownership,
+menu derivation, numbering under concurrency, approval routing and notification,
+segregation of duties, the overtime two-step rule, amount bands, the audit trail
+and PDF pagination. It creates its own users and cleans up after itself.
+
+### Useful commands
+
+```bash
+cd api && npm run seed
+```
+
+```bash
+cd api && npx prisma studio
+```
+
+```bash
+cd api && npx prisma db push
+```
+
+## Layout
+
+```
+api/
+  prisma/schema.prisma      one schema for the whole business
+  prisma/seed.ts            permissions, roles, workflows, numbering, admin
+  src/permissions/          the registry — source of truth for access AND the menu
+  src/shared/               approvals, numbering, audit, notifications,
+                            attachments, search, pdf  ← reused by every module
+  src/routes/
+web/
+  src/components/DataList.tsx   the one list pattern every screen uses
+  src/components/Shell.tsx      top bar, sidebar, notifications, Ctrl+K
+  src/pages/
+docs/
+```
+
+### The two files to understand first
+
+**`api/src/permissions/registry.ts`** declares every module, screen and action in
+G-Core. It generates the `Permission` rows *and* the navigation menu, so a screen
+cannot appear without the access to open it, or vanish while the access still
+exists. Adding a screen in a later phase means adding an entry here.
+
+**`api/src/shared/approvals.ts`** routes every document type — leave, overtime,
+purchase requests, budget requests, quotations, POs, invoices, expenses. A module
+calls `submitForApproval(...)` and subscribes with `onApprovalSettled(...)`. It
+never implements routing, notification or history itself.
+
+## Security notes
+
+- A requester can never approve their own document — enforced in the engine, for
+  super admins too.
+- Permission checks are server-side. The front end only decides what to render.
+- A per-person `DENY` beats any grant from a role.
+- Password hashes and cost rates are stripped before anything reaches the audit
+  log or an API response (`api/src/shared/audit.ts`).
+
+`npm audit` reports a high-severity advisory in `deepmerge-ts`, reached through
+the Prisma **CLI**'s config loader. It is a dev-time toolchain dependency that
+only ever parses our own schema; it is not in the server's runtime path. Prisma 7
+drops it but pulls in an unused `mysql2` advisory instead, so the tree is pinned
+to Prisma 6.19.3 for now.
+
+## Deploying — read before writing any script
+
+The production server is **shared with a safety-critical system**
+(`gasion-vision`, live hospital oxygen-plant monitoring). Careless restarts have
+taken it down three times. See
+[docs/BUSINESS-OPERATIONS-MODEL.md §12](docs/BUSINESS-OPERATIONS-MODEL.md).
+
+- **Never** kill Node by image name (`taskkill /F /IM node.exe`,
+  `Get-Process node | Stop-Process`). Restart by PID, by port, or via this app's
+  own service entry.
+- **Never** stop or reconfigure the `Cloudflared` Windows service — it belongs to
+  the other system.
+- **Never** run `pm2 kill` / `pm2 delete all` / `pm2 startup` on that host.
+- G-Core gets its own port, own tunnel and own process entry.
+
+In production the API also serves `web/dist`, so there is one origin and one
+tunnel: build the web app, then start the API.

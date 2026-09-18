@@ -1,0 +1,370 @@
+// G-CORE — Phase 1 (Foundation) schema.
+//
+// One database, one schema. Divisions are modules in this schema, never
+// separate databases — see docs/BUSINESS-OPERATIONS-MODEL.md §10.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  IDENTITY & ACCESS
+// ════════════════════════════════════════════════════════════════════
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  employeeNo   String?   @unique
+  passwordHash String
+  position     String?
+  isActive     Boolean   @default(true)
+  isSuperAdmin Boolean   @default(false)
+
+  // Approval routing: "approvers are to whom they are directly reporting".
+  supervisorId String?
+  supervisor   User?     @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
+  reports      User[]    @relation("Supervision")
+
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  roles       UserRole[]
+  overrides   UserPermissionOverride[]
+
+  notifications  Notification[]
+  savedFilters   SavedFilter[]
+  attachments    Attachment[]
+  auditLogs      AuditLog[]
+  approvalsRaised ApprovalRequest[] @relation("Requester")
+  approvalActions ApprovalAction[]
+  workflowStepsTargeting ApprovalStep[] @relation("StepUser")
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([isActive])
+  @@index([supervisorId])
+}
+
+model Department {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model Role {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  name        String
+  description String?
+  // System roles cannot be deleted, but their permissions remain editable —
+  // "Roles should be customizable" (requirements §14).
+  isSystem    Boolean @default(false)
+
+  permissions RolePermission[]
+  users       UserRole[]
+  workflowStepsTargeting ApprovalStep[] @relation("StepRole")
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// One row per `module.submodule.action` triple. Seeded from
+/// src/permissions/registry.ts — the registry is the source of truth.
+model Permission {
+  id        String @id @default(cuid())
+  key       String @unique
+  module    String
+  submodule String
+  action    String
+  label     String
+
+  roles     RolePermission[]
+  overrides UserPermissionOverride[]
+
+  @@index([module, submodule])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+enum OverrideEffect {
+  ALLOW
+  DENY
+}
+
+/// Per-user grant or revoke on top of their roles. This is what makes
+/// "I can customize what they can access ... until the menu of this access"
+/// work without inventing a role per person. DENY always wins.
+model UserPermissionOverride {
+  userId       String
+  permissionId String
+  effect       OverrideEffect
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  COMPANY & CONFIGURATION
+// ════════════════════════════════════════════════════════════════════
+
+/// Single row. Drives every PDF header — "Settings for PDF Details
+/// (Company Details, Logo to be used)".
+model Company {
+  id           String  @id @default("company")
+  name         String
+  legalName    String?
+  address      String?
+  city         String?
+  country      String  @default("Philippines")
+  tin          String?
+  phone        String?
+  email        String?
+  website      String?
+  logoPath     String?
+  currency     String  @default("PHP")
+
+  /// Tax rates are configuration, not constants — rates change, and some
+  /// customers withhold differently (model §5.4).
+  vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
+  ewtRate      Decimal @default(0.02) @db.Decimal(6, 4)
+
+  /// Prefixes every document number, e.g. GT-QT-2026-0001.
+  numberPrefix String  @default("GT")
+
+  updatedAt    DateTime @updatedAt
+}
+
+/// Free-form keyed configuration. Anything that must be changeable without a
+/// deploy and does not deserve its own column.
+model Setting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedAt   DateTime @updatedAt
+}
+
+enum SequencePeriod {
+  YEAR
+  NONE
+}
+
+/// Configurable document numbering (model §7).
+model NumberSequence {
+  id           String         @id @default(cuid())
+  documentType String
+  label        String
+  pattern      String         @default("{PREFIX}-{TYPE}-{YYYY}-{SEQ}")
+  typeCode     String
+  period       SequencePeriod @default(YEAR)
+  periodKey    String         @default("")
+  padding      Int            @default(4)
+  lastNumber   Int            @default(0)
+  updatedAt    DateTime       @updatedAt
+
+  @@unique([documentType, periodKey])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  APPROVAL ENGINE  (one engine for every document type — model §6.1)
+// ════════════════════════════════════════════════════════════════════
+
+enum ApproverType {
+  ROLE
+  USER
+  SUPERVISOR
+  HR
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum ApprovalActionType {
+  APPROVED
+  REJECTED
+  RETURNED
+}
+
+model ApprovalWorkflow {
+  id           String  @id @default(cuid())
+  documentType String
+  name         String
+  isActive     Boolean @default(true)
+
+  /// Amount band this workflow applies to. Null = unbounded. This is how
+  /// "approval thresholds should be configurable in Settings" is expressed.
+  minAmount    Decimal? @db.Decimal(18, 2)
+  maxAmount    Decimal? @db.Decimal(18, 2)
+
+  steps    ApprovalStep[]
+  requests ApprovalRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([documentType, isActive])
+}
+
+model ApprovalStep {
+  id           String       @id @default(cuid())
+  workflowId   String
+  workflow     ApprovalWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  sequence     Int
+  name         String
+  approverType ApproverType
+
+  roleId String?
+  role   Role?   @relation("StepRole", fields: [roleId], references: [id], onDelete: SetNull)
+  userId String?
+  user   User?   @relation("StepUser", fields: [userId], references: [id], onDelete: SetNull)
+
+  actions ApprovalAction[]
+
+  @@unique([workflowId, sequence])
+}
+
+model ApprovalRequest {
+  id             String         @id @default(cuid())
+  documentType   String
+  documentId     String
+  documentNumber String?
+  subject        String
+  amount         Decimal?       @db.Decimal(18, 2)
+
+  /// Deep link to the actual record — notifications must not land on a list
+  /// screen (model §8).
+  link           String?
+
+  requesterId String
+  requester   User   @relation("Requester", fields: [requesterId], references: [id], onDelete: Cascade)
+
+  workflowId String?
+  workflow   ApprovalWorkflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+
+  currentSequence Int            @default(1)
+  status          ApprovalStatus @default(PENDING)
+
+  actions   ApprovalAction[]
+  createdAt DateTime @default(now())
+  closedAt  DateTime?
+
+  @@index([documentType, documentId])
+  @@index([status])
+  @@index([requesterId])
+}
+
+model ApprovalAction {
+  id         String             @id @default(cuid())
+  requestId  String
+  request    ApprovalRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  stepId     String?
+  step       ApprovalStep?      @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  sequence   Int
+  approverId String
+  approver   User               @relation(fields: [approverId], references: [id], onDelete: Cascade)
+  action     ApprovalActionType
+  comment    String?
+  actedAt    DateTime           @default(now())
+
+  @@index([requestId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  CROSS-CUTTING SERVICES
+// ════════════════════════════════════════════════════════════════════
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String?
+  link      String?
+  isRead    Boolean  @default(false)
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+model Attachment {
+  id           String   @id @default(cuid())
+  entityType   String
+  entityId     String
+  fileName     String
+  storedName   String
+  mimeType     String
+  size         Int
+  /// Original capture time for report photos — evidence keeps its timestamp
+  /// (model §2.10).
+  capturedAt   DateTime?
+  caption      String?
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  uploadedAt   DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  entityType String
+  entityId   String
+  action     String
+  summary    String?
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorName  String?
+  before     Json?
+  after      Json?
+  ip         String?
+  at         DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([at])
+}
+
+/// Saved filters for the shared list pattern (model §8.4).
+model SavedFilter {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listKey   String
+  name      String
+  query     Json
+  isShared  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([listKey])
+}
