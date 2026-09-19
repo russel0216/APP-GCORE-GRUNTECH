@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Empty, ErrorBox, Field, Loading, Modal, formatMoney, useToast } from '../../components/ui';
@@ -418,7 +418,6 @@ interface Stage {
 }
 
 export function Pipeline() {
-  const navigate = useNavigate();
   const [stages, setStages] = useState<Stage[]>([]);
   const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
   const [owner, setOwner] = useState('');
@@ -527,7 +526,7 @@ export function Pipeline() {
               )}
               <div className="pipe-body">
                 {stage.cards.map((c) => (
-                  <div key={`${c.kind}-${c.id}`} className="pipe-card" onClick={() => navigate(c.link)}>
+                  <Link key={`${c.kind}-${c.id}`} to={c.link} className="pipe-card">
                     <div className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ fontSize: 13 }}>{c.title}</span>
                       <span className={`tag ${c.kind === 'quotation' ? '' : ''}`}>
@@ -541,7 +540,7 @@ export function Pipeline() {
                       <span className="mono" style={{ fontSize: 12 }}>
                         {formatMoney(c.amount)}
                       </span>
-                      <span className="faint" style={{ fontSize: 11 }}>
+                      <span className="section-label">
                         {c.probability}%
                       </span>
                     </div>
@@ -550,7 +549,7 @@ export function Pipeline() {
                         {c.owner.name}
                       </div>
                     )}
-                  </div>
+                  </Link>
                 ))}
               </div>
             </div>

@@ -41,6 +41,22 @@ four databases and four copies of "customer".
    same scope switch, same export, everywhere.
 10. **Money is `Decimal` in Prisma**, converted with `Number()` only at the API
     boundary. Never do arithmetic on a float and store it back.
+11. **Spacing, type and colour come from tokens in `web/src/styles.css`.** Use
+    `var(--s-1..--s-8)` for spacing, `var(--fs-xs..--fs-2xl)` for type. Do not
+    write a raw pixel value in an inline `style`; the app carried 537 of them
+    across fourteen different margin values, and that is what the tokens exist
+    to stop. `--faint` is the *lowest* readable text colour at 4.6:1 — nothing
+    dimmer.
+12. **One status pill: `StatusBadge` from `components/ui.tsx`.** `statusTone()`
+    takes an `extra` map for a module's own statuses. Do not write a tenth local
+    `tone()`; there were nine and they had already drifted.
+13. **Every interactive thing is reachable from a keyboard.** A `<div onClick>`
+    that opens a record is a bug. Use a `<Link>` or a `<button>`, or give it
+    `tabIndex` and an Enter/Space handler. `:focus-visible` is global — do not
+    remove an outline without replacing it.
+14. **The sidebar grouping is a registry field.** `SubmoduleDef.group` in
+    `api/src/permissions/registry.ts`, carried through `menuFor()`. It takes no
+    part in permission keys. Never hard-code a grouping in `Shell.tsx`.
 
 ## Verification
 

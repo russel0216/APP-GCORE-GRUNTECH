@@ -41,12 +41,7 @@ const STATUSES = [
   { value: 'REJECTED', label: 'Returned' },
 ];
 
-function tone(status: string) {
-  if (status === 'APPROVED') return 'ok';
-  if (status === 'REJECTED' || status === 'CANCELLED') return 'danger';
-  if (status === 'DRAFT') return '';
-  return 'warn';
-}
+import { statusTone as tone } from '../../components/ui';
 
 export interface TemplateField {
   key: string;
@@ -1206,7 +1201,7 @@ export function Renewals() {
                           ? `${-r.daysRemaining} days ago`
                           : `${r.daysRemaining} days`}
                       </span>
-                      <div className="faint" style={{ fontSize: 11 }}>
+                      <div className="section-label">
                         {r.kind === 'CONTRACT' ? 'contract' : 'warranty'}
                       </div>
                     </td>

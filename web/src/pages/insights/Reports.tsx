@@ -700,7 +700,7 @@ export function InventoryAnalytics() {
                           {r.available} {r.item.unit}
                         </span>
                         {r.borrowed > 0 && (
-                          <div className="faint" style={{ fontSize: 11 }}>
+                          <div className="section-label">
                             {r.borrowed} out on loan
                           </div>
                         )}
@@ -912,7 +912,7 @@ export function PerformanceReport() {
                         <td className="faint">{r.requester}</td>
                         <td>
                           {r.waitingOn}
-                          <div className="faint" style={{ fontSize: 11 }}>
+                          <div className="section-label">
                             {r.step}
                           </div>
                         </td>

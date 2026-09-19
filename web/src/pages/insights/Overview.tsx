@@ -475,7 +475,7 @@ export function Profitability() {
               <div>
                 <span className="badge warn">spending ahead of billing</span>{' '}
                 <span className="mono faint">{data.watchlist.overspending.join(', ')}</span>
-                <div className="faint" style={{ fontSize: 11 }}>
+                <div className="section-label">
                   Cost is running more than ten points ahead of what has been billed — the job is
                   funding itself out of the company's cash.
                 </div>
@@ -534,7 +534,7 @@ export function Profitability() {
                     <span className={r.expectedMarginPct < 10 ? 'warn' : ''}>
                       {r.expectedMarginPct.toFixed(1)}%
                     </span>
-                    <div className="faint" style={{ fontSize: 11 }}>
+                    <div className="section-label">
                       {formatMoney(r.expectedProfit)}
                     </div>
                   </td>

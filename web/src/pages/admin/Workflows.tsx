@@ -109,7 +109,14 @@ export function Workflows() {
           <h3 className="card-title">{docTypes.find((d) => d.type === docType)?.label ?? docType}</h3>
           <div className="grid grid-2">
             {list.map((w) => (
-              <div key={w.id} className="card" style={{ cursor: 'pointer' }} onClick={() => setEditing(w)}>
+              // A button, not a div: opening a workflow to edit it was
+              // mouse-only, on the screen where approval routing is decided.
+              <button
+                type="button"
+                key={w.id}
+                className="card clickable card-button"
+                onClick={() => setEditing(w)}
+              >
                 <div className="row" style={{ justifyContent: 'space-between' }}>
                   <strong>{w.name}</strong>
                   <span className={`badge ${w.isActive ? 'ok' : ''}`}>
@@ -152,7 +159,7 @@ export function Workflows() {
                 <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
                   {w.requestCount} request{w.requestCount === 1 ? '' : 's'} routed
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         </div>

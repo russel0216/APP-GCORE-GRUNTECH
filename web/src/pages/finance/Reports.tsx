@@ -188,7 +188,7 @@ export function FinanceDashboard() {
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span>
                 Withheld tax awaiting a BIR 2307
-                <div className="faint" style={{ fontSize: 11 }}>
+                <div className="section-label">
                   creditable, but only once the certificate arrives
                 </div>
               </span>

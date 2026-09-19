@@ -35,6 +35,24 @@ export function Shell() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  /** Escape closes the notification drawer, as it does every other overlay. */
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDrawerOpen(false);
+    };
+    const onClick = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (!el.closest('.drawer') && !el.closest('.bell')) setDrawerOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClick);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClick);
+    };
+  }, [drawerOpen]);
+
   async function loadNotifications() {
     try {
       const res = await api.get<ListResult<Notification> & { unread: number }>(
@@ -101,8 +119,40 @@ export function Shell() {
     return best?.key ?? null;
   })();
 
+  /**
+   * The sidebar, cut into the headings the registry declares.
+   *
+   * G-OPS carries twenty-three screens spanning sales, delivery and
+   * aftermarket. Flat, nothing told you which was which. Order comes from the
+   * registry, not from sorting — the registry order is the order somebody
+   * works in — and a module that declares no groups (Insights, with six
+   * entries) falls through to a single unlabelled run, exactly as before.
+   */
+  const navGroups = (() => {
+    if (!activeModule) return [];
+    const out: { name: string | null; items: typeof activeModule.submodules }[] = [];
+    for (const sub of activeModule.submodules) {
+      const name = sub.group ?? null;
+      // Merged by name rather than by adjacency. G-OPS lists Costing after the
+      // delivery screens, which as a run-length grouping produced a second
+      // "Sales" heading further down the menu. A group appears once, where its
+      // first member appears, and no future registry ordering can split it.
+      const existing = out.find((g) => g.name === name);
+      if (existing) existing.items.push(sub);
+      else out.push({ name, items: [sub] });
+    }
+    // One heading over the whole list is a label, not a grouping.
+    return out.length === 1 ? [{ name: null, items: out[0].items }] : out;
+  })();
+
   return (
     <div className="shell">
+      {/* First in the tab order, and the only way past a 23-item menu without
+          twenty-three presses of Tab. */}
+      <a className="skip-link" href="#content">
+        Skip to content
+      </a>
+
       <header className="topbar">
         <Link to="/" className="topbar-brand">
           G-CORE
@@ -144,9 +194,18 @@ export function Shell() {
           <span className="kbd">Ctrl K</span>
         </button>
 
-        <button className="bell" onClick={() => setDrawerOpen((d) => !d)} aria-label="Notifications">
+        <button
+          className="bell"
+          onClick={() => setDrawerOpen((d) => !d)}
+          aria-expanded={drawerOpen}
+          aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
+        >
           🔔
-          {unread > 0 && <span className="bell-dot">{unread > 99 ? '99+' : unread}</span>}
+          {unread > 0 && (
+            <span className="bell-dot" aria-hidden="true">
+              {unread > 99 ? '99+' : unread}
+            </span>
+          )}
         </button>
 
         <button className="avatar" onClick={() => navigate('/account')} title={me?.user.name}>
@@ -178,7 +237,10 @@ export function Shell() {
             </div>
           ) : (
             notifications.map((n) => (
-              <div
+              // A notification is the fastest route to a document waiting on
+              // you, and it was reachable by mouse only.
+              <button
+                type="button"
                 key={n.id}
                 className={`notif${n.isRead ? '' : ' unread'}`}
                 onClick={() => void openNotification(n)}
@@ -188,7 +250,7 @@ export function Shell() {
                   {n.body ? `${n.body} · ` : ''}
                   {relativeTime(n.createdAt)}
                 </div>
-              </div>
+              </button>
             ))
           )}
         </div>
@@ -198,7 +260,7 @@ export function Shell() {
           scrollable strip. Without it a service engineer on a tablet can reach
           a screen only through the home page or Ctrl+K. */}
       {activeModule && (
-        <nav className="module-strip">
+        <nav className="module-strip" aria-label={`${activeModule.label} menu`}>
           {activeModule.submodules.map((sub) => {
             const upcoming = sub.phase > SHIPPED_PHASE;
             const active = sub.key === activeKey;
@@ -210,7 +272,12 @@ export function Shell() {
               );
             }
             return (
-              <Link key={sub.key} to={sub.path} className={`strip-item${active ? ' active' : ''}`}>
+              <Link
+                key={sub.key}
+                to={sub.path}
+                className={`strip-item${active ? ' active' : ''}`}
+                aria-current={active ? 'page' : undefined}
+              >
                 {sub.label}
               </Link>
             );
@@ -220,29 +287,45 @@ export function Shell() {
 
       <div className="shell-body">
         {activeModule && (
-          <nav className="sidebar">
+          <nav className="sidebar" aria-label={`${activeModule.label} menu`}>
             <div className="sidebar-title">{activeModule.label}</div>
-            {activeModule.submodules.map((sub) => {
-              const upcoming = sub.phase > SHIPPED_PHASE;
-              const active = sub.key === activeKey;
-              if (upcoming) {
-                return (
-                  <div key={sub.key} className="nav-item soon" title={sub.note ?? 'Ships in a later phase'}>
-                    <span>{sub.label}</span>
-                    <span className="tag">P{sub.phase}</span>
-                  </div>
-                );
-              }
-              return (
-                <Link key={sub.key} to={sub.path} className={`nav-item${active ? ' active' : ''}`}>
-                  <span>{sub.label}</span>
-                </Link>
-              );
-            })}
+            {navGroups.map((group, i) => (
+              <div key={group.name ?? `g${i}`}>
+                {group.name && <div className="nav-group">{group.name}</div>}
+                {group.items.map((sub) => {
+                  const upcoming = sub.phase > SHIPPED_PHASE;
+                  const active = sub.key === activeKey;
+                  if (upcoming) {
+                    return (
+                      <div
+                        key={sub.key}
+                        className="nav-item soon"
+                        title={sub.note ?? 'Ships in a later phase'}
+                      >
+                        <span>{sub.label}</span>
+                        <span className="tag">P{sub.phase}</span>
+                      </div>
+                    );
+                  }
+                  return (
+                    <Link
+                      key={sub.key}
+                      to={sub.path}
+                      className={`nav-item${active ? ' active' : ''}`}
+                      // Announces the current page to a screen reader, which
+                      // the magenta bar only ever said to people who can see it.
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      <span>{sub.label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+            ))}
           </nav>
         )}
 
-        <main className="content">
+        <main className="content" id="content" tabIndex={-1}>
           <Outlet />
         </main>
       </div>

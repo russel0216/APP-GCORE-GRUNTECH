@@ -20,12 +20,7 @@ const STATUSES = [
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
 
-function tone(s: string) {
-  if (s === 'APPROVED') return 'ok';
-  if (s === 'REJECTED' || s === 'CANCELLED') return 'danger';
-  if (s === 'DRAFT') return '';
-  return 'warn';
-}
+import { statusTone as tone } from '../../components/ui';
 
 const label = (s: string) => s.toLowerCase().replace(/_/g, ' ');
 

@@ -92,6 +92,8 @@ export interface MenuSubmodule {
   path: string;
   phase: number;
   note?: string;
+  /** Sidebar heading this screen sits under; see SubmoduleDef.group. */
+  group?: string;
   actions: string[];
 }
 export interface MenuModule {
@@ -118,6 +120,7 @@ export function menuFor(user: ResolvedUser): MenuModule[] {
         path: sub.path,
         phase: sub.phase,
         note: sub.note,
+        group: sub.group,
         actions: sub.actions.filter((a) => can(user, `${mod.key}.${sub.key}.${a}`)),
       });
     }

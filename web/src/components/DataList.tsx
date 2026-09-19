@@ -44,6 +44,8 @@ interface Props<T> {
   actions?: ReactNode;
   emptyTitle?: string;
   emptyHint?: string;
+  /** Offered inside the empty state — usually the same button as `actions`. */
+  emptyAction?: ReactNode;
   /** Bump to force a reload from outside (after a create, say). */
   reloadToken?: number;
   rowKey: (row: T) => string;
@@ -60,6 +62,7 @@ export function DataList<T>({
   actions,
   emptyTitle = 'Nothing here yet',
   emptyHint,
+  emptyAction,
   reloadToken = 0,
   rowKey,
 }: Props<T>) {
@@ -127,6 +130,7 @@ export function DataList<T>({
   }, [load, reloadToken]);
 
   const visible = columns.filter((c) => !hidden.has(c.key));
+  const activeFilterCount = Object.values(active).filter(Boolean).length;
 
   function toggleSort(column: Column<T>) {
     if (!column.sortKey) return;
@@ -210,18 +214,65 @@ export function DataList<T>({
           </select>
         ))}
 
-        <div className="topbar-spacer" />
-
-        <button className="btn btn-sm" onClick={() => setShowColumns((s) => !s)}>
-          Columns
-        </button>
-        <button className="btn btn-sm" onClick={exportCsv} disabled={!data?.rows.length}>
-          Export
-        </button>
-        <button className="btn btn-sm" onClick={() => void load()}>
-          Refresh
-        </button>
+        {/*
+          Columns, Export and Refresh are the same three on every screen and
+          are never why someone came here. Grouped to the right, and on a
+          narrow screen they take a line of their own rather than squeezing
+          the search box down to its minimum.
+        */}
+        <div className="list-tools">
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setShowColumns((s) => !s)}
+            aria-expanded={showColumns}
+          >
+            Columns
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={exportCsv}
+            disabled={!data?.rows.length}
+          >
+            Export
+          </button>
+          <button type="button" className="btn btn-sm" onClick={() => void load()}>
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {/*
+        A filtered list used to look exactly like an empty one. Three rows out
+        of four hundred with nothing on screen explaining why is how people
+        conclude their data has gone missing.
+      */}
+      {(activeFilterCount > 0 || debounced) && (
+        <div className="filter-note">
+          <span>
+            {debounced && (
+              <>
+                Matching “<strong>{debounced}</strong>”
+                {activeFilterCount > 0 ? ', ' : ''}
+              </>
+            )}
+            {activeFilterCount > 0 &&
+              `${activeFilterCount} filter${activeFilterCount === 1 ? '' : 's'} applied`}
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              setActive({});
+              setSearch('');
+              setPage(1);
+            }}
+          >
+            Clear all
+          </button>
+        </div>
+      )}
 
       {showColumns && (
         <div className="card" style={{ marginBottom: 12 }}>
@@ -249,26 +300,77 @@ export function DataList<T>({
 
       <ErrorBox error={error} />
 
-      <div className="table-wrap">
+      {/*
+        `busy` is a reload over rows that are already on screen. It used to be
+        silent: change a filter, and the old rows sat there looking like the
+        answer until the new ones replaced them. Now the table dims and says so.
+      */}
+      <div className={`table-wrap${loading && data ? ' busy' : ''}`}>
+        {loading && data && <div className="table-busy-bar" aria-hidden="true" />}
         {loading && !data ? (
           <Loading />
         ) : !data?.rows.length ? (
-          <Empty title={emptyTitle} hint={emptyHint} />
+          <Empty
+            /*
+              "No customers yet" is a lie when there are four hundred of them
+              and a filter is hiding all four hundred. Filtered-to-nothing and
+              genuinely-empty are different situations and now say so.
+            */
+            title={activeFilterCount > 0 || debounced ? 'No matches' : emptyTitle}
+            hint={
+              activeFilterCount > 0 || debounced
+                ? 'Nothing here matches the current search and filters.'
+                : emptyHint
+            }
+            /*
+              An empty state that offers nothing is a dead end, and it is the
+              first thing a new user sees on most of these screens. Falling
+              back to the toolbar's own actions means every list gets its
+              primary button here without thirty pages repeating it — and when
+              the list is empty only because of a filter, no action is offered,
+              because the answer then is to clear the filter, not to create
+              something.
+            */
+            action={activeFilterCount > 0 || debounced ? undefined : (emptyAction ?? actions)}
+          />
         ) : (
           <table className="data">
             <thead>
               <tr>
-                {visible.map((c) => (
-                  <th
-                    key={c.key}
-                    className={c.sortKey ? 'sortable' : ''}
-                    style={{ width: c.width, textAlign: c.align }}
-                    onClick={() => toggleSort(c)}
-                  >
-                    {c.label}
-                    {sort === c.sortKey && (dir === 'asc' ? ' ↑' : ' ↓')}
-                  </th>
-                ))}
+                {visible.map((c) => {
+                  const sorted = c.sortKey && sort === c.sortKey;
+                  return (
+                    <th
+                      key={c.key}
+                      scope="col"
+                      className={c.sortKey ? 'sortable' : ''}
+                      style={{ width: c.width, textAlign: c.align }}
+                      // aria-sort is how a screen reader announces which column
+                      // orders the table and in which direction. It had none.
+                      aria-sort={
+                        !c.sortKey ? undefined : sorted ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'
+                      }
+                      // A sortable header is a control, so it has to be
+                      // reachable and operable without a mouse.
+                      tabIndex={c.sortKey ? 0 : undefined}
+                      role={c.sortKey ? 'button' : undefined}
+                      onClick={() => toggleSort(c)}
+                      onKeyDown={(e) => {
+                        if (c.sortKey && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          toggleSort(c);
+                        }
+                      }}
+                    >
+                      {c.label}
+                      {c.sortKey && (
+                        <span className="sort-mark" aria-hidden="true">
+                          {sorted ? (dir === 'asc' ? '↑' : '↓') : '↕'}
+                        </span>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -277,9 +379,22 @@ export function DataList<T>({
                   key={rowKey(row)}
                   className={onRowClick ? 'clickable' : ''}
                   onClick={() => onRowClick?.(row)}
+                  // A row that opens a record is the primary action on most of
+                  // these screens, and it was mouse-only.
+                  tabIndex={onRowClick ? 0 : undefined}
+                  onKeyDown={(e) => {
+                    if (onRowClick && (e.key === 'Enter' || e.key === ' ')) {
+                      e.preventDefault();
+                      onRowClick(row);
+                    }
+                  }}
                 >
                   {visible.map((c) => (
-                    <td key={c.key} style={{ textAlign: c.align }}>
+                    <td
+                      key={c.key}
+                      className={c.align === 'right' ? 'num' : undefined}
+                      style={{ textAlign: c.align }}
+                    >
                       {c.render(row)}
                     </td>
                   ))}

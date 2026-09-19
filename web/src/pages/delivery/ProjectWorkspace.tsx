@@ -539,7 +539,18 @@ export function ProjectWorkspace() {
                 </thead>
                 <tbody>
                   {job.progressReports.map((r) => (
-                    <tr key={r.id} className="clickable" onClick={() => navigate(`/g-ops/progress/${r.id}`)}>
+                    <tr
+                      key={r.id}
+                      className="clickable"
+                      tabIndex={0}
+                      onClick={() => navigate(`/g-ops/progress/${r.id}`)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          navigate(`/g-ops/progress/${r.id}`);
+                        }
+                      }}
+                    >
                       <td className="mono">{r.reportNo}</td>
                       <td className="mono">{r.number}</td>
                       <td>
@@ -586,7 +597,18 @@ export function ProjectWorkspace() {
                 </thead>
                 <tbody>
                   {job.billings.map((b) => (
-                    <tr key={b.id} className="clickable" onClick={() => navigate(`/g-ops/billings/${b.id}`)}>
+                    <tr
+                      key={b.id}
+                      className="clickable"
+                      tabIndex={0}
+                      onClick={() => navigate(`/g-ops/billings/${b.id}`)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          navigate(`/g-ops/billings/${b.id}`);
+                        }
+                      }}
+                    >
                       <td className="mono">{b.billingNo}</td>
                       <td className="mono">{b.number}</td>
                       <td>{formatDate(b.billingDate)}</td>

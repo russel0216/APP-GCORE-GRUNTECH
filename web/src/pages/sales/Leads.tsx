@@ -28,13 +28,7 @@ export const LEAD_STATUSES = [
   { value: 'ON_HOLD', label: 'On hold' },
 ];
 
-function statusTone(status: string) {
-  if (status === 'WON') return 'ok';
-  if (status === 'LOST') return 'danger';
-  if (status === 'ON_HOLD') return '';
-  if (status.startsWith('QUOTATION') || status === 'NEGOTIATION') return 'info';
-  return 'warn';
-}
+import { statusTone } from '../../components/ui';
 
 export function StatusBadge({ status }: { status: string }) {
   return (
@@ -358,7 +352,18 @@ export function LeadDetail() {
                 </thead>
                 <tbody>
                   {lead.quotations.map((q) => (
-                    <tr key={q.id} className="clickable" onClick={() => navigate(`/g-ops/quotations/${q.id}`)}>
+                    <tr
+                      key={q.id}
+                      className="clickable"
+                      tabIndex={0}
+                      onClick={() => navigate(`/g-ops/quotations/${q.id}`)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          navigate(`/g-ops/quotations/${q.id}`);
+                        }
+                      }}
+                    >
                       <td className="mono">{q.number}</td>
                       <td>{q.subject}</td>
                       <td>

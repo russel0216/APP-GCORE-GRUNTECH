@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
+  statusTone,
   Checkbox,
   ErrorBox,
   Field,
@@ -38,12 +39,13 @@ const STAGES = [
 
 const STAGE_LABEL = Object.fromEntries(STAGES.map((s) => [s.value, s.label]));
 
-function tone(stage: string) {
-  if (stage === 'APPROVED') return 'ok';
-  if (stage === 'REJECTED' || stage === 'CANCELLED') return 'danger';
-  if (stage === 'PRIOR_APPROVED') return 'info';
-  return 'warn';
-}
+/**
+ * Overtime differs from the shared rules in one place: PRIOR_APPROVED is
+ * informational, not a settled approval, because prior approval moves no money
+ * - only the filing does. That is the reason for an override rather than a
+ * tenth copy of the whole mapping.
+ */
+const tone = (stage: string) => statusTone(stage, { PRIOR_APPROVED: 'info' });
 
 interface OtRow {
   id: string;

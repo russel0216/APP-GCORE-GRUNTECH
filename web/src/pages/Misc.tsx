@@ -7,7 +7,7 @@ import { ErrorBox, Field, Loading, useToast } from '../components/ui';
 // ── Account ──────────────────────────────────────────────────────────────────
 
 export function Account() {
-  const { me } = useAuth();
+  const { me, signOut } = useAuth();
   const toast = useToast();
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
@@ -49,25 +49,25 @@ export function Account() {
           <h3 className="card-title">Details</h3>
           <div className="stack">
             <div>
-              <div className="faint" style={{ fontSize: 11 }}>
+              <div className="section-label">
                 NAME
               </div>
               <div>{me?.user.name}</div>
             </div>
             <div>
-              <div className="faint" style={{ fontSize: 11 }}>
+              <div className="section-label">
                 EMAIL
               </div>
               <div className="mono">{me?.user.email}</div>
             </div>
             <div>
-              <div className="faint" style={{ fontSize: 11 }}>
+              <div className="section-label">
                 POSITION
               </div>
               <div>{me?.user.position ?? '—'}</div>
             </div>
             <div>
-              <div className="faint" style={{ fontSize: 11 }}>
+              <div className="section-label">
                 ROLES
               </div>
               <div className="row" style={{ gap: 5 }}>
@@ -84,7 +84,7 @@ export function Account() {
               </div>
             </div>
             <div>
-              <div className="faint" style={{ fontSize: 11 }}>
+              <div className="section-label">
                 EFFECTIVE PERMISSIONS
               </div>
               <div className="mono">{me?.permissions.length ?? 0}</div>
@@ -126,6 +126,22 @@ export function Account() {
             {busy ? 'Changing…' : 'Change password'}
           </button>
         </form>
+      </div>
+
+      {/*
+        Sign out lives here as well as in the top bar. Below 520px the top bar
+        cannot fit brand, search, bell, avatar and a full-width Sign out on the
+        same line, so the button is hidden there — and a way out of the
+        application that exists only on a wide screen is not a way out.
+      */}
+      <div className="card" style={{ marginTop: 'var(--s-4)' }}>
+        <h3 className="card-title">Session</h3>
+        <div className="row">
+          <button className="btn btn-danger" onClick={signOut}>
+            Sign out
+          </button>
+          <span className="muted">Ends this session on this device only.</span>
+        </div>
       </div>
     </div>
   );

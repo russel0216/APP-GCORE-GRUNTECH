@@ -109,6 +109,8 @@ export interface MenuSubmodule {
   path: string;
   phase: number;
   note?: string;
+  /** Sidebar heading, set in the permission registry. Absent means "flat". */
+  group?: string;
   actions: string[];
 }
 

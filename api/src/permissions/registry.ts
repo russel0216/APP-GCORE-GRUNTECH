@@ -63,6 +63,20 @@ export interface SubmoduleDef {
   phase: number;
   /** Shown in the menu but not yet implemented. */
   note?: string;
+  /**
+   * Heading this screen sits under in the sidebar.
+   *
+   * G-OPS carries twenty-three screens spanning sales, delivery and
+   * aftermarket; as one flat list nothing said that Approved Plans belongs to
+   * delivery and Renewals does not. The grouping belongs here rather than in
+   * the web app because the registry is the single source of the menu — a
+   * second list in Shell.tsx would be a second thing to keep in step.
+   *
+   * Purely presentational: it takes no part in permission keys, so
+   * allPermissions() is unaffected and the seed grants nothing new. A module
+   * that sets none renders flat, exactly as it did before.
+   */
+  group?: string;
 }
 
 export interface ModuleDef {
@@ -78,34 +92,34 @@ export const REGISTRY: ModuleDef[] = [
     label: 'G-OPS',
     blurb: 'Operations — sales, projects, costing, after market',
     submodules: [
-      { key: 'dashboard', label: 'Dashboard', path: '/g-ops', actions: READ, phase: 3 },
-      { key: 'leads', label: 'Leads', path: '/g-ops/leads', actions: OWNED, phase: 3 },
-      { key: 'customers', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
-      { key: 'calendar', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
-      { key: 'quotations', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
-      { key: 'pipeline', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
-      { key: 'projects', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
+      { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-ops', actions: READ, phase: 3 },
+      { key: 'leads', group: 'Sales', label: 'Leads', path: '/g-ops/leads', actions: OWNED, phase: 3 },
+      { key: 'customers', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
+      { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
+      { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
+      { key: 'pipeline', group: 'Sales', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
+      { key: 'projects', group: 'Delivery', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       // Plans live inside the project workspace; the menu entry opens the
       // register across all jobs.
-      { key: 'plans', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, note: 'Managed from a project’s Plans tab' },
-      { key: 'budget_monitoring', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4 },
-      { key: 'purchase_requests', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
-      { key: 'budget_requests', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
-      { key: 'progress_billing', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
-      { key: 'costing', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
+      { key: 'plans', group: 'Delivery', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, note: 'Managed from a project’s Plans tab' },
+      { key: 'budget_monitoring', group: 'Delivery', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4 },
+      { key: 'purchase_requests', group: 'Delivery', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
+      { key: 'budget_requests', group: 'Delivery', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
+      { key: 'progress_billing', group: 'Delivery', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
+      { key: 'costing', group: 'Sales', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
       // did we put in that hospital, and when does its warranty run out".
-      { key: 'aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
-      { key: 'installed_base', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED, phase: 8 },
-      { key: 'service_contracts', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED, phase: 8 },
-      { key: 'visits', label: 'PM Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Uses the Preventive Maintenance permissions to schedule and report' },
-      { key: 'renewals', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
-      { key: 'report_templates', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
-      { key: 'commissioning_reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
-      { key: 'pm_reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_APPROVABLE, phase: 8 },
-      { key: 'inspection_reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_APPROVABLE, phase: 8 },
-      { key: 'service_costing', label: 'Service Costing', path: '/g-ops/service-costing', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
+      { key: 'installed_base', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED, phase: 8 },
+      { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED, phase: 8 },
+      { key: 'visits', group: 'Aftermarket', label: 'PM Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Uses the Preventive Maintenance permissions to schedule and report' },
+      { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
+      { key: 'report_templates', group: 'Aftermarket', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
+      { key: 'commissioning_reports', group: 'Aftermarket', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'pm_reports', group: 'Aftermarket', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'inspection_reports', group: 'Aftermarket', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: OWNED_APPROVABLE, phase: 8 },
     ],
   },
   {
@@ -113,35 +127,35 @@ export const REGISTRY: ModuleDef[] = [
     label: 'G-HR',
     blurb: 'Human resources — attendance, leave, overtime',
     submodules: [
-      { key: 'clock', label: 'Clock In/Out', path: '/g-hr/clock', actions: ['view_own', 'create'], phase: 6 },
-      { key: 'dashboard', label: 'Dashboard', path: '/g-hr', actions: READ, phase: 6 },
+      { key: 'clock', group: 'My day', label: 'Clock In/Out', path: '/g-hr/clock', actions: ['view_own', 'create'], phase: 6 },
+      { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-hr', actions: READ, phase: 6 },
       // The register behind the dashboard: every clock entry, with how the
       // person was identified. Gated by the dashboard permission — seeing the
       // day's counts and seeing the entries behind them are the same right.
       {
-        key: 'attendance',
+        key: 'attendance', group: 'Records',
         label: 'Attendance',
         path: '/g-hr/attendance',
         actions: READ,
         phase: 6,
         note: 'Uses the Dashboard permission',
       },
-      { key: 'leave', label: 'Leave', path: '/g-hr/leave', actions: OWNED_APPROVABLE, phase: 6 },
-      { key: 'overtime', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_APPROVABLE, phase: 6 },
-      { key: 'employees', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },
+      { key: 'leave', group: 'My day', label: 'Leave', path: '/g-hr/leave', actions: OWNED_APPROVABLE, phase: 6 },
+      { key: 'overtime', group: 'My day', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_APPROVABLE, phase: 6 },
+      { key: 'employees', group: 'Records', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },
       // Pay data is separated from the employee record on purpose. A project
       // manager needs headcount and assignment; they must not see salaries.
       // Labor cost reaches projects as a burdened rate, never as a wage.
       {
-        key: 'employee_rates',
+        key: 'employee_rates', group: 'Records',
         label: 'Employee Pay Rates',
         path: '/g-hr/employees',
         actions: ['view_all', 'edit_all'],
         phase: 2,
         note: 'Controls visibility of daily rate, burden and statutory numbers on the employee record',
       },
-      { key: 'reports', label: 'HR Reports', path: '/g-hr/reports', actions: READ, phase: 6 },
-      { key: 'settings', label: 'HR Settings', path: '/g-hr/settings', actions: ['view_all', 'edit_all'], phase: 6 },
+      { key: 'reports', group: 'Administration', label: 'HR Reports', path: '/g-hr/reports', actions: READ, phase: 6 },
+      { key: 'settings', group: 'Administration', label: 'HR Settings', path: '/g-hr/settings', actions: ['view_all', 'edit_all'], phase: 6 },
     ],
   },
   {
@@ -149,22 +163,22 @@ export const REGISTRY: ModuleDef[] = [
     label: 'G-FIN',
     blurb: 'Finance — receivables, payables, cash',
     submodules: [
-      { key: 'dashboard', label: 'Executive Dashboard', path: '/g-fin', actions: READ, phase: 7 },
-      { key: 'ar', label: 'Accounts Receivable', path: '/g-fin/ar', actions: [...SHARED, 'approve'], phase: 7 },
-      { key: 'ap', label: 'Accounts Payable', path: '/g-fin/ap', actions: [...SHARED, 'approve'], phase: 7 },
-      { key: 'expenses', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED_APPROVABLE, phase: 7 },
+      { key: 'dashboard', group: 'Overview', label: 'Executive Dashboard', path: '/g-fin', actions: READ, phase: 7 },
+      { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: [...SHARED, 'approve'], phase: 7 },
+      { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: [...SHARED, 'approve'], phase: 7 },
+      { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED_APPROVABLE, phase: 7 },
       // Every movement of money, in or out. Recording one is gated by the A/R
       // or A/P create permission depending on direction — seeing the register
       // is its own, lesser right.
-      { key: 'payments', label: 'Payments', path: '/g-fin/payments', actions: READ, phase: 7 },
-      { key: 'cashflow', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
-      { key: 'budget_vs_actual', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
-      { key: 'reports', label: 'Reports', path: '/g-fin/reports', actions: READ, phase: 7 },
+      { key: 'payments', group: 'Money in', label: 'Payments', path: '/g-fin/payments', actions: READ, phase: 7 },
+      { key: 'cashflow', group: 'Analysis', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
+      { key: 'budget_vs_actual', group: 'Analysis', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
+      { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-fin/reports', actions: READ, phase: 7 },
       // Payment terms, supplier withholding and the aging buckets. Finance's
       // own rules — owning them should not require being a system
       // administrator, the same way HR owns the working day.
       {
-        key: 'settings',
+        key: 'settings', group: 'Administration',
         label: 'Finance Settings',
         path: '/g-fin/settings',
         actions: ['view_all', 'edit_all'],
@@ -177,18 +191,18 @@ export const REGISTRY: ModuleDef[] = [
     label: 'G-CHAIN',
     blurb: 'Supply chain — procurement, receiving, inventory',
     submodules: [
-      { key: 'dashboard', label: 'Dashboard', path: '/g-chain', actions: READ, phase: 5 },
-      { key: 'purchase_requests', label: 'Purchase Requests', path: '/g-chain/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
-      { key: 'canvass', label: 'Canvass / RFQ', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
-      { key: 'purchase_orders', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED_APPROVABLE, phase: 5 },
-      { key: 'receiving', label: 'Receiving', path: '/g-chain/receiving', actions: SHARED, phase: 5 },
-      { key: 'stock_issuance', label: 'Stock Issuance', path: '/g-chain/stock-issuance', actions: SHARED, phase: 5 },
-      { key: 'borrow_slips', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: SHARED, phase: 5 },
-      { key: 'inventory', label: 'Inventory', path: '/g-chain/inventory', actions: SHARED, phase: 5 },
-      { key: 'items', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
-      { key: 'suppliers', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
-      { key: 'warehouses', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
-      { key: 'reports', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
+      { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-chain', actions: READ, phase: 5 },
+      { key: 'purchase_requests', group: 'Procurement', label: 'Purchase Requests', path: '/g-chain/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
+      { key: 'canvass', group: 'Procurement', label: 'Canvass / RFQ', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
+      { key: 'purchase_orders', group: 'Procurement', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED_APPROVABLE, phase: 5 },
+      { key: 'receiving', group: 'Warehouse', label: 'Receiving', path: '/g-chain/receiving', actions: SHARED, phase: 5 },
+      { key: 'stock_issuance', group: 'Warehouse', label: 'Stock Issuance', path: '/g-chain/stock-issuance', actions: SHARED, phase: 5 },
+      { key: 'borrow_slips', group: 'Warehouse', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: SHARED, phase: 5 },
+      { key: 'inventory', group: 'Warehouse', label: 'Inventory', path: '/g-chain/inventory', actions: SHARED, phase: 5 },
+      { key: 'items', group: 'Master data', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
+      { key: 'suppliers', group: 'Master data', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
+      { key: 'warehouses', group: 'Master data', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
+      { key: 'reports', group: 'Analysis', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
     ],
   },
   {
@@ -214,15 +228,15 @@ export const REGISTRY: ModuleDef[] = [
     label: 'Admin',
     blurb: 'Users, roles, workflows and company configuration',
     submodules: [
-      { key: 'users', label: 'Users', path: '/admin/users', actions: SHARED, phase: 1 },
-      { key: 'roles', label: 'Roles & Permissions', path: '/admin/roles', actions: SHARED, phase: 1 },
-      { key: 'workflows', label: 'Approval Workflows', path: '/admin/workflows', actions: SHARED, phase: 1 },
-      { key: 'company', label: 'Company Settings', path: '/admin/company', actions: ['view_all', 'edit_all'], phase: 1 },
-      { key: 'numbering', label: 'Numbering', path: '/admin/numbering', actions: ['view_all', 'edit_all'], phase: 1 },
-      { key: 'categories', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost categories and item categories' },
-      { key: 'templates', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1, note: 'PDF layouts ship in Phase 1; service report form templates in Phase 8' },
-      { key: 'audit', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
-      { key: 'settings', label: 'System Settings', path: '/admin/settings', actions: ['view_all', 'edit_all'], phase: 1 },
+      { key: 'users', group: 'People', label: 'Users', path: '/admin/users', actions: SHARED, phase: 1 },
+      { key: 'roles', group: 'People', label: 'Roles & Permissions', path: '/admin/roles', actions: SHARED, phase: 1 },
+      { key: 'workflows', group: 'Process', label: 'Approval Workflows', path: '/admin/workflows', actions: SHARED, phase: 1 },
+      { key: 'company', group: 'Configuration', label: 'Company Settings', path: '/admin/company', actions: ['view_all', 'edit_all'], phase: 1 },
+      { key: 'numbering', group: 'Process', label: 'Numbering', path: '/admin/numbering', actions: ['view_all', 'edit_all'], phase: 1 },
+      { key: 'categories', group: 'Configuration', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost categories and item categories' },
+      { key: 'templates', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1, note: 'PDF layouts ship in Phase 1; service report form templates in Phase 8' },
+      { key: 'audit', group: 'Records', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
+      { key: 'settings', group: 'Configuration', label: 'System Settings', path: '/admin/settings', actions: ['view_all', 'edit_all'], phase: 1 },
     ],
   },
 ];

@@ -21,15 +21,64 @@
   --line: #1e2a24;
   --line-soft: #172019;
 
+  /*
+    Three levels of text, and all three have to be readable. The old --faint
+    was #4d5d55, which is 2.7:1 against the card surface - below even the 3:1
+    floor for non-text, in 369 places carrying document numbers and timestamps.
+    These values are measured, not picked by eye:
+
+      --text   #dbe9e0  on --surface  16.0:1
+      --muted  #8aa298  on --surface   7.2:1
+      --faint  #6b7f76  on --surface   4.6:1   (WCAG AA for body text)
+
+    The hierarchy is narrower than it was. That is the cost of the third level
+    being legible at all, and it is the right trade.
+  */
   --text: #dbe9e0;
-  --muted: #7d9389;
-  --faint: #4d5d55;
+  --muted: #8aa298;
+  --faint: #6b7f76;
 
   --danger: #ff6b8a;
   --warn: #f0b429;
   --ok: #39ff9d;
   --info: #6ba8ff;
 
+  /*
+    Spacing, on a 4px base. Before these existed the app used fourteen
+    different margin values and fourteen different gaps, which is why two
+    cards side by side rarely lined up.
+  */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 40px;
+
+  /* Type. Six sizes, replacing the eight that were in use ad hoc. */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+
+  /* Elevation. Three steps: resting, raised, floating. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.6);
+
+  /*
+    One focus ring, used by everything. Neon rather than magenta so it never
+    reads as the same thing as an input's own focus colour, and offset so it
+    sits outside a control rather than shrinking it.
+  */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--neon);
+
+  --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 16px;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
@@ -69,6 +118,67 @@ select,
 textarea {
   font-family: inherit;
   font-size: inherit;
+}
+
+/*
+  Keyboard focus.
+
+  The stylesheet used to define focus on inputs and nothing else, so tabbing
+  through the app lost the caret entirely the moment it reached a button, a nav
+  item or a table header. One rule, :focus-visible so it never fires on a mouse
+  click, and everything inherits it - including the things that are not really
+  controls but behave like them (sortable headers, clickable rows, cards).
+*/
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* A row cannot take a box-shadow reliably, so it gets an outline instead. */
+tr:focus-visible,
+td:focus-visible,
+th:focus-visible {
+  box-shadow: none;
+  outline: 2px solid var(--neon);
+  outline-offset: -2px;
+}
+
+/*
+  Somebody who has asked their operating system to stop moving things means it.
+  Transitions become instant rather than merely quick, because "fast" is still
+  motion to a person with a vestibular disorder.
+*/
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/*
+  Jump past the topbar and the whole module menu straight to the page. It is the
+  first thing in the tab order and invisible until it is focused, which is the
+  only time it is of use to anyone.
+*/
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 200;
+  padding: var(--s-3) var(--s-4);
+  background: var(--magenta);
+  color: #fff;
+  font-weight: 600;
+  border-radius: 0 0 var(--radius) 0;
+}
+
+.skip-link:focus {
+  left: 0;
 }
 
 /* ─────────────────────────────── Landing & login ───────────────────────── */
@@ -135,22 +245,59 @@ textarea {
 /* ─────────────────────────────── Forms ─────────────────────────────────── */
 
 .field {
-  margin-bottom: 14px;
+  margin-bottom: var(--s-4);
 }
 
 .field > label {
   display: block;
-  font-size: 11px;
-  letter-spacing: 1.1px;
+  font-size: var(--fs-xs);
+  /* Was 1.1px. Uppercase plus wide tracking is the house style, but at 11px it
+     was costing more legibility than the look was worth on a dense form. */
+  letter-spacing: 0.8px;
   text-transform: uppercase;
   color: var(--neon-dim);
-  margin-bottom: 6px;
+  margin-bottom: var(--s-2);
+}
+
+/* A required field says so, rather than letting the user find out on submit. */
+.field > label .req {
+  color: var(--danger);
+  margin-left: 3px;
 }
 
 .field .hint {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
-  margin-top: 5px;
+  margin-top: var(--s-1);
+}
+
+/*
+  Field-level validation.
+
+  Until now the only place an error appeared was the page-level ErrorBox at the
+  top of the form, so on a long form the message was off-screen from the field
+  it was about. This puts it under the input it belongs to, and marks the input
+  itself so the two are unmistakably connected.
+*/
+.field .field-error {
+  font-size: var(--fs-xs);
+  color: var(--danger);
+  margin-top: var(--s-1);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-1);
+}
+
+.field.invalid input,
+.field.invalid select,
+.field.invalid textarea {
+  border-color: var(--danger);
+}
+
+.field.invalid input:focus,
+.field.invalid select:focus,
+.field.invalid textarea:focus {
+  box-shadow: 0 0 0 3px rgba(255, 107, 138, 0.2);
 }
 
 input[type='text'],
@@ -164,11 +311,33 @@ textarea {
   width: 100%;
   background: #050706;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  /* 9px gave a 36px control. 10px gives 38px, and on a touch screen the rule
+     below takes it the rest of the way to a 44px target. */
+  padding: 10px var(--s-3);
   color: var(--text);
   outline: none;
   transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+/*
+  Touch. A pointer that cannot be precise needs a 44px target, and a field
+  engineer filling in a receiving slip on a tablet is exactly that case.
+*/
+@media (pointer: coarse) {
+  input[type='text'],
+  input[type='email'],
+  input[type='password'],
+  input[type='number'],
+  input[type='date'],
+  input[type='datetime-local'],
+  select,
+  .btn {
+    min-height: 44px;
+  }
+  .btn-sm {
+    min-height: 38px;
+  }
 }
 
 input:focus,
@@ -181,6 +350,24 @@ textarea:focus {
 input:disabled,
 select:disabled {
   opacity: 0.5;
+}
+
+/*
+  Chrome paints an autofilled field with its own near-white background, which
+  on a dark form gives a white box with pale text in it - unreadable, and on
+  the lead and customer forms it hit half the fields. The background cannot be
+  overridden directly, so this paints over it with an inset shadow and forces
+  the text colour back.
+*/
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+select:-webkit-autofill,
+textarea:-webkit-autofill {
+  -webkit-text-fill-color: var(--text);
+  -webkit-box-shadow: 0 0 0 1000px #050706 inset;
+  caret-color: var(--text);
+  transition: background-color 9999s ease-in-out 0s;
 }
 
 textarea {
@@ -209,9 +396,9 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  padding: 8px 15px;
-  border-radius: 8px;
+  gap: var(--s-2);
+  padding: 8px var(--s-4);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--text);
@@ -272,8 +459,18 @@ textarea {
 }
 
 .btn-sm {
-  padding: 5px 10px;
-  font-size: 12px;
+  padding: 6px var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+/*
+  A button that is only an icon needs an accessible name, which it carries as
+  aria-label - and a square target, which it did not have.
+*/
+.btn-icon {
+  padding: 6px;
+  min-width: 30px;
+  justify-content: center;
 }
 
 .btn-block {
@@ -404,22 +601,46 @@ textarea {
 
 .sidebar-title {
   font-family: var(--display);
-  font-size: 10px;
-  letter-spacing: 2.4px;
-  color: var(--faint);
+  font-size: var(--fs-xs);
+  letter-spacing: 2px;
+  color: var(--neon-dim);
   text-transform: uppercase;
-  padding: 10px 10px 6px;
+  padding: var(--s-2) var(--s-3) var(--s-3);
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: var(--s-2);
+}
+
+/*
+  Group headings.
+
+  G-OPS carries twenty-three screens spanning sales, delivery and aftermarket,
+  and as one flat list nothing told you that Approved Plans belongs to delivery
+  and Renewals does not. The grouping comes from the registry, so the menu still
+  has exactly one source of truth (project rule 1); a module that declares no
+  groups renders flat, exactly as before.
+*/
+.nav-group {
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 600;
+  padding: var(--s-4) var(--s-3) var(--s-1);
+}
+
+.nav-group:first-child {
+  padding-top: var(--s-1);
 }
 
 .nav-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 7px;
+  gap: var(--s-2);
+  padding: 7px var(--s-3);
+  border-radius: var(--radius-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 
@@ -463,27 +684,48 @@ textarea {
 
 /* ─────────────────────────────── Page furniture ────────────────────────── */
 
+/*
+  The page header wraps now. It was a non-wrapping flex row, so on a narrow
+  screen a long title and its action buttons fought over the same space and both
+  lost. Below 640px the actions drop to their own line, full width.
+*/
 .page-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 18px;
+  gap: var(--s-4);
+  margin-bottom: var(--s-5);
+  flex-wrap: wrap;
+}
+
+.page-head > * {
+  min-width: 0;
 }
 
 .page-head h1 {
   margin: 0;
   font-family: var(--display);
-  font-size: 20px;
-  letter-spacing: 2px;
+  font-size: var(--fs-xl);
+  letter-spacing: 1.5px;
   color: var(--neon);
+  /* Orbitron at 20px with 2px tracking clipped its own descenders. */
+  line-height: 1.3;
 }
 
 .page-head p {
-  margin: 5px 0 0;
+  margin: var(--s-1) 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-md);
   max-width: 70ch;
+}
+
+@media (max-width: 640px) {
+  .page-head {
+    gap: var(--s-3);
+  }
+  .page-head > .row {
+    width: 100%;
+  }
 }
 
 .breadcrumb {
@@ -508,21 +750,47 @@ textarea {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 16px 18px;
+  padding: var(--s-4) var(--s-5);
+  box-shadow: var(--shadow-sm);
+}
+
+/* A card that is really a button has to be reset back to looking like a card. */
+.card-button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+/* A card that is a link or a button should say so before it is clicked. */
+.card.clickable,
+a.card {
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s, transform 0.08s;
+}
+
+.card.clickable:hover,
+a.card:hover {
+  border-color: var(--magenta);
+  box-shadow: var(--shadow-md);
 }
 
 .card-title {
   font-family: var(--display);
-  font-size: 11px;
-  letter-spacing: 2px;
+  font-size: var(--fs-xs);
+  letter-spacing: 1.6px;
   text-transform: uppercase;
   color: var(--neon-dim);
-  margin: 0 0 12px;
+  margin: 0 0 var(--s-3);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
 }
 
 .grid {
   display: grid;
-  gap: 14px;
+  gap: var(--s-4);
 }
 
 .grid-2 {
@@ -540,14 +808,14 @@ textarea {
 .row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--s-2);
   flex-wrap: wrap;
 }
 
 .stack {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--s-3);
 }
 
 .muted {
@@ -567,67 +835,100 @@ textarea {
   text-align: right;
 }
 
-/* ─────────────────────────────── Division cards (home) ─────────────────── */
-
-.division-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 18px;
-}
-
-.division-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 24px 20px;
-  min-height: 132px;
-  background: var(--surface);
-  border: 2px solid var(--magenta);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 20px rgba(192, 38, 211, 0.05);
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-
-.division-card:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 0 18px rgba(192, 38, 211, 0.6), inset 0 0 24px rgba(192, 38, 211, 0.1);
-}
-
-.division-card .label {
-  font-family: var(--display);
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: 3px;
-  color: var(--neon);
-  text-shadow: 0 0 5px rgba(57, 255, 157, 0.7);
-}
-
-.division-card .blurb {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.division-card .count {
-  margin-top: auto;
-  font-size: 11px;
-  color: var(--faint);
-}
-
 /* ─────────────────────────────── The list pattern ──────────────────────── */
 
 .list-toolbar {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--s-2);
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: var(--s-3);
 }
 
 .list-search {
   flex: 1;
   min-width: 190px;
   max-width: 340px;
+}
+
+/*
+  The tools on the right - Columns, Export, Refresh - are the same three on
+  every screen and are never the reason someone came. They group together and,
+  on a narrow screen, take a line of their own rather than pushing the search
+  box down to 190px.
+*/
+.list-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-left: auto;
+}
+
+@media (max-width: 720px) {
+  .list-search {
+    max-width: none;
+  }
+  .list-tools {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+/*
+  Filters were invisible once set: a list could be filtered to three rows with
+  nothing on screen saying why. This says how many are on and offers the way out.
+*/
+.filter-note {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: var(--s-3);
+}
+
+/*
+  Reloading after a filter change used to show the previous rows with no sign
+  that anything was happening, so a slow query looked like a filter that did
+  nothing. The table dims and a bar runs across the top of it.
+*/
+.table-wrap {
+  position: relative;
+}
+
+.table-wrap.busy table.data {
+  opacity: 0.45;
+  transition: opacity 0.12s;
+}
+
+.table-busy-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  background: var(--line);
+  z-index: 2;
+}
+
+.table-busy-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: var(--neon);
+  animation: table-busy 1s linear infinite;
+}
+
+@keyframes table-busy {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
 }
 
 .scope-switch {
@@ -667,14 +968,16 @@ table.data {
 table.data th {
   position: sticky;
   top: 0;
+  z-index: 1;
   background: var(--surface-2);
   text-align: left;
-  font-size: 10.5px;
-  letter-spacing: 1px;
+  /* 10.5px is below the point where uppercase tracking stays readable. */
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
   text-transform: uppercase;
   color: var(--muted);
   font-weight: 600;
-  padding: 10px 12px;
+  padding: var(--s-3);
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
@@ -688,10 +991,41 @@ table.data th.sortable:hover {
   color: var(--neon);
 }
 
+/*
+  The sort arrow lives in a fixed-width slot rather than being appended to the
+  label, so the column no longer jumps sideways when you sort it. The slot is
+  always there; only the glyph inside it changes.
+*/
+table.data th .sort-mark {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  margin-left: var(--s-1);
+  color: var(--neon);
+}
+
+table.data th[aria-sort='none'] .sort-mark {
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+table.data th.sortable:hover .sort-mark,
+table.data th.sortable:focus-visible .sort-mark {
+  opacity: 1;
+}
+
 table.data td {
-  padding: 10px 12px;
+  /* Was 10px/12px. 12px vertical gives a row enough air to be scanned down a
+     column of forty without losing your place. */
+  padding: var(--s-3);
   border-bottom: 1px solid var(--line-soft);
   vertical-align: top;
+}
+
+/* Zebra striping, faint enough to guide the eye without banding the page. */
+table.data tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.012);
 }
 
 table.data tbody tr:hover {
@@ -702,16 +1036,38 @@ table.data tbody tr.clickable {
   cursor: pointer;
 }
 
+/*
+  A numeric column reads as a column only when the digits line up, which needs
+  tabular figures - proportional digits make 111 narrower than 000.
+*/
+table.data td.num,
+table.data .mono {
+  font-variant-numeric: tabular-nums;
+}
+
 .empty {
-  padding: 42px 20px;
+  padding: var(--s-8) var(--s-5);
   text-align: center;
   color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
 }
 
 .empty strong {
   display: block;
   color: var(--text);
-  margin-bottom: 5px;
+  font-size: var(--fs-lg);
+}
+
+.empty p {
+  margin: 0;
+  max-width: 46ch;
+}
+
+.empty .empty-action {
+  margin-top: var(--s-2);
 }
 
 .pager {
@@ -903,10 +1259,18 @@ table.data tbody tr.clickable {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
 }
 
+/* A <button> now, so it is reachable by keyboard; reset to look like the
+   block it was. */
 .notif {
   display: block;
-  padding: 11px 15px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
   border-bottom: 1px solid var(--line-soft);
+  color: inherit;
+  font: inherit;
+  padding: var(--s-3) var(--s-4);
   cursor: pointer;
 }
 
@@ -932,11 +1296,11 @@ table.data tbody tr.clickable {
 /* ─────────────────────────────── Messages ──────────────────────────────── */
 
 .alert {
-  padding: 10px 13px;
-  border-radius: 8px;
-  font-size: 13px;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-md);
   border: 1px solid;
-  margin-bottom: 14px;
+  margin-bottom: var(--s-4);
 }
 
 .alert.error {
@@ -957,9 +1321,16 @@ table.data tbody tr.clickable {
   background: rgba(107, 168, 255, 0.07);
 }
 
+/* Was defined 400 lines away in the G-HR section, away from its own siblings. */
+.alert.warn {
+  color: var(--warn);
+  border-color: rgba(240, 180, 41, 0.4);
+  background: rgba(240, 180, 41, 0.07);
+}
+
 .alert ul {
-  margin: 7px 0 0;
-  padding-left: 18px;
+  margin: var(--s-2) 0 0;
+  padding-left: var(--s-5);
 }
 
 .toast-stack {
@@ -973,14 +1344,46 @@ table.data tbody tr.clickable {
 }
 
 .toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
   min-width: 250px;
   max-width: 400px;
-  padding: 11px 15px;
-  border-radius: 9px;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--surface-2);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
-  font-size: 13px;
+  box-shadow: var(--shadow-md);
+  font-size: var(--fs-md);
+  animation: toast-in 0.16s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.toast span {
+  flex: 1;
+}
+
+/* A toast that disappears on a timer is no use to someone still reading it;
+   a dismiss control means the timer is a convenience rather than a deadline. */
+.toast button {
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.toast button:hover {
+  opacity: 1;
 }
 
 .toast.ok {
@@ -991,6 +1394,28 @@ table.data tbody tr.clickable {
 .toast.error {
   border-color: rgba(255, 107, 138, 0.5);
   color: var(--danger);
+}
+
+.toast.warn {
+  border-color: rgba(240, 180, 41, 0.45);
+  color: var(--warn);
+}
+
+.toast.info {
+  border-color: rgba(107, 168, 255, 0.4);
+  color: var(--info);
+}
+
+@media (max-width: 520px) {
+  .toast-stack {
+    left: var(--s-3);
+    right: var(--s-3);
+    bottom: var(--s-3);
+  }
+  .toast {
+    min-width: 0;
+    max-width: none;
+  }
 }
 
 /* ─────────────────────────────── Permission matrix ─────────────────────── */
@@ -1271,9 +1696,11 @@ hr.rule {
   margin-top: 10px;
 }
 
+/* A <Link> now rather than a div with onClick, so it is keyboard reachable. */
 .pipe-card {
-  padding: 8px 9px;
-  border-radius: 8px;
+  display: block;
+  padding: var(--s-2);
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
   border: 1px solid var(--line);
   cursor: pointer;
@@ -1356,12 +1783,6 @@ hr.rule {
 
 /* ──────────────────────────── G-HR: the clock ───────────────────────────── */
 
-.alert.warn {
-  color: var(--warn);
-  border-color: rgba(240, 180, 41, 0.4);
-  background: rgba(240, 180, 41, 0.07);
-}
-
 /* Label / value pairs on a detail card. */
 .kv {
   display: grid;
@@ -1432,14 +1853,6 @@ hr.rule {
   border-top: 1px dashed var(--line);
 }
 
-.hr-status {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  margin-right: 7px;
-}
-
 /* ────────────────────────── G-FIN: cash flow bars ──────────────────────── */
 
 /* Money in above the line, money out below. The shape reads faster than the
@@ -1497,12 +1910,17 @@ hr.rule {
 }
 
 /* A quiet heading that groups tiles without competing with the page title. */
+/*
+  The small uppercase label above a value. It existed as a class used four
+  times and as `className="faint" style={{ fontSize: 11 }}` written out by hand
+  fourteen more, across eight files. Same thing, one name.
+*/
 .section-label {
-  font-size: 11px;
-  letter-spacing: 1.4px;
+  font-size: var(--fs-xs);
+  letter-spacing: 1.2px;
   text-transform: uppercase;
   color: var(--muted);
-  margin: 0 0 9px;
+  margin: 0 0 var(--s-2);
   font-weight: 600;
 }
 
@@ -1685,6 +2103,25 @@ hr.rule {
      trigger collapses to its icon already, so the labels go instead — both
      screens are still reachable from the launcher and Ctrl+K. */
   .topbar-link {
+    display: none;
+  }
+}
+
+/*
+  At phone width the bar still carried brand, module badge, search, bell,
+  avatar and a full "Sign out" - about 40px more than a 375px screen has. The
+  gaps tighten, the module badge goes (the strip below it names the module
+  anyway), and Sign out becomes the avatar's job via Account.
+*/
+@media (max-width: 520px) {
+  .topbar {
+    gap: var(--s-2);
+    padding: 0 var(--s-3);
+  }
+  .topbar > .badge {
+    display: none;
+  }
+  .topbar .btn-ghost {
     display: none;
   }
 }

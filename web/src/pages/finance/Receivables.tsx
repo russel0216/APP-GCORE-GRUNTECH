@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
+  statusTone as tone,
   ErrorBox,
   Field,
   Loading,
@@ -31,12 +32,7 @@ export const INVOICE_STATUSES = [
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
 
-export function tone(status: string) {
-  if (status === 'PAID' || status === 'APPROVED' || status === 'REIMBURSED') return 'ok';
-  if (status === 'CANCELLED' || status === 'REJECTED') return 'danger';
-  if (status === 'DRAFT') return '';
-  return 'warn';
-}
+export { tone };
 
 export const label = (s: string) => s.toLowerCase().replace(/_/g, ' ');
 

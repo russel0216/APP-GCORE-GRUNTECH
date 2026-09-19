@@ -1465,7 +1465,6 @@ export function ChainReports() {
 
 /** G-CHAIN landing — the pipeline at a glance. */
 export function ChainDashboard() {
-  const navigate = useNavigate();
   const [counts, setCounts] = useState<Record<string, number>>({});
 
   useEffect(() => {
@@ -1505,7 +1504,7 @@ export function ChainDashboard() {
 
       <div className="grid grid-3" style={{ marginBottom: 18 }}>
         {tiles.map((t) => (
-          <div key={t.label} className="card" style={{ cursor: 'pointer' }} onClick={() => navigate(t.to)}>
+          <Link key={t.label} to={t.to} className="card">
             <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
               {t.label.toUpperCase()}
             </div>
@@ -1519,7 +1518,7 @@ export function ChainDashboard() {
             >
               {t.value}
             </div>
-          </div>
+          </Link>
         ))}
       </div>
 

@@ -4,6 +4,8 @@ import { api, getToken } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
+  humanise,
+  statusTone,
   Empty,
   ErrorBox,
   Field,
@@ -24,16 +26,17 @@ export const PR_STATUSES = [
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
 
-export function statusTone(s: string) {
-  if (s === 'APPROVED' || s === 'ORDERED' || s === 'RECEIVED' || s === 'ISSUED') return 'ok';
-  if (s === 'REJECTED' || s === 'CANCELLED') return 'danger';
-  if (s === 'DRAFT') return '';
-  return 'warn';
-}
+/**
+ * Re-exported so the dozen call sites across G-CHAIN keep working, but the
+ * rules now live in one place for the whole application. This copy, and eight
+ * others like it, had already drifted apart.
+ */
+export { statusTone };
 
-export function label(s: string) {
-  return s.toLowerCase().replace(/_/g, ' ');
-}
+/** `humanise` under the name G-CHAIN already calls it. */
+export const label = humanise;
+
+
 
 export function openPdf(path: string, onError: () => void) {
   fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })

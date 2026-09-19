@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
+  statusTone,
   ErrorBox,
   Field,
   Loading,
@@ -32,12 +33,8 @@ const STATUSES = [
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
 
-function tone(status: string) {
-  if (status === 'ACTIVE') return 'ok';
-  if (status === 'EXPIRED' || status === 'CANCELLED') return 'danger';
-  if (status === 'RENEWED') return 'info';
-  return '';
-}
+/** RENEWED reads as information here, not as a settled-well outcome. */
+const tone = (status: string) => statusTone(status, { RENEWED: 'info' });
 
 interface Contract {
   id: string;

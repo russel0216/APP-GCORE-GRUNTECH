@@ -481,7 +481,7 @@ export function CostingDetailPage() {
             {costing.notes && (
               <>
                 <hr className="rule" />
-                <div className="faint" style={{ fontSize: 11 }}>
+                <div className="section-label">
                   NOTES
                 </div>
                 <div style={{ whiteSpace: 'pre-wrap' }}>{costing.notes}</div>

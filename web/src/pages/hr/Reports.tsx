@@ -217,7 +217,7 @@ function LeaveReport() {
                         <td key={t.id} className="right mono">
                           {b ? b.remaining : '—'}
                           {b && b.pending > 0 && (
-                            <div className="faint" style={{ fontSize: 11 }}>
+                            <div className="section-label">
                               {b.pending} pending
                             </div>
                           )}

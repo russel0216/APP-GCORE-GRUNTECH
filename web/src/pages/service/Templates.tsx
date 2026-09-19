@@ -489,7 +489,6 @@ interface Dashboard {
 }
 
 export function AftermarketDashboard() {
-  const navigate = useNavigate();
   const [tab, setTab] = useState<'overview' | 'rules'>('overview');
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -562,7 +561,7 @@ export function AftermarketDashboard() {
 
       <div className="grid grid-4" style={{ marginBottom: 18 }}>
         {tiles.map((t) => (
-          <div key={t.label} className="card" style={{ cursor: 'pointer' }} onClick={() => navigate(t.to)}>
+          <Link key={t.label} to={t.to} className="card">
             <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
               {t.label.toUpperCase()}
             </div>
@@ -570,7 +569,7 @@ export function AftermarketDashboard() {
             <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
               {t.sub}
             </div>
-          </div>
+          </Link>
         ))}
       </div>
 
