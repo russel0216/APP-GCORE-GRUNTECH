@@ -42,6 +42,8 @@ import {
   activityRoutes,
   pipelineRoutes,
 } from './routes/sales';
+import { jobRoutes, budgetRequestRoutes } from './routes/jobs';
+import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
 
 const app = express();
 
@@ -101,6 +103,13 @@ app.use('/api/costings', costingRoutes);
 app.use('/api/quotations', quotationRoutes);
 app.use('/api/activities', activityRoutes);
 app.use('/api/pipeline', pipelineRoutes);
+
+// Delivery (Phase 4)
+app.use('/api/jobs', jobRoutes);
+app.use('/api/jobs', planRoutes);
+app.use('/api/budget-requests', budgetRequestRoutes);
+app.use('/api/progress-reports', progressRoutes);
+app.use('/api/billings', billingRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

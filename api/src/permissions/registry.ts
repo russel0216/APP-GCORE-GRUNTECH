@@ -85,7 +85,9 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'quotations', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
       { key: 'pipeline', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
       { key: 'projects', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
-      { key: 'plans', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4 },
+      // Plans live inside the project workspace; the menu entry opens the
+      // register across all jobs.
+      { key: 'plans', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, note: 'Managed from a project’s Plans tab' },
       { key: 'budget_monitoring', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4 },
       { key: 'purchase_requests', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
       { key: 'budget_requests', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },

@@ -178,6 +178,27 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
     );
   }
 
+  // A step whose only eligible approver is the requester can never be acted on:
+  // segregation of duties refuses self-approval, so the document would sit
+  // pending forever with no error anywhere. This is the subtler cousin of "no
+  // one holds this role" — there IS an approver set, it just contains only the
+  // person who raised it. Caught here, at submission, while it can still be
+  // fixed by changing the workflow rather than by wondering why nothing moved.
+  const firstStep = workflow.steps[0];
+  const firstApprovers = await approversForStep(firstStep, input.requesterId);
+  if (firstApprovers.length && firstApprovers.every((id) => id === input.requesterId)) {
+    throw badRequest(
+      `"${workflow.name}" routes step 1 ("${firstStep.name}") only to you, and nobody may approve a document they raised. ` +
+        `Add another approver to that step in Admin › Approval Workflows.`,
+    );
+  }
+  if (!firstApprovers.length) {
+    throw badRequest(
+      `"${workflow.name}" routes step 1 ("${firstStep.name}") to nobody. ` +
+        `Check that someone holds that role in Admin › Approval Workflows.`,
+    );
+  }
+
   const request = await prisma.approvalRequest.create({
     data: {
       documentType: input.documentType,

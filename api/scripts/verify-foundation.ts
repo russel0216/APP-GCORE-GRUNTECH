@@ -284,8 +284,25 @@ async function main() {
     (await pendingFor(pm.id)).some((r) => r.id === small.id),
   );
 
-  // The case the self-approval rule actually exists for: the requester IS an
-  // eligible approver, because the document routes to a role they hold.
+  // With only ONE project manager, a PR routed to that role and raised by them
+  // could never be approved by anyone. Submission is refused outright rather
+  // than accepted into a state nobody can move it out of.
+  await expectRejection(
+    'a document whose only approver is the requester is refused at submission',
+    () =>
+      submitForApproval({
+        documentType: 'purchase_request',
+        documentId: `${TAG}-pr-pm-solo`,
+        subject: 'Verify — sole PM raises their own PR',
+        amount: 20_000,
+        requesterId: pm.id,
+      }),
+    'only to you',
+  );
+
+  // With a second project manager the same document submits fine — and the
+  // self-approval rule is what stops the requester acting on it.
+  const pm2 = await makeUser('Verify PM Two', 'pm2@verify.local', ['project_manager']);
   const pmOwnRequest = await submitForApproval({
     documentType: 'purchase_request',
     documentId: `${TAG}-pr-pm-own`,
@@ -293,6 +310,7 @@ async function main() {
     amount: 20_000,
     requesterId: pm.id,
   });
+  check('with a second approver it submits', pmOwnRequest.status === 'PENDING');
   await expectRejection(
     'an eligible approver still cannot approve their OWN document',
     () => act({ requestId: pmOwnRequest.id, userId: pm.id, action: 'APPROVED' }),
@@ -301,6 +319,10 @@ async function main() {
   check(
     'and it stays out of their own queue',
     !(await pendingFor(pm.id)).some((r) => r.id === pmOwnRequest.id),
+  );
+  check(
+    'but it is in the other approver’s queue',
+    (await pendingFor(pm2.id)).some((r) => r.id === pmOwnRequest.id),
   );
   const smallWf = await prisma.approvalWorkflow.findUnique({
     where: { id: small.workflowId! },

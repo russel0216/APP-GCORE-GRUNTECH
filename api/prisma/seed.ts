@@ -303,9 +303,13 @@ const WORKFLOWS: WorkflowSeed[] = [
   },
   {
     documentType: 'budget_request',
-    name: 'Budget Request — management',
+    name: 'Budget Request — finance then management',
+    // Deliberately NOT routed to project managers. A PM is normally the person
+    // raising a budget request — routing step 1 back to their own role means
+    // the only eligible approver is the requester, and the request stalls
+    // forever. A budget increase is a money decision anyway.
     steps: [
-      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
+      { sequence: 1, name: 'Finance review', approverType: 'ROLE', roleKey: 'finance' },
       { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
   },
@@ -461,11 +465,44 @@ async function main() {
     (await prisma.role.findMany({ select: { id: true, key: true } })).map((r) => [r.key, r.id]),
   );
 
+  // Seeded workflows that were superseded by a corrected version. Left in place
+  // but deactivated, so they stop matching new documents while any history
+  // routed through them stays readable. Deleting them would orphan that.
+  const RETIRED = ['Budget Request — management'];
+  for (const name of RETIRED) {
+    const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });
+    if (stale) {
+      await prisma.approvalWorkflow.update({ where: { id: stale.id }, data: { isActive: false } });
+      console.log(`  · Retired superseded workflow "${name}"`);
+    }
+  }
+
   for (const seed of WORKFLOWS) {
     const already = await prisma.approvalWorkflow.findFirst({
       where: { documentType: seed.documentType, name: seed.name },
+      include: { _count: { select: { requests: true } } },
     });
-    if (already) continue;
+
+    if (already) {
+      // An unused seeded workflow is refreshed, so a corrected routing reaches
+      // an existing database. One that has already routed documents is left
+      // alone: it is in use, and the customer may have edited it deliberately.
+      if (already._count.requests === 0) {
+        await prisma.$transaction(async (tx) => {
+          await tx.approvalStep.deleteMany({ where: { workflowId: already.id } });
+          await tx.approvalStep.createMany({
+            data: seed.steps.map((s) => ({
+              workflowId: already.id,
+              sequence: s.sequence,
+              name: s.name,
+              approverType: s.approverType,
+              roleId: s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null,
+            })),
+          });
+        });
+      }
+      continue;
+    }
 
     await prisma.approvalWorkflow.create({
       data: {

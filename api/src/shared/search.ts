@@ -291,6 +291,85 @@ registerSearch({
   },
 });
 
+// ── Phase 4: delivery ────────────────────────────────────────────────────────
+
+registerSearch({
+  kind: 'job',
+  label: 'Projects',
+  permission: 'gops.projects.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.job.findMany({
+      where: {
+        OR: [
+          { name: { contains: term, mode: 'insensitive' } },
+          { number: { contains: term, mode: 'insensitive' } },
+          { customerPoNumber: { contains: term, mode: 'insensitive' } },
+          { customer: { name: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        name: true,
+        status: true,
+        customer: { select: { name: true } },
+      },
+    });
+    return rows.map((r) => ({
+      kind: 'job',
+      id: r.id,
+      title: r.name,
+      subtitle: `${r.number} · ${r.customer.name} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
+      link: `/g-ops/projects/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'progress',
+  label: 'Progress & billing',
+  permission: 'gops.progress_billing.view_all',
+  search: async (term, _user, limit) => {
+    const [reports, billings] = await Promise.all([
+      prisma.progressReport.findMany({
+        where: {
+          OR: [
+            { number: { contains: term, mode: 'insensitive' } },
+            { job: { name: { contains: term, mode: 'insensitive' } } },
+          ],
+        },
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, number: true, reportNo: true, job: { select: { id: true, name: true } } },
+      }),
+      prisma.progressBilling.findMany({
+        where: { number: { contains: term, mode: 'insensitive' } },
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, number: true, billingNo: true, job: { select: { id: true, name: true } } },
+      }),
+    ]);
+    return [
+      ...reports.map((r) => ({
+        kind: 'progress',
+        id: r.id,
+        title: `${r.number} — report #${r.reportNo}`,
+        subtitle: r.job.name,
+        link: `/g-ops/progress/${r.id}`,
+      })),
+      ...billings.map((b) => ({
+        kind: 'progress',
+        id: b.id,
+        title: `${b.number} — billing #${b.billingNo}`,
+        subtitle: b.job.name,
+        link: `/g-ops/billings/${b.id}`,
+      })),
+    ].slice(0, limit);
+  },
+});
+
 registerSearch({
   kind: 'approval',
   label: 'Approvals',

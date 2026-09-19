@@ -45,10 +45,10 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales delivery; do npx tsx scripts/verify-$s.ts; done
 ```
 
-108 assertions across permission resolution, numbering concurrency, the approval
+150 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
 engine, CSV parsing, the import contract, and Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability).
@@ -128,10 +128,12 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1 (foundation), 2 (masters) and 3 (sales) are done. Next is Phase 4 —
-delivery: Job, budget, schedule of values, plans, tasks, progress reports, the
-S-curve and progress billing. Full sequence with acceptance criteria in
-`docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+Phases 1 (foundation), 2 (masters), 3 (sales) and 4 (delivery) are done. Next is
+Phase 5 — G-CHAIN: purchase requests (both kinds), canvass, purchase orders,
+receiving, inventory, stock issuance and borrow slips. That phase is what fills
+the COMMITTED, INCURRED and CONSUMED columns of the job cost ledger, which
+already exist and are already displayed. Full sequence with acceptance criteria
+in `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
 phase's screens from "upcoming" to live. Bump it when a phase lands.
@@ -176,3 +178,34 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **`vatRate` is snapshotted onto each revision** so an old revision still prints
   the tax it was issued with after Settings change. Same principle will apply to
   billing in Phase 7.
+
+## Phase 4 notes worth carrying forward
+
+- **`JobScopeItem` is a SNAPSHOT of the costing's `ScopeSection`**, not a
+  reference. A costing can be reopened and edited; if progress were measured
+  against live costing rows, every reported percentage would shift underneath
+  the reports that recorded it. Covered by a test.
+- **All cost reaches a job through `JobCostEntry`.** Never edit a stored budget
+  total — write a ledger row with a `sourceType`/`sourceId`. Budget Monitoring is
+  a view over that table.
+- **Available = budgeted − committed − incurred.** CONSUMED is reported but NOT
+  subtracted: stock issued to a job was already counted as incurred when it was
+  received, and subtracting both charges the same peso twice.
+- **Phase 5 writes COMMITTED (approved PR → issued PO), INCURRED (receiving) and
+  CONSUMED (stock issuance).** Phase 6 writes INCURRED for posted overtime. The
+  columns already exist and are already displayed.
+- **Margin is reported as EXPECTED margin**, from the budget. Margin computed
+  from spend-so-far reads 100% on a job that has not spent anything, which is
+  true and useless. `grossMarginPct` is still returned but only means something
+  near completion.
+- **A progress report is a chain.** Only one may be open at a time, each carries
+  the previous to-date percentages forward, and an approved one cannot be edited.
+- **Billing covers only the increment.** It compares the report's to-date
+  percentage against the highest already billed per scope line, so re-billing
+  the same work is arithmetically impossible rather than merely discouraged.
+- **EWT is withheld on the gross, not on the VAT.** Net collectible = gross + VAT
+  − EWT. Invoiced ≠ collectible, and A/R must never read the withheld part as
+  overdue.
+- **The S-curve's three lines share a time basis** — billed is plotted against
+  the period its progress report covers, not the date the billing was raised.
+  Otherwise comparing the lines is meaningless.

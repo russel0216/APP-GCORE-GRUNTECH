@@ -57,7 +57,22 @@ previous implementation traces back to its absence.
 | Sales calendar, a week per screen | `/g-ops/calendar` |
 | Pipeline with weighted value | `/g-ops/pipeline` |
 
-Screens from Phases 4–9 appear in the menu marked with their phase. Their
+**Phase 4 — Delivery.** Job → budget → progress → billing.
+
+| Capability | Where |
+|---|---|
+| Projects created from a costing | `/g-ops/projects` |
+| **Project workspace** — one page, eight tabs | `/g-ops/projects/:id` |
+| **Four-state cost ledger** — budgeted / committed / incurred / consumed | Project → Budget |
+| Budget requests, approved through the shared engine | `/g-ops/budget-requests` |
+| Schedule of values, snapshotted from the costing | Project → Scope |
+| Progress reports, chained, with period percentages | `/g-ops/progress` |
+| **S-curve** — planned vs actual vs billed | Project → Overview |
+| Progress billing with VAT and EWT | Project → Billing |
+| Approved plans register, job tasks | Project → Plans / Tasks |
+| Budget monitoring across all projects | `/g-ops/budget-monitoring` |
+
+Screens from Phases 5–9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
 
@@ -157,7 +172,19 @@ schedule of values reconciles to the centavo on an awkward figure, VAT computed
 both inclusive and exclusive, record ownership, that an author cannot approve
 their own quotation, and that a superseded revision keeps its own totals.
 
-All three create their own records and clean up after themselves. Run them after
+```bash
+cd api && npx tsx scripts/verify-delivery.ts
+```
+
+39 assertions for Phase 4: that the schedule of values is snapshotted and does
+not move when the costing is later edited, the four-state budget arithmetic
+(including that consumed is not subtracted twice), that a budget request only
+moves the budget after every approval, that earned value is weighted by scope
+value rather than averaged, that EWT is withheld on the gross and not the VAT,
+that a second billing covers only the increment, and that the S-curve's three
+lines share a time basis.
+
+All four create their own records and clean up after themselves. Run them after
 touching anything in `api/src/shared/` or `api/src/permissions/`.
 
 > They consume real numbering sequences, so after a few runs your quotation

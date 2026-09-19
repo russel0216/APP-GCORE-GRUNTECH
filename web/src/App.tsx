@@ -23,6 +23,16 @@ import { Costings } from './pages/sales/Costings';
 import { CostingDetailPage } from './pages/sales/CostingDetail';
 import { Quotations, QuotationDetail } from './pages/sales/Quotations';
 import { SalesCalendar, Pipeline } from './pages/sales/CalendarPipeline';
+import { Projects } from './pages/delivery/Projects';
+import { ProjectWorkspace } from './pages/delivery/ProjectWorkspace';
+import {
+  ProgressReports,
+  ProgressReportDetail,
+  BillingDetailPage,
+  BudgetRequests,
+  BudgetMonitoring,
+  PlansRegister,
+} from './pages/delivery/Progress';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -303,6 +313,72 @@ function Routed() {
           element={
             <Guard permission="gops.pipeline.view_all">
               <Pipeline />
+            </Guard>
+          }
+        />
+
+        {/* Delivery (Phase 4) */}
+        <Route
+          path="/g-ops/projects"
+          element={
+            <GuardAny permissions={['gops.projects.view_all', 'gops.projects.view_own']}>
+              <Projects />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/projects/:id"
+          element={
+            <GuardAny permissions={['gops.projects.view_all', 'gops.projects.view_own']}>
+              <ProjectWorkspace />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/progress"
+          element={
+            <GuardAny permissions={['gops.progress_billing.view_all', 'gops.progress_billing.view_own']}>
+              <ProgressReports />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/progress/:id"
+          element={
+            <GuardAny permissions={['gops.progress_billing.view_all', 'gops.progress_billing.view_own']}>
+              <ProgressReportDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/billings/:id"
+          element={
+            <GuardAny permissions={['gops.progress_billing.view_all', 'gops.progress_billing.view_own']}>
+              <BillingDetailPage />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/budget-requests"
+          element={
+            <GuardAny permissions={['gops.budget_requests.view_all', 'gops.budget_requests.view_own']}>
+              <BudgetRequests />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/budget-monitoring"
+          element={
+            <Guard permission="gops.budget_monitoring.view_all">
+              <BudgetMonitoring />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/plans"
+          element={
+            <Guard permission="gops.plans.view_all">
+              <PlansRegister />
             </Guard>
           }
         />
