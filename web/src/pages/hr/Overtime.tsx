@@ -14,6 +14,7 @@ import {
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { todayLocal } from '../../lib/day';
 
 /**
  * Overtime — two filings against one record.
@@ -242,7 +243,7 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
 
   const [form, setForm] = useState({
-    date: new Date().toISOString().slice(0, 10),
+    date: todayLocal(),
     plannedStart: '17:00',
     plannedEnd: '20:00',
     dinnerBreak: true,

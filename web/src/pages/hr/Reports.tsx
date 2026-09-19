@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { Empty, ErrorBox, Field, Loading, formatMoney } from '../../components/ui';
+import { todayLocal } from '../../lib/day';
 
 /**
  * HR reports.
@@ -34,7 +35,7 @@ interface LeaveBalances {
 }
 
 const startOfYear = () => `${new Date().getFullYear()}-01-01`;
-const today = () => new Date().toISOString().slice(0, 10);
+const today = todayLocal;
 
 export function HrReports() {
   const [tab, setTab] = useState<'overtime' | 'leave'>('overtime');

@@ -14,6 +14,7 @@ import {
   useToast,
 } from '../../components/ui';
 import type { Asset } from './InstalledBase';
+import { todayLocal } from '../../lib/day';
 
 /**
  * Service contracts.
@@ -263,7 +264,7 @@ function CoverModal({
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [settings, setSettings] = useState<{ defaultFrequencyMonths: number } | null>(null);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocal();
   const oneYear = (() => {
     const d = new Date(`${today}T00:00:00Z`);
     d.setUTCFullYear(d.getUTCFullYear() + 1);

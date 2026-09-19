@@ -14,6 +14,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { RecordPaymentModal, tone, label } from './Receivables';
+import { todayLocal } from '../../lib/day';
 
 /**
  * Accounts Payable — supplier bills and expense claims.
@@ -317,7 +318,7 @@ function NewBillModal({
     vatRate: number;
   } | null>(null);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocal();
   const [form, setForm] = useState({
     supplierId: from?.order.supplier.id ?? '',
     jobId: from?.order.job?.id ?? '',

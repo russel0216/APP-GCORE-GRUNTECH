@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ErrorBox, Field, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
 import { Meter as ProgressBar } from '../../components/charts';
+import { todayLocal } from '../../lib/day';
 
 export const JOB_STATUSES = [
   { value: 'PLANNING', label: 'Planning' },
@@ -205,7 +206,7 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
     projectManagerId: '',
     customerPoNumber: '',
     customerPoDate: '',
-    startDate: new Date().toISOString().slice(0, 10),
+    startDate: todayLocal(),
   });
 
   useEffect(() => {

@@ -154,6 +154,7 @@ export function OpsDashboard() {
               <div className="grid grid-2">
                 <Stat
                   label="On hold"
+                  icon="clock"
                   value={onHold}
                   tone="warn"
                   to="/g-ops/leads"
@@ -161,6 +162,7 @@ export function OpsDashboard() {
                 />
                 <Stat
                   label="Lost"
+                  icon="alert"
                   value={lost}
                   tone="muted"
                   to="/g-ops/leads"
@@ -189,6 +191,7 @@ export function OpsDashboard() {
                 <div className="stack">
                   <Stat
                     label="Progress reports awaiting approval"
+                    icon="document"
                     value={delivery.reportsAwaitingApproval}
                     tone="warn"
                     to="/g-ops/progress"
@@ -196,6 +199,7 @@ export function OpsDashboard() {
                   />
                   <Stat
                     label="Projects on hold"
+                    icon="clock"
                     value={n(delivery.jobs, 'ON_HOLD')}
                     tone="warn"
                     to="/g-ops/projects"
@@ -221,6 +225,7 @@ export function OpsDashboard() {
                 <div className="stack">
                   <Stat
                     label="Up for renewal"
+                    icon="calendar"
                     value={aftermarket.upForRenewal}
                     tone="warn"
                     to="/g-ops/renewals"
@@ -228,6 +233,7 @@ export function OpsDashboard() {
                   />
                   <Stat
                     label="PM visits due or overdue"
+                    icon="wrench"
                     value={aftermarket.visitsDue}
                     tone="danger"
                     to="/g-ops/visits"
@@ -235,6 +241,7 @@ export function OpsDashboard() {
                   />
                   <Stat
                     label="Service reports awaiting approval"
+                    icon="document"
                     value={aftermarket.reportsAwaitingApproval}
                     tone="warn"
                     to="/g-ops/pm"

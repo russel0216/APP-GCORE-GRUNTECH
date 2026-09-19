@@ -13,6 +13,7 @@ import {
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { todayLocal } from '../../lib/day';
 
 /**
  * Accounts Receivable.
@@ -299,7 +300,7 @@ function RaiseInvoiceModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [terms, setTerms] = useState(30);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocal();
   const [form, setForm] = useState({ invoiceDate: today, poReference: '', notes: '' });
 
   const dueDate = (() => {
@@ -643,7 +644,7 @@ function CertificateModal({
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
     ewtCertificateNo: invoice.ewtCertificateNo ?? '',
-    ewtCertificateAt: invoice.ewtCertificateAt?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+    ewtCertificateAt: invoice.ewtCertificateAt?.slice(0, 10) ?? todayLocal(),
   });
 
   async function save() {
@@ -737,7 +738,7 @@ export function RecordPaymentModal({
   });
   const [form, setForm] = useState({
     method: 'BANK_TRANSFER',
-    paymentDate: new Date().toISOString().slice(0, 10),
+    paymentDate: todayLocal(),
     reference: '',
     bank: '',
     notes: '',

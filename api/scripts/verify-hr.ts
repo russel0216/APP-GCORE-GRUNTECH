@@ -883,8 +883,17 @@ async function main() {
       today?.timeIn != null && today.timeOut != null && today.timeInMethod === 'PIN',
     );
 
+    /*
+      The LOCAL calendar date, not toISOString(). Attendance is keyed on the
+      local day by `dayKey()`, so asking for the UTC one extracted the wrong
+      day's rows for the eight hours either side of midnight in Manila — which
+      is how this assertion failed at 07:00 with the route working correctly.
+    */
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const now = new Date();
+    const localDay = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
     const csv = await fetch(
-      `${BASE}/attendance/export?from=${new Date().toISOString().slice(0, 10)}&to=${new Date().toISOString().slice(0, 10)}`,
+      `${BASE}/attendance/export?from=${localDay}&to=${localDay}`,
       { headers: { Authorization: `Bearer ${hrToken}` } },
     );
     const csvText = await csv.text();

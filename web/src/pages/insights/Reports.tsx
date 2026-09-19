@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { Empty, ErrorBox, Field, Loading, formatDate, formatMoney } from '../../components/ui';
 import { Tile, RangePicker, ExportButton, Bar } from './Overview';
+import { todayLocal } from '../../lib/day';
 
 /**
  * The four reports that answer a question somebody actually asks.
@@ -61,7 +62,7 @@ interface Pipeline {
 export function SalesAnalytics() {
   const thisYear = new Date().getFullYear();
   const [from, setFrom] = useState(`${thisYear}-01-01`);
-  const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
+  const [to, setTo] = useState(todayLocal());
   const [data, setData] = useState<Pipeline | null>(null);
   const [error, setError] = useState<unknown>(null);
 
@@ -802,7 +803,7 @@ interface Performance {
 export function PerformanceReport() {
   const thisYear = new Date().getFullYear();
   const [from, setFrom] = useState(`${thisYear}-01-01`);
-  const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
+  const [to, setTo] = useState(todayLocal());
   const [data, setData] = useState<Performance | null>(null);
   const [error, setError] = useState<unknown>(null);
 

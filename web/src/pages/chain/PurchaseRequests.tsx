@@ -15,6 +15,8 @@ import {
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { DocumentApproval } from '../../components/ApprovalStepper';
+import { RecordHeader } from '../../components/RecordHeader';
 
 export const PR_STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -369,11 +371,15 @@ export function PurchaseRequestDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [adding, setAdding] = useState(false);
+  // Bumped on every reload so the approval chain re-reads after a submit —
+  // the chain lives behind its own endpoint and will not know otherwise.
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
       setPr(await api.get<PrDetail>(`/purchase-requests/${id}`));
+      setReload((n) => n + 1);
       setError(null);
     } catch (err) {
       setError(err);
@@ -440,43 +446,56 @@ export function PurchaseRequestDetail() {
         <span className="mono">{pr.number}</span>
       </div>
 
-      <div className="page-head">
-        <div>
-          <h1>{pr.purpose}</h1>
-          <p>
-            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment'}
-            {pr.job ? ` · ${pr.job.name}` : pr.warehouse ? ` · ${pr.warehouse.name}` : ''} ·{' '}
-            {pr.requestedBy.name}
-            <span className={`badge ${statusTone(pr.status)}`} style={{ marginLeft: 8 }}>
-              {label(pr.status)}
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          <button
-            className="btn"
-            onClick={() => openPdf(`/api/purchase-requests/${pr.id}/pdf`, () => toast('error', 'Could not print'))}
-          >
-            Print
-          </button>
-          {pr.canEdit && pr.items.length > 0 && (
-            <button className="btn btn-ok" onClick={submit}>
-              Submit for approval
+      <RecordHeader
+        type="Purchase Request"
+        code={pr.number}
+        title={pr.purpose}
+        status={pr.status}
+        amount={formatMoney(pr.estimatedTotal)}
+        // Estimated, not contracted: a PR is a request, and what it finally
+        // costs is settled at the purchase order.
+        amountLabel="Estimated total"
+        actions={
+          <>
+            <button
+              className="btn"
+              onClick={() =>
+                openPdf(`/api/purchase-requests/${pr.id}/pdf`, () => toast('error', 'Could not print'))
+              }
+            >
+              Print
             </button>
-          )}
-          {(pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') && can('gchain.canvass.create') && (
-            <button className="btn" onClick={startCanvass}>
-              Start canvass
-            </button>
-          )}
-          {(pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
-            can('gchain.purchase_orders.create') && (
-              <button className="btn btn-primary" onClick={raiseOrder}>
-                Raise order
+            {pr.canEdit && pr.items.length > 0 && (
+              <button className="btn btn-ok" onClick={submit}>
+                Submit for approval
               </button>
             )}
-        </div>
-      </div>
+            {(pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
+              can('gchain.canvass.create') && (
+                <button className="btn" onClick={startCanvass}>
+                  Start canvass
+                </button>
+              )}
+            {(pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
+              can('gchain.purchase_orders.create') && (
+                <button className="btn btn-primary" onClick={raiseOrder}>
+                  Raise order
+                </button>
+              )}
+          </>
+        }
+      />
+
+      {/* The kind and the counterparty, under the header rather than in it —
+          the header answers what/which/what state, this answers the rest. */}
+      <p className="record-head-meta" style={{ marginBottom: 'var(--s-4)' }}>
+        {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment'}
+        {pr.job ? ` · ${pr.job.name}` : pr.warehouse ? ` · ${pr.warehouse.name}` : ''} ·{' '}
+        requested by {pr.requestedBy.name}
+      </p>
+
+      <DocumentApproval documentType="purchase_request" documentId={pr.id} reloadToken={reload} />
+
 
       <ErrorBox error={error} />
 

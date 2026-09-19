@@ -4,6 +4,7 @@ import { api, qs, SHIPPED_PHASE, type ListResult } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { CommandPalette } from './CommandPalette';
 import { initials, relativeTime } from './ui';
+import { Icon, sectionIcon } from './Icon';
 
 interface Notification {
   id: string;
@@ -23,6 +24,29 @@ export function Shell() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(me?.unread ?? 0);
+
+  /*
+    Collapsed to an icon rail, remembered per viewer.
+    
+    localStorage is the right home: it is a preference, not a record, and it
+    failing is not worth an error. Read once, in the initialiser, so the
+    sidebar never renders wide and then snaps narrow.
+  */
+  const [railed, setRailed] = useState(() => {
+    try {
+      return localStorage.getItem('gcore_nav_railed') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('gcore_nav_railed', railed ? '1' : '0');
+    } catch {
+      /* a preference that cannot be saved is still a preference */
+    }
+  }, [railed]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -166,6 +190,29 @@ export function Shell() {
   /** Where a section's name points: its first screen that actually exists. */
   const sectionTarget = (group: (typeof navGroups)[number]) =>
     group.items.find((s) => s.phase <= SHIPPED_PHASE)?.path ?? null;
+
+  /*
+    Daylight everywhere except the launcher. The launcher is the product's
+    identity — black, neon, the animated marks — and was explicitly to be
+    kept; every screen you reach FROM it is a working surface, and a working
+    surface is easier to read in daylight.
+  */
+  const day = location.pathname !== '/';
+
+  /*
+    The theme goes on <html>, not on the shell div.
+
+    On the shell it cannot reach <body>, so the page behind a short sidebar
+    stayed black while everything in front of it turned white — and a selector
+    written `[data-theme] .shell` never matches the .shell that carries the
+    attribute in the first place.
+  */
+  useEffect(() => {
+    const root = document.documentElement;
+    if (day) root.setAttribute('data-theme', 'day');
+    else root.removeAttribute('data-theme');
+    return () => root.removeAttribute('data-theme');
+  }, [day]);
 
   return (
     <div className="shell">
@@ -345,10 +392,26 @@ export function Shell() {
       <div className="shell-body">
         {activeModule && (
           <nav
-            className={`sidebar${sectioned ? ' sidebar-sections' : ''}`}
+            className={`sidebar${sectioned ? ' sidebar-sections' : ''}${railed ? ' railed' : ''}`}
             aria-label={sectioned ? `${activeModule.label} sections` : `${activeModule.label} menu`}
           >
-            <div className="sidebar-title">{activeModule.label}</div>
+            <div className="sidebar-head">
+              <span className="sidebar-title">{activeModule.label}</span>
+              {/*
+                aria-expanded describes the nav, not the button, so a screen
+                reader is told what the control does rather than what it is.
+              */}
+              <button
+                type="button"
+                className="rail-toggle"
+                onClick={() => setRailed((r) => !r)}
+                aria-expanded={!railed}
+                aria-label={railed ? 'Expand the menu' : 'Collapse the menu to icons'}
+                title={railed ? 'Expand the menu' : 'Collapse the menu to icons'}
+              >
+                <Icon name="panel" size={16} />
+              </button>
+            </div>
 
             {/*
               Sections, not screens. Picking one opens its screens on the second
@@ -362,8 +425,9 @@ export function Shell() {
                   const live = group.items.filter((s) => s.phase <= SHIPPED_PHASE).length;
                   if (!target) {
                     return (
-                      <div key={group.name} className="nav-item soon">
-                        <span>{group.name}</span>
+                      <div key={group.name} className="nav-item soon" title={group.name ?? ''}>
+                        <Icon name={sectionIcon(group.name)} size={17} />
+                        <span className="nav-label">{group.name}</span>
                         <span className="tag">soon</span>
                       </div>
                     );
@@ -374,8 +438,13 @@ export function Shell() {
                       to={target}
                       className={`nav-item${active ? ' active' : ''}`}
                       aria-current={active ? 'true' : undefined}
+                      // The title is the only name a railed item has on screen,
+                      // and aria-label is the only one it has to a reader.
+                      title={group.name ?? ''}
+                      aria-label={railed ? `${group.name} — ${live} screen${live === 1 ? '' : 's'}` : undefined}
                     >
-                      <span>{group.name}</span>
+                      <Icon name={sectionIcon(group.name)} size={17} />
+                      <span className="nav-label">{group.name}</span>
                       <span className="tag">{live}</span>
                     </Link>
                   );

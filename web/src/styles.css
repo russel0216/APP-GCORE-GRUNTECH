@@ -12,7 +12,7 @@
   --neon: #39ff9d;
   --neon-dim: #7fe8ab;
   --magenta: #c026d3;
-  --magenta-soft: rgba(192, 38, 211, 0.35);
+  --magenta-soft: rgb(var(--magenta-rgb) / 0.35);
 
   --bg: #000;
   --surface: #0a0c0b;
@@ -44,6 +44,24 @@
   --info: #6ba8ff;
 
   /*
+    The same colours as space-separated triples, so a tint can be written
+    `rgb(var(--neon-rgb) / 0.12)` and follow the theme. Before these, 94 colour
+    literals were baked into the stylesheet and none of them could change.
+
+    --tint is what lightens a surface, --shade what darkens one. On a dark
+    theme those are white and black; on a light one they swap, which is the
+    whole reason they are named for their JOB rather than their colour.
+  */
+  --neon-rgb: 57 255 157;
+  --magenta-rgb: 192 38 211;
+  --danger-rgb: 255 107 138;
+  --warn-rgb: 240 180 41;
+  --info-rgb: 107 168 255;
+  --tint-rgb: 255 255 255;
+  --shade-rgb: 0 0 0;
+  --topbar-bg: rgb(6 8 7 / 0.94);
+
+  /*
     Spacing, on a 4px base. Before these existed the app used fourteen
     different margin values and fourteen different gaps, which is why two
     cards side by side rarely lined up.
@@ -67,9 +85,9 @@
   --fs-2xl: 24px;
 
   /* Elevation. Three steps: resting, raised, floating. */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgb(var(--shade-rgb) / 0.4);
+  --shadow-md: 0 4px 14px rgb(var(--shade-rgb) / 0.45);
+  --shadow-lg: 0 20px 60px rgb(var(--shade-rgb) / 0.6);
 
   /*
     One focus ring, used by everything. Neon rather than magenta so it never
@@ -189,7 +207,7 @@ th:focus-visible {
   flex-direction: column;
   align-items: center;
   background:
-    radial-gradient(900px 500px at 50% -10%, rgba(57, 255, 157, 0.08), transparent 60%),
+    radial-gradient(900px 500px at 50% -10%, rgb(var(--neon-rgb) / 0.08), transparent 60%),
     var(--bg);
 }
 
@@ -199,7 +217,7 @@ th:focus-visible {
   letter-spacing: 8px;
   font-size: 44px;
   color: var(--neon);
-  text-shadow: 0 0 6px rgba(57, 255, 157, 0.8), 0 0 22px rgba(57, 255, 157, 0.45);
+  text-shadow: 0 0 6px rgb(var(--neon-rgb) / 0.8), 0 0 22px rgb(var(--neon-rgb) / 0.45);
   margin: 0;
 }
 
@@ -229,7 +247,7 @@ th:focus-visible {
   border: 2px solid var(--magenta);
   border-radius: var(--radius-lg);
   padding: 26px;
-  box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 20px rgba(192, 38, 211, 0.06);
+  box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 20px rgb(var(--magenta-rgb) / 0.06);
 }
 
 .panel h2 {
@@ -239,7 +257,7 @@ th:focus-visible {
   letter-spacing: 3px;
   text-align: center;
   color: var(--neon);
-  text-shadow: 0 0 5px rgba(57, 255, 157, 0.7);
+  text-shadow: 0 0 5px rgb(var(--neon-rgb) / 0.7);
 }
 
 /* ─────────────────────────────── Forms ─────────────────────────────────── */
@@ -297,7 +315,7 @@ th:focus-visible {
 .field.invalid input:focus,
 .field.invalid select:focus,
 .field.invalid textarea:focus {
-  box-shadow: 0 0 0 3px rgba(255, 107, 138, 0.2);
+  box-shadow: 0 0 0 3px rgb(var(--danger-rgb) / 0.2);
 }
 
 input[type='text'],
@@ -344,7 +362,7 @@ input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--magenta);
-  box-shadow: 0 0 0 3px rgba(192, 38, 211, 0.18);
+  box-shadow: 0 0 0 3px rgb(var(--magenta-rgb) / 0.18);
 }
 
 input:disabled,
@@ -427,7 +445,7 @@ textarea {
   border-color: var(--magenta);
   color: #fff;
   font-weight: 600;
-  box-shadow: 0 0 10px rgba(192, 38, 211, 0.4);
+  box-shadow: 0 0 10px rgb(var(--magenta-rgb) / 0.4);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -436,14 +454,14 @@ textarea {
 }
 
 .btn-ok {
-  background: rgba(57, 255, 157, 0.12);
-  border-color: rgba(57, 255, 157, 0.5);
+  background: rgb(var(--neon-rgb) / 0.12);
+  border-color: rgb(var(--neon-rgb) / 0.5);
   color: var(--neon);
 }
 
 .btn-danger {
-  background: rgba(255, 107, 138, 0.1);
-  border-color: rgba(255, 107, 138, 0.45);
+  background: rgb(var(--danger-rgb) / 0.1);
+  border-color: rgb(var(--danger-rgb) / 0.45);
   color: var(--danger);
 }
 
@@ -494,7 +512,7 @@ textarea {
   gap: 14px;
   padding: 0 18px;
   height: 54px;
-  background: rgba(6, 8, 7, 0.94);
+  background: var(--topbar-bg);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
 }
@@ -505,7 +523,7 @@ textarea {
   letter-spacing: 3px;
   font-size: 15px;
   color: var(--neon);
-  text-shadow: 0 0 6px rgba(57, 255, 157, 0.5);
+  text-shadow: 0 0 6px rgb(var(--neon-rgb) / 0.5);
 }
 
 .topbar-spacer {
@@ -601,7 +619,10 @@ textarea {
   position: sticky;
   top: 54px;
   align-self: flex-start;
-  max-height: calc(100vh - 54px);
+  /* A fixed height, not a max: sized to its content the panel stopped under
+     the last menu item and left a seam of page colour beside a long record,
+     which read as the sidebar having run out rather than as a short menu. */
+  height: calc(100vh - 54px);
   overflow-y: auto;
 }
 
@@ -669,7 +690,7 @@ textarea {
 }
 
 .nav-item.active {
-  background: rgba(192, 38, 211, 0.14);
+  background: rgb(var(--magenta-rgb) / 0.14);
   color: var(--neon);
   box-shadow: inset 2px 0 0 var(--magenta);
 }
@@ -782,17 +803,26 @@ textarea {
   color: inherit;
 }
 
-/* A card that is a link or a button should say so before it is clicked. */
+/*
+  A card that is a link or a button should say so before it is clicked.
+
+  The hover lifts on NEON rather than magenta. Magenta is this app's "you are
+  here" colour — the active nav item, the focused input, the primary button —
+  so using it for hover as well meant a row of cards under the cursor read as a
+  row of selected things. Neon is the affordance colour; magenta stays the
+  state colour.
+*/
 .card.clickable,
 a.card {
   cursor: pointer;
-  transition: border-color 0.12s, box-shadow 0.12s, transform 0.08s;
+  transition: border-color 0.14s, box-shadow 0.14s, background 0.14s;
 }
 
 .card.clickable:hover,
 a.card:hover {
-  border-color: var(--magenta);
-  box-shadow: var(--shadow-md);
+  border-color: rgb(var(--neon-rgb) / 0.35);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md), 0 0 0 1px rgb(var(--neon-rgb) / 0.12);
 }
 
 .card-title {
@@ -967,7 +997,7 @@ a.card:hover {
 }
 
 .scope-switch button.active {
-  background: rgba(192, 38, 211, 0.2);
+  background: rgb(var(--magenta-rgb) / 0.2);
   color: var(--neon);
 }
 
@@ -1044,7 +1074,7 @@ table.data td {
 
 /* Zebra striping, faint enough to guide the eye without banding the page. */
 table.data tbody tr:nth-child(even) {
-  background: rgba(255, 255, 255, 0.012);
+  background: rgb(var(--tint-rgb) / 0.012);
 }
 
 table.data tbody tr:hover {
@@ -1118,26 +1148,26 @@ table.data .mono {
 
 .badge.ok {
   color: var(--ok);
-  border-color: rgba(57, 255, 157, 0.4);
-  background: rgba(57, 255, 157, 0.08);
+  border-color: rgb(var(--neon-rgb) / 0.4);
+  background: rgb(var(--neon-rgb) / 0.08);
 }
 
 .badge.warn {
   color: var(--warn);
-  border-color: rgba(240, 180, 41, 0.4);
-  background: rgba(240, 180, 41, 0.08);
+  border-color: rgb(var(--warn-rgb) / 0.4);
+  background: rgb(var(--warn-rgb) / 0.08);
 }
 
 .badge.danger {
   color: var(--danger);
-  border-color: rgba(255, 107, 138, 0.4);
-  background: rgba(255, 107, 138, 0.08);
+  border-color: rgb(var(--danger-rgb) / 0.4);
+  background: rgb(var(--danger-rgb) / 0.08);
 }
 
 .badge.info {
   color: var(--info);
-  border-color: rgba(107, 168, 255, 0.4);
-  background: rgba(107, 168, 255, 0.08);
+  border-color: rgb(var(--info-rgb) / 0.4);
+  background: rgb(var(--info-rgb) / 0.08);
 }
 
 /* ─────────────────────────────── Overlays ──────────────────────────────── */
@@ -1146,7 +1176,7 @@ table.data .mono {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(0, 0, 0, 0.72);
+  background: rgb(var(--shade-rgb) / 0.72);
   backdrop-filter: blur(3px);
   display: flex;
   justify-content: center;
@@ -1162,7 +1192,7 @@ table.data .mono {
   background: var(--surface);
   border: 1px solid var(--magenta);
   border-radius: var(--radius-lg);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 20px 60px rgb(var(--shade-rgb) / 0.6);
 }
 
 .modal-wide {
@@ -1210,7 +1240,7 @@ table.data .mono {
   border: 1px solid var(--magenta);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 24px 70px rgb(var(--shade-rgb) / 0.7);
 }
 
 .palette input {
@@ -1251,7 +1281,7 @@ table.data .mono {
 
 .palette-hit:hover,
 .palette-hit.active {
-  background: rgba(192, 38, 211, 0.16);
+  background: rgb(var(--magenta-rgb) / 0.16);
 }
 
 .palette-hit .title {
@@ -1275,7 +1305,7 @@ table.data .mono {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 18px 50px rgb(var(--shade-rgb) / 0.6);
 }
 
 /* A <button> now, so it is reachable by keyboard; reset to look like the
@@ -1324,27 +1354,27 @@ table.data .mono {
 
 .alert.error {
   color: var(--danger);
-  border-color: rgba(255, 107, 138, 0.45);
-  background: rgba(255, 107, 138, 0.08);
+  border-color: rgb(var(--danger-rgb) / 0.45);
+  background: rgb(var(--danger-rgb) / 0.08);
 }
 
 .alert.ok {
   color: var(--neon);
-  border-color: rgba(57, 255, 157, 0.4);
-  background: rgba(57, 255, 157, 0.07);
+  border-color: rgb(var(--neon-rgb) / 0.4);
+  background: rgb(var(--neon-rgb) / 0.07);
 }
 
 .alert.info {
   color: var(--info);
-  border-color: rgba(107, 168, 255, 0.35);
-  background: rgba(107, 168, 255, 0.07);
+  border-color: rgb(var(--info-rgb) / 0.35);
+  background: rgb(var(--info-rgb) / 0.07);
 }
 
 /* Was defined 400 lines away in the G-HR section, away from its own siblings. */
 .alert.warn {
   color: var(--warn);
-  border-color: rgba(240, 180, 41, 0.4);
-  background: rgba(240, 180, 41, 0.07);
+  border-color: rgb(var(--warn-rgb) / 0.4);
+  background: rgb(var(--warn-rgb) / 0.07);
 }
 
 .alert ul {
@@ -1406,22 +1436,22 @@ table.data .mono {
 }
 
 .toast.ok {
-  border-color: rgba(57, 255, 157, 0.45);
+  border-color: rgb(var(--neon-rgb) / 0.45);
   color: var(--neon);
 }
 
 .toast.error {
-  border-color: rgba(255, 107, 138, 0.5);
+  border-color: rgb(var(--danger-rgb) / 0.5);
   color: var(--danger);
 }
 
 .toast.warn {
-  border-color: rgba(240, 180, 41, 0.45);
+  border-color: rgb(var(--warn-rgb) / 0.45);
   color: var(--warn);
 }
 
 .toast.info {
-  border-color: rgba(107, 168, 255, 0.4);
+  border-color: rgb(var(--info-rgb) / 0.4);
   color: var(--info);
 }
 
@@ -1502,14 +1532,14 @@ table.data .mono {
 }
 
 .perm-chip.on {
-  background: rgba(57, 255, 157, 0.14);
-  border-color: rgba(57, 255, 157, 0.5);
+  background: rgb(var(--neon-rgb) / 0.14);
+  border-color: rgb(var(--neon-rgb) / 0.5);
   color: var(--neon);
 }
 
 .perm-chip.deny {
-  background: rgba(255, 107, 138, 0.12);
-  border-color: rgba(255, 107, 138, 0.5);
+  background: rgb(var(--danger-rgb) / 0.12);
+  border-color: rgb(var(--danger-rgb) / 0.5);
   color: var(--danger);
 }
 
@@ -1583,16 +1613,16 @@ hr.rule {
 
 .meter-fill {
   height: 100%;
-  background: linear-gradient(90deg, rgba(57, 255, 157, 0.35), rgba(57, 255, 157, 0.65));
+  background: linear-gradient(90deg, rgb(var(--neon-rgb) / 0.35), rgb(var(--neon-rgb) / 0.65));
   transition: width 0.25s ease;
 }
 
 .meter-fill.warn {
-  background: linear-gradient(90deg, rgba(240, 180, 41, 0.35), rgba(240, 180, 41, 0.7));
+  background: linear-gradient(90deg, rgb(var(--warn-rgb) / 0.35), rgb(var(--warn-rgb) / 0.7));
 }
 
 .meter-fill.danger {
-  background: linear-gradient(90deg, rgba(255, 107, 138, 0.35), rgba(255, 107, 138, 0.75));
+  background: linear-gradient(90deg, rgb(var(--danger-rgb) / 0.35), rgb(var(--danger-rgb) / 0.75));
 }
 
 .meter-label {
@@ -1602,7 +1632,7 @@ hr.rule {
   place-items: center;
   font-size: 10.5px;
   color: var(--text);
-  text-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+  text-shadow: 0 0 4px rgb(var(--shade-rgb) / 0.8);
 }
 
 /* ─────────────────────────────── Sales calendar ────────────────────────── */
@@ -1847,7 +1877,7 @@ hr.rule {
 }
 
 .strip-item.active {
-  background: rgba(192, 38, 211, 0.2);
+  background: rgb(var(--magenta-rgb) / 0.2);
   border-color: var(--magenta);
   color: var(--neon);
 }
@@ -1955,7 +1985,7 @@ hr.rule {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(8, 12, 16, 0.82);
+  background: rgb(var(--shade-rgb) / 0.82);
 }
 
 .clock-btn {
@@ -1989,11 +2019,11 @@ hr.rule {
 }
 
 .flow-in {
-  background: rgba(57, 255, 157, 0.55);
+  background: rgb(var(--neon-rgb) / 0.55);
 }
 
 .flow-out {
-  background: rgba(240, 180, 41, 0.5);
+  background: rgb(var(--warn-rgb) / 0.5);
 }
 
 /* ─────────────────────── Aftermarket: report read-back ─────────────────── */
@@ -2004,7 +2034,7 @@ hr.rule {
   padding: 8px 11px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgb(var(--tint-rgb) / 0.02);
   font-size: 13px;
   min-height: 36px;
 }
@@ -2015,14 +2045,14 @@ hr.rule {
    bars compare far faster than two columns of figures do. */
 .mini-bar {
   height: 7px;
-  background: rgba(255, 255, 255, 0.04);
+  background: rgb(var(--tint-rgb) / 0.04);
   border-radius: 2px;
   overflow: hidden;
 }
 
 .mini-bar-fill {
   height: 100%;
-  background: rgba(57, 255, 157, 0.5);
+  background: rgb(var(--neon-rgb) / 0.5);
   border-radius: 2px;
 }
 
@@ -2043,14 +2073,32 @@ hr.rule {
 
 /* ═══════════════════════════ The launcher ════════════════════════════════ */
 
+/*
+  The launcher fills one screen and does not scroll.
+
+  It used to run to 1659px against a 900px viewport — three quarters of a page
+  of scrolling to reach My Work, on the screen everybody lands on first. Every
+  measurement below is now a clamp against viewport HEIGHT rather than a fixed
+  pixel, so the page breathes on a large monitor and compresses on a laptop
+  instead of overflowing it. The floor of each clamp is the point below which
+  the thing stops being legible.
+
+  min-height subtracts the top bar and .content's own padding, so the column
+  is exactly the space that is left.
+*/
 .home {
   max-width: 1180px;
   margin: 0 auto;
+  min-height: calc(100vh - 54px - 22px - var(--s-4));
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(10px, 2vh, 26px);
 }
 
 .home-hero {
   text-align: center;
-  padding: 26px 0 40px;
+  padding: 0;
 }
 
 .home-wordmark {
@@ -2059,8 +2107,11 @@ hr.rule {
 }
 
 .home-wordmark img {
-  width: min(560px, 82vw);
-  height: auto;
+  /* Height-led, not width-led: this is the element that has to yield first
+     when the viewport is short. */
+  height: clamp(74px, 15vh, 180px);
+  width: auto;
+  max-width: 82vw;
   /* Drawn on black like the division marks, so it blends with the page rather
      than sitting in a visible rectangle on it. */
   mix-blend-mode: screen;
@@ -2084,16 +2135,25 @@ hr.rule {
    orphaned" instead of as two balanced pairs. Below 760px it drops to a single
    column rather than a cramped pair — these cards are mostly artwork, and
    artwork at 150px wide is just noise. */
+/* Four across on a wide screen, not two by two. The second row was 300px of
+   the overflow on its own, and four divisions in a row reads as one set. */
 .module-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 22px;
-  margin-bottom: 46px;
+  gap: clamp(10px, 1.6vh, 22px);
+  margin-bottom: 0;
 }
 
 @media (min-width: 760px) {
   .module-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* Only once there is room for the art to survive being quartered. */
+  @media (min-width: 1040px) {
+    .module-grid {
+      grid-template-columns: repeat(4, 1fr);
+    }
   }
 
   /* One or two cards are centred and given a sensible width instead of being
@@ -2109,13 +2169,13 @@ hr.rule {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 30px 22px 26px;
-  min-height: 268px;
+  gap: clamp(2px, 0.5vh, 6px);
+  padding: clamp(12px, 2vh, 28px) 16px clamp(10px, 1.8vh, 24px);
+  min-height: clamp(150px, 27vh, 268px);
   background: var(--surface);
   border: 2px solid var(--magenta);
   border-radius: var(--radius-lg);
-  box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 26px rgba(192, 38, 211, 0.05);
+  box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 26px rgb(var(--magenta-rgb) / 0.05);
   text-decoration: none;
   transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s;
 }
@@ -2123,15 +2183,15 @@ hr.rule {
 .module-card:hover {
   transform: translateY(-4px);
   border-color: var(--neon);
-  box-shadow: 0 0 24px rgba(57, 255, 157, 0.35), inset 0 0 28px rgba(192, 38, 211, 0.1);
+  box-shadow: 0 0 24px rgb(var(--neon-rgb) / 0.35), inset 0 0 28px rgb(var(--magenta-rgb) / 0.1);
 }
 
 .module-art {
-  height: 150px;
+  height: clamp(58px, 11vh, 150px);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 8px;
+  margin-bottom: clamp(2px, 0.6vh, 8px);
 }
 
 .module-art img {
@@ -2146,12 +2206,14 @@ hr.rule {
 .module-name {
   font-family: var(--display);
   font-weight: 900;
-  font-size: 22px;
-  letter-spacing: 4px;
+  font-size: clamp(15px, 2.1vh, 22px);
+  letter-spacing: 3px;
   color: var(--neon);
-  text-shadow: 0 0 6px rgba(57, 255, 157, 0.7), 0 0 18px rgba(57, 255, 157, 0.35);
+  text-shadow: 0 0 6px rgb(var(--neon-rgb) / 0.7), 0 0 18px rgb(var(--neon-rgb) / 0.35);
 }
 
+/* The blurb is the first thing to go on a short screen: the division name and
+   its mark already say which door this is. */
 .module-blurb {
   font-size: 11.5px;
   color: var(--muted);
@@ -2166,7 +2228,7 @@ hr.rule {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: clamp(6px, 1.2vh, 14px);
 }
 
 .home-work-head h2 {
@@ -2179,8 +2241,8 @@ hr.rule {
 }
 
 .home-footer {
-  margin-top: 46px;
-  padding: 22px 0 10px;
+  margin-top: 0;
+  padding: clamp(8px, 1.4vh, 18px) 0 0;
   text-align: center;
   font-size: 11px;
   letter-spacing: 1px;
@@ -2211,8 +2273,8 @@ hr.rule {
 
 .topbar-link.active {
   color: var(--neon);
-  border-color: rgba(57, 255, 157, 0.4);
-  background: rgba(57, 255, 157, 0.07);
+  border-color: rgb(var(--neon-rgb) / 0.4);
+  background: rgb(var(--neon-rgb) / 0.07);
 }
 
 @media (max-width: 860px) {
@@ -2338,7 +2400,10 @@ hr.rule {
 
 .bar-row {
   display: grid;
-  grid-template-columns: minmax(96px, 150px) 1fr 44px;
+  /* `auto` on the value, not a fixed 44px: that was sized for a count, and a
+     bar of money clipped "PHP 335,386.66" against the edge of its panel. The
+     1fr track gives up whatever the figures need. */
+  grid-template-columns: minmax(96px, 150px) 1fr auto;
   align-items: center;
   gap: var(--s-3);
   font-size: var(--fs-md);
@@ -2360,7 +2425,7 @@ a.bar-row:hover .bar-label {
 
 .bar-track {
   height: 10px;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgb(var(--tint-rgb) / 0.05);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -2374,6 +2439,8 @@ a.bar-row:hover .bar-label {
 
 .bar-value {
   text-align: right;
+  white-space: nowrap;
+  padding-left: var(--s-2);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
@@ -2388,7 +2455,7 @@ a.bar-row:hover .bar-label {
 
 .funnel-row {
   display: grid;
-  grid-template-columns: minmax(110px, 170px) 1fr 44px 48px;
+  grid-template-columns: minmax(110px, 170px) 1fr auto 48px;
   align-items: center;
   gap: var(--s-3);
   font-size: var(--fs-md);
@@ -2410,7 +2477,7 @@ a.funnel-row:hover .funnel-label {
 
 .funnel-track {
   height: 18px;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgb(var(--tint-rgb) / 0.05);
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
@@ -2453,7 +2520,7 @@ a.funnel-row:hover .funnel-label {
 
 .donut-track {
   fill: none;
-  stroke: rgba(255, 255, 255, 0.05);
+  stroke: rgb(var(--tint-rgb) / 0.05);
   stroke-width: 16;
 }
 
@@ -2467,6 +2534,11 @@ a.funnel-row:hover .funnel-label {
   font-size: 22px;
   font-weight: 700;
   text-anchor: middle;
+  font-family: var(--body);
+}
+
+.donut-total.long {
+  font-size: 12px;
   font-family: var(--body);
 }
 
@@ -2517,11 +2589,868 @@ a.funnel-row:hover .funnel-label {
 
 @media (max-width: 520px) {
   .bar-row {
-    grid-template-columns: minmax(80px, 120px) 1fr 36px;
+    grid-template-columns: minmax(80px, 120px) 1fr auto;
     gap: var(--s-2);
   }
   .funnel-row {
-    grid-template-columns: minmax(84px, 130px) 1fr 36px 40px;
+    grid-template-columns: minmax(84px, 130px) 1fr auto 40px;
     gap: var(--s-2);
   }
+}
+
+/* ──────────────────────────── KPI cards ────────────────────────────────── */
+/*
+  The dashboard metric card. One implementation for all five dashboards; there
+  were three before it, and the Insights one was a <div onClick> no keyboard
+  could reach.
+
+  Self-contained rather than composed onto .card, so it can carry its own
+  radius and its own hover without fighting the card rules.
+
+    LABEL            small, uppercase, muted
+    1,562            the metric - Orbitron, tabular
+    context line     faint, optional
+
+  The accent is a 3px ::before down the left edge rather than a border, so the
+  card needs no padding compensation and the bar follows the corner radius.
+  A tinted background would read as "selected"; an edge reads as "this one
+  wants attention", which is what it means. It only ever ADDS to what the
+  subtext already says in words - roughly one man in twelve cannot separate
+  the neon from the amber.
+*/
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--s-3) var(--s-4);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
+  overflow: hidden;
+  /* Some cards carry a subtext line and some do not. Without a floor, a row
+     of them comes out ragged. */
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+}
+
+.kpi-card:hover {
+  border-color: rgb(var(--neon-rgb) / 0.3);
+  box-shadow: var(--shadow-md);
+}
+
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background: var(--line);
+}
+
+.kpi-card.neon::before { background: var(--neon); }
+.kpi-card.magenta::before { background: var(--magenta); }
+.kpi-card.warn::before { background: var(--warn); }
+.kpi-card.ok::before { background: var(--ok); }
+
+/*
+  Not in the supplied block, and both are in use: `danger` four times (an
+  overdue payable, a negative working position, absent staff, overdue borrow
+  slips) and `info` three times. Without these they fall through to the grey
+  default, and a figure that means "deal with this today" renders as neutral.
+*/
+.kpi-card.danger::before { background: var(--danger); }
+.kpi-card.info::before { background: var(--info); }
+
+/* `quiet` is the default edge under its own name — nothing to report. */
+.kpi-card.quiet::before { background: var(--line); }
+
+.kpi-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: var(--s-1);
+}
+
+.kpi-value {
+  /* Body, not --display. Orbitron has no glyph for a slashed zero at the
+     weight these cards use, so every KPI reading nought printed a tofu box —
+     confirmed on the HR dashboard, where four of five tiles were unreadable.
+     The display face stays on headings, where it never has to carry a digit. */
+  font-family: var(--body);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin-top: auto;
+  overflow-wrap: anywhere;
+}
+
+/* Money and long figures drop to Inter — Orbitron has no useful comma. */
+.kpi-value.figure {
+  font-family: var(--body);
+  letter-spacing: -0.2px;
+}
+
+.kpi-subtext {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  margin-top: var(--s-1);
+}
+
+/* ─────────────────────────── Approval stepper ──────────────────────────── */
+/*
+  Where a document has got to in its approval chain.
+
+  `GET /approvals/history/:type/:id` has been served since Phase 1 and nothing
+  ever called it, so "who is sitting on this" was a question you could only
+  answer by asking the person.
+
+  Magenta for the pending step, not amber. Magenta is this app's "you are here"
+  colour - the active nav item, the focused control - and the pending step is
+  exactly that: where the document currently sits. Amber stays for status
+  badges, which say something different.
+*/
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  /* --surface-2 rather than --surface: this sits INSIDE a card, and a nested
+     panel the same colour as its parent is an invisible box with a border. */
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  scrollbar-width: none;
+  list-style: none;
+  margin: 0;
+}
+
+.stepper::-webkit-scrollbar {
+  display: none;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.step-node {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.step-item.approved .step-node {
+  background: rgb(var(--neon-rgb) / 0.15);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.step-item.pending .step-node {
+  background: rgb(var(--magenta-rgb) / 0.15);
+  border-color: var(--magenta);
+  color: var(--magenta);
+  box-shadow: 0 0 8px rgb(var(--magenta-rgb) / 0.4);
+}
+
+/*
+  Not in the supplied block, and a chain that cannot show a rejection is a
+  chain that quietly reports a rejected document as merely unfinished.
+*/
+.step-item.rejected .step-node {
+  background: rgb(var(--danger-rgb) / 0.15);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.step-divider {
+  flex: 1;
+  height: 2px;
+  min-width: 24px;
+  background: var(--line-soft);
+}
+
+.step-divider.active {
+  background: var(--neon);
+}
+
+/*
+  The two lines beside each node. The step name alone answers "what" but not
+  "who" or "when", which is the whole reason to render the chain.
+*/
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.step-name {
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+.step-item.waiting .step-name {
+  color: var(--muted);
+}
+
+.step-who {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.step-item.pending .step-who {
+  color: var(--magenta);
+}
+
+.step-item.rejected .step-who {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  /*
+    Horizontal scrolling is the right call on a tablet and the wrong one on a
+    phone, where three steps are wider than the screen and nothing tells you
+    the rest are off to the right.
+  */
+  .stepper {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--s-3);
+  }
+  .step-divider {
+    display: none;
+  }
+}
+
+/* ────────────────────────── Record header bar ──────────────────────────── */
+/*
+  The header on a single-record page. See components/RecordHeader.tsx.
+
+  A 4px neon edge, the same language the KPI cards use for "this is the thing
+  you are looking at". NOT `.panel` — that is the sign-in form's box, a 2px
+  magenta border with a glow, and it belongs to exactly one screen.
+
+  NOT sticky, though it was meant to be. `.content` carries `overflow-x: auto`
+  as a safety net against wide content, and any overflow other than `visible`
+  makes an element the containing block for a sticky descendant. So a `top`
+  offset resolved against the content box rather than the viewport and pinned
+  the bar BELOW its own resting position, overlapping the panel under it — at
+  scroll zero, before anyone had scrolled anything. Making it stick means
+  dropping that safety net across every page, which is a larger change than
+  one header bar is worth.
+*/
+.record-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-4);
+  padding: var(--s-4) var(--s-5);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--neon);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.record-head-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.record-head-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+/* "PURCHASE REQUEST • GT-PR-2026-0042" */
+.record-head-kind {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.record-head-kind strong {
+  color: var(--neon);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.record-head-main h1 {
+  margin: 0;
+  font-size: var(--fs-xl);
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.record-head-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  max-width: 80ch;
+}
+
+.record-head-aside {
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  flex-wrap: wrap;
+}
+
+.record-head-amount {
+  text-align: right;
+}
+
+.record-head-amount-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+/*
+  The headline figure, in the body face for the same reason as .kpi-value:
+  Orbitron draws no zero here and a contract worth 5,000,000 would print three
+  tofu boxes. The display face stays on the labels around it.
+*/
+.record-head-amount-value {
+  font-family: var(--body);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--neon);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 860px) {
+  .record-head {
+    padding: var(--s-3) var(--s-4);
+    gap: var(--s-3);
+  }
+  .record-head-aside {
+    width: 100%;
+    justify-content: space-between;
+    gap: var(--s-3);
+  }
+}
+
+@media (max-width: 520px) {
+  /* The amount stops competing with the title for the same line. */
+  .record-head-aside {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .record-head-amount {
+    text-align: left;
+  }
+}
+
+/* ──────────────────────── Numbers read as numbers ──────────────────────── */
+/*
+  Tabular figures everywhere one number is compared against another.
+  Proportional digits make 111 narrower than 000 - fine in a sentence, wrong in
+  a column of money.
+*/
+.mono,
+.money,
+td.num,
+.bar-value,
+.funnel-value,
+.stat-value,
+.kpi-value,
+.donut-legend strong,
+table.data td.right {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ──────────────────────────── Icon badges ──────────────────────────────── */
+/*
+  The tinted disc behind an icon, on KPI cards and list rows.
+
+  The reference dashboards fill these with a solid pastel — a treatment that
+  only works on white. On black a pastel disc reads as a hole. A wash at 12%
+  under a ring at 30%, with the glyph itself at full colour, gives the same
+  "badged" look and keeps the glyph legible.
+*/
+.icon-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid;
+}
+
+.icon-badge.neon    { color: var(--neon);    background: rgb(var(--neon-rgb) / 0.12);  border-color: rgb(var(--neon-rgb) / 0.3); }
+.icon-badge.ok      { color: var(--ok);      background: rgb(var(--neon-rgb) / 0.12);  border-color: rgb(var(--neon-rgb) / 0.3); }
+.icon-badge.magenta { color: var(--magenta); background: rgb(var(--magenta-rgb) / 0.15);  border-color: rgb(var(--magenta-rgb) / 0.4); }
+.icon-badge.warn    { color: var(--warn);    background: rgb(var(--warn-rgb) / 0.12);  border-color: rgb(var(--warn-rgb) / 0.32); }
+.icon-badge.danger  { color: var(--danger);  background: rgb(var(--danger-rgb) / 0.12); border-color: rgb(var(--danger-rgb) / 0.32); }
+.icon-badge.info    { color: var(--info);    background: rgb(var(--info-rgb) / 0.12); border-color: rgb(var(--info-rgb) / 0.32); }
+.icon-badge.quiet   { color: var(--muted);   background: rgb(var(--tint-rgb) / 0.04); border-color: var(--line); }
+
+/* ─────────────────────── KPI card, badged variant ──────────────────────── */
+/*
+  The badge sits on its own line above the label, as in both references. The
+  card keeps its accent edge — the badge repeats the same colour, so the two
+  agree rather than compete.
+*/
+.kpi-card .icon-badge {
+  margin-bottom: var(--s-1);
+}
+
+/*
+  "View details ›" along the foot of a card that goes somewhere.
+
+  Both references do this, and it is worth copying: a tile that is secretly a
+  link is a tile most people never click. It only appears on cards that ARE
+  links, and it slides its chevron on hover so the affordance is felt as well
+  as read.
+*/
+.kpi-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--line-soft);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.kpi-more .chev {
+  transition: transform 0.15s ease;
+}
+
+a.kpi-card:hover .kpi-more {
+  color: var(--neon);
+}
+
+a.kpi-card:hover .kpi-more .chev {
+  transform: translateX(3px);
+}
+
+/* The badged card is taller — it carries a disc and possibly a footer. */
+.kpi-card.badged {
+  min-height: 132px;
+}
+
+/* ──────────────────────── Icon list (panel rows) ───────────────────────── */
+/*
+  A row of "icon · two lines of text · a figure", which is how both references
+  present a short list inside a panel. Replaces a bare <dl> of label/value
+  pairs, which read as a form rather than as something to act on.
+*/
+.icon-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.icon-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  color: var(--text);
+}
+
+a.icon-row:hover {
+  background: var(--surface-2);
+  border-color: rgb(var(--neon-rgb) / 0.25);
+}
+
+.icon-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.icon-row-title {
+  font-size: var(--fs-md);
+}
+
+.icon-row-sub {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.icon-row-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The "View all ›" that closes a list, as in the reference. */
+.panel-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-1);
+  margin-top: var(--s-2);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line-soft);
+  font-size: var(--fs-md);
+  color: var(--muted);
+}
+
+.panel-more:hover {
+  color: var(--neon);
+}
+
+/* ──────────────────── Series legend above a chart ──────────────────────── */
+/*
+  Named series with their totals, sitting above the chart rather than under
+  it — the Ascension reference reads well because the two figures are legible
+  before you look at the shape at all.
+*/
+.series-legend {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-6);
+  flex-wrap: wrap;
+}
+
+.series {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.series-name {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.series-value {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.series-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/*
+  Under about 820px of viewport there is not enough height for the blurbs and
+  the My Work detail at once. The blurb goes first — the mark and the name
+  already say which division a card opens — and My Work keeps only its
+  headline counts.
+*/
+@media (max-height: 820px) and (min-width: 1040px) {
+  .module-blurb {
+    display: none;
+  }
+  .home {
+    gap: var(--s-2);
+  }
+  .module-card {
+    min-height: clamp(126px, 21vh, 200px);
+  }
+  .home-work .card {
+    padding: var(--s-2) var(--s-3);
+  }
+  .home-work .card-title {
+    margin-bottom: var(--s-1);
+  }
+  .home-work .stack {
+    gap: var(--s-1);
+  }
+  .home-work-head {
+    margin-bottom: var(--s-1);
+  }
+}
+
+/*
+  My Work on the launcher is a summary, not the screen itself — "Open My Work"
+  is right there. Tight padding, a capped list and smaller secondary lines keep
+  the whole page inside one viewport whatever is in somebody's queue.
+*/
+.home-work .card {
+  padding: var(--s-3) var(--s-4);
+}
+
+.home-work .card-title {
+  margin-bottom: var(--s-2);
+}
+
+.home-work .stack {
+  gap: var(--s-2);
+}
+
+.home-work .card .faint,
+.home-work .card .mono {
+  font-size: var(--fs-xs);
+}
+
+/*
+  The launcher does not need .content's 60px scroll gutter — that exists so a
+  long page does not end flush against the window. This page ends on purpose.
+  Reclaiming it is the last 44px that puts the whole screen inside the fold.
+*/
+.content:has(> .home) {
+  padding-bottom: var(--s-4);
+}
+
+/* ─────────────────────── Sidebar: icons and the rail ───────────────────── */
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3) var(--s-3);
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: var(--s-2);
+}
+
+/* The title rule already styles this; here it only has to stop being a block. */
+.sidebar-head .sidebar-title {
+  padding: 0;
+  border: 0;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.rail-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.rail-toggle:hover {
+  color: var(--neon);
+  border-color: rgb(var(--neon-rgb) / 0.35);
+}
+
+/* The icon leads; the label is what goes away. */
+.nav-item svg {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.nav-item.active svg {
+  opacity: 1;
+}
+
+.nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+  Collapsed: 60px of icons.
+
+  Width is the only thing that animates — animating the labels as well makes
+  the whole column reflow twice per toggle. They are simply gone, which is
+  also why every railed item carries a title and an aria-label: an icon on its
+  own is a rebus, not a name.
+*/
+.sidebar {
+  transition: width 0.16s ease;
+}
+
+.sidebar.railed {
+  width: 60px;
+}
+
+.sidebar.railed .nav-label,
+.sidebar.railed .tag,
+.sidebar.railed .nav-group,
+.sidebar.railed .sidebar-title {
+  display: none;
+}
+
+.sidebar.railed .sidebar-head {
+  justify-content: center;
+  padding: var(--s-2) 0 var(--s-3);
+}
+
+.sidebar.railed .nav-item {
+  justify-content: center;
+  padding: var(--s-3) 0;
+}
+
+/* Below 860px the sidebar is replaced by the section strip, so the rail has
+   nothing to collapse. */
+@media (max-width: 860px) {
+  .sidebar.railed {
+    width: auto;
+  }
+}
+
+/* ════════════════════════════ Daylight ═══════════════════════════════════ */
+/*
+  The app in daylight. The LAUNCHER stays dark — that screen is the product's
+  identity and was explicitly to be retained — so this is scoped to the shell
+  when it is showing a module rather than applied to :root.
+
+  Only tokens are redefined. Nothing below this block restyles a component:
+  the 94 colour literals that used to be baked into the stylesheet are now
+  token triples, which is what makes a second theme a palette rather than a
+  rewrite.
+
+  The accents change VALUE, not role. Neon #39ff9d is 1.4:1 on white — a
+  decorative colour that cannot carry text — so in daylight the same token
+  holds a deep green that reads at 5.3:1. Every one of the 34 places that sets
+  `color: var(--neon)` follows automatically.
+
+  Measured against --surface (#ffffff):
+    --text   #16202e  15.3:1
+    --muted  #53637a   5.9:1
+    --faint  #6b7b92   4.6:1
+    --neon   #0a7148   5.3:1
+    --magenta #9b1fb0  6.3:1
+*/
+[data-theme='day'] {
+  --bg: #eef1f6;
+  --surface: #ffffff;
+  --surface-2: #f5f7fb;
+  --surface-3: #e9edf4;
+  --line: #d8dfea;
+  --line-soft: #e9edf4;
+
+  --text: #16202e;
+  --muted: #53637a;
+  --faint: #6b7b92;
+
+  --neon: #0a7148;
+  --neon-dim: #0a7148;
+  --magenta: #9b1fb0;
+  --magenta-soft: rgb(155 31 176 / 0.2);
+
+  --ok: #0a7148;
+  --danger: #c02a45;
+  --warn: #9a6207;
+  --info: #1f5fd0;
+
+  --neon-rgb: 10 113 72;
+  --magenta-rgb: 155 31 176;
+  --danger-rgb: 192 42 69;
+  --warn-rgb: 154 98 7;
+  --info-rgb: 31 95 208;
+
+  /* Swapped: on a light surface it is black that lightens nothing and white
+     that disappears. */
+  --tint-rgb: 0 0 0;
+  --shade-rgb: 100 116 139;
+
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.06);
+  --shadow-md: 0 4px 14px rgb(15 23 42 / 0.09);
+  --shadow-lg: 0 20px 60px rgb(15 23 42 / 0.16);
+
+  --focus-ring: 0 0 0 2px #fff, 0 0 0 4px var(--magenta);
+  --topbar-bg: rgb(255 255 255 / 0.92);
+}
+
+/* The attribute sits on <html>, so body and every surface below it follow. */
+[data-theme='day'] body,
+[data-theme='day'] .shell {
+  background: var(--bg);
+}
+
+/*
+  Three things carry a glow that only works on black. In daylight they become
+  ordinary type — the shadow is what made them legible on a dark surface, and
+  on a white one it only smears them.
+*/
+[data-theme='day'] .topbar-brand,
+[data-theme='day'] .module-name,
+[data-theme='day'] .panel h2,
+[data-theme='day'] .wordmark {
+  text-shadow: none;
+}
+
+/* Inputs are white-on-white without this — the dark theme's near-black field
+   colour is the one value that cannot come from a surface token. */
+[data-theme='day'] input[type='text'],
+[data-theme='day'] input[type='email'],
+[data-theme='day'] input[type='password'],
+[data-theme='day'] input[type='number'],
+[data-theme='day'] input[type='date'],
+[data-theme='day'] input[type='datetime-local'],
+[data-theme='day'] select,
+[data-theme='day'] textarea {
+  background: #fff;
+}
+
+[data-theme='day'] input:-webkit-autofill,
+[data-theme='day'] input:-webkit-autofill:hover,
+[data-theme='day'] input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #fff inset;
+}
+
+/* A field label in neon-dim was styled for a dark card; in daylight it is a
+   label like any other. */
+[data-theme='day'] .field > label {
+  color: var(--muted);
+}
+
+/* The primary button keeps magenta but needs white type on it either way. */
+[data-theme='day'] .btn-primary {
+  box-shadow: none;
 }

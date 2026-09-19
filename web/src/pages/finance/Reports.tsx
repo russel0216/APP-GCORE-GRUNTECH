@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Empty, ErrorBox, Field, Loading, formatDate, formatMoney, useToast } from '../../components/ui';
+import { BarList, Donut, Meter, Panel, Stat, type Slice } from '../../components/charts';
+import { IconBadge } from '../../components/Icon';
+
+/** Money arrives as a float; round to centavos before it is charted. */
+const cents = (n: number) => Math.round(n * 100) / 100;
 
 /**
  * The finance reports and the executive dashboard.
@@ -75,7 +80,6 @@ interface Dashboard {
 }
 
 export function FinanceDashboard() {
-  const navigate = useNavigate();
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<unknown>(null);
 
@@ -89,32 +93,91 @@ export function FinanceDashboard() {
   const tiles = [
     {
       label: 'Receivable',
+      icon: 'money-in' as const,
+      more: 'Open A/R',
       value: data.receivable,
       sub: data.receivableOverdue > 0 ? `${formatMoney(data.receivableOverdue)} overdue` : 'nothing overdue',
-      tone: data.receivableOverdue > 0 ? 'var(--warn)' : 'var(--neon)',
+      accent: data.receivableOverdue > 0 ? ('warn' as const) : ('ok' as const),
       to: '/g-fin/ar?outstanding=true',
     },
     {
       label: 'Payable',
+      icon: 'money-out' as const,
+      more: 'Open A/P',
       value: data.payable,
       sub: data.payableOverdue > 0 ? `${formatMoney(data.payableOverdue)} overdue` : 'nothing overdue',
-      tone: data.payableOverdue > 0 ? 'var(--danger)' : undefined,
+      accent: data.payableOverdue > 0 ? ('danger' as const) : ('quiet' as const),
       to: '/g-fin/ap?outstanding=true',
     },
     {
       label: 'Owed to staff',
+      icon: 'people' as const,
+      more: 'Open claims',
       value: data.reimbursable,
       sub: 'approved claims not yet reimbursed',
+      accent: 'info' as const,
       to: '/g-fin/expenses?status=APPROVED',
     },
     {
       label: 'Working position',
+      icon: 'balance' as const,
+      more: 'Open cash flow',
       value: data.workingPosition,
       sub: 'receivable less everything owed',
-      tone: data.workingPosition < 0 ? 'var(--danger)' : 'var(--neon)',
+      accent: data.workingPosition < 0 ? ('danger' as const) : ('ok' as const),
       to: '/g-fin/cash-flow',
     },
   ];
+
+  // Every figure below is read off the documents themselves. Nothing on this
+  // screen writes anything — one GET, and the router it comes from is
+  // read-only by construction.
+  const owed: Slice[] = [
+    {
+      label: 'Customers owe us',
+      value: data.receivable,
+      display: formatMoney(data.receivable),
+      tone: 'neon',
+      to: '/g-fin/ar?outstanding=true',
+    },
+    {
+      label: 'We owe suppliers',
+      value: data.payable,
+      display: formatMoney(data.payable),
+      tone: 'danger',
+      to: '/g-fin/ap?outstanding=true',
+    },
+    {
+      label: 'We owe staff',
+      value: data.reimbursable,
+      display: formatMoney(data.reimbursable),
+      tone: 'info',
+      to: '/g-fin/expenses?status=APPROVED',
+    },
+  ];
+
+  // Receivable splits exactly two ways, so it is a genuine whole — which is
+  // the only thing a doughnut may be used for.
+  const receivableCurrent = cents(data.receivable - data.receivableOverdue);
+  const ageing: Slice[] = [
+    {
+      label: 'Not yet due',
+      value: receivableCurrent,
+      display: formatMoney(receivableCurrent),
+      tone: 'neon',
+      to: '/g-fin/ar?outstanding=true',
+    },
+    {
+      label: 'Overdue',
+      value: data.receivableOverdue,
+      display: formatMoney(data.receivableOverdue),
+      tone: 'danger',
+      to: '/g-fin/ar?overdue=true',
+    },
+  ];
+
+  const collectedPct =
+    data.invoicedThisYear > 0 ? (data.collectedThisYear / data.invoicedThisYear) * 100 : 0;
 
   return (
     <div>
@@ -129,73 +192,149 @@ export function FinanceDashboard() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
+      {/* `figure` sets these in Inter rather than Orbitron: these are pesos
+          with thousands separators, and the display face has no useful comma. */}
+      <div className="kpi-grid">
         {tiles.map((t) => (
-          <div
+          <Stat
             key={t.label}
-            className="card"
-            style={{ cursor: 'pointer' }}
-            onClick={() => navigate(t.to)}
-          >
-            <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-              {t.label.toUpperCase()}
-            </div>
-            <div style={{ fontSize: 22, marginTop: 6, fontWeight: 600, color: t.tone }}>
-              {formatMoney(t.value)}
-            </div>
-            <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-              {t.sub}
-            </div>
-          </div>
+            label={t.label}
+            value={formatMoney(t.value)}
+            sub={t.sub}
+            accent={t.accent}
+            icon={t.icon}
+            more={t.more}
+            figure
+            to={t.to}
+          />
         ))}
       </div>
 
       <div className="grid grid-2">
-        <div className="card">
-          <h3 className="card-title">Collections</h3>
-          <dl className="kv">
-            <dt>This month</dt>
-            <dd className="mono">{formatMoney(data.collectedThisMonth)}</dd>
-            <dt>This year</dt>
-            <dd className="mono">{formatMoney(data.collectedThisYear)}</dd>
-            <dt>Invoiced this year</dt>
-            <dd className="mono">{formatMoney(data.invoicedThisYear)}</dd>
-            <dt>Active projects</dt>
-            <dd className="mono">{data.activeJobs}</dd>
-          </dl>
-          <p className="faint" style={{ marginTop: 12, marginBottom: 0 }}>
-            Collections count cleared money only. An uncleared cheque is a promise, and a cash
-            position that counts promises is the one that bounces.
+        <Panel
+          title="What we are owed, against what we owe"
+          blurb="Scaled against the largest of the three. Every bar carries its own amount, so the lengths rank them and the figures say what they are."
+          action={
+            <Link to="/g-fin/cash-flow" className="btn btn-sm">
+              Cash flow
+            </Link>
+          }
+        >
+          <BarList slices={owed} caption="Outstanding on both sides, today" />
+          <p className="panel-blurb">
+            Working position is {formatMoney(data.workingPosition)} —{' '}
+            {data.workingPosition < 0
+              ? 'we owe more than we are owed.'
+              : 'what customers owe us, less everything we owe.'}
           </p>
-        </div>
+        </Panel>
 
-        <div className="card">
-          <h3 className="card-title">Waiting on someone</h3>
-          <div className="stack">
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span>Approved billings not yet invoiced</span>
-              <Link to="/g-fin/ar" className="mono">
-                {data.queue.billingsAwaitingInvoice}
-              </Link>
-            </div>
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span>Goods received with no supplier bill</span>
-              <Link to="/g-fin/ap" className="mono">
-                {data.queue.receivingsAwaitingBill}
-              </Link>
-            </div>
-            <div className="sep" />
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span>
-                Withheld tax awaiting a BIR 2307
-                <div className="section-label">
-                  creditable, but only once the certificate arrives
-                </div>
+        <Panel
+          title="Collected against invoiced"
+          blurb="Cleared money only. An uncleared cheque is a promise, and a cash position that counts promises is the one that bounces."
+        >
+          <div className="series-legend">
+            <div className="series">
+              <span className="series-name">
+                <span className="series-dot" style={{ background: 'var(--neon)' }} />
+                Collected this year
               </span>
-              <span className="mono">{formatMoney(data.withheldAwaitingCertificate)}</span>
+              <span className="series-value">{formatMoney(data.collectedThisYear)}</span>
+            </div>
+            <div className="series">
+              <span className="series-name">
+                <span className="series-dot" style={{ background: 'var(--muted)' }} />
+                Invoiced this year
+              </span>
+              <span className="series-value">{formatMoney(data.invoicedThisYear)}</span>
             </div>
           </div>
-        </div>
+
+          <Meter pct={collectedPct} tone={collectedPct < 70 ? 'warn' : undefined} />
+          <p className="panel-blurb">
+            {formatMoney(data.collectedThisYear)} collected of{' '}
+            {formatMoney(data.invoicedThisYear)} invoiced this year —{' '}
+            <strong>{collectedPct.toFixed(1)}%</strong>. The rest is still outstanding, not lost.
+          </p>
+          <div className="grid grid-2">
+            <Stat
+              label="Collected this month"
+              value={formatMoney(data.collectedThisMonth)}
+              sub="cleared into the bank"
+              figure
+              accent="ok"
+              to="/g-fin/payments"
+            />
+            <Stat
+              label="Active projects"
+              value={data.activeJobs}
+              sub="billing against them"
+              accent="info"
+              to="/g-ops/projects?status=IN_PROGRESS"
+            />
+          </div>
+        </Panel>
+      </div>
+
+      <div className="grid grid-2">
+        <Panel
+          title="Receivable, by age"
+          blurb="Outstanding measured against NET COLLECTIBLE, never the invoice total — EWT is withheld at source, so invoiced is not collectible and the withheld part must never read as overdue."
+        >
+          <Donut
+            slices={ageing}
+            caption="Every peso customers owe, split by whether its terms have run out"
+            centreLabel="receivable"
+            centreValue={formatMoney(data.receivable)}
+          />
+        </Panel>
+
+        <Panel
+          title="Waiting on someone"
+          blurb="Work that is finished but has not turned into a document yet. Each one is money that cannot move until somebody raises the paperwork."
+        >
+          <ul className="icon-list">
+            <li>
+              <Link to="/g-fin/ar" className="icon-row">
+                <IconBadge name="invoice" accent="warn" size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Approved billings not yet invoiced</span>
+                  <span className="icon-row-sub">Nothing can be collected until they are raised</span>
+                </span>
+                <span className="icon-row-value">{data.queue.billingsAwaitingInvoice}</span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/g-fin/ap" className="icon-row">
+                <IconBadge name="box" accent="warn" size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Goods received with no supplier bill</span>
+                  <span className="icon-row-sub">Already a cost to the job; not yet a payable</span>
+                </span>
+                <span className="icon-row-value">{data.queue.receivingsAwaitingBill}</span>
+              </Link>
+            </li>
+            <li>
+              <span className="icon-row">
+                <IconBadge
+                  name="document"
+                  accent={data.withheldAwaitingCertificate > 0 ? 'warn' : 'quiet'}
+                  size={32}
+                />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Withheld tax awaiting a BIR 2307</span>
+                  <span className="icon-row-sub">Creditable, but only once the certificate arrives</span>
+                </span>
+                <span className="icon-row-value">
+                  {formatMoney(data.withheldAwaitingCertificate)}
+                </span>
+              </span>
+            </li>
+          </ul>
+          <Link to="/g-fin/reports" className="panel-more">
+            All finance reports <span aria-hidden="true">›</span>
+          </Link>
+        </Panel>
       </div>
     </div>
   );

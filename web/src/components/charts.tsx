@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
+import { IconBadge, type IconName } from './Icon';
 
 /**
  * The chart set.
@@ -36,7 +37,16 @@ const TONE_VAR: Record<Tone, string> = {
 
 export interface Slice {
   label: string;
+  /** Drives the geometry: bar length, funnel width, donut arc. */
   value: number;
+  /**
+   * What to PRINT, when the raw number is not what a reader wants to see.
+   *
+   * A bar of money is the case that forces this: `value` has to stay a number
+   * for the maths, but printing it raw gives "335386.66" beside a bar. Pass
+   * `formatMoney(...)` here and the geometry is unaffected.
+   */
+  display?: string;
   tone?: Tone;
   /** The list this slice counted — a figure you cannot open is a dead end. */
   to?: string;
@@ -45,44 +55,95 @@ export interface Slice {
 // ── Stat ─────────────────────────────────────────────────────────────────────
 
 /**
- * One number and what it means. The unit of every dashboard here.
+ * The KPI card: one number, what it means, and what it implies.
  *
- * `value` of `null` means "could not be read", which is not zero and must not
- * look like it — a dash says so.
+ *   ORDERS AWAITING DELIVERY
+ *   14
+ *   3 of them overdue
+ *
+ * There were three of these before this one. `Stat` here, `Tile` in Insights
+ * (32 call sites, and a `<div onClick>` no keyboard could reach), and hand-
+ * written markup in the HR, G-CHAIN and Aftermarket dashboards. Same card,
+ * four appearances.
+ *
+ * `accent` paints the left edge and the figure. It is for "this one needs
+ * attention", and it only ever ADDS to what the card already says in words —
+ * `sub` carries the same meaning in text, because roughly one man in twelve
+ * cannot separate the neon from the amber.
+ *
+ * `value` is a ReactNode: some cards show a Meter or a formatted money string
+ * rather than a bare number. Pass `figure` for anything long or comma'd —
+ * Orbitron is a display face and has no useful comma.
  */
 export function Stat({
   label,
   value,
   hint,
+  sub,
   tone,
+  accent,
+  figure,
+  icon,
+  more,
   to,
 }: {
   label: string;
-  value: number | string | null;
-  hint?: string;
-  /** Applied only when the value is non-zero: zero is usually the good news. */
-  tone?: Tone;
+  value: ReactNode;
+  /** Context under the figure. `sub` is the Insights name for the same slot. */
+  hint?: ReactNode;
+  sub?: ReactNode;
+  /** Palette name, or a raw colour for the few series that need one. */
+  tone?: Tone | string;
+  /** Left edge + figure colour. Applied whatever the value. */
+  accent?: 'ok' | 'warn' | 'danger' | 'info' | 'neon' | 'quiet';
+  /** Set the figure in Inter rather than Orbitron — for money and long numbers. */
+  figure?: boolean;
+  /** A badged disc above the label. */
+  icon?: IconName;
+  /**
+   * The "View details ›" footer. Only meaningful with `to`: a tile that is
+   * secretly a link is a tile most people never click.
+   */
+  more?: string;
   to?: string;
 }) {
-  const live = typeof value === 'number' ? value > 0 : Boolean(value);
+  const context = hint ?? sub;
+  const colour = tone ? (TONE_VAR[tone as Tone] ?? tone) : undefined;
+
   const body = (
     <>
-      <div className="section-label">{label}</div>
+      {icon && <IconBadge name={icon} accent={accent ?? 'neon'} />}
+      <div className="kpi-label">{label}</div>
       <div
-        className="stat-value"
-        style={live && tone ? { color: TONE_VAR[tone] } : undefined}
+        className={`kpi-value${figure ? ' figure' : ''}`}
+        style={colour ? { color: colour } : undefined}
       >
-        {value === null ? '—' : value}
+        {value === null || value === undefined ? '—' : value}
       </div>
-      {hint && <div className="stat-hint">{hint}</div>}
+      {context !== undefined && context !== null && <div className="kpi-subtext">{context}</div>}
+      {to && more && (
+        <span className="kpi-more">
+          {more}
+          <span className="chev" aria-hidden="true">
+            ›
+          </span>
+        </span>
+      )}
     </>
   );
+
+  // .kpi-card is self-contained — it carries its own surface, radius and
+  // hover, so it is not composed onto .card.
+  const className = `kpi-card${accent ? ` ${accent}` : ''}${icon || more ? ' badged' : ''}`;
+
+  // A Link, never a div with an onClick. Thirty-two of these were unreachable
+  // by keyboard before they came through here.
   return to ? (
-    <Link to={to} className="card clickable stat">
+    <Link to={to} className={className}>
       {body}
     </Link>
   ) : (
-    <div className="card stat">{body}</div>
+    <div className={className}>{body}</div>
   );
 }
 
@@ -128,7 +189,7 @@ export function BarList({
                   }}
                 />
               </span>
-              <span className="bar-value">{s.value}</span>
+              <span className="bar-value">{s.display ?? s.value}</span>
             </>
           );
           return s.to ? (
@@ -188,7 +249,7 @@ export function Funnel({ stages, caption }: { stages: Slice[]; caption?: string 
                   }}
                 />
               </span>
-              <span className="funnel-value">{stage.value}</span>
+              <span className="funnel-value">{stage.display ?? stage.value}</span>
               <span className="funnel-drop">{drop ?? ''}</span>
             </>
           );
@@ -220,10 +281,13 @@ export function Donut({
   slices,
   caption,
   centreLabel,
+  centreValue,
 }: {
   slices: Slice[];
   caption?: string;
   centreLabel?: string;
+  /** Overrides the summed total in the middle — for money, same reason as `display`. */
+  centreValue?: string;
 }) {
   const total = slices.reduce((a, s) => a + s.value, 0);
   if (total === 0) return <Empty caption={caption} />;
@@ -257,14 +321,20 @@ export function Donut({
                   strokeDashoffset={-offset}
                   transform="rotate(-90 70 70)"
                 >
-                  <title>{`${s.label}: ${s.value}`}</title>
+                  <title>{`${s.label}: ${s.display ?? s.value}`}</title>
                 </circle>
               );
               offset += len;
               return el;
             })}
-          <text x="70" y="66" className="donut-total">
-            {total}
+          {/* A money total is far wider than a count. It drops a size rather
+              than overflowing the ring. */}
+          <text
+            x="70"
+            y="66"
+            className={`donut-total${centreValue && centreValue.length > 6 ? ' long' : ''}`}
+          >
+            {centreValue ?? total}
           </text>
           {centreLabel && (
             <text x="70" y="82" className="donut-caption">
@@ -279,7 +349,7 @@ export function Donut({
             <li key={s.label}>
               <span className="swatch" style={{ background: TONE_VAR[s.tone ?? 'neon'] }} />
               {s.to ? <Link to={s.to}>{s.label}</Link> : <span>{s.label}</span>}
-              <strong>{s.value}</strong>
+              <strong>{s.display ?? s.value}</strong>
             </li>
           ))}
         </ul>

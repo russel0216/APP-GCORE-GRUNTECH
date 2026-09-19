@@ -10,6 +10,8 @@ import {
   formatDateTime,
   useToast,
 } from '../../components/ui';
+import { Stat } from '../../components/charts';
+import { todayLocal } from '../../lib/day';
 
 /**
  * The HR dashboard — "Attendance dashboard showing Present / Late / On Leave /
@@ -33,7 +35,7 @@ function label(s: string) {
   return s.toLowerCase().replace(/_/g, ' ');
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = todayLocal;
 
 interface DashboardRow {
   employee: {
@@ -113,11 +115,54 @@ export function HrDashboard() {
 
   const tiles = data
     ? [
-        { label: 'Present', value: data.summary.present, tone: 'var(--neon)' },
-        { label: 'Late', value: data.summary.late, tone: 'var(--warn)' },
-        { label: 'On leave', value: data.summary.onLeave, tone: 'var(--info)' },
-        { label: 'Absent', value: data.summary.absent, tone: 'var(--danger)' },
-        { label: 'Pending approvals', value: data.summary.pendingApprovals, tone: 'var(--warn)' },
+        // Each carries the context that makes the number mean something, and
+        // an accent only where a non-zero wants attention. "Present: 12" on
+        // its own is a fact; against a headcount it is a judgement.
+        {
+          label: 'Present',
+          icon: 'check' as const,
+          more: 'Open attendance',
+          value: data.summary.present,
+          sub: `of ${data.headcount} active`,
+          accent: 'ok' as const,
+          to: '/g-hr/attendance',
+        },
+        {
+          label: 'Late',
+          icon: 'clock' as const,
+          more: 'Open attendance',
+          value: data.summary.late,
+          sub: data.summary.late > 0 ? 'arrived after the grace period' : 'nobody late today',
+          accent: data.summary.late > 0 ? ('warn' as const) : ('quiet' as const),
+          to: '/g-hr/attendance?status=LATE',
+        },
+        {
+          label: 'On leave',
+          icon: 'calendar' as const,
+          more: 'Open leave',
+          value: data.summary.onLeave,
+          sub: 'approved and away',
+          accent: 'info' as const,
+          to: '/g-hr/leave?status=APPROVED',
+        },
+        {
+          label: 'Absent',
+          icon: 'alert' as const,
+          more: 'Open attendance',
+          value: data.summary.absent,
+          sub: data.summary.absent > 0 ? 'no clock-in, no approved leave' : 'everybody accounted for',
+          accent: data.summary.absent > 0 ? ('danger' as const) : ('quiet' as const),
+          to: '/g-hr/attendance',
+        },
+        {
+          label: 'Pending approvals',
+          icon: 'document' as const,
+          more: 'Open My Work',
+          value: data.summary.pendingApprovals,
+          sub: data.summary.pendingApprovals > 0 ? 'leave and overtime waiting' : 'queue is clear',
+          accent: data.summary.pendingApprovals > 0 ? ('warn' as const) : ('quiet' as const),
+          to: '/my-work',
+        },
       ]
     : [];
 
@@ -153,23 +198,18 @@ export function HrDashboard() {
         <Loading label="Counting heads…" />
       ) : (
         <>
-          <div className="grid grid-4" style={{ marginBottom: 18 }}>
+          <div className="kpi-grid">
             {tiles.map((t) => (
-              <div key={t.label} className="card">
-                <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-                  {t.label.toUpperCase()}
-                </div>
-                <div
-                  style={{
-                    fontSize: 24,
-                    marginTop: 6,
-                    fontWeight: 600,
-                    color: t.value > 0 ? t.tone : undefined,
-                  }}
-                >
-                  {t.value}
-                </div>
-              </div>
+              <Stat
+                key={t.label}
+                label={t.label}
+                value={t.value}
+                sub={t.sub}
+                accent={t.accent}
+                icon={t.icon}
+                more={t.more}
+                to={t.to}
+              />
             ))}
           </div>
 

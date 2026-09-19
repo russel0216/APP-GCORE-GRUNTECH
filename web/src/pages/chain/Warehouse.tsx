@@ -14,6 +14,7 @@ import {
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { Stat } from '../../components/charts';
 import { label, openPdf, statusTone } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
@@ -1485,9 +1486,33 @@ export function ChainDashboard() {
   }, []);
 
   const tiles = [
-    { label: 'Requests awaiting approval', value: counts.pendingPrs ?? 0, to: '/g-chain/purchase-requests?status=PENDING_APPROVAL' },
-    { label: 'Orders awaiting delivery', value: counts.awaitingDelivery ?? 0, to: '/g-chain/purchase-orders' },
-    { label: 'Overdue borrow slips', value: counts.overdueBorrows ?? 0, to: '/g-chain/borrow-slips', danger: true },
+    {
+      label: 'Requests awaiting approval',
+      icon: 'document' as const,
+      more: 'Open requests',
+      value: counts.pendingPrs ?? 0,
+      sub: (counts.pendingPrs ?? 0) > 0 ? 'nothing can be ordered until these clear' : 'queue is clear',
+      accent: (counts.pendingPrs ?? 0) > 0 ? ('warn' as const) : ('quiet' as const),
+      to: '/g-chain/purchase-requests?status=PENDING_APPROVAL',
+    },
+    {
+      label: 'Orders awaiting delivery',
+      icon: 'cart' as const,
+      more: 'Open orders',
+      value: counts.awaitingDelivery ?? 0,
+      sub: 'issued or part-received',
+      accent: (counts.awaitingDelivery ?? 0) > 0 ? ('info' as const) : ('quiet' as const),
+      to: '/g-chain/purchase-orders',
+    },
+    {
+      label: 'Overdue borrow slips',
+      icon: 'wrench' as const,
+      more: 'Open borrow slips',
+      value: counts.overdueBorrows ?? 0,
+      sub: (counts.overdueBorrows ?? 0) > 0 ? 'tools out past their return date' : 'everything back on time',
+      accent: (counts.overdueBorrows ?? 0) > 0 ? ('danger' as const) : ('quiet' as const),
+      to: '/g-chain/borrow-slips',
+    },
   ];
 
   return (
@@ -1502,23 +1527,18 @@ export function ChainDashboard() {
         </div>
       </div>
 
-      <div className="grid grid-3" style={{ marginBottom: 18 }}>
+      <div className="kpi-grid">
         {tiles.map((t) => (
-          <Link key={t.label} to={t.to} className="card">
-            <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-              {t.label.toUpperCase()}
-            </div>
-            <div
-              style={{
-                fontSize: 24,
-                marginTop: 6,
-                fontWeight: 600,
-                color: t.danger && t.value > 0 ? 'var(--danger)' : t.value > 0 ? 'var(--neon)' : undefined,
-              }}
-            >
-              {t.value}
-            </div>
-          </Link>
+          <Stat
+            key={t.label}
+            label={t.label}
+            value={t.value}
+            sub={t.sub}
+            accent={t.accent}
+            icon={t.icon}
+            more={t.more}
+            to={t.to}
+          />
         ))}
       </div>
 

@@ -13,6 +13,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { RecordPaymentModal, tone, label } from './Receivables';
+import { todayLocal } from '../../lib/day';
 
 /**
  * Expense claims — money someone spent out of their own pocket.
@@ -197,7 +198,7 @@ function NewClaimModal({
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocal();
   const [form, setForm] = useState({ claimDate: today, purpose: '', jobId: '', costCategoryId: '' });
   const [lines, setLines] = useState([
     { spentOn: today, description: '', category: '', receiptNo: '', amount: 0 },

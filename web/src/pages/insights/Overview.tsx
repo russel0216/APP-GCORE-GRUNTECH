@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, qs, getToken } from '../../lib/api';
 import { ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
 import { MiniBar as Bar } from '../../components/charts';
+import { Stat as Tile } from '../../components/charts';
+import { todayLocal } from '../../lib/day';
 
 /**
  * Insights — the reporting layer (Phase 9).
@@ -15,38 +17,14 @@ import { MiniBar as Bar } from '../../components/charts';
 
 // ── Shared bits ──────────────────────────────────────────────────────────────
 
-export function Tile({
-  label,
-  value,
-  sub,
-  tone,
-  to,
-}: {
-  label: string;
-  value: ReactNode;
-  sub?: ReactNode;
-  tone?: string;
-  to?: string;
-}) {
-  const navigate = useNavigate();
-  return (
-    <div
-      className="card"
-      style={to ? { cursor: 'pointer' } : undefined}
-      onClick={to ? () => navigate(to) : undefined}
-    >
-      <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-        {label.toUpperCase()}
-      </div>
-      <div style={{ fontSize: 22, marginTop: 6, fontWeight: 600, color: tone }}>{value}</div>
-      {sub && (
-        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-          {sub}
-        </div>
-      )}
-    </div>
-  );
-}
+/**
+ * The Insights metric card, under the name its 32 call sites already use.
+ *
+ * The body moved to components/charts.tsx. This one was a `<div>` with an
+ * onClick, so every one of those 32 cards was unreachable by keyboard and
+ * announced as nothing in particular; the shared card is a `<Link>`.
+ */
+export { Tile };
 
 /** The date range every report shares, so one habit works everywhere. */
 export function RangePicker({
@@ -69,7 +47,7 @@ export function RangePicker({
       </Field>
       <button
         className="btn btn-sm"
-        onClick={() => onChange(`${thisYear}-01-01`, new Date().toISOString().slice(0, 10))}
+        onClick={() => onChange(`${thisYear}-01-01`, todayLocal())}
       >
         This year
       </button>
@@ -154,7 +132,7 @@ interface Trend {
 export function CompanyOverview() {
   const thisYear = new Date().getFullYear();
   const [from, setFrom] = useState(`${thisYear}-01-01`);
-  const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
+  const [to, setTo] = useState(todayLocal());
   const [data, setData] = useState<Dashboard | null>(null);
   const [trend, setTrend] = useState<Trend | null>(null);
   const [error, setError] = useState<unknown>(null);

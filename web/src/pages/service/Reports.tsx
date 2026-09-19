@@ -42,6 +42,7 @@ const STATUSES = [
 ];
 
 import { statusTone as tone } from '../../components/ui';
+import { todayLocal } from '../../lib/day';
 
 export interface TemplateField {
   key: string;
@@ -299,7 +300,7 @@ function NewReportModal({
     visitId: '',
     customerId: '',
     assetId: '',
-    performedAt: new Date().toISOString().slice(0, 10),
+    performedAt: todayLocal(),
   });
 
   useEffect(() => {

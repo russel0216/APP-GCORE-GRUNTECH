@@ -147,7 +147,7 @@ export function Home() {
                 <div className="muted">Nothing is waiting on you.</div>
               ) : (
                 <div className="stack">
-                  {work.awaitingMyApproval.slice(0, 4).map((a) => (
+                  {work.awaitingMyApproval.slice(0, 3).map((a) => (
                     <div
                       key={a.id}
                       className="row"
@@ -163,7 +163,7 @@ export function Home() {
                       {a.amount !== null && <span className="mono">{formatMoney(a.amount)}</span>}
                     </div>
                   ))}
-                  {waiting > 4 && <div className="faint">and {waiting - 4} more…</div>}
+                  {waiting > 3 && <div className="faint">and {waiting - 3} more…</div>}
                 </div>
               )}
             </div>
@@ -174,7 +174,7 @@ export function Home() {
                 <div className="muted">You have nothing waiting on someone else.</div>
               ) : (
                 <div className="stack">
-                  {work.myPendingSubmissions.slice(0, 4).map((s) => (
+                  {work.myPendingSubmissions.slice(0, 3).map((s) => (
                     <div key={s.id}>
                       <div>{s.subject}</div>
                       <div className="faint mono">
@@ -201,7 +201,7 @@ export function Home() {
                 <div className="muted">Nothing yet.</div>
               ) : (
                 <div className="stack">
-                  {work.recentActivity.slice(0, 4).map((a) => (
+                  {work.recentActivity.slice(0, 3).map((a) => (
                     <div key={a.id}>
                       <div>{a.summary ?? `${a.action} ${a.entityType}`}</div>
                       <div className="faint">{relativeTime(a.at)}</div>

@@ -15,6 +15,7 @@ import {
 } from '../../components/ui';
 import { SCurve, type CurvePoint } from './SCurve';
 import { JOB_STATUSES, ProgressBar, jobStatusTone } from './Projects';
+import { todayLocal } from '../../lib/day';
 
 /**
  * The project workspace (model §8.1).
@@ -1164,11 +1165,11 @@ function NewReportModal({
   const lastReport = job.progressReports[0];
   const defaultFrom = lastReport
     ? new Date(new Date(lastReport.periodTo).getTime() + 86400000).toISOString().slice(0, 10)
-    : (job.startDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10));
+    : (job.startDate?.slice(0, 10) ?? todayLocal());
 
   const [form, setForm] = useState({
     periodFrom: defaultFrom,
-    periodTo: new Date().toISOString().slice(0, 10),
+    periodTo: todayLocal(),
   });
 
   async function create() {
