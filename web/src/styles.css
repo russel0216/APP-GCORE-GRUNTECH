@@ -595,7 +595,13 @@ textarea {
   flex-shrink: 0;
   border-right: 1px solid var(--line);
   background: var(--surface);
-  padding: 14px 10px 24px;
+  padding: var(--s-4) var(--s-2) var(--s-6);
+  /* Sticky, and exactly as tall as what is left under the top bar, so it stays
+     level with the second line beside it instead of scrolling away from it. */
+  position: sticky;
+  top: 54px;
+  align-self: flex-start;
+  max-height: calc(100vh - 54px);
   overflow-y: auto;
 }
 
@@ -1728,15 +1734,13 @@ hr.rule {
 /* The sidebar's replacement below 860px: the same screens, scrolled sideways. */
 
 /*
-  One sticky wrapper for both bars, so the lower one never has to know how tall
-  the upper one is. It carries no background or border of its own — each bar
-  paints itself, so when the section bar is hidden on a wide screen nothing is
-  left behind but the screen bar.
+  The section bar, for narrow screens only. Sticky under the top bar, where the
+  sidebar it replaces would have been.
 */
 .nav-bars {
   position: sticky;
   top: 54px;
-  z-index: 30;
+  z-index: 31;
 }
 
 /* Sections. Hidden on a wide screen, where the sidebar carries them. */
@@ -1751,15 +1755,32 @@ hr.rule {
   sections, and the section you pick opens its six screens across the top —
   which is the shape of the business rather than the shape of the database.
 */
+/*
+  The column the page lives in. The second line belongs in HERE, beside the
+  sidebar rather than above it, so the two menus start at the same height —
+  sections down the left, that section's screens across the top of the page
+  they open.
+*/
+.content-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .sub-nav {
   display: flex;
   align-items: stretch;
   gap: var(--s-1);
-  padding: 0 var(--s-5);
+  padding: 0 var(--s-6);
   background: var(--surface);
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
   scrollbar-width: none;
+  /* Stays put when the page scrolls, level with the sidebar beside it. */
+  position: sticky;
+  top: 54px;
+  z-index: 29;
 }
 
 .sub-nav::-webkit-scrollbar {
@@ -1804,6 +1825,10 @@ hr.rule {
 @media (max-width: 860px) {
   .sub-nav {
     padding: 0 var(--s-3);
+    /* The section strip already holds the top of the screen here. Two sticky
+       bars would need one to know the other's height, and getting that wrong
+       is worse than letting this one scroll. */
+    position: static;
   }
   .sub-nav-item {
     padding: var(--s-3);

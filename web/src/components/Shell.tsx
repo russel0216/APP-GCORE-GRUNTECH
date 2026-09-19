@@ -339,37 +339,6 @@ export function Shell() {
                 })}
           </nav>
 
-          {/* The second line: the screens inside the section you are in. */}
-          {sectioned && activeGroup && (
-            <nav className="sub-nav" aria-label={`${activeGroup.name} menu`}>
-              {activeGroup.items.map((sub) => {
-                const upcoming = sub.phase > SHIPPED_PHASE;
-                const active = sub.key === activeKey;
-                if (upcoming) {
-                  return (
-                    <span
-                      key={sub.key}
-                      className="sub-nav-item soon"
-                      title={sub.note ?? `Ships in Phase ${sub.phase}`}
-                    >
-                      {sub.label}
-                      <span className="tag">P{sub.phase}</span>
-                    </span>
-                  );
-                }
-                return (
-                  <Link
-                    key={sub.key}
-                    to={sub.path}
-                    className={`sub-nav-item${active ? ' active' : ''}`}
-                    aria-current={active ? 'page' : undefined}
-                  >
-                    {sub.label}
-                  </Link>
-                );
-              })}
-            </nav>
-          )}
         </div>
       )}
 
@@ -447,9 +416,49 @@ export function Shell() {
           </nav>
         )}
 
-        <main className="content" id="content" tabIndex={-1}>
-          <Outlet />
-        </main>
+        {/*
+          The second line sits in the SAME column as the page, not above the
+          whole shell — so it starts level with the sidebar rather than pushing
+          it down. Sections on the left, that section's screens across the top
+          of the page they belong to.
+        */}
+        <div className="content-col">
+          {/* The second line: the screens inside the section you are in. */}
+        {sectioned && activeGroup && (
+          <nav className="sub-nav" aria-label={`${activeGroup.name} menu`}>
+            {activeGroup.items.map((sub) => {
+              const upcoming = sub.phase > SHIPPED_PHASE;
+              const active = sub.key === activeKey;
+              if (upcoming) {
+                return (
+                  <span
+                    key={sub.key}
+                    className="sub-nav-item soon"
+                    title={sub.note ?? `Ships in Phase ${sub.phase}`}
+                  >
+                    {sub.label}
+                    <span className="tag">P{sub.phase}</span>
+                  </span>
+                );
+              }
+              return (
+                <Link
+                  key={sub.key}
+                  to={sub.path}
+                  className={`sub-nav-item${active ? ' active' : ''}`}
+                  aria-current={active ? 'page' : undefined}
+                >
+                  {sub.label}
+                </Link>
+              );
+            })}
+          </nav>
+        )}
+
+          <main className="content" id="content" tabIndex={-1}>
+            <Outlet />
+          </main>
+        </div>
       </div>
 
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
