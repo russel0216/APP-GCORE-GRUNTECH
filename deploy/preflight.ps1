@@ -10,7 +10,14 @@
 
 $ErrorActionPreference = 'Continue'
 
-$root        = 'C:\G-CORE-GRUNTECH'
+# Where this installation actually is.
+#
+# Derived from the script's own location rather than hard-coded, so these
+# scripts work from wherever the repository was put - on the server, on a
+# laptop, or from a folder somebody renamed. Hard-coding it meant the very
+# first person to run the preflight got "the argument ... does not exist",
+# which tells them nothing about what is wrong.
+$root = Split-Path -Parent $PSScriptRoot
 $apiPort     = 5100
 $dbPort      = 5434
 $task        = 'GCoreGruntechApi'
@@ -26,6 +33,12 @@ function Bad($m)   { Write-Host "  [STOP] $m" -ForegroundColor Red;   $script:pr
 Write-Host ""
 Write-Host "G-CORE Gruntech preflight" -ForegroundColor Cyan
 Write-Host "=========================" -ForegroundColor Cyan
+# Say which installation this is checking. Without it, running the wrong copy
+# looks exactly like running the right one.
+Write-Host "Checking: $root" -ForegroundColor DarkGray
+if ($root -ne 'C:\G-CORE-GRUNTECH') {
+    Write-Host "(The server install lives at C:\G-CORE-GRUNTECH. This is a copy somewhere else, which is fine for a dry run.)" -ForegroundColor DarkGray
+}
 
 # -- Who is on our ports ------------------------------------------------------
 Write-Host "`nPorts" -ForegroundColor Cyan
@@ -71,9 +84,12 @@ if (-not $api) {
 $db = Describe-Listener $dbPort
 if (-not $db) { Ok "$dbPort is free (our Postgres)" } else { Warn "$dbPort is in use by pid $($db.Pid) ($($db.Name)). If that is our own gcore-gruntech-db container, fine." }
 
+# 5433 belongs to somebody else wherever this runs: gasion_db on the server,
+# the dev compose file on a laptop. Report what is actually there rather than
+# asserting which - a preflight that guesses is a preflight you stop reading.
 $other = Describe-Listener 5433
-if ($other) { Ok "5433 is in use, as expected - that is gasion_db, and we do not touch it" }
-else        { Warn "5433 is free. The other system's database does not appear to be running." }
+if ($other) { Ok "5433 is in use by pid $($other.Pid) ($($other.Name)) - not ours either way, and untouched" }
+else        { Warn "5433 is free. On the server that would mean gasion_db is not running." }
 
 $hr = Describe-Listener 5001
 if ($hr) { Ok "5001 is in use, as expected - that is G-CORE HR" }

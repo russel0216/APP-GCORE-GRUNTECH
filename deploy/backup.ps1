@@ -14,7 +14,8 @@
 $ErrorActionPreference = 'Stop'
 
 $dir       = 'C:\backups\gcore-gruntech'
-$uploads   = 'C:\G-CORE-GRUNTECH\data\uploads'
+$root      = Split-Path -Parent $PSScriptRoot
+$uploads   = Join-Path $root 'data\uploads'
 $container = 'gcore-gruntech-db'
 $retention = 30
 

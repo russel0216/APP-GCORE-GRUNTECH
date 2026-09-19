@@ -12,7 +12,9 @@
 # leading slash into a Windows path and the command would fail obscurely.
 set -euo pipefail
 
-ROOT=/c/G-CORE-GRUNTECH
+# Where this installation actually is: derived from the script, not hard-coded,
+# so it works wherever the repository was put.
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 API_PORT=5100
 TASK="GCoreGruntechApi"
 

@@ -9,7 +9,9 @@ REM Logs go to data\logs\api.log, outside the repository so a pull never
 REM disturbs them and a clone never carries them.
 
 setlocal
-set ROOT=C:\G-CORE-GRUNTECH
+REM Derived from this script's own folder (%~dp0 ends with a backslash), so
+REM the scheduled task works wherever the repository was put.
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 set LOGDIR=%ROOT%\data\logs
 
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"

@@ -10,7 +10,14 @@
 
 $ErrorActionPreference = 'Stop'
 
-$root    = 'C:\G-CORE-GRUNTECH'
+# Where this installation actually is.
+#
+# Derived from the script's own location rather than hard-coded, so these
+# scripts work from wherever the repository was put - on the server, on a
+# laptop, or from a folder somebody renamed. Hard-coding it meant the very
+# first person to run the preflight got "the argument ... does not exist",
+# which tells them nothing about what is wrong.
+$root = Split-Path -Parent $PSScriptRoot
 $apiPort = 5100
 $task    = 'GCoreGruntechApi'
 
