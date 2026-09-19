@@ -6,6 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import {
   Empty,
   ErrorBox,
+  StatusBadge,
   Field,
   Loading,
   Modal,
@@ -34,8 +35,76 @@ interface ReportRow {
   billing: { id: string; number: string; status: string } | null;
 }
 
+/**
+ * The rows the billings half of this screen shows. Only what the register
+ * needs — the detail page reads the full record.
+ */
+interface BillingRow {
+  id: string;
+  number: string;
+  billingNo: number;
+  status: string;
+  billingDate: string;
+  grossAmount: number;
+  netCollectible: number;
+  job: { id: string; number: string; name: string };
+  progressReport: { id: string; number: string } | null;
+}
+
 export function ProgressReports() {
   const navigate = useNavigate();
+  /*
+    The menu entry is "Progress & Billing" and it used to show progress
+    reports only: a billing was reachable through the report that raised it or
+    through the project workspace, and there was no register of them anywhere.
+    A menu that names two things has to show both.
+  */
+  const [tab, setTab] = useState<'reports' | 'billings'>('reports');
+
+  const billingColumns: Column<BillingRow>[] = [
+    { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (b) => <span className="mono">{b.number}</span> },
+    {
+      key: 'job',
+      label: 'Project',
+      render: (b) => (
+        <div>
+          <div>{b.job.name}</div>
+          <div className="faint mono">{b.job.number}</div>
+        </div>
+      ),
+    },
+    { key: 'billingNo', label: '#', align: 'right', render: (b) => b.billingNo },
+    { key: 'billingDate', label: 'Date', sortKey: 'billingDate', render: (b) => formatDate(b.billingDate) },
+    {
+      key: 'against',
+      label: 'Against',
+      render: (b) =>
+        b.progressReport ? (
+          <span className="mono faint">{b.progressReport.number}</span>
+        ) : (
+          <span className="faint">—</span>
+        ),
+    },
+    {
+      key: 'gross',
+      label: 'Gross',
+      align: 'right',
+      render: (b) => <span className="mono">{formatMoney(b.grossAmount)}</span>,
+    },
+    {
+      // Invoiced is not collectible: EWT is withheld at source, so this is the
+      // figure A/R actually chases. Showing gross alone overstates every one.
+      key: 'net',
+      label: 'Net collectible',
+      align: 'right',
+      render: (b) => <span className="mono">{formatMoney(b.netCollectible)}</span>,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (b) => <StatusBadge status={b.status} />,
+    },
+  ];
 
   const columns: Column<ReportRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (r) => <span className="mono">{r.number}</span> },
@@ -90,11 +159,55 @@ export function ProgressReports() {
           <h1>Progress &amp; Billing</h1>
           <p>
             Reports are a chain — each one carries the previous percentages forward, so it reads as
-            a period statement rather than a running total someone has to work out by hand.
+            a period statement rather than a running total someone has to work out by hand. A
+            billing covers only the increment that report added.
           </p>
+        </div>
+        <div className="scope-switch" role="tablist" aria-label="Progress or billing">
+          <button
+            role="tab"
+            aria-selected={tab === 'reports'}
+            className={tab === 'reports' ? 'active' : ''}
+            onClick={() => setTab('reports')}
+          >
+            Progress reports
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === 'billings'}
+            className={tab === 'billings' ? 'active' : ''}
+            onClick={() => setTab('billings')}
+          >
+            Billings
+          </button>
         </div>
       </div>
 
+      {tab === 'billings' ? (
+        <DataList<BillingRow>
+          listKey="progress-billings"
+          endpoint="/billings"
+          columns={billingColumns}
+          rowKey={(b) => b.id}
+          scoped
+          searchPlaceholder="Search number, project…"
+          onRowClick={(b) => navigate(`/g-ops/billings/${b.id}`)}
+          emptyTitle="Nothing billed yet"
+          emptyHint="A billing is raised from an approved progress report, and covers only the work that report added."
+          filters={[
+            {
+              key: 'status',
+              label: 'Status',
+              options: [
+                { value: 'DRAFT', label: 'Draft' },
+                { value: 'PENDING_APPROVAL', label: 'Pending approval' },
+                { value: 'APPROVED', label: 'Approved' },
+                { value: 'INVOICED', label: 'Invoiced' },
+              ],
+            },
+          ]}
+        />
+      ) : (
       <DataList<ReportRow>
         listKey="progress-reports"
         endpoint="/progress-reports"
@@ -116,6 +229,7 @@ export function ProgressReports() {
           },
         ]}
       />
+      )}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, qs, getToken } from '../../lib/api';
 import { ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
+import { MiniBar as Bar } from '../../components/charts';
 
 /**
  * Insights — the reporting layer (Phase 9).
@@ -109,16 +110,8 @@ export function ExportButton({ path, label = 'Export CSV' }: { path: string; lab
 }
 
 /** A bar whose width is a share of the largest value in its group. */
-export function Bar({ value, peak, tone }: { value: number; peak: number; tone?: string }) {
-  return (
-    <div className="mini-bar">
-      <div
-        className="mini-bar-fill"
-        style={{ width: `${peak > 0 ? Math.max(1, (Math.abs(value) / peak) * 100) : 0}%`, background: tone }}
-      />
-    </div>
-  );
-}
+/** The in-cell bar, under the name the Insights screens already import. */
+export { Bar };
 
 // ── Company overview ─────────────────────────────────────────────────────────
 

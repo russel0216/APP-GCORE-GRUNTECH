@@ -52,7 +52,18 @@ four databases and four copies of "customer".
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
    holding a password hash or a cost rate.
 9. **Every list screen uses `web/src/components/DataList.tsx`.** Same toolbar,
-   same scope switch, same export, everywhere.
+   same scope switch, same export, everywhere. **Every chart uses
+   `web/src/components/charts.tsx`** — `Stat`, `BarList`, `Funnel`, `Donut`,
+   `Meter`, `MiniBar`, `Panel`. There were three hand-rolled bars before that
+   file and none of them looked alike. Two rules they hold to: a chart is
+   readable without colour (every series carries its own number), and an empty
+   series says "nothing yet" rather than drawing a frame that looks like a
+   failed load.
+9a. **A menu entry must open what its label says.** Both halves of that: the
+   path in the registry has to have a route (G-OPS Purchase Requests had none
+   and fell through to "Not built yet"), and the screen has to show what the
+   label promises ("Progress & Billing" showed progress reports only). Run the
+   label-to-component map before adding a menu entry, not after.
 10. **Money is `Decimal` in Prisma**, converted with `Number()` only at the API
     boundary. Never do arithmetic on a float and store it back.
 11. **Spacing, type and colour come from tokens in `web/src/styles.css`.** Use
@@ -89,7 +100,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales delivery chain hr finance aftermarket insights; do npx tsx scripts/verify-$s.ts; done
 ```
 
-489 assertions across permission resolution, numbering concurrency, the approval
+495 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
 engine and the sign-offs, margins and money it prints, CSV parsing, the import contract, Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability)

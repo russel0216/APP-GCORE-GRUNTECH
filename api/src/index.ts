@@ -81,6 +81,7 @@ import {
   aftermarketRoutes,
 } from './routes/aftermarket';
 import { insightRoutes } from './routes/insights';
+import { gopsRoutes } from './routes/gops';
 
 const app = express();
 
@@ -183,6 +184,7 @@ app.use('/api/aftermarket', aftermarketRoutes);
 
 // Insights (Phase 9) — read-only reporting across every division
 app.use('/api/insights', insightRoutes);
+app.use('/api/gops', gopsRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

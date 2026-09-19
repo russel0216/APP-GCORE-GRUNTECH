@@ -917,6 +917,59 @@ async function main() {
       nosy.status === 403,
       String(nosy.status),
     );
+
+    // ── The G-OPS overview ───────────────────────────────────────────────────
+    //
+    // It spans sales, delivery and aftermarket, so it is checked here where
+    // all three already exist. What matters is not the arithmetic — these are
+    // groupBy counts — but that holding the DASHBOARD permission does not hand
+    // somebody counts off screens they cannot open. A count is a small leak
+    // wearing a number, and it is exactly the kind of thing that gets waved
+    // through because it "is only a total".
+    // The service manager does not hold the G-OPS dashboard permission by
+    // role — which is the right default, and means the actor has to be given
+    // it explicitly rather than the assertion being quietly weakened to match.
+    const dash = await prisma.permission.findUnique({ where: { key: 'gops.dashboard.view_all' } });
+    await prisma.userPermissionOverride.create({
+      data: { userId: manager.id, permissionId: dash!.id, effect: 'ALLOW' },
+    });
+
+    const overview = await api(managerToken, 'GET', '/gops/overview');
+    check('the G-OPS overview runs', overview.status === 200, String(overview.status));
+    check(
+      'it reports the stretches this person works in',
+      !!overview.body.aftermarket && typeof overview.body.aftermarket.contracts === 'object',
+      JSON.stringify(overview.body.aftermarket ?? {}).slice(0, 140),
+    );
+    check(
+      'contracts come back tallied by status, not as one number',
+      Object.keys(overview.body.aftermarket?.contracts ?? {}).length > 0,
+      JSON.stringify(overview.body.aftermarket?.contracts ?? {}).slice(0, 140),
+    );
+
+    // The gating, which is the whole reason this endpoint exists rather than a
+    // dozen list calls: a service manager holds no projects permission, so the
+    // delivery block must be ABSENT — not zero, not an empty object.
+    check(
+      'a block the caller cannot open is absent, not zeroed',
+      overview.body.delivery === null,
+      JSON.stringify(overview.body.delivery),
+    );
+    // Same rule one level down: they can see quotations but not leads.
+    check(
+      'and the rule holds per screen inside a block',
+      overview.body.sales !== null &&
+        overview.body.sales.leads === null &&
+        overview.body.sales.quotations !== null,
+      JSON.stringify(overview.body.sales ?? {}).slice(0, 140),
+    );
+
+    const engineerOverview = await api(engineerToken, 'GET', '/gops/overview');
+    check(
+      'somebody without the dashboard permission cannot open it at all',
+      engineerOverview.status === 403,
+      String(engineerOverview.status),
+    );
   }
 
   await cleanup();

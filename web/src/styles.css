@@ -2243,62 +2243,285 @@ hr.rule {
   }
 }
 
-/* ──────────────────────────── G-OPS: the overview ───────────────────────── */
-
+/* ─────────────────────────────── Charts ────────────────────────────────── */
 /*
-  A band holds four tiles. The shared .grid-4 has a 190px minimum, which inside
-  a card's padding drops to three columns on a laptop and orphans the fourth on
-  a row of its own. 160px keeps a band on one line down to about 1000px and
-  still falls to 2 x 2 rather than a single column on a tablet.
+  One vocabulary for every chart in the app, replacing three near-identical
+  bars that each looked slightly different. See components/charts.tsx for why
+  every one of these carries its own number as well as its length.
 */
-.ops-grid {
-  display: grid;
+
+.chart {
+  display: flex;
+  flex-direction: column;
   gap: var(--s-3);
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
-/*
-  A tile is a count and the label that explains it, and it is a link to the
-  list it counted. Nested inside a section card, so it drops the outer card's
-  shadow and takes a flatter surface — otherwise cards inside cards read as
-  two levels of importance when they are one.
-*/
-.ops-tile {
+.chart-caption {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.chart-empty {
+  padding: var(--s-5) 0;
+  color: var(--faint);
+  font-size: var(--fs-md);
+}
+
+/* A section of a dashboard. */
+.panel-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.panel-head .card-title {
+  margin: 0;
+}
+
+.panel-blurb {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  max-width: 80ch;
+}
+
+/* ── Stat ─────────────────────────────────────────────────────────────────── */
+
+.stat {
   background: var(--surface-2);
   box-shadow: none;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
   gap: var(--s-2);
   min-height: 92px;
 }
 
-.ops-tile .section-label {
+.stat .section-label {
   margin: 0;
   color: var(--muted);
 }
 
 /*
-  Inter, not Orbitron. The display face is squarish by design and its zero
-  reads as an empty box at this size — on a screen whose entire job is numbers
-  that is the one glyph that has to be unmistakable. Same rule the stylesheet
-  opens with: the display face for identity, Inter for anything data-dense.
+  Inter, not the display face. Orbitron is squarish by design and its zero
+  reads as an empty box - on a tile whose whole job is a number, that is the
+  one glyph that has to be unmistakable.
 */
-.ops-tile-value {
+.stat-value {
   font-family: var(--body);
   font-size: var(--fs-2xl);
   font-weight: 700;
   line-height: 1;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
+  margin-top: auto;
 }
 
-/* Zero is the good answer on most of these, so it stays quiet. */
-.ops-tile-value.ok {
+.stat-hint {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+/* ── Bars ─────────────────────────────────────────────────────────────────── */
+
+.bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 150px) 1fr 44px;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--fs-md);
+  color: var(--text);
+  padding: 2px 0;
+  border-radius: var(--radius-sm);
+}
+
+a.bar-row:hover .bar-label {
   color: var(--neon);
 }
 
-/* Anything above zero on a queue or an overdue count wants a look. */
-.ops-tile-value.warn {
+.bar-label {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ── Funnel ───────────────────────────────────────────────────────────────── */
+
+.funnel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.funnel-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 170px) 1fr 44px 48px;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--fs-md);
+  color: var(--text);
+  padding: 3px 0;
+  border-radius: var(--radius-sm);
+}
+
+a.funnel-row:hover .funnel-label {
+  color: var(--neon);
+}
+
+.funnel-label {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.funnel-track {
+  height: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.funnel-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-sm);
+  transition: width 0.25s ease;
+}
+
+.funnel-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* The drop-off between stages - the number the funnel shape exists to show. */
+.funnel-drop {
+  text-align: right;
+  font-size: var(--fs-xs);
   color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Donut ────────────────────────────────────────────────────────────────── */
+
+.donut {
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  flex-wrap: wrap;
+}
+
+.donut svg {
+  width: 140px;
+  height: 140px;
+  flex-shrink: 0;
+}
+
+.donut-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.05);
+  stroke-width: 16;
+}
+
+.donut-slice {
+  fill: none;
+  stroke-width: 16;
+}
+
+.donut-total {
+  fill: var(--text);
+  font-size: 22px;
+  font-weight: 700;
+  text-anchor: middle;
+  font-family: var(--body);
+}
+
+.donut-caption {
+  fill: var(--muted);
+  font-size: 9px;
+  text-anchor: middle;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-family: var(--body);
+}
+
+.donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  flex: 1;
+  min-width: 170px;
+  font-size: var(--fs-md);
+}
+
+.donut-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--muted);
+}
+
+.donut-legend strong {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.donut-legend a:hover {
+  color: var(--neon);
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 520px) {
+  .bar-row {
+    grid-template-columns: minmax(80px, 120px) 1fr 36px;
+    gap: var(--s-2);
+  }
+  .funnel-row {
+    grid-template-columns: minmax(84px, 130px) 1fr 36px 40px;
+    gap: var(--s-2);
+  }
 }

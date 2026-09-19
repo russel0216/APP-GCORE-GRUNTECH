@@ -459,6 +459,32 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/*
+            The same screen under G-OPS, because the registry lists Purchase
+            Requests in both menus and means it: a project manager raises one
+            against a job, procurement works it. It had no route here at all,
+            so the Delivery menu entry fell through to "Not built yet" — the
+            registry promised a screen the app never rendered.
+
+            Its own path, so the menu can highlight it and the sidebar stays in
+            G-OPS; and either module's permission opens it, since the two menu
+            entries are the two ways into one register.
+        */}
+        <Route
+          path="/g-ops/purchase-requests"
+          element={
+            <GuardAny
+              permissions={[
+                'gops.purchase_requests.view_all',
+                'gops.purchase_requests.view_own',
+                'gchain.purchase_requests.view_all',
+                'gchain.purchase_requests.view_own',
+              ]}
+            >
+              <PurchaseRequests />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-chain/purchase-requests/:id"
           element={

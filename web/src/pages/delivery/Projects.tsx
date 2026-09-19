@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ErrorBox, Field, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import { Meter as ProgressBar } from '../../components/charts';
 
 export const JOB_STATUSES = [
   { value: 'PLANNING', label: 'Planning' },
@@ -22,18 +23,12 @@ export function jobStatusTone(s: string) {
   return '';
 }
 
-export function ProgressBar({ pct, tone }: { pct: number; tone?: string }) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  return (
-    <div className="meter" title={`${pct.toFixed(1)}%`}>
-      <div
-        className={`meter-fill${tone ? ` ${tone}` : ''}`}
-        style={{ width: `${clamped}%` }}
-      />
-      <span className="meter-label mono">{pct.toFixed(1)}%</span>
-    </div>
-  );
-}
+/**
+ * The percentage bar, under the name eight screens already import. The body
+ * lives in components/charts.tsx now — there were two implementations of this
+ * and they did not look the same.
+ */
+export { ProgressBar };
 
 interface JobRow {
   id: string;
