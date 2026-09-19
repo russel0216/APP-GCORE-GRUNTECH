@@ -15,7 +15,7 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
-import { submitForApproval, onApprovalSettled } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, approvalSignoffs } from '../shared/approvals';
 import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
 import {
   postJobCost,
@@ -1394,21 +1394,19 @@ purchaseOrderRoutes.get(
 
     if (po.notes) sections.push({ kind: 'text', title: 'Notes', body: po.notes });
 
+    const poSignoffs = await approvalSignoffs('purchase_order', po.id);
+
     const pdf = await renderDocument({
       title: 'Purchase Order',
       documentNumber: po.number,
-      trace: {
-        createdAt: po.createdAt,
-        createdBy: po.createdBy.name,
-        documentType: 'purchase_order',
-        documentId: po.id,
-      },
       date: po.orderDate,
       reference: po.supplier.name,
       sections,
       signatories: [
-        { role: 'Prepared by', name: po.createdBy.name, position: po.createdBy.position ?? undefined },
-        { role: 'Approved by' },
+        { role: 'Prepared by', name: po.createdBy.name, position: po.createdBy.position ?? undefined, at: po.createdAt },
+        // Name and timestamp come from the approval the engine recorded, so
+        // the signature block says who actually approved it and when.
+        { role: 'Approved by', ...poSignoffs[0] },
         { role: 'Received by' },
       ],
     });
@@ -1437,15 +1435,11 @@ purchaseRequestRoutes.get(
     const currency = company?.currency ?? 'PHP';
     const estimatedTotal = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
 
+    const prSignoffs = await approvalSignoffs('purchase_request', pr.id);
+
     const pdf = await renderDocument({
       title: 'Purchase Request',
       documentNumber: pr.number,
-      trace: {
-        createdAt: pr.createdAt,
-        createdBy: pr.requestedBy.name,
-        documentType: 'purchase_request',
-        documentId: pr.id,
-      },
       date: pr.createdAt,
       reference: pr.purpose,
       sections: [
@@ -1483,9 +1477,11 @@ purchaseRequestRoutes.get(
         ...(pr.notes ? [{ kind: 'text' as const, title: 'Notes', body: pr.notes }] : []),
       ],
       signatories: [
-        { role: 'Requested by', name: pr.requestedBy.name, position: pr.requestedBy.position ?? undefined },
-        { role: 'Checked by' },
-        { role: 'Approved by' },
+        { role: 'Requested by', name: pr.requestedBy.name, position: pr.requestedBy.position ?? undefined, at: pr.createdAt },
+        // A two-step workflow fills both slots; a one-step workflow fills the
+        // last one and leaves Checked by as the blank rule it always was.
+        { role: 'Checked by', ...(prSignoffs.length > 1 ? prSignoffs[0] : undefined) },
+        { role: 'Approved by', ...(prSignoffs.length > 1 ? prSignoffs[1] : prSignoffs[0]) },
       ],
     });
 

@@ -1061,21 +1061,13 @@ quotationRoutes.get(
     const pdf = await renderDocument({
       title: 'Quotation',
       documentNumber: quotation.number,
-      // The approval hangs off the REVISION, not the quotation — passing the
-      // quotation id here would print an empty trail on an approved document.
-      trace: {
-        createdAt: revision.createdAt,
-        createdBy: quotation.owner?.name,
-        documentType: 'quotation',
-        documentId: revision.id,
-      },
       revision: String(revision.revision),
       date: revision.createdAt,
       reference: `${quotation.customer.name}${quotation.site ? ` — ${quotation.site.name}` : ''}`,
       sections,
       signatories: [
-        { role: 'Prepared by', name: quotation.owner.name, position: quotation.owner.position ?? undefined },
-        { role: 'Approved by', name: revision.approvedBy?.name },
+        { role: 'Prepared by', name: quotation.owner.name, position: quotation.owner.position ?? undefined, at: revision.createdAt },
+        { role: 'Approved by', name: revision.approvedBy?.name, at: revision.approvedAt },
         { role: 'Conforme', name: quotation.contact?.name },
       ],
       footerNote: `${company?.name ?? ''} · ${quotation.number} R${revision.revision}`,

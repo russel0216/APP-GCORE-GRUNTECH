@@ -354,10 +354,6 @@ pdfRoutes.get(
 
     const pdf = await renderDocument({
       title: 'Document Specimen',
-      // The specimen exists to show what a real document looks like, so it
-      // carries a trail too — otherwise Settings would print a preview that
-      // misses the block every other document now ends with.
-      trace: { createdAt: new Date(Date.now() - 36 * 3600_000), createdBy: 'Specimen' },
       documentNumber: `${company?.numberPrefix ?? 'GT'}-SPEC-${new Date().getFullYear()}-0001`,
       revision: '0',
       date: new Date(),
@@ -412,8 +408,10 @@ pdfRoutes.get(
         },
       ],
       signatories: [
-        { role: 'Prepared by', name: me.name, position: me.position ?? undefined },
-        { role: 'Checked by' },
+        // Dated, so the specimen shows the timestamp line every real document
+        // carries rather than a preview that quietly omits it.
+        { role: 'Prepared by', name: me.name, position: me.position ?? undefined, at: new Date(Date.now() - 36 * 3600_000) },
+        { role: 'Checked by', name: me.name, at: new Date(Date.now() - 20 * 3600_000) },
         { role: 'Approved by' },
       ],
     });

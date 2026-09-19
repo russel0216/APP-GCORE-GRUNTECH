@@ -393,3 +393,38 @@ export async function historyFor(documentType: string, documentId: string) {
     orderBy: { createdAt: 'desc' },
   });
 }
+
+/**
+ * Who signed off at each step of a document's approval, and when.
+ *
+ * Feeds the signature block on a PDF: the approval engine already records the
+ * approver and the moment they acted, so a printed document can carry a real
+ * name and a real timestamp under "Checked by" and "Approved by" instead of an
+ * empty rule.
+ *
+ * In step order, approvals only. A rejection is not a sign-off, and a document
+ * that was rejected and resubmitted should print the approvals that stand — so
+ * the latest request wins, not the accumulated history of every attempt.
+ */
+export async function approvalSignoffs(
+  documentType: string,
+  documentId: string,
+): Promise<{ name: string; position?: string; at: Date }[]> {
+  const request = await prisma.approvalRequest.findFirst({
+    where: { documentType, documentId },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      actions: {
+        where: { action: 'APPROVED' },
+        orderBy: { sequence: 'asc' },
+        include: { approver: { select: { name: true, position: true } } },
+      },
+    },
+  });
+
+  return (request?.actions ?? []).map((a) => ({
+    name: a.approver.name,
+    position: a.approver.position ?? undefined,
+    at: a.actedAt,
+  }));
+}

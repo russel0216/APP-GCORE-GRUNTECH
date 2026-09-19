@@ -32,13 +32,13 @@ four databases and four copies of "customer".
    number.
 6. **Every printable document goes through `renderDocument(...)`.** Uniform PDFs
    across all menus is an explicit requirement. A module supplies sections; it
-   never draws a header, signature block, page number or document trail.
-   **Always pass `trace`** — raised-at, and the approval chain — so a printed
-   document can be used to find where an operation is stuck. Give it
-   `documentType` + `documentId` for anything that routes through the approval
-   engine, or `approvedAt`/`approvedBy` for the few approved on the record
-   (progress reports and billings). Note the trap: a quotation's approval hangs
-   off the **revision**, so its trace takes the revision id.
+   never draws a header, signature block or page number.
+   **Give every signatory an `at`** — when they raised, checked or approved it —
+   so a printed document dates its own signatures. For anything routed through
+   the approval engine, `approvalSignoffs(documentType, documentId)` returns the
+   name and timestamp per step; spread it into the matching slot. Leave `at` off
+   where nothing has happened: an unsigned slot must stay a blank rule rather
+   than borrow the document's date.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
@@ -81,9 +81,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales delivery chain hr finance aftermarket insights; do npx tsx scripts/verify-$s.ts; done
 ```
 
-488 assertions across permission resolution, numbering concurrency, the approval
+483 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
-engine and the document trail it prints, CSV parsing, the import contract, Phase 3's money paths (contract
+engine and the signature timestamps it prints, CSV parsing, the import contract, Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
 Phase 6's HR arithmetic and face pipeline, Phase 7's tax, aging and allocation
 arithmetic, Phase 8's schedule dates and template versioning, and Phase 9's

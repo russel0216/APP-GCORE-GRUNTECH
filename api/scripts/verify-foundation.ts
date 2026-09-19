@@ -19,8 +19,14 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, pendingFor, onApprovalSettled } from '../src/shared/approvals';
-import { renderDocument, formatElapsed } from '../src/shared/pdf';
+import {
+  submitForApproval,
+  act,
+  pendingFor,
+  onApprovalSettled,
+  approvalSignoffs,
+} from '../src/shared/approvals';
+import { renderDocument, formatDateTime } from '../src/shared/pdf';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -420,79 +426,66 @@ async function main() {
   const pageCount = Number((pdf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
   check('long content paginates without runaway pages', pageCount === 2, `${pageCount} pages`);
 
-  // ── 8. The document trail ──────────────────────────────────────────────────
-  console.log('\nDocument trail');
+  // ── 8. Signature timestamps ────────────────────────────────────────────────
+  console.log('\nSignature timestamps');
 
-  // How long each step took is the whole reason the trail is printed, so the
-  // formatting of a duration is worth pinning down.
-  check('a duration under a minute says so', formatElapsed(30_000) === 'under a minute');
-  check('minutes stay minutes', formatElapsed(45 * 60_000) === '45m');
-  check('hours carry their minutes', formatElapsed((5 * 60 + 48) * 60_000) === '5h 48m');
-  check('a day and a bit reads as days', formatElapsed((28 * 60 + 24) * 60_000) === '1d 4h');
+  // The approval engine records who acted and when; that is what fills in a
+  // name and a date under "Checked by" and "Approved by" on the printed sheet.
+  const signoffs = await approvalSignoffs('overtime_request', `${TAG}-ot-1`);
+  check('both approvals come back as sign-offs', signoffs.length === 2, `${signoffs.length}`);
+  check('in step order', signoffs[0]?.name === supervisor.name && signoffs[1]?.name === hrPerson.name);
+  check('each carries the moment it was approved', signoffs.every((x) => x.at instanceof Date));
 
-  const traced = await renderDocument({
-    title: 'Traced Document',
+  const signed = await renderDocument({
+    title: 'Signed Document',
     documentNumber: 'GT-OT-2026-0001',
     sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
-    trace: {
-      createdAt: ot.createdAt,
-      createdBy: employee.name,
-      documentType: 'overtime_request',
-      documentId: `${TAG}-ot-1`,
-    },
+    signatories: [
+      { role: 'Prepared by', name: employee.name, at: ot.createdAt },
+      { role: 'Checked by', ...signoffs[0] },
+      { role: 'Approved by', ...signoffs[1] },
+    ],
   });
-  const tracedText = pdfText(traced);
+  const signedText = pdfText(signed);
 
-  check('the trail is printed', tracedText.includes('DOCUMENT TRAIL'));
+  const stamp = (d: Date) => formatDateTime(d);
+  check('the preparer is dated', signedText.includes(stamp(ot.createdAt)));
+  check('the checker is dated', signedText.includes(stamp(signoffs[0].at)));
+  check('the approver is dated', signedText.includes(stamp(signoffs[1].at)));
+  check(
+    'each name is still printed against its role',
+    signedText.includes(employee.name) &&
+      signedText.includes(supervisor.name) &&
+      signedText.includes(hrPerson.name),
+  );
 
-  // The signature block pins itself to the foot of the page, so the trail has
-  // to be reserved for rather than appended — it was costing every document an
-  // extra page until the signatures were told to sit higher.
+  // The date format is read at a glance under a signature, so it is pinned.
+  check(
+    'the stamp reads as a date and a time',
+    /^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}$/.test(stamp(new Date('2026-09-19T07:40:00Z'))),
+    stamp(new Date('2026-09-19T07:40:00Z')),
+  );
+
+  // An unsigned slot must stay a blank rule. Borrowing the document's own date
+  // would make an unapproved document look approved.
+  const unsigned = await renderDocument({
+    title: 'Unsigned Document',
+    date: new Date('2026-01-02T03:04:00Z'),
+    sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
+    signatories: [
+      { role: 'Prepared by', name: employee.name, at: ot.createdAt },
+      { role: 'Approved by' },
+    ],
+  });
+  check(
+    'an unsigned slot carries no date at all',
+    !pdfText(unsigned).includes(stamp(new Date('2026-01-02T03:04:00Z'))),
+  );
+
+  // The extra line under each name must not push the block into a new page.
   const pages = (buf: Buffer) => Number((buf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
-  check('the trail does not cost the document a page', pages(traced) === 1, `${pages(traced)} pages`);
+  check('the timestamps do not cost the document a page', pages(signed) === 1, `${pages(signed)} pages`);
 
-  check('it records when the document was raised', tracedText.includes('Raised'));
-  check('the requester is named', tracedText.includes(employee.name));
-  check(
-    'every approval step appears, so a slow one can be found',
-    tracedText.includes('Step 1') && tracedText.includes('Step 2'),
-  );
-  check(
-    'each approver is named against their step',
-    tracedText.includes(supervisor.name) && tracedText.includes(hrPerson.name),
-  );
-  check('the total time from raised to approved is printed', tracedText.includes('Raised to approved'));
-
-  // A PDF is a snapshot; two copies that disagree are only tellable apart by
-  // when each was taken.
-  check('every document says when it was printed', tracedText.includes('Printed'));
-
-  // The document types with no approval step must SAY so. A blank where the
-  // approval should be reads as "approved, time unknown".
-  const untraced = await renderDocument({
-    title: 'Unapproved Document',
-    sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
-    trace: { createdAt: new Date(), createdBy: employee.name },
-  });
-  check(
-    'a document with no approval step says so rather than leaving a blank',
-    pdfText(untraced).includes('no approval step'),
-  );
-
-  // Still pending: the trail has to show the step it is sitting on, because a
-  // document stuck for three days is exactly what this is for.
-  const pendingDoc = await renderDocument({
-    title: 'Pending Document',
-    sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
-    trace: {
-      createdAt: large.createdAt,
-      documentType: 'purchase_request',
-      documentId: large.documentId,
-    },
-  });
-  const pendingText = pdfText(pendingDoc);
-  check('a document still in the chain shows what it is waiting on', pendingText.includes('awaiting'));
-  check('and how long it has been waiting', pendingText.includes('waiting'));
 
   // ── Done ───────────────────────────────────────────────────────────────────
   await cleanup();
