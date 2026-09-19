@@ -662,21 +662,40 @@ the dev box.
 | 4 | **Master data starts clean.** No migration from the gasiontech apps. Customers, suppliers, employees and items are entered as work comes in. Phase 2 still ships a **CSV import** for each master, so a bulk load stays possible without a second project. | 2026-09-19 |
 | 5 | **Face descriptors are computed on the server, not in the browser.** The camera posts a photograph; the API decodes it, detects the face and produces the 128 floats. Matching in the page would be faster and would cost the server nothing, but it would mean trusting a number the client chose — and that number is all that stands between somebody and clocking in as a colleague. Weights ship inside `@vladmandic/face-api`, so there is nothing to download at deploy time and no CDN in the path of the time clock. Every clock entry keeps its photo regardless of method, because the photo is the evidence and the match is only the convenience. | 2026-09-19 |
 | 6 | **Overtime is two approvals on one record.** A *prior* filing before the work, approved by the supervisor alone — authorisation to stay, and the employee's evidence of it, moving no money. Then an *actual* filing after the work, approved by the supervisor **and** HR, which is what posts INCURRED cost to the project. A variance against the estimate must be explained in writing before it can be submitted. | 2026-09-19 |
+| 7 | **A supplier bill matched to a receiving posts no job cost.** Receiving already incurred it when the goods arrived (§5.1); posting again would charge the project twice for the same peso. A bill with nothing received behind it — a subcontractor's certificate, a service call, a utility — is the first time that cost appears, so that one does post, at the subtotal because input VAT is recoverable. | 2026-09-19 |
+| 8 | **A/R and A/P balances are measured against net collectible and net payable**, never against the invoice or bill total. Withheld tax is reported in its own column and chased as a certificate; it is not a debt. A payment is checked against what is still owed before it is written, and settled totals are re-derived from the allocation rows rather than incremented, so reversing a payment cannot leave a stale balance. | 2026-09-19 |
 
 ## 14. Still open
 
-Neither blocks the start of the build.
+None of these blocks the build. The first one is the only one getting worse
+with time.
 
-1. **Retention / downpayment** — revisit before Phase 4 ships (§5.4). Worth asking
-   whoever handles Gruntech's collections whether customers withhold a percentage
-   of each progress billing until final acceptance; it is cheap to add now and
-   expensive to add later.
+1. **Retention / downpayment** — still unanswered, and Phases 4 and 7 have now
+   both shipped without it (§5.4). This is the one item on this list that is
+   getting more expensive, so it is worth a direct question to whoever handles
+   Gruntech's collections: *do customers withhold a percentage of each progress
+   billing until final acceptance, and does Gruntech bill a mobilisation
+   downpayment that is then recouped?*
+
+   It is not yet a migration. The nullable columns are reserved on `Job` and
+   `ProgressBilling`, and `Invoice` carries the billing's figures rather than
+   recomputing them, so switching either on means a calculation, two template
+   lines and a recoupment schedule — perhaps two days. It becomes expensive once
+   real billings exist that *should* have withheld retention and did not,
+   because each of those has to be corrected by hand against what the customer
+   actually paid.
 2. **Attendance hardware** — which biometric device is the fallback when face
    recognition fails, and does it push to the app or does the app poll it? Phase 6
    ships with `BIOMETRIC` as a recorded clock method and a written reason, so an
    entry made at a door device can be attributed today; wiring an actual device to
    the API is a small addition once the model is known.
-3. **The face-match threshold** — shipped at 0.6, the library's own default, and
+3. **Supplier withholding rates** — G-FIN ships with 1% on goods and 2% on
+   services as *suggestions* on the bill screen, and zero as the default, because
+   withholding when you should not have underpays a supplier and is awkward to
+   unwind. Whether Gruntech is classified as a Top Withholding Agent — which is
+   what makes withholding on purchases compulsory rather than optional — is a
+   question for its accountant, not a decision this system should make.
+4. **The face-match threshold** — shipped at 0.6, the library's own default, and
    editable in G-HR › Settings. On the sample photographs the same person lands at
    0.13–0.28 and two different people at 0.69–0.73, so 0.6 sits in a wide gap. That
    gap will narrow with real site conditions — poor light, hard hats, dust — and

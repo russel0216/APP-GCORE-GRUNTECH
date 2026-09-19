@@ -79,6 +79,12 @@ model User {
   attendanceRecorded Attendance[]    @relation("AttendanceRecorder")
   leaveDecided      LeaveRequest[]   @relation("LeaveDecider")
 
+  invoicesCreated   Invoice[]      @relation("InvoiceCreator")
+  billsCreated      SupplierBill[] @relation("BillCreator")
+  expenseClaims     ExpenseClaim[] @relation("Claimant")
+  paymentsRecorded  Payment[]      @relation("PaymentRecorder")
+  reimbursements    Payment[]      @relation("Payee")
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -427,6 +433,8 @@ model Customer {
   quotations Quotation[]
   activities SalesActivity[]
   jobs       Job[]
+  invoices   Invoice[]
+  payments   Payment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -506,6 +514,8 @@ model Supplier {
   preferredItems  Item[]            @relation("PreferredSupplier")
   canvassEntries  CanvassSupplier[]
   purchaseOrders  PurchaseOrder[]
+  bills           SupplierBill[]
+  payments        Payment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -619,6 +629,8 @@ model CostCategory {
   poItems        PurchaseOrderItem[]
   issueItems     StockIssueItem[]
   overtime       OvertimeRequest[]
+  supplierBills  SupplierBill[] @relation("BillCategory")
+  expenseClaims  ExpenseClaim[] @relation("ExpenseCategory")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1159,6 +1171,9 @@ model Job {
   stockIssues      StockIssue[]
   borrowSlips      BorrowSlip[]
   overtime         OvertimeRequest[]
+  invoices         Invoice[]
+  supplierBills    SupplierBill[]
+  expenseClaims    ExpenseClaim[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1388,6 +1403,7 @@ model ProgressBilling {
   approvedAt DateTime?
 
   lines ProgressBillingLine[]
+  invoice Invoice?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1685,6 +1701,7 @@ model PurchaseOrder {
 
   items      PurchaseOrderItem[]
   receivings Receiving[]
+  bills      SupplierBill[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1740,6 +1757,7 @@ model Receiving {
   notes          String?
 
   items ReceivingItem[]
+  bills SupplierBill[]
 
   createdAt DateTime @default(now())
 
@@ -2190,4 +2208,356 @@ model SavedFilter {
   createdAt DateTime @default(now())
 
   @@index([listKey])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  G-FIN — Phase 7
+//
+//  Finance CONSUMES operational transactions; it does not re-key them
+//  (model §4.6). An invoice is raised from an approved progress billing and
+//  carries its figures forward. A supplier bill is raised against a purchase
+//  order and its receivings. An expense claim is the only document here that
+//  starts life in finance.
+//
+//  The rule that shapes all of it: invoiced ≠ collectible. EWT is withheld at
+//  source by the customer and comes back as a tax certificate, not as cash, so
+//  every outstanding balance is measured against NET COLLECTIBLE.
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+/// What we billed the customer. Raised from a progress billing wherever one
+/// exists, so the figures are carried rather than retyped.
+model Invoice {
+  id     String        @id @default(cuid())
+  number String        @unique
+  status InvoiceStatus @default(DRAFT)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  /// One invoice per progress billing. A billing that has been invoiced cannot
+  /// be invoiced again — that is what makes double-billing impossible rather
+  /// than merely discouraged.
+  progressBillingId String?          @unique
+  progressBilling   ProgressBilling? @relation(fields: [progressBillingId], references: [id], onDelete: Restrict)
+
+  invoiceDate DateTime  @db.Date
+  dueDate     DateTime  @db.Date
+  terms       String?
+  poReference String?
+
+  /// Snapshotted from the billing, or entered on a standalone invoice. Never
+  /// recomputed from Settings afterwards.
+  grossAmount    Decimal @db.Decimal(18, 2)
+  vatRate        Decimal @default(0.12) @db.Decimal(6, 4)
+  vatAmount      Decimal @db.Decimal(18, 2)
+  ewtRate        Decimal @default(0.02) @db.Decimal(6, 4)
+  ewtAmount      Decimal @db.Decimal(18, 2)
+  invoiceTotal   Decimal @db.Decimal(18, 2)
+  /// invoiceTotal − ewtAmount. THE figure A/R is measured against.
+  netCollectible Decimal @db.Decimal(18, 2)
+
+  /// Maintained from allocations. Denormalised because every A/R screen reads
+  /// it and the aging query cannot afford a join per row.
+  amountCollected Decimal @default(0) @db.Decimal(18, 2)
+
+  /// BIR Form 2307. Until it arrives the withheld tax is neither cash nor a
+  /// credit — worth chasing, and invisible unless it is recorded.
+  ewtCertificateNo String?
+  ewtCertificateAt DateTime? @db.Date
+
+  notes      String?
+  issuedAt   DateTime?
+  voidedAt   DateTime?
+  voidReason String?
+
+  createdById String
+  createdBy   User   @relation("InvoiceCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  lines       InvoiceLine[]
+  allocations PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([customerId, status])
+  @@index([dueDate])
+  @@index([jobId])
+}
+
+model InvoiceLine {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  sortOrder   Int     @default(0)
+  description String
+  /// Percentage billed this period, where the line came from a scope item.
+  detail      String?
+  amount      Decimal @db.Decimal(18, 2)
+
+  @@index([invoiceId])
+}
+
+enum BillStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+/// What a supplier billed us. Raised against a purchase order where one
+/// exists.
+///
+/// A bill matched to a receiving posts NOTHING to the job cost ledger: the
+/// receiving already incurred it, and posting again would charge the same peso
+/// twice. A bill with no receiving behind it — a subcontractor certificate, a
+/// service call, a utility — is the first time that cost appears, so that one
+/// does post.
+model SupplierBill {
+  id     String     @id @default(cuid())
+  number String     @unique
+  status BillStatus @default(DRAFT)
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  orderId String?
+  order   PurchaseOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  /// Set when the bill covers goods already received. Its presence is what
+  /// suppresses the cost posting.
+  receivingId String?
+  receiving   Receiving? @relation(fields: [receivingId], references: [id], onDelete: SetNull)
+
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  costCategoryId String?
+  costCategory   CostCategory? @relation("BillCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  /// Theirs, not ours — printed on their invoice.
+  supplierInvoiceNo String?
+  billDate          DateTime @db.Date
+  dueDate           DateTime @db.Date
+  terms             String?
+
+  subtotal  Decimal @db.Decimal(18, 2)
+  vatRate   Decimal @default(0.12) @db.Decimal(6, 4)
+  vatAmount Decimal @db.Decimal(18, 2)
+  total     Decimal @db.Decimal(18, 2)
+
+  /// Gruntech withholds from the supplier in turn — 1% on goods, 2% on
+  /// services by default. Withheld on the subtotal, never on the VAT.
+  ewtRate    Decimal @default(0) @db.Decimal(6, 4)
+  ewtAmount  Decimal @default(0) @db.Decimal(18, 2)
+  /// total − ewtAmount. What actually leaves the bank.
+  netPayable Decimal @db.Decimal(18, 2)
+
+  amountPaid Decimal @default(0) @db.Decimal(18, 2)
+
+  /// True when a job cost entry was written for this bill, so a later status
+  /// change cannot post it a second time.
+  postedToJob Boolean   @default(false)
+  postedAt    DateTime?
+
+  notes      String?
+  approvedAt DateTime?
+
+  createdById String
+  createdBy   User   @relation("BillCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  lines       SupplierBillLine[]
+  allocations PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([supplierId, status])
+  @@index([dueDate])
+  @@index([jobId])
+}
+
+model SupplierBillLine {
+  id     String       @id @default(cuid())
+  billId String
+  bill   SupplierBill @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  sortOrder   Int     @default(0)
+  description String
+  quantity    Decimal @default(1) @db.Decimal(18, 4)
+  unitPrice   Decimal @db.Decimal(18, 4)
+  amount      Decimal @db.Decimal(18, 2)
+
+  @@index([billId])
+}
+
+enum ExpenseStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  REIMBURSED
+  CANCELLED
+}
+
+/// Money someone spent out of their own pocket on the company's behalf.
+///
+/// The only G-FIN document that does not come from an operational one, and
+/// therefore the only one where a person keys the amounts. Approving it posts
+/// INCURRED cost when it is tagged to a job.
+model ExpenseClaim {
+  id     String        @id @default(cuid())
+  number String        @unique
+  status ExpenseStatus @default(DRAFT)
+
+  claimedById String
+  claimedBy   User   @relation("Claimant", fields: [claimedById], references: [id], onDelete: Restrict)
+
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  costCategoryId String?
+  costCategory   CostCategory? @relation("ExpenseCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  claimDate DateTime @db.Date
+  purpose   String
+
+  total Decimal @default(0) @db.Decimal(18, 2)
+
+  amountPaid Decimal @default(0) @db.Decimal(18, 2)
+
+  postedToJob Boolean   @default(false)
+  postedAt    DateTime?
+
+  notes      String?
+  approvedAt DateTime?
+
+  lines       ExpenseClaimLine[]
+  allocations PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([claimedById, status])
+  @@index([jobId])
+}
+
+model ExpenseClaimLine {
+  id      String       @id @default(cuid())
+  claimId String
+  claim   ExpenseClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  sortOrder   Int      @default(0)
+  spentOn     DateTime @db.Date
+  description String
+  /// Free text: fare, meals, accommodation, materials bought on site…
+  category    String?
+  /// The OR or receipt number, because a claim without one is not claimable.
+  receiptNo   String?
+  amount      Decimal  @db.Decimal(18, 2)
+
+  @@index([claimId])
+}
+
+enum PaymentKind {
+  /// Money in — a customer settling an invoice.
+  RECEIPT
+  /// Money out — a supplier bill or an expense reimbursement.
+  DISBURSEMENT
+}
+
+enum PaymentMethod {
+  CASH
+  CHECK
+  BANK_TRANSFER
+  ONLINE
+  OFFSET
+}
+
+/// One movement of money, allocated across one or more documents.
+///
+/// Allocation matters: a customer rarely pays exactly one invoice. A single
+/// cheque against three billings has to land on the right three, or A/R aging
+/// is fiction.
+model Payment {
+  id     String        @id @default(cuid())
+  number String        @unique
+  kind   PaymentKind
+  method PaymentMethod @default(BANK_TRANSFER)
+
+  paymentDate DateTime @db.Date
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  /// For an expense reimbursement, the person being paid back.
+  payeeUserId String?
+  payeeUser   User?   @relation("Payee", fields: [payeeUserId], references: [id], onDelete: SetNull)
+
+  amount Decimal @db.Decimal(18, 2)
+
+  /// Cheque number, transfer reference, OR number.
+  reference String?
+  bank      String?
+  /// A cheque is not cash until it clears; until then it is a promise.
+  clearedAt DateTime? @db.Date
+
+  notes String?
+
+  recordedById String
+  recordedBy   User   @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
+
+  allocations PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([kind, paymentDate])
+  @@index([customerId])
+  @@index([supplierId])
+}
+
+/// A slice of a payment applied to one document. Exactly one of the three
+/// document references is set.
+model PaymentAllocation {
+  id        String  @id @default(cuid())
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  billId String?
+  bill   SupplierBill? @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  claimId String?
+  claim   ExpenseClaim? @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  amount Decimal @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([paymentId])
+  @@index([invoiceId])
+  @@index([billId])
+  @@index([claimId])
 }

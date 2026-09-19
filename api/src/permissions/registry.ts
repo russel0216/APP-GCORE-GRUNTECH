@@ -145,9 +145,23 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'ar', label: 'Accounts Receivable', path: '/g-fin/ar', actions: [...SHARED, 'approve'], phase: 7 },
       { key: 'ap', label: 'Accounts Payable', path: '/g-fin/ap', actions: [...SHARED, 'approve'], phase: 7 },
       { key: 'expenses', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED_APPROVABLE, phase: 7 },
+      // Every movement of money, in or out. Recording one is gated by the A/R
+      // or A/P create permission depending on direction — seeing the register
+      // is its own, lesser right.
+      { key: 'payments', label: 'Payments', path: '/g-fin/payments', actions: READ, phase: 7 },
       { key: 'cashflow', label: 'Cash Flow', path: '/g-fin/cash-flow', actions: READ, phase: 7 },
       { key: 'budget_vs_actual', label: 'Budget vs Actual', path: '/g-fin/budget-vs-actual', actions: READ, phase: 7 },
       { key: 'reports', label: 'Reports', path: '/g-fin/reports', actions: READ, phase: 7 },
+      // Payment terms, supplier withholding and the aging buckets. Finance's
+      // own rules — owning them should not require being a system
+      // administrator, the same way HR owns the working day.
+      {
+        key: 'settings',
+        label: 'Finance Settings',
+        path: '/g-fin/settings',
+        actions: ['view_all', 'edit_all'],
+        phase: 7,
+      },
     ],
   },
   {

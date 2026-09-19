@@ -25,6 +25,10 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   quotation: ['sales', 'sales_manager'],
   purchase_order: ['procurement'],
   expense: ['employee', 'project_engineer', 'sales'],
+  // A supplier's invoice arrives in finance, so finance keys it in. Routing a
+  // step back to finance is the same fault the budget-request and
+  // purchase-order workflows both shipped with.
+  supplier_bill: ['finance', 'procurement'],
 };
 
 async function main() {

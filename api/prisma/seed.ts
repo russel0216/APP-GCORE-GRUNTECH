@@ -172,6 +172,8 @@ const ROLES: RoleSeed[] = [
       ['gfin', 'budget_vs_actual'],
       ['gfin', 'reports'],
       ['gfin', 'dashboard'],
+      ['gfin', 'settings'],
+      ['gfin', 'payments'],
     ],
     only: [
       'gops.projects.view_all',
@@ -338,6 +340,25 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [
       { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
       { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+    ],
+  },
+  {
+    // A supplier's bill arrives in finance, so finance is the one who RAISES
+    // it — which is exactly why finance cannot be a step on it. The check that
+    // matters is the project manager who ordered the goods confirming they are
+    // what turned up, and management on anything large.
+    documentType: 'supplier_bill',
+    name: 'Supplier bill — up to P50,000',
+    maxAmount: 50_000,
+    steps: [{ sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' }],
+  },
+  {
+    documentType: 'supplier_bill',
+    name: 'Supplier bill — P50,000 and above',
+    minAmount: 50_000,
+    steps: [
+      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
+      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
   },
   {
@@ -639,6 +660,27 @@ async function main() {
     update: {},
   });
   console.log('  ✓ HR rules');
+
+  // ── Finance rules ──────────────────────────────────────────────────────────
+  // Supplier withholding follows the usual BIR schedule — 1% on goods, 2% on
+  // services — but defaults to zero on each bill, because withholding when you
+  // should not have underpays a supplier and is awkward to unwind. These are
+  // the SUGGESTIONS the bill screen offers, not an automatic deduction.
+  await prisma.setting.upsert({
+    where: { key: 'finance.rules' },
+    create: {
+      key: 'finance.rules',
+      description: 'Payment terms, supplier withholding rates and aging buckets',
+      value: {
+        defaultTermsDays: 30,
+        supplierEwtGoods: 0.01,
+        supplierEwtServices: 0.02,
+        agingBuckets: [30, 60, 90],
+      },
+    },
+    update: {},
+  });
+  console.log('  ✓ Finance rules');
 
   // ── Super admin ────────────────────────────────────────────────────────────
   const existingAdmin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } });

@@ -64,6 +64,14 @@ import {
   hrReportRoutes,
 } from './routes/hr';
 import { warmUpFaceModels } from './shared/face';
+import {
+  invoiceRoutes,
+  billRoutes,
+  expenseRoutes,
+  paymentRoutes,
+  financeReportRoutes,
+  financeSettingsRoutes,
+} from './routes/finance';
 
 const app = express();
 
@@ -147,6 +155,14 @@ app.use('/api/leave', leaveRoutes);
 app.use('/api/overtime', overtimeRoutes);
 app.use('/api/hr-settings', hrSettingsRoutes);
 app.use('/api/hr-reports', hrReportRoutes);
+
+// G-FIN (Phase 7)
+app.use('/api/invoices', invoiceRoutes);
+app.use('/api/supplier-bills', billRoutes);
+app.use('/api/expense-claims', expenseRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/finance-reports', financeReportRoutes);
+app.use('/api/finance-settings', financeSettingsRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

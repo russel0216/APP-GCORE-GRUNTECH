@@ -100,7 +100,23 @@ previous implementation traces back to its absence.
 | Overtime by project, leave balances across the team | `/g-hr/reports` |
 | Working day, breaks, premium, match threshold | `/g-hr/settings` |
 
-Screens from Phases 7–9 appear in the menu marked with their phase. Their
+**Phase 7 — G-FIN.** Billing → invoice → collection, and what is still owed.
+
+| Capability | Where |
+|---|---|
+| **Invoice raised from an approved billing** — nothing retyped | `/g-fin/ar` |
+| A/R measured against **net collectible**, not the invoice total | `/g-fin/ar/:id` |
+| BIR 2307 certificates against withheld EWT | Invoice → Record BIR 2307 |
+| Supplier bills, matched to a receiving or standing alone | `/g-fin/ap` |
+| **Withholding on the payable side** — 1% goods, 2% services | New bill |
+| Expense claims with receipt numbers, reimbursed on approval | `/g-fin/expenses` |
+| Payments allocated across several documents | Any A/R or A/P detail |
+| **A/R and A/P aging** in configurable buckets | `/g-fin/reports` |
+| Cash flow — cleared movement plus what is due to move | `/g-fin/cash-flow` |
+| Budget vs actual across every project | `/g-fin/budget-vs-actual` |
+| Executive dashboard | `/g-fin` |
+
+Screens from Phases 8–9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
 
@@ -260,7 +276,19 @@ people land well the far side of the threshold. This one needs the API running,
 because the route guards — clocking in twice, filing actual hours before
 authorisation, an unexplained variance — are checked over HTTP.
 
-All six create their own records and clean up after themselves. Run them after
+```bash
+cd api && npx tsx scripts/verify-finance.ts
+```
+
+64 assertions for Phase 7, almost all of them about three things. That **EWT is
+withheld on the gross and not on the VAT**, and that an invoice paid to its net
+collectible reads as paid rather than as short by the withheld amount. That a
+**supplier bill matched to a receiving posts no job cost** — the receiving
+already incurred it — while a bill with nothing received behind it does. And
+that a **payment cannot be over-applied**, in either direction, to a document
+that no longer owes that much.
+
+All seven create their own records and clean up after themselves. Run them after
 touching anything in `api/src/shared/` or `api/src/permissions/`.
 
 ### Checking your approval routing

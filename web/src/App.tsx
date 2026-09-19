@@ -58,6 +58,16 @@ import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
 import { HrSettingsPage } from './pages/hr/Settings';
 import { HrReports } from './pages/hr/Reports';
+import { Receivables, InvoiceDetail, Payments } from './pages/finance/Receivables';
+import { Payables, BillDetail } from './pages/finance/Payables';
+import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
+import {
+  FinanceDashboard,
+  FinanceReports,
+  CashFlow,
+  BudgetVsActual,
+  FinanceSettings,
+} from './pages/finance/Reports';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -595,6 +605,104 @@ function Routed() {
           element={
             <Guard permission="ghr.settings.view_all">
               <HrSettingsPage />
+            </Guard>
+          }
+        />
+
+        {/* G-FIN (Phase 7) */}
+        <Route
+          path="/g-fin"
+          element={
+            <Guard permission="gfin.dashboard.view_all">
+              <FinanceDashboard />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/ar"
+          element={
+            <Guard permission="gfin.ar.view_all">
+              <Receivables />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/ar/:id"
+          element={
+            <Guard permission="gfin.ar.view_all">
+              <InvoiceDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/ap"
+          element={
+            <Guard permission="gfin.ap.view_all">
+              <Payables />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/ap/:id"
+          element={
+            <Guard permission="gfin.ap.view_all">
+              <BillDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/expenses"
+          element={
+            <GuardAny permissions={['gfin.expenses.view_all', 'gfin.expenses.view_own']}>
+              <Expenses />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-fin/expenses/:id"
+          element={
+            <GuardAny permissions={['gfin.expenses.view_all', 'gfin.expenses.view_own']}>
+              <ExpenseClaimDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-fin/payments"
+          element={
+            <Guard permission="gfin.payments.view_all">
+              <Payments />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/cash-flow"
+          element={
+            <Guard permission="gfin.cashflow.view_all">
+              <CashFlow />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/budget-vs-actual"
+          element={
+            <Guard permission="gfin.budget_vs_actual.view_all">
+              <BudgetVsActual />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-fin/reports"
+          element={
+            <GuardAny permissions={['gfin.reports.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all']}>
+              <FinanceReports />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-fin/settings"
+          element={
+            <Guard permission="gfin.settings.view_all">
+              <FinanceSettings />
             </Guard>
           }
         />

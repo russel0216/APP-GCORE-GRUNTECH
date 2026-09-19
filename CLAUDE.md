@@ -45,16 +45,17 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales delivery chain hr; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales delivery chain hr finance; do npx tsx scripts/verify-$s.ts; done
 ```
 
-254 assertions across permission resolution, numbering concurrency, the approval
+318 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
 engine, CSV parsing, the import contract, Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
-and Phase 6's HR arithmetic and face pipeline. `verify-hr.ts` needs the API
-running: its route guards are checked over HTTP, and it says so loudly rather
-than skipping them if the API is down. All create their own records and clean
+Phase 6's HR arithmetic and face pipeline, and Phase 7's tax, aging and
+allocation arithmetic. `verify-hr.ts` and `verify-finance.ts` need the API
+running: their route guards are checked over HTTP, and they say so loudly
+rather than skipping them if the API is down. All create their own records and clean
 up. Run them after touching anything in
 `api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
 service — the services have no click-path to test them, which is exactly why
@@ -136,11 +137,10 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1–6 are done. Next is Phase 7 — G-FIN: AR from progress billings, AP
-from receivings, expense claims, payments, cash flow and the executive
-dashboard. Operations-driven only — no GL, no chart of accounts, no payroll
-(model §4.6 and decision 2). Full sequence with acceptance criteria in
-`docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+Phases 1–7 are done. Next is Phase 8 — Aftermarket: installed base, service
+contracts, the preventive-maintenance schedule, report templates, and
+commissioning / PM / inspection reports with their own service costing. Full
+sequence with acceptance criteria in `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
 phase's screens from "upcoming" to live. Bump it when a phase lands.
@@ -269,3 +269,39 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **The menu highlights the longest matching path.** A module dashboard lives at
   the module root (`/g-hr`, `/g-chain`), so a plain prefix test lights it up on
   every screen in that module. `Shell.tsx` picks the most specific match.
+
+## Phase 7 notes worth carrying forward
+
+- **Outstanding is measured against NET COLLECTIBLE, never the invoice total.**
+  `settleable()` and `refreshSettlement()` in `src/shared/finance.ts` are the
+  only places that decide it. An invoice paid to its net collectible is PAID;
+  measuring against the invoice total would leave every customer permanently
+  short by the withheld EWT and make them all look like late payers.
+- **EWT is withheld on the gross, not on the VAT** — on both sides. Same rule as
+  Phase 4's billing, in the other direction for supplier bills.
+- **A supplier bill matched to a receiving posts NO job cost.** The receiving
+  already incurred it (Phase 5); posting again charges the project twice.
+  `bill.receivingId !== null` is the whole test. A bill with nothing received
+  behind it — subcontract certificate, service call, utility — is the first time
+  that cost appears, so that one does post, at the SUBTOTAL because input VAT is
+  recoverable. Covered by a test that asserts exactly one of two bills reaches
+  the ledger.
+- **A payment must be fully allocated, and cannot over-apply.** Every allocation
+  is checked against `outstanding` before anything is written. Settled totals are
+  RE-DERIVED from the allocation rows, never incremented, so deleting a payment
+  cannot leave a stale balance behind.
+- **Cleared money only.** Cash-flow actuals count payments with a `clearedAt`. A
+  cheque is recorded on the day it is written and stays uncleared until somebody
+  says otherwise — a position that counts promises is the one that bounces.
+- **An invoice is raised FROM a billing and carries its figures.** Both rates,
+  both tax amounts and the line breakdown are copied, never recomputed, so an
+  invoice raised months later still prints the tax the work was billed under.
+  `progressBillingId` is unique, which is what makes double-invoicing impossible
+  rather than merely discouraged.
+- **The supplier-bill workflow must not route to finance.** Finance receives the
+  supplier's invoice, so finance raises it — the third seeded workflow to ship
+  with that fault. `audit-workflows.ts` now knows the typical requester for it.
+- **Finance owns its own rules** (`gfin.settings`), the same way HR owns the
+  working day. Payment terms, supplier withholding and the aging buckets live
+  there; VAT and EWT stay on the company record because they print on documents
+  from three other modules.

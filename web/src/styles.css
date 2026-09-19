@@ -1439,3 +1439,29 @@ hr.rule {
   border-radius: 50%;
   margin-right: 7px;
 }
+
+/* ────────────────────────── G-FIN: cash flow bars ──────────────────────── */
+
+/* Money in above the line, money out below. The shape reads faster than the
+   figures do, and both share one scale so the comparison is honest. */
+.flow-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 80px;
+}
+
+.flow-in,
+.flow-out {
+  height: 7px;
+  border-radius: 2px;
+  min-width: 1px;
+}
+
+.flow-in {
+  background: rgba(57, 255, 157, 0.55);
+}
+
+.flow-out {
+  background: rgba(240, 180, 41, 0.5);
+}
