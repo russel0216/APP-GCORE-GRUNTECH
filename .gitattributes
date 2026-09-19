@@ -1,0 +1,30 @@
+# Line endings, pinned per file type.
+#
+# This matters on the production server. Git on Windows converts to CRLF on
+# checkout by default, and a shell script that arrives with CRLF fails at the
+# shebang — `#!/usr/bin/env bash\r` looks for an interpreter literally named
+# "bash\r" and reports "no such file or directory" about a file that plainly
+# exists. Easy to spend an hour on at the wrong moment.
+
+* text=auto
+
+# Shell scripts must be LF, wherever they are checked out.
+*.sh text eol=lf
+
+# Windows scripts must be CRLF, and ASCII besides: Windows PowerShell 5.1 reads
+# a .ps1 without a BOM as ANSI, so anything above 0x7F corrupts into bytes that
+# break the parse.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Leave binaries alone.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.ico binary
+*.dump binary
+*.zip binary
