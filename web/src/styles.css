@@ -2242,3 +2242,63 @@ hr.rule {
     display: none;
   }
 }
+
+/* ──────────────────────────── G-OPS: the overview ───────────────────────── */
+
+/*
+  A band holds four tiles. The shared .grid-4 has a 190px minimum, which inside
+  a card's padding drops to three columns on a laptop and orphans the fourth on
+  a row of its own. 160px keeps a band on one line down to about 1000px and
+  still falls to 2 x 2 rather than a single column on a tablet.
+*/
+.ops-grid {
+  display: grid;
+  gap: var(--s-3);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+/*
+  A tile is a count and the label that explains it, and it is a link to the
+  list it counted. Nested inside a section card, so it drops the outer card's
+  shadow and takes a flatter surface — otherwise cards inside cards read as
+  two levels of importance when they are one.
+*/
+.ops-tile {
+  background: var(--surface-2);
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-height: 92px;
+}
+
+.ops-tile .section-label {
+  margin: 0;
+  color: var(--muted);
+}
+
+/*
+  Inter, not Orbitron. The display face is squarish by design and its zero
+  reads as an empty box at this size — on a screen whose entire job is numbers
+  that is the one glyph that has to be unmistakable. Same rule the stylesheet
+  opens with: the display face for identity, Inter for anything data-dense.
+*/
+.ops-tile-value {
+  font-family: var(--body);
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Zero is the good answer on most of these, so it stays quiet. */
+.ops-tile-value.ok {
+  color: var(--neon);
+}
+
+/* Anything above zero on a queue or an overdue count wants a look. */
+.ops-tile-value.warn {
+  color: var(--warn);
+}

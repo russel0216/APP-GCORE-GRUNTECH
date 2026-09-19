@@ -6,6 +6,7 @@ import { Login } from './pages/Login';
 import { Home } from './pages/Home';
 import { MyWork } from './pages/MyWork';
 import { Account, SystemSettings, ComingSoon } from './pages/Misc';
+import { OpsDashboard } from './pages/OpsDashboard';
 import { Users } from './pages/admin/Users';
 import { Roles } from './pages/admin/Roles';
 import { Company } from './pages/admin/Company';
@@ -434,6 +435,14 @@ function Routed() {
         />
 
         {/* G-CHAIN (Phase 5) */}
+        <Route
+          path="/g-ops"
+          element={
+            <Guard permission="gops.dashboard.view_all">
+              <OpsDashboard />
+            </Guard>
+          }
+        />
         <Route
           path="/g-chain"
           element={
@@ -912,7 +921,6 @@ function Routed() {
             numbering are already configurable, so this is a signpost, not a 404. */}
         <Route path="/admin/templates" element={<ComingSoon />} />
         <Route path="/g-ops/*" element={<ComingSoon />} />
-        <Route path="/g-ops" element={<ComingSoon />} />
         <Route path="/g-hr/*" element={<ComingSoon />} />
         <Route path="/g-hr" element={<ComingSoon />} />
         <Route path="/g-fin/*" element={<ComingSoon />} />
