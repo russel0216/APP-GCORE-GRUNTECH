@@ -1519,9 +1519,29 @@ hr.rule {
 }
 
 .home-wordmark {
-  font-size: clamp(40px, 8vw, 78px);
-  letter-spacing: clamp(6px, 2vw, 16px);
-  line-height: 1;
+  margin: 0;
+  line-height: 0;
+}
+
+.home-wordmark img {
+  width: min(560px, 82vw);
+  height: auto;
+  /* Drawn on black like the division marks, so it blends with the page rather
+     than sitting in a visible rectangle on it. */
+  mix-blend-mode: screen;
+}
+
+/* Present to a screen reader, absent to the eye. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Two by two, pinned rather than auto-fitted. Left to itself the grid packs

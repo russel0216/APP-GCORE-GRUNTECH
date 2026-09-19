@@ -83,7 +83,14 @@ export function Home() {
   return (
     <div className="home">
       <div className="home-hero">
-        <h1 className="wordmark home-wordmark">G-CORE</h1>
+        {/* The wordmark is the animated original, carrying the emblem inside
+            the O that the text version cannot reproduce. The h1 is still a
+            real heading for anything reading the page rather than looking at
+            it; the image sits inside it and the text is hidden visually. */}
+        <h1 className="home-wordmark">
+          <img src="/modules/wordmark.webp" alt="G-CORE" loading="eager" draggable={false} />
+          <span className="visually-hidden">G-CORE</span>
+        </h1>
         <div className="wordmark-sub">{company}</div>
       </div>
 
