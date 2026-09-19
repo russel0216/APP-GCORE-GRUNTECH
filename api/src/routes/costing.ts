@@ -112,6 +112,13 @@ costingRoutes.get(
     }
     if (q.filters.status) where.status = q.filters.status as Prisma.EnumCostingStatusFilter['equals'];
     if (q.filters.customerId) where.customerId = q.filters.customerId;
+    // Service Costing is this same screen, narrowed to the costings that back a
+    // service contract. A service costing is not a different kind of record —
+    // it is a costing whose job happens to be a contract (model §4.5) — so it
+    // would be a mistake to give it a second table to drift out of step with.
+    if (q.filters.jobType) {
+      where.jobs = { some: { type: q.filters.jobType as Prisma.EnumJobTypeFilter['equals'] } };
+    }
 
     const [rows, total] = await Promise.all([
       prisma.costing.findMany({

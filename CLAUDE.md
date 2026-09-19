@@ -45,17 +45,18 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales delivery chain hr finance; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales delivery chain hr finance aftermarket; do npx tsx scripts/verify-$s.ts; done
 ```
 
-318 assertions across permission resolution, numbering concurrency, the approval
+393 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
 engine, CSV parsing, the import contract, Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
-Phase 6's HR arithmetic and face pipeline, and Phase 7's tax, aging and
-allocation arithmetic. `verify-hr.ts` and `verify-finance.ts` need the API
-running: their route guards are checked over HTTP, and they say so loudly
-rather than skipping them if the API is down. All create their own records and clean
+Phase 6's HR arithmetic and face pipeline, Phase 7's tax, aging and allocation
+arithmetic, and Phase 8's schedule dates and template versioning. `verify-hr.ts`,
+`verify-finance.ts` and `verify-aftermarket.ts` need the API running: their
+route guards are checked over HTTP, and they say so loudly rather than skipping
+them if the API is down. All create their own records and clean
 up. Run them after touching anything in
 `api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
 service — the services have no click-path to test them, which is exactly why
@@ -137,10 +138,12 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1–7 are done. Next is Phase 8 — Aftermarket: installed base, service
-contracts, the preventive-maintenance schedule, report templates, and
-commissioning / PM / inspection reports with their own service costing. Full
-sequence with acceptance criteria in `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+Phases 1–8 are done. Next is Phase 9 — Intelligence: the executive dashboard,
+project profitability, pipeline analytics, the cash forecast, inventory
+analytics and performance reports. Its acceptance criterion is that management
+answers questions without exporting to Excel, so it is a reporting layer over
+what the first eight phases already record — not new records. Full sequence in
+`docs/BUSINESS-OPERATIONS-MODEL.md` §11.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
 phase's screens from "upcoming" to live. Bump it when a phase lands.
@@ -305,3 +308,41 @@ are permission-configurable — that is deliberate, not a stub left behind.
   working day. Payment terms, supplier withholding and the aging buckets live
   there; VAT and EWT stay on the company record because they print on documents
   from three other modules.
+
+## Phase 8 notes worth carrying forward
+
+- **A service contract IS a job of type SERVICE_CONTRACT** (model §4.5). Its
+  costing, budget, schedule of values and progress billing are the Phase 3/4
+  machinery unchanged. `ServiceContract` is a 1:1 extension carrying only what a
+  job cannot: what is covered, how often, and until when. Do not give it a
+  second commercial record to drift out of step.
+- **Service Costing is the costing list narrowed to service jobs**, via
+  `?jobType=SERVICE_CONTRACT`. A service costing is a costing whose job happens
+  to be a contract — it is not a different table.
+- **The first PM visit falls one interval AFTER cover starts**, not on day one;
+  a visit that would fall past the end date is dropped, not clamped. `addMonths`
+  clamps to the month end, so three months after 31 January is 30 April.
+- **Regenerating a schedule only rewrites SCHEDULED and CANCELLED visits.**
+  COMPLETED and MISSED ones are a record of what happened and must survive.
+- **A template that has been used is immutable.** Editing publishes a new
+  version under the same key and flips `isCurrent`; reports keep pointing at the
+  exact version row they were filled in on. That is the only reason an old
+  report still renders the way it was signed.
+- **A visit completes when its REPORT is approved**, not when the engineer
+  leaves site — otherwise the schedule counts visits nobody has checked. A
+  rejected report leaves its visit open.
+- **Warranty is a fact, not a tick box.** `underWarranty` is decided from the
+  asset's dates against the date the work was done, at the moment the report is
+  created. A commissioning report is what starts a warranty running.
+- **A report cannot be submitted half-filled or unsigned**, but saves as a draft
+  freely — it is written on site, often on bad signal, and a form that refuses to
+  save gets filled in afterwards from memory instead.
+- **Expiry and missed visits are swept on read**, in `sweepOverdue()`, called
+  when the aftermarket screens load. G-Core has no scheduler, and a status that
+  is only correct when a cron job ran is worse than one derived on read.
+- **The renewal pipeline has two sources**: contracts ending, and warranties
+  lapsing on equipment with no active contract. The second is the one nobody
+  sees and usually the larger opportunity.
+- **The three report menus are one screen.** Commissioning, PM and Inspection
+  are `kind` filters over `ServiceReport`; what differs between them lives in
+  the template, which is data.

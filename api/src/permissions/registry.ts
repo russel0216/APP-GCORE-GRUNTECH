@@ -93,7 +93,15 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'budget_requests', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
       { key: 'progress_billing', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
       { key: 'costing', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
+      // Aftermarket (Phase 8). The installed base is what turns a finished
+      // project into a renewal pipeline — without it nobody can answer "what
+      // did we put in that hospital, and when does its warranty run out".
+      { key: 'aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
+      { key: 'installed_base', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED, phase: 8 },
       { key: 'service_contracts', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED, phase: 8 },
+      { key: 'visits', label: 'PM Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Uses the Preventive Maintenance permissions to schedule and report' },
+      { key: 'renewals', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
+      { key: 'report_templates', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
       { key: 'commissioning_reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
       { key: 'pm_reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_APPROVABLE, phase: 8 },
       { key: 'inspection_reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_APPROVABLE, phase: 8 },

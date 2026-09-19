@@ -85,6 +85,12 @@ model User {
   paymentsRecorded  Payment[]      @relation("PaymentRecorder")
   reimbursements    Payment[]      @relation("Payee")
 
+  assetsCreated     InstalledAsset[]  @relation("AssetCreator")
+  contractsCreated  ServiceContract[] @relation("ContractCreator")
+  visitsAssigned    ServiceVisit[]    @relation("VisitEngineer")
+  templatesAuthored ReportTemplate[]  @relation("TemplateAuthor")
+  reportsPerformed  ServiceReport[]   @relation("ReportAuthor")
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -435,6 +441,9 @@ model Customer {
   jobs       Job[]
   invoices   Invoice[]
   payments   Payment[]
+  assets     InstalledAsset[]
+  visits     ServiceVisit[]
+  serviceReports ServiceReport[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -486,6 +495,9 @@ model CustomerSite {
   costings   Costing[]
   quotations Quotation[]
   jobs       Job[]
+  assets     InstalledAsset[]
+  visits     ServiceVisit[]
+  serviceReports ServiceReport[]
 
   @@index([customerId])
 }
@@ -700,6 +712,7 @@ model Item {
   borrowItems     BorrowSlipItem[]
   balances        InventoryBalance[]
   stockMoves      InventoryTransaction[]
+  installedAssets InstalledAsset[]
 
   @@index([isActive])
   @@index([name])
@@ -1174,6 +1187,9 @@ model Job {
   invoices         Invoice[]
   supplierBills    SupplierBill[]
   expenseClaims    ExpenseClaim[]
+  installedAssets  InstalledAsset[] @relation("AssetInstaller")
+  serviceContract  ServiceContract?
+  serviceReports   ServiceReport[]  @relation("ServiceReportJob")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2560,4 +2576,314 @@ model PaymentAllocation {
   @@index([invoiceId])
   @@index([billId])
   @@index([claimId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  AFTERMARKET — Phase 8
+//
+//  What turns a finished project into a renewal pipeline (model §4.5):
+//
+//    Job turnover → installed asset register → warranty
+//      → service contract → PM schedule → visit
+//      → commissioning / PM / inspection report → billing → renewal
+//
+//  A service contract is NOT a new kind of commercial record: it is a Job of
+//  type SERVICE_CONTRACT, with its own costing, budget across the same five
+//  categories, schedule of values and progress billing. ServiceContract below
+//  carries only what a job does not already have — what is covered, how often,
+//  and when it runs out.
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum AssetStatus {
+  /// Installed and in service.
+  ACTIVE
+  /// Still installed, not running — mothballed, awaiting parts.
+  INACTIVE
+  /// Removed from site, or replaced.
+  DECOMMISSIONED
+}
+
+/// One piece of equipment Gruntech installed, where it stands today.
+///
+/// The register is what makes aftermarket possible at all: without it nobody
+/// can answer "what did we put in that hospital, and when does its warranty
+/// run out".
+model InstalledAsset {
+  id     String      @id @default(cuid())
+  code   String      @unique
+  status AssetStatus @default(ACTIVE)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  siteId     String?
+  site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+
+  /// The project that installed it. Kept even after the job closes — this link
+  /// is how a turned-over project becomes a renewal lead.
+  jobId String?
+  job   Job?    @relation("AssetInstaller", fields: [jobId], references: [id], onDelete: SetNull)
+
+  /// The catalogue item, where it was one Gruntech supplies.
+  itemId String?
+  item   Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  name         String
+  manufacturer String?
+  model        String?
+  serialNo     String?
+  capacity     String?
+  location     String?
+
+  installedAt   DateTime? @db.Date
+  commissionedAt DateTime? @db.Date
+  /// When free repair stops and billable service starts. The single most
+  /// commercially useful date in this table.
+  warrantyEndsAt DateTime? @db.Date
+
+  notes String?
+
+  createdById String?
+  createdBy   User?   @relation("AssetCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  contracts ServiceContractAsset[]
+  visits    ServiceVisit[]
+  reports   ServiceReport[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId, status])
+  @@index([siteId])
+  @@index([warrantyEndsAt])
+  @@index([serialNo])
+}
+
+enum ContractStatus {
+  DRAFT
+  ACTIVE
+  EXPIRED
+  RENEWED
+  CANCELLED
+}
+
+/// The coverage terms of a service contract.
+///
+/// One-to-one with a Job of type SERVICE_CONTRACT, which holds the money: the
+/// costing, the budget, the schedule of values and the progress billings. This
+/// record answers only the questions a job cannot — which equipment is covered,
+/// how often it is visited, what response time was promised, and when it runs
+/// out.
+model ServiceContract {
+  id     String         @id @default(cuid())
+  number String         @unique
+  status ContractStatus @default(DRAFT)
+
+  jobId String @unique
+  job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  startsAt DateTime @db.Date
+  endsAt   DateTime @db.Date
+
+  /// Months between preventive-maintenance visits. 3 = quarterly.
+  frequencyMonths Int @default(3)
+  /// Planned visits over the whole term. Derived on generation, stored so a
+  /// later change of frequency does not rewrite a schedule already agreed.
+  plannedVisits   Int @default(0)
+
+  /// Hours promised for a breakdown call. Free text because contracts say
+  /// things like "next working day" as often as they say a number.
+  responseTime String?
+  /// What the contract does NOT cover — consumables, parts, travel.
+  exclusions   String?
+  coverageNotes String?
+
+  /// Set when this contract replaced an expiring one, so a renewal chain is
+  /// readable backwards.
+  renewedFromId String?          @unique
+  renewedFrom   ServiceContract? @relation("Renewal", fields: [renewedFromId], references: [id], onDelete: SetNull)
+  renewedTo     ServiceContract? @relation("Renewal")
+
+  assets   ServiceContractAsset[]
+  visits   ServiceVisit[]
+  reports  ServiceReport[]
+
+  createdById String
+  createdBy   User   @relation("ContractCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, endsAt])
+}
+
+model ServiceContractAsset {
+  id         String          @id @default(cuid())
+  contractId String
+  contract   ServiceContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  assetId    String
+  asset      InstalledAsset  @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([contractId, assetId])
+  @@index([assetId])
+}
+
+enum ServiceKind {
+  COMMISSIONING
+  PREVENTIVE_MAINTENANCE
+  INSPECTION
+  CORRECTIVE
+}
+
+enum VisitStatus {
+  SCHEDULED
+  COMPLETED
+  MISSED
+  CANCELLED
+}
+
+/// A planned or completed attendance on site.
+///
+/// Separate from the report on purpose: a visit that has not happened yet has
+/// nothing to report, and "what is due this month" must be answerable without
+/// reading half-empty documents. A report may also exist with no visit behind
+/// it, because a breakdown call does not appear on a schedule.
+model ServiceVisit {
+  id     String      @id @default(cuid())
+  number String      @unique
+  kind   ServiceKind @default(PREVENTIVE_MAINTENANCE)
+  status VisitStatus @default(SCHEDULED)
+
+  contractId String?
+  contract   ServiceContract? @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  siteId     String?
+  site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+
+  assetId String?
+  asset   InstalledAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  /// Which visit of the contract's schedule this is — 1 of 4, 2 of 4.
+  sequence  Int?
+  dueDate   DateTime  @db.Date
+  performedAt DateTime? @db.Date
+
+  assignedToId String?
+  assignedTo   User?   @relation("VisitEngineer", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  notes String?
+
+  report ServiceReport?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, dueDate])
+  @@index([contractId])
+  @@index([assignedToId, status])
+}
+
+/// A versioned form definition (model §4.5: "report templates are data").
+///
+/// A template is IMMUTABLE once a report has been written against it. Editing
+/// publishes a new version under the same key; reports keep pointing at the
+/// exact version they were filled in on, so an old report renders forever the
+/// way it was signed.
+model ReportTemplate {
+  id      String      @id @default(cuid())
+  /// Stable across versions. Duplicating a template gives a new key.
+  key     String
+  version Int         @default(1)
+  kind    ServiceKind
+  name    String
+  description String?
+
+  /// [{ key, title, help?, fields: [{ key, label, type, options?, required?,
+  ///    unit? }], allowPhotos?: boolean }]
+  sections Json
+
+  /// Only one version per key is the one new reports get.
+  isCurrent Boolean @default(true)
+  isActive  Boolean @default(true)
+
+  createdById String?
+  createdBy   User?   @relation("TemplateAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+
+  reports ServiceReport[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([key, version])
+  @@index([kind, isCurrent])
+}
+
+enum ReportStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+/// A commissioning, PM, inspection or corrective report.
+///
+/// One document type with a kind, rather than three near-identical tables: the
+/// fields that differ between them live in the template, which is data.
+model ServiceReport {
+  id     String       @id @default(cuid())
+  number String       @unique
+  kind   ServiceKind
+  status ReportStatus @default(DRAFT)
+
+  visitId String? @unique
+  visit   ServiceVisit? @relation(fields: [visitId], references: [id], onDelete: SetNull)
+
+  contractId String?
+  contract   ServiceContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  /// The project, for a commissioning report written at turnover.
+  jobId String?
+  job   Job?    @relation("ServiceReportJob", fields: [jobId], references: [id], onDelete: SetNull)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  siteId     String?
+  site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+
+  assetId String?
+  asset   InstalledAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  /// The exact template VERSION this was filled in on.
+  templateId String
+  template   ReportTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  performedAt  DateTime  @db.Date
+  performedById String
+  performedBy   User     @relation("ReportAuthor", fields: [performedById], references: [id], onDelete: Restrict)
+
+  /// The filled form: { [sectionKey]: { [fieldKey]: value, __photos?: [id] } }.
+  data Json
+
+  findings        String?
+  recommendations String?
+  /// Whether the work was covered — warranty, contract, or billable. Decided
+  /// when the report is written, because that is when someone knows.
+  billable        Boolean @default(false)
+  underWarranty   Boolean @default(false)
+
+  /// Acknowledged on site. A service report nobody signed is an assertion.
+  customerSignedBy String?
+  customerSignedAt DateTime?
+
+  approvedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([kind, status])
+  @@index([customerId])
+  @@index([assetId])
+  @@index([performedAt])
 }

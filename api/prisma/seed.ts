@@ -86,6 +86,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.customers.view_all',
+      'gops.installed_base.view_all',
+      'gops.visits.view_all',
       'gops.quotations.view_all',
       'gchain.purchase_requests.view_all',
       'gchain.purchase_orders.view_all',
@@ -121,6 +123,45 @@ const ROLES: RoleSeed[] = [
       'gops.service_contracts.view_all',
       ...VIEW_OWN_SELF('gops', 'service_costing'),
       'gops.customers.view_all',
+      'gchain.inventory.view_all',
+      ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+      // They are the ones on site, so they are the ones who can say what is
+      // actually installed and what its serial number is.
+      'gops.aftermarket.view_all',
+      'gops.installed_base.view_all',
+      'gops.installed_base.create',
+      'gops.installed_base.edit_all',
+      'gops.visits.view_all',
+      'gops.report_templates.view_all',
+      'gops.renewals.view_all',
+    ],
+  },
+  {
+    // Runs the aftermarket side: owns the contracts, the schedule and the
+    // renewal pipeline, and signs off the reports the engineers write. A
+    // separate role from Service Engineer on purpose — nobody approves their
+    // own work, and the approval engine refuses it anyway.
+    key: 'service_manager',
+    name: 'Service Manager',
+    description: 'Owns service contracts, the PM schedule and renewals; approves service reports',
+    grants: [
+      ['gops', 'commissioning_reports'],
+      ['gops', 'pm_reports'],
+      ['gops', 'inspection_reports'],
+      ['gops', 'service_contracts'],
+      ['gops', 'installed_base'],
+      ['gops', 'service_costing'],
+    ],
+    only: [
+      'gops.aftermarket.view_all',
+      'gops.visits.view_all',
+      'gops.visits.export',
+      'gops.renewals.view_all',
+      'gops.renewals.export',
+      'gops.report_templates.view_all',
+      'gops.customers.view_all',
+      'gops.quotations.view_all',
+      'gops.costing.view_all',
       'gchain.inventory.view_all',
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
     ],
@@ -341,6 +382,27 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
       { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
     ],
+  },
+  {
+    // A service report is written on site by the engineer who did the work, so
+    // the check is the service manager who has to stand behind it, and — for a
+    // commissioning report, which starts a warranty running — management too.
+    documentType: 'commissioning_report',
+    name: 'Commissioning report — service manager then management',
+    steps: [
+      { sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' },
+      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+  },
+  {
+    documentType: 'pm_report',
+    name: 'PM report — service manager',
+    steps: [{ sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' }],
+  },
+  {
+    documentType: 'inspection_report',
+    name: 'Inspection report — service manager',
+    steps: [{ sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' }],
   },
   {
     // A supplier's bill arrives in finance, so finance is the one who RAISES
@@ -681,6 +743,189 @@ async function main() {
     update: {},
   });
   console.log('  ✓ Finance rules');
+
+  // ── Aftermarket rules ──────────────────────────────────────────────────────
+  await prisma.setting.upsert({
+    where: { key: 'aftermarket.rules' },
+    create: {
+      key: 'aftermarket.rules',
+      description: 'Warranty length, PM frequency and how far ahead expiry is flagged',
+      value: {
+        expiryWarningDays: 90,
+        defaultWarrantyMonths: 12,
+        defaultFrequencyMonths: 3,
+        missedAfterDays: 14,
+      },
+    },
+    update: {},
+  });
+  console.log('  ✓ Aftermarket rules');
+
+  // ── Report templates ───────────────────────────────────────────────────────
+  // Starting forms for an industrial gas contractor, versioned from the first
+  // day. A template that has been used is never edited in place — editing
+  // publishes v2 and leaves v1 exactly as it was signed (model §4.5). These are
+  // a head start for a service engineer to customise, not a constraint.
+  const TEMPLATES: {
+    key: string;
+    kind: 'COMMISSIONING' | 'PREVENTIVE_MAINTENANCE' | 'INSPECTION';
+    name: string;
+    description: string;
+    sections: unknown[];
+  }[] = [
+    {
+      key: 'commissioning-oxygen-plant',
+      kind: 'COMMISSIONING',
+      name: 'Oxygen plant commissioning',
+      description: 'Handover check for a PSA oxygen generation plant',
+      sections: [
+        {
+          key: 'installation',
+          title: 'Installation',
+          allowPhotos: true,
+          fields: [
+            { key: 'foundation', label: 'Foundation and anchoring', type: 'pass_fail', required: true },
+            { key: 'piping', label: 'Piping and supports', type: 'pass_fail', required: true },
+            { key: 'electrical', label: 'Electrical termination', type: 'pass_fail', required: true },
+            { key: 'labels', label: 'Labelling and signage', type: 'pass_fail' },
+          ],
+        },
+        {
+          key: 'performance',
+          title: 'Performance test',
+          allowPhotos: true,
+          fields: [
+            { key: 'purity', label: 'Oxygen purity', type: 'number', unit: '%', required: true },
+            { key: 'flow', label: 'Flow rate', type: 'number', unit: 'LPM', required: true },
+            { key: 'pressure', label: 'Outlet pressure', type: 'number', unit: 'bar', required: true },
+            { key: 'dewpoint', label: 'Dew point', type: 'number', unit: '°C' },
+            { key: 'noise', label: 'Noise level', type: 'number', unit: 'dB' },
+            { key: 'runHours', label: 'Continuous run test', type: 'number', unit: 'hours', required: true },
+          ],
+        },
+        {
+          key: 'safety',
+          title: 'Safety and alarms',
+          fields: [
+            { key: 'lowPurity', label: 'Low-purity alarm tested', type: 'boolean', required: true },
+            { key: 'lowPressure', label: 'Low-pressure alarm tested', type: 'boolean', required: true },
+            { key: 'emergencyStop', label: 'Emergency stop tested', type: 'boolean', required: true },
+            { key: 'reliefValve', label: 'Relief valve setting', type: 'number', unit: 'bar' },
+          ],
+        },
+        {
+          key: 'handover',
+          title: 'Handover',
+          fields: [
+            { key: 'manuals', label: 'Manuals handed over', type: 'boolean', required: true },
+            { key: 'training', label: 'Operator training given', type: 'boolean', required: true },
+            { key: 'trainedNames', label: 'Who was trained', type: 'text' },
+            { key: 'spares', label: 'Spares left on site', type: 'note' },
+          ],
+        },
+      ],
+    },
+    {
+      key: 'pm-oxygen-plant',
+      kind: 'PREVENTIVE_MAINTENANCE',
+      name: 'Oxygen plant preventive maintenance',
+      description: 'Routine quarterly service of a PSA plant and its compressor',
+      sections: [
+        {
+          key: 'readings',
+          title: 'Operating readings',
+          fields: [
+            { key: 'hours', label: 'Running hours', type: 'number', unit: 'h', required: true },
+            { key: 'purity', label: 'Oxygen purity', type: 'number', unit: '%', required: true },
+            { key: 'pressure', label: 'Outlet pressure', type: 'number', unit: 'bar', required: true },
+            { key: 'dewpoint', label: 'Dew point', type: 'number', unit: '°C' },
+          ],
+        },
+        {
+          key: 'compressor',
+          title: 'Compressor',
+          allowPhotos: true,
+          fields: [
+            { key: 'oilLevel', label: 'Oil level', type: 'pass_fail', required: true },
+            { key: 'oilChanged', label: 'Oil changed', type: 'boolean' },
+            { key: 'airFilter', label: 'Air filter', type: 'select', options: ['Clean', 'Cleaned', 'Replaced'], required: true },
+            { key: 'beltCondition', label: 'Belt / coupling', type: 'pass_fail' },
+            { key: 'leaks', label: 'Air leaks found', type: 'note' },
+          ],
+        },
+        {
+          key: 'dryer',
+          title: 'Dryer and filtration',
+          fields: [
+            { key: 'drain', label: 'Auto drain working', type: 'pass_fail', required: true },
+            { key: 'prefilter', label: 'Pre-filter', type: 'select', options: ['Clean', 'Cleaned', 'Replaced'] },
+            { key: 'postfilter', label: 'Post-filter', type: 'select', options: ['Clean', 'Cleaned', 'Replaced'] },
+          ],
+        },
+        {
+          key: 'safety',
+          title: 'Safety checks',
+          fields: [
+            { key: 'alarms', label: 'Alarms tested', type: 'boolean', required: true },
+            { key: 'gauges', label: 'Gauges within calibration', type: 'pass_fail' },
+            { key: 'housekeeping', label: 'Plant room housekeeping', type: 'pass_fail' },
+          ],
+        },
+      ],
+    },
+    {
+      key: 'inspection-general',
+      kind: 'INSPECTION',
+      name: 'General service inspection',
+      description: 'Site inspection or breakdown call-out',
+      sections: [
+        {
+          key: 'call',
+          title: 'The call',
+          fields: [
+            { key: 'reported', label: 'Reported fault', type: 'note', required: true },
+            { key: 'reportedBy', label: 'Reported by', type: 'text' },
+            { key: 'downtime', label: 'Equipment down since', type: 'date' },
+          ],
+        },
+        {
+          key: 'findings',
+          title: 'What was found',
+          allowPhotos: true,
+          fields: [
+            { key: 'cause', label: 'Cause', type: 'note', required: true },
+            { key: 'condition', label: 'Overall condition', type: 'select', options: ['Good', 'Fair', 'Poor', 'Unsafe'], required: true },
+            { key: 'partsUsed', label: 'Parts used', type: 'note' },
+          ],
+        },
+        {
+          key: 'outcome',
+          title: 'Outcome',
+          fields: [
+            { key: 'resolved', label: 'Resolved on this visit', type: 'boolean', required: true },
+            { key: 'returnNeeded', label: 'Return visit needed', type: 'boolean' },
+            { key: 'partsToOrder', label: 'Parts to order', type: 'note' },
+          ],
+        },
+      ],
+    },
+  ];
+
+  for (const t of TEMPLATES) {
+    const existing = await prisma.reportTemplate.findFirst({ where: { key: t.key } });
+    if (existing) continue;
+    await prisma.reportTemplate.create({
+      data: {
+        key: t.key,
+        version: 1,
+        kind: t.kind,
+        name: t.name,
+        description: t.description,
+        sections: t.sections as never,
+      },
+    });
+  }
+  console.log(`  ✓ Report templates (${TEMPLATES.length})`);
 
   // ── Super admin ────────────────────────────────────────────────────────────
   const existingAdmin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } });

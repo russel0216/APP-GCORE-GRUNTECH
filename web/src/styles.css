@@ -1465,3 +1465,16 @@ hr.rule {
 .flow-out {
   background: rgba(240, 180, 41, 0.5);
 }
+
+/* ─────────────────────── Aftermarket: report read-back ─────────────────── */
+
+/* A submitted report is read, not edited. Rendering its answers as plain text
+   rather than as disabled inputs makes that obvious at a glance. */
+.readback {
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 13px;
+  min-height: 36px;
+}

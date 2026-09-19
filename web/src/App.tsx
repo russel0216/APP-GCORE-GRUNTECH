@@ -68,6 +68,14 @@ import {
   BudgetVsActual,
   FinanceSettings,
 } from './pages/finance/Reports';
+import { InstalledBase, AssetDetailPage } from './pages/service/InstalledBase';
+import { ServiceContracts, ContractDetail } from './pages/service/Contracts';
+import { ServiceReports, ServiceReportDetail, PmSchedule, Renewals } from './pages/service/Reports';
+import {
+  ReportTemplates,
+  AftermarketDashboard,
+  ServiceCosting,
+} from './pages/service/Templates';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -706,6 +714,119 @@ function Routed() {
             </Guard>
           }
         />
+
+        {/* Aftermarket (Phase 8) */}
+        <Route
+          path="/g-ops/aftermarket"
+          element={
+            <Guard permission="gops.aftermarket.view_all">
+              <AftermarketDashboard />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/installed-base"
+          element={
+            <Guard permission="gops.installed_base.view_all">
+              <InstalledBase />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/installed-base/:id"
+          element={
+            <Guard permission="gops.installed_base.view_all">
+              <AssetDetailPage />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/service-contracts"
+          element={
+            <GuardAny permissions={['gops.service_contracts.view_all', 'gops.service_contracts.view_own']}>
+              <ServiceContracts />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/service-contracts/:id"
+          element={
+            <GuardAny permissions={['gops.service_contracts.view_all', 'gops.service_contracts.view_own']}>
+              <ContractDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/visits"
+          element={
+            <Guard permission="gops.visits.view_all">
+              <PmSchedule />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/renewals"
+          element={
+            <Guard permission="gops.renewals.view_all">
+              <Renewals />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/report-templates"
+          element={
+            <Guard permission="gops.report_templates.view_all">
+              <ReportTemplates />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/service-costing"
+          element={
+            <GuardAny permissions={['gops.service_costing.view_all', 'gops.service_costing.view_own']}>
+              <ServiceCosting />
+            </GuardAny>
+          }
+        />
+        {/* The three report menus are one screen with a preset filter — the
+            fields that differ between them live in the template, not in code. */}
+        <Route
+          path="/g-ops/service-reports"
+          element={
+            <GuardAny
+              permissions={[
+                'gops.pm_reports.view_all',
+                'gops.pm_reports.view_own',
+                'gops.commissioning_reports.view_all',
+                'gops.commissioning_reports.view_own',
+                'gops.inspection_reports.view_all',
+                'gops.inspection_reports.view_own',
+              ]}
+            >
+              <ServiceReports />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/service-reports/:id"
+          element={
+            <GuardAny
+              permissions={[
+                'gops.pm_reports.view_all',
+                'gops.pm_reports.view_own',
+                'gops.commissioning_reports.view_all',
+                'gops.commissioning_reports.view_own',
+                'gops.inspection_reports.view_all',
+                'gops.inspection_reports.view_own',
+              ]}
+            >
+              <ServiceReportDetail />
+            </GuardAny>
+          }
+        />
+        <Route path="/g-ops/commissioning" element={<Navigate to="/g-ops/service-reports?kind=COMMISSIONING" replace />} />
+        <Route path="/g-ops/pm" element={<Navigate to="/g-ops/service-reports?kind=PREVENTIVE_MAINTENANCE" replace />} />
+        <Route path="/g-ops/inspections" element={<Navigate to="/g-ops/service-reports?kind=INSPECTION" replace />} />
 
         {/* Screens whose module ships in a later phase — their access and
             numbering are already configurable, so this is a signpost, not a 404. */}

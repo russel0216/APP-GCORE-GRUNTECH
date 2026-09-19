@@ -116,7 +116,21 @@ previous implementation traces back to its absence.
 | Budget vs actual across every project | `/g-fin/budget-vs-actual` |
 | Executive dashboard | `/g-fin` |
 
-Screens from Phases 8–9 appear in the menu marked with their phase. Their
+**Phase 8 — Aftermarket.** A finished project becomes a renewal pipeline.
+
+| Capability | Where |
+|---|---|
+| **Installed base** — what was put in, where, and its warranty | `/g-ops/installed-base` |
+| Register everything a turned-over project installed, in one go | Installed base → from a project |
+| Service contracts — cover, frequency, what is covered | `/g-ops/service-contracts` |
+| **PM schedule written from the contract** | Contract → Activate and schedule |
+| Every visit, assigned and tracked | `/g-ops/visits` |
+| **Report templates as data**, versioned | `/g-ops/report-templates` |
+| Commissioning, PM, inspection and corrective reports | `/g-ops/service-reports` |
+| **Renewals** — contracts ending and warranties lapsing | `/g-ops/renewals` |
+| Service costing | `/g-ops/service-costing` |
+
+Screens from Phase 9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
 
@@ -288,7 +302,19 @@ already incurred it — while a bill with nothing received behind it does. And
 that a **payment cannot be over-applied**, in either direction, to a document
 that no longer owes that much.
 
-All seven create their own records and clean up after themselves. Run them after
+```bash
+cd api && npx tsx scripts/verify-aftermarket.ts
+```
+
+75 assertions for Phase 8. Mostly dates, because that is what this phase is:
+that a quarterly contract signed in January is first visited in April rather
+than on day one, that a visit falling past the end date is dropped rather than
+squeezed in, and that three months after 31 January is 30 April. Then the two
+rules that protect a record of what happened — **regenerating a schedule never
+erases a visit that was made**, and **a template that has been used is
+immutable**, so a report from two years ago still renders the way it was signed.
+
+All eight create their own records and clean up after themselves. Run them after
 touching anything in `api/src/shared/` or `api/src/permissions/`.
 
 ### Checking your approval routing

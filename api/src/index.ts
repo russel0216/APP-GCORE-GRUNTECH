@@ -72,6 +72,14 @@ import {
   financeReportRoutes,
   financeSettingsRoutes,
 } from './routes/finance';
+import {
+  assetRoutes,
+  contractRoutes,
+  visitRoutes,
+  templateRoutes,
+  serviceReportRoutes,
+  aftermarketRoutes,
+} from './routes/aftermarket';
 
 const app = express();
 
@@ -163,6 +171,14 @@ app.use('/api/expense-claims', expenseRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/finance-reports', financeReportRoutes);
 app.use('/api/finance-settings', financeSettingsRoutes);
+
+// Aftermarket (Phase 8)
+app.use('/api/installed-assets', assetRoutes);
+app.use('/api/service-contracts', contractRoutes);
+app.use('/api/service-visits', visitRoutes);
+app.use('/api/report-templates', templateRoutes);
+app.use('/api/service-reports', serviceReportRoutes);
+app.use('/api/aftermarket', aftermarketRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 
