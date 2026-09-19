@@ -1505,3 +1505,166 @@ hr.rule {
   margin: 0 0 9px;
   font-weight: 600;
 }
+
+/* ═══════════════════════════ The launcher ════════════════════════════════ */
+
+.home {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.home-hero {
+  text-align: center;
+  padding: 26px 0 40px;
+}
+
+.home-wordmark {
+  font-size: clamp(40px, 8vw, 78px);
+  letter-spacing: clamp(6px, 2vw, 16px);
+  line-height: 1;
+}
+
+/* Two by two, pinned rather than auto-fitted. Left to itself the grid packs
+   three across on a wide screen, which reads as "four things, one of them
+   orphaned" instead of as two balanced pairs. Below 760px it drops to a single
+   column rather than a cramped pair — these cards are mostly artwork, and
+   artwork at 150px wide is just noise. */
+.module-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 22px;
+  margin-bottom: 46px;
+}
+
+@media (min-width: 760px) {
+  .module-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* One or two cards are centred and given a sensible width instead of being
+     stretched across half the page or stranded at its left edge. */
+  .module-grid-few {
+    grid-template-columns: repeat(auto-fit, minmax(330px, 420px));
+    justify-content: center;
+  }
+}
+
+.module-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 30px 22px 26px;
+  min-height: 268px;
+  background: var(--surface);
+  border: 2px solid var(--magenta);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 26px rgba(192, 38, 211, 0.05);
+  text-decoration: none;
+  transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s;
+}
+
+.module-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--neon);
+  box-shadow: 0 0 24px rgba(57, 255, 157, 0.35), inset 0 0 28px rgba(192, 38, 211, 0.1);
+}
+
+.module-art {
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+.module-art img {
+  max-height: 100%;
+  max-width: 230px;
+  object-fit: contain;
+  /* The marks are drawn on black. Screen blending drops that background out
+     against the card, so they sit on the surface rather than in a box on it. */
+  mix-blend-mode: screen;
+}
+
+.module-name {
+  font-family: var(--display);
+  font-weight: 900;
+  font-size: 22px;
+  letter-spacing: 4px;
+  color: var(--neon);
+  text-shadow: 0 0 6px rgba(57, 255, 157, 0.7), 0 0 18px rgba(57, 255, 157, 0.35);
+}
+
+.module-blurb {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
+  max-width: 280px;
+  line-height: 1.45;
+}
+
+/* ── My Work, beneath the launcher ──────────────────────────────────────── */
+
+.home-work-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.home-work-head h2 {
+  font-family: var(--display);
+  font-size: 13px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+}
+
+.home-footer {
+  margin-top: 46px;
+  padding: 22px 0 10px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+
+/* ── Insights and Admin in the top bar ──────────────────────────────────── */
+
+.topbar-link {
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 7px 12px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.topbar-link:hover {
+  color: var(--neon);
+  border-color: var(--line);
+}
+
+.topbar-link.active {
+  color: var(--neon);
+  border-color: rgba(57, 255, 157, 0.4);
+  background: rgba(57, 255, 157, 0.07);
+}
+
+@media (max-width: 860px) {
+  /* On a phone the search box and these two labels cannot all fit. The search
+     trigger collapses to its icon already, so the labels go instead — both
+     screens are still reachable from the launcher and Ctrl+K. */
+  .topbar-link {
+    display: none;
+  }
+}

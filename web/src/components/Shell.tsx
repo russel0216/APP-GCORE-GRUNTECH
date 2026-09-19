@@ -83,6 +83,11 @@ export function Shell() {
    * wins, and where two entries share a path (Employees and Employee Pay Rates)
    * the first one does, so a single entry is ever active.
    */
+  // Both are permission-driven: menuFor() only returns a module this person
+  // can open, so the absence of an entry is the absence of the button.
+  const insights = me?.menu.find((m) => m.key === 'insights');
+  const admin = me?.menu.find((m) => m.key === 'admin');
+
   const activeKey = (() => {
     if (!activeModule) return null;
     let best: { key: string; length: number } | null = null;
@@ -109,6 +114,28 @@ export function Shell() {
         )}
 
         <div className="topbar-spacer" />
+
+        {/* Insights and Admin live up here rather than on the launcher grid:
+            they are places you go occasionally, and giving them equal weight to
+            the four divisions somebody works in every day would misrepresent
+            how the business is shaped. Each appears only if the menu says this
+            person may open it. */}
+        {insights && (
+          <Link
+            to="/insights"
+            className={`topbar-link${location.pathname.startsWith('/insights') ? ' active' : ''}`}
+          >
+            Insights
+          </Link>
+        )}
+        {admin && (
+          <Link
+            to={admin.submodules[0]?.path ?? '/admin/users'}
+            className={`topbar-link${location.pathname.startsWith('/admin') ? ' active' : ''}`}
+          >
+            Admin
+          </Link>
+        )}
 
         <button className="search-trigger" onClick={() => setPaletteOpen(true)}>
           <span>⌕</span>
