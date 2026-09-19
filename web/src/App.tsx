@@ -12,6 +12,12 @@ import { Company } from './pages/admin/Company';
 import { Numbering } from './pages/admin/Numbering';
 import { Workflows } from './pages/admin/Workflows';
 import { Audit } from './pages/admin/Audit';
+import { Customers } from './pages/masters/Customers';
+import { Customer360Page } from './pages/masters/Customer360';
+import { Suppliers, SupplierDetail } from './pages/masters/Suppliers';
+import { Employees } from './pages/masters/Employees';
+import { Items } from './pages/masters/Items';
+import { Categories, Warehouses } from './pages/masters/Reference';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -118,6 +124,88 @@ function Routed() {
           element={
             <Guard permission="admin.settings.view_all">
               <SystemSettings />
+            </Guard>
+          }
+        />
+        <Route
+          path="/admin/categories"
+          element={
+            <Guard permission="admin.categories.view_all">
+              <Categories />
+            </Guard>
+          }
+        />
+
+        {/* Masters (Phase 2) */}
+        <Route
+          path="/g-ops/customers"
+          element={
+            <Guard permission="gops.customers.view_all">
+              <Customers />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/customers/:id"
+          element={
+            <Guard permission="gops.customers.view_all">
+              <Customer360Page />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/suppliers"
+          element={
+            <Guard permission="gchain.suppliers.view_all">
+              <Suppliers />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/suppliers/:id"
+          element={
+            <Guard permission="gchain.suppliers.view_all">
+              <SupplierDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/items"
+          element={
+            <Guard permission="gchain.items.view_all">
+              <Items />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/items/:id"
+          element={
+            <Guard permission="gchain.items.view_all">
+              <Items />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/warehouses"
+          element={
+            <Guard permission="gchain.warehouses.view_all">
+              <Warehouses />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/employees"
+          element={
+            <Guard permission="ghr.employees.view_all">
+              <Employees />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/employees/:id"
+          element={
+            <Guard permission="ghr.employees.view_all">
+              <Employees />
             </Guard>
           }
         />

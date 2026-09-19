@@ -179,6 +179,9 @@ const ROLES: RoleSeed[] = [
       'gops.customers.view_all',
       'gchain.purchase_orders.view_all',
       'gchain.receiving.view_all',
+      // Finance costs labour, so it needs the rates — model §4.4.
+      'ghr.employees.view_all',
+      'ghr.employee_rates.view_all',
     ],
   },
   {
@@ -209,6 +212,7 @@ const ROLES: RoleSeed[] = [
       ['ghr', 'leave'],
       ['ghr', 'overtime'],
       ['ghr', 'employees'],
+      ['ghr', 'employee_rates'],
       ['ghr', 'reports'],
       ['ghr', 'settings'],
       ['ghr', 'dashboard'],
@@ -373,6 +377,22 @@ async function main() {
   );
 
   // ── Roles ──────────────────────────────────────────────────────────────────
+  //
+  // Re-running the seed must never undo an administrator's deliberate change,
+  // but it must still deliver permissions introduced by a later phase —
+  // otherwise every new screen stays invisible to every existing role until
+  // someone notices and ticks it by hand.
+  //
+  // Those two requirements only reconcile if the seed remembers what it has
+  // already offered. A pair it has never offered is granted; a pair it has
+  // offered before is left alone, because its absence now means someone
+  // revoked it on purpose.
+  const OFFER_KEY = 'seed.offeredRolePermissions';
+  const offeredSetting = await prisma.setting.findUnique({ where: { key: OFFER_KEY } });
+  const offered = new Set<string>((offeredSetting?.value as string[] | undefined) ?? []);
+  const isFirstEverRun = offeredSetting === null;
+
+  let grantedLater = 0;
   for (const seed of ROLES) {
     const keys = new Set<string>(seed.only ?? []);
     for (const [mod, sub] of seed.grants ?? []) {
@@ -386,17 +406,36 @@ async function main() {
       update: { name: seed.name, description: seed.description },
     });
 
-    // Only set permissions on first creation — after that they belong to the
-    // customer. Re-running the seed must not undo an administrator's edits.
-    const existing = await prisma.rolePermission.count({ where: { roleId: role.id } });
-    if (existing === 0) {
+    const neverOffered = [...keys].filter((k) => !offered.has(`${seed.key}:${k}`));
+    const additions = neverOffered
+      .map((k) => permissionByKey.get(k))
+      .filter((id): id is string => !!id);
+
+    if (additions.length) {
       await prisma.rolePermission.createMany({
-        data: ids.map((permissionId) => ({ roleId: role.id, permissionId })),
+        data: additions.map((permissionId) => ({ roleId: role.id, permissionId })),
         skipDuplicates: true,
       });
+      if (!isFirstEverRun) grantedLater += additions.length;
     }
+
+    for (const k of keys) offered.add(`${seed.key}:${k}`);
   }
-  console.log(`  ✓ Roles (${ROLES.length})`);
+
+  await prisma.setting.upsert({
+    where: { key: OFFER_KEY },
+    create: {
+      key: OFFER_KEY,
+      value: [...offered],
+      description:
+        'Role/permission pairs the seed has already offered. Prevents re-granting anything an administrator revoked, while still delivering permissions added by a later phase.',
+    },
+    update: { value: [...offered] },
+  });
+
+  console.log(
+    `  ✓ Roles (${ROLES.length})${grantedLater ? ` — granted ${grantedLater} newly introduced permission(s)` : ''}`,
+  );
 
   // ── Numbering ──────────────────────────────────────────────────────────────
   for (const dt of DOCUMENT_TYPES) {
@@ -461,6 +500,51 @@ async function main() {
     await prisma.department.upsert({ where: { code: d.code }, create: d, update: {} });
   }
   console.log('  ✓ Departments');
+
+  // ── Cost categories ────────────────────────────────────────────────────────
+  // The five buckets every costing, budget and cost-ledger row is grouped by
+  // (model §5.1). Marked isSystem so they cannot be deleted out from under the
+  // ledger; the labels stay editable.
+  for (const [i, c] of [
+    { code: 'MAT', name: 'Materials' },
+    { code: 'EQP', name: 'Equipment' },
+    { code: 'LAB', name: 'Labor' },
+    { code: 'SUB', name: 'Subcontractor' },
+    { code: 'IND', name: 'Indirect Cost' },
+  ].entries()) {
+    await prisma.costCategory.upsert({
+      where: { code: c.code },
+      create: { ...c, sortOrder: i, isSystem: true },
+      update: { isSystem: true },
+    });
+  }
+  console.log('  ✓ Cost categories (5)');
+
+  // ── Item categories ────────────────────────────────────────────────────────
+  // A starting tree for an industrial gas and mechanical contractor. Fully
+  // editable — this is a head start, not a constraint.
+  for (const c of [
+    { code: 'PIPE', name: 'Piping & Fittings' },
+    { code: 'VALV', name: 'Valves & Regulators' },
+    { code: 'ELEC', name: 'Electrical & Controls' },
+    { code: 'COMP', name: 'Compressors & Pumps' },
+    { code: 'GASE', name: 'Gas Equipment' },
+    { code: 'FAB', name: 'Fabrication Materials' },
+    { code: 'CONS', name: 'Consumables' },
+    { code: 'TOOL', name: 'Tools & Instruments' },
+    { code: 'SAFE', name: 'Safety & PPE' },
+  ]) {
+    await prisma.itemCategory.upsert({ where: { code: c.code }, create: c, update: {} });
+  }
+  console.log('  ✓ Item categories (9)');
+
+  // ── Warehouse ──────────────────────────────────────────────────────────────
+  await prisma.warehouse.upsert({
+    where: { code: 'MAIN' },
+    create: { code: 'MAIN', name: 'Main Warehouse' },
+    update: {},
+  });
+  console.log('  ✓ Warehouse');
 
   // ── Super admin ────────────────────────────────────────────────────────────
   const existingAdmin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } });

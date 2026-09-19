@@ -26,6 +26,15 @@ import {
   savedFilterRoutes,
   pdfRoutes,
 } from './routes/workspace';
+import { customerRoutes } from './routes/customers';
+import {
+  supplierRoutes,
+  employeeRoutes,
+  itemRoutes,
+  referenceRoutes,
+  warehouseRoutes,
+} from './routes/masters';
+import { importRoutes } from './routes/imports';
 
 const app = express();
 
@@ -69,6 +78,15 @@ app.use('/api/my-work', myWorkRoutes);
 app.use('/api/attachments', attachmentRoutes);
 app.use('/api/saved-filters', savedFilterRoutes);
 app.use('/api/pdf', pdfRoutes);
+
+// Masters (Phase 2)
+app.use('/api/customers', customerRoutes);
+app.use('/api/suppliers', supplierRoutes);
+app.use('/api/employees', employeeRoutes);
+app.use('/api/items', itemRoutes);
+app.use('/api/reference', referenceRoutes);
+app.use('/api/warehouses', warehouseRoutes);
+app.use('/api/imports', importRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

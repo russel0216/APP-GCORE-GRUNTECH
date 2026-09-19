@@ -145,6 +145,31 @@ export function Shell() {
         </div>
       )}
 
+      {/* Narrow screens hide the sidebar, so the module's screens move into a
+          scrollable strip. Without it a service engineer on a tablet can reach
+          a screen only through the home page or Ctrl+K. */}
+      {activeModule && (
+        <nav className="module-strip">
+          {activeModule.submodules.map((sub) => {
+            const upcoming = sub.phase > SHIPPED_PHASE;
+            const active =
+              location.pathname === sub.path || location.pathname.startsWith(`${sub.path}/`);
+            if (upcoming) {
+              return (
+                <span key={sub.key} className="strip-item soon" title={`Ships in Phase ${sub.phase}`}>
+                  {sub.label}
+                </span>
+              );
+            }
+            return (
+              <Link key={sub.key} to={sub.path} className={`strip-item${active ? ' active' : ''}`}>
+                {sub.label}
+              </Link>
+            );
+          })}
+        </nav>
+      )}
+
       <div className="shell-body">
         {activeModule && (
           <nav className="sidebar">

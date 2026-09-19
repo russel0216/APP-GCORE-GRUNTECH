@@ -45,15 +45,15 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && npx tsx scripts/verify-foundation.ts
+cd api && npx tsx scripts/verify-foundation.ts && npx tsx scripts/verify-masters.ts
 ```
 
-40 assertions across permission resolution, numbering concurrency, the approval
-engine, the overtime two-step rule, amount bands, the audit trail and the PDF
-engine. It creates its own users and cleans up. Run it after touching anything in
-`api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
-service — the services have no click-path to test them, which is exactly why this
-script exists.
+80 assertions across permission resolution, numbering concurrency, the approval
+engine, the overtime two-step rule, amount bands, the audit trail, the PDF
+engine, CSV parsing and the import contract. Both create their own records and
+clean up. Run them after touching anything in `api/src/shared/` or
+`api/src/permissions/`. Add cases when you add a shared service — the services
+have no click-path to test them, which is exactly why these scripts exist.
 
 ## Local development
 
@@ -66,9 +66,19 @@ existing local install. Then `cd api && npm run dev` and `cd web && npm run dev`
 
 Seeded admin: `admin@gruntech.com` / `ChangeMe!2026`.
 
-Re-running `npm run seed` is safe. It refreshes permissions from the registry and
-removes stale ones, but **does not** overwrite role permissions that already
-exist — those belong to the customer once set.
+Re-running `npm run seed` is safe, and the rule it follows is worth knowing
+before you change it:
+
+- Permissions are refreshed from the registry and stale ones removed.
+- A role/permission pair the seed has **never offered** is granted. This is how
+  a permission introduced by a later phase reaches existing roles — without it,
+  every new screen stays invisible until someone ticks it by hand.
+- A pair it **has** offered before is left alone, because its absence now means
+  an administrator revoked it deliberately.
+
+The record of what has been offered lives in the `seed.offeredRolePermissions`
+setting. Deleting that row makes the next seed re-grant every role its full
+starting set, overriding any revocation.
 
 ## Decided, do not relitigate
 
@@ -110,8 +120,27 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phase 1 (foundation) is done. Next is Phase 2 (masters: customers, contacts,
-sites, suppliers, employees, items), then Phase 3 (sales). Full sequence with
-acceptance criteria in `docs/BUSINESS-OPERATIONS-MODEL.md` §11. Screens from
-later phases already appear in the menu tagged with their phase and are
-permission-configurable — that is deliberate, not a stub left behind.
+Phases 1 (foundation) and 2 (masters) are done. Next is Phase 3 — sales: leads,
+the sales calendar, quotations with revisions, costing and the pipeline. Full
+sequence with acceptance criteria in `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+
+`SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
+phase's screens from "upcoming" to live. Bump it when a phase lands.
+
+Screens from later phases already appear in the menu tagged with their phase and
+are permission-configurable — that is deliberate, not a stub left behind.
+
+## Phase 2 notes worth carrying forward
+
+- **Employee vs User.** `Employee` is the person; `User` is the login, linked
+  1:1 and optional. The reporting line lives on `User`, not `Employee`, because
+  the approval engine routes by user and two places to record "who approves for
+  me" is one too many.
+- **Pay data** (`dailyRate`, `burdenMultiplier`, statutory numbers) is stripped
+  server-side unless the caller holds `ghr.employee_rates.view_all`. Never hide
+  it in the UI alone. Projects are charged the burdened rate, never the wage.
+- **Cost categories are system rows.** The five cannot be deleted; the ledger
+  groups by them. Labels are editable.
+- **Deleting a master** is fine today because nothing references them. From
+  Phase 3 onward, a customer with quotations or a supplier with POs must be
+  deactivated, not deleted — commercial history cannot lose its counterparty.

@@ -89,6 +89,116 @@ registerSearch({
   },
 });
 
+// ── Phase 2: the masters ─────────────────────────────────────────────────────
+
+registerSearch({
+  kind: 'customer',
+  label: 'Customers',
+  permission: 'gops.customers.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.customer.findMany({
+      where: {
+        OR: [
+          { name: { contains: term, mode: 'insensitive' } },
+          { code: { contains: term, mode: 'insensitive' } },
+          { legalName: { contains: term, mode: 'insensitive' } },
+          // Finding the company by the person you dealt with.
+          { contacts: { some: { name: { contains: term, mode: 'insensitive' } } } },
+        ],
+      },
+      take: limit,
+      select: { id: true, code: true, name: true, industry: true, isActive: true },
+    });
+    return rows.map((r) => ({
+      kind: 'customer',
+      id: r.id,
+      title: r.name,
+      subtitle: [r.code, r.industry, r.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
+      link: `/g-ops/customers/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'supplier',
+  label: 'Suppliers',
+  permission: 'gchain.suppliers.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.supplier.findMany({
+      where: {
+        OR: [
+          { name: { contains: term, mode: 'insensitive' } },
+          { code: { contains: term, mode: 'insensitive' } },
+          { category: { contains: term, mode: 'insensitive' } },
+          { contacts: { some: { name: { contains: term, mode: 'insensitive' } } } },
+        ],
+      },
+      take: limit,
+      select: { id: true, code: true, name: true, category: true, isActive: true },
+    });
+    return rows.map((r) => ({
+      kind: 'supplier',
+      id: r.id,
+      title: r.name,
+      subtitle: [r.code, r.category, r.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
+      link: `/g-chain/suppliers/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'employee',
+  label: 'Employees',
+  permission: 'ghr.employees.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.employee.findMany({
+      where: {
+        OR: [
+          { firstName: { contains: term, mode: 'insensitive' } },
+          { lastName: { contains: term, mode: 'insensitive' } },
+          { employeeNo: { contains: term, mode: 'insensitive' } },
+          { position: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      select: { id: true, employeeNo: true, firstName: true, lastName: true, position: true },
+    });
+    return rows.map((r) => ({
+      kind: 'employee',
+      id: r.id,
+      title: `${r.firstName} ${r.lastName}`,
+      subtitle: [r.employeeNo, r.position].filter(Boolean).join(' · '),
+      link: `/g-hr/employees/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'item',
+  label: 'Items',
+  permission: 'gchain.items.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.item.findMany({
+      where: {
+        OR: [
+          { name: { contains: term, mode: 'insensitive' } },
+          { code: { contains: term, mode: 'insensitive' } },
+          { partNumber: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      select: { id: true, code: true, name: true, partNumber: true, unit: true },
+    });
+    return rows.map((r) => ({
+      kind: 'item',
+      id: r.id,
+      title: r.name,
+      subtitle: [r.code, r.partNumber, r.unit].filter(Boolean).join(' · '),
+      link: `/g-chain/items/${r.id}`,
+    }));
+  },
+});
+
 registerSearch({
   kind: 'approval',
   label: 'Approvals',

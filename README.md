@@ -21,7 +21,7 @@ previous implementation traces back to its absence.
 | Users, supervisors, departments | `/admin/users` |
 | Roles + granular permissions + per-person overrides | `/admin/roles` |
 | Company settings (drives every PDF) | `/admin/company` |
-| Document numbering, 22 document types | `/admin/numbering` |
+| Document numbering, 26 document types | `/admin/numbering` |
 | Approval engine, one for every document type | `/admin/workflows` |
 | Audit log | `/admin/audit` |
 | Notification centre with deep links | bell in the top bar |
@@ -31,9 +31,33 @@ previous implementation traces back to its absence.
 | Attachments | `api/src/shared/attachments.ts` |
 | My Work | `/` and `/my-work` |
 
-Screens from Phases 2–9 appear in the menu marked with their phase. Their
+**Phase 2 — Master data.** Enter once, reuse everywhere.
+
+| Capability | Where |
+|---|---|
+| Customers, multiple contacts, multiple sites | `/g-ops/customers` |
+| **Customer 360** — one workspace per customer | `/g-ops/customers/:id` |
+| Suppliers and their contacts | `/g-chain/suppliers` |
+| Employees, with pay behind its own permission | `/g-hr/employees` |
+| Item master, typed and costed | `/g-chain/items` |
+| Cost categories (the five buckets) + item categories | `/admin/categories` |
+| Warehouses and locations | `/g-chain/warehouses` |
+| **CSV import** for all four masters | Import button on each list |
+
+Screens from Phases 3–9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
+
+### About the CSV import
+
+Gruntech starts with clean data, so this is not a migration tool — it is the
+escape hatch for the day a clean supplier list turns up in a spreadsheet.
+
+Upload once and it reports what it *would* do, row by row, with Excel row
+numbers. Nothing is written until you upload again and confirm, and **a single
+bad row blocks the whole file**. That is deliberate: a half-applied import of
+master data is worse than a rejected one, because afterwards nobody can tell
+which rows landed. Re-importing the same file updates rather than duplicates.
 
 ## Running it locally
 
@@ -78,7 +102,20 @@ cd api && npx tsx scripts/verify-foundation.ts
 40 assertions: role inheritance and per-person overrides, record ownership,
 menu derivation, numbering under concurrency, approval routing and notification,
 segregation of duties, the overtime two-step rule, amount bands, the audit trail
-and PDF pagination. It creates its own users and cleans up after itself.
+and PDF pagination.
+
+```bash
+cd api && npx tsx scripts/verify-masters.ts
+```
+
+40 assertions for Phase 2: CSV parsing (quoted commas, embedded newlines,
+doubled quotes, Excel's BOM), the import contract (dry run writes nothing, one
+bad row blocks the file, re-import updates rather than duplicates), the
+permission gate on employee pay, master numbering under concurrency, and that
+global search never returns a record kind the user cannot open.
+
+Both scripts create their own records and clean up after themselves. Run them
+after touching anything in `api/src/shared/` or `api/src/permissions/`.
 
 ### Useful commands
 

@@ -14,6 +14,14 @@ import { notFound } from '../http/kit';
  * and never becomes an afterthought bolted onto each new module.
  */
 export const DOCUMENT_TYPES: { type: string; code: string; label: string }[] = [
+  // Master record codes. Not documents, but they benefit from the same
+  // configurable, collision-free machinery — and an operator can always
+  // override the suggestion with their own scheme.
+  { type: 'customer', code: 'CUST', label: 'Customer code' },
+  { type: 'supplier', code: 'SUPP', label: 'Supplier code' },
+  { type: 'employee', code: 'EMP', label: 'Employee number' },
+  { type: 'item', code: 'ITM', label: 'Item code' },
+
   { type: 'lead', code: 'LEAD', label: 'Lead' },
   { type: 'quotation', code: 'QT', label: 'Quotation' },
   { type: 'costing', code: 'COST', label: 'Costing' },

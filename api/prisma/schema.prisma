@@ -45,6 +45,10 @@ model User {
   approvalActions ApprovalAction[]
   workflowStepsTargeting ApprovalStep[] @relation("StepUser")
 
+  employee          Employee?
+  customersCreated  Customer[] @relation("CustomerCreator")
+  suppliersCreated  Supplier[] @relation("SupplierCreator")
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -58,6 +62,7 @@ model Department {
   code      String   @unique
   name      String
   users     User[]
+  employees Employee[]
   createdAt DateTime @default(now())
 }
 
@@ -353,6 +358,302 @@ model AuditLog {
 
   @@index([entityType, entityId])
   @@index([at])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  MASTERS  (Phase 2)
+//
+//  "Information entered once should be reusable by downstream modules
+//  without duplicate data entry." These records are global — Sales,
+//  Projects, Procurement, Finance and Service all read the same rows.
+// ════════════════════════════════════════════════════════════════════
+
+model Customer {
+  id           String  @id @default(cuid())
+  code         String  @unique
+  name         String
+  legalName    String?
+  tin          String?
+  industry     String?
+  /// Free text, e.g. "30 days", "50% down, balance on turnover".
+  paymentTerms String?
+  creditLimit  Decimal? @db.Decimal(18, 2)
+  phone        String?
+  email        String?
+  website      String?
+  notes        String?
+  isActive     Boolean @default(true)
+
+  /// Who entered it. Supports the Mine/All switch on the list; customers
+  /// themselves are shared data that anyone with access may edit.
+  createdById String?
+  createdBy   User?   @relation("CustomerCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  contacts CustomerContact[]
+  sites    CustomerSite[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([name])
+}
+
+/// "Sometimes they have multiple contact in a single customer."
+model CustomerContact {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  name       String
+  position   String?
+  email      String?
+  phone      String?
+  mobile     String?
+  isPrimary  Boolean  @default(false)
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  sites CustomerSite[]
+
+  @@index([customerId])
+}
+
+/// A delivery/works address. Projects and service contracts hang off a site,
+/// not just a customer — one hospital group can have many plants.
+model CustomerSite {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  name       String
+  address    String?
+  city       String?
+  region     String?
+  contactId  String?
+  contact    CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  notes      String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([customerId])
+}
+
+model Supplier {
+  id           String  @id @default(cuid())
+  code         String  @unique
+  name         String
+  legalName    String?
+  tin          String?
+  /// What they supply — steel, valves, electrical, subcontract labour…
+  category     String?
+  paymentTerms String?
+  address      String?
+  city         String?
+  phone        String?
+  email        String?
+  website      String?
+  notes        String?
+  isActive     Boolean @default(true)
+
+  createdById String?
+  createdBy   User?   @relation("SupplierCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  contacts       SupplierContact[]
+  preferredItems Item[]            @relation("PreferredSupplier")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([name])
+}
+
+model SupplierContact {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  name       String
+  position   String?
+  email      String?
+  phone      String?
+  mobile     String?
+  isPrimary  Boolean  @default(false)
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([supplierId])
+}
+
+enum EmploymentType {
+  REGULAR
+  PROBATIONARY
+  PROJECT_BASED
+  CONTRACTUAL
+  PART_TIME
+}
+
+/// The person. `User` is their login; not every employee needs one, and the
+/// admin account is a User with no Employee record.
+///
+/// Reporting line deliberately lives on `User`, not here: the approval engine
+/// routes by user, and two places to record "who approves for me" is one place
+/// too many. An employee with no user account files nothing, so has no route.
+model Employee {
+  id          String  @id @default(cuid())
+  employeeNo  String  @unique
+  firstName   String
+  lastName    String
+  middleName  String?
+  suffix      String?
+
+  userId String? @unique
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  position     String?
+
+  employmentType  EmploymentType @default(REGULAR)
+  dateHired       DateTime?      @db.Date
+  dateRegularized DateTime?      @db.Date
+  dateSeparated   DateTime?      @db.Date
+
+  mobile        String?
+  personalEmail String?
+  address       String?
+  birthDate     DateTime? @db.Date
+
+  emergencyContactName  String?
+  emergencyContactPhone String?
+
+  // ── Sensitive ──────────────────────────────────────────────────────────
+  // Gated by ghr.employee_rates.view_all and stripped from audit entries.
+  // Projects see labour as a burdened cost, never as a wage.
+  dailyRate      Decimal? @db.Decimal(14, 2)
+  /// Multiplier covering statutory contributions, leave accrual and overhead.
+  /// Burdened cost = dailyRate × burdenMultiplier.
+  burdenMultiplier Decimal? @db.Decimal(6, 3)
+  sssNo          String?
+  philhealthNo   String?
+  pagibigNo      String?
+  tin            String?
+
+  isActive  Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([lastName, firstName])
+}
+
+/// The five cost buckets every costing, budget and cost-ledger row uses
+/// (model §5.1). Seeded, extensible, and the system ones cannot be deleted
+/// because the ledger's shape depends on them.
+model CostCategory {
+  id        String  @id @default(cuid())
+  code      String  @unique
+  name      String
+  sortOrder Int     @default(0)
+  isSystem  Boolean @default(false)
+  isActive  Boolean @default(true)
+
+  items Item[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ItemCategory {
+  id       String  @id @default(cuid())
+  code     String  @unique
+  name     String
+  parentId String?
+  parent   ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children ItemCategory[] @relation("ItemCategoryTree")
+
+  items Item[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum ItemType {
+  MATERIAL
+  EQUIPMENT
+  CONSUMABLE
+  SERVICE
+  TOOL
+}
+
+/// One item master, used by Costing (estimated), Procurement (ordered),
+/// Inventory (stocked) and Job (consumed) — model §3.
+model Item {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  partNumber  String?
+  name        String
+  description String?
+  itemType    ItemType @default(MATERIAL)
+
+  categoryId String?
+  category   ItemCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  /// Which bucket this lands in when it reaches a job's cost ledger.
+  costCategoryId String?
+  costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  unit          String   @default("pcs")
+  standardCost  Decimal? @db.Decimal(18, 2)
+  lastCost      Decimal? @db.Decimal(18, 2)
+
+  /// Stocked items carry balances and reorder levels; a service or a one-off
+  /// fabricated part does not.
+  isStocked    Boolean @default(true)
+  minStock     Decimal? @db.Decimal(18, 3)
+  reorderLevel Decimal? @db.Decimal(18, 3)
+
+  preferredSupplierId String?
+  preferredSupplier   Supplier? @relation("PreferredSupplier", fields: [preferredSupplierId], references: [id], onDelete: SetNull)
+
+  isActive  Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([name])
+  @@index([partNumber])
+}
+
+model Warehouse {
+  id        String  @id @default(cuid())
+  code      String  @unique
+  name      String
+  address   String?
+  city      String?
+  isActive  Boolean @default(true)
+
+  locations Location[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Bin / rack / shelf within a warehouse.
+model Location {
+  id          String    @id @default(cuid())
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  code        String
+  name        String?
+  isActive    Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@unique([warehouseId, code])
 }
 
 /// Saved filters for the shared list pattern (model §8.4).

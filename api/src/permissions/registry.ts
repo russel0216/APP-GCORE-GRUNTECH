@@ -108,6 +108,17 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'leave', label: 'Leave', path: '/g-hr/leave', actions: OWNED_APPROVABLE, phase: 6 },
       { key: 'overtime', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_APPROVABLE, phase: 6 },
       { key: 'employees', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },
+      // Pay data is separated from the employee record on purpose. A project
+      // manager needs headcount and assignment; they must not see salaries.
+      // Labor cost reaches projects as a burdened rate, never as a wage.
+      {
+        key: 'employee_rates',
+        label: 'Employee Pay Rates',
+        path: '/g-hr/employees',
+        actions: ['view_all', 'edit_all'],
+        phase: 2,
+        note: 'Controls visibility of daily rate, burden and statutory numbers on the employee record',
+      },
       { key: 'reports', label: 'HR Reports', path: '/g-hr/reports', actions: READ, phase: 6 },
       { key: 'settings', label: 'HR Settings', path: '/g-hr/settings', actions: ['view_all', 'edit_all'], phase: 6 },
     ],
@@ -139,7 +150,9 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'stock_issuance', label: 'Stock Issuance', path: '/g-chain/stock-issuance', actions: SHARED, phase: 5 },
       { key: 'borrow_slips', label: 'Borrow Slips', path: '/g-chain/borrow-slips', actions: SHARED, phase: 5 },
       { key: 'inventory', label: 'Inventory', path: '/g-chain/inventory', actions: SHARED, phase: 5 },
+      { key: 'items', label: 'Item Master', path: '/g-chain/items', actions: SHARED, phase: 2 },
       { key: 'suppliers', label: 'Suppliers', path: '/g-chain/suppliers', actions: SHARED, phase: 2 },
+      { key: 'warehouses', label: 'Warehouses', path: '/g-chain/warehouses', actions: SHARED, phase: 2 },
       { key: 'reports', label: 'Reports', path: '/g-chain/reports', actions: READ, phase: 5 },
     ],
   },
@@ -153,6 +166,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'workflows', label: 'Approval Workflows', path: '/admin/workflows', actions: SHARED, phase: 1 },
       { key: 'company', label: 'Company Settings', path: '/admin/company', actions: ['view_all', 'edit_all'], phase: 1 },
       { key: 'numbering', label: 'Numbering', path: '/admin/numbering', actions: ['view_all', 'edit_all'], phase: 1 },
+      { key: 'categories', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost categories and item categories' },
       { key: 'templates', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1, note: 'PDF layouts ship in Phase 1; service report form templates in Phase 8' },
       { key: 'audit', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
       { key: 'settings', label: 'System Settings', path: '/admin/settings', actions: ['view_all', 'edit_all'], phase: 1 },

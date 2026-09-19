@@ -1125,8 +1125,53 @@ hr.rule {
   margin: 18px 0;
 }
 
+/* ── Narrow-screen module navigation ─────────────────────────────────────── */
+/* The sidebar's replacement below 860px: the same screens, scrolled sideways. */
+
+.module-strip {
+  display: none;
+}
+
+.strip-item {
+  flex-shrink: 0;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.strip-item.active {
+  background: rgba(192, 38, 211, 0.2);
+  border-color: var(--magenta);
+  color: var(--neon);
+}
+
+.strip-item.soon {
+  opacity: 0.4;
+}
+
 @media (max-width: 860px) {
   .sidebar {
+    display: none;
+  }
+  .module-strip {
+    display: flex;
+    gap: 7px;
+    align-items: center;
+    padding: 9px 14px;
+    overflow-x: auto;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 54px;
+    z-index: 30;
+    /* Let it scroll sideways without showing a scrollbar over the content. */
+    scrollbar-width: none;
+  }
+  .module-strip::-webkit-scrollbar {
     display: none;
   }
   .content {
@@ -1137,5 +1182,15 @@ hr.rule {
   }
   .search-trigger span.label {
     display: none;
+  }
+  .drawer {
+    right: 8px;
+    left: 8px;
+    width: auto;
+  }
+  /* A record workspace's tabs wrap instead of overflowing off-screen. */
+  .scope-switch {
+    flex-wrap: wrap;
+    border-radius: 8px;
   }
 }

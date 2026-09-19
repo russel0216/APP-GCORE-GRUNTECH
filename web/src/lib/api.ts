@@ -134,5 +134,11 @@ export interface Me {
   unread: number;
 }
 
-/** The phase a module is built to — anything above this renders as upcoming. */
-export const SHIPPED_PHASE = 1;
+/**
+ * Screens at or below this phase are live; anything above renders as upcoming.
+ *
+ * Bumped as each phase lands. The registry on the server already declares every
+ * screen and its phase, so this is the only place the front end needs to know
+ * how far the build has got.
+ */
+export const SHIPPED_PHASE = 2;
