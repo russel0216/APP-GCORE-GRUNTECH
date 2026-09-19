@@ -53,11 +53,25 @@ export interface PdfDocumentSpec {
   footerNote?: string;
 }
 
-const MARGIN = 42;
+/**
+ * Measured off the documents this is patterned on (P00340, REQ-00073), so the
+ * output matches the paperwork the business already issues.
+ *
+ * The margin is the big one: 14pt, about 5mm, against the 42pt this used to
+ * leave. On A4 that is 56pt of extra width per page — a whole column on a
+ * purchase request — and it is the "maximise the print margin" the layout was
+ * asked for. Every consumer printer manages 5mm; below about 12pt some start
+ * clipping, which is why this does not go lower.
+ */
+const MARGIN = 14;
+/** Where the footer block starts, measured up from the bottom edge. */
+const FOOTER_TOP = 60;
 const INK = '#111111';
 const MUTED = '#666666';
 const RULE = '#cccccc';
-const HEAD_BG = '#f0f0f0';
+/** The slate band behind a table head, white text on it. */
+const HEAD_BG = '#70798a';
+const HEAD_INK = '#ffffff';
 
 export async function renderDocument(spec: PdfDocumentSpec): Promise<Buffer> {
   const company = await prisma.company.findUnique({ where: { id: 'company' } });
@@ -80,7 +94,7 @@ export async function renderDocument(spec: PdfDocumentSpec): Promise<Buffer> {
 
   drawHeader(doc, spec, company);
   for (const section of spec.sections) drawSection(doc, section);
-  drawSignatures(doc, spec.signatories);
+  drawSignoffs(doc, spec.signatories);
   paginate(doc, spec, company);
 
   doc.end();
@@ -89,52 +103,52 @@ export async function renderDocument(spec: PdfDocumentSpec): Promise<Buffer> {
 
 type Company = Awaited<ReturnType<typeof prisma.company.findUnique>>;
 
+/**
+ * The document identifies itself top-left; the logo sits top-right.
+ *
+ * The company's name and address are NOT up here — they are in the footer,
+ * which is where the documents this is patterned on put them. It is the right
+ * way round: the first thing a reader needs is which document this is, and the
+ * letterhead is what you check afterwards.
+ */
 function drawHeader(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
   const right = doc.page.width - MARGIN;
-  let textLeft = MARGIN;
+  const top = MARGIN + 6;
 
   if (company?.logoPath && fs.existsSync(company.logoPath)) {
     try {
-      doc.image(company.logoPath, MARGIN, MARGIN - 4, { fit: [54, 54] });
-      textLeft = MARGIN + 66;
+      doc.image(company.logoPath, right - 150, top - 6, { fit: [150, 56], align: 'right' });
     } catch {
       /* a broken logo must never stop a document printing */
     }
   }
 
+  // "Purchase Request No. GT-PR-2026-0042" — one line, the way it is spoken.
   doc.fillColor(INK).font('Helvetica-Bold').fontSize(13);
-  doc.text(company?.name ?? 'Company name not set', textLeft, MARGIN, { width: 300 });
+  doc.text(
+    spec.documentNumber ? `${spec.title} No. ${spec.documentNumber}` : spec.title,
+    MARGIN,
+    top,
+    { width: right - MARGIN - 170 },
+  );
 
-  doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
-  const lines = [
-    company?.address,
-    [company?.city, company?.country].filter(Boolean).join(', '),
-    company?.tin ? `TIN: ${company.tin}` : null,
-    [company?.phone, company?.email].filter(Boolean).join('  ·  '),
-  ].filter((l): l is string => Boolean(l && l.trim()));
-  for (const line of lines) doc.text(line, textLeft, doc.y, { width: 300 });
+  doc.font('Helvetica').fontSize(10).fillColor(INK);
+  doc.text(formatDate(spec.date ?? new Date()), MARGIN, doc.y + 3, { width: 300 });
 
-  // Document identity block, right-aligned against the company block.
-  const idTop = MARGIN;
-  doc.font('Helvetica-Bold').fontSize(14).fillColor(INK);
-  doc.text(spec.title.toUpperCase(), right - 230, idTop, { width: 230, align: 'right' });
-
-  doc.font('Helvetica').fontSize(8).fillColor(MUTED);
-  const meta: string[] = [];
-  if (spec.documentNumber) meta.push(`No. ${spec.documentNumber}`);
-  if (spec.revision) meta.push(`Rev. ${spec.revision}`);
-  meta.push(formatDate(spec.date ?? new Date()));
-  doc.text(meta.join('   ·   '), right - 230, doc.y + 1, { width: 230, align: 'right' });
-
-  const ruleY = Math.max(doc.y, idTop + 46) + 8;
-  doc.moveTo(MARGIN, ruleY).lineTo(right, ruleY).strokeColor(RULE).lineWidth(1).stroke();
-  doc.y = ruleY + 10;
-
-  if (spec.reference) {
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK);
-    doc.text(spec.reference, MARGIN, doc.y, { width: right - MARGIN * 2 });
-    doc.y += 4;
+  // Bold label, regular value, on one line each — as on the reference.
+  const meta: [string, string][] = [];
+  if (spec.revision) meta.push(['Revision:', spec.revision]);
+  if (spec.reference) meta.push(['Reference:', spec.reference]);
+  for (const [label, value] of meta) {
+    const y = doc.y + 3;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK);
+    doc.text(label, MARGIN, y, { width: 200, lineBreak: false, continued: true });
+    doc.font('Helvetica').text(` ${value}`, { lineBreak: false });
+    doc.y = y + 13;
   }
+
+  // Clear of the logo whatever the header ran to.
+  doc.y = Math.max(doc.y, top + 58) + 12;
 }
 
 function sectionTitle(doc: PDFKit.PDFDocument, title?: string) {
@@ -145,7 +159,7 @@ function sectionTitle(doc: PDFKit.PDFDocument, title?: string) {
   // own content — cramped on the page, and close enough to merge with it when
   // the PDF is parsed by anything that groups text into lines.
   doc.y += 10;
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text(title.toUpperCase(), MARGIN, doc.y);
+  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(title.toUpperCase(), MARGIN, doc.y);
   doc.y += 7;
 }
 
@@ -182,10 +196,10 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
           rowHeight = 0;
         }
         const x = MARGIN + col * colWidth;
-        doc.font('Helvetica').fontSize(7).fillColor(MUTED);
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED);
         doc.text(field.label.toUpperCase(), x, rowTop, { width: colWidth - 10 });
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(INK);
-        doc.text(field.value || '—', x, doc.y, { width: colWidth - 10 });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(INK);
+        doc.text(field.value || '—', x, doc.y + 1, { width: colWidth - 10 });
         rowHeight = Math.max(rowHeight, doc.y - rowTop);
         col = (col + 1) % cols;
         if (col === 0) doc.y = rowTop + rowHeight + 6;
@@ -207,7 +221,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       drawTableHead(doc, section.head, widths, align);
       for (const row of section.rows) {
         const height = rowHeight(doc, row, widths);
-        if (doc.y + height > doc.page.height - 84) {
+        if (doc.y + height > doc.page.height - FOOTER_TOP - 24) {
           doc.addPage();
           drawTableHead(doc, section.head, widths, align);
         }
@@ -230,26 +244,28 @@ function drawTableHead(
   widths: number[],
   align: ('left' | 'right' | 'center')[],
 ) {
-  ensureSpace(doc, 40);
+  ensureSpace(doc, 44);
   const top = doc.y;
-  const height = 16;
+  // 24pt and white on slate, as measured off the reference documents. A taller
+  // band reads as a header rather than as a slightly shaded first row.
+  const height = 24;
   doc.rect(MARGIN, top, widths.reduce((a, b) => a + b, 0), height).fill(HEAD_BG);
-  doc.fillColor(INK).font('Helvetica-Bold').fontSize(7.5);
+  doc.fillColor(HEAD_INK).font('Helvetica-Bold').fontSize(8.5);
   let x = MARGIN;
   head.forEach((cell, i) => {
-    doc.text(cell.toUpperCase(), x + 4, top + 5, { width: widths[i] - 8, align: align[i] });
+    doc.text(cell.toUpperCase(), x + 8, top + 8, { width: widths[i] - 16, align: align[i] });
     x += widths[i];
   });
   doc.y = top + height;
 }
 
 function rowHeight(doc: PDFKit.PDFDocument, row: string[], widths: number[]): number {
-  doc.font('Helvetica').fontSize(8.5);
+  doc.font('Helvetica').fontSize(9);
   let tallest = 0;
   row.forEach((cell, i) => {
-    tallest = Math.max(tallest, doc.heightOfString(cell ?? '', { width: widths[i] - 8 }));
+    tallest = Math.max(tallest, doc.heightOfString(cell ?? '', { width: widths[i] - 16 }));
   });
-  return tallest + 8;
+  return tallest + 14;
 }
 
 function drawTableRow(
@@ -260,10 +276,10 @@ function drawTableRow(
   height: number,
 ) {
   const top = doc.y;
-  doc.font('Helvetica').fontSize(8.5).fillColor(INK);
+  doc.font('Helvetica').fontSize(9).fillColor(INK);
   let x = MARGIN;
   row.forEach((cell, i) => {
-    doc.text(cell ?? '', x + 4, top + 4, { width: widths[i] - 8, align: align[i] });
+    doc.text(cell ?? '', x + 8, top + 7, { width: widths[i] - 16, align: align[i] });
     x += widths[i];
   });
   const bottom = top + height;
@@ -276,47 +292,53 @@ function drawTableRow(
   doc.y = bottom;
 }
 
-function drawSignatures(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
-  const people = signatories ?? [
-    { role: 'Prepared by' },
-    { role: 'Checked by' },
-    { role: 'Approved by' },
-  ];
+/**
+ * Who did what, and when — one line each, no signature rules.
+ *
+ *   REQUESTED BY :  Erwin Dela Pena, 18 Sep 2026, 3:40 PM
+ *   APPROVED BY :   Grace Villanueva, Pending
+ *
+ * Patterned on the documents the business already issues. Ruled boxes to sign
+ * in are for paper that gets signed by hand; these are approved in the system
+ * and the record of that is the name and the timestamp, so a rule underneath
+ * would be inviting a second, weaker signature over the top of a real one.
+ *
+ * An unapproved slot says "Pending" rather than sitting blank, because a blank
+ * is indistinguishable from a step nobody bothered to fill in.
+ */
+function drawSignoffs(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
+  const people = signatories ?? [];
   if (!people.length) return;
 
-  // 66 before the date line was added under each name.
-  const blockHeight = 76;
+  const lineHeight = 15;
+  const blockHeight = people.length * lineHeight + 6;
   ensureSpace(doc, blockHeight + 10);
-  doc.y = Math.max(doc.y + 18, doc.page.height - 84 - blockHeight);
+  // Sits directly above the footer, wherever the content ended.
+  doc.y = Math.max(doc.y + 20, doc.page.height - FOOTER_TOP - 10 - blockHeight);
 
-  const usable = doc.page.width - MARGIN * 2;
-  const colWidth = usable / people.length;
-  const top = doc.y;
+  // The labels are set on one shared column so the names line up under each
+  // other, however long "REQUESTED BY" is against "NOTED BY".
+  doc.font('Helvetica-Bold').fontSize(9);
+  const labelWidth = Math.max(...people.map((p) => doc.widthOfString(`${p.role.toUpperCase()} :`))) + 10;
 
-  people.forEach((person, i) => {
-    const x = MARGIN + i * colWidth;
-    doc.font('Helvetica').fontSize(7).fillColor(MUTED);
-    doc.text(person.role.toUpperCase(), x, top, { width: colWidth - 12 });
+  for (const person of people) {
+    const y = doc.y;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK);
+    doc.text(`${person.role.toUpperCase()} :`, MARGIN, y, { lineBreak: false });
 
-    const lineY = top + 34;
-    doc
-      .moveTo(x, lineY)
-      .lineTo(x + colWidth - 18, lineY)
-      .strokeColor(RULE)
-      .lineWidth(0.8)
-      .stroke();
-
-    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
-    doc.text(person.name ?? ' ', x, lineY + 4, { width: colWidth - 12 });
-    if (person.position) {
-      doc.font('Helvetica').fontSize(7).fillColor(MUTED);
-      doc.text(person.position, x, doc.y, { width: colWidth - 12 });
+    const x = MARGIN + labelWidth;
+    if (person.name) {
+      doc.font('Helvetica').fontSize(9).fillColor(INK);
+      const name = person.position ? `${person.name} (${person.position}),` : `${person.name},`;
+      doc.text(name, x, y, { lineBreak: false, continued: true });
+      doc.font('Helvetica-Oblique').fillColor(MUTED);
+      doc.text(person.at ? ` ${formatDateTime(person.at)}` : ' Pending', { lineBreak: false });
+    } else {
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED);
+      doc.text('Pending', x, y, { lineBreak: false });
     }
-    if (person.at) {
-      doc.font('Helvetica').fontSize(7).fillColor(MUTED);
-      doc.text(formatDateTime(person.at), x, doc.y, { width: colWidth - 12 });
-    }
-  });
+    doc.y = y + lineHeight;
+  }
 }
 
 /**
@@ -325,6 +347,16 @@ function drawSignatures(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
  */
 function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
   const range = doc.bufferedPageRange();
+
+  // Three columns, as on the reference: who we are, how to reach us, and the
+  // TIN — which is the one a Philippine counterparty actually looks for.
+  const who = [
+    company?.name ?? '',
+    company?.address ?? '',
+    [company?.city, company?.country].filter(Boolean).join(', '),
+  ];
+  const reach = [company?.phone ?? '', company?.email ?? '', company?.website ?? ''];
+
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
 
@@ -336,24 +368,45 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
     const bottomMargin = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
 
-    const y = doc.page.height - 46;
-    doc
-      .moveTo(MARGIN, y - 8)
-      .lineTo(doc.page.width - MARGIN, y - 8)
-      .strokeColor(RULE)
-      .lineWidth(0.5)
-      .stroke();
+    const right = doc.page.width - MARGIN;
+    const top = doc.page.height - FOOTER_TOP + 8;
 
-    doc.font('Helvetica').fontSize(7).fillColor(MUTED);
-    const left = spec.footerNote ?? company?.name ?? '';
-    doc.text(left, MARGIN, y, { width: 320, lineBreak: false });
-    doc.text(`Page ${i + 1} of ${range.count}`, doc.page.width - MARGIN - 160, y, {
-      width: 160,
-      align: 'right',
-      lineBreak: false,
+    doc.moveTo(MARGIN, top - 8).lineTo(right, top - 8).strokeColor(RULE).lineWidth(0.7).stroke();
+
+    const colTwo = MARGIN + 236;
+    const colThree = MARGIN + 410;
+    const line = 11;
+
+    who.forEach((text, n) => {
+      if (!text.trim()) return;
+      doc.font(n === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5).fillColor(n === 0 ? INK : MUTED);
+      doc.text(text, MARGIN, top + n * line, { width: 230, lineBreak: false });
     });
-    if (spec.documentNumber) {
-      doc.text(spec.documentNumber, MARGIN, y + 9, { width: 320, lineBreak: false });
+
+    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+    reach.forEach((text, n) => {
+      if (!text.trim()) return;
+      doc.text(text, colTwo, top + n * line, { width: 170, lineBreak: false });
+    });
+
+    if (company?.tin) {
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(INK);
+      doc.text('TIN:', colThree, top, { lineBreak: false, continued: true });
+      doc.font('Helvetica').fillColor(MUTED).text(` ${company.tin}`, { lineBreak: false });
+    }
+    if (spec.footerNote) {
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+      doc.text(spec.footerNote, colThree, top + line, { width: right - colThree, lineBreak: false });
+    }
+
+    // Only when there is more than one page — "Page 1 of 1" is noise.
+    if (range.count > 1) {
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+      doc.text(`Page ${i + 1} of ${range.count}`, colThree, top + line * 2, {
+        width: right - colThree,
+        align: 'right',
+        lineBreak: false,
+      });
     }
 
     doc.page.margins.bottom = bottomMargin;
@@ -363,7 +416,7 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
 }
 
 function ensureSpace(doc: PDFKit.PDFDocument, needed: number) {
-  if (doc.y + needed > doc.page.height - 84) doc.addPage();
+  if (doc.y + needed > doc.page.height - FOOTER_TOP - 24) doc.addPage();
 }
 
 export function formatDate(d: Date): string {
@@ -371,34 +424,51 @@ export function formatDate(d: Date): string {
 }
 
 /**
- * Date and time to the minute, in Manila. A timestamp under a signature is
- * evidence, so it is printed in the timezone the business works in rather than
+ * A timestamp beside a name, in the form the reference documents use:
+ * "Sep 17, 2026, 9:13 AM". Manila, because a timestamp on an approval is
+ * evidence and it belongs in the timezone the business works in rather than
  * whatever the server happens to be set to.
  *
- * Built from parts rather than left to toLocaleString, which renders this as
- * "Sep 19, 2026, 15:40" — two commas doing different jobs, on a line that is
- * read at a glance.
+ * Assembled from parts rather than left to toLocaleString, which inserts "at"
+ * before the time in some ICU versions and would quietly change the wording of
+ * every document when Node is upgraded.
  */
 export function formatDateTime(d: Date): string {
   const parts = new Intl.DateTimeFormat('en-PH', {
     timeZone: 'Asia/Manila',
     year: 'numeric',
     month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
+    day: 'numeric',
+    hour: 'numeric',
     minute: '2-digit',
-    hour12: false,
+    hour12: true,
   }).formatToParts(d);
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
-  return `${get('day')} ${get('month')} ${get('year')}, ${get('hour')}:${get('minute')}`;
+  const get = (type: string) => parts.find((x) => x.type === type)?.value ?? '';
+  return `${get('month')} ${get('day')}, ${get('year')}, ${get('hour')}:${get('minute')} ${get('dayPeriod').toUpperCase()}`;
 }
 
 
+/**
+ * Money, as the reference documents print it: "PHP 1,562.20".
+ *
+ * The currency CODE, not the peso sign — and not only because that is the
+ * house style. U+20B1 is outside WinAnsiEncoding, which is all a standard PDF
+ * font can draw, so every amount on every document this engine has produced
+ * came out as "±1,562.20". A plus-or-minus sign in front of a price on a
+ * customer's quotation. Embedding a Unicode font would fix the glyph; using
+ * the code fixes it and matches the paperwork at the same time.
+ */
 export function formatMoney(value: number | string, currency = 'PHP'): string {
   const n = typeof value === 'string' ? Number(value) : value;
   return new Intl.NumberFormat('en-PH', {
     style: 'currency',
     currency,
+    currencyDisplay: 'code',
     minimumFractionDigits: 2,
-  }).format(Number.isFinite(n) ? n : 0);
+  })
+    .format(Number.isFinite(n) ? n : 0)
+    // Intl separates the code with a non-breaking space; a plain one sits
+    // better in a right-aligned column.
+    .replace(/ /g, ' ')
+    .trim();
 }

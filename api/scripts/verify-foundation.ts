@@ -26,7 +26,7 @@ import {
   onApprovalSettled,
   approvalSignoffs,
 } from '../src/shared/approvals';
-import { renderDocument, formatDateTime } from '../src/shared/pdf';
+import { renderDocument, formatDateTime, formatMoney } from '../src/shared/pdf';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -420,11 +420,15 @@ async function main() {
   check('a PDF renders', pdf.length > 1000, `${pdf.length} bytes`);
   check('it is a valid PDF', pdf.subarray(0, 5).toString() === '%PDF-');
 
-  // Content streams are Flate-compressed, so the footer text is not readable in
-  // the raw bytes — count the page objects instead. 60 table rows should be two
-  // pages; a regression in the footer's margin handling inflates this.
+  // 60 table rows over three pages. It was two until the rows were given the
+  // height the reference documents use — a deliberate change, and the exact
+  // number is kept here so the next change to row metrics is deliberate too.
+  //
+  // What this really guards is the footer: it sits below the bottom margin, and
+  // when PDFKit treated that as overflow it gave every footer a page of its own
+  // and turned this document into six.
   const pageCount = Number((pdf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
-  check('long content paginates without runaway pages', pageCount === 2, `${pageCount} pages`);
+  check('long content paginates without runaway pages', pageCount === 3, `${pageCount} pages`);
 
   // ── 8. Signature timestamps ────────────────────────────────────────────────
   console.log('\nSignature timestamps');
@@ -459,15 +463,15 @@ async function main() {
       signedText.includes(hrPerson.name),
   );
 
-  // The date format is read at a glance under a signature, so it is pinned.
+  // Pinned to the form the reference documents use: "Sep 17, 2026, 9:13 AM".
   check(
-    'the stamp reads as a date and a time',
-    /^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}$/.test(stamp(new Date('2026-09-19T07:40:00Z'))),
+    'the stamp reads the way the reference documents print it',
+    /^[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M$/.test(stamp(new Date('2026-09-19T07:40:00Z'))),
     stamp(new Date('2026-09-19T07:40:00Z')),
   );
 
-  // An unsigned slot must stay a blank rule. Borrowing the document's own date
-  // would make an unapproved document look approved.
+  // An unsigned slot says Pending. Borrowing the document's own date would make
+  // an unapproved document look approved.
   const unsigned = await renderDocument({
     title: 'Unsigned Document',
     date: new Date('2026-01-02T03:04:00Z'),
@@ -477,14 +481,44 @@ async function main() {
       { role: 'Approved by' },
     ],
   });
+  const unsignedText = pdfText(unsigned);
   check(
     'an unsigned slot carries no date at all',
-    !pdfText(unsigned).includes(stamp(new Date('2026-01-02T03:04:00Z'))),
+    !unsignedText.includes(stamp(new Date('2026-01-02T03:04:00Z'))),
+  );
+  check('and says so rather than sitting blank', unsignedText.includes('Pending'));
+
+  const pages = (buf: Buffer) => Number((buf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
+  check('the sign-offs do not cost the document a page', pages(signed) === 1, `${pages(signed)} pages`);
+
+  // ── 9. Printing to the reference pattern ───────────────────────────────────
+  console.log('\nDocument pattern');
+
+  // Money is printed with the currency CODE. U+20B1 is outside WinAnsi, which
+  // is all a standard PDF font can draw, so the peso sign silently rendered as
+  // "±" on every amount this engine has ever produced.
+  const money = formatMoney(1562.2);
+  check('money reads as the reference prints it', money === 'PHP 1,562.20', money);
+  check(
+    'and is drawable by a standard PDF font',
+    [...money].every((c) => c.codePointAt(0)! <= 0xff),
+    [...money].filter((c) => c.codePointAt(0)! > 0xff).join(''),
+  );
+  check(
+    'an amount survives the round trip into the page',
+    pdfText(
+      await renderDocument({
+        title: 'Money',
+        sections: [{ kind: 'table', head: ['Item', 'Amount'], align: ['left', 'right'], rows: [['x', money]] }],
+      }),
+    ).includes('PHP 1,562.20'),
   );
 
-  // The extra line under each name must not push the block into a new page.
-  const pages = (buf: Buffer) => Number((buf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
-  check('the timestamps do not cost the document a page', pages(signed) === 1, `${pages(signed)} pages`);
+  // The margin is the "maximise the print margin" the layout was asked for.
+  // Measured off the page rather than read back off the constant.
+  const edges = pdfEdges(signed);
+  check('content starts 14pt from the edge', edges.left === 14, `${edges.left}pt`);
+  check('and nothing runs off the bottom', edges.bottom > 12, `${edges.bottom}pt clear`);
 
 
   // ── Done ───────────────────────────────────────────────────────────────────
@@ -544,4 +578,36 @@ function pdfText(pdf: Buffer): string {
     }
   }
   return out.join('\n');
+}
+
+/**
+ * Where the ink actually starts and stops on page 1, in points.
+ *
+ * The margin is a stated requirement rather than an implementation detail, so
+ * it is measured off the rendered page. Reading it back off the constant would
+ * pass even if the drawing code ignored it.
+ */
+function pdfEdges(pdf: Buffer): { left: number; bottom: number } {
+  const raw = pdf.toString('latin1');
+  let left = Infinity;
+  let lowest = 0;
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    // "1 0 0 1 <x> <y> Tm" — PDFKit's text-positioning matrix.
+    for (const t of body.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm/g)) {
+      left = Math.min(left, Number(t[1]));
+      lowest = Math.max(lowest, 841.89 - Number(t[2]));
+    }
+  }
+  return { left: Math.round(left), bottom: Math.round(841.89 - lowest) };
 }

@@ -32,13 +32,21 @@ four databases and four copies of "customer".
    number.
 6. **Every printable document goes through `renderDocument(...)`.** Uniform PDFs
    across all menus is an explicit requirement. A module supplies sections; it
-   never draws a header, signature block or page number.
-   **Give every signatory an `at`** — when they raised, checked or approved it —
-   so a printed document dates its own signatures. For anything routed through
-   the approval engine, `approvalSignoffs(documentType, documentId)` returns the
-   name and timestamp per step; spread it into the matching slot. Leave `at` off
-   where nothing has happened: an unsigned slot must stay a blank rule rather
-   than borrow the document's date.
+   never draws a header, sign-off block, footer or page number. The layout is
+   patterned on the paperwork the business already issues (`P00340`,
+   `REQ-00073`): a **14pt margin**, the document naming itself top-left, the
+   logo top-right, a slate table head in white, the company block in the footer,
+   and sign-offs as one line each — `APPROVED BY : Name (Position), Sep 17,
+   2026, 9:13 AM` — with **no signature rules**.
+   **Give every signatory an `at`**, so a document dates its own sign-offs. For
+   anything routed through the approval engine,
+   `approvalSignoffs(documentType, documentId)` returns the name and timestamp
+   per step; spread it into the matching slot. Leave `at` off where nothing has
+   happened — the slot then prints "Pending", which is the truth, rather than
+   borrowing the document's date.
+   **Money is `formatMoney`, which prints `PHP 1,562.20`** — the currency code,
+   not `₱`. U+20B1 is outside WinAnsiEncoding, so a standard PDF font draws it
+   as `±`. Never put a non-Latin-1 character in a PDF without embedding a font.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
@@ -81,9 +89,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales delivery chain hr finance aftermarket insights; do npx tsx scripts/verify-$s.ts; done
 ```
 
-483 assertions across permission resolution, numbering concurrency, the approval
+489 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
-engine and the signature timestamps it prints, CSV parsing, the import contract, Phase 3's money paths (contract
+engine and the sign-offs, margins and money it prints, CSV parsing, the import contract, Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
 Phase 6's HR arithmetic and face pipeline, Phase 7's tax, aging and allocation
 arithmetic, Phase 8's schedule dates and template versioning, and Phase 9's
