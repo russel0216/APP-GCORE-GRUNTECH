@@ -359,6 +359,34 @@ approvals seem not to be arriving.
 > numbers will be well past 0001. That only affects this laptop — the server
 > starts from a fresh seed.
 
+### Deploying
+
+Everything for the production server is in **[`deploy/`](deploy/README.md)** —
+read that first, because the target machine also runs `gasion-vision`, live
+hospital oxygen-plant monitoring, and it has been taken down three times by
+careless restarts.
+
+```bash
+powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\preflight.ps1
+```
+
+Read-only. It reports what is already using the ports, container names and task
+names this deployment wants, and whether the neighbouring system is healthy. Run
+it before installing, and any time a rebuild behaves oddly.
+
+| | |
+|---|---|
+| `preflight.ps1` | Changes nothing. Says what would collide. |
+| `install.ps1` | First time only. Refuses to run if the preflight fails. |
+| `rebuild.ps1` / `rebuild.sh` | Every deploy after that. Restarts **only** our scheduled task. |
+| `backup.ps1` | Nightly database dump and uploads archive, 30-day retention. |
+| `docker-compose.prod.yml` | Our own Postgres — port 5434, own volume. **Not** the repo root compose file, which would collide with `gasion_db` on 5433. |
+| `cloudflared-config.yml` | Our own tunnel. **Never** `cloudflared service install` on that host. |
+
+G-Core Gruntech owns exactly this and nothing else: `C:\G-CORE-GRUNTECH`, port
+5100, the `GCoreGruntechApi` scheduled task, the `gcore-gruntech-db` container,
+and the `gcore-gruntech` tunnel.
+
 ### Useful commands
 
 ```bash

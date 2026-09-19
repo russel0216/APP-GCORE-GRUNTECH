@@ -130,6 +130,24 @@ taken it down three times.
 
 In production the API serves `web/dist`, so there is one origin and one tunnel.
 
+**The scripts are in `deploy/`.** `preflight.ps1` is read-only and reports what
+would collide; `install.ps1` runs once and refuses if the preflight fails;
+`rebuild.ps1` / `rebuild.sh` are every deploy after that. G-Core owns
+`C:\G-CORE-GRUNTECH`, port **5100**, the **`GCoreGruntechApi`** scheduled task,
+the **`gcore-gruntech-db`** container on **5434**, and the **`gcore-gruntech`**
+tunnel — nothing else on that machine.
+
+Two traps worth knowing before you edit those scripts:
+
+- **The repository's root `docker-compose.yml` must never run on that server.**
+  It publishes 5433, which is already `gasion_db`. `deploy/docker-compose.prod.yml`
+  uses 5434 and its own volume.
+- **`node.exe` reports the same executable path for every node process on the
+  box**, so an ownership check on `Process.Path` would judge our own API a
+  stranger and refuse to free the port on every rebuild. `Test-OurProcess`
+  matches on the *command line*, which is why `start-api.cmd` launches with an
+  absolute script path. Do not "simplify" either half.
+
 ## Known advisory
 
 `npm audit` flags `deepmerge-ts` (high) reached through the Prisma **CLI**'s

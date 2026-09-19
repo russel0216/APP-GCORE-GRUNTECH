@@ -1,0 +1,48 @@
+# PostgreSQL for G-CORE Gruntech on the production server.
+#
+#   cd C:\G-CORE-GRUNTECH\deploy
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# This is NOT the repository's root docker-compose.yml. That one publishes host
+# port 5433, which on this server is already `gasion_db` — the container behind
+# the gasiontech apps. Starting it there would either fail to bind or leave two
+# people confused about which database they are looking at.
+#
+# Own container, own volume, own port, own credentials. Decision 1 in the model
+# is that G-Core Gruntech shares no database with gasiontech, and this is where
+# that decision becomes a fact rather than an intention.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: gcore-gruntech-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gcore
+      # CHANGE THIS before the first `up`. The password is baked into the
+      # volume on creation, so changing it afterwards means destroying the
+      # volume and restoring from a dump.
+      POSTGRES_PASSWORD: CHANGE_ME_BEFORE_FIRST_START
+      POSTGRES_DB: gcore
+    ports:
+      # 5434 on the host. 5433 is gasion_db and 5432 is any local install.
+      # Bound to loopback only: nothing reaches this database except from this
+      # machine, and the app is the only thing on this machine that wants it.
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - gcore-gruntech-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gcore -d gcore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      # Without this a long-running container's log file grows without bound,
+      # which on a shared box eventually becomes somebody else's problem.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gcore-gruntech-pgdata:
+    name: gcore-gruntech-pgdata

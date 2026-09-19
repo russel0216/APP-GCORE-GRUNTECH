@@ -1,0 +1,33 @@
+# Cloudflare Tunnel for G-CORE Gruntech.
+#
+# Place at:  C:\Users\<you>\.cloudflared\gcore-gruntech.yml
+#
+# NOT at config.yml. That filename is the default the `Cloudflared` Windows
+# service reads, and that service belongs to gasiontech — overwriting it would
+# point their subdomain at this app.
+#
+# Fill in:
+#   <TUNNEL_ID>  printed by `cloudflared tunnel create gcore-gruntech`
+#   <you>        your Windows username
+#
+# Then run it as its own scheduled task (see deploy/README.md section 6).
+# Never `cloudflared service install` on this host: that replaces the existing
+# service.
+
+tunnel: <TUNNEL_ID>
+credentials-file: C:\Users\<you>\.cloudflared\<TUNNEL_ID>.json
+
+# The whole subdomain goes to one port. In production the Node process serves
+# both /api and the web app, so there is nothing else to route.
+ingress:
+  - hostname: gruntech.gcore.tech
+    service: http://localhost:5100
+    originRequest:
+      # Face enrolment and clock-in upload a photo, and a report can carry
+      # several. The default 30s is tight for a site laptop on mobile data.
+      connectTimeout: 30s
+      # Long enough for a PDF render or a CSV export over a slow link.
+      httpHostHeader: gruntech.gcore.tech
+
+  # Required, and must be last.
+  - service: http_status:404

@@ -633,7 +633,8 @@ launcher — that is the architecture being replaced.
             shared/{approvals,numbering,pdf,attachments,notifications,audit,search}
 /web        React + Vite + TypeScript — shell, record workspaces, list pattern
 /docs       this file and its companions
-/deploy     scripts for the server
+/deploy     preflight, install, rebuild, backup, tunnel and compose
+            for the shared server (see deploy/README.md)
 ```
 
 Rationale: the existing `G-CORE-HR` app is already Node/Express/TypeScript/Prisma/
