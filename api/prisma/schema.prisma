@@ -75,6 +75,10 @@ model User {
   borrowsIssued     BorrowSlip[]      @relation("BorrowIssuer")
   stockMoves        InventoryTransaction[]
 
+  facesEnrolled     FaceEnrollment[] @relation("FaceEnroller")
+  attendanceRecorded Attendance[]    @relation("AttendanceRecorder")
+  leaveDecided      LeaveRequest[]   @relation("LeaveDecider")
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -586,6 +590,12 @@ model Employee {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  faces         FaceEnrollment[]
+  attendance    Attendance[]
+  leaveBalances LeaveBalance[]
+  leaveRequests LeaveRequest[]
+  overtime      OvertimeRequest[]
+
   @@index([isActive])
   @@index([lastName, firstName])
 }
@@ -608,6 +618,7 @@ model CostCategory {
   prItems        PurchaseRequestItem[]
   poItems        PurchaseOrderItem[]
   issueItems     StockIssueItem[]
+  overtime       OvertimeRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1147,6 +1158,7 @@ model Job {
   purchaseOrders   PurchaseOrder[]
   stockIssues      StockIssue[]
   borrowSlips      BorrowSlip[]
+  overtime         OvertimeRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1933,6 +1945,237 @@ model InventoryTransaction {
 
   @@index([itemId, warehouseId, occurredAt])
   @@index([sourceType, sourceId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  G-HR  (Phase 6)
+//
+//  Clock in/out → Attendance → Timesheet → Job labour cost.
+//  Leave and Overtime route through the one approval engine.
+//
+//  The rule that matters (model §4.4): overtime posts to a project's
+//  budget ONLY once the supervisor AND HR have both approved. That is
+//  enforced by the workflow having two steps and the module subscribing
+//  to the settled outcome — never to an intermediate approval.
+// ════════════════════════════════════════════════════════════════════
+
+/// A face descriptor captured at enrolment. Several per employee improves
+/// matching across lighting, glasses and angle.
+///
+/// The 128-float descriptor is computed in the browser and matched on the
+/// server by Euclidean distance. See docs: this trusts the client to compute
+/// honestly, which is why the capture photo is always stored as evidence.
+model FaceEnrollment {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  /// 128 floats.
+  descriptor Json
+  photoPath  String?
+  label      String?
+
+  enrolledById String?
+  enrolledBy   User?   @relation("FaceEnroller", fields: [enrolledById], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+
+  @@index([employeeId])
+}
+
+enum ClockMethod {
+  FACE
+  PIN
+  BIOMETRIC
+  MANUAL
+}
+
+enum AttendanceStatus {
+  PRESENT
+  LATE
+  ABSENT
+  ON_LEAVE
+  HALF_DAY
+  REST_DAY
+}
+
+/// One row per employee per day.
+model Attendance {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  date DateTime @db.Date
+
+  timeIn        DateTime?
+  timeInMethod  ClockMethod?
+  timeInPhoto   String?
+  /// Match distance at clock-in, kept so a questionable match can be reviewed.
+  timeInScore   Decimal?     @db.Decimal(6, 4)
+
+  timeOut       DateTime?
+  timeOutMethod ClockMethod?
+  timeOutPhoto  String?
+  timeOutScore  Decimal?     @db.Decimal(6, 4)
+
+  status      AttendanceStatus @default(PRESENT)
+  lateMinutes Int              @default(0)
+  /// Net of the unpaid break, so it is hours actually worked.
+  workedMinutes Int            @default(0)
+
+  notes        String?
+  recordedById String?
+  recordedBy   User?   @relation("AttendanceRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([employeeId, date])
+  @@index([date])
+  @@index([status])
+}
+
+model LeaveType {
+  id            String  @id @default(cuid())
+  code          String  @unique
+  name          String
+  /// The yearly allotment — "Allotted counts of leave per type" in Settings.
+  daysPerYear   Decimal @default(0) @db.Decimal(6, 2)
+  isPaid        Boolean @default(true)
+  /// Sick leave usually needs a medical certificate.
+  requiresProof Boolean @default(false)
+  sortOrder     Int     @default(0)
+  isActive      Boolean @default(true)
+
+  balances LeaveBalance[]
+  requests LeaveRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// What an employee is entitled to, and has used, in one year.
+model LeaveBalance {
+  id          String    @id @default(cuid())
+  employeeId  String
+  employee    Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveTypeId String
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Cascade)
+
+  year        Int
+  entitled    Decimal @default(0) @db.Decimal(6, 2)
+  carriedOver Decimal @default(0) @db.Decimal(6, 2)
+  /// Only APPROVED leave counts here — pending requests are shown separately.
+  used        Decimal @default(0) @db.Decimal(6, 2)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([employeeId, leaveTypeId, year])
+  @@index([year])
+}
+
+enum LeaveStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model LeaveRequest {
+  id     String      @id @default(cuid())
+  number String      @unique
+  status LeaveStatus @default(DRAFT)
+
+  employeeId  String
+  employee    Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveTypeId String
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
+
+  /// Dates carry times so a half day accounts correctly — "Start Date – End
+  /// Date with time so that anyone who file for half day will account."
+  startDate DateTime @db.Date
+  startTime String?
+  endDate   DateTime @db.Date
+  endTime   String?
+  /// Working days, to 0.5.
+  days      Decimal  @db.Decimal(6, 2)
+
+  reason     String
+  proofNote  String?
+  decidedAt  DateTime?
+  decidedById String?
+  decidedBy   User?   @relation("LeaveDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([employeeId, status])
+  @@index([startDate])
+}
+
+enum OtStage {
+  PRIOR
+  PRIOR_APPROVED
+  ACTUAL_FILED
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+/// Overtime, in two acts.
+///
+/// 1. PRIOR — filed BEFORE the work with estimated hours. Its whole purpose is
+///    the employee's evidence that the overtime was authorised.
+/// 2. ACTUAL — the real finish time, filed after. Any variance against the
+///    estimate is shown to the approver rather than quietly absorbed.
+///
+/// Cost posts to the job only when the actual filing is fully approved.
+model OvertimeRequest {
+  id     String  @id @default(cuid())
+  number String  @unique
+  stage  OtStage @default(PRIOR)
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  date DateTime @db.Date
+
+  /// "HH:mm" local to the site — overtime is planned in wall-clock time.
+  plannedStart   String
+  plannedEnd     String
+  estimatedHours Decimal @db.Decimal(6, 2)
+
+  actualStart  String?
+  actualEnd    String?
+  actualHours  Decimal? @db.Decimal(6, 2)
+  /// Dinner break 17:00–18:00, −60 min, pre-checked. Unchecking means
+  /// continuous work.
+  dinnerBreak  Boolean  @default(true)
+
+  reason        String
+  varianceNote  String?
+
+  /// Where the cost is deducted from — "On approvals have an option to where
+  /// project it will be deducted in G-Ops Project management Budget Monitoring."
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  costCategoryId String?
+  costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  /// Snapshotted at posting so a later rate change does not rewrite history.
+  hourlyRate Decimal? @db.Decimal(14, 4)
+  multiplier Decimal? @db.Decimal(6, 3)
+  amount     Decimal? @db.Decimal(18, 2)
+
+  priorApprovedAt DateTime?
+  postedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([employeeId, stage])
+  @@index([date])
+  @@index([jobId])
 }
 
 /// Saved filters for the shared list pattern (model §8.4).

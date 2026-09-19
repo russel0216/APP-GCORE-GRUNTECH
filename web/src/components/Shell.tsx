@@ -74,6 +74,28 @@ export function Shell() {
       m.submodules.some((s) => location.pathname === s.path || location.pathname.startsWith(`${s.path}/`)),
     ) ?? null;
 
+  /**
+   * Exactly one menu entry is highlighted: the one whose path matches the URL
+   * most specifically.
+   *
+   * A module's dashboard sits at the module root — /g-hr, /g-chain — so a plain
+   * prefix test lights it up on every screen in that module. Longest match
+   * wins, and where two entries share a path (Employees and Employee Pay Rates)
+   * the first one does, so a single entry is ever active.
+   */
+  const activeKey = (() => {
+    if (!activeModule) return null;
+    let best: { key: string; length: number } | null = null;
+    for (const sub of activeModule.submodules) {
+      const matches =
+        location.pathname === sub.path || location.pathname.startsWith(`${sub.path}/`);
+      if (matches && (!best || sub.path.length > best.length)) {
+        best = { key: sub.key, length: sub.path.length };
+      }
+    }
+    return best?.key ?? null;
+  })();
+
   return (
     <div className="shell">
       <header className="topbar">
@@ -152,8 +174,7 @@ export function Shell() {
         <nav className="module-strip">
           {activeModule.submodules.map((sub) => {
             const upcoming = sub.phase > SHIPPED_PHASE;
-            const active =
-              location.pathname === sub.path || location.pathname.startsWith(`${sub.path}/`);
+            const active = sub.key === activeKey;
             if (upcoming) {
               return (
                 <span key={sub.key} className="strip-item soon" title={`Ships in Phase ${sub.phase}`}>
@@ -176,8 +197,7 @@ export function Shell() {
             <div className="sidebar-title">{activeModule.label}</div>
             {activeModule.submodules.map((sub) => {
               const upcoming = sub.phase > SHIPPED_PHASE;
-              const active =
-                location.pathname === sub.path || location.pathname.startsWith(`${sub.path}/`);
+              const active = sub.key === activeKey;
               if (upcoming) {
                 return (
                   <div key={sub.key} className="nav-item soon" title={sub.note ?? 'Ships in a later phase'}>

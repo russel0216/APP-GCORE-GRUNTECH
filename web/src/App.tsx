@@ -52,6 +52,12 @@ import {
   ChainReports,
   ChainDashboard,
 } from './pages/chain/Warehouse';
+import { Clock } from './pages/hr/Clock';
+import { HrDashboard, AttendanceRegister } from './pages/hr/Dashboard';
+import { Leave } from './pages/hr/Leave';
+import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
+import { HrSettingsPage } from './pages/hr/Settings';
+import { HrReports } from './pages/hr/Reports';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -528,6 +534,67 @@ function Routed() {
           element={
             <Guard permission="gchain.reports.view_all">
               <ChainReports />
+            </Guard>
+          }
+        />
+
+        {/* G-HR (Phase 6) */}
+        {/* The clock is deliberately ungated: "any one who access the web
+            application can clock in clock out". */}
+        <Route path="/g-hr/clock" element={<Clock />} />
+        <Route
+          path="/g-hr"
+          element={
+            <Guard permission="ghr.dashboard.view_all">
+              <HrDashboard />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/attendance"
+          element={
+            <Guard permission="ghr.dashboard.view_all">
+              <AttendanceRegister />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/leave"
+          element={
+            <GuardAny permissions={['ghr.leave.view_all', 'ghr.leave.view_own']}>
+              <Leave />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/overtime"
+          element={
+            <GuardAny permissions={['ghr.overtime.view_all', 'ghr.overtime.view_own']}>
+              <Overtime />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/overtime/:id"
+          element={
+            <GuardAny permissions={['ghr.overtime.view_all', 'ghr.overtime.view_own']}>
+              <OvertimeDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/reports"
+          element={
+            <Guard permission="ghr.reports.view_all">
+              <HrReports />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/settings"
+          element={
+            <Guard permission="ghr.settings.view_all">
+              <HrSettingsPage />
             </Guard>
           }
         />

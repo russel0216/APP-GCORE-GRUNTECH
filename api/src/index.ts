@@ -55,6 +55,15 @@ import {
   borrowRoutes,
   inventoryRoutes,
 } from './routes/warehouse';
+import {
+  clockRoutes,
+  attendanceRoutes,
+  leaveRoutes,
+  overtimeRoutes,
+  hrSettingsRoutes,
+  hrReportRoutes,
+} from './routes/hr';
+import { warmUpFaceModels } from './shared/face';
 
 const app = express();
 
@@ -131,6 +140,14 @@ app.use('/api/stock-issues', stockIssueRoutes);
 app.use('/api/borrow-slips', borrowRoutes);
 app.use('/api/inventory', inventoryRoutes);
 
+// G-HR (Phase 6)
+app.use('/api/clock', clockRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/leave', leaveRoutes);
+app.use('/api/overtime', overtimeRoutes);
+app.use('/api/hr-settings', hrSettingsRoutes);
+app.use('/api/hr-reports', hrReportRoutes);
+
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 
 // In production this process also serves the built SPA, so there is one origin,
@@ -152,6 +169,11 @@ async function start() {
       console.log(`  web dev  http://localhost:5173  (run "npm run dev" in /web)`);
     }
   });
+
+  // Loading the face models takes a few seconds. Doing it now rather than on
+  // the first clock-in means nobody stands at the door thinking it is broken.
+  // Deliberately not awaited — the API serves everything else meanwhile.
+  void warmUpFaceModels();
 }
 
 start().catch((err) => {

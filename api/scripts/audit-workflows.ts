@@ -43,6 +43,12 @@ async function main() {
     roleMembers.set(role.key, role.users.map((u) => u.user.name));
   }
 
+  // SUPERVISOR falls back to HR when the requester has no supervisor set. That
+  // fallback is only a fallback if somebody holds HR — otherwise anyone without
+  // a supervisor files into a void.
+  const hrHolders = (roleMembers.get('hr') ?? []).length;
+  const unsupervised = await prisma.user.count({ where: { isActive: true, supervisorId: null } });
+
   let problems = 0;
   console.log('\nApproval workflow routing audit\n');
 
@@ -80,8 +86,13 @@ async function main() {
       if (step.approverType === 'USER' && !step.user) {
         issues.push(`step ${step.sequence} "${step.name}" names a person who no longer exists`);
       }
-      if (step.approverType === 'HR' && (roleMembers.get('hr') ?? []).length === 0) {
+      if (step.approverType === 'HR' && hrHolders === 0) {
         issues.push(`step ${step.sequence} "${step.name}" routes to HR, which nobody holds`);
+      }
+      if (step.approverType === 'SUPERVISOR' && hrHolders === 0 && unsupervised > 0) {
+        issues.push(
+          `step ${step.sequence} "${step.name}" routes to each requester's supervisor, but ${unsupervised} active user(s) have none — and the HR fallback is unheld, so their documents route to nobody`,
+        );
       }
     }
 

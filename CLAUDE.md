@@ -45,14 +45,17 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales delivery chain; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales delivery chain hr; do npx tsx scripts/verify-$s.ts; done
 ```
 
-185 assertions across permission resolution, numbering concurrency, the approval
+254 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
-engine, CSV parsing, the import contract, and Phase 3's money paths (contract
-amount, schedule-of-values reconciliation, VAT both ways, revision immutability).
-All create their own records and clean up. Run them after touching anything in
+engine, CSV parsing, the import contract, Phase 3's money paths (contract
+amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
+and Phase 6's HR arithmetic and face pipeline. `verify-hr.ts` needs the API
+running: its route guards are checked over HTTP, and it says so loudly rather
+than skipping them if the API is down. All create their own records and clean
+up. Run them after touching anything in
 `api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
 service — the services have no click-path to test them, which is exactly why
 these scripts exist.
@@ -133,11 +136,10 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1–5 are done. Next is Phase 6 — G-HR: clock in/out with face
-recognition, attendance, leave, overtime with its two-step approval, the HR
-dashboard and CSV export. Overtime is what writes INCURRED labour cost to a
-job's ledger, and the engine already refuses to post it until both the
-supervisor and HR have approved. Full sequence with acceptance criteria in
+Phases 1–6 are done. Next is Phase 7 — G-FIN: AR from progress billings, AP
+from receivings, expense claims, payments, cash flow and the executive
+dashboard. Operations-driven only — no GL, no chart of accounts, no payroll
+(model §4.6 and decision 2). Full sequence with acceptance criteria in
 `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
@@ -233,3 +235,37 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **The S-curve's three lines share a time basis** — billed is plotted against
   the period its progress report covers, not the date the billing was raised.
   Otherwise comparing the lines is meaningless.
+
+## Phase 6 notes worth carrying forward
+
+- **The descriptor is computed on the server.** `describeFace()` in
+  `src/shared/face.ts` takes the photo bytes; the browser posts a picture and
+  nothing else. If you ever move that into the page for speed, you have handed
+  the client the right to assert who it is. The photo is stored on every clock
+  entry, whatever the method — it is the evidence, the match is the convenience.
+- **Refuse a photo with more than one face.** Picking the largest is how you
+  clock in a colleague who is not there. Covered by a test against the sample
+  group photo.
+- **Prior approval moves no money.** `overtime_prior` settles to
+  `PRIOR_APPROVED` and writes nothing to the ledger. Only `overtime_request` —
+  the actual filing, through the seeded two-step supervisor → HR workflow —
+  posts INCURRED, and at the ACTUAL hours, never the estimate.
+- **A leave balance is spent on approval, not on filing.** Pending days are
+  reported separately (`remainingAfterPending`) so nobody over-commits, and
+  cancelling an approved request gives the days back. Filing must never be able
+  to cost somebody an entitlement.
+- **Absence is derived, never stored.** The dashboard infers it from active
+  employees with no attendance row and no approved leave. A nightly job writing
+  absence rows would be wrong the moment someone clocked in late.
+- **A fallback always carries a written reason.** The fallback is the weak door;
+  an unexplained one is all an audit would have to go on.
+- **Overtime's job lookup is `/overtime/chargeable`, not `/jobs/lookup`.**
+  Naming the job you worked on is not the same right as project-management
+  access. It returns numbers and names only. Note the route order — it must sit
+  above `/:id` or the `:id` route swallows it.
+- **Burdened, never the wage.** A project is charged
+  `dailyRate × burden ÷ hoursPerDay × premium`. Nobody sees a colleague's salary
+  on a project screen; `ghr.employee_rates.view_all` gates the rate itself.
+- **The menu highlights the longest matching path.** A module dashboard lives at
+  the module root (`/g-hr`, `/g-chain`), so a plain prefix test lights it up on
+  every screen in that module. `Shell.tsx` picks the most specific match.

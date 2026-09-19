@@ -107,6 +107,17 @@ export const REGISTRY: ModuleDef[] = [
     submodules: [
       { key: 'clock', label: 'Clock In/Out', path: '/g-hr/clock', actions: ['view_own', 'create'], phase: 6 },
       { key: 'dashboard', label: 'Dashboard', path: '/g-hr', actions: READ, phase: 6 },
+      // The register behind the dashboard: every clock entry, with how the
+      // person was identified. Gated by the dashboard permission — seeing the
+      // day's counts and seeing the entries behind them are the same right.
+      {
+        key: 'attendance',
+        label: 'Attendance',
+        path: '/g-hr/attendance',
+        actions: READ,
+        phase: 6,
+        note: 'Uses the Dashboard permission',
+      },
       { key: 'leave', label: 'Leave', path: '/g-hr/leave', actions: OWNED_APPROVABLE, phase: 6 },
       { key: 'overtime', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_APPROVABLE, phase: 6 },
       { key: 'employees', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },

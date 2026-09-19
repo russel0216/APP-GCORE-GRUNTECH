@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-backend-wasm": "^4.22.0",
+    "@vladmandic/face-api": "^1.7.15",
     "bcryptjs": "^2.4.3",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
@@ -31,6 +34,7 @@
     "morgan": "^1.10.0",
     "multer": "^2.0.0",
     "pdfkit": "^0.15.1",
+    "sharp": "^0.35.4",
     "zod": "^3.24.1"
   },
   "devDependencies": {

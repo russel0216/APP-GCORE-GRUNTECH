@@ -1,0 +1,397 @@
+import { useCallback, useEffect, useState } from 'react';
+import { api } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
+import { Checkbox, ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
+import type { LeaveType } from './Leave';
+
+/**
+ * HR settings — the working day, the breaks, the overtime premium, the leave
+ * allotments and the face-match threshold.
+ *
+ * None of these belong in code. The working day differs by site, the premium
+ * is a legal minimum somebody may choose to beat, and the match threshold is a
+ * judgement about how often a genuine person is turned away versus how often a
+ * stranger gets through. HR owns all of it.
+ */
+
+interface HrSettings {
+  workStart: string;
+  workEnd: string;
+  graceMinutes: number;
+  breakMinutes: number;
+  dinnerBreakStart: string;
+  dinnerBreakEnd: string;
+  dinnerBreakMinutes: number;
+  overtimeMultiplier: number;
+  hoursPerDay: number;
+  faceThreshold: number;
+}
+
+export function HrSettingsPage() {
+  const { can } = useAuth();
+  const toast = useToast();
+  const editable = can('ghr.settings.edit_all');
+
+  const [settings, setSettings] = useState<HrSettings | null>(null);
+  const [types, setTypes] = useState<LeaveType[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const [editingType, setEditingType] = useState<Partial<LeaveType> | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [s, t] = await Promise.all([
+        api.get<HrSettings>('/hr-settings'),
+        api.get<LeaveType[]>('/leave/types'),
+      ]);
+      setSettings(s);
+      setTypes(t);
+    } catch (err) {
+      setError(err);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function save() {
+    if (!settings) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setSettings(await api.put<HrSettings>('/hr-settings', settings));
+      toast('ok', 'HR rules saved');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!settings || !types) return <Loading label="Loading HR rules…" />;
+
+  const set = <K extends keyof HrSettings>(key: K, value: HrSettings[K]) =>
+    setSettings({ ...settings, [key]: value });
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h1>HR Settings</h1>
+          <p>
+            The rules every attendance, leave and overtime calculation runs on. Changing one
+            affects entries made from now on — it does not rewrite what has already been recorded.
+          </p>
+        </div>
+        {editable && (
+          <button className="btn btn-primary btn-sm" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : 'Save rules'}
+          </button>
+        )}
+      </div>
+
+      <ErrorBox error={error} />
+
+      {!editable && (
+        <div className="alert info">
+          You can see these rules but not change them. That needs{' '}
+          <span className="mono">ghr.settings.edit_all</span>.
+        </div>
+      )}
+
+      <fieldset disabled={!editable} style={{ border: 0, padding: 0, margin: 0 }}>
+        <div className="grid grid-2">
+          <div className="card">
+            <h3 className="card-title">The working day</h3>
+            <div className="grid grid-2">
+              <Field label="Starts">
+                <input
+                  type="time"
+                  value={settings.workStart}
+                  onChange={(e) => set('workStart', e.target.value)}
+                />
+              </Field>
+              <Field label="Ends">
+                <input
+                  type="time"
+                  value={settings.workEnd}
+                  onChange={(e) => set('workEnd', e.target.value)}
+                />
+              </Field>
+            </div>
+            <Field
+              label="Grace period (minutes)"
+              hint="Arriving within this of the start time is not counted as late"
+            >
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={settings.graceMinutes}
+                onChange={(e) => set('graceMinutes', Number(e.target.value))}
+              />
+            </Field>
+            <Field
+              label="Unpaid break (minutes)"
+              hint="Deducted from a full day's worked hours, not from a short visit"
+            >
+              <input
+                type="number"
+                min={0}
+                max={240}
+                value={settings.breakMinutes}
+                onChange={(e) => set('breakMinutes', Number(e.target.value))}
+              />
+            </Field>
+            <Field
+              label="Hours in a normal day"
+              hint="Used to turn a daily rate into an hourly one"
+            >
+              <input
+                type="number"
+                min={1}
+                max={24}
+                step={0.5}
+                value={settings.hoursPerDay}
+                onChange={(e) => set('hoursPerDay', Number(e.target.value))}
+              />
+            </Field>
+          </div>
+
+          <div className="card">
+            <h3 className="card-title">Overtime</h3>
+            <div className="grid grid-2">
+              <Field label="Dinner break from">
+                <input
+                  type="time"
+                  value={settings.dinnerBreakStart}
+                  onChange={(e) => set('dinnerBreakStart', e.target.value)}
+                />
+              </Field>
+              <Field label="Until">
+                <input
+                  type="time"
+                  value={settings.dinnerBreakEnd}
+                  onChange={(e) => set('dinnerBreakEnd', e.target.value)}
+                />
+              </Field>
+            </div>
+            <Field
+              label="Break deducted (minutes)"
+              hint="Only taken off overtime that actually spans the break"
+            >
+              <input
+                type="number"
+                min={0}
+                max={240}
+                value={settings.dinnerBreakMinutes}
+                onChange={(e) => set('dinnerBreakMinutes', Number(e.target.value))}
+              />
+            </Field>
+            <Field
+              label="Overtime premium"
+              hint="Philippine law sets at least 1.25× the hourly rate for ordinary-day overtime"
+            >
+              <input
+                type="number"
+                min={1}
+                max={5}
+                step={0.05}
+                value={settings.overtimeMultiplier}
+                onChange={(e) => set('overtimeMultiplier', Number(e.target.value))}
+              />
+            </Field>
+            <div className="alert info" style={{ marginBottom: 0 }}>
+              A project bears the <em>burdened</em> hourly rate — daily rate × burden ÷{' '}
+              {settings.hoursPerDay} — times this premium. Nobody sees a colleague's wage on a
+              project screen.
+            </div>
+          </div>
+
+          <div className="card">
+            <h3 className="card-title">Face recognition</h3>
+            <Field
+              label="Match threshold"
+              hint="Lower is stricter. 0.6 is the library default; 0.5 turns away more genuine people, 0.7 lets more strangers through."
+            >
+              <input
+                type="number"
+                min={0.3}
+                max={0.9}
+                step={0.01}
+                value={settings.faceThreshold}
+                onChange={(e) => set('faceThreshold', Number(e.target.value))}
+              />
+            </Field>
+            <div className="alert warn" style={{ marginBottom: 0 }}>
+              Recognition runs on the server, from the photo the camera sends. Every clock entry
+              keeps its photo — a match that later looks wrong can be checked against the picture
+              rather than argued about.
+            </div>
+          </div>
+
+          <div className="card">
+            <h3 className="card-title">Leave types</h3>
+            <p className="muted">Allotted days per year, per type.</p>
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th className="right">Days / year</th>
+                    <th>Paid</th>
+                    <th>Proof</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {types.map((t) => (
+                    <tr
+                      key={t.id}
+                      style={editable ? { cursor: 'pointer' } : undefined}
+                      onClick={editable ? () => setEditingType(t) : undefined}
+                    >
+                      <td>
+                        {t.name} <span className="faint mono">{t.code}</span>
+                        {!t.isActive && <span className="badge"> retired</span>}
+                      </td>
+                      <td className="right mono">{t.daysPerYear}</td>
+                      <td>{t.isPaid ? 'yes' : <span className="faint">unpaid</span>}</td>
+                      <td>{t.requiresProof ? 'required' : <span className="faint">—</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {editable && (
+              <button
+                className="btn btn-sm"
+                style={{ marginTop: 12 }}
+                onClick={() =>
+                  setEditingType({ code: '', name: '', daysPerYear: 0, isPaid: true, requiresProof: false, isActive: true })
+                }
+              >
+                + Add a leave type
+              </button>
+            )}
+          </div>
+        </div>
+      </fieldset>
+
+      {editingType && (
+        <LeaveTypeModal
+          value={editingType}
+          onClose={() => setEditingType(null)}
+          onSaved={() => {
+            setEditingType(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function LeaveTypeModal({
+  value,
+  onClose,
+  onSaved,
+}: {
+  value: Partial<LeaveType>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    code: value.code ?? '',
+    name: value.name ?? '',
+    daysPerYear: value.daysPerYear ?? 0,
+    isPaid: value.isPaid ?? true,
+    requiresProof: value.requiresProof ?? false,
+    sortOrder: value.sortOrder ?? 0,
+    isActive: value.isActive ?? true,
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (value.id) await api.patch(`/leave/types/${value.id}`, form);
+      else await api.post('/leave/types', form);
+      toast('ok', 'Leave type saved');
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={value.id ? `Edit ${value.name}` : 'New leave type'}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={busy || !form.code.trim() || form.name.trim().length < 2}
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Code">
+          <input
+            value={form.code}
+            onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
+            disabled={!!value.id}
+            placeholder="VL"
+          />
+        </Field>
+        <Field label="Days per year">
+          <input
+            type="number"
+            min={0}
+            max={365}
+            step={0.5}
+            value={form.daysPerYear}
+            onChange={(e) => setForm({ ...form, daysPerYear: Number(e.target.value) })}
+          />
+        </Field>
+      </div>
+      <Field label="Name">
+        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Checkbox
+        checked={form.isPaid}
+        onChange={(v) => setForm({ ...form, isPaid: v })}
+        label="Paid leave"
+      />
+      <Checkbox
+        checked={form.requiresProof}
+        onChange={(v) => setForm({ ...form, requiresProof: v })}
+        label="Needs supporting documentation (a medical certificate, say)"
+      />
+      <Checkbox
+        checked={form.isActive}
+        onChange={(v) => setForm({ ...form, isActive: v })}
+        label="Available to file against"
+      />
+      {value.id && (
+        <div className="alert info" style={{ marginTop: 10, marginBottom: 0 }}>
+          Changing the yearly allotment affects balances created from now on. Existing balance rows
+          keep the entitlement they were opened with.
+        </div>
+      )}
+    </Modal>
+  );
+}

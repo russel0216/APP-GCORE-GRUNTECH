@@ -276,6 +276,14 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [{ sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' }],
   },
   {
+    // Prior approval is authorisation to work, not a cost decision, so the
+    // supervisor who directed the work is the only sign-off. HR joins on the
+    // actual filing, where the money is.
+    documentType: 'overtime_prior',
+    name: 'Overtime prior approval — supervisor',
+    steps: [{ sequence: 1, name: 'Supervisor authorisation', approverType: 'SUPERVISOR' }],
+  },
+  {
     documentType: 'overtime_request',
     name: 'Overtime — supervisor then HR',
     steps: [
@@ -591,6 +599,46 @@ async function main() {
     update: {},
   });
   console.log('  ✓ Warehouse');
+
+  // ── Leave types ────────────────────────────────────────────────────────────
+  // Philippine statutory minimum is five days of Service Incentive Leave. Most
+  // employers split that into vacation and sick; the allotments here are a
+  // starting point HR edits in G-HR › Settings, not a legal position.
+  for (const t of [
+    { code: 'VL', name: 'Vacation Leave', daysPerYear: 5, isPaid: true, requiresProof: false, sortOrder: 1 },
+    { code: 'SL', name: 'Sick Leave', daysPerYear: 5, isPaid: true, requiresProof: true, sortOrder: 2 },
+    { code: 'EL', name: 'Emergency Leave', daysPerYear: 3, isPaid: true, requiresProof: false, sortOrder: 3 },
+    { code: 'BL', name: 'Bereavement Leave', daysPerYear: 3, isPaid: true, requiresProof: true, sortOrder: 4 },
+    { code: 'LWOP', name: 'Leave Without Pay', daysPerYear: 0, isPaid: false, requiresProof: false, sortOrder: 9 },
+  ]) {
+    await prisma.leaveType.upsert({ where: { code: t.code }, create: t, update: {} });
+  }
+  console.log('  ✓ Leave types (5)');
+
+  // ── HR rules ───────────────────────────────────────────────────────────────
+  // Written once, then owned by HR. The overtime premium is the statutory 125%
+  // for ordinary-day overtime; the face threshold is face-api's own default.
+  await prisma.setting.upsert({
+    where: { key: 'hr.rules' },
+    create: {
+      key: 'hr.rules',
+      description: 'Working day, breaks, overtime premium and face-match threshold',
+      value: {
+        workStart: '08:00',
+        workEnd: '17:00',
+        graceMinutes: 15,
+        breakMinutes: 60,
+        dinnerBreakStart: '17:00',
+        dinnerBreakEnd: '18:00',
+        dinnerBreakMinutes: 60,
+        overtimeMultiplier: 1.25,
+        hoursPerDay: 8,
+        faceThreshold: 0.6,
+      },
+    },
+    update: {},
+  });
+  console.log('  ✓ HR rules');
 
   // ── Super admin ────────────────────────────────────────────────────────────
   const existingAdmin = await prisma.user.findUnique({ where: { email: ADMIN_EMAIL } });

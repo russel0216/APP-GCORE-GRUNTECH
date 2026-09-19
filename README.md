@@ -85,7 +85,22 @@ previous implementation traces back to its absence.
 | Borrow slips with overdue tracking | `/g-chain/borrow-slips` |
 | Stock valuation and reorder report | `/g-chain/reports` |
 
-Screens from Phases 6–9 appear in the menu marked with their phase. Their
+**Phase 6 — G-HR.** Clock in, leave, overtime — and what overtime costs a project.
+
+| Capability | Where |
+|---|---|
+| **Clock in / out with face recognition**, PIN or biometric fallback | `/g-hr/clock` |
+| Attendance dashboard — present / late / on leave / absent | `/g-hr` |
+| Attendance register, with manual correction | `/g-hr/attendance` |
+| **CSV extract over a date range** | Dashboard → Extract CSV |
+| Leave types, allotments and balances | `/g-hr/leave` |
+| Leave filing with half days, approved by your supervisor | `/g-hr/leave` |
+| **Overtime prior approval** — authorisation before the work | `/g-hr/overtime` |
+| **Overtime actual filing** — real hours, variance explained | `/g-hr/overtime/:id` |
+| Overtime by project, leave balances across the team | `/g-hr/reports` |
+| Working day, breaks, premium, match threshold | `/g-hr/settings` |
+
+Screens from Phases 7–9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
 
@@ -226,7 +241,26 @@ commitment, that receiving releases the order's, that a direct-to-job receipt is
 charged to the job and NOT added to stock, and that consumed is never subtracted
 on top of incurred.
 
-All five create their own records and clean up after themselves. Run them after
+```bash
+cd api && npx tsx scripts/verify-hr.ts
+```
+
+69 assertions for Phase 6. The arithmetic first — lateness against the grace
+period, the dinner break deducted only from overtime that actually spans it,
+weekends excluded from leave, half days read off the times. Then the two rules
+this phase exists for: that a leave balance is drawn down on approval and never
+on filing, and that overtime cost reaches a project **only** once the supervisor
+and HR have both approved the actual hours, at the actual hours rather than the
+estimate.
+
+The face pipeline is tested on real photographs, not on numbers the script made
+up: a picture with no face is refused, one with several faces is refused, the
+same face through a smaller and lossier capture still matches, and two different
+people land well the far side of the threshold. This one needs the API running,
+because the route guards — clocking in twice, filing actual hours before
+authorisation, an unexplained variance — are checked over HTTP.
+
+All six create their own records and clean up after themselves. Run them after
 touching anything in `api/src/shared/` or `api/src/permissions/`.
 
 ### Checking your approval routing

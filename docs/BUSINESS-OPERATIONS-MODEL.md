@@ -660,6 +660,8 @@ the dev box.
 | 2 | **G-FIN is operations-driven finance only** — AR, AP, Expenses, Payments, Cash Flow, Budget vs Actual, Executive Dashboard. GL, chart of accounts, bank reconciliation, payroll, fixed assets and tax filing are out of scope (§4.6). | 2026-09-19 |
 | 3 | **Billing: VAT 12% + EWT 2% only.** Rates configurable in Settings. Downpayment recoupment and retention are deferred, with the schema shape reserved so either can be switched on later without migrating historical billings (§5.4). | 2026-09-19 |
 | 4 | **Master data starts clean.** No migration from the gasiontech apps. Customers, suppliers, employees and items are entered as work comes in. Phase 2 still ships a **CSV import** for each master, so a bulk load stays possible without a second project. | 2026-09-19 |
+| 5 | **Face descriptors are computed on the server, not in the browser.** The camera posts a photograph; the API decodes it, detects the face and produces the 128 floats. Matching in the page would be faster and would cost the server nothing, but it would mean trusting a number the client chose — and that number is all that stands between somebody and clocking in as a colleague. Weights ship inside `@vladmandic/face-api`, so there is nothing to download at deploy time and no CDN in the path of the time clock. Every clock entry keeps its photo regardless of method, because the photo is the evidence and the match is only the convenience. | 2026-09-19 |
+| 6 | **Overtime is two approvals on one record.** A *prior* filing before the work, approved by the supervisor alone — authorisation to stay, and the employee's evidence of it, moving no money. Then an *actual* filing after the work, approved by the supervisor **and** HR, which is what posts INCURRED cost to the project. A variance against the estimate must be explained in writing before it can be submitted. | 2026-09-19 |
 
 ## 14. Still open
 
@@ -670,8 +672,15 @@ Neither blocks the start of the build.
    of each progress billing until final acceptance; it is cheap to add now and
    expensive to add later.
 2. **Attendance hardware** — which biometric device is the fallback when face
-   recognition fails, and does it push to the app or does the app poll it? Affects
-   Phase 6 only.
+   recognition fails, and does it push to the app or does the app poll it? Phase 6
+   ships with `BIOMETRIC` as a recorded clock method and a written reason, so an
+   entry made at a door device can be attributed today; wiring an actual device to
+   the API is a small addition once the model is known.
+3. **The face-match threshold** — shipped at 0.6, the library's own default, and
+   editable in G-HR › Settings. On the sample photographs the same person lands at
+   0.13–0.28 and two different people at 0.69–0.73, so 0.6 sits in a wide gap. That
+   gap will narrow with real site conditions — poor light, hard hats, dust — and
+   the number is worth revisiting after a month of use rather than guessing now.
 
 ---
 
