@@ -20,10 +20,10 @@ import { Loading, formatMoney, relativeTime } from '../components/ui';
 
 /** The four divisions, in the order the original landing page had them. */
 const DIVISIONS: { key: string; art: string; alt: string }[] = [
-  { key: 'gops', art: '/modules/g-ops.webp', alt: 'Interlocking gears forming a G' },
-  { key: 'ghr', art: '/modules/g-hr.webp', alt: 'A head drawn as a network of nodes' },
-  { key: 'gfin', art: '/modules/g-fin.webp', alt: 'A rising chart over stacked peso notes and coins' },
-  { key: 'gchain', art: '/modules/g-chain.webp', alt: 'Warehouse racking feeding a delivery van' },
+  { key: 'gops', art: '/modules/g-ops.gif', alt: 'Interlocking gears forming a G' },
+  { key: 'ghr', art: '/modules/g-hr.gif', alt: 'A head drawn as a network of nodes' },
+  { key: 'gfin', art: '/modules/g-fin.gif', alt: 'A rising chart over stacked peso notes and coins' },
+  { key: 'gchain', art: '/modules/g-chain.gif', alt: 'Warehouse racking feeding a delivery van' },
 ];
 
 interface MyWork {
@@ -88,7 +88,7 @@ export function Home() {
             real heading for anything reading the page rather than looking at
             it; the image sits inside it and the text is hidden visually. */}
         <h1 className="home-wordmark">
-          <img src="/modules/wordmark.webp" alt="G-CORE" loading="eager" draggable={false} />
+          <img src="/modules/wordmark.gif" alt="G-CORE" loading="eager" draggable={false} />
           <span className="visually-hidden">G-CORE</span>
         </h1>
         <div className="wordmark-sub">{company}</div>
@@ -104,9 +104,11 @@ export function Home() {
           return (
             <Link key={key} to={target} className="module-card" title={module!.blurb}>
               <div className="module-art">
-                {/* The marks are animated WebP rather than video: they loop
-                    forever, carry their own transparency and cost nothing to
-                    decode. `loading="eager"` because they are the page. */}
+                {/* GIF, deliberately. An animated WebP built from the same
+                    source was correct by every measure - 75 frames, infinite
+                    loop, served whole - and still would not play. GIF is the
+                    most broadly supported animation on the web and takes the
+                    format out of the list of things that can go wrong. */}
                 <img src={art} alt={alt} loading="eager" draggable={false} />
               </div>
               <div className="module-name">{module!.label}</div>
