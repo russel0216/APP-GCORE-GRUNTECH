@@ -831,9 +831,32 @@ function Routed() {
             </GuardAny>
           }
         />
-        <Route path="/g-ops/commissioning" element={<Navigate to="/g-ops/service-reports?kind=COMMISSIONING" replace />} />
-        <Route path="/g-ops/pm" element={<Navigate to="/g-ops/service-reports?kind=PREVENTIVE_MAINTENANCE" replace />} />
-        <Route path="/g-ops/inspections" element={<Navigate to="/g-ops/service-reports?kind=INSPECTION" replace />} />
+        {/*
+            The three report menus render HERE, at their own declared paths,
+            rather than redirecting to /g-ops/service-reports with a ?kind= that
+            nothing read. Same screen, presetting its own kind — and a URL the
+            permission registry actually declares, so the menu can highlight it.
+        */}
+        {['/g-ops/commissioning', '/g-ops/pm', '/g-ops/inspections'].map((path) => (
+          <Route
+            key={path}
+            path={path}
+            element={
+              <GuardAny
+                permissions={[
+                  'gops.pm_reports.view_all',
+                  'gops.pm_reports.view_own',
+                  'gops.commissioning_reports.view_all',
+                  'gops.commissioning_reports.view_own',
+                  'gops.inspection_reports.view_all',
+                  'gops.inspection_reports.view_own',
+                ]}
+              >
+                <ServiceReports />
+              </GuardAny>
+            }
+          />
+        ))}
 
         {/* Insights (Phase 9) — read-only reporting across every division */}
         <Route

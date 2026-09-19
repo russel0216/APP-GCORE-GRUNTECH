@@ -145,6 +145,28 @@ export function Shell() {
     return out.length === 1 ? [{ name: null, items: out[0].items }] : out;
   })();
 
+  /**
+   * Two levels of menu, not one list of twenty-three.
+   *
+   * The sidebar carries the module's SECTIONS — Sales, Delivery, Aftermarket —
+   * and the section you are in opens its screens on a second line across the
+   * top. Twenty-three entries down the left was the whole menu shouting at
+   * once; this shows you four choices, and then six.
+   *
+   * A module that declares no sections (Insights, six entries) keeps the flat
+   * sidebar and grows no second line — two levels over six items would be
+   * ceremony.
+   */
+  const sectioned = navGroups.length > 1 && navGroups.every((g) => g.name);
+
+  const activeGroup = sectioned
+    ? (navGroups.find((g) => g.items.some((s) => s.key === activeKey)) ?? navGroups[0])
+    : null;
+
+  /** Where a section's name points: its first screen that actually exists. */
+  const sectionTarget = (group: (typeof navGroups)[number]) =>
+    group.items.find((s) => s.phase <= SHIPPED_PHASE)?.path ?? null;
+
   return (
     <div className="shell">
       {/* First in the tab order, and the only way past a 23-item menu without
@@ -256,40 +278,140 @@ export function Shell() {
         </div>
       )}
 
-      {/* Narrow screens hide the sidebar, so the module's screens move into a
-          scrollable strip. Without it a service engineer on a tablet can reach
-          a screen only through the home page or Ctrl+K. */}
+      {/*
+        The bars under the top bar. One sticky wrapper rather than two, so the
+        second one does not have to know how tall the first one is.
+
+        On a wide screen the sections live in the sidebar, so only the screen
+        line shows here. On a narrow screen the sidebar is gone, so the section
+        line appears too and the pair replaces it entirely — a service engineer
+        on a tablet can still reach every screen without the launcher or Ctrl+K.
+      */}
       {activeModule && (
-        <nav className="module-strip" aria-label={`${activeModule.label} menu`}>
-          {activeModule.submodules.map((sub) => {
-            const upcoming = sub.phase > SHIPPED_PHASE;
-            const active = sub.key === activeKey;
-            if (upcoming) {
-              return (
-                <span key={sub.key} className="strip-item soon" title={`Ships in Phase ${sub.phase}`}>
-                  {sub.label}
-                </span>
-              );
-            }
-            return (
-              <Link
-                key={sub.key}
-                to={sub.path}
-                className={`strip-item${active ? ' active' : ''}`}
-                aria-current={active ? 'page' : undefined}
-              >
-                {sub.label}
-              </Link>
-            );
-          })}
-        </nav>
+        <div className="nav-bars">
+          <nav className="module-strip" aria-label={`${activeModule.label} sections`}>
+            {sectioned
+              ? navGroups.map((group) => {
+                  const target = sectionTarget(group);
+                  const active = group === activeGroup;
+                  if (!target) {
+                    return (
+                      <span key={group.name} className="strip-item soon">
+                        {group.name}
+                      </span>
+                    );
+                  }
+                  return (
+                    <Link
+                      key={group.name}
+                      to={target}
+                      className={`strip-item${active ? ' active' : ''}`}
+                      aria-current={active ? 'true' : undefined}
+                    >
+                      {group.name}
+                    </Link>
+                  );
+                })
+              : activeModule.submodules.map((sub) => {
+                  const upcoming = sub.phase > SHIPPED_PHASE;
+                  const active = sub.key === activeKey;
+                  if (upcoming) {
+                    return (
+                      <span
+                        key={sub.key}
+                        className="strip-item soon"
+                        title={`Ships in Phase ${sub.phase}`}
+                      >
+                        {sub.label}
+                      </span>
+                    );
+                  }
+                  return (
+                    <Link
+                      key={sub.key}
+                      to={sub.path}
+                      className={`strip-item${active ? ' active' : ''}`}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      {sub.label}
+                    </Link>
+                  );
+                })}
+          </nav>
+
+          {/* The second line: the screens inside the section you are in. */}
+          {sectioned && activeGroup && (
+            <nav className="sub-nav" aria-label={`${activeGroup.name} menu`}>
+              {activeGroup.items.map((sub) => {
+                const upcoming = sub.phase > SHIPPED_PHASE;
+                const active = sub.key === activeKey;
+                if (upcoming) {
+                  return (
+                    <span
+                      key={sub.key}
+                      className="sub-nav-item soon"
+                      title={sub.note ?? `Ships in Phase ${sub.phase}`}
+                    >
+                      {sub.label}
+                      <span className="tag">P{sub.phase}</span>
+                    </span>
+                  );
+                }
+                return (
+                  <Link
+                    key={sub.key}
+                    to={sub.path}
+                    className={`sub-nav-item${active ? ' active' : ''}`}
+                    aria-current={active ? 'page' : undefined}
+                  >
+                    {sub.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          )}
+        </div>
       )}
 
       <div className="shell-body">
         {activeModule && (
-          <nav className="sidebar" aria-label={`${activeModule.label} menu`}>
+          <nav
+            className={`sidebar${sectioned ? ' sidebar-sections' : ''}`}
+            aria-label={sectioned ? `${activeModule.label} sections` : `${activeModule.label} menu`}
+          >
             <div className="sidebar-title">{activeModule.label}</div>
-            {navGroups.map((group, i) => (
+
+            {/*
+              Sections, not screens. Picking one opens its screens on the second
+              line at the top; the left stays four or five choices long however
+              many screens the module has behind them.
+            */}
+            {sectioned
+              ? navGroups.map((group) => {
+                  const target = sectionTarget(group);
+                  const active = group === activeGroup;
+                  const live = group.items.filter((s) => s.phase <= SHIPPED_PHASE).length;
+                  if (!target) {
+                    return (
+                      <div key={group.name} className="nav-item soon">
+                        <span>{group.name}</span>
+                        <span className="tag">soon</span>
+                      </div>
+                    );
+                  }
+                  return (
+                    <Link
+                      key={group.name}
+                      to={target}
+                      className={`nav-item${active ? ' active' : ''}`}
+                      aria-current={active ? 'true' : undefined}
+                    >
+                      <span>{group.name}</span>
+                      <span className="tag">{live}</span>
+                    </Link>
+                  );
+                })
+              : navGroups.map((group, i) => (
               <div key={group.name ?? `g${i}`}>
                 {group.name && <div className="nav-group">{group.name}</div>}
                 {group.items.map((sub) => {
@@ -321,7 +443,7 @@ export function Shell() {
                   );
                 })}
               </div>
-            ))}
+                ))}
           </nav>
         )}
 

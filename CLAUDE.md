@@ -54,9 +54,20 @@ four databases and four copies of "customer".
     that opens a record is a bug. Use a `<Link>` or a `<button>`, or give it
     `tabIndex` and an Enter/Space handler. `:focus-visible` is global — do not
     remove an outline without replacing it.
-14. **The sidebar grouping is a registry field.** `SubmoduleDef.group` in
-    `api/src/permissions/registry.ts`, carried through `menuFor()`. It takes no
-    part in permission keys. Never hard-code a grouping in `Shell.tsx`.
+14. **The menu is two levels, and both come from `SubmoduleDef.group`** in
+    `api/src/permissions/registry.ts`, carried through `menuFor()`. The sidebar
+    lists a module's SECTIONS; the section you are in opens its screens on a
+    second line across the top. A module whose entries declare no group renders
+    flat with no second line. `group` takes no part in permission keys — adding
+    or renaming one leaves `allPermissions()` byte-identical. Never hard-code a
+    grouping in `Shell.tsx`, and keep a section to roughly six screens: ten on
+    one line is what the two levels exist to avoid.
+15. **A menu path must be a path the app actually renders.** Three aftermarket
+    entries used to `<Navigate>` to `/g-ops/service-reports?kind=…`, a URL the
+    registry does not declare — so the menu could highlight nothing, and the
+    `?kind=` was never read, leaving all three menus showing every report. One
+    screen serving several menu entries takes `initialFilters` on `DataList` and
+    keeps each entry's own path.
 
 ## Verification
 

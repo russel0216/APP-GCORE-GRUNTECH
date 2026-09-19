@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -105,9 +105,41 @@ interface Report {
   photos?: { id: string; fileName: string; caption: string | null }[];
 }
 
+/**
+ * The three report menus - Commissioning Reports, Preventive Maintenance and
+ * Service Inspections - are one screen with a preset kind, because what differs
+ * between them lives in the template rather than in code.
+ *
+ * Each keeps its OWN path. They used to redirect to /g-ops/service-reports with
+ * a ?kind= nobody read, which cost two things: the preset never applied, so all
+ * three menus showed every report; and the menu could not highlight a path the
+ * registry does not declare, so all three lit up nothing.
+ */
+const PRESET_BY_PATH: Record<string, { kind: string; title: string; blurb: string }> = {
+  '/g-ops/commissioning': {
+    kind: 'COMMISSIONING',
+    title: 'Commissioning Reports',
+    blurb:
+      'The handover record for equipment put into service - and what starts its warranty running.',
+  },
+  '/g-ops/pm': {
+    kind: 'PREVENTIVE_MAINTENANCE',
+    title: 'Preventive Maintenance',
+    blurb:
+      'Scheduled visits against a contract. A visit completes when its report is approved, not when the engineer leaves site.',
+  },
+  '/g-ops/inspections': {
+    kind: 'INSPECTION',
+    title: 'Service Inspections',
+    blurb: 'Inspections and breakdown calls, on the same template engine as the rest.',
+  },
+};
+
 export function ServiceReports() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const preset = PRESET_BY_PATH[pathname];
   const [writing, setWriting] = useState(false);
   const [reload, setReload] = useState(0);
 
@@ -188,11 +220,12 @@ export function ServiceReports() {
     <div>
       <div className="page-head">
         <div>
-          <h1>Service Reports</h1>
+          <h1>{preset?.title ?? 'Service Reports'}</h1>
           <p>
-            Commissioning, preventive maintenance, inspections and breakdown calls. The form comes
-            from a template, so the fields are yours to change — and an old report keeps rendering
-            the way it was signed.
+            {preset?.blurb ??
+              'Commissioning, preventive maintenance, inspections and breakdown calls.'}{' '}
+            The form comes from a template, so the fields are yours to change — and an old report
+            keeps rendering the way it was signed.
           </p>
         </div>
       </div>
@@ -203,6 +236,7 @@ export function ServiceReports() {
         columns={columns}
         rowKey={(r) => r.id}
         scoped
+        initialFilters={preset ? { kind: preset.kind } : undefined}
         reloadToken={reload}
         searchPlaceholder="Search number, findings, customer, serial…"
         emptyTitle="No reports yet"

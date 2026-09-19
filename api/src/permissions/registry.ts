@@ -115,10 +115,10 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED, phase: 8 },
       { key: 'visits', group: 'Aftermarket', label: 'PM Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Uses the Preventive Maintenance permissions to schedule and report' },
       { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
-      { key: 'report_templates', group: 'Aftermarket', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
-      { key: 'commissioning_reports', group: 'Aftermarket', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
-      { key: 'pm_reports', group: 'Aftermarket', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_APPROVABLE, phase: 8 },
-      { key: 'inspection_reports', group: 'Aftermarket', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'report_templates', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
+      { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'inspection_reports', group: 'Service reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_APPROVABLE, phase: 8 },
       { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: OWNED_APPROVABLE, phase: 8 },
     ],
   },
@@ -127,8 +127,8 @@ export const REGISTRY: ModuleDef[] = [
     label: 'G-HR',
     blurb: 'Human resources — attendance, leave, overtime',
     submodules: [
-      { key: 'clock', group: 'My day', label: 'Clock In/Out', path: '/g-hr/clock', actions: ['view_own', 'create'], phase: 6 },
       { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-hr', actions: READ, phase: 6 },
+      { key: 'clock', group: 'My day', label: 'Clock In/Out', path: '/g-hr/clock', actions: ['view_own', 'create'], phase: 6 },
       // The register behind the dashboard: every clock entry, with how the
       // person was identified. Gated by the dashboard permission — seeing the
       // day's counts and seeing the entries behind them are the same right.

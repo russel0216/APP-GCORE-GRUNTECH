@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api, qs, type ListResult } from '../lib/api';
 import { Empty, ErrorBox, Loading } from './ui';
 
@@ -46,6 +46,11 @@ interface Props<T> {
   emptyHint?: string;
   /** Offered inside the empty state — usually the same button as `actions`. */
   emptyAction?: ReactNode;
+  /**
+   * Filters the screen starts with — for a menu entry that is one screen with
+   * a preset, such as the three service-report menus.
+   */
+  initialFilters?: Record<string, string>;
   /** Bump to force a reload from outside (after a create, say). */
   reloadToken?: number;
   rowKey: (row: T) => string;
@@ -63,6 +68,7 @@ export function DataList<T>({
   emptyTitle = 'Nothing here yet',
   emptyHint,
   emptyAction,
+  initialFilters,
   reloadToken = 0,
   rowKey,
 }: Props<T>) {
@@ -77,7 +83,19 @@ export function DataList<T>({
   const [sort, setSort] = useState<string | null>(null);
   const [dir, setDir] = useState<'asc' | 'desc'>('desc');
   const [scope, setScope] = useState<'mine' | 'all'>('all');
-  const [active, setActive] = useState<Record<string, string>>({});
+  const [active, setActive] = useState<Record<string, string>>(initialFilters ?? {});
+
+  // A preset that changes because the route changed — Preventive Maintenance to
+  // Service Inspections, say — is a different screen, not a filter the user set.
+  const presetKey = JSON.stringify(initialFilters ?? {});
+  const firstPreset = useRef(presetKey);
+  useEffect(() => {
+    if (presetKey === firstPreset.current) return;
+    firstPreset.current = presetKey;
+    setActive(initialFilters ?? {});
+    setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetKey]);
   const [showColumns, setShowColumns] = useState(false);
 
   const [hidden, setHidden] = useState<Set<string>>(() => {

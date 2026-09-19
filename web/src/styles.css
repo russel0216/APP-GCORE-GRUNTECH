@@ -599,6 +599,19 @@ textarea {
   overflow-y: auto;
 }
 
+/*
+  A sidebar holding four sections does not need the width of one holding
+  twenty-three screens, and the space is worth more to a costing sheet.
+*/
+.sidebar-sections {
+  width: 196px;
+}
+
+.sidebar-sections .nav-item {
+  padding: var(--s-3);
+  font-size: var(--fs-base);
+}
+
 .sidebar-title {
   font-family: var(--display);
   font-size: var(--fs-xs);
@@ -1714,8 +1727,87 @@ hr.rule {
 /* ── Narrow-screen module navigation ─────────────────────────────────────── */
 /* The sidebar's replacement below 860px: the same screens, scrolled sideways. */
 
+/*
+  One sticky wrapper for both bars, so the lower one never has to know how tall
+  the upper one is. It carries no background or border of its own — each bar
+  paints itself, so when the section bar is hidden on a wide screen nothing is
+  left behind but the screen bar.
+*/
+.nav-bars {
+  position: sticky;
+  top: 54px;
+  z-index: 30;
+}
+
+/* Sections. Hidden on a wide screen, where the sidebar carries them. */
 .module-strip {
   display: none;
+}
+
+/*
+  The second line: the screens inside the section you are in.
+
+  This is the answer to twenty-three items down the left. The sidebar shows four
+  sections, and the section you pick opens its six screens across the top —
+  which is the shape of the business rather than the shape of the database.
+*/
+.sub-nav {
+  display: flex;
+  align-items: stretch;
+  gap: var(--s-1);
+  padding: 0 var(--s-5);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sub-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.sub-nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-shrink: 0;
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--fs-md);
+  color: var(--muted);
+  white-space: nowrap;
+  /* A tab is underlined, not boxed: the line ties it to the page below it. */
+  border-bottom: 2px solid transparent;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.sub-nav-item:hover {
+  color: var(--text);
+  border-bottom-color: var(--line);
+}
+
+.sub-nav-item.active {
+  color: var(--neon);
+  border-bottom-color: var(--magenta);
+  font-weight: 600;
+}
+
+.sub-nav-item.soon {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sub-nav-item.soon:hover {
+  color: var(--muted);
+  border-bottom-color: transparent;
+}
+
+@media (max-width: 860px) {
+  .sub-nav {
+    padding: 0 var(--s-3);
+  }
+  .sub-nav-item {
+    padding: var(--s-3);
+  }
 }
 
 .strip-item {
@@ -1743,17 +1835,17 @@ hr.rule {
   .sidebar {
     display: none;
   }
+  /* The sidebar's replacement: the sections it was carrying, in a row. The
+     sticky positioning lives on .nav-bars now, which holds this and the screen
+     line together. */
   .module-strip {
     display: flex;
-    gap: 7px;
+    gap: var(--s-2);
     align-items: center;
-    padding: 9px 14px;
+    padding: var(--s-2) var(--s-3);
     overflow-x: auto;
-    background: var(--surface);
+    background: var(--surface-2);
     border-bottom: 1px solid var(--line);
-    position: sticky;
-    top: 54px;
-    z-index: 30;
     /* Let it scroll sideways without showing a scrollbar over the content. */
     scrollbar-width: none;
   }
