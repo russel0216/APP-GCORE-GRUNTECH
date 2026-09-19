@@ -33,6 +33,25 @@ import {
   BudgetMonitoring,
   PlansRegister,
 } from './pages/delivery/Progress';
+import { PurchaseRequests, PurchaseRequestDetail } from './pages/chain/PurchaseRequests';
+import {
+  Canvasses,
+  CanvassDetail,
+  PurchaseOrders,
+  PurchaseOrderDetail,
+} from './pages/chain/Orders';
+import {
+  Receivings,
+  ReceivingDetail,
+  StockIssues,
+  StockIssueDetail,
+  BorrowSlips,
+  BorrowSlipDetail,
+  Inventory,
+  StockCard,
+  ChainReports,
+  ChainDashboard,
+} from './pages/chain/Warehouse';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -379,6 +398,136 @@ function Routed() {
           element={
             <Guard permission="gops.plans.view_all">
               <PlansRegister />
+            </Guard>
+          }
+        />
+
+        {/* G-CHAIN (Phase 5) */}
+        <Route
+          path="/g-chain"
+          element={
+            <Guard permission="gchain.dashboard.view_all">
+              <ChainDashboard />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-requests"
+          element={
+            <GuardAny permissions={['gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own']}>
+              <PurchaseRequests />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-requests/:id"
+          element={
+            <GuardAny permissions={['gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own']}>
+              <PurchaseRequestDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/canvass"
+          element={
+            <GuardAny permissions={['gchain.canvass.view_all', 'gchain.canvass.view_own']}>
+              <Canvasses />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/canvass/:id"
+          element={
+            <GuardAny permissions={['gchain.canvass.view_all', 'gchain.canvass.view_own']}>
+              <CanvassDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-orders"
+          element={
+            <GuardAny permissions={['gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own']}>
+              <PurchaseOrders />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/purchase-orders/:id"
+          element={
+            <GuardAny permissions={['gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own']}>
+              <PurchaseOrderDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-chain/receiving"
+          element={
+            <Guard permission="gchain.receiving.view_all">
+              <Receivings />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/receiving/:id"
+          element={
+            <Guard permission="gchain.receiving.view_all">
+              <ReceivingDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/stock-issuance"
+          element={
+            <Guard permission="gchain.stock_issuance.view_all">
+              <StockIssues />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/stock-issuance/:id"
+          element={
+            <Guard permission="gchain.stock_issuance.view_all">
+              <StockIssueDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/borrow-slips"
+          element={
+            <Guard permission="gchain.borrow_slips.view_all">
+              <BorrowSlips />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/borrow-slips/:id"
+          element={
+            <Guard permission="gchain.borrow_slips.view_all">
+              <BorrowSlipDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/inventory"
+          element={
+            <Guard permission="gchain.inventory.view_all">
+              <Inventory />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/inventory/:itemId"
+          element={
+            <Guard permission="gchain.inventory.view_all">
+              <StockCard />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-chain/reports"
+          element={
+            <Guard permission="gchain.reports.view_all">
+              <ChainReports />
             </Guard>
           }
         />

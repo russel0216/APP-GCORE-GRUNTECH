@@ -320,9 +320,15 @@ const WORKFLOWS: WorkflowSeed[] = [
   },
   {
     documentType: 'purchase_order',
-    name: 'Purchase Order — procurement then finance',
+    name: 'Purchase Order — project manager then finance',
+    // NOT routed to procurement: procurement is who raises a purchase order,
+    // and nobody approves their own document. Routing step 1 back to their own
+    // role would stall every order in a team with one buyer.
+    //
+    // The project manager owns the budget it spends; finance owns the cash that
+    // leaves. Those are the two people with a reason to look.
     steps: [
-      { sequence: 1, name: 'Procurement head', approverType: 'ROLE', roleKey: 'procurement' },
+      { sequence: 1, name: 'Project Manager', approverType: 'ROLE', roleKey: 'project_manager' },
       { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
     ],
   },
@@ -468,7 +474,10 @@ async function main() {
   // Seeded workflows that were superseded by a corrected version. Left in place
   // but deactivated, so they stop matching new documents while any history
   // routed through them stays readable. Deleting them would orphan that.
-  const RETIRED = ['Budget Request — management'];
+  const RETIRED = [
+    'Budget Request — management',
+    'Purchase Order — procurement then finance',
+  ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });
     if (stale) {

@@ -72,7 +72,20 @@ previous implementation traces back to its absence.
 | Approved plans register, job tasks | Project → Plans / Tasks |
 | Budget monitoring across all projects | `/g-ops/budget-monitoring` |
 
-Screens from Phases 5–9 appear in the menu marked with their phase. Their
+**Phase 5 — G-CHAIN.** Request → canvass → order → receive → stock → issue.
+
+| Capability | Where |
+|---|---|
+| Purchase requests, in two kinds | `/g-chain/purchase-requests` |
+| Canvass / RFQ with side-by-side quote comparison | `/g-chain/canvass` |
+| Purchase orders, approved and issued | `/g-chain/purchase-orders` |
+| Receiving against an order | `/g-chain/receiving` |
+| **Inventory at moving average cost**, with stock cards | `/g-chain/inventory` |
+| Stock issuance — charges a project at average cost | `/g-chain/stock-issuance` |
+| Borrow slips with overdue tracking | `/g-chain/borrow-slips` |
+| Stock valuation and reorder report | `/g-chain/reports` |
+
+Screens from Phases 6–9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
 
@@ -95,6 +108,24 @@ centavo (the rounding remainder lands on the last section).
 From a quotation, **Fill from costing** turns those same sections into the
 quotation's lines. Quote what you scoped, and the numbers carry through to
 billing without anyone retyping them.
+
+### The two kinds of purchase request
+
+This is the distinction that keeps project costs honest, and it is worth
+knowing before anyone raises a request.
+
+**Direct to job** — bought for one project. Approving the request *commits* its
+budget at estimated prices; issuing the order replaces that with the price
+actually agreed; receiving the goods turns it into *incurred* cost. The material
+does **not** enter stock, because it has already been charged.
+
+**Stock replenishment** — bought for the warehouse. No project is touched.
+Receiving adds to inventory at cost; issuing to a job charges that job at the
+moving average.
+
+Material therefore reaches a project's cost exactly once, whichever route it
+took. Each handover releases what came before, so a request and its order are
+never both counted.
 
 ### About the CSV import
 
@@ -184,10 +215,32 @@ value rather than averaged, that EWT is withheld on the gross and not the VAT,
 that a second billing covers only the increment, and that the S-curve's three
 lines share a time basis.
 
-All four create their own records and clean up after themselves. Run them after
+```bash
+cd api && npx tsx scripts/verify-chain.ts
+```
+
+35 assertions for Phase 5, mostly about not counting money twice: the moving
+average (a receipt moves it, an issue does not), that a warehouse cannot issue
+or lend what it does not have, that issuing an order releases the request's
+commitment, that receiving releases the order's, that a direct-to-job receipt is
+charged to the job and NOT added to stock, and that consumed is never subtracted
+on top of incurred.
+
+All five create their own records and clean up after themselves. Run them after
 touching anything in `api/src/shared/` or `api/src/permissions/`.
 
-> They consume real numbering sequences, so after a few runs your quotation
+### Checking your approval routing
+
+```bash
+cd api && npx tsx scripts/audit-workflows.ts
+```
+
+Read-only. Reports any workflow step that routes to a role nobody holds, or to
+the role that normally *raises* that document — both of which leave documents
+stuck with no error anywhere. Run it after assigning roles, and any time
+approvals seem not to be arriving.
+
+> The verification scripts consume real numbering sequences, so after a few runs your quotation
 > numbers will be well past 0001. That only affects this laptop — the server
 > starts from a fresh seed.
 

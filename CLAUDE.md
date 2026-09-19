@@ -45,10 +45,10 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales delivery; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales delivery chain; do npx tsx scripts/verify-$s.ts; done
 ```
 
-150 assertions across permission resolution, numbering concurrency, the approval
+185 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
 engine, CSV parsing, the import contract, and Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability).
@@ -56,6 +56,11 @@ All create their own records and clean up. Run them after touching anything in
 `api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
 service — the services have no click-path to test them, which is exactly why
 these scripts exist.
+
+`npx tsx scripts/audit-workflows.ts` is a separate read-only check: it reports
+any workflow step routed to a role nobody holds, or to the role that normally
+raises that document. Two seeded workflows shipped with that second fault and
+were found one at a time by documents refusing to submit — run this instead.
 
 `verify-sales.ts` imports `src/routes/sales` purely for its side effect, because
 that import is what registers the quotation's `onApprovalSettled` subscriber. If
@@ -128,12 +133,12 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1 (foundation), 2 (masters), 3 (sales) and 4 (delivery) are done. Next is
-Phase 5 — G-CHAIN: purchase requests (both kinds), canvass, purchase orders,
-receiving, inventory, stock issuance and borrow slips. That phase is what fills
-the COMMITTED, INCURRED and CONSUMED columns of the job cost ledger, which
-already exist and are already displayed. Full sequence with acceptance criteria
-in `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+Phases 1–5 are done. Next is Phase 6 — G-HR: clock in/out with face
+recognition, attendance, leave, overtime with its two-step approval, the HR
+dashboard and CSV export. Overtime is what writes INCURRED labour cost to a
+job's ledger, and the engine already refuses to post it until both the
+supervisor and HR have approved. Full sequence with acceptance criteria in
+`docs/BUSINESS-OPERATIONS-MODEL.md` §11.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
 phase's screens from "upcoming" to live. Bump it when a phase lands.
@@ -206,6 +211,25 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **EWT is withheld on the gross, not on the VAT.** Net collectible = gross + VAT
   − EWT. Invoiced ≠ collectible, and A/R must never read the withheld part as
   overdue.
+## Phase 5 notes worth carrying forward
+
+- **The two purchase kinds must stay disjoint.** DIRECT_TO_JOB charges the job
+  at receiving and does NOT build stock. STOCK_REPLENISHMENT builds stock and
+  charges a job only at issuance. Adding a direct-to-job receipt to inventory
+  would let the same material be charged twice — a bug that shipped briefly and
+  is now covered by a test.
+- **Every handover releases what came before.** PR approval commits at estimate
+  → PO issue releases that and commits the agreed price → receiving releases
+  that and incurs. Use `releaseCommitment()`; it posts a negative row rather
+  than deleting, so the ledger stays a history.
+- **Moving weighted average**: a receipt recomputes it, an issue takes it as
+  given. Issuing must never change the cost of what remains.
+- **Borrowing does not charge job cost.** It moves stock out of *available*
+  while leaving it owned. Only configure an internal rental rate if Gruntech
+  actually charges projects for tool time (model §4.3).
+- **The budget guard** blocks a direct-to-job PR that exceeds a category's
+  available budget, unless `procurement.blockOverBudget` is set to false in
+  Settings. Default on.
 - **The S-curve's three lines share a time basis** — billed is plotted against
   the period its progress report covers, not the date the billing was raised.
   Otherwise comparing the lines is meaningless.

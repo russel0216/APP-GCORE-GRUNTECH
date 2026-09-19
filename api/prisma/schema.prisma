@@ -65,6 +65,16 @@ model User {
   plansUploaded     ApprovedPlan[]   @relation("PlanUploader")
   tasksAssigned     JobTask[]        @relation("TaskAssignee")
 
+  prsRequested      PurchaseRequest[] @relation("PrRequester")
+  canvassesCreated  Canvass[]         @relation("CanvassCreator")
+  posCreated        PurchaseOrder[]   @relation("PoCreator")
+  receivings        Receiving[]       @relation("Receiver")
+  stockIssued       StockIssue[]      @relation("Issuer")
+  stockReceivedBy   StockIssue[]      @relation("IssuedTo")
+  borrowsTaken      BorrowSlip[]      @relation("Borrower")
+  borrowsIssued     BorrowSlip[]      @relation("BorrowIssuer")
+  stockMoves        InventoryTransaction[]
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -488,8 +498,10 @@ model Supplier {
   createdById String?
   createdBy   User?   @relation("SupplierCreator", fields: [createdById], references: [id], onDelete: SetNull)
 
-  contacts       SupplierContact[]
-  preferredItems Item[]            @relation("PreferredSupplier")
+  contacts        SupplierContact[]
+  preferredItems  Item[]            @relation("PreferredSupplier")
+  canvassEntries  CanvassSupplier[]
+  purchaseOrders  PurchaseOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -593,6 +605,9 @@ model CostCategory {
   costingLines   CostingLine[]
   costEntries    JobCostEntry[]
   budgetRequests BudgetRequest[]
+  prItems        PurchaseRequestItem[]
+  poItems        PurchaseOrderItem[]
+  issueItems     StockIssueItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -655,7 +670,13 @@ model Item {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  costingLines CostingLine[]
+  costingLines    CostingLine[]
+  prItems         PurchaseRequestItem[]
+  poItems         PurchaseOrderItem[]
+  issueItems      StockIssueItem[]
+  borrowItems     BorrowSlipItem[]
+  balances        InventoryBalance[]
+  stockMoves      InventoryTransaction[]
 
   @@index([isActive])
   @@index([name])
@@ -672,6 +693,14 @@ model Warehouse {
 
   locations Location[]
 
+  purchaseRequests PurchaseRequest[]
+  purchaseOrders   PurchaseOrder[]
+  receivings       Receiving[]
+  stockIssues      StockIssue[]
+  borrowSlips      BorrowSlip[]
+  balances         InventoryBalance[]
+  stockMoves       InventoryTransaction[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -684,6 +713,9 @@ model Location {
   code        String
   name        String?
   isActive    Boolean   @default(true)
+
+  receivingItems ReceivingItem[]
+  issueItems     StockIssueItem[]
 
   createdAt DateTime @default(now())
 
@@ -1111,6 +1143,11 @@ model Job {
   plans        ApprovedPlan[]
   tasks        JobTask[]
 
+  purchaseRequests PurchaseRequest[]
+  purchaseOrders   PurchaseOrder[]
+  stockIssues      StockIssue[]
+  borrowSlips      BorrowSlip[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1431,6 +1468,471 @@ model JobTask {
 
   @@index([jobId, status])
   @@index([assignedToId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  G-CHAIN  (Phase 5)
+//
+//  Purchase Request → Canvass → Purchase Order → Receiving → Inventory
+//  → Stock Issuance → Job cost.
+//
+//  The distinction that prevents double-counting (model §4.3):
+//
+//    DIRECT_TO_JOB        commits at PR/PO, charges the job at RECEIVING
+//    STOCK_REPLENISHMENT  buys warehouse stock, charges the job at ISSUANCE
+//
+//  Without it, material bought for a job and later issued from stock gets
+//  counted against that job twice.
+// ════════════════════════════════════════════════════════════════════
+
+enum PurchaseKind {
+  DIRECT_TO_JOB
+  STOCK_REPLENISHMENT
+}
+
+enum PrStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+  PARTIALLY_ORDERED
+  ORDERED
+}
+
+model PurchaseRequest {
+  id     String       @id @default(cuid())
+  number String       @unique
+  kind   PurchaseKind @default(DIRECT_TO_JOB)
+  status PrStatus     @default(DRAFT)
+
+  /// Required when kind is DIRECT_TO_JOB — enforced in the route, because a
+  /// stock replenishment legitimately has no job.
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+
+  requestedById String
+  requestedBy   User   @relation("PrRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  purpose  String
+  neededBy DateTime? @db.Date
+  notes    String?
+
+  approvedAt DateTime?
+
+  items    PurchaseRequestItem[]
+  canvasses Canvass[]
+  orders   PurchaseOrder[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([jobId])
+}
+
+model PurchaseRequestItem {
+  id        String          @id @default(cuid())
+  requestId String
+  request   PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  itemId String?
+  item   Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  /// Which budget line this lands in. Required for a direct-to-job request.
+  costCategoryId String?
+  costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  description  String
+  quantity     Decimal @db.Decimal(18, 3)
+  unit         String  @default("pcs")
+  estimatedCost Decimal @default(0) @db.Decimal(18, 2)
+  /// quantity × estimatedCost, stored so the commitment is a recorded fact.
+  estimatedAmount Decimal @default(0) @db.Decimal(18, 2)
+  orderedQty   Decimal @default(0) @db.Decimal(18, 3)
+  sortOrder    Int     @default(0)
+
+  quotes     CanvassQuote[]
+  orderItems PurchaseOrderItem[]
+
+  @@index([requestId])
+}
+
+enum CanvassStatus {
+  OPEN
+  AWARDED
+  CANCELLED
+}
+
+/// "Canvass/RFQ — supplier selection." Three quotes is the convention; the
+/// system does not force it, but it shows how many you have.
+model Canvass {
+  id     String        @id @default(cuid())
+  number String        @unique
+  status CanvassStatus @default(OPEN)
+
+  requestId String
+  request   PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  createdById String
+  createdBy   User   @relation("CanvassCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  notes      String?
+  awardedAt  DateTime?
+
+  suppliers CanvassSupplier[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([requestId])
+}
+
+model CanvassSupplier {
+  id        String  @id @default(cuid())
+  canvassId String
+  canvass   Canvass @relation(fields: [canvassId], references: [id], onDelete: Cascade)
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  /// Set when this supplier wins the canvass. Only one per canvass.
+  isSelected   Boolean @default(false)
+  leadTimeDays Int?
+  terms        String?
+  remarks      String?
+
+  quotes CanvassQuote[]
+
+  @@unique([canvassId, supplierId])
+}
+
+model CanvassQuote {
+  id                String          @id @default(cuid())
+  canvassSupplierId String
+  canvassSupplier   CanvassSupplier @relation(fields: [canvassSupplierId], references: [id], onDelete: Cascade)
+
+  requestItemId String
+  requestItem   PurchaseRequestItem @relation(fields: [requestItemId], references: [id], onDelete: Cascade)
+
+  unitPrice Decimal @db.Decimal(18, 2)
+  remarks   String?
+
+  @@unique([canvassSupplierId, requestItemId])
+}
+
+enum PoStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  ISSUED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id     String   @id @default(cuid())
+  number String   @unique
+  status PoStatus @default(DRAFT)
+  kind   PurchaseKind @default(DIRECT_TO_JOB)
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  requestId String?
+  request   PurchaseRequest? @relation(fields: [requestId], references: [id], onDelete: SetNull)
+
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+
+  createdById String
+  createdBy   User   @relation("PoCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  orderDate    DateTime  @default(now()) @db.Date
+  deliveryDate DateTime? @db.Date
+  deliverTo    String?
+  terms        String?
+  notes        String?
+
+  /// Snapshotted so an old order still prints the tax it was issued with.
+  vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
+  vatInclusive Boolean @default(false)
+  subtotal     Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount    Decimal @default(0) @db.Decimal(18, 2)
+  total        Decimal @default(0) @db.Decimal(18, 2)
+
+  issuedAt   DateTime?
+  approvedAt DateTime?
+
+  items      PurchaseOrderItem[]
+  receivings Receiving[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([supplierId])
+  @@index([jobId])
+}
+
+model PurchaseOrderItem {
+  id      String        @id @default(cuid())
+  orderId String
+  order   PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  requestItemId String?
+  requestItem   PurchaseRequestItem? @relation(fields: [requestItemId], references: [id], onDelete: SetNull)
+
+  itemId String?
+  item   Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  costCategoryId String?
+  costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  description String
+  quantity    Decimal @db.Decimal(18, 3)
+  unit        String  @default("pcs")
+  unitPrice   Decimal @db.Decimal(18, 2)
+  amount      Decimal @db.Decimal(18, 2)
+  receivedQty Decimal @default(0) @db.Decimal(18, 3)
+  sortOrder   Int     @default(0)
+
+  receivingItems ReceivingItem[]
+
+  @@index([orderId])
+}
+
+model Receiving {
+  id     String @id @default(cuid())
+  number String @unique
+
+  orderId String
+  order   PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+
+  receivedById String
+  receivedBy   User   @relation("Receiver", fields: [receivedById], references: [id], onDelete: Restrict)
+
+  receivedDate   DateTime @default(now()) @db.Date
+  deliveryRefNo  String?
+  invoiceRefNo   String?
+  notes          String?
+
+  items ReceivingItem[]
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+model ReceivingItem {
+  id          String    @id @default(cuid())
+  receivingId String
+  receiving   Receiving @relation(fields: [receivingId], references: [id], onDelete: Cascade)
+
+  orderItemId String
+  orderItem   PurchaseOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  quantity  Decimal @db.Decimal(18, 3)
+  unitCost  Decimal @db.Decimal(18, 2)
+  serialNo  String?
+  batchNo   String?
+  remarks   String?
+
+  @@index([receivingId])
+}
+
+enum IssueStatus {
+  DRAFT
+  ISSUED
+  CANCELLED
+}
+
+/// Stock leaving the warehouse for a job. This is where a stock-sourced item
+/// first charges the job (model §4.3).
+model StockIssue {
+  id     String      @id @default(cuid())
+  number String      @unique
+  status IssueStatus @default(DRAFT)
+
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  issuedById String
+  issuedBy   User   @relation("Issuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  issuedToId String?
+  issuedTo   User?  @relation("IssuedTo", fields: [issuedToId], references: [id], onDelete: SetNull)
+  issuedToName String?
+
+  issueDate DateTime @default(now()) @db.Date
+  purpose   String
+  notes     String?
+  issuedAt  DateTime?
+
+  items StockIssueItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([jobId])
+  @@index([status])
+}
+
+model StockIssueItem {
+  id      String     @id @default(cuid())
+  issueId String
+  issue   StockIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  costCategoryId String?
+  costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  quantity Decimal @db.Decimal(18, 3)
+  /// Moving-average cost at the moment of issue, snapshotted.
+  unitCost Decimal @default(0) @db.Decimal(18, 2)
+  amount   Decimal @default(0) @db.Decimal(18, 2)
+  remarks  String?
+
+  @@index([issueId])
+}
+
+enum BorrowStatus {
+  OUT
+  PARTIALLY_RETURNED
+  RETURNED
+  OVERDUE
+}
+
+/// Tools and equipment lent out and expected back.
+///
+/// A borrow slip does NOT charge job cost (model §4.3) — the asset is on loan,
+/// not consumed. It moves stock out of available and back again.
+model BorrowSlip {
+  id     String       @id @default(cuid())
+  number String       @unique
+  status BorrowStatus @default(OUT)
+
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  borrowerId   String?
+  borrower     User?   @relation("Borrower", fields: [borrowerId], references: [id], onDelete: SetNull)
+  borrowerName String
+
+  issuedById String
+  issuedBy   User   @relation("BorrowIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+
+  borrowedAt DateTime  @default(now()) @db.Date
+  dueAt      DateTime  @db.Date
+  returnedAt DateTime? @db.Date
+  purpose    String
+  notes      String?
+
+  items BorrowSlipItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([dueAt])
+}
+
+model BorrowSlipItem {
+  id     String     @id @default(cuid())
+  slipId String
+  slip   BorrowSlip @relation(fields: [slipId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  quantity    Decimal @db.Decimal(18, 3)
+  returnedQty Decimal @default(0) @db.Decimal(18, 3)
+  serialNo    String?
+  remarks     String?
+
+  @@index([slipId])
+}
+
+/// Stock on hand per item per warehouse, with its moving-average cost.
+model InventoryBalance {
+  id          String    @id @default(cuid())
+  itemId      String
+  item        Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  quantity Decimal @default(0) @db.Decimal(18, 3)
+  /// On loan via a borrow slip — still owned, not available to issue.
+  borrowedQty Decimal @default(0) @db.Decimal(18, 3)
+
+  /// Moving weighted average. Recomputed on every receipt; issues take it as
+  /// given, which is what stops an issue changing the cost of what remains.
+  averageCost Decimal @default(0) @db.Decimal(18, 4)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([itemId, warehouseId])
+  @@index([warehouseId])
+}
+
+enum StockMoveType {
+  RECEIPT
+  ISSUE
+  BORROW
+  RETURN
+  ADJUSTMENT
+}
+
+/// The stock card: every movement, in order, with the balance after it.
+model InventoryTransaction {
+  id          String    @id @default(cuid())
+  itemId      String
+  item        Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  type     StockMoveType
+  /// Signed: positive in, negative out.
+  quantity Decimal       @db.Decimal(18, 3)
+  unitCost Decimal       @default(0) @db.Decimal(18, 4)
+  /// Balance after this movement, so the card reads without re-summing.
+  balanceAfter Decimal   @db.Decimal(18, 3)
+
+  sourceType   String
+  sourceId     String?
+  sourceNumber String?
+  notes        String?
+
+  createdById String?
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  occurredAt DateTime @default(now())
+
+  @@index([itemId, warehouseId, occurredAt])
+  @@index([sourceType, sourceId])
 }
 
 /// Saved filters for the shared list pattern (model §8.4).

@@ -65,6 +65,8 @@ async function cleanup() {
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.auditLog.deleteMany({ where: { entityId: { startsWith: TAG } } });
+  await prisma.approvalWorkflow.deleteMany({ where: { documentType: { startsWith: TAG } } });
+  await prisma.role.deleteMany({ where: { key: { startsWith: TAG } } });
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], supervisorId?: string) {
@@ -284,16 +286,35 @@ async function main() {
     (await pendingFor(pm.id)).some((r) => r.id === small.id),
   );
 
-  // With only ONE project manager, a PR routed to that role and raised by them
-  // could never be approved by anyone. Submission is refused outright rather
-  // than accepted into a state nobody can move it out of.
+  // A document whose only eligible approver is the requester can never move.
+  //
+  // This uses a throwaway role and workflow rather than project_manager: the
+  // assertion is about a role with exactly ONE holder, and a shared role's
+  // membership depends on whatever else is in the database. An earlier version
+  // of this test passed or failed depending on who happened to exist.
+  const soloRole = await prisma.role.create({
+    data: { key: `${TAG}_solo`, name: 'Verify Solo Approver' },
+  });
+  await prisma.userRole.create({ data: { userId: pm.id, roleId: soloRole.id } });
+  await prisma.approvalWorkflow.create({
+    data: {
+      documentType: `${TAG}_solo_doc`,
+      name: 'Verify — routes only to the requester',
+      steps: {
+        create: [
+          { sequence: 1, name: 'Solo approval', approverType: 'ROLE', roleId: soloRole.id },
+        ],
+      },
+    },
+  });
+
   await expectRejection(
     'a document whose only approver is the requester is refused at submission',
     () =>
       submitForApproval({
-        documentType: 'purchase_request',
-        documentId: `${TAG}-pr-pm-solo`,
-        subject: 'Verify — sole PM raises their own PR',
+        documentType: `${TAG}_solo_doc`,
+        documentId: `${TAG}-solo`,
+        subject: 'Verify — sole approver raises their own document',
         amount: 20_000,
         requesterId: pm.id,
       }),

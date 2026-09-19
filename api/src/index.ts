@@ -44,6 +44,17 @@ import {
 } from './routes/sales';
 import { jobRoutes, budgetRequestRoutes } from './routes/jobs';
 import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
+import {
+  purchaseRequestRoutes,
+  canvassRoutes,
+  purchaseOrderRoutes,
+} from './routes/procurement';
+import {
+  receivingRoutes,
+  stockIssueRoutes,
+  borrowRoutes,
+  inventoryRoutes,
+} from './routes/warehouse';
 
 const app = express();
 
@@ -110,6 +121,15 @@ app.use('/api/jobs', planRoutes);
 app.use('/api/budget-requests', budgetRequestRoutes);
 app.use('/api/progress-reports', progressRoutes);
 app.use('/api/billings', billingRoutes);
+
+// G-CHAIN (Phase 5)
+app.use('/api/purchase-requests', purchaseRequestRoutes);
+app.use('/api/canvasses', canvassRoutes);
+app.use('/api/purchase-orders', purchaseOrderRoutes);
+app.use('/api/receivings', receivingRoutes);
+app.use('/api/stock-issues', stockIssueRoutes);
+app.use('/api/borrow-slips', borrowRoutes);
+app.use('/api/inventory', inventoryRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

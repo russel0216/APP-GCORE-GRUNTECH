@@ -1,0 +1,1484 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { Prisma } from '@prisma/client';
+import { prisma } from '../prisma';
+import {
+  handler,
+  parseBody,
+  listQuery,
+  listResult,
+  orderBy,
+  notFound,
+  badRequest,
+  forbidden,
+} from '../http/kit';
+import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { audit } from '../shared/audit';
+import { nextNumber } from '../shared/numbering';
+import { submitForApproval, onApprovalSettled } from '../shared/approvals';
+import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import {
+  postJobCost,
+  releaseCommitment,
+  availableBudget,
+  overBudgetIsBlocked,
+} from '../shared/inventory';
+
+const D = (v: number | string | null | undefined) =>
+  v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
+const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
+const cents = (n: number) => Math.round(n * 100) / 100;
+
+function asDate(v: string | null | undefined): Date | null {
+  if (!v) return null;
+  const date = new Date(v);
+  if (Number.isNaN(date.getTime())) throw badRequest(`"${v}" is not a valid date`);
+  return date;
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PURCHASE REQUESTS
+// ════════════════════════════════════════════════════════════════════
+
+export const purchaseRequestRoutes = Router();
+purchaseRequestRoutes.use(authenticate);
+
+function presentPr(pr: Record<string, unknown>) {
+  const items = (pr.items ?? []) as Record<string, unknown>[];
+  return {
+    ...pr,
+    items: items.map((i) => ({
+      ...i,
+      quantity: num(i.quantity as Prisma.Decimal),
+      estimatedCost: num(i.estimatedCost as Prisma.Decimal),
+      estimatedAmount: num(i.estimatedAmount as Prisma.Decimal),
+      orderedQty: num(i.orderedQty as Prisma.Decimal),
+    })),
+    estimatedTotal: items.reduce((s, i) => s + num(i.estimatedAmount as Prisma.Decimal), 0),
+  };
+}
+
+purchaseRequestRoutes.get(
+  '/',
+  requireAny('gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where: Prisma.PurchaseRequestWhereInput = {};
+
+    const onlyOwn =
+      !me.isSuperAdmin && !me.permissions.has('gchain.purchase_requests.view_all');
+    if (onlyOwn || q.scope === 'mine') where.requestedById = me.id;
+    if (q.filters.status) where.status = q.filters.status as Prisma.EnumPrStatusFilter['equals'];
+    if (q.filters.kind) where.kind = q.filters.kind as Prisma.EnumPurchaseKindFilter['equals'];
+    if (q.filters.jobId) where.jobId = q.filters.jobId;
+    if (q.search) {
+      where.OR = [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { purpose: { contains: q.search, mode: 'insensitive' } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      prisma.purchaseRequest.findMany({
+        where,
+        include: {
+          job: { select: { id: true, number: true, name: true } },
+          requestedBy: { select: { id: true, name: true } },
+          warehouse: { select: { id: true, name: true } },
+          items: { select: { estimatedAmount: true } },
+          _count: { select: { canvasses: true, orders: true } },
+        },
+        orderBy: orderBy(q, ['number', 'neededBy', 'createdAt'], { createdAt: 'desc' }),
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+      }),
+      prisma.purchaseRequest.count({ where }),
+    ]);
+
+    res.json(
+      listResult(
+        rows.map((r) => ({
+          id: r.id,
+          number: r.number,
+          kind: r.kind,
+          status: r.status,
+          purpose: r.purpose,
+          neededBy: r.neededBy,
+          createdAt: r.createdAt,
+          job: r.job,
+          warehouse: r.warehouse,
+          requestedBy: r.requestedBy,
+          itemCount: r.items.length,
+          estimatedTotal: cents(r.items.reduce((s, i) => s + num(i.estimatedAmount), 0)),
+          canvassCount: r._count.canvasses,
+          orderCount: r._count.orders,
+        })),
+        total,
+        q,
+      ),
+    );
+  }),
+);
+
+async function loadPr(id: string) {
+  return prisma.purchaseRequest.findUnique({
+    where: { id },
+    include: {
+      job: { select: { id: true, number: true, name: true } },
+      warehouse: { select: { id: true, name: true } },
+      requestedBy: { select: { id: true, name: true, position: true } },
+      items: {
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          item: { select: { id: true, code: true, name: true, unit: true } },
+          costCategory: { select: { id: true, code: true, name: true } },
+        },
+      },
+      canvasses: {
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, number: true, status: true, createdAt: true },
+      },
+      orders: {
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          number: true,
+          status: true,
+          total: true,
+          supplier: { select: { id: true, name: true } },
+        },
+      },
+    },
+  });
+}
+
+purchaseRequestRoutes.get(
+  '/:id',
+  requireAny('gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const pr = await loadPr(req.params.id);
+    if (!pr) throw notFound('Purchase request not found');
+
+    // Budget position per category, so the requester sees what is left before
+    // they ask for more.
+    const budget: Record<string, Awaited<ReturnType<typeof availableBudget>>> = {};
+    if (pr.jobId) {
+      const categoryIds = [...new Set(pr.items.map((i) => i.costCategoryId).filter(Boolean))];
+      for (const categoryId of categoryIds as string[]) {
+        budget[categoryId] = await availableBudget(prisma, pr.jobId, categoryId);
+      }
+    }
+
+    res.json({
+      ...presentPr(pr as unknown as Record<string, unknown>),
+      orders: pr.orders.map((o) => ({ ...o, total: num(o.total) })),
+      budget,
+      canEdit:
+        pr.status === 'DRAFT' &&
+        (me.isSuperAdmin ||
+          me.permissions.has('gchain.purchase_requests.edit_all') ||
+          (pr.requestedById === me.id && me.permissions.has('gchain.purchase_requests.edit_own'))),
+    });
+  }),
+);
+
+const prSchema = z.object({
+  kind: z.enum(['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT']).default('DIRECT_TO_JOB'),
+  jobId: z.string().optional().nullable(),
+  warehouseId: z.string().optional().nullable(),
+  purpose: z.string().trim().min(3, 'Say what this is for'),
+  neededBy: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+purchaseRequestRoutes.post(
+  '/',
+  require_('gchain.purchase_requests.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(prSchema, req.body);
+
+    // The distinction that stops double-counting: a direct-to-job request must
+    // name its job, a stock replenishment must not.
+    if (body.kind === 'DIRECT_TO_JOB' && !body.jobId) {
+      throw badRequest('A direct-to-job request must name the project it is for');
+    }
+    if (body.kind === 'STOCK_REPLENISHMENT' && !body.warehouseId) {
+      throw badRequest('A stock replenishment must name the warehouse it is for');
+    }
+
+    const pr = await prisma.$transaction(async (tx) => {
+      const number = await nextNumber('purchase_request', tx);
+      return tx.purchaseRequest.create({
+        data: {
+          number,
+          kind: body.kind,
+          jobId: body.kind === 'DIRECT_TO_JOB' ? body.jobId : null,
+          warehouseId: body.warehouseId || null,
+          requestedById: me.id,
+          purpose: body.purpose,
+          neededBy: asDate(body.neededBy),
+          notes: body.notes || null,
+        },
+      });
+    });
+
+    await audit(
+      {
+        entityType: 'purchase_request',
+        entityId: pr.id,
+        action: 'CREATED',
+        summary: `Raised ${pr.number} — ${pr.purpose}`,
+      },
+      req,
+    );
+    res.status(201).json(pr);
+  }),
+);
+
+async function prForEdit(req: Parameters<typeof currentUser>[0], id: string) {
+  const me = currentUser(req);
+  const pr = await prisma.purchaseRequest.findUnique({ where: { id } });
+  if (!pr) throw notFound('Purchase request not found');
+  if (pr.status !== 'DRAFT') {
+    throw badRequest(`${pr.number} is ${pr.status.toLowerCase().replace(/_/g, ' ')} and cannot be changed`);
+  }
+  const mayEdit =
+    me.isSuperAdmin ||
+    me.permissions.has('gchain.purchase_requests.edit_all') ||
+    (pr.requestedById === me.id && me.permissions.has('gchain.purchase_requests.edit_own'));
+  if (!mayEdit) throw forbidden('This request belongs to someone else');
+  return pr;
+}
+
+purchaseRequestRoutes.patch(
+  '/:id',
+  require_('gchain.purchase_requests.edit_own'),
+  handler(async (req, res) => {
+    await prForEdit(req, req.params.id);
+    const body = parseBody(prSchema.partial(), req.body);
+
+    const pr = await prisma.purchaseRequest.update({
+      where: { id: req.params.id },
+      data: {
+        ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
+        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+        ...(body.neededBy !== undefined ? { neededBy: asDate(body.neededBy) } : {}),
+        ...(body.warehouseId !== undefined ? { warehouseId: body.warehouseId || null } : {}),
+      },
+    });
+    res.json(pr);
+  }),
+);
+
+const prItemSchema = z.object({
+  itemId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  description: z.string().trim().min(1, 'Describe what is needed'),
+  quantity: z.number().positive('Quantity must be more than zero'),
+  unit: z.string().trim().min(1).default('pcs'),
+  estimatedCost: z.number().min(0).default(0),
+});
+
+purchaseRequestRoutes.post(
+  '/:id/items',
+  require_('gchain.purchase_requests.edit_own'),
+  handler(async (req, res) => {
+    const pr = await prForEdit(req, req.params.id);
+    const body = parseBody(prItemSchema, req.body);
+
+    if (pr.kind === 'DIRECT_TO_JOB' && !body.costCategoryId) {
+      throw badRequest('A direct-to-job line needs a cost category — it is how the cost finds its budget line');
+    }
+
+    const count = await prisma.purchaseRequestItem.count({ where: { requestId: pr.id } });
+    await prisma.purchaseRequestItem.create({
+      data: {
+        requestId: pr.id,
+        itemId: body.itemId || null,
+        costCategoryId: body.costCategoryId || null,
+        description: body.description,
+        quantity: D(body.quantity),
+        unit: body.unit,
+        estimatedCost: D(body.estimatedCost),
+        estimatedAmount: D(cents(body.quantity * body.estimatedCost)),
+        sortOrder: count,
+      },
+    });
+
+    const full = await loadPr(pr.id);
+    res.status(201).json(presentPr(full as unknown as Record<string, unknown>));
+  }),
+);
+
+purchaseRequestRoutes.patch(
+  '/:id/items/:itemId',
+  require_('gchain.purchase_requests.edit_own'),
+  handler(async (req, res) => {
+    await prForEdit(req, req.params.id);
+    const body = parseBody(prItemSchema.partial(), req.body);
+
+    const existing = await prisma.purchaseRequestItem.findFirst({
+      where: { id: req.params.itemId, requestId: req.params.id },
+    });
+    if (!existing) throw notFound('Line not found');
+
+    const quantity = body.quantity ?? num(existing.quantity);
+    const estimatedCost = body.estimatedCost ?? num(existing.estimatedCost);
+
+    await prisma.purchaseRequestItem.update({
+      where: { id: req.params.itemId },
+      data: {
+        ...(body.itemId !== undefined ? { itemId: body.itemId || null } : {}),
+        ...(body.costCategoryId !== undefined ? { costCategoryId: body.costCategoryId || null } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.unit !== undefined ? { unit: body.unit } : {}),
+        quantity: D(quantity),
+        estimatedCost: D(estimatedCost),
+        estimatedAmount: D(cents(quantity * estimatedCost)),
+      },
+    });
+
+    const full = await loadPr(req.params.id);
+    res.json(presentPr(full as unknown as Record<string, unknown>));
+  }),
+);
+
+purchaseRequestRoutes.delete(
+  '/:id/items/:itemId',
+  require_('gchain.purchase_requests.edit_own'),
+  handler(async (req, res) => {
+    await prForEdit(req, req.params.id);
+    const existing = await prisma.purchaseRequestItem.findFirst({
+      where: { id: req.params.itemId, requestId: req.params.id },
+    });
+    if (!existing) throw notFound('Line not found');
+    await prisma.purchaseRequestItem.delete({ where: { id: req.params.itemId } });
+    const full = await loadPr(req.params.id);
+    res.json(presentPr(full as unknown as Record<string, unknown>));
+  }),
+);
+
+/**
+ * Submitting a purchase request for approval.
+ *
+ * Before it routes, a direct-to-job request is checked against the budget. "A
+ * PR that would push Available below zero is blocked, or requires a Budget
+ * Request first" (model §5.2) — a budget nobody can exceed is the only kind
+ * that means anything.
+ */
+purchaseRequestRoutes.post(
+  '/:id/submit',
+  require_('gchain.purchase_requests.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: req.params.id },
+      include: { items: { include: { costCategory: true } }, job: true },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (pr.status !== 'DRAFT') throw badRequest('This request has already been submitted');
+    if (!pr.items.length) throw badRequest('Add at least one line before submitting');
+
+    const total = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
+
+    if (pr.kind === 'DIRECT_TO_JOB' && pr.jobId) {
+      const blocked = await overBudgetIsBlocked();
+      const byCategory = new Map<string, { name: string; amount: number }>();
+      for (const line of pr.items) {
+        if (!line.costCategoryId) continue;
+        const entry = byCategory.get(line.costCategoryId) ?? {
+          name: line.costCategory?.name ?? 'that category',
+          amount: 0,
+        };
+        entry.amount += num(line.estimatedAmount);
+        byCategory.set(line.costCategoryId, entry);
+      }
+
+      const shortfalls: string[] = [];
+      for (const [categoryId, entry] of byCategory) {
+        const position = await availableBudget(prisma, pr.jobId, categoryId);
+        if (entry.amount > position.available + 0.005) {
+          shortfalls.push(
+            `${entry.name}: ${formatMoney(entry.amount)} requested, ${formatMoney(position.available)} available`,
+          );
+        }
+      }
+
+      if (shortfalls.length && blocked) {
+        throw badRequest(
+          `This request exceeds the project's remaining budget — ${shortfalls.join('; ')}. ` +
+            `Raise a budget request first, or reduce the quantities.`,
+        );
+      }
+    }
+
+    await prisma.purchaseRequest.update({
+      where: { id: pr.id },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+
+    await submitForApproval({
+      documentType: 'purchase_request',
+      documentId: pr.id,
+      documentNumber: pr.number,
+      subject: `${pr.job ? `${pr.job.number} — ` : ''}${pr.purpose}`,
+      amount: total,
+      link: `/g-chain/purchase-requests/${pr.id}`,
+      requesterId: me.id,
+    });
+
+    res.json({ ok: true });
+  }),
+);
+
+/**
+ * An approved direct-to-job request commits budget.
+ *
+ * This is the SOFT commitment — a promise to spend, at estimated prices. The
+ * purchase order later replaces it with the firm figure at the price actually
+ * agreed (model §5.1).
+ */
+onApprovalSettled('purchase_request', async (request, outcome) => {
+  const pr = await prisma.purchaseRequest.findUnique({
+    where: { id: request.documentId },
+    include: { items: true },
+  });
+  if (!pr) return;
+
+  if (outcome !== 'APPROVED') {
+    await prisma.purchaseRequest.update({ where: { id: pr.id }, data: { status: 'REJECTED' } });
+    return;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.purchaseRequest.update({
+      where: { id: pr.id },
+      data: { status: 'APPROVED', approvedAt: new Date() },
+    });
+
+    if (pr.kind !== 'DIRECT_TO_JOB' || !pr.jobId) return;
+
+    const byCategory = new Map<string, number>();
+    for (const line of pr.items) {
+      if (!line.costCategoryId) continue;
+      byCategory.set(
+        line.costCategoryId,
+        (byCategory.get(line.costCategoryId) ?? 0) + num(line.estimatedAmount),
+      );
+    }
+    for (const [costCategoryId, amount] of byCategory) {
+      await postJobCost(tx, {
+        jobId: pr.jobId,
+        costCategoryId,
+        state: 'COMMITTED',
+        amount,
+        sourceType: 'purchase_request',
+        sourceId: pr.id,
+        sourceNumber: pr.number,
+        description: `Approved request — ${pr.purpose}`,
+        createdById: pr.requestedById,
+      });
+    }
+  });
+
+  await audit({
+    entityType: 'purchase_request',
+    entityId: pr.id,
+    action: 'APPROVED',
+    summary:
+      pr.kind === 'DIRECT_TO_JOB'
+        ? `${pr.number} approved — budget committed`
+        : `${pr.number} approved`,
+  });
+});
+
+purchaseRequestRoutes.delete(
+  '/:id',
+  require_('gchain.purchase_requests.delete'),
+  handler(async (req, res) => {
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { orders: true } } },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED') {
+      throw badRequest('Only a draft or rejected request can be deleted');
+    }
+    if (pr._count.orders > 0) throw badRequest('Purchase orders were raised from this request');
+
+    await prisma.purchaseRequest.delete({ where: { id: req.params.id } });
+    await audit(
+      { entityType: 'purchase_request', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${pr.number}` },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ════════════════════════════════════════════════════════════════════
+//  CANVASS
+// ════════════════════════════════════════════════════════════════════
+
+export const canvassRoutes = Router();
+canvassRoutes.use(authenticate);
+
+canvassRoutes.get(
+  '/',
+  requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where: Prisma.CanvassWhereInput = {};
+    if (q.filters.status) where.status = q.filters.status as Prisma.EnumCanvassStatusFilter['equals'];
+    if (q.search) {
+      where.OR = [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { request: { number: { contains: q.search, mode: 'insensitive' } } },
+        { request: { purpose: { contains: q.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      prisma.canvass.findMany({
+        where,
+        include: {
+          request: {
+            select: { id: true, number: true, purpose: true, job: { select: { id: true, name: true } } },
+          },
+          createdBy: { select: { id: true, name: true } },
+          suppliers: { select: { id: true, isSelected: true, supplier: { select: { name: true } } } },
+        },
+        orderBy: orderBy(q, ['number', 'createdAt'], { createdAt: 'desc' }),
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+      }),
+      prisma.canvass.count({ where }),
+    ]);
+
+    res.json(
+      listResult(
+        rows.map((r) => ({
+          ...r,
+          supplierCount: r.suppliers.length,
+          awarded: r.suppliers.find((s) => s.isSelected)?.supplier.name ?? null,
+        })),
+        total,
+        q,
+      ),
+    );
+  }),
+);
+
+async function loadCanvass(id: string) {
+  return prisma.canvass.findUnique({
+    where: { id },
+    include: {
+      request: {
+        include: {
+          job: { select: { id: true, number: true, name: true } },
+          items: {
+            orderBy: { sortOrder: 'asc' },
+            include: { costCategory: { select: { id: true, name: true } } },
+          },
+        },
+      },
+      createdBy: { select: { id: true, name: true } },
+      suppliers: {
+        include: {
+          supplier: { select: { id: true, code: true, name: true, paymentTerms: true } },
+          quotes: true,
+        },
+      },
+    },
+  });
+}
+
+canvassRoutes.get(
+  '/:id',
+  requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
+  handler(async (req, res) => {
+    const canvass = await loadCanvass(req.params.id);
+    if (!canvass) throw notFound('Canvass not found');
+
+    // Total per supplier for the lines they actually quoted, so the comparison
+    // is like for like.
+    const suppliers = canvass.suppliers.map((s) => {
+      const quoted = new Map(s.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
+      const total = canvass.request.items.reduce((sum, item) => {
+        const price = quoted.get(item.id);
+        return price === undefined ? sum : sum + num(item.quantity) * price;
+      }, 0);
+      return {
+        ...s,
+        quotes: s.quotes.map((qq) => ({ ...qq, unitPrice: num(qq.unitPrice) })),
+        quotedCount: s.quotes.length,
+        total: cents(total),
+        complete: s.quotes.length === canvass.request.items.length,
+      };
+    });
+
+    const complete = suppliers.filter((s) => s.complete && s.total > 0);
+    const lowest = complete.length
+      ? complete.reduce((best, s) => (s.total < best.total ? s : best))
+      : null;
+
+    res.json({
+      ...canvass,
+      request: presentPr(canvass.request as unknown as Record<string, unknown>),
+      suppliers,
+      lowestSupplierId: lowest?.id ?? null,
+    });
+  }),
+);
+
+canvassRoutes.post(
+  '/',
+  require_('gchain.canvass.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ requestId: z.string().min(1), notes: z.string().optional() }), req.body);
+
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: body.requestId },
+      include: { items: true },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (pr.status !== 'APPROVED' && pr.status !== 'PARTIALLY_ORDERED') {
+      throw badRequest('Only an approved request can be canvassed');
+    }
+    if (!pr.items.length) throw badRequest('That request has no lines');
+
+    const canvass = await prisma.$transaction(async (tx) => {
+      const number = await nextNumber('canvass', tx);
+      return tx.canvass.create({
+        data: { number, requestId: pr.id, createdById: me.id, notes: body.notes || null },
+      });
+    });
+
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: canvass.id,
+        action: 'CREATED',
+        summary: `Opened ${canvass.number} for ${pr.number}`,
+      },
+      req,
+    );
+    res.status(201).json(canvass);
+  }),
+);
+
+canvassRoutes.post(
+  '/:id/suppliers',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z.object({
+        supplierId: z.string().min(1),
+        leadTimeDays: z.number().int().min(0).optional().nullable(),
+        terms: z.string().optional().nullable(),
+        remarks: z.string().optional().nullable(),
+      }),
+      req.body,
+    );
+
+    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id } });
+    if (!canvass) throw notFound('Canvass not found');
+    if (canvass.status !== 'OPEN') throw badRequest('This canvass has been awarded');
+
+    const clash = await prisma.canvassSupplier.findFirst({
+      where: { canvassId: canvass.id, supplierId: body.supplierId },
+    });
+    if (clash) throw badRequest('That supplier is already on this canvass');
+
+    await prisma.canvassSupplier.create({
+      data: {
+        canvassId: canvass.id,
+        supplierId: body.supplierId,
+        leadTimeDays: body.leadTimeDays ?? null,
+        terms: body.terms || null,
+        remarks: body.remarks || null,
+      },
+    });
+    const full = await loadCanvass(canvass.id);
+    res.status(201).json(full);
+  }),
+);
+
+canvassRoutes.put(
+  '/:id/suppliers/:supplierRowId/quotes',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z.object({
+        quotes: z.array(z.object({ requestItemId: z.string(), unitPrice: z.number().min(0) })),
+      }),
+      req.body,
+    );
+
+    const row = await prisma.canvassSupplier.findFirst({
+      where: { id: req.params.supplierRowId, canvassId: req.params.id },
+      include: { canvass: true },
+    });
+    if (!row) throw notFound('Supplier not on this canvass');
+    if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has been awarded');
+
+    await prisma.$transaction(async (tx) => {
+      await tx.canvassQuote.deleteMany({ where: { canvassSupplierId: row.id } });
+      if (body.quotes.length) {
+        await tx.canvassQuote.createMany({
+          data: body.quotes.map((qq) => ({
+            canvassSupplierId: row.id,
+            requestItemId: qq.requestItemId,
+            unitPrice: D(qq.unitPrice),
+          })),
+        });
+      }
+    });
+
+    const full = await loadCanvass(req.params.id);
+    res.json(full);
+  }),
+);
+
+canvassRoutes.delete(
+  '/:id/suppliers/:supplierRowId',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const row = await prisma.canvassSupplier.findFirst({
+      where: { id: req.params.supplierRowId, canvassId: req.params.id },
+    });
+    if (!row) throw notFound('Supplier not on this canvass');
+    await prisma.canvassSupplier.delete({ where: { id: row.id } });
+    res.json({ ok: true });
+  }),
+);
+
+/** Awarding the canvass marks the winner; the PO is raised from it after. */
+canvassRoutes.post(
+  '/:id/award/:supplierRowId',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const row = await prisma.canvassSupplier.findFirst({
+      where: { id: req.params.supplierRowId, canvassId: req.params.id },
+      include: { supplier: true, quotes: true, canvass: { include: { request: { include: { items: true } } } } },
+    });
+    if (!row) throw notFound('Supplier not on this canvass');
+    if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has already been awarded');
+    if (!row.quotes.length) throw badRequest('That supplier has not quoted anything');
+
+    await prisma.$transaction(async (tx) => {
+      await tx.canvassSupplier.updateMany({
+        where: { canvassId: req.params.id },
+        data: { isSelected: false },
+      });
+      await tx.canvassSupplier.update({ where: { id: row.id }, data: { isSelected: true } });
+      await tx.canvass.update({
+        where: { id: req.params.id },
+        data: { status: 'AWARDED', awardedAt: new Date() },
+      });
+    });
+
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: req.params.id,
+        action: 'APPROVED',
+        summary: `${row.canvass.number} awarded to ${row.supplier.name}`,
+      },
+      req,
+    );
+    res.json({ ok: true, supplier: row.supplier.name });
+  }),
+);
+
+// ════════════════════════════════════════════════════════════════════
+//  PURCHASE ORDERS
+// ════════════════════════════════════════════════════════════════════
+
+export const purchaseOrderRoutes = Router();
+purchaseOrderRoutes.use(authenticate);
+
+async function recalcPo(orderId: string, tx: Prisma.TransactionClient = prisma) {
+  const order = await tx.purchaseOrder.findUnique({
+    where: { id: orderId },
+    include: { items: true },
+  });
+  if (!order) return null;
+
+  const subtotal = cents(order.items.reduce((s, i) => s + num(i.amount), 0));
+  const rate = num(order.vatRate);
+  const vatAmount = order.vatInclusive ? cents(subtotal - subtotal / (1 + rate)) : cents(subtotal * rate);
+  const total = order.vatInclusive ? subtotal : cents(subtotal + vatAmount);
+
+  return tx.purchaseOrder.update({
+    where: { id: orderId },
+    data: { subtotal: D(subtotal), vatAmount: D(vatAmount), total: D(total) },
+  });
+}
+
+purchaseOrderRoutes.get(
+  '/',
+  requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where: Prisma.PurchaseOrderWhereInput = {};
+    if (q.filters.status) where.status = q.filters.status as Prisma.EnumPoStatusFilter['equals'];
+    if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
+    if (q.filters.jobId) where.jobId = q.filters.jobId;
+    if (q.search) {
+      where.OR = [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      prisma.purchaseOrder.findMany({
+        where,
+        include: {
+          supplier: { select: { id: true, name: true } },
+          job: { select: { id: true, number: true, name: true } },
+          request: { select: { id: true, number: true } },
+          items: { select: { quantity: true, receivedQty: true } },
+        },
+        orderBy: orderBy(q, ['number', 'orderDate', 'total', 'createdAt'], { createdAt: 'desc' }),
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+      }),
+      prisma.purchaseOrder.count({ where }),
+    ]);
+
+    res.json(
+      listResult(
+        rows.map((r) => {
+          const ordered = r.items.reduce((s, i) => s + num(i.quantity), 0);
+          const received = r.items.reduce((s, i) => s + num(i.receivedQty), 0);
+          return {
+            id: r.id,
+            number: r.number,
+            kind: r.kind,
+            status: r.status,
+            supplier: r.supplier,
+            job: r.job,
+            request: r.request,
+            orderDate: r.orderDate,
+            deliveryDate: r.deliveryDate,
+            total: num(r.total),
+            receivedPct: ordered > 0 ? cents((received / ordered) * 100) : 0,
+          };
+        }),
+        total,
+        q,
+      ),
+    );
+  }),
+);
+
+async function loadPo(id: string) {
+  return prisma.purchaseOrder.findUnique({
+    where: { id },
+    include: {
+      supplier: true,
+      job: { select: { id: true, number: true, name: true } },
+      warehouse: { select: { id: true, name: true } },
+      request: { select: { id: true, number: true, purpose: true } },
+      createdBy: { select: { id: true, name: true, position: true } },
+      items: {
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          item: { select: { id: true, code: true, name: true } },
+          costCategory: { select: { id: true, name: true } },
+        },
+      },
+      receivings: {
+        orderBy: { receivedDate: 'desc' },
+        select: {
+          id: true,
+          number: true,
+          receivedDate: true,
+          receivedBy: { select: { name: true } },
+        },
+      },
+    },
+  });
+}
+
+function presentPo(po: NonNullable<Awaited<ReturnType<typeof loadPo>>>) {
+  return {
+    ...po,
+    vatRate: num(po.vatRate),
+    subtotal: num(po.subtotal),
+    vatAmount: num(po.vatAmount),
+    total: num(po.total),
+    items: po.items.map((i) => ({
+      ...i,
+      quantity: num(i.quantity),
+      unitPrice: num(i.unitPrice),
+      amount: num(i.amount),
+      receivedQty: num(i.receivedQty),
+      outstandingQty: cents(num(i.quantity) - num(i.receivedQty)),
+    })),
+  };
+}
+
+purchaseOrderRoutes.get(
+  '/:id',
+  requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
+  handler(async (req, res) => {
+    const po = await loadPo(req.params.id);
+    if (!po) throw notFound('Purchase order not found');
+    res.json(presentPo(po));
+  }),
+);
+
+/**
+ * Raising a purchase order, optionally from an awarded canvass.
+ *
+ * From a canvass, the winning supplier's quoted prices become the order lines —
+ * the point of canvassing in the first place.
+ */
+const poSchema = z.object({
+  supplierId: z.string().min(1, 'Choose a supplier'),
+  requestId: z.string().optional().nullable(),
+  canvassId: z.string().optional().nullable(),
+  deliveryDate: z.string().optional().nullable(),
+  deliverTo: z.string().optional().nullable(),
+  terms: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+  vatInclusive: z.boolean().default(false),
+});
+
+purchaseOrderRoutes.post(
+  '/',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(poSchema, req.body);
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+
+    let pr: Awaited<ReturnType<typeof prisma.purchaseRequest.findUnique>> = null;
+    let lines: {
+      requestItemId: string | null;
+      itemId: string | null;
+      costCategoryId: string | null;
+      description: string;
+      quantity: number;
+      unit: string;
+      unitPrice: number;
+    }[] = [];
+
+    if (body.canvassId) {
+      const canvass = await prisma.canvass.findUnique({
+        where: { id: body.canvassId },
+        include: {
+          request: { include: { items: true } },
+          suppliers: { where: { isSelected: true }, include: { quotes: true } },
+        },
+      });
+      if (!canvass) throw notFound('Canvass not found');
+      if (canvass.status !== 'AWARDED') throw badRequest('Award the canvass before raising the order');
+
+      const winner = canvass.suppliers[0];
+      if (!winner) throw badRequest('That canvass has no awarded supplier');
+      if (winner.supplierId !== body.supplierId) {
+        throw badRequest('The order supplier does not match the awarded supplier');
+      }
+
+      const priced = new Map(winner.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
+      pr = canvass.request;
+      lines = canvass.request.items
+        .filter((i) => priced.has(i.id))
+        .map((i) => ({
+          requestItemId: i.id,
+          itemId: i.itemId,
+          costCategoryId: i.costCategoryId,
+          description: i.description,
+          quantity: num(i.quantity) - num(i.orderedQty),
+          unit: i.unit,
+          unitPrice: priced.get(i.id) ?? 0,
+        }))
+        .filter((l) => l.quantity > 0);
+    } else if (body.requestId) {
+      const found = await prisma.purchaseRequest.findUnique({
+        where: { id: body.requestId },
+        include: { items: true },
+      });
+      if (!found) throw notFound('Purchase request not found');
+      if (found.status !== 'APPROVED' && found.status !== 'PARTIALLY_ORDERED') {
+        throw badRequest('Only an approved request can be ordered');
+      }
+      pr = found;
+      lines = found.items
+        .map((i) => ({
+          requestItemId: i.id,
+          itemId: i.itemId,
+          costCategoryId: i.costCategoryId,
+          description: i.description,
+          quantity: num(i.quantity) - num(i.orderedQty),
+          unit: i.unit,
+          unitPrice: num(i.estimatedCost),
+        }))
+        .filter((l) => l.quantity > 0);
+    }
+
+    if (pr && !lines.length) {
+      throw badRequest('Everything on that request has already been ordered');
+    }
+
+    const po = await prisma.$transaction(async (tx) => {
+      const number = await nextNumber('purchase_order', tx);
+      const created = await tx.purchaseOrder.create({
+        data: {
+          number,
+          kind: pr?.kind ?? 'DIRECT_TO_JOB',
+          supplierId: body.supplierId,
+          requestId: pr?.id ?? null,
+          jobId: pr?.jobId ?? null,
+          warehouseId: pr?.warehouseId ?? null,
+          createdById: me.id,
+          deliveryDate: asDate(body.deliveryDate),
+          deliverTo: body.deliverTo || null,
+          terms: body.terms || null,
+          notes: body.notes || null,
+          vatRate: company?.vatRate ?? D(0.12),
+          vatInclusive: body.vatInclusive,
+          items: {
+            create: lines.map((l, i) => ({
+              requestItemId: l.requestItemId,
+              itemId: l.itemId,
+              costCategoryId: l.costCategoryId,
+              description: l.description,
+              quantity: D(l.quantity),
+              unit: l.unit,
+              unitPrice: D(l.unitPrice),
+              amount: D(cents(l.quantity * l.unitPrice)),
+              sortOrder: i,
+            })),
+          },
+        },
+      });
+      await recalcPo(created.id, tx);
+      return created;
+    });
+
+    await audit(
+      {
+        entityType: 'purchase_order',
+        entityId: po.id,
+        action: 'CREATED',
+        summary: `Raised ${po.number}${pr ? ` from ${pr.number}` : ''}`,
+      },
+      req,
+    );
+    res.status(201).json({ ...po, total: num(po.total) });
+  }),
+);
+
+const poItemSchema = z.object({
+  itemId: z.string().optional().nullable(),
+  costCategoryId: z.string().optional().nullable(),
+  description: z.string().trim().min(1),
+  quantity: z.number().positive(),
+  unit: z.string().trim().min(1).default('pcs'),
+  unitPrice: z.number().min(0),
+});
+
+async function poForEdit(id: string) {
+  const po = await prisma.purchaseOrder.findUnique({ where: { id } });
+  if (!po) throw notFound('Purchase order not found');
+  if (po.status !== 'DRAFT') {
+    throw badRequest(`${po.number} is ${po.status.toLowerCase().replace(/_/g, ' ')} and cannot be changed`);
+  }
+  return po;
+}
+
+purchaseOrderRoutes.post(
+  '/:id/items',
+  require_('gchain.purchase_orders.edit_all'),
+  handler(async (req, res) => {
+    await poForEdit(req.params.id);
+    const body = parseBody(poItemSchema, req.body);
+    const count = await prisma.purchaseOrderItem.count({ where: { orderId: req.params.id } });
+
+    await prisma.purchaseOrderItem.create({
+      data: {
+        orderId: req.params.id,
+        itemId: body.itemId || null,
+        costCategoryId: body.costCategoryId || null,
+        description: body.description,
+        quantity: D(body.quantity),
+        unit: body.unit,
+        unitPrice: D(body.unitPrice),
+        amount: D(cents(body.quantity * body.unitPrice)),
+        sortOrder: count,
+      },
+    });
+    await recalcPo(req.params.id);
+    res.status(201).json(presentPo((await loadPo(req.params.id))!));
+  }),
+);
+
+purchaseOrderRoutes.patch(
+  '/:id/items/:itemId',
+  require_('gchain.purchase_orders.edit_all'),
+  handler(async (req, res) => {
+    await poForEdit(req.params.id);
+    const body = parseBody(poItemSchema.partial(), req.body);
+    const existing = await prisma.purchaseOrderItem.findFirst({
+      where: { id: req.params.itemId, orderId: req.params.id },
+    });
+    if (!existing) throw notFound('Line not found');
+
+    const quantity = body.quantity ?? num(existing.quantity);
+    const unitPrice = body.unitPrice ?? num(existing.unitPrice);
+
+    await prisma.purchaseOrderItem.update({
+      where: { id: existing.id },
+      data: {
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.unit !== undefined ? { unit: body.unit } : {}),
+        ...(body.costCategoryId !== undefined ? { costCategoryId: body.costCategoryId || null } : {}),
+        quantity: D(quantity),
+        unitPrice: D(unitPrice),
+        amount: D(cents(quantity * unitPrice)),
+      },
+    });
+    await recalcPo(req.params.id);
+    res.json(presentPo((await loadPo(req.params.id))!));
+  }),
+);
+
+purchaseOrderRoutes.delete(
+  '/:id/items/:itemId',
+  require_('gchain.purchase_orders.edit_all'),
+  handler(async (req, res) => {
+    await poForEdit(req.params.id);
+    const existing = await prisma.purchaseOrderItem.findFirst({
+      where: { id: req.params.itemId, orderId: req.params.id },
+    });
+    if (!existing) throw notFound('Line not found');
+    await prisma.purchaseOrderItem.delete({ where: { id: existing.id } });
+    await recalcPo(req.params.id);
+    res.json(presentPo((await loadPo(req.params.id))!));
+  }),
+);
+
+purchaseOrderRoutes.patch(
+  '/:id',
+  require_('gchain.purchase_orders.edit_all'),
+  handler(async (req, res) => {
+    await poForEdit(req.params.id);
+    const body = parseBody(poSchema.partial().omit({ requestId: true, canvassId: true }), req.body);
+
+    await prisma.purchaseOrder.update({
+      where: { id: req.params.id },
+      data: {
+        ...(body.supplierId !== undefined ? { supplierId: body.supplierId } : {}),
+        ...(body.deliveryDate !== undefined ? { deliveryDate: asDate(body.deliveryDate) } : {}),
+        ...(body.deliverTo !== undefined ? { deliverTo: body.deliverTo || null } : {}),
+        ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
+        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+        ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+      },
+    });
+    await recalcPo(req.params.id);
+    res.json(presentPo((await loadPo(req.params.id))!));
+  }),
+);
+
+purchaseOrderRoutes.post(
+  '/:id/submit',
+  require_('gchain.purchase_orders.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      include: { items: true, supplier: true, job: true },
+    });
+    if (!po) throw notFound('Purchase order not found');
+    if (po.status !== 'DRAFT') throw badRequest('This order has already been submitted');
+    if (!po.items.length) throw badRequest('Add at least one line before submitting');
+
+    await prisma.purchaseOrder.update({ where: { id: po.id }, data: { status: 'PENDING_APPROVAL' } });
+
+    await submitForApproval({
+      documentType: 'purchase_order',
+      documentId: po.id,
+      documentNumber: po.number,
+      subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
+      amount: num(po.total),
+      link: `/g-chain/purchase-orders/${po.id}`,
+      requesterId: me.id,
+    });
+
+    res.json({ ok: true });
+  }),
+);
+
+/**
+ * An approved order becomes the FIRM commitment.
+ *
+ * The request's soft commitment at estimated prices is released and replaced
+ * with the order's figure at the price actually agreed. Without the release,
+ * the same material would be committed twice — once as a request, once as an
+ * order — and the project would look far more committed than it is.
+ */
+onApprovalSettled('purchase_order', async (request, outcome) => {
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { id: request.documentId },
+    include: { items: true, request: true },
+  });
+  if (!po) return;
+
+  if (outcome !== 'APPROVED') {
+    await prisma.purchaseOrder.update({ where: { id: po.id }, data: { status: 'DRAFT' } });
+    return;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.purchaseOrder.update({
+      where: { id: po.id },
+      data: { status: 'ISSUED', approvedAt: new Date(), issuedAt: new Date() },
+    });
+
+    // Mark the ordered quantities back on the request.
+    for (const line of po.items) {
+      if (!line.requestItemId) continue;
+      const reqItem = await tx.purchaseRequestItem.findUnique({ where: { id: line.requestItemId } });
+      if (!reqItem) continue;
+      await tx.purchaseRequestItem.update({
+        where: { id: line.requestItemId },
+        data: { orderedQty: D(num(reqItem.orderedQty) + num(line.quantity)) },
+      });
+    }
+
+    if (po.requestId) {
+      const reqItems = await tx.purchaseRequestItem.findMany({ where: { requestId: po.requestId } });
+      const fully = reqItems.every((i) => num(i.orderedQty) >= num(i.quantity) - 0.0005);
+      await tx.purchaseRequest.update({
+        where: { id: po.requestId },
+        data: { status: fully ? 'ORDERED' : 'PARTIALLY_ORDERED' },
+      });
+    }
+
+    if (po.kind !== 'DIRECT_TO_JOB' || !po.jobId) return;
+
+    // Release the request's soft commitment, then commit the firm figure.
+    if (po.requestId) {
+      await releaseCommitment(tx, {
+        jobId: po.jobId,
+        sourceType: 'purchase_request',
+        sourceId: po.requestId,
+        reason: `Superseded by order ${po.number}`,
+        createdById: po.createdById,
+      });
+    }
+
+    const byCategory = new Map<string, number>();
+    for (const line of po.items) {
+      if (!line.costCategoryId) continue;
+      byCategory.set(
+        line.costCategoryId,
+        (byCategory.get(line.costCategoryId) ?? 0) + num(line.amount),
+      );
+    }
+    for (const [costCategoryId, amount] of byCategory) {
+      await postJobCost(tx, {
+        jobId: po.jobId,
+        costCategoryId,
+        state: 'COMMITTED',
+        amount,
+        sourceType: 'purchase_order',
+        sourceId: po.id,
+        sourceNumber: po.number,
+        description: 'Order issued',
+        createdById: po.createdById,
+      });
+    }
+  });
+
+  await audit({
+    entityType: 'purchase_order',
+    entityId: po.id,
+    action: 'APPROVED',
+    summary: `${po.number} issued${po.kind === 'DIRECT_TO_JOB' ? ' — budget committed at order price' : ''}`,
+  });
+});
+
+purchaseOrderRoutes.delete(
+  '/:id',
+  require_('gchain.purchase_orders.delete'),
+  handler(async (req, res) => {
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { receivings: true } } },
+    });
+    if (!po) throw notFound('Purchase order not found');
+    if (po._count.receivings > 0) throw badRequest('Goods have been received against this order');
+    if (po.status !== 'DRAFT') throw badRequest('Only a draft order can be deleted');
+
+    await prisma.purchaseOrder.delete({ where: { id: req.params.id } });
+    await audit(
+      { entityType: 'purchase_order', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${po.number}` },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ── PDFs ─────────────────────────────────────────────────────────────────────
+
+purchaseOrderRoutes.get(
+  '/:id/pdf',
+  requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
+  handler(async (req, res) => {
+    const po = await loadPo(req.params.id);
+    if (!po) throw notFound('Purchase order not found');
+
+    const view = presentPo(po);
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const currency = company?.currency ?? 'PHP';
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        columns: 2,
+        fields: [
+          { label: 'Supplier', value: po.supplier.name },
+          { label: 'Deliver to', value: po.deliverTo ?? po.warehouse?.name ?? '—' },
+          { label: 'Address', value: [po.supplier.address, po.supplier.city].filter(Boolean).join(', ') || '—' },
+          { label: 'Required by', value: po.deliveryDate ? formatDate(po.deliveryDate) : '—' },
+          { label: 'Terms', value: po.terms ?? po.supplier.paymentTerms ?? '—' },
+          { label: 'Reference', value: po.request?.number ?? '—' },
+          { label: 'For', value: po.job ? `${po.job.number} — ${po.job.name}` : 'Stock replenishment' },
+          { label: 'TIN', value: po.supplier.tin ?? '—' },
+        ],
+      },
+      {
+        kind: 'table',
+        title: 'Order',
+        head: ['#', 'Description', 'Qty', 'Unit', 'Unit price', 'Amount'],
+        widths: [5, 45, 10, 9, 15, 16],
+        align: ['right', 'left', 'right', 'left', 'right', 'right'],
+        rows: view.items.map((i, n) => [
+          String(n + 1),
+          i.description,
+          String(i.quantity),
+          i.unit,
+          formatMoney(i.unitPrice, currency),
+          formatMoney(i.amount, currency),
+        ]),
+      },
+      {
+        kind: 'table',
+        head: ['', 'Amount'],
+        widths: [72, 28],
+        align: ['right', 'right'],
+        rows: po.vatInclusive
+          ? [
+              ['Total (VAT inclusive)', formatMoney(view.total, currency)],
+              [`VAT included (${(view.vatRate * 100).toFixed(0)}%)`, formatMoney(view.vatAmount, currency)],
+            ]
+          : [
+              ['Subtotal', formatMoney(view.subtotal, currency)],
+              [`VAT (${(view.vatRate * 100).toFixed(0)}%)`, formatMoney(view.vatAmount, currency)],
+              ['TOTAL', formatMoney(view.total, currency)],
+            ],
+      },
+    ];
+
+    if (po.notes) sections.push({ kind: 'text', title: 'Notes', body: po.notes });
+
+    const pdf = await renderDocument({
+      title: 'Purchase Order',
+      documentNumber: po.number,
+      date: po.orderDate,
+      reference: po.supplier.name,
+      sections,
+      signatories: [
+        { role: 'Prepared by', name: po.createdBy.name, position: po.createdBy.position ?? undefined },
+        { role: 'Approved by' },
+        { role: 'Received by' },
+      ],
+    });
+
+    await audit(
+      { entityType: 'purchase_order', entityId: po.id, action: 'EXPORTED', summary: `Printed ${po.number}` },
+      req,
+    );
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${po.number}.pdf"`);
+    res.send(pdf);
+  }),
+);
+
+purchaseRequestRoutes.get(
+  '/:id/pdf',
+  requireAny('gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own'),
+  handler(async (req, res) => {
+    const pr = await loadPr(req.params.id);
+    if (!pr) throw notFound('Purchase request not found');
+
+    // Reads straight off the loaded record — the presented shape widens its
+    // item type and loses the fields the table needs.
+    const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const currency = company?.currency ?? 'PHP';
+    const estimatedTotal = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
+
+    const pdf = await renderDocument({
+      title: 'Purchase Request',
+      documentNumber: pr.number,
+      date: pr.createdAt,
+      reference: pr.purpose,
+      sections: [
+        {
+          kind: 'fields',
+          columns: 3,
+          fields: [
+            { label: 'Type', value: pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment' },
+            { label: 'Project', value: pr.job ? `${pr.job.number} — ${pr.job.name}` : '—' },
+            { label: 'Warehouse', value: pr.warehouse?.name ?? '—' },
+            { label: 'Requested by', value: pr.requestedBy.name },
+            { label: 'Needed by', value: pr.neededBy ? formatDate(pr.neededBy) : '—' },
+            { label: 'Status', value: pr.status.replace(/_/g, ' ') },
+          ],
+        },
+        {
+          kind: 'table',
+          title: 'Items requested',
+          head: ['#', 'Description', 'Category', 'Qty', 'Unit', 'Est. cost', 'Est. amount'],
+          widths: [5, 32, 17, 9, 8, 14, 15],
+          align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
+          rows: [
+            ...pr.items.map((i, n) => [
+              String(n + 1),
+              i.description,
+              i.costCategory?.name ?? '—',
+              String(num(i.quantity)),
+              i.unit,
+              formatMoney(num(i.estimatedCost), currency),
+              formatMoney(num(i.estimatedAmount), currency),
+            ]),
+            ['', 'ESTIMATED TOTAL', '', '', '', '', formatMoney(estimatedTotal, currency)],
+          ],
+        },
+        ...(pr.notes ? [{ kind: 'text' as const, title: 'Notes', body: pr.notes }] : []),
+      ],
+      signatories: [
+        { role: 'Requested by', name: pr.requestedBy.name, position: pr.requestedBy.position ?? undefined },
+        { role: 'Checked by' },
+        { role: 'Approved by' },
+      ],
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${pr.number}.pdf"`);
+    res.send(pdf);
+  }),
+);

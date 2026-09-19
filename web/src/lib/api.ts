@@ -141,4 +141,4 @@ export interface Me {
  * screen and its phase, so this is the only place the front end needs to know
  * how far the build has got.
  */
-export const SHIPPED_PHASE = 4;
+export const SHIPPED_PHASE = 5;
