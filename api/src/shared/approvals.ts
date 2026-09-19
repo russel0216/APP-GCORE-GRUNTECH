@@ -37,7 +37,21 @@ export function onApprovalSettled(documentType: string, fn: Listener): void {
 }
 
 async function emitSettled(req: ApprovalRequest, outcome: ApprovalOutcome): Promise<void> {
-  for (const fn of listeners.get(req.documentType) ?? []) {
+  const subscribers = listeners.get(req.documentType) ?? [];
+
+  // A settled approval with nobody listening is a silent data inconsistency:
+  // the decision is recorded, but whatever it was supposed to trigger — marking
+  // a revision approved, posting overtime to a job budget — never happens.
+  // Subscriptions register as a side effect of importing a module, so a change
+  // to the import graph can break this without any other symptom.
+  if (subscribers.length === 0) {
+    console.warn(
+      `Approval ${req.id} for "${req.documentType}" settled as ${outcome} with no subscriber. ` +
+        `If that document type is meant to react, its module may not be imported.`,
+    );
+  }
+
+  for (const fn of subscribers) {
     try {
       await fn(req, outcome);
     } catch (err) {

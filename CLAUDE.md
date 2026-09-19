@@ -45,15 +45,23 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && npx tsx scripts/verify-foundation.ts && npx tsx scripts/verify-masters.ts
+cd api && for s in foundation masters sales; do npx tsx scripts/verify-$s.ts; done
 ```
 
-80 assertions across permission resolution, numbering concurrency, the approval
+108 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
-engine, CSV parsing and the import contract. Both create their own records and
-clean up. Run them after touching anything in `api/src/shared/` or
-`api/src/permissions/`. Add cases when you add a shared service — the services
-have no click-path to test them, which is exactly why these scripts exist.
+engine, CSV parsing, the import contract, and Phase 3's money paths (contract
+amount, schedule-of-values reconciliation, VAT both ways, revision immutability).
+All create their own records and clean up. Run them after touching anything in
+`api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
+service — the services have no click-path to test them, which is exactly why
+these scripts exist.
+
+`verify-sales.ts` imports `src/routes/sales` purely for its side effect, because
+that import is what registers the quotation's `onApprovalSettled` subscriber. If
+a test ever needs an approval outcome to do something, it must import the module
+that subscribes — otherwise the approval settles into the void, and the engine
+warns about exactly that.
 
 ## Local development
 
@@ -120,9 +128,10 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1 (foundation) and 2 (masters) are done. Next is Phase 3 — sales: leads,
-the sales calendar, quotations with revisions, costing and the pipeline. Full
-sequence with acceptance criteria in `docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+Phases 1 (foundation), 2 (masters) and 3 (sales) are done. Next is Phase 4 —
+delivery: Job, budget, schedule of values, plans, tasks, progress reports, the
+S-curve and progress billing. Full sequence with acceptance criteria in
+`docs/BUSINESS-OPERATIONS-MODEL.md` §11.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
 phase's screens from "upcoming" to live. Bump it when a phase lands.
@@ -144,3 +153,26 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **Deleting a master** is fine today because nothing references them. From
   Phase 3 onward, a customer with quotations or a supplier with POs must be
   deactivated, not deleted — commercial history cannot lose its counterparty.
+
+## Phase 3 notes worth carrying forward
+
+- **ScopeSection is both the scope of work AND the Schedule of Values.** One
+  record, deliberately. Phase 4 reports progress against these sections, bills
+  against them and draws the S-curve from their durations. Do not add a parallel
+  SOV table.
+- **The SOV must total the contract value.** `POST /costings/:id/sections/
+  distribute` reconciles it, putting the rounding remainder on the last section
+  so the sum is exact rather than a centavo out.
+- **No Opportunity entity.** The requirements treat the opportunity as the lead
+  until a quotation exists, so the pipeline is a view over leads + quotations.
+  Do not introduce a third record to keep in step.
+- **A revision leaves DRAFT and never comes back.** Approved, rejected and
+  superseded revisions reject edits at the route. Raise a new revision instead —
+  that is what revision control is for.
+- **Only one revision per quotation may be APPROVED**; approving supersedes any
+  earlier approved one, inside a transaction.
+- **A costing marked FINAL rejects edits** except the status change that reopens
+  it. An approved quotation and, in Phase 4, a project budget derive from it.
+- **`vatRate` is snapshotted onto each revision** so an old revision still prints
+  the tax it was issued with after Settings change. Same principle will apply to
+  billing in Phase 7.

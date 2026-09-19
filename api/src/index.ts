@@ -35,6 +35,13 @@ import {
   warehouseRoutes,
 } from './routes/masters';
 import { importRoutes } from './routes/imports';
+import { costingRoutes } from './routes/costing';
+import {
+  leadRoutes,
+  quotationRoutes,
+  activityRoutes,
+  pipelineRoutes,
+} from './routes/sales';
 
 const app = express();
 
@@ -87,6 +94,13 @@ app.use('/api/items', itemRoutes);
 app.use('/api/reference', referenceRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/imports', importRoutes);
+
+// Sales (Phase 3)
+app.use('/api/leads', leadRoutes);
+app.use('/api/costings', costingRoutes);
+app.use('/api/quotations', quotationRoutes);
+app.use('/api/activities', activityRoutes);
+app.use('/api/pipeline', pipelineRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

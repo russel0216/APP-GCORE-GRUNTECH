@@ -199,6 +199,98 @@ registerSearch({
   },
 });
 
+// ── Phase 3: sales ───────────────────────────────────────────────────────────
+
+registerSearch({
+  kind: 'lead',
+  label: 'Leads',
+  permission: 'gops.leads.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.lead.findMany({
+      where: {
+        OR: [
+          { companyName: { contains: term, mode: 'insensitive' } },
+          { number: { contains: term, mode: 'insensitive' } },
+          { contactPerson: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, companyName: true, status: true },
+    });
+    return rows.map((r) => ({
+      kind: 'lead',
+      id: r.id,
+      title: r.companyName,
+      subtitle: `${r.number} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
+      link: `/g-ops/leads/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'quotation',
+  label: 'Quotations',
+  permission: 'gops.quotations.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.quotation.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { subject: { contains: term, mode: 'insensitive' } },
+          { customer: { name: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        subject: true,
+        outcome: true,
+        customer: { select: { name: true } },
+      },
+    });
+    return rows.map((r) => ({
+      kind: 'quotation',
+      id: r.id,
+      title: `${r.number} — ${r.subject}`,
+      subtitle: `${r.customer.name} · ${r.outcome.toLowerCase()}`,
+      link: `/g-ops/quotations/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'costing',
+  label: 'Costings',
+  permission: 'gops.costing.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.costing.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { title: { contains: term, mode: 'insensitive' } },
+          { customer: { name: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, number: true, title: true, contractValue: true },
+    });
+    return rows.map((r) => ({
+      kind: 'costing',
+      id: r.id,
+      title: r.title,
+      subtitle: `${r.number} · ${new Intl.NumberFormat('en-PH', {
+        style: 'currency',
+        currency: 'PHP',
+      }).format(Number(r.contractValue))}`,
+      link: `/g-ops/costing/${r.id}`,
+    }));
+  },
+});
+
 registerSearch({
   kind: 'approval',
   label: 'Approvals',

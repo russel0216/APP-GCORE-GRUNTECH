@@ -44,9 +44,42 @@ previous implementation traces back to its absence.
 | Warehouses and locations | `/g-chain/warehouses` |
 | **CSV import** for all four masters | Import button on each list |
 
-Screens from Phases 3–9 appear in the menu marked with their phase. Their
+**Phase 3 — Sales.** Lead → costing → quotation → approved.
+
+| Capability | Where |
+|---|---|
+| Leads, assignable, with status and weighted value | `/g-ops/leads` |
+| **Costing** — five cost buckets, markup, contract amount | `/g-ops/costing` |
+| **Schedule of values** — scope of work that billing is measured against | Costing → Scope of work |
+| Quotations with preserved revisions | `/g-ops/quotations` |
+| Quotation approval through the shared engine | Submit for approval |
+| Quotation and costing PDFs | Print on either screen |
+| Sales calendar, a week per screen | `/g-ops/calendar` |
+| Pipeline with weighted value | `/g-ops/pipeline` |
+
+Screens from Phases 4–9 appear in the menu marked with their phase. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
+
+### The costing → billing backbone
+
+This is the part worth understanding before using it.
+
+A costing holds two things that must agree. **Cost lines** in the five buckets
+give the total cost; markup and discount turn that into the **contract amount**.
+Separately, the **scope of work** breaks that contract amount into sections —
+typically main work, testing & commissioning, turnover — each with a duration
+and a value.
+
+Those scope sections *are* the Schedule of Values. In Phase 4 they become what
+progress is reported against, what progress billing bills, and what the S-curve
+is measured on. So their total has to equal the contract value: the costing
+screen says so plainly, and **Spread contract value** reconciles them to the
+centavo (the rounding remainder lands on the last section).
+
+From a quotation, **Fill from costing** turns those same sections into the
+quotation's lines. Quote what you scoped, and the numbers carry through to
+billing without anyone retyping them.
 
 ### About the CSV import
 
@@ -114,8 +147,22 @@ bad row blocks the file, re-import updates rather than duplicates), the
 permission gate on employee pay, master numbering under concurrency, and that
 global search never returns a record kind the user cannot open.
 
-Both scripts create their own records and clean up after themselves. Run them
-after touching anything in `api/src/shared/` or `api/src/permissions/`.
+```bash
+cd api && npx tsx scripts/verify-sales.ts
+```
+
+28 assertions for Phase 3, concentrated on the money: how the contract amount
+is reached, that margin is profit over contract and not over cost, that the
+schedule of values reconciles to the centavo on an awkward figure, VAT computed
+both inclusive and exclusive, record ownership, that an author cannot approve
+their own quotation, and that a superseded revision keeps its own totals.
+
+All three create their own records and clean up after themselves. Run them after
+touching anything in `api/src/shared/` or `api/src/permissions/`.
+
+> They consume real numbering sequences, so after a few runs your quotation
+> numbers will be well past 0001. That only affects this laptop — the server
+> starts from a fresh seed.
 
 ### Useful commands
 
