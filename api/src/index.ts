@@ -80,6 +80,7 @@ import {
   serviceReportRoutes,
   aftermarketRoutes,
 } from './routes/aftermarket';
+import { insightRoutes } from './routes/insights';
 
 const app = express();
 
@@ -179,6 +180,9 @@ app.use('/api/service-visits', visitRoutes);
 app.use('/api/report-templates', templateRoutes);
 app.use('/api/service-reports', serviceReportRoutes);
 app.use('/api/aftermarket', aftermarketRoutes);
+
+// Insights (Phase 9) — read-only reporting across every division
+app.use('/api/insights', insightRoutes);
 
 app.use('/api', (_req, _res, next) => next(notFound('No such endpoint')));
 

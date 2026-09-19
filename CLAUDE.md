@@ -45,18 +45,19 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales delivery chain hr finance aftermarket; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales delivery chain hr finance aftermarket insights; do npx tsx scripts/verify-$s.ts; done
 ```
 
-393 assertions across permission resolution, numbering concurrency, the approval
+473 assertions across permission resolution, numbering concurrency, the approval
 engine, the overtime two-step rule, amount bands, the audit trail, the PDF
 engine, CSV parsing, the import contract, Phase 3's money paths (contract
 amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
 Phase 6's HR arithmetic and face pipeline, Phase 7's tax, aging and allocation
-arithmetic, and Phase 8's schedule dates and template versioning. `verify-hr.ts`,
-`verify-finance.ts` and `verify-aftermarket.ts` need the API running: their
-route guards are checked over HTTP, and they say so loudly rather than skipping
-them if the API is down. All create their own records and clean
+arithmetic, Phase 8's schedule dates and template versioning, and Phase 9's
+reconciliation between the reports and the records. `verify-hr.ts`,
+`verify-finance.ts`, `verify-aftermarket.ts` and `verify-insights.ts` need the
+API running: their route guards are checked over HTTP, and they say so loudly
+rather than skipping them if the API is down. All create their own records and clean
 up. Run them after touching anything in
 `api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
 service — the services have no click-path to test them, which is exactly why
@@ -138,12 +139,17 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-Phases 1–8 are done. Next is Phase 9 — Intelligence: the executive dashboard,
-project profitability, pipeline analytics, the cash forecast, inventory
-analytics and performance reports. Its acceptance criterion is that management
-answers questions without exporting to Excel, so it is a reporting layer over
-what the first eight phases already record — not new records. Full sequence in
-`docs/BUSINESS-OPERATIONS-MODEL.md` §11.
+**All nine phases are built.** The sequence in
+`docs/BUSINESS-OPERATIONS-MODEL.md` §11 is complete.
+
+What is left is not more phases. It is: deploying to the server under the
+constraints below, assigning the seeded roles to real people (run
+`scripts/audit-workflows.ts` — approvals route to roles, and an unheld role
+means documents stall), entering real master data, and the two open questions
+in model §14 (retention/downpayment, and whether Gruntech withholds from
+suppliers). Treat further work as changes to a live system rather than as
+phases: add a case to the matching `verify-*.ts` for anything that touches
+`api/src/shared/`.
 
 `SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
 phase's screens from "upcoming" to live. Bump it when a phase lands.
@@ -346,3 +352,36 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **The three report menus are one screen.** Commissioning, PM and Inspection
   are `kind` filters over `ServiceReport`; what differs between them lives in
   the template, which is data.
+
+## Phase 9 notes worth carrying forward
+
+- **Insights adds NO tables, and must never acquire one.** Every figure is read
+  off documents the other phases record. The moment a report keeps its own copy
+  of a number, it gains the ability to disagree with the document behind it —
+  which is the whole failure mode this layer exists to avoid. The router ends
+  with a middleware that refuses any non-GET request, and there is a test for it.
+- **Where a report disagrees with a module screen, the report is wrong.**
+  `verify-insights.ts` asserts profitability against the ledger read directly,
+  and the company overview against the sales report. Add a reconciliation
+  assertion whenever you add a figure that also appears somewhere else.
+- **A quotation's value is its latest APPROVED revision, else its latest.** The
+  overview briefly counted only approved ones and showed an open quotation as
+  worth nothing while Sales Analytics showed its real value. Two screens
+  disagreeing is the bug this module is most prone to.
+- **Say when a number is not yet meaningful.** `tooEarly` flags a job that has
+  spent under 20% of its budget, because its running margin is ~100% and that is
+  true and useless. Screens lead with EXPECTED margin, which comes from the
+  budget and means something on day one.
+- **Slow-moving stock ranks by VALUE, not age.** A thousand idle washers matter
+  less than one idle compressor, and sorting by age buries the compressor.
+- **The cash forecast counts what is waiting on US** — approved billings nobody
+  invoiced, and issued purchase orders nobody has billed us for. A forecast
+  built only from invoices flatters the position on both sides.
+- **Performance is about output, never attendance.** Lateness and leave stay in
+  G-HR behind HR's permissions. Aggregating them into a management league table
+  would turn a payroll record into a surveillance tool without anybody deciding
+  to. The approval-bottleneck view is the useful half anyway.
+- **Every report has a `.csv` twin, and the export is audited before the bytes
+  go out.** An export that failed to be logged should not have happened.
+- **Each role gets the cross-cutting view its job needs**; only `executive` sees
+  all of them, because Insights aggregates margin.

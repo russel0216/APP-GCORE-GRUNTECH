@@ -1478,3 +1478,30 @@ hr.rule {
   font-size: 13px;
   min-height: 36px;
 }
+
+/* ────────────────────────── Insights: small bars ───────────────────────── */
+
+/* A bar whose width is a share of the largest value beside it. Two stacked
+   bars compare far faster than two columns of figures do. */
+.mini-bar {
+  height: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.mini-bar-fill {
+  height: 100%;
+  background: rgba(57, 255, 157, 0.5);
+  border-radius: 2px;
+}
+
+/* A quiet heading that groups tiles without competing with the page title. */
+.section-label {
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 9px;
+  font-weight: 600;
+}

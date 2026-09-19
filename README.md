@@ -130,7 +130,22 @@ previous implementation traces back to its absence.
 | **Renewals** — contracts ending and warranties lapsing | `/g-ops/renewals` |
 | Service costing | `/g-ops/service-costing` |
 
-Screens from Phase 9 appear in the menu marked with their phase. Their
+**Phase 9 — Insights.** Management reporting across every division.
+
+| Capability | Where |
+|---|---|
+| **Company overview** — the whole business on one screen | `/insights` |
+| Twelve-month trend: won, billed, collected, cost | Overview |
+| **Project profitability** with a watchlist | `/insights/profitability` |
+| **Sales analytics** — funnel, win rates, weighted pipeline | `/insights/pipeline` |
+| **Cash forecast** including work earned but not invoiced | `/insights/cash-forecast` |
+| **Inventory analytics** — slow movers by value, reorder | `/insights/inventory` |
+| Performance and the approval bottleneck | `/insights/performance` |
+| A CSV twin of every report | Export on each screen |
+
+Insights adds **no tables**. Every figure is read off documents the other eight
+phases record, which is the only way a management report can never disagree
+with the records behind it. Their
 **access and numbering are already configurable**, so the surrounding
 configuration is in place before the screen arrives.
 
@@ -314,7 +329,19 @@ rules that protect a record of what happened — **regenerating a schedule never
 erases a visit that was made**, and **a template that has been used is
 immutable**, so a report from two years ago still renders the way it was signed.
 
-All eight create their own records and clean up after themselves. Run them after
+```bash
+cd api && npx tsx scripts/verify-insights.ts
+```
+
+80 assertions for Phase 9. Since it adds no records, they are about the thing a
+reporting layer gets wrong instead: **reconciliation**. Profitability read
+through the report equals the ledger read directly, to the centavo, on awkward
+figures. The company overview and the sales report show the same pipeline
+total. A job that has spent 1% of its budget is flagged as too early to judge
+rather than reporting a 99% margin. Slow-moving stock ranks by value, not age.
+And the whole module refuses to write anything at all.
+
+All nine create their own records and clean up after themselves. Run them after
 touching anything in `api/src/shared/` or `api/src/permissions/`.
 
 ### Checking your approval routing

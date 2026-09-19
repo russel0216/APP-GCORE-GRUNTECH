@@ -76,6 +76,13 @@ import {
   AftermarketDashboard,
   ServiceCosting,
 } from './pages/service/Templates';
+import { CompanyOverview, Profitability } from './pages/insights/Overview';
+import {
+  SalesAnalytics,
+  CashForecast,
+  InventoryAnalytics,
+  PerformanceReport,
+} from './pages/insights/Reports';
 
 /**
  * Route guard. Permission checks live on the server — this only decides what to
@@ -827,6 +834,56 @@ function Routed() {
         <Route path="/g-ops/commissioning" element={<Navigate to="/g-ops/service-reports?kind=COMMISSIONING" replace />} />
         <Route path="/g-ops/pm" element={<Navigate to="/g-ops/service-reports?kind=PREVENTIVE_MAINTENANCE" replace />} />
         <Route path="/g-ops/inspections" element={<Navigate to="/g-ops/service-reports?kind=INSPECTION" replace />} />
+
+        {/* Insights (Phase 9) — read-only reporting across every division */}
+        <Route
+          path="/insights"
+          element={
+            <Guard permission="insights.dashboard.view_all">
+              <CompanyOverview />
+            </Guard>
+          }
+        />
+        <Route
+          path="/insights/profitability"
+          element={
+            <Guard permission="insights.profitability.view_all">
+              <Profitability />
+            </Guard>
+          }
+        />
+        <Route
+          path="/insights/pipeline"
+          element={
+            <Guard permission="insights.pipeline.view_all">
+              <SalesAnalytics />
+            </Guard>
+          }
+        />
+        <Route
+          path="/insights/cash-forecast"
+          element={
+            <Guard permission="insights.cash.view_all">
+              <CashForecast />
+            </Guard>
+          }
+        />
+        <Route
+          path="/insights/inventory"
+          element={
+            <Guard permission="insights.inventory.view_all">
+              <InventoryAnalytics />
+            </Guard>
+          }
+        />
+        <Route
+          path="/insights/performance"
+          element={
+            <Guard permission="insights.performance.view_all">
+              <PerformanceReport />
+            </Guard>
+          }
+        />
 
         {/* Screens whose module ships in a later phase — their access and
             numbering are already configurable, so this is a signpost, not a 404. */}

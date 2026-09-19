@@ -68,7 +68,14 @@ const ROLES: RoleSeed[] = [
       ['gops', 'pipeline'],
       ['gops', 'costing'],
     ],
-    only: ['gops.dashboard.view_all', 'gops.projects.view_all', 'gops.projects.export'],
+    only: [
+      'gops.dashboard.view_all',
+      'gops.projects.view_all',
+      'gops.projects.export',
+      // The pipeline analytics are their own numbers, seen whole.
+      'insights.pipeline.view_all',
+      'insights.pipeline.export',
+    ],
   },
   {
     key: 'project_manager',
@@ -86,6 +93,9 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.customers.view_all',
+      // Margin on the projects they run.
+      'insights.profitability.view_all',
+      'insights.profitability.export',
       'gops.installed_base.view_all',
       'gops.visits.view_all',
       'gops.quotations.view_all',
@@ -177,6 +187,7 @@ const ROLES: RoleSeed[] = [
       ['gchain', 'reports'],
     ],
     only: [
+      'insights.inventory.view_all',
       'gchain.dashboard.view_all',
       'gchain.purchase_requests.view_all',
       'gchain.purchase_requests.edit_all',
@@ -195,6 +206,8 @@ const ROLES: RoleSeed[] = [
       ['gchain', 'inventory'],
     ],
     only: [
+      'insights.inventory.view_all',
+      'insights.inventory.export',
       'gchain.dashboard.view_all',
       'gchain.purchase_orders.view_all',
       'gchain.reports.view_all',
@@ -217,6 +230,11 @@ const ROLES: RoleSeed[] = [
       ['gfin', 'payments'],
     ],
     only: [
+      'insights.dashboard.view_all',
+      'insights.profitability.view_all',
+      'insights.profitability.export',
+      'insights.cash.view_all',
+      'insights.cash.export',
       'gops.projects.view_all',
       'gops.progress_billing.view_all',
       'gops.customers.view_all',

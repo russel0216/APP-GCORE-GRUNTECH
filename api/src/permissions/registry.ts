@@ -192,6 +192,24 @@ export const REGISTRY: ModuleDef[] = [
     ],
   },
   {
+    // Phase 9. Deliberately a module of its own: these are the questions that
+    // cross module boundaries, and no single division's dashboard can answer
+    // them. It adds NO tables — every figure here is read off documents the
+    // other eight phases already record, which is the only way the numbers can
+    // never disagree with the records behind them.
+    key: 'insights',
+    label: 'Insights',
+    blurb: 'Management reporting across every division',
+    submodules: [
+      { key: 'dashboard', label: 'Company Overview', path: '/insights', actions: READ, phase: 9 },
+      { key: 'profitability', label: 'Project Profitability', path: '/insights/profitability', actions: READ, phase: 9 },
+      { key: 'pipeline', label: 'Sales Analytics', path: '/insights/pipeline', actions: READ, phase: 9 },
+      { key: 'cash', label: 'Cash Forecast', path: '/insights/cash-forecast', actions: READ, phase: 9 },
+      { key: 'inventory', label: 'Inventory Analytics', path: '/insights/inventory', actions: READ, phase: 9 },
+      { key: 'performance', label: 'Performance', path: '/insights/performance', actions: READ, phase: 9 },
+    ],
+  },
+  {
     key: 'admin',
     label: 'Admin',
     blurb: 'Users, roles, workflows and company configuration',

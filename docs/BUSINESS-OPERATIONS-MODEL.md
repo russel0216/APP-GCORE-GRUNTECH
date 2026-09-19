@@ -524,6 +524,13 @@ G-CORE
 │   ├── Borrow Slips ............ due dates, overdue flags
 │   ├── Inventory ............... item master, stock card, reorder levels
 │   └── Reports
+├── INSIGHTS  (Phase 9 — read-only, no tables of its own)
+│   ├── Company Overview ........ every division on one screen + 12-month trend
+│   ├── Project Profitability ... expected vs running margin, watchlist
+│   ├── Sales Analytics ......... funnel, win rates, weighted pipeline
+│   ├── Cash Forecast ........... including work earned but not yet invoiced
+│   ├── Inventory Analytics ..... slow movers by value, reorder, throughput
+│   └── Performance ............. output by person, and the approval bottleneck
 └── ADMIN / SETTINGS
     ├── Users · Roles & Permissions · Approval Workflows
     ├── Company Settings ........ name, logo, address, TIN — drives every PDF
@@ -607,6 +614,12 @@ retention (§5.4) — schema shape reserved, behaviour not built.
 **Phases 1 and 2 are not optional and cannot be deferred.** Every defect in the
 current gasiontech implementation traces back to their absence.
 
+**All nine phases are built** as of 19 September 2026, with 473 assertions
+across nine verification scripts. What remains is not further phases: it is
+deployment under the constraints in §12, assigning the seeded roles to real
+people so approvals have somewhere to route, entering real master data, and the
+open questions in §14. From here, treat changes as changes to a live system.
+
 ---
 
 ## 12. Architecture & deployment
@@ -666,6 +679,8 @@ the dev box.
 | 8 | **A/R and A/P balances are measured against net collectible and net payable**, never against the invoice or bill total. Withheld tax is reported in its own column and chased as a certificate; it is not a debt. A payment is checked against what is still owed before it is written, and settled totals are re-derived from the allocation rows rather than incremented, so reversing a payment cannot leave a stale balance. | 2026-09-19 |
 | 9 | **A service contract is a Job of type SERVICE_CONTRACT, not a new commercial record.** Its costing, budget, schedule of values and progress billing are the existing machinery. `ServiceContract` is a one-to-one extension carrying only the coverage terms — what equipment, how often, until when — because those are the questions a job cannot answer. Service Costing is the costing list narrowed to service jobs, for the same reason. | 2026-09-19 |
 | 10 | **A report template that has been used is immutable.** Editing publishes a new version under the same key; reports keep pointing at the exact version they were filled in on, so a report signed two years ago still renders the way it was signed. A visit is complete only when its report has been APPROVED — marking it done when the engineer left site would count a visit nobody has checked. | 2026-09-19 |
+| 11 | **Insights adds no tables.** Phase 9 is a read layer: every figure is computed from documents the other eight phases record, and the module refuses any non-GET request. A report that keeps its own copy of a number gains the ability to disagree with the document behind it, which is the one failure a management report cannot survive. Where a report and a module screen disagree, the report is wrong. | 2026-09-19 |
+| 12 | **A number that is not yet meaningful says so.** Running margin on a job that has spent 2% of its budget is ~100% — arithmetically true, completely misleading. Every screen leads with EXPECTED margin, from the budget, and flags a job as too early to judge rather than reporting the useless figure silently. | 2026-09-19 |
 
 ## 14. Still open
 
