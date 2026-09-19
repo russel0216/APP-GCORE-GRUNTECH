@@ -206,6 +206,20 @@ Get-Service Cloudflared                   # gasiontech's tunnel — should be Ru
 docker ps --filter name=gasion_db         # the other database — should be up
 ```
 
+## Locked out of the admin account
+
+```powershell
+cd C:\G-CORE-GRUNTECH\api
+npx tsx scripts\reset-password.ts admin@gruntech.com
+```
+
+Prints a generated password once. With no arguments it lists the accounts on
+the database. It says loudly when the database is a production one, and writes
+every reset to the audit log - "who changed the managing director's password,
+and when" is exactly what an audit trail is for.
+
+Needing shell access to run it is the design, not a gap.
+
 ## Rolling back
 
 ```powershell

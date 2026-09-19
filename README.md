@@ -392,6 +392,20 @@ G-Core Gruntech owns exactly this and nothing else: `C:\G-CORE-GRUNTECH`, port
 5100, the `GCoreGruntechApi` scheduled task, the `gcore-gruntech-db` container,
 and the `gcore-gruntech` tunnel.
 
+### Locked out
+
+There is no "forgot password" e-mail — that would need an SMTP account, a token
+table and a public endpoint, which is three things to secure for a problem
+shell access already solves.
+
+```bash
+cd api && npx tsx scripts/reset-password.ts admin@gruntech.com
+```
+
+Generates a password and prints it once. Pass one as a second argument to
+choose it yourself. Run it with no arguments to list the accounts on the
+database. Every reset is written to the audit log.
+
 ### Useful commands
 
 ```bash
