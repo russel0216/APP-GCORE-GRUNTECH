@@ -56,6 +56,18 @@ is already using the ports and names this deployment wants.
 powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\preflight.ps1
 ```
 
+Every script here works out where it is from its own location, so if the
+repository is somewhere else - a laptop, a folder somebody renamed - point the
+command at wherever `deploy` actually is and it will check *that* installation.
+It prints which one at the top, so there is no doubt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Users\<you>\Desktop\APP-GCORE GRUNTECH\deploy\preflight.ps1"
+```
+
+That also means you can dry-run the preflight on the development machine before
+going anywhere near the server.
+
 Fix anything it reports before going on.
 
 ### 1. Prerequisites

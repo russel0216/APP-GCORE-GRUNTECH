@@ -374,6 +374,11 @@ Read-only. It reports what is already using the ports, container names and task
 names this deployment wants, and whether the neighbouring system is healthy. Run
 it before installing, and any time a rebuild behaves oddly.
 
+Each script works out where it is from its own location, so that path is only
+the *server* one. On the development machine, point it at the repository you
+actually have - it prints which installation it is checking, and dry-running it
+there is a reasonable thing to do.
+
 | | |
 |---|---|
 | `preflight.ps1` | Changes nothing. Says what would collide. |
