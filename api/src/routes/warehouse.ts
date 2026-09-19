@@ -1105,6 +1105,7 @@ stockIssueRoutes.get(
     const pdf = await renderDocument({
       title: 'Stock Issuance',
       documentNumber: issue.number,
+      trace: { createdAt: issue.createdAt, createdBy: issue.issuedBy?.name },
       date: issue.issueDate,
       reference: issue.job ? `${issue.job.number} — ${issue.job.name}` : issue.purpose,
       sections: [

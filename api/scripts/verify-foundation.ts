@@ -13,13 +13,14 @@
  * against a development database; it refuses to run against production.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, pendingFor, onApprovalSettled } from '../src/shared/approvals';
-import { renderDocument } from '../src/shared/pdf';
+import { renderDocument, formatElapsed } from '../src/shared/pdf';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -419,6 +420,80 @@ async function main() {
   const pageCount = Number((pdf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
   check('long content paginates without runaway pages', pageCount === 2, `${pageCount} pages`);
 
+  // ── 8. The document trail ──────────────────────────────────────────────────
+  console.log('\nDocument trail');
+
+  // How long each step took is the whole reason the trail is printed, so the
+  // formatting of a duration is worth pinning down.
+  check('a duration under a minute says so', formatElapsed(30_000) === 'under a minute');
+  check('minutes stay minutes', formatElapsed(45 * 60_000) === '45m');
+  check('hours carry their minutes', formatElapsed((5 * 60 + 48) * 60_000) === '5h 48m');
+  check('a day and a bit reads as days', formatElapsed((28 * 60 + 24) * 60_000) === '1d 4h');
+
+  const traced = await renderDocument({
+    title: 'Traced Document',
+    documentNumber: 'GT-OT-2026-0001',
+    sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
+    trace: {
+      createdAt: ot.createdAt,
+      createdBy: employee.name,
+      documentType: 'overtime_request',
+      documentId: `${TAG}-ot-1`,
+    },
+  });
+  const tracedText = pdfText(traced);
+
+  check('the trail is printed', tracedText.includes('DOCUMENT TRAIL'));
+
+  // The signature block pins itself to the foot of the page, so the trail has
+  // to be reserved for rather than appended — it was costing every document an
+  // extra page until the signatures were told to sit higher.
+  const pages = (buf: Buffer) => Number((buf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
+  check('the trail does not cost the document a page', pages(traced) === 1, `${pages(traced)} pages`);
+
+  check('it records when the document was raised', tracedText.includes('Raised'));
+  check('the requester is named', tracedText.includes(employee.name));
+  check(
+    'every approval step appears, so a slow one can be found',
+    tracedText.includes('Step 1') && tracedText.includes('Step 2'),
+  );
+  check(
+    'each approver is named against their step',
+    tracedText.includes(supervisor.name) && tracedText.includes(hrPerson.name),
+  );
+  check('the total time from raised to approved is printed', tracedText.includes('Raised to approved'));
+
+  // A PDF is a snapshot; two copies that disagree are only tellable apart by
+  // when each was taken.
+  check('every document says when it was printed', tracedText.includes('Printed'));
+
+  // The document types with no approval step must SAY so. A blank where the
+  // approval should be reads as "approved, time unknown".
+  const untraced = await renderDocument({
+    title: 'Unapproved Document',
+    sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
+    trace: { createdAt: new Date(), createdBy: employee.name },
+  });
+  check(
+    'a document with no approval step says so rather than leaving a blank',
+    pdfText(untraced).includes('no approval step'),
+  );
+
+  // Still pending: the trail has to show the step it is sitting on, because a
+  // document stuck for three days is exactly what this is for.
+  const pendingDoc = await renderDocument({
+    title: 'Pending Document',
+    sections: [{ kind: 'fields', fields: [{ label: 'Checked', value: 'Yes' }] }],
+    trace: {
+      createdAt: large.createdAt,
+      documentType: 'purchase_request',
+      documentId: large.documentId,
+    },
+  });
+  const pendingText = pdfText(pendingDoc);
+  check('a document still in the chain shows what it is waiting on', pendingText.includes('awaiting'));
+  check('and how long it has been waiting', pendingText.includes('waiting'));
+
   // ── Done ───────────────────────────────────────────────────────────────────
   await cleanup();
 
@@ -433,3 +508,47 @@ main()
     process.exitCode = 1;
   })
   .finally(() => prisma.$disconnect());
+
+/**
+ * Readable text out of a rendered PDF.
+ *
+ * PDFKit Flate-compresses its content streams, so the words are not in the raw
+ * bytes — which is why the older assertions here could only count page objects
+ * and never what those pages said.
+ *
+ * Two things to know about what comes out of the inflate. PDFKit writes text as
+ * `[<hex> kern <hex>] TJ` rather than `(literal) Tj`, and it splits a run at
+ * every kerning pair — so "Marikina" arrives as `<4d6172> -15 <696b696e61>`.
+ * Both halves of one TJ array belong to the same word, so they are joined with
+ * nothing between them and only whole operators are separated.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue; // not every stream is text, and a font program is not a failure
+    }
+
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1]
+          ? Buffer.from(part[1], 'hex').toString('latin1')
+          : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}

@@ -540,6 +540,14 @@ progressRoutes.get(
     const pdf = await renderDocument({
       title: 'Progress Report',
       documentNumber: report.number,
+      // A progress report is approved on the record by one person rather than
+      // through the workflow engine, so its trail comes from those two fields.
+      trace: {
+        createdAt: report.createdAt,
+        createdBy: report.preparedBy.name,
+        approvedAt: report.approvedAt,
+        approvedBy: report.approvedBy?.name,
+      },
       date: report.periodTo,
       reference: `${report.job.number} — ${report.job.name}  ·  Report #${report.reportNo}`,
       sections,
@@ -860,6 +868,7 @@ billingRoutes.get(
     const pdf = await renderDocument({
       title: 'Progress Billing',
       documentNumber: billing.number,
+      trace: { createdAt: billing.createdAt, approvedAt: billing.approvedAt },
       date: billing.billingDate,
       reference: `${billing.job.number} — ${billing.job.name}  ·  Billing #${billing.billingNo}`,
       sections: [

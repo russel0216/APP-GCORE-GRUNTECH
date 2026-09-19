@@ -757,6 +757,7 @@ costingRoutes.get(
     const pdf = await renderDocument({
       title: 'Costing Sheet',
       documentNumber: costing.number,
+      trace: { createdAt: costing.createdAt, createdBy: costing.owner?.name },
       date: costing.createdAt,
       reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
       sections,

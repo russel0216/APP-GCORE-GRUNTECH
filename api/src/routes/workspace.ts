@@ -354,6 +354,10 @@ pdfRoutes.get(
 
     const pdf = await renderDocument({
       title: 'Document Specimen',
+      // The specimen exists to show what a real document looks like, so it
+      // carries a trail too — otherwise Settings would print a preview that
+      // misses the block every other document now ends with.
+      trace: { createdAt: new Date(Date.now() - 36 * 3600_000), createdBy: 'Specimen' },
       documentNumber: `${company?.numberPrefix ?? 'GT'}-SPEC-${new Date().getFullYear()}-0001`,
       revision: '0',
       date: new Date(),

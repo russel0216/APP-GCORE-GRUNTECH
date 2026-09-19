@@ -1061,6 +1061,14 @@ quotationRoutes.get(
     const pdf = await renderDocument({
       title: 'Quotation',
       documentNumber: quotation.number,
+      // The approval hangs off the REVISION, not the quotation — passing the
+      // quotation id here would print an empty trail on an approved document.
+      trace: {
+        createdAt: revision.createdAt,
+        createdBy: quotation.owner?.name,
+        documentType: 'quotation',
+        documentId: revision.id,
+      },
       revision: String(revision.revision),
       date: revision.createdAt,
       reference: `${quotation.customer.name}${quotation.site ? ` — ${quotation.site.name}` : ''}`,

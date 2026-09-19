@@ -28,6 +28,44 @@ export interface Signatory {
   position?: string;
 }
 
+/**
+ * When the document was raised, and when each approval landed.
+ *
+ * Every printable document carries this, so a signed PDF answers "who was
+ * sitting on this, and for how long" on its own — without anybody opening the
+ * system. That is the point: the bottleneck in an operation is almost never
+ * the step somebody remembers, and a document that records only its own date
+ * cannot be used to find it.
+ *
+ * Two approval mechanisms exist in G-Core and both are rendered:
+ *
+ *   - the approval engine's chain, for the document types that route through
+ *     `submitForApproval` — give `documentType` and `documentId` and the trail
+ *     is read from `ApprovalRequest`/`ApprovalAction`;
+ *   - a single approval recorded on the document itself, which is how a
+ *     progress report and a progress billing work — pass `approvedAt` and
+ *     `approvedBy` directly.
+ *
+ * A document with neither says so, rather than leaving a blank that could be
+ * read as "approved, time unknown".
+ */
+export interface PdfTrace {
+  /** When the record itself was raised. */
+  createdAt: Date;
+  createdBy?: string | null;
+  /** For documents approved on the record rather than through the engine. */
+  approvedAt?: Date | null;
+  approvedBy?: string | null;
+  /** For documents that route through the approval engine. */
+  documentType?: string;
+  /**
+   * The id the approval was raised against — which is not always the id of the
+   * thing being printed. A quotation's approval hangs off the REVISION, so a
+   * quotation PDF must pass the revision id or its own trail comes back empty.
+   */
+  documentId?: string;
+}
+
 export interface PdfDocumentSpec {
   title: string;
   documentNumber?: string;
@@ -40,6 +78,8 @@ export interface PdfDocumentSpec {
   signatories?: Signatory[];
   /** Small print above the page number. */
   footerNote?: string;
+  /** Raised-at and approved-at, printed as a trail at the foot of the document. */
+  trace?: PdfTrace;
 }
 
 const MARGIN = 42;
@@ -67,13 +107,215 @@ export async function renderDocument(spec: PdfDocumentSpec): Promise<Buffer> {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
   });
 
+  // Read before anything is drawn: the trail needs a database round trip, and
+  // PDFKit's cursor cannot be left half-way through a document across an await.
+  const trail = spec.trace ? await buildTrail(spec.trace) : null;
+  const printedAt = new Date();
+
   drawHeader(doc, spec, company);
   for (const section of spec.sections) drawSection(doc, section);
-  drawSignatures(doc, spec.signatories);
-  paginate(doc, spec, company);
+  // The signature block pins itself to the foot of the page, so it has to be
+  // told how much room the trail needs beneath it. Without this reservation
+  // every document gained a second page just to carry its own trail.
+  drawSignatures(doc, spec.signatories, trail ? trailHeight(trail) : 0);
+  if (trail) drawTrace(doc, trail);
+  paginate(doc, spec, company, printedAt);
 
   doc.end();
   return done;
+}
+
+// ── The document trail ───────────────────────────────────────────────────────
+
+interface TrailRow {
+  label: string;
+  when: Date | null;
+  who: string | null;
+  /** Time spent waiting on THIS step — the number a bottleneck shows up in. */
+  elapsedMs: number | null;
+  outcome?: 'APPROVED' | 'REJECTED' | 'PENDING';
+}
+
+interface Trail {
+  rows: TrailRow[];
+  totalMs: number | null;
+  note: string | null;
+}
+
+/**
+ * Turns whichever approval record exists into one list of rows.
+ *
+ * Each row's elapsed time is measured from the PREVIOUS event, not from the
+ * start, because "step 2 took three days" is the sentence that identifies a
+ * bottleneck and "the document was three days old by step 2" is not.
+ */
+async function buildTrail(trace: PdfTrace): Promise<Trail> {
+  const rows: TrailRow[] = [
+    { label: 'Raised', when: trace.createdAt, who: trace.createdBy ?? null, elapsedMs: null },
+  ];
+
+  let previous = trace.createdAt;
+  let note: string | null = null;
+
+  if (trace.documentType && trace.documentId) {
+    // Imported lazily: pdf.ts is imported by the approval-settled subscribers,
+    // and a top-level import back into approvals.ts would close the circle.
+    const { historyFor } = await import('./approvals');
+    const requests = await historyFor(trace.documentType, trace.documentId);
+    // historyFor returns newest first; a trail reads forwards.
+    const rounds = [...requests].reverse();
+
+    rounds.forEach((request, index) => {
+      if (rounds.length > 1) {
+        rows.push({
+          label: `Submitted (attempt ${index + 1})`,
+          when: request.createdAt,
+          who: request.requester.name,
+          elapsedMs: request.createdAt.getTime() - previous.getTime(),
+        });
+        previous = request.createdAt;
+      }
+
+      for (const action of request.actions) {
+        const step = request.workflow?.steps.find((s) => s.sequence === action.sequence);
+        rows.push({
+          label: `Step ${action.sequence}${step ? ` · ${step.name}` : ''}`,
+          when: action.actedAt,
+          who: action.approver.name,
+          elapsedMs: action.actedAt.getTime() - previous.getTime(),
+          outcome: action.action === 'REJECTED' ? 'REJECTED' : 'APPROVED',
+        });
+        previous = action.actedAt;
+      }
+
+      if (request.status === 'PENDING') {
+        const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
+        rows.push({
+          label: `Step ${request.currentSequence}${step ? ` · ${step.name}` : ''}`,
+          when: null,
+          who: null,
+          // Waiting time is live: measured to the moment this PDF was printed.
+          elapsedMs: Date.now() - previous.getTime(),
+          outcome: 'PENDING',
+        });
+      } else if (request.actions.length === 0 && request.closedAt) {
+        // Settled without a recorded action — a document seeded or migrated
+        // rather than approved through the engine. Say what is known and mark
+        // what is not, because a trail that simply stops after "Raised" reads
+        // as "never approved" on a document that plainly was.
+        rows.push({
+          label: request.status === 'APPROVED' ? 'Approved' : 'Closed',
+          when: request.closedAt,
+          who: null,
+          elapsedMs: request.closedAt.getTime() - previous.getTime(),
+          outcome: request.status === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+        });
+        previous = request.closedAt;
+        note = 'Settled without a recorded approver — not raised through the approval engine.';
+      }
+    });
+
+    if (requests.length === 0) {
+      note = 'Not submitted for approval.';
+    }
+  } else if (trace.approvedAt) {
+    rows.push({
+      label: 'Approved',
+      when: trace.approvedAt,
+      who: trace.approvedBy ?? null,
+      elapsedMs: trace.approvedAt.getTime() - trace.createdAt.getTime(),
+      outcome: 'APPROVED',
+    });
+    previous = trace.approvedAt;
+  } else {
+    note = 'This document type carries no approval step.';
+  }
+
+  const settled = [...rows].reverse().find((r) => r.when && r.outcome);
+  const totalMs = settled?.when ? settled.when.getTime() - trace.createdAt.getTime() : null;
+
+  return { rows, totalMs, note };
+}
+
+/** What drawTrace is about to need, so the signature block can leave room. */
+function trailHeight(trail: Trail): number {
+  return (
+    14 + // gap above
+    16 + // heading and rule
+    trail.rows.reduce((h, r) => h + (r.outcome === 'REJECTED' ? 17.5 : 10), 0) +
+    (trail.totalMs !== null ? 13 : 0) +
+    (trail.note ? 9 : 0)
+  );
+}
+
+function drawTrace(doc: PDFKit.PDFDocument, trail: Trail) {
+  const right = doc.page.width - MARGIN;
+  const width = right - MARGIN;
+
+  ensureSpace(doc, 40 + trail.rows.length * 12);
+  doc.y += 14;
+
+  doc.font('Helvetica-Bold').fontSize(7.5).fillColor(MUTED);
+  doc.text('DOCUMENT TRAIL', MARGIN, doc.y, { width, characterSpacing: 0.6 });
+  doc.moveTo(MARGIN, doc.y + 2).lineTo(right, doc.y + 2).strokeColor(RULE).lineWidth(0.5).stroke();
+  doc.y += 6;
+
+  // Right-aligned columns so the elapsed times form a scannable column - the
+  // whole reason this block exists is to be read down, not across.
+  const whenX = MARGIN + 150;
+  const whoX = MARGIN + 258;
+  const elapsedX = right - 78;
+
+  for (const row of trail.rows) {
+    const y = doc.y;
+    doc.font('Helvetica').fontSize(7).fillColor(INK);
+    doc.text(row.label, MARGIN, y, { width: 146, lineBreak: false });
+
+    doc.fillColor(row.when ? INK : MUTED);
+    doc.text(row.when ? formatDateTime(row.when) : 'awaiting', whenX, y, {
+      width: 104,
+      lineBreak: false,
+    });
+
+    doc.fillColor(MUTED);
+    doc.text(row.who ?? '—', whoX, y, { width: elapsedX - whoX - 6, lineBreak: false });
+
+    if (row.elapsedMs !== null) {
+      doc.fillColor(row.outcome === 'PENDING' ? INK : MUTED);
+      doc.text(`${row.outcome === 'PENDING' ? 'waiting ' : ''}${formatElapsed(row.elapsedMs)}`, elapsedX, y, {
+        width: 78,
+        align: 'right',
+        lineBreak: false,
+      });
+    }
+
+    if (row.outcome === 'REJECTED') {
+      doc.font('Helvetica-Bold').fontSize(6.5).fillColor(INK);
+      doc.text('REJECTED', whoX, y + 7.5, { width: 80, lineBreak: false });
+      doc.y += 7.5;
+    }
+
+    doc.y = y + 10;
+  }
+
+  if (trail.totalMs !== null) {
+    doc.moveTo(elapsedX - 6, doc.y + 1).lineTo(right, doc.y + 1).strokeColor(RULE).lineWidth(0.5).stroke();
+    doc.y += 3;
+    doc.font('Helvetica-Bold').fontSize(7).fillColor(INK);
+    doc.text('Raised to approved', MARGIN, doc.y, { width: 200, lineBreak: false });
+    doc.text(formatElapsed(trail.totalMs), elapsedX, doc.y, {
+      width: 78,
+      align: 'right',
+      lineBreak: false,
+    });
+    doc.y += 10;
+  }
+
+  if (trail.note) {
+    doc.font('Helvetica-Oblique').fontSize(6.5).fillColor(MUTED);
+    doc.text(trail.note, MARGIN, doc.y, { width, lineBreak: false });
+    doc.y += 9;
+  }
 }
 
 type Company = Awaited<ReturnType<typeof prisma.company.findUnique>>;
@@ -265,7 +507,7 @@ function drawTableRow(
   doc.y = bottom;
 }
 
-function drawSignatures(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
+function drawSignatures(doc: PDFKit.PDFDocument, signatories: Signatory[] | undefined, reserve = 0) {
   const people = signatories ?? [
     { role: 'Prepared by' },
     { role: 'Checked by' },
@@ -274,8 +516,8 @@ function drawSignatures(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
   if (!people.length) return;
 
   const blockHeight = 66;
-  ensureSpace(doc, blockHeight + 10);
-  doc.y = Math.max(doc.y + 18, doc.page.height - 84 - blockHeight);
+  ensureSpace(doc, blockHeight + 10 + reserve);
+  doc.y = Math.max(doc.y + 18, doc.page.height - 84 - blockHeight - reserve);
 
   const usable = doc.page.width - MARGIN * 2;
   const colWidth = usable / people.length;
@@ -307,7 +549,12 @@ function drawSignatures(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
  * Footer and "Page n of m" on every page. Done at the end because the total
  * page count is only known once the content is laid out.
  */
-function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
+function paginate(
+  doc: PDFKit.PDFDocument,
+  spec: PdfDocumentSpec,
+  company: Company,
+  printedAt: Date,
+) {
   const range = doc.bufferedPageRange();
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
@@ -336,9 +583,15 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
       align: 'right',
       lineBreak: false,
     });
-    if (spec.documentNumber) {
-      doc.text(spec.documentNumber, MARGIN, y + 9, { width: 320, lineBreak: false });
-    }
+    // A PDF is a snapshot. Without the moment it was taken, two copies of the
+    // same document that disagree cannot be told apart.
+    const stamp = [
+      spec.documentNumber,
+      `Printed ${formatDateTime(printedAt)}`,
+    ]
+      .filter(Boolean)
+      .join('   ·   ');
+    doc.text(stamp, MARGIN, y + 9, { width: 400, lineBreak: false });
 
     doc.page.margins.bottom = bottomMargin;
   }
@@ -352,6 +605,39 @@ function ensureSpace(doc: PDFKit.PDFDocument, needed: number) {
 
 export function formatDate(d: Date): string {
   return d.toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+/**
+ * Date and time to the minute, in Manila. A timestamp on an approval is
+ * evidence, so it is printed in the timezone the business works in rather than
+ * whatever the server happens to be set to.
+ */
+export function formatDateTime(d: Date): string {
+  return d.toLocaleString('en-PH', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+/**
+ * How long a step took, at the precision that is worth reading. Nobody chasing
+ * a bottleneck cares about the seconds, and "1d 4h" is easier to compare down a
+ * column than "28.4 hours".
+ */
+export function formatElapsed(ms: number): string {
+  if (ms < 0) return '—';
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return 'under a minute';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
 }
 
 export function formatMoney(value: number | string, currency = 'PHP'): string {

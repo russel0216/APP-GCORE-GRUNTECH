@@ -1397,6 +1397,12 @@ purchaseOrderRoutes.get(
     const pdf = await renderDocument({
       title: 'Purchase Order',
       documentNumber: po.number,
+      trace: {
+        createdAt: po.createdAt,
+        createdBy: po.createdBy.name,
+        documentType: 'purchase_order',
+        documentId: po.id,
+      },
       date: po.orderDate,
       reference: po.supplier.name,
       sections,
@@ -1434,6 +1440,12 @@ purchaseRequestRoutes.get(
     const pdf = await renderDocument({
       title: 'Purchase Request',
       documentNumber: pr.number,
+      trace: {
+        createdAt: pr.createdAt,
+        createdBy: pr.requestedBy.name,
+        documentType: 'purchase_request',
+        documentId: pr.id,
+      },
       date: pr.createdAt,
       reference: pr.purpose,
       sections: [
