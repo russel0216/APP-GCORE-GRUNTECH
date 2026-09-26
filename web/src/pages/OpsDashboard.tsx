@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../lib/api';
+import { api, qs } from '../lib/api';
+import { todayLocal } from '../lib/day';
 import { ErrorBox, Loading } from '../components/ui';
 import { BarList, Donut, Funnel, Panel, Stat, type Slice } from '../components/charts';
+import { RangePicker } from './insights/Overview';
 
 /**
  * G-OPS — the module overview.
@@ -15,8 +17,8 @@ import { BarList, Donut, Funnel, Panel, Stat, type Slice } from '../components/c
  *   Sales        Where is the next job coming from, and where is work
  *                falling out of the pipeline?
  *   Delivery     What are we carrying, and what has stopped moving?
- *   Aftermarket  What do we still owe the sites we have installed, and what
- *                is about to lapse?
+ *   Aftermarket  What cover are we carrying on the sites we have installed,
+ *                and how much maintenance actually got done?
  *
  * It is COUNTS, not money. Value lives in Insights, which reconciles every
  * figure against the documents behind it (model §11). Two places adding up the
@@ -25,6 +27,15 @@ import { BarList, Donut, Funnel, Panel, Stat, type Slice } from '../components/c
  * One request to `/gops/overview`, which groups each entity once — and every
  * bar, slice and tile links to the list it counted, because a figure you
  * cannot open is a figure you cannot act on.
+ *
+ * The date range (year to date by default, or month to date, or a custom
+ * span — the same `RangePicker` every Insights report uses) governs the
+ * figures that ARE a period question: the sales funnel, and the PM
+ * accomplished in Aftermarket. The rest answer "what are we carrying right
+ * now" — a project doesn't stop being IN_PROGRESS, and cover doesn't stop
+ * running, because it falls outside the window — so those stay live whatever
+ * range is showing. See the matching comment on `periodWhere` in
+ * api/src/routes/gops.ts.
  */
 
 interface Tally {
@@ -36,9 +47,8 @@ interface Overview {
   delivery: { jobs: Tally | null; reportsAwaitingApproval: number | null } | null;
   aftermarket: {
     contracts: Tally | null;
-    upForRenewal: number | null;
-    visitsDue: number | null;
-    reportsAwaitingApproval: number | null;
+    activeContracts: number | null;
+    pmAccomplished: number | null;
   } | null;
 }
 
@@ -48,10 +58,15 @@ const n = (t: Tally | null | undefined, ...keys: string[]) =>
 export function OpsDashboard() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [from, setFrom] = useState(`${new Date().getFullYear()}-01-01`);
+  const [to, setTo] = useState(todayLocal());
 
   useEffect(() => {
-    api.get<Overview>('/gops/overview').then(setData).catch(setError);
-  }, []);
+    api
+      .get<Overview>(`/gops/overview${qs({ from, to })}`)
+      .then(setData)
+      .catch(setError);
+  }, [from, to]);
 
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading label="Reading the pipeline…" />;
@@ -128,6 +143,30 @@ export function OpsDashboard() {
             behind it.
           </p>
         </div>
+
+        {/*
+          The range sits with the page title, not inside a panel — so the line
+          under it says what it reaches, because a control in the page head
+          reads as governing the whole page unless it says otherwise. Shown to
+          anyone holding either block it affects, not Sales alone: someone with
+          Aftermarket and no Sales still needs to pick the period their PM
+          count is measured over.
+        */}
+        {(sales || aftermarket) && (
+          <div>
+            <RangePicker
+              from={from}
+              to={to}
+              onChange={(f, t) => {
+                setFrom(f);
+                setTo(t);
+              }}
+            />
+            <div className="faint" style={{ fontSize: 'var(--fs-xs)', textAlign: 'right' }}>
+              Sales and PM accomplished — everything else shows what is open now
+            </div>
+          </div>
+        )}
       </div>
 
       {!sales && !delivery && !aftermarket ? (
@@ -147,34 +186,36 @@ export function OpsDashboard() {
                 </Link>
               }
             >
-              <Funnel
-                stages={funnel}
-                caption="Enquiry through to won, with the drop-off at each stage"
-              />
               <div className="grid grid-2">
-                <Stat
-                  label="On hold"
-                  icon="clock"
-                  value={onHold}
-                  tone="warn"
-                  to="/g-ops/leads"
-                  hint="Waiting on the customer"
+                <Funnel
+                  stages={funnel}
+                  caption="Enquiry through to won, with the drop-off at each stage"
                 />
-                <Stat
-                  label="Lost"
-                  icon="alert"
-                  value={lost}
-                  tone="muted"
-                  to="/g-ops/leads"
-                  hint="Leads and quotations together"
-                />
+                <div className="stack fill">
+                  <Stat
+                    label="On hold"
+                    icon="clock"
+                    value={onHold}
+                    tone="warn"
+                    to="/g-ops/leads"
+                    hint="Waiting on the customer"
+                  />
+                  <Stat
+                    label="Lost"
+                    icon="alert"
+                    value={lost}
+                    tone="muted"
+                    to="/g-ops/leads"
+                    hint="Leads and quotations together"
+                  />
+                </div>
               </div>
             </Panel>
           )}
 
           {delivery && (
             <Panel
-              title="Delivery"
+              title="Project"
               blurb="The jobs the business is carrying, and anything that has stopped moving."
               action={
                 <Link to="/g-ops/projects" className="btn btn-sm">
@@ -213,7 +254,7 @@ export function OpsDashboard() {
           {aftermarket && (
             <Panel
               title="Aftermarket"
-              blurb="What the business still owes the sites it has installed — and the cover that is about to lapse."
+              blurb="The cover the business is carrying on the sites it has installed, and the maintenance actually carried out against it."
               action={
                 <Link to="/g-ops/renewals" className="btn btn-sm">
                   Open renewals
@@ -224,28 +265,20 @@ export function OpsDashboard() {
                 <BarList slices={contracts} caption="Service contracts, by state" />
                 <div className="stack">
                   <Stat
-                    label="Up for renewal"
-                    icon="calendar"
-                    value={aftermarket.upForRenewal}
-                    tone="warn"
-                    to="/g-ops/renewals"
-                    hint="Running, but ending within 60 days"
-                  />
-                  <Stat
-                    label="PM visits due or overdue"
-                    icon="wrench"
-                    value={aftermarket.visitsDue}
-                    tone="danger"
-                    to="/g-ops/visits"
-                    hint="Scheduled, and the date has passed"
-                  />
-                  <Stat
-                    label="Service reports awaiting approval"
+                    label="Contracts"
                     icon="document"
-                    value={aftermarket.reportsAwaitingApproval}
-                    tone="warn"
-                    to="/g-ops/pm"
-                    hint="A visit is not complete until its report is approved"
+                    value={aftermarket.activeContracts}
+                    tone="neon"
+                    to="/g-ops/service-contracts"
+                    hint="Cover running today"
+                  />
+                  <Stat
+                    label="PM accomplished"
+                    icon="check"
+                    value={aftermarket.pmAccomplished}
+                    tone="neon"
+                    to="/g-ops/visits"
+                    hint="Preventive maintenance completed in the selected range"
                   />
                 </div>
               </div>

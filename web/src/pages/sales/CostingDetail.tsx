@@ -206,7 +206,7 @@ export function CostingDetailPage() {
           {costing.canEdit && costing.status === 'DRAFT' && (
             <>
               <button className="btn" onClick={() => setEditing(true)}>
-                Edit
+                Modify
               </button>
               <button className="btn btn-ok" onClick={() => setStatus('FINAL')}>
                 Mark final
@@ -303,7 +303,7 @@ export function CostingDetailPage() {
                           {editable && (
                             <td>
                               <button className="btn btn-sm" onClick={() => setLineModal(line)}>
-                                Edit
+                                Modify
                               </button>
                             </td>
                           )}
@@ -394,7 +394,7 @@ export function CostingDetailPage() {
                         {editable && (
                           <td>
                             <button className="btn btn-sm" onClick={() => setSectionModal(s)}>
-                              Edit
+                              Modify
                             </button>
                           </td>
                         )}
@@ -639,7 +639,7 @@ function LineModal({
 
   return (
     <Modal
-      title={line ? 'Edit cost line' : 'Add cost line'}
+      title={line ? 'Modify cost line' : 'Add cost line'}
       onClose={onClose}
       footer={
         <>
@@ -795,7 +795,7 @@ function SectionModal({
 
   return (
     <Modal
-      title={section ? `Edit ${section.name}` : 'Add scope section'}
+      title={section ? `Modify ${section.name}` : 'Add scope section'}
       onClose={onClose}
       footer={
         <>

@@ -330,7 +330,7 @@ function LeaveTypeModal({
 
   return (
     <Modal
-      title={value.id ? `Edit ${value.name}` : 'New leave type'}
+      title={value.id ? `Modify ${value.name}` : 'New leave type'}
       onClose={onClose}
       footer={
         <>

@@ -210,6 +210,34 @@ myWorkRoutes.get(
 export const attachmentRoutes = Router();
 attachmentRoutes.use(authenticate);
 
+/*
+  /file/:id has to be registered before the generic /:entityType/:entityId
+  routes below, or Express matches it there first — "file" becomes the
+  entityType, "id" the entityId, and the ORM query simply finds nothing,
+  which came back as a 200 with an empty list rather than an error. Nothing
+  had called this route until the account-photo avatar did (see ui.tsx's
+  Avatar), so it sat wrong, unnoticed, for however long it's been here — the
+  same class of route-order fault the Phase 6 notes already flag for
+  /overtime/chargeable. Keep this one on top.
+*/
+attachmentRoutes.get(
+  '/file/:id',
+  handler(async (req, res) => {
+    const row = await prisma.attachment.findUnique({ where: { id: req.params.id } });
+    if (!row) throw notFound('Attachment not found');
+
+    const full = attachmentPath(row.storedName);
+    if (!fs.existsSync(full)) throw notFound('The stored file is missing from disk');
+
+    res.setHeader('Content-Type', row.mimeType);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${encodeURIComponent(row.fileName)}"`,
+    );
+    fs.createReadStream(full).pipe(res);
+  }),
+);
+
 attachmentRoutes.get(
   '/:entityType/:entityId',
   handler(async (req, res) => {
@@ -244,24 +272,6 @@ attachmentRoutes.post(
       );
     }
     res.status(201).json(saved);
-  }),
-);
-
-attachmentRoutes.get(
-  '/file/:id',
-  handler(async (req, res) => {
-    const row = await prisma.attachment.findUnique({ where: { id: req.params.id } });
-    if (!row) throw notFound('Attachment not found');
-
-    const full = attachmentPath(row.storedName);
-    if (!fs.existsSync(full)) throw notFound('The stored file is missing from disk');
-
-    res.setHeader('Content-Type', row.mimeType);
-    res.setHeader(
-      'Content-Disposition',
-      `inline; filename="${encodeURIComponent(row.fileName)}"`,
-    );
-    fs.createReadStream(full).pipe(res);
   }),
 );
 

@@ -19,7 +19,7 @@ import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
-import { upload, saveAttachment, attachmentPath } from '../shared/attachments';
+import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { describeFace, faceEngineReady } from '../shared/face';
 import {
   hrSettings,
@@ -198,6 +198,31 @@ clockRoutes.post(
       },
       req,
     );
+
+    // A live enrolment capture is a BETTER account photo than anything a
+    // plain upload could offer — it is verified, current and, per the note in
+    // describeFace, provably one person. Whoever the enrolment was for (self
+    // or, with the employee permission, someone else) gets it as their
+    // picture too, replacing whichever the account had before. This is the
+    // only path that touches User.photoPath from a face capture; nothing
+    // enrols FROM a profile photo, only the other way round.
+    const enrolledUser = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { userId: true },
+    });
+    if (enrolledUser?.userId) {
+      const previous = await prisma.user.findUnique({
+        where: { id: enrolledUser.userId },
+        select: { photoPath: true },
+      });
+      await prisma.user.update({
+        where: { id: enrolledUser.userId },
+        data: { photoPath: attachment.id },
+      });
+      if (previous?.photoPath && previous.photoPath !== attachment.id) {
+        await deleteAttachment(previous.photoPath).catch(() => {});
+      }
+    }
 
     res.status(201).json({ id: enrollment.id, samples: count });
   }),

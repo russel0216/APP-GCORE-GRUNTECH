@@ -17,73 +17,79 @@ datasource db {
 // ════════════════════════════════════════════════════════════════════
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String  @id @default(cuid())
+  email        String  @unique
   name         String
-  employeeNo   String?   @unique
+  employeeNo   String? @unique
   passwordHash String
   position     String?
-  isActive     Boolean   @default(true)
-  isSuperAdmin Boolean   @default(false)
+  isActive     Boolean @default(true)
+  isSuperAdmin Boolean @default(false)
+
+  /// Attachment id, not a disk path (same convention as FaceEnrollment.photoPath) —
+  /// the most recent verified capture from face enrolment, or a plain upload for
+  /// an account with no linked employee. Cosmetic only: nothing reads this for
+  /// matching, so replacing it can never affect who clocks in as whom.
+  photoPath String?
 
   // Approval routing: "approvers are to whom they are directly reporting".
   supervisorId String?
-  supervisor   User?     @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
-  reports      User[]    @relation("Supervision")
+  supervisor   User?   @relation("Supervision", fields: [supervisorId], references: [id], onDelete: SetNull)
+  reports      User[]  @relation("Supervision")
 
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
 
-  roles       UserRole[]
-  overrides   UserPermissionOverride[]
+  roles     UserRole[]
+  overrides UserPermissionOverride[]
 
-  notifications  Notification[]
-  savedFilters   SavedFilter[]
-  attachments    Attachment[]
-  auditLogs      AuditLog[]
-  approvalsRaised ApprovalRequest[] @relation("Requester")
-  approvalActions ApprovalAction[]
-  workflowStepsTargeting ApprovalStep[] @relation("StepUser")
+  notifications          Notification[]
+  savedFilters           SavedFilter[]
+  attachments            Attachment[]
+  auditLogs              AuditLog[]
+  approvalsRaised        ApprovalRequest[] @relation("Requester")
+  approvalActions        ApprovalAction[]
+  workflowStepsTargeting ApprovalStep[]    @relation("StepUser")
 
-  employee          Employee?
-  customersCreated  Customer[] @relation("CustomerCreator")
-  suppliersCreated  Supplier[] @relation("SupplierCreator")
+  employee         Employee?
+  customersCreated Customer[] @relation("CustomerCreator")
+  suppliersCreated Supplier[] @relation("SupplierCreator")
 
-  leadsAssigned     Lead[]      @relation("LeadAssignee")
-  leadsCreated      Lead[]      @relation("LeadCreator")
-  costingsOwned     Costing[]   @relation("CostingOwner")
-  quotationsOwned   Quotation[] @relation("QuotationOwner")
+  leadsAssigned     Lead[]              @relation("LeadAssignee")
+  leadsCreated      Lead[]              @relation("LeadCreator")
+  costingsOwned     Costing[]           @relation("CostingOwner")
+  quotationsOwned   Quotation[]         @relation("QuotationOwner")
   revisionsApproved QuotationRevision[] @relation("RevisionApprover")
   activities        SalesActivity[]     @relation("ActivityAssignee")
 
-  jobsManaged       Job[]            @relation("JobManager")
-  jobsCreated       Job[]            @relation("JobCreator")
-  costEntries       JobCostEntry[]
-  budgetRequests    BudgetRequest[]  @relation("BudgetRequester")
-  reportsPrepared   ProgressReport[] @relation("ReportPreparer")
-  reportsApproved   ProgressReport[] @relation("ReportApprover")
-  plansUploaded     ApprovedPlan[]   @relation("PlanUploader")
-  tasksAssigned     JobTask[]        @relation("TaskAssignee")
+  jobsManaged     Job[]            @relation("JobManager")
+  jobsCreated     Job[]            @relation("JobCreator")
+  costEntries     JobCostEntry[]
+  budgetRequests  BudgetRequest[]  @relation("BudgetRequester")
+  reportsPrepared ProgressReport[] @relation("ReportPreparer")
+  reportsApproved ProgressReport[] @relation("ReportApprover")
+  plansUploaded   ApprovedPlan[]   @relation("PlanUploader")
+  tasksAssigned   JobTask[]        @relation("TaskAssignee")
 
-  prsRequested      PurchaseRequest[] @relation("PrRequester")
-  canvassesCreated  Canvass[]         @relation("CanvassCreator")
-  posCreated        PurchaseOrder[]   @relation("PoCreator")
-  receivings        Receiving[]       @relation("Receiver")
-  stockIssued       StockIssue[]      @relation("Issuer")
-  stockReceivedBy   StockIssue[]      @relation("IssuedTo")
-  borrowsTaken      BorrowSlip[]      @relation("Borrower")
-  borrowsIssued     BorrowSlip[]      @relation("BorrowIssuer")
-  stockMoves        InventoryTransaction[]
+  prsRequested     PurchaseRequest[]      @relation("PrRequester")
+  canvassesCreated Canvass[]              @relation("CanvassCreator")
+  posCreated       PurchaseOrder[]        @relation("PoCreator")
+  receivings       Receiving[]            @relation("Receiver")
+  stockIssued      StockIssue[]           @relation("Issuer")
+  stockReceivedBy  StockIssue[]           @relation("IssuedTo")
+  borrowsTaken     BorrowSlip[]           @relation("Borrower")
+  borrowsIssued    BorrowSlip[]           @relation("BorrowIssuer")
+  stockMoves       InventoryTransaction[]
 
-  facesEnrolled     FaceEnrollment[] @relation("FaceEnroller")
-  attendanceRecorded Attendance[]    @relation("AttendanceRecorder")
-  leaveDecided      LeaveRequest[]   @relation("LeaveDecider")
+  facesEnrolled      FaceEnrollment[] @relation("FaceEnroller")
+  attendanceRecorded Attendance[]     @relation("AttendanceRecorder")
+  leaveDecided       LeaveRequest[]   @relation("LeaveDecider")
 
-  invoicesCreated   Invoice[]      @relation("InvoiceCreator")
-  billsCreated      SupplierBill[] @relation("BillCreator")
-  expenseClaims     ExpenseClaim[] @relation("Claimant")
-  paymentsRecorded  Payment[]      @relation("PaymentRecorder")
-  reimbursements    Payment[]      @relation("Payee")
+  invoicesCreated  Invoice[]      @relation("InvoiceCreator")
+  billsCreated     SupplierBill[] @relation("BillCreator")
+  expenseClaims    ExpenseClaim[] @relation("Claimant")
+  paymentsRecorded Payment[]      @relation("PaymentRecorder")
+  reimbursements   Payment[]      @relation("Payee")
 
   assetsCreated     InstalledAsset[]  @relation("AssetCreator")
   contractsCreated  ServiceContract[] @relation("ContractCreator")
@@ -100,12 +106,12 @@ model User {
 }
 
 model Department {
-  id        String   @id @default(cuid())
-  code      String   @unique
+  id        String     @id @default(cuid())
+  code      String     @unique
   name      String
   users     User[]
   employees Employee[]
-  createdAt DateTime @default(now())
+  createdAt DateTime   @default(now())
 }
 
 model Role {
@@ -117,12 +123,12 @@ model Role {
   // "Roles should be customizable" (requirements §14).
   isSystem    Boolean @default(false)
 
-  permissions RolePermission[]
-  users       UserRole[]
-  workflowStepsTargeting ApprovalStep[] @relation("StepRole")
+  permissions            RolePermission[]
+  users                  UserRole[]
+  workflowStepsTargeting ApprovalStep[]   @relation("StepRole")
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// One row per `module.submodule.action` triple. Seeded from
@@ -153,8 +159,8 @@ model RolePermission {
 model UserRole {
   userId String
   roleId String
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([userId, roleId])
 }
@@ -171,8 +177,8 @@ model UserPermissionOverride {
   userId       String
   permissionId String
   effect       OverrideEffect
-  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission     @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@id([userId, permissionId])
 }
@@ -184,28 +190,28 @@ model UserPermissionOverride {
 /// Single row. Drives every PDF header — "Settings for PDF Details
 /// (Company Details, Logo to be used)".
 model Company {
-  id           String  @id @default("company")
-  name         String
-  legalName    String?
-  address      String?
-  city         String?
-  country      String  @default("Philippines")
-  tin          String?
-  phone        String?
-  email        String?
-  website      String?
-  logoPath     String?
-  currency     String  @default("PHP")
+  id        String  @id @default("company")
+  name      String
+  legalName String?
+  address   String?
+  city      String?
+  country   String  @default("Philippines")
+  tin       String?
+  phone     String?
+  email     String?
+  website   String?
+  logoPath  String?
+  currency  String  @default("PHP")
 
   /// Tax rates are configuration, not constants — rates change, and some
   /// customers withhold differently (model §5.4).
-  vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
-  ewtRate      Decimal @default(0.02) @db.Decimal(6, 4)
+  vatRate Decimal @default(0.12) @db.Decimal(6, 4)
+  ewtRate Decimal @default(0.02) @db.Decimal(6, 4)
 
   /// Prefixes every document number, e.g. GT-QT-2026-0001.
-  numberPrefix String  @default("GT")
+  numberPrefix String @default("GT")
 
-  updatedAt    DateTime @updatedAt
+  updatedAt DateTime @updatedAt
 }
 
 /// Free-form keyed configuration. Anything that must be changeable without a
@@ -270,8 +276,8 @@ model ApprovalWorkflow {
 
   /// Amount band this workflow applies to. Null = unbounded. This is how
   /// "approval thresholds should be configurable in Settings" is expressed.
-  minAmount    Decimal? @db.Decimal(18, 2)
-  maxAmount    Decimal? @db.Decimal(18, 2)
+  minAmount Decimal? @db.Decimal(18, 2)
+  maxAmount Decimal? @db.Decimal(18, 2)
 
   steps    ApprovalStep[]
   requests ApprovalRequest[]
@@ -283,7 +289,7 @@ model ApprovalWorkflow {
 }
 
 model ApprovalStep {
-  id           String       @id @default(cuid())
+  id           String           @id @default(cuid())
   workflowId   String
   workflow     ApprovalWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
   sequence     Int
@@ -301,16 +307,16 @@ model ApprovalStep {
 }
 
 model ApprovalRequest {
-  id             String         @id @default(cuid())
+  id             String   @id @default(cuid())
   documentType   String
   documentId     String
   documentNumber String?
   subject        String
-  amount         Decimal?       @db.Decimal(18, 2)
+  amount         Decimal? @db.Decimal(18, 2)
 
   /// Deep link to the actual record — notifications must not land on a list
   /// screen (model §8).
-  link           String?
+  link String?
 
   requesterId String
   requester   User   @relation("Requester", fields: [requesterId], references: [id], onDelete: Cascade)
@@ -322,7 +328,7 @@ model ApprovalRequest {
   status          ApprovalStatus @default(PENDING)
 
   actions   ApprovalAction[]
-  createdAt DateTime @default(now())
+  createdAt DateTime         @default(now())
   closedAt  DateTime?
 
   @@index([documentType, documentId])
@@ -351,22 +357,22 @@ model ApprovalAction {
 // ════════════════════════════════════════════════════════════════════
 
 model Notification {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   type      String
   title     String
   body      String?
   link      String?
-  isRead    Boolean  @default(false)
+  isRead    Boolean   @default(false)
   readAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId, isRead])
 }
 
 model Attachment {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   entityType   String
   entityId     String
   fileName     String
@@ -378,8 +384,8 @@ model Attachment {
   capturedAt   DateTime?
   caption      String?
   uploadedById String
-  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
-  uploadedAt   DateTime @default(now())
+  uploadedBy   User      @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  uploadedAt   DateTime  @default(now())
 
   @@index([entityType, entityId])
 }
@@ -411,8 +417,8 @@ model AuditLog {
 // ════════════════════════════════════════════════════════════════════
 
 model Customer {
-  id           String  @id @default(cuid())
-  code         String  @unique
+  id           String   @id @default(cuid())
+  code         String   @unique
   name         String
   legalName    String?
   tin          String?
@@ -424,7 +430,7 @@ model Customer {
   email        String?
   website      String?
   notes        String?
-  isActive     Boolean @default(true)
+  isActive     Boolean  @default(true)
 
   /// Who entered it. Supports the Mine/All switch on the list; customers
   /// themselves are shared data that anyone with access may edit.
@@ -434,15 +440,15 @@ model Customer {
   contacts CustomerContact[]
   sites    CustomerSite[]
 
-  leads      Lead[]
-  costings   Costing[]
-  quotations Quotation[]
-  activities SalesActivity[]
-  jobs       Job[]
-  invoices   Invoice[]
-  payments   Payment[]
-  assets     InstalledAsset[]
-  visits     ServiceVisit[]
+  leads          Lead[]
+  costings       Costing[]
+  quotations     Quotation[]
+  activities     SalesActivity[]
+  jobs           Job[]
+  invoices       Invoice[]
+  payments       Payment[]
+  assets         InstalledAsset[]
+  visits         ServiceVisit[]
   serviceReports ServiceReport[]
 
   createdAt DateTime @default(now())
@@ -477,9 +483,9 @@ model CustomerContact {
 /// A delivery/works address. Projects and service contracts hang off a site,
 /// not just a customer — one hospital group can have many plants.
 model CustomerSite {
-  id         String   @id @default(cuid())
+  id         String           @id @default(cuid())
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
   name       String
   address    String?
   city       String?
@@ -487,16 +493,16 @@ model CustomerSite {
   contactId  String?
   contact    CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
   notes      String?
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  isActive   Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
 
-  leads      Lead[]
-  costings   Costing[]
-  quotations Quotation[]
-  jobs       Job[]
-  assets     InstalledAsset[]
-  visits     ServiceVisit[]
+  leads          Lead[]
+  costings       Costing[]
+  quotations     Quotation[]
+  jobs           Job[]
+  assets         InstalledAsset[]
+  visits         ServiceVisit[]
   serviceReports ServiceReport[]
 
   @@index([customerId])
@@ -522,12 +528,12 @@ model Supplier {
   createdById String?
   createdBy   User?   @relation("SupplierCreator", fields: [createdById], references: [id], onDelete: SetNull)
 
-  contacts        SupplierContact[]
-  preferredItems  Item[]            @relation("PreferredSupplier")
-  canvassEntries  CanvassSupplier[]
-  purchaseOrders  PurchaseOrder[]
-  bills           SupplierBill[]
-  payments        Payment[]
+  contacts       SupplierContact[]
+  preferredItems Item[]            @relation("PreferredSupplier")
+  canvassEntries CanvassSupplier[]
+  purchaseOrders PurchaseOrder[]
+  bills          SupplierBill[]
+  payments       Payment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -568,12 +574,12 @@ enum EmploymentType {
 /// routes by user, and two places to record "who approves for me" is one place
 /// too many. An employee with no user account files nothing, so has no route.
 model Employee {
-  id          String  @id @default(cuid())
-  employeeNo  String  @unique
-  firstName   String
-  lastName    String
-  middleName  String?
-  suffix      String?
+  id         String  @id @default(cuid())
+  employeeNo String  @unique
+  firstName  String
+  lastName   String
+  middleName String?
+  suffix     String?
 
   userId String? @unique
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
@@ -598,14 +604,14 @@ model Employee {
   // ── Sensitive ──────────────────────────────────────────────────────────
   // Gated by ghr.employee_rates.view_all and stripped from audit entries.
   // Projects see labour as a burdened cost, never as a wage.
-  dailyRate      Decimal? @db.Decimal(14, 2)
+  dailyRate        Decimal? @db.Decimal(14, 2)
   /// Multiplier covering statutory contributions, leave accrual and overhead.
   /// Burdened cost = dailyRate × burdenMultiplier.
   burdenMultiplier Decimal? @db.Decimal(6, 3)
-  sssNo          String?
-  philhealthNo   String?
-  pagibigNo      String?
-  tin            String?
+  sssNo            String?
+  philhealthNo     String?
+  pagibigNo        String?
+  tin              String?
 
   isActive  Boolean  @default(true)
   notes     String?
@@ -641,16 +647,16 @@ model CostCategory {
   poItems        PurchaseOrderItem[]
   issueItems     StockIssueItem[]
   overtime       OvertimeRequest[]
-  supplierBills  SupplierBill[] @relation("BillCategory")
-  expenseClaims  ExpenseClaim[] @relation("ExpenseCategory")
+  supplierBills  SupplierBill[]        @relation("BillCategory")
+  expenseClaims  ExpenseClaim[]        @relation("ExpenseCategory")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
 model ItemCategory {
-  id       String  @id @default(cuid())
-  code     String  @unique
+  id       String         @id @default(cuid())
+  code     String         @unique
   name     String
   parentId String?
   parent   ItemCategory?  @relation("ItemCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
@@ -687,13 +693,13 @@ model Item {
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
-  unit          String   @default("pcs")
-  standardCost  Decimal? @db.Decimal(18, 2)
-  lastCost      Decimal? @db.Decimal(18, 2)
+  unit         String   @default("pcs")
+  standardCost Decimal? @db.Decimal(18, 2)
+  lastCost     Decimal? @db.Decimal(18, 2)
 
   /// Stocked items carry balances and reorder levels; a service or a one-off
   /// fabricated part does not.
-  isStocked    Boolean @default(true)
+  isStocked    Boolean  @default(true)
   minStock     Decimal? @db.Decimal(18, 3)
   reorderLevel Decimal? @db.Decimal(18, 3)
 
@@ -720,12 +726,12 @@ model Item {
 }
 
 model Warehouse {
-  id        String  @id @default(cuid())
-  code      String  @unique
-  name      String
-  address   String?
-  city      String?
-  isActive  Boolean @default(true)
+  id       String  @id @default(cuid())
+  code     String  @unique
+  name     String
+  address  String?
+  city     String?
+  isActive Boolean @default(true)
 
   locations Location[]
 
@@ -793,13 +799,18 @@ model Lead {
   /// company is free text until it is linked to a real Customer.
   companyName String
   customerId  String?
-  customer    Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customer    Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
   siteId      String?
   site        CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
   contactPerson String?
   contactEmail  String?
   contactPhone  String?
+
+  /// Where the work is. Copied off the customer's site when there is one, and
+  /// editable either way — a lead often names a site the customer record does
+  /// not have yet, and losing it means ringing back to ask where to go.
+  address String?
 
   source      String?
   description String?
@@ -810,9 +821,9 @@ model Lead {
   createdById  String
   createdBy    User   @relation("LeadCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
-  estimatedValue  Decimal? @db.Decimal(18, 2)
+  estimatedValue  Decimal?  @db.Decimal(18, 2)
   /// Salesperson's own read on the chance of award, used for weighted pipeline.
-  probability     Int      @default(0)
+  probability     Int       @default(0)
   expectedClosing DateTime? @db.Date
 
   nextAction     String?
@@ -846,7 +857,7 @@ model Costing {
   status CostingStatus @default(DRAFT)
 
   customerId String?
-  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customer   Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
   siteId     String?
   site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
@@ -867,8 +878,8 @@ model Costing {
   notes        String?
   terms        String?
 
-  lines          CostingLine[]
-  scopeSections  ScopeSection[]
+  lines              CostingLine[]
+  scopeSections      ScopeSection[]
   quotationRevisions QuotationRevision[]
   jobs               Job[]
 
@@ -928,7 +939,7 @@ model ScopeSection {
   /// validated against the costing's contract value.
   value Decimal @default(0) @db.Decimal(18, 2)
 
-  sortOrder Int @default(0)
+  sortOrder Int         @default(0)
   tasks     ScopeTask[]
 
   @@index([costingId])
@@ -971,11 +982,11 @@ model Quotation {
   number String @unique
 
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
   contactId  String?
   contact    CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
   siteId     String?
-  site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  site       CustomerSite?    @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
   leadId String?
   lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: SetNull)
@@ -1019,16 +1030,16 @@ model QuotationRevision {
   terms        String?
   notes        String?
 
-  subtotal    Decimal @default(0) @db.Decimal(18, 2)
-  vatAmount   Decimal @default(0) @db.Decimal(18, 2)
-  total       Decimal @default(0) @db.Decimal(18, 2)
+  subtotal     Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount    Decimal @default(0) @db.Decimal(18, 2)
+  total        Decimal @default(0) @db.Decimal(18, 2)
   /// Snapshot of the rate used, so an old revision still prints the tax it was
   /// issued with after Settings change.
-  vatRate     Decimal @default(0.12) @db.Decimal(6, 4)
+  vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
   vatInclusive Boolean @default(false)
 
   approvedById String?
-  approvedBy   User?   @relation("RevisionApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedBy   User?     @relation("RevisionApprover", fields: [approvedById], references: [id], onDelete: SetNull)
   approvedAt   DateTime?
 
   items QuotationItem[]
@@ -1075,11 +1086,11 @@ enum ActivityStatus {
 
 /// "One look at what all the sales personnel are going to do by day."
 model SalesActivity {
-  id      String         @id @default(cuid())
-  type    ActivityType   @default(FOLLOW_UP)
-  status  ActivityStatus @default(PLANNED)
-  subject String
-  notes   String?
+  id       String         @id @default(cuid())
+  type     ActivityType   @default(FOLLOW_UP)
+  status   ActivityStatus @default(PLANNED)
+  subject  String
+  notes    String?
   location String?
 
   assignedToId String
@@ -1093,7 +1104,7 @@ model SalesActivity {
   customer    Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   startsAt        DateTime
-  durationMinutes Int      @default(60)
+  durationMinutes Int       @default(60)
   completedAt     DateTime?
 
   createdAt DateTime @default(now())
@@ -1135,9 +1146,9 @@ model Job {
   name   String
 
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
   siteId     String?
-  site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  site       CustomerSite?    @relation(fields: [siteId], references: [id], onDelete: SetNull)
   contactId  String?
   contact    CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
@@ -1154,7 +1165,7 @@ model Job {
   createdById      String
   createdBy        User    @relation("JobCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
-  contractValue    Decimal  @db.Decimal(18, 2)
+  contractValue    Decimal   @db.Decimal(18, 2)
   customerPoNumber String?
   customerPoDate   DateTime? @db.Date
   contractDate     DateTime? @db.Date
@@ -1171,13 +1182,13 @@ model Job {
 
   notes String?
 
-  scopeItems   JobScopeItem[]
-  costEntries  JobCostEntry[]
-  budgetRequests BudgetRequest[]
+  scopeItems      JobScopeItem[]
+  costEntries     JobCostEntry[]
+  budgetRequests  BudgetRequest[]
   progressReports ProgressReport[]
-  billings     ProgressBilling[]
-  plans        ApprovedPlan[]
-  tasks        JobTask[]
+  billings        ProgressBilling[]
+  plans           ApprovedPlan[]
+  tasks           JobTask[]
 
   purchaseRequests PurchaseRequest[]
   purchaseOrders   PurchaseOrder[]
@@ -1187,9 +1198,9 @@ model Job {
   invoices         Invoice[]
   supplierBills    SupplierBill[]
   expenseClaims    ExpenseClaim[]
-  installedAssets  InstalledAsset[] @relation("AssetInstaller")
+  installedAssets  InstalledAsset[]  @relation("AssetInstaller")
   serviceContract  ServiceContract?
-  serviceReports   ServiceReport[]  @relation("ServiceReportJob")
+  serviceReports   ServiceReport[]   @relation("ServiceReportJob")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1340,9 +1351,9 @@ model ProgressReport {
   nextPeriodPlan String?
 
   preparedById String
-  preparedBy   User   @relation("ReportPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
+  preparedBy   User      @relation("ReportPreparer", fields: [preparedById], references: [id], onDelete: Restrict)
   approvedById String?
-  approvedBy   User?  @relation("ReportApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedBy   User?     @relation("ReportApprover", fields: [approvedById], references: [id], onDelete: SetNull)
   approvedAt   DateTime?
 
   lines   ProgressReportLine[]
@@ -1418,7 +1429,7 @@ model ProgressBilling {
   notes      String?
   approvedAt DateTime?
 
-  lines ProgressBillingLine[]
+  lines   ProgressBillingLine[]
   invoice Invoice?
 
   createdAt DateTime @default(now())
@@ -1436,11 +1447,11 @@ model ProgressBillingLine {
   scopeItemId String
   scopeItem   JobScopeItem @relation(fields: [scopeItemId], references: [id], onDelete: Cascade)
 
-  scopeValue        Decimal @db.Decimal(18, 2)
-  previousPct       Decimal @db.Decimal(7, 4)
-  toDatePct         Decimal @db.Decimal(7, 4)
-  previousAmount    Decimal @db.Decimal(18, 2)
-  thisPeriodAmount  Decimal @db.Decimal(18, 2)
+  scopeValue       Decimal @db.Decimal(18, 2)
+  previousPct      Decimal @db.Decimal(7, 4)
+  toDatePct        Decimal @db.Decimal(7, 4)
+  previousAmount   Decimal @db.Decimal(18, 2)
+  thisPeriodAmount Decimal @db.Decimal(18, 2)
 
   @@unique([billingId, scopeItemId])
 }
@@ -1455,12 +1466,12 @@ enum PlanStatus {
 /// "Approved Plan — documents, approved plan required attachments or time
 /// stamp." Work should not start on an unapproved plan (model §4.2).
 model ApprovedPlan {
-  id     String     @id @default(cuid())
-  jobId  String
-  job    Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  title  String
+  id         String     @id @default(cuid())
+  jobId      String
+  job        Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  title      String
   drawingNo  String?
-  revision   String  @default("0")
+  revision   String     @default("0")
   discipline String?
   status     PlanStatus @default(FOR_APPROVAL)
 
@@ -1567,9 +1578,9 @@ model PurchaseRequest {
 
   approvedAt DateTime?
 
-  items    PurchaseRequestItem[]
+  items     PurchaseRequestItem[]
   canvasses Canvass[]
-  orders   PurchaseOrder[]
+  orders    PurchaseOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1590,14 +1601,14 @@ model PurchaseRequestItem {
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
-  description  String
-  quantity     Decimal @db.Decimal(18, 3)
-  unit         String  @default("pcs")
-  estimatedCost Decimal @default(0) @db.Decimal(18, 2)
+  description     String
+  quantity        Decimal @db.Decimal(18, 3)
+  unit            String  @default("pcs")
+  estimatedCost   Decimal @default(0) @db.Decimal(18, 2)
   /// quantity × estimatedCost, stored so the commitment is a recorded fact.
   estimatedAmount Decimal @default(0) @db.Decimal(18, 2)
-  orderedQty   Decimal @default(0) @db.Decimal(18, 3)
-  sortOrder    Int     @default(0)
+  orderedQty      Decimal @default(0) @db.Decimal(18, 3)
+  sortOrder       Int     @default(0)
 
   quotes     CanvassQuote[]
   orderItems PurchaseOrderItem[]
@@ -1624,8 +1635,8 @@ model Canvass {
   createdById String
   createdBy   User   @relation("CanvassCreator", fields: [createdById], references: [id], onDelete: Restrict)
 
-  notes      String?
-  awardedAt  DateTime?
+  notes     String?
+  awardedAt DateTime?
 
   suppliers CanvassSupplier[]
 
@@ -1679,9 +1690,9 @@ enum PoStatus {
 }
 
 model PurchaseOrder {
-  id     String   @id @default(cuid())
-  number String   @unique
-  status PoStatus @default(DRAFT)
+  id     String       @id @default(cuid())
+  number String       @unique
+  status PoStatus     @default(DRAFT)
   kind   PurchaseKind @default(DIRECT_TO_JOB)
 
   supplierId String
@@ -1767,10 +1778,10 @@ model Receiving {
   receivedById String
   receivedBy   User   @relation("Receiver", fields: [receivedById], references: [id], onDelete: Restrict)
 
-  receivedDate   DateTime @default(now()) @db.Date
-  deliveryRefNo  String?
-  invoiceRefNo   String?
-  notes          String?
+  receivedDate  DateTime @default(now()) @db.Date
+  deliveryRefNo String?
+  invoiceRefNo  String?
+  notes         String?
 
   items ReceivingItem[]
   bills SupplierBill[]
@@ -1791,11 +1802,11 @@ model ReceivingItem {
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
-  quantity  Decimal @db.Decimal(18, 3)
-  unitCost  Decimal @db.Decimal(18, 2)
-  serialNo  String?
-  batchNo   String?
-  remarks   String?
+  quantity Decimal @db.Decimal(18, 3)
+  unitCost Decimal @db.Decimal(18, 2)
+  serialNo String?
+  batchNo  String?
+  remarks  String?
 
   @@index([receivingId])
 }
@@ -1819,13 +1830,13 @@ model StockIssue {
   warehouseId String
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
 
-  issuedById String
-  issuedBy   User   @relation("Issuer", fields: [issuedById], references: [id], onDelete: Restrict)
-  issuedToId String?
-  issuedTo   User?  @relation("IssuedTo", fields: [issuedToId], references: [id], onDelete: SetNull)
+  issuedById   String
+  issuedBy     User    @relation("Issuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  issuedToId   String?
+  issuedTo     User?   @relation("IssuedTo", fields: [issuedToId], references: [id], onDelete: SetNull)
   issuedToName String?
 
-  issueDate DateTime @default(now()) @db.Date
+  issueDate DateTime  @default(now()) @db.Date
   purpose   String
   notes     String?
   issuedAt  DateTime?
@@ -1930,7 +1941,7 @@ model InventoryBalance {
   warehouseId String
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
 
-  quantity Decimal @default(0) @db.Decimal(18, 3)
+  quantity    Decimal @default(0) @db.Decimal(18, 3)
   /// On loan via a borrow slip — still owned, not available to issue.
   borrowedQty Decimal @default(0) @db.Decimal(18, 3)
 
@@ -1960,12 +1971,12 @@ model InventoryTransaction {
   warehouseId String
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
 
-  type     StockMoveType
+  type         StockMoveType
   /// Signed: positive in, negative out.
-  quantity Decimal       @db.Decimal(18, 3)
-  unitCost Decimal       @default(0) @db.Decimal(18, 4)
+  quantity     Decimal       @db.Decimal(18, 3)
+  unitCost     Decimal       @default(0) @db.Decimal(18, 4)
   /// Balance after this movement, so the card reads without re-summing.
-  balanceAfter Decimal   @db.Decimal(18, 3)
+  balanceAfter Decimal       @db.Decimal(18, 3)
 
   sourceType   String
   sourceId     String?
@@ -2010,7 +2021,7 @@ model FaceEnrollment {
   label      String?
 
   enrolledById String?
-  enrolledBy   User?   @relation("FaceEnroller", fields: [enrolledById], references: [id], onDelete: SetNull)
+  enrolledBy   User?    @relation("FaceEnroller", fields: [enrolledById], references: [id], onDelete: SetNull)
   createdAt    DateTime @default(now())
 
   @@index([employeeId])
@@ -2040,21 +2051,21 @@ model Attendance {
 
   date DateTime @db.Date
 
-  timeIn        DateTime?
-  timeInMethod  ClockMethod?
-  timeInPhoto   String?
+  timeIn       DateTime?
+  timeInMethod ClockMethod?
+  timeInPhoto  String?
   /// Match distance at clock-in, kept so a questionable match can be reviewed.
-  timeInScore   Decimal?     @db.Decimal(6, 4)
+  timeInScore  Decimal?     @db.Decimal(6, 4)
 
   timeOut       DateTime?
   timeOutMethod ClockMethod?
   timeOutPhoto  String?
   timeOutScore  Decimal?     @db.Decimal(6, 4)
 
-  status      AttendanceStatus @default(PRESENT)
-  lateMinutes Int              @default(0)
+  status        AttendanceStatus @default(PRESENT)
+  lateMinutes   Int              @default(0)
   /// Net of the unpaid break, so it is hours actually worked.
-  workedMinutes Int            @default(0)
+  workedMinutes Int              @default(0)
 
   notes        String?
   recordedById String?
@@ -2134,11 +2145,11 @@ model LeaveRequest {
   /// Working days, to 0.5.
   days      Decimal  @db.Decimal(6, 2)
 
-  reason     String
-  proofNote  String?
-  decidedAt  DateTime?
+  reason      String
+  proofNote   String?
+  decidedAt   DateTime?
   decidedById String?
-  decidedBy   User?   @relation("LeaveDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+  decidedBy   User?     @relation("LeaveDecider", fields: [decidedById], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2179,20 +2190,20 @@ model OvertimeRequest {
   plannedEnd     String
   estimatedHours Decimal @db.Decimal(6, 2)
 
-  actualStart  String?
-  actualEnd    String?
-  actualHours  Decimal? @db.Decimal(6, 2)
+  actualStart String?
+  actualEnd   String?
+  actualHours Decimal? @db.Decimal(6, 2)
   /// Dinner break 17:00–18:00, −60 min, pre-checked. Unchecking means
   /// continuous work.
-  dinnerBreak  Boolean  @default(true)
+  dinnerBreak Boolean  @default(true)
 
-  reason        String
-  varianceNote  String?
+  reason       String
+  varianceNote String?
 
   /// Where the cost is deducted from — "On approvals have an option to where
   /// project it will be deducted in G-Ops Project management Budget Monitoring."
-  jobId String?
-  job   Job?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  jobId          String?
+  job            Job?          @relation(fields: [jobId], references: [id], onDelete: SetNull)
   costCategoryId String?
   costCategory   CostCategory? @relation(fields: [costCategoryId], references: [id], onDelete: SetNull)
 
@@ -2267,8 +2278,8 @@ model Invoice {
   progressBillingId String?          @unique
   progressBilling   ProgressBilling? @relation(fields: [progressBillingId], references: [id], onDelete: Restrict)
 
-  invoiceDate DateTime  @db.Date
-  dueDate     DateTime  @db.Date
+  invoiceDate DateTime @db.Date
+  dueDate     DateTime @db.Date
   terms       String?
   poReference String?
 
@@ -2614,7 +2625,7 @@ model InstalledAsset {
   status AssetStatus @default(ACTIVE)
 
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
   siteId     String?
   site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
@@ -2634,7 +2645,7 @@ model InstalledAsset {
   capacity     String?
   location     String?
 
-  installedAt   DateTime? @db.Date
+  installedAt    DateTime? @db.Date
   commissionedAt DateTime? @db.Date
   /// When free repair stops and billable service starts. The single most
   /// commercially useful date in this table.
@@ -2692,9 +2703,9 @@ model ServiceContract {
 
   /// Hours promised for a breakdown call. Free text because contracts say
   /// things like "next working day" as often as they say a number.
-  responseTime String?
+  responseTime  String?
   /// What the contract does NOT cover — consumables, parts, travel.
-  exclusions   String?
+  exclusions    String?
   coverageNotes String?
 
   /// Set when this contract replaced an expiring one, so a renewal chain is
@@ -2703,9 +2714,9 @@ model ServiceContract {
   renewedFrom   ServiceContract? @relation("Renewal", fields: [renewedFromId], references: [id], onDelete: SetNull)
   renewedTo     ServiceContract? @relation("Renewal")
 
-  assets   ServiceContractAsset[]
-  visits   ServiceVisit[]
-  reports  ServiceReport[]
+  assets  ServiceContractAsset[]
+  visits  ServiceVisit[]
+  reports ServiceReport[]
 
   createdById String
   createdBy   User   @relation("ContractCreator", fields: [createdById], references: [id], onDelete: Restrict)
@@ -2757,7 +2768,7 @@ model ServiceVisit {
   contract   ServiceContract? @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
   siteId     String?
   site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
@@ -2765,8 +2776,8 @@ model ServiceVisit {
   asset   InstalledAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
 
   /// Which visit of the contract's schedule this is — 1 of 4, 2 of 4.
-  sequence  Int?
-  dueDate   DateTime  @db.Date
+  sequence    Int?
+  dueDate     DateTime  @db.Date
   performedAt DateTime? @db.Date
 
   assignedToId String?
@@ -2791,12 +2802,12 @@ model ServiceVisit {
 /// exact version they were filled in on, so an old report renders forever the
 /// way it was signed.
 model ReportTemplate {
-  id      String      @id @default(cuid())
+  id          String      @id @default(cuid())
   /// Stable across versions. Duplicating a template gives a new key.
-  key     String
-  version Int         @default(1)
-  kind    ServiceKind
-  name    String
+  key         String
+  version     Int         @default(1)
+  kind        ServiceKind
+  name        String
   description String?
 
   /// [{ key, title, help?, fields: [{ key, label, type, options?, required?,
@@ -2837,7 +2848,7 @@ model ServiceReport {
   kind   ServiceKind
   status ReportStatus @default(DRAFT)
 
-  visitId String? @unique
+  visitId String?       @unique
   visit   ServiceVisit? @relation(fields: [visitId], references: [id], onDelete: SetNull)
 
   contractId String?
@@ -2848,7 +2859,7 @@ model ServiceReport {
   job   Job?    @relation("ServiceReportJob", fields: [jobId], references: [id], onDelete: SetNull)
 
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
   siteId     String?
   site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
@@ -2859,7 +2870,7 @@ model ServiceReport {
   templateId String
   template   ReportTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
 
-  performedAt  DateTime  @db.Date
+  performedAt   DateTime @db.Date
   performedById String
   performedBy   User     @relation("ReportAuthor", fields: [performedById], references: [id], onDelete: Restrict)
 

@@ -287,7 +287,7 @@ function ActivityModal({
 
   return (
     <Modal
-      title={activity ? 'Edit activity' : 'Schedule activity'}
+      title={activity ? 'Modify activity' : 'Schedule activity'}
       onClose={onClose}
       footer={
         <>

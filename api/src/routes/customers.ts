@@ -13,6 +13,7 @@ import {
   badRequest,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
+import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 
@@ -156,16 +157,110 @@ customerRoutes.get(
     });
     if (!customer) throw notFound('Customer not found');
 
+    /*
+      The commercial history, each collection behind the permission that guards
+      the screen it comes from. Somebody who may see customers but not invoices
+      sees the customer without them — the 360 view is a window onto those
+      modules, never a way around their permissions.
+    */
+    const me = currentUser(req);
+    const customerId = customer.id;
+
+    const [quotations, projects, invoices, serviceContracts] = await Promise.all([
+      can(me, 'gops.quotations.view_all')
+        ? prisma.quotation.findMany({
+            where: { customerId },
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              number: true,
+              subject: true,
+              outcome: true,
+              createdAt: true,
+              revisions: {
+                orderBy: { revision: 'desc' },
+                select: { revision: true, status: true, total: true },
+              },
+            },
+          })
+        : [],
+      can(me, 'gops.projects.view_all')
+        ? prisma.job.findMany({
+            where: { customerId },
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              number: true,
+              name: true,
+              status: true,
+              contractValue: true,
+              type: true,
+            },
+          })
+        : [],
+      can(me, 'gfin.ar.view_all')
+        ? prisma.invoice.findMany({
+            where: { customerId },
+            orderBy: { invoiceDate: 'desc' },
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              invoiceDate: true,
+              dueDate: true,
+              invoiceTotal: true,
+              netCollectible: true,
+              amountCollected: true,
+            },
+          })
+        : [],
+      can(me, 'gops.service_contracts.view_all')
+        ? prisma.serviceContract.findMany({
+            where: { job: { customerId } },
+            orderBy: { endsAt: 'desc' },
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              startsAt: true,
+              endsAt: true,
+              frequencyMonths: true,
+              job: { select: { id: true, number: true, name: true } },
+            },
+          })
+        : [],
+    ]);
+
     res.json({
       ...customer,
       creditLimit: customer.creditLimit ? Number(customer.creditLimit) : null,
-      // Filled by Phases 3, 4, 7 and 8.
+      quotations: quotations.map((q) => {
+        // What the quotation is worth: its latest approved revision, else its
+        // latest — the same rule Insights uses, so the two cannot disagree.
+        const best = q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0];
+        return {
+          id: q.id,
+          number: q.number,
+          subject: q.subject,
+          outcome: q.outcome,
+          createdAt: q.createdAt,
+          revisionNo: best?.revision ?? null,
+          revisionStatus: best?.status ?? null,
+          total: best ? Number(best.total) : null,
+        };
+      }),
+      projects: projects.map((j) => ({ ...j, contractValue: Number(j.contractValue) })),
+      invoices: invoices.map((i) => ({
+        ...i,
+        invoiceTotal: Number(i.invoiceTotal),
+        netCollectible: Number(i.netCollectible),
+        amountCollected: Number(i.amountCollected),
+        outstanding: Number(i.netCollectible) - Number(i.amountCollected),
+      })),
+      serviceContracts,
+      // Still empty: nothing reads them yet.
       opportunities: [],
-      quotations: [],
-      projects: [],
-      invoices: [],
       payments: [],
-      serviceContracts: [],
       serviceReports: [],
       documents: [],
     });

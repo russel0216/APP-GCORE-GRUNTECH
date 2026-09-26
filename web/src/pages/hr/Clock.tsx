@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, formatDateTime, useToast } from '../../components/ui';
 
 /**
@@ -96,6 +97,7 @@ function useCamera() {
 
 export function Clock() {
   const toast = useToast();
+  const { refresh: refreshAuth } = useAuth();
   const camera = useCamera();
   const [state, setState] = useState<ClockState | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -169,9 +171,12 @@ export function Clock() {
         'ok',
         result.samples < 3
           ? `Face saved — ${result.samples} of 3. Capture a couple more from slightly different angles.`
-          : `Face saved — ${result.samples} samples. You can clock in now.`,
+          : `Face saved — ${result.samples} samples. It's also your account photo now.`,
       );
       await load();
+      // The server just pointed this capture at User.photoPath (see hr.ts) —
+      // refetch /auth/me so the topbar avatar reflects it without a reload.
+      await refreshAuth();
     } catch (err) {
       setError(err);
     } finally {

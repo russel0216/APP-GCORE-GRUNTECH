@@ -290,7 +290,7 @@ function UserEditor({
   return (
     <Modal
       wide
-      title={isNew ? 'Add user' : `Edit ${form.name || 'user'}`}
+      title={isNew ? 'Add user' : `Modify ${form.name || 'user'}`}
       onClose={onClose}
       footer={
         <>

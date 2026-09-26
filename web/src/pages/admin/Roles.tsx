@@ -191,7 +191,7 @@ function RoleEditor({
   return (
     <Modal
       wide
-      title={role ? `Edit ${role.name}` : 'Add role'}
+      title={role ? `Modify ${role.name}` : 'Add role'}
       onClose={onClose}
       footer={
         <>

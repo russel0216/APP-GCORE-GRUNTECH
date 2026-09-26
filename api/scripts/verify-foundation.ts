@@ -27,6 +27,7 @@ import {
   approvalSignoffs,
 } from '../src/shared/approvals';
 import { renderDocument, formatDateTime, formatMoney } from '../src/shared/pdf';
+import { readAppearance } from '../src/routes/appearance';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -520,6 +521,114 @@ async function main() {
   check('content starts 14pt from the edge', edges.left === 14, `${edges.left}pt`);
   check('and nothing runs off the bottom', edges.bottom > 12, `${edges.bottom}pt clear`);
 
+
+  // ══ Appearance ═══════════════════════════════════════════════════════════
+  console.log('');
+  console.log('Appearance');
+
+  /*
+    Token values are written straight into a <style> element, so the sanitiser
+    is the only thing between a saved setting and a rule nobody asked for. A
+    value carrying a brace could close the declaration and open its own; a
+    name carrying `</style>` could leave CSS altogether.
+  */
+  const hostile = readAppearance({
+    tokens: {
+      'fs-base': '16px',
+      'sidebar-w': '240px; } body { display: none; ',
+      'evil</style><script>alert(1)</script>': 'x',
+      'has space': '10px',
+      'comment': '10px /* ',
+    },
+    dark: { neon: '#39ff9d' },
+    day: { neon: '#0a7148' },
+    css: '.page-head h1 { letter-spacing: 3px; }',
+  });
+
+  check(
+    'a token value that would close its own declaration is dropped',
+    hostile.tokens['sidebar-w'] === undefined,
+    JSON.stringify(hostile.tokens['sidebar-w']),
+  );
+  check(
+    'and a token name that would leave the style element with it',
+    Object.keys(hostile.tokens).every((k) => /^[a-z0-9-]+$/.test(k)),
+    Object.keys(hostile.tokens).join(', '),
+  );
+  check(
+    'the honest ones in the same payload still come through',
+    hostile.tokens['fs-base'] === '16px',
+    JSON.stringify(hostile.tokens),
+  );
+  check(
+    'each theme keeps its own colours rather than sharing one set',
+    hostile.dark.neon === '#39ff9d' && hostile.day.neon === '#0a7148',
+    `dark ${hostile.dark.neon}, day ${hostile.day.neon}`,
+  );
+  check(
+    'custom CSS is kept as written — it is the sanctioned way to write a rule',
+    hostile.css.includes('letter-spacing: 3px'),
+  );
+
+  const empty = readAppearance(undefined);
+  check(
+    'an unset appearance reads as nothing overridden, not as a broken one',
+    !Object.keys(empty.tokens).length &&
+      !Object.keys(empty.dark).length &&
+      !Object.keys(empty.day).length &&
+      empty.css === '',
+  );
+
+  /*
+    An empty value means "use the stylesheet", so it must not survive as a
+    token — `--fs-base: ;` is a parse error that takes the whole block with it.
+  */
+  const blanks = readAppearance({ tokens: { 'fs-base': '   ', 'fs-lg': '18px' } });
+  check(
+    'a blank value clears the override instead of writing an empty rule',
+    blanks.tokens['fs-base'] === undefined && blanks.tokens['fs-lg'] === '18px',
+    JSON.stringify(blanks.tokens),
+  );
+
+  /*
+    Per-element rules from the layout editor.
+
+    The selector whitelist shipped without `/` in it, which quietly threw away
+    every rule the editor produced — they all begin `[data-route="/g-ops"]`.
+    The save returned 200 and the layout snapped back on the next load, which
+    is the worst shape a bug can take: a success message over a discarded
+    write. The real selector is the assertion.
+  */
+  const real =
+    '[data-route="/g-ops"] .panel-block:nth-child(1) div:nth-child(3) .kpi-card:nth-child(1)';
+  const editor = readAppearance({
+    rules: {
+      [real]: { transform: 'translate(40px, 24px)', width: '497px' },
+      'body } * { display: none': { width: '10px' },
+      '.card': { 'background: red; x': '1px' },
+      '.empty': {},
+    },
+  });
+
+  check(
+    'a selector the layout editor actually produces is stored, route scope and all',
+    editor.rules[real]?.transform === 'translate(40px, 24px)' &&
+      editor.rules[real]?.width === '497px',
+    JSON.stringify(editor.rules[real]),
+  );
+  check(
+    'a selector that would close the rule and open its own is dropped',
+    editor.rules['body } * { display: none'] === undefined,
+  );
+  check(
+    'so is a property name smuggling a second declaration',
+    Object.keys(editor.rules['.card'] ?? {}).length === 0,
+    JSON.stringify(editor.rules['.card']),
+  );
+  check(
+    'and a selector with nothing left to say is not stored as an empty rule',
+    editor.rules['.empty'] === undefined,
+  );
 
   // ── Done ───────────────────────────────────────────────────────────────────
   await cleanup();

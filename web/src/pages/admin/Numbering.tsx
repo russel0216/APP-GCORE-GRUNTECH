@@ -86,7 +86,7 @@ export function Numbering() {
                 {can('admin.numbering.edit_all') && (
                   <td>
                     <button className="btn btn-sm" onClick={() => setEditing(row)}>
-                      Edit
+                      Modify
                     </button>
                   </td>
                 )}

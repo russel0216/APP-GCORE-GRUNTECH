@@ -5,6 +5,35 @@ import { handler } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 
 /**
+ * The from/to range, as a Prisma filter on one date column.
+ *
+ * Two kinds of figure live on this dashboard and only one of them takes a
+ * range. Period ACTIVITY — quotations raised, PM visits accomplished — is a
+ * question about a window, and dated by the column that records when the
+ * thing happened: `createdAt` for a document that was raised, `performedAt`
+ * for work that was carried out. A LIVE QUEUE — projects in progress,
+ * contracts running — is a question about right now, and filtering it by
+ * date wouldn't narrow the dashboard, it would hide what is open. Those
+ * stay unfiltered whatever range is showing.
+ */
+function periodWhere(
+  req: { query: { from?: unknown; to?: unknown } },
+  column: 'createdAt' | 'performedAt' = 'createdAt',
+) {
+  const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+  const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+  if (!from && !to) return {};
+  return {
+    [column]: {
+      ...(from ? { gte: new Date(from) } : {}),
+      // A bare date is midnight, which would cut off "to" before its own day
+      // has started — push it to the end of that day instead.
+      ...(to ? { lte: new Date(`${to}T23:59:59.999`) } : {}),
+    },
+  };
+}
+
+/**
  * G-OPS — the module overview.
  *
  * One read, not twenty. The dashboard used to count each tile with its own
@@ -56,6 +85,8 @@ gopsRoutes.get(
   require_('gops.dashboard.view_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
+    const period = periodWhere(req);
+    const performed = periodWhere(req, 'performedAt');
 
     const sees = {
       leads: canSee(me, 'leads'),
@@ -65,7 +96,6 @@ gopsRoutes.get(
       progress: canSee(me, 'progress_billing'),
       contracts: canSee(me, 'service_contracts'),
       visits: canSee(me, 'visits'),
-      reports: canSee(me, 'pm_reports'),
     };
 
     // Someone who can only see their own records must not be counting the
@@ -73,31 +103,27 @@ gopsRoutes.get(
     const mineOnly = (submodule: string) =>
       !me.isSuperAdmin && !me.permissions.has(`gops.${submodule}.view_all`);
 
-    const soon = new Date();
-    soon.setDate(soon.getDate() + 60);
-    const now = new Date();
-
-    const [leads, quotations, costings, jobs, reportsPending, contracts, expiring, visitsDue, serviceReports] =
+    const [leads, quotations, costings, jobs, reportsPending, contracts, activeContracts, pmAccomplished] =
       await Promise.all([
         sees.leads
           ? prisma.lead.groupBy({
               by: ['status'],
               _count: { _all: true },
-              where: mineOnly('leads') ? { assignedToId: me.id } : {},
+              where: { ...period, ...(mineOnly('leads') ? { assignedToId: me.id } : {}) },
             })
           : null,
         sees.quotations
           ? prisma.quotation.groupBy({
               by: ['outcome'],
               _count: { _all: true },
-              where: mineOnly('quotations') ? { ownerId: me.id } : {},
+              where: { ...period, ...(mineOnly('quotations') ? { ownerId: me.id } : {}) },
             })
           : null,
         sees.costing
           ? prisma.costing.groupBy({
               by: ['status'],
               _count: { _all: true },
-              where: mineOnly('costing') ? { ownerId: me.id } : {},
+              where: { ...period, ...(mineOnly('costing') ? { ownerId: me.id } : {}) },
             })
           : null,
         sees.projects
@@ -113,20 +139,15 @@ gopsRoutes.get(
         sees.contracts
           ? prisma.serviceContract.groupBy({ by: ['status'], _count: { _all: true } })
           : null,
-        // "Up for renewal" is a date question, not a status one: still running,
-        // but ending inside the window the renewals screen works to.
-        sees.contracts
-          ? prisma.serviceContract.count({
-              where: { status: 'ACTIVE', endsAt: { lte: soon } },
-            })
-          : null,
+        // Cover the business is carrying right now — a live figure, so no range.
+        sees.contracts ? prisma.serviceContract.count({ where: { status: 'ACTIVE' } }) : null,
+        // PM actually carried out, dated by the day the engineer did the work
+        // rather than the day the visit row was created — a visit scheduled in
+        // January and performed in March belongs to March.
         sees.visits
           ? prisma.serviceVisit.count({
-              where: { status: 'SCHEDULED', dueDate: { lte: now } },
+              where: { kind: 'PREVENTIVE_MAINTENANCE', status: 'COMPLETED', ...performed },
             })
-          : null,
-        sees.reports
-          ? prisma.serviceReport.count({ where: { status: 'PENDING_APPROVAL' } })
           : null,
       ]);
 
@@ -148,12 +169,11 @@ gopsRoutes.get(
             reportsAwaitingApproval: reportsPending,
           }
         : null,
-      aftermarket: sees.contracts || sees.visits || sees.reports
+      aftermarket: sees.contracts || sees.visits
         ? {
             contracts: contracts ? tally(contracts) : null,
-            upForRenewal: expiring,
-            visitsDue,
-            reportsAwaitingApproval: serviceReports,
+            activeContracts,
+            pmAccomplished,
           }
         : null,
     });

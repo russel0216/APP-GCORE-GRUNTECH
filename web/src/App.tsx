@@ -10,6 +10,7 @@ import { OpsDashboard } from './pages/OpsDashboard';
 import { Users } from './pages/admin/Users';
 import { Roles } from './pages/admin/Roles';
 import { Company } from './pages/admin/Company';
+import { Appearance } from './pages/admin/Appearance';
 import { Numbering } from './pages/admin/Numbering';
 import { Workflows } from './pages/admin/Workflows';
 import { Audit } from './pages/admin/Audit';
@@ -184,6 +185,14 @@ function Routed() {
           element={
             <Guard permission="admin.company.view_all">
               <Company />
+            </Guard>
+          }
+        />
+        <Route
+          path="/admin/appearance"
+          element={
+            <Guard permission="admin.appearance.view_all">
+              <Appearance />
             </Guard>
           }
         />

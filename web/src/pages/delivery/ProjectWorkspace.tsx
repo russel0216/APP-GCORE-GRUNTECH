@@ -231,7 +231,7 @@ export function ProjectWorkspace() {
         {mayEdit && (
           <div className="row">
             <button className="btn" onClick={() => setEditing(true)}>
-              Edit
+              Modify
             </button>
             {job.status === 'PLANNING' && (
               <button className="btn btn-ok" onClick={() => setStatus('IN_PROGRESS')}>
@@ -986,7 +986,7 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
   return (
     <Modal
       wide
-      title={`Edit ${job.number}`}
+      title={`Modify ${job.number}`}
       onClose={onClose}
       footer={
         <>

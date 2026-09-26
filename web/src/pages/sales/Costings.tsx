@@ -193,7 +193,7 @@ export function CostingForm({
 
   return (
     <Modal
-      title={costing ? `Edit ${costing.number}` : 'New costing'}
+      title={costing ? `Modify ${costing.number}` : 'New costing'}
       onClose={onClose}
       footer={
         <>

@@ -91,6 +91,20 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
+  /**
+   * An authenticated binary — a PDF, a logo, an account photo. `fetch` alone
+   * won't carry the bearer token to an `<img src>`, so this is the one place
+   * that fetches the bytes directly; callers turn the result into an object
+   * URL and revoke it when they're done with it.
+   */
+  async getBlob(path: string): Promise<Blob> {
+    const headers: Record<string, string> = {};
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`/api${path}`, { headers });
+    if (!res.ok) throw new ApiError(res.status, `Request failed (${res.status})`);
+    return res.blob();
+  },
 };
 
 // ── Shared shapes ────────────────────────────────────────────────────────────
@@ -129,10 +143,18 @@ export interface Me {
     position: string | null;
     isSuperAdmin: boolean;
     roles: string[];
+    /** Attachment id — see components/ui.tsx's Avatar. */
+    photoPath: string | null;
   };
   permissions: string[];
   menu: MenuModule[];
   company: { name: string; logoPath: string | null; currency: string; numberPrefix: string } | null;
+  appearance?: {
+    tokens: Record<string, string>;
+    dark: Record<string, string>;
+    day: Record<string, string>;
+    css: string;
+  };
   unread: number;
 }
 

@@ -409,7 +409,6 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
 
 export function OvertimeDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const toast = useToast();
   const [row, setRow] = useState<(OtRow & { rate: Preview['rate']; variance: number | null }) | null>(
     null,
@@ -446,11 +445,6 @@ export function OvertimeDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-hr/overtime')}>
-          ← Overtime
-        </button>
-      </div>
 
       <div className="page-head">
         <div>

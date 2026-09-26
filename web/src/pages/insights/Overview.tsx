@@ -36,7 +36,10 @@ export function RangePicker({
   to: string;
   onChange: (from: string, to: string) => void;
 }) {
-  const thisYear = new Date().getFullYear();
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const monthStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
+  const yearStart = `${now.getFullYear()}-01-01`;
   return (
     <div className="row">
       <Field label="From">
@@ -46,8 +49,14 @@ export function RangePicker({
         <input type="date" value={to} onChange={(e) => onChange(from, e.target.value)} />
       </Field>
       <button
-        className="btn btn-sm"
-        onClick={() => onChange(`${thisYear}-01-01`, todayLocal())}
+        className={`btn btn-sm${from === monthStart && to === todayLocal() ? ' btn-active' : ''}`}
+        onClick={() => onChange(monthStart, todayLocal())}
+      >
+        This month
+      </button>
+      <button
+        className={`btn btn-sm${from === yearStart && to === todayLocal() ? ' btn-active' : ''}`}
+        onClick={() => onChange(yearStart, todayLocal())}
       >
         This year
       </button>

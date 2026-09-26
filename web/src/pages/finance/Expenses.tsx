@@ -416,7 +416,6 @@ function NewClaimModal({
 
 export function ExpenseClaimDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const toast = useToast();
   const { me, can } = useAuth();
   const [row, setRow] = useState<Claim | null>(null);
@@ -462,11 +461,6 @@ export function ExpenseClaimDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-fin/expenses')}>
-          ← Expense claims
-        </button>
-      </div>
 
       <div className="page-head">
         <div>

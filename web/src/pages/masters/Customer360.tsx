@@ -9,6 +9,8 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
+  formatDate,
   formatDateTime,
   formatMoney,
   useToast,
@@ -50,29 +52,58 @@ interface Site {
   isActive: boolean;
 }
 
+interface QuotationLine {
+  id: string;
+  number: string;
+  subject: string;
+  outcome: string;
+  createdAt: string;
+  revisionNo: number | null;
+  revisionStatus: string | null;
+  total: number | null;
+}
+
+interface ProjectLine {
+  id: string;
+  number: string;
+  name: string;
+  status: string;
+  type: string;
+  contractValue: number;
+}
+
+interface InvoiceLine {
+  id: string;
+  number: string;
+  status: string;
+  invoiceDate: string;
+  dueDate: string;
+  invoiceTotal: number;
+  netCollectible: number;
+  amountCollected: number;
+  outstanding: number;
+}
+
+interface ContractLine {
+  id: string;
+  number: string;
+  status: string;
+  startsAt: string;
+  endsAt: string;
+  frequencyMonths: number;
+  job: { id: string; number: string; name: string };
+}
+
 interface Customer360 extends CustomerRow {
   createdAt: string;
   updatedAt: string;
   contacts: Contact[];
   sites: Site[];
-  quotations: unknown[];
-  projects: unknown[];
-  invoices: unknown[];
-  serviceContracts: unknown[];
+  quotations: QuotationLine[];
+  projects: ProjectLine[];
+  invoices: InvoiceLine[];
+  serviceContracts: ContractLine[];
 }
-
-type Tab = 'overview' | 'contacts' | 'sites' | 'quotations' | 'projects' | 'invoices' | 'service' | 'activity';
-
-const TABS: { key: Tab; label: string; phase?: number }[] = [
-  { key: 'overview', label: 'Overview' },
-  { key: 'contacts', label: 'Contacts' },
-  { key: 'sites', label: 'Sites' },
-  { key: 'quotations', label: 'Quotations', phase: 3 },
-  { key: 'projects', label: 'Projects', phase: 4 },
-  { key: 'invoices', label: 'Invoices', phase: 7 },
-  { key: 'service', label: 'Service', phase: 8 },
-  { key: 'activity', label: 'Activity' },
-];
 
 export function Customer360Page() {
   const { id } = useParams<{ id: string }>();
@@ -83,7 +114,6 @@ export function Customer360Page() {
   const [customer, setCustomer] = useState<Customer360 | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  const [tab, setTab] = useState<Tab>('overview');
   const [editing, setEditing] = useState(false);
   const [contactModal, setContactModal] = useState<Contact | 'new' | null>(null);
   const [siteModal, setSiteModal] = useState<Site | 'new' | null>(null);
@@ -107,12 +137,12 @@ export function Customer360Page() {
   }, [load]);
 
   useEffect(() => {
-    if (tab !== 'activity' || !id) return;
+    if (!id) return;
     api
       .get<typeof activity>(`/audit/customer/${id}`)
       .then(setActivity)
       .catch(() => setActivity([]));
-  }, [tab, id]);
+  }, [id]);
 
   const mayEdit = can('gops.customers.edit_all');
 
@@ -157,7 +187,7 @@ export function Customer360Page() {
         {mayEdit && (
           <div className="row">
             <button className="btn" onClick={() => setEditing(true)}>
-              Edit
+              Modify
             </button>
             {can('gops.customers.delete') && (
               <button className="btn btn-danger" onClick={remove}>
@@ -170,18 +200,7 @@ export function Customer360Page() {
 
       <ErrorBox error={error} />
 
-      <div className="scope-switch" style={{ marginBottom: 16, flexWrap: 'wrap' }}>
-        {TABS.map((t) => (
-          <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>
-            {t.label}
-            {t.key === 'contacts' && customer.contacts.length > 0 && ` (${customer.contacts.length})`}
-            {t.key === 'sites' && customer.sites.length > 0 && ` (${customer.sites.length})`}
-            {t.phase && <span className="tag" style={{ marginLeft: 6 }}>P{t.phase}</span>}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'overview' && (
+      <div className="stack">
         <div className="grid grid-2">
           <div className="card">
             <h3 className="card-title">Company</h3>
@@ -218,9 +237,7 @@ export function Customer360Page() {
             </div>
           )}
         </div>
-      )}
 
-      {tab === 'contacts' && (
         <div className="card">
           <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
             <h3 className="card-title" style={{ margin: 0 }}>
@@ -269,7 +286,7 @@ export function Customer360Page() {
                       {mayEdit && (
                         <td>
                           <button className="btn btn-sm" onClick={() => setContactModal(c)}>
-                            Edit
+                            Modify
                           </button>
                         </td>
                       )}
@@ -280,9 +297,7 @@ export function Customer360Page() {
             </div>
           )}
         </div>
-      )}
 
-      {tab === 'sites' && (
         <div className="card">
           <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
             <h3 className="card-title" style={{ margin: 0 }}>
@@ -328,7 +343,7 @@ export function Customer360Page() {
                       {mayEdit && (
                         <td>
                           <button className="btn btn-sm" onClick={() => setSiteModal(s)}>
-                            Edit
+                            Modify
                           </button>
                         </td>
                       )}
@@ -339,13 +354,104 @@ export function Customer360Page() {
             </div>
           )}
         </div>
-      )}
 
-      {(['quotations', 'projects', 'invoices', 'service'] as Tab[]).includes(tab) && (
-        <UpcomingTab tab={tab} />
-      )}
+        <Collection
+          title="Quotations"
+          count={customer.quotations.length}
+          empty="No quotations raised for this customer."
+          head={['Number', 'Subject', 'Revision', 'Value', 'Outcome']}
+        >
+          {customer.quotations.map((q) => (
+            <tr key={q.id}>
+              <td>
+                <Link className="mono" to={`/g-ops/quotations/${q.id}`}>
+                  {q.number}
+                </Link>
+              </td>
+              <td>{q.subject}</td>
+              <td>{q.revisionNo === null ? '—' : `Rev ${q.revisionNo} · ${q.revisionStatus}`}</td>
+              <td className="num">{q.total === null ? '—' : formatMoney(q.total)}</td>
+              <td>
+                <StatusBadge status={q.outcome} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
 
-      {tab === 'activity' && (
+        <Collection
+          title="Projects"
+          count={customer.projects.length}
+          empty="Nothing has been awarded yet."
+          head={['Number', 'Project', 'Kind', 'Contract value', 'Status']}
+        >
+          {customer.projects.map((j) => (
+            <tr key={j.id}>
+              <td>
+                <Link className="mono" to={`/g-ops/projects/${j.id}`}>
+                  {j.number}
+                </Link>
+              </td>
+              <td>{j.name}</td>
+              <td className="muted">
+                {j.type === 'SERVICE_CONTRACT' ? 'Service contract' : 'Project'}
+              </td>
+              <td className="num">{formatMoney(j.contractValue)}</td>
+              <td>
+                <StatusBadge status={j.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Invoices"
+          count={customer.invoices.length}
+          empty="Nothing invoiced yet."
+          head={['Number', 'Issued', 'Due', 'Invoiced', 'Collectible', 'Outstanding', 'Status']}
+        >
+          {customer.invoices.map((i) => (
+            <tr key={i.id}>
+              <td>
+                <Link className="mono" to={`/g-fin/ar/${i.id}`}>
+                  {i.number}
+                </Link>
+              </td>
+              <td>{formatDate(i.invoiceDate)}</td>
+              <td>{formatDate(i.dueDate)}</td>
+              <td className="num">{formatMoney(i.invoiceTotal)}</td>
+              <td className="num">{formatMoney(i.netCollectible)}</td>
+              <td className="num">{formatMoney(i.outstanding)}</td>
+              <td>
+                <StatusBadge status={i.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Service contracts"
+          count={customer.serviceContracts.length}
+          empty="No service cover on record."
+          head={['Number', 'Covers', 'From', 'Until', 'PM every', 'Status']}
+        >
+          {customer.serviceContracts.map((c) => (
+            <tr key={c.id}>
+              <td>
+                <Link className="mono" to={`/g-ops/service-contracts/${c.id}`}>
+                  {c.number}
+                </Link>
+              </td>
+              <td>{c.job.name}</td>
+              <td>{formatDate(c.startsAt)}</td>
+              <td>{formatDate(c.endsAt)}</td>
+              <td>{c.frequencyMonths} months</td>
+              <td>
+                <StatusBadge status={c.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
         <div className="card">
           <h3 className="card-title">Activity</h3>
           {activity.length === 0 ? (
@@ -377,7 +483,7 @@ export function Customer360Page() {
             </div>
           )}
         </div>
-      )}
+      </div>
 
       {editing && (
         <CustomerForm
@@ -418,6 +524,56 @@ export function Customer360Page() {
   );
 }
 
+/**
+ * One collection of the customer's history — quotations, projects, invoices,
+ * service cover. Same card, same table, same empty line, so the page reads as
+ * one document rather than four screens stacked.
+ *
+ * A collection the caller may not see arrives empty from the server, which is
+ * the same as having none: the 360 view is a window onto those modules and
+ * never a way around their permissions.
+ */
+function Collection({
+  title,
+  count,
+  empty,
+  head,
+  children,
+}: {
+  title: string;
+  count: number;
+  empty: string;
+  head: string[];
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="card">
+      <h3 className="card-title">
+        {title}
+        {count > 0 && <span className="badge">{count}</span>}
+      </h3>
+      {count === 0 ? (
+        /* One faint line, not a full empty state: four of those stacked turned
+           a customer with no history into a page of blank panels. */
+        <p className="collection-empty">{empty}</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                {head.map((h) => (
+                  <th key={h}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>{children}</tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--line-soft)' }}>
@@ -425,21 +581,6 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
         {label}
       </dt>
       <dd style={{ margin: 0 }}>{value || <span className="faint">—</span>}</dd>
-    </div>
-  );
-}
-
-function UpcomingTab({ tab }: { tab: Tab }) {
-  const copy: Record<string, { phase: number; text: string }> = {
-    quotations: { phase: 3, text: 'Quotations raised for this customer, with their revisions.' },
-    projects: { phase: 4, text: 'Projects, their progress, budget and billing position.' },
-    invoices: { phase: 7, text: 'Invoices, collections and what is still outstanding.' },
-    service: { phase: 8, text: 'Service contracts, PM schedule, installed base and service reports.' },
-  };
-  const c = copy[tab];
-  return (
-    <div className="card">
-      <Empty title={`Ships in Phase ${c.phase}`} hint={c.text} />
     </div>
   );
 }
@@ -508,7 +649,7 @@ function ContactModal({
 
   return (
     <Modal
-      title={contact ? `Edit ${contact.name}` : 'Add contact'}
+      title={contact ? `Modify ${contact.name}` : 'Add contact'}
       onClose={onClose}
       footer={
         <>
@@ -627,7 +768,7 @@ function SiteModal({
 
   return (
     <Modal
-      title={site ? `Edit ${site.name}` : 'Add site'}
+      title={site ? `Modify ${site.name}` : 'Add site'}
       onClose={onClose}
       footer={
         <>

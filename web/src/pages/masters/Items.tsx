@@ -298,7 +298,7 @@ function ItemForm({
   return (
     <Modal
       wide
-      title={item ? `Edit ${item.name}` : 'Add item'}
+      title={item ? `Modify ${item.name}` : 'Add item'}
       onClose={onClose}
       footer={
         <>

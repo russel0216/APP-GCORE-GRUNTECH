@@ -300,7 +300,7 @@ async function main() {
 
   const engineer = await makeUser('ZZ Service Engineer', 'eng@verifya.local', ['service_engineer']);
   const manager = await makeUser('ZZ Service Manager', 'svc@verifya.local', ['service_manager']);
-  await makeUser('ZZ Director', 'exec@verifya.local', ['executive']);
+  const director = await makeUser('ZZ Director', 'exec@verifya.local', ['executive']);
 
   const customer = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital` },
@@ -770,6 +770,77 @@ async function main() {
       const text = await res.text();
       return { status: res.status, body: text ? JSON.parse(text) : {} };
     };
+
+    /*
+      The G-OPS dashboard's "PM accomplished" tile.
+
+      Two things it is easy to get wrong and impossible to notice by looking:
+      counting visits that are merely SCHEDULED, and dating them by createdAt
+      — the row's birthday — rather than performedAt, the day the engineer
+      actually did the work. A visit scheduled in January and performed in
+      March belongs to March, and a January range must not claim it.
+
+      Dated in a year of their own, because the contract fixtures above
+      generate and complete PM visits of their own in 2026 — an absolute
+      count across this year would be measuring those too, and would drift
+      the moment those fixtures change.
+    */
+    const directorToken = signToken(director.id, director.email);
+    await prisma.serviceVisit.createMany({
+      data: [
+        {
+          number: `${TAG}-PM-A`, kind: 'PREVENTIVE_MAINTENANCE', status: 'COMPLETED',
+          customerId: customer.id, dueDate: day('2019-03-10'), performedAt: day('2019-03-12'),
+        },
+        {
+          number: `${TAG}-PM-B`, kind: 'PREVENTIVE_MAINTENANCE', status: 'COMPLETED',
+          customerId: customer.id, dueDate: day('2019-09-10'), performedAt: day('2019-09-12'),
+        },
+        // Neither of these is an accomplishment: one has not happened, the
+        // other is a different kind of visit.
+        {
+          number: `${TAG}-PM-C`, kind: 'PREVENTIVE_MAINTENANCE', status: 'SCHEDULED',
+          customerId: customer.id, dueDate: day('2019-09-15'),
+        },
+        {
+          number: `${TAG}-PM-D`, kind: 'INSPECTION', status: 'COMPLETED',
+          customerId: customer.id, dueDate: day('2019-09-10'), performedAt: day('2019-09-12'),
+        },
+      ],
+    });
+
+    const pmIn = async (from: string, to: string) => {
+      const res = await api(directorToken, 'GET', `/gops/overview?from=${from}&to=${to}`);
+      return (res.body.aftermarket as { pmAccomplished: number } | null)?.pmAccomplished;
+    };
+
+    const pmYear = await pmIn('2019-01-01', '2019-12-31');
+    check(
+      'the dashboard counts PM that was carried out, not PM that was merely booked',
+      pmYear === 2,
+      `${pmYear} — the scheduled visit and the inspection must not be in it`,
+    );
+
+    const pmSep = await pmIn('2019-09-01', '2019-09-30');
+    check(
+      'and counts it in the month the work was done',
+      pmSep === 1,
+      `September reported ${pmSep}`,
+    );
+
+    const pmJan = await pmIn('2019-01-01', '2019-01-31');
+    check(
+      'a month nothing was performed in reports none, whatever was booked then',
+      pmJan === 0,
+      `January reported ${pmJan}`,
+    );
+
+    const pmDay = await pmIn('2019-09-12', '2019-09-12');
+    check(
+      'a single-day range includes work performed on that day',
+      pmDay === 1,
+      `the day itself reported ${pmDay} — the "to" bound must cover its whole day`,
+    );
 
     const onProject = await api(managerToken, 'POST', '/service-contracts', {
       jobId: project.id,

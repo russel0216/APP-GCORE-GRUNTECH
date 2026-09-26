@@ -767,6 +767,45 @@ async function main() {
       JSON.stringify(me.body).slice(0, 160),
     );
 
+    /*
+      Enrolling over HTTP — the actual /clock/enroll route, not the direct
+      prisma.faceEnrollment.create() used above for the matching unit tests.
+      This is what verifies the account-photo propagation: a live capture is
+      supposed to overwrite User.photoPath with the SAME attachment id the
+      enrolment stored, so the topbar avatar and the enrolment photo are
+      provably one file, not two that happen to look alike.
+    */
+    const enrolForm = new FormData();
+    enrolForm.set('photo', new Blob([sample('sample2.jpg')], { type: 'image/jpeg' }), 'enrol.jpg');
+    const enrolRes = await fetch(`${BASE}/clock/enroll`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${workerToken}` },
+      body: enrolForm,
+    });
+    const enrolBody = (await enrolRes.json()) as { id: string; samples: number };
+    check(
+      'enrolling over HTTP accepts a real photo',
+      enrolRes.status === 201 && enrolBody.samples > 0,
+      `${enrolRes.status} ${JSON.stringify(enrolBody)}`,
+    );
+
+    const enrolledRow = await prisma.faceEnrollment.findUnique({ where: { id: enrolBody.id } });
+    const workerAfter = await prisma.user.findUnique({ where: { id: worker.id }, select: { photoPath: true } });
+    check(
+      'the capture becomes the account photo — same attachment id, not a copy',
+      !!enrolledRow?.photoPath && enrolledRow.photoPath === workerAfter?.photoPath,
+      `enrolment ${enrolledRow?.photoPath} vs account ${workerAfter?.photoPath}`,
+    );
+
+    const photoRes = await fetch(`${BASE}/attachments/file/${workerAfter?.photoPath}`, {
+      headers: { Authorization: `Bearer ${workerToken}` },
+    });
+    check(
+      'and that photo is actually fetchable — the /file/:id route is not shadowed',
+      photoRes.status === 200 && (photoRes.headers.get('content-type') ?? '').startsWith('image/'),
+      `${photoRes.status} ${photoRes.headers.get('content-type')}`,
+    );
+
     // Filing actual hours on an overtime that was never authorised.
     const unauthorised = await prisma.overtimeRequest.create({
       data: {

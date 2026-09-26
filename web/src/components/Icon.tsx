@@ -36,6 +36,7 @@ export type IconName =
   | 'shield'
   | 'layers'
   | 'truck'
+  | 'image'
   | 'panel';
 
 /** Path data only — the wrapper supplies the canvas and the stroke. */
@@ -62,6 +63,9 @@ const PATHS: Record<IconName, string> = {
   shield: 'M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6zM9 12l2 2 4-4',
   layers: 'M12 3 3 8l9 5 9-5zM3 13l9 5 9-5M3 18l9 5 9-5',
   truck: 'M3 6h11v10H3zM14 9h4l3 3v4h-7zM7.5 18.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0m12 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0',
+  // A framed picture: the mountain and the sun, which is the one shape
+  // everybody reads as "image" without a label.
+  image: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m0 11 4.5-4.5 3 3L15 11l5 5M9 9.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0',
   panel: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m6 0v14',
 };
 
@@ -77,7 +81,7 @@ const PATHS: Record<IconName, string> = {
 const SECTION_ICONS: Record<string, IconName> = {
   Overview: 'grid',
   Sales: 'tag',
-  Delivery: 'truck',
+  Project: 'truck',
   Aftermarket: 'wrench',
   'Service reports': 'document',
   'My day': 'clock',

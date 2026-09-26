@@ -634,7 +634,6 @@ function NewBillModal({
 
 export function BillDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const toast = useToast();
   const { can } = useAuth();
   const [row, setRow] = useState<Bill | null>(null);
@@ -668,11 +667,6 @@ export function BillDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-fin/ap')}>
-          ← Payables
-        </button>
-      </div>
 
       <div className="page-head">
         <div>

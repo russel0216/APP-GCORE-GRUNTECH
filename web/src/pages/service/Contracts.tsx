@@ -466,7 +466,6 @@ interface ContractDetail extends Contract {
 
 export function ContractDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const toast = useToast();
   const { can } = useAuth();
   const [row, setRow] = useState<ContractDetail | null>(null);
@@ -504,11 +503,6 @@ export function ContractDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-ops/service-contracts')}>
-          ← Service contracts
-        </button>
-      </div>
 
       <div className="page-head">
         <div>

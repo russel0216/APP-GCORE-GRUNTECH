@@ -283,7 +283,7 @@ export function QuotationDetail() {
           </button>
           {quotation.canEdit && (
             <button className="btn" onClick={() => setSettingsOpen(true)}>
-              Edit
+              Modify
             </button>
           )}
           {quotation.canEdit && revision?.status !== 'DRAFT' && (
@@ -419,7 +419,7 @@ export function QuotationDetail() {
                         {editable && (
                           <td>
                             <button className="btn btn-sm" onClick={() => setItemModal(item)}>
-                              Edit
+                              Modify
                             </button>
                           </td>
                         )}
@@ -569,11 +569,28 @@ function NewQuotationModal({
   const [contacts, setContacts] = useState<{ id: string; name: string }[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
   const [costings, setCostings] = useState<{ id: string; number: string; title: string }[]>([]);
-  const [form, setForm] = useState({ customerId: '', contactId: '', siteId: '', subject: '', costingId: '' });
+  const [leads, setLeads] = useState<{ id: string; companyName: string; status: string }[]>([]);
+  const [form, setForm] = useState({
+    customerId: '', contactId: '', siteId: '', subject: '', costingId: '', leadId: '',
+  });
 
   useEffect(() => {
     api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
     api.get<typeof costings>('/costings/lookup').then(setCostings).catch(() => {});
+    /*
+      Leads still open, so a quotation can say which enquiry it answers.
+
+      This moved here from a button on the lead screen. The link is not
+      decoration: a quotation's outcome writes the lead's status back, so a
+      quotation raised without one leaves its lead sitting at whatever stage
+      somebody last set by hand.
+    */
+    api
+      .get<{ rows: { id: string; companyName: string; status: string }[] }>(
+        '/leads?pageSize=200&status=NEW,CONTACTED,QUALIFIED,SITE_VISIT,COSTING,QUOTATION_CREATED,NEGOTIATION',
+      )
+      .then((r) => setLeads(r.rows))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -603,6 +620,7 @@ function NewQuotationModal({
         siteId: form.siteId || null,
         subject: form.subject,
         costingId: form.costingId || null,
+        leadId: form.leadId || null,
       });
       toast('ok', 'Quotation created');
       onCreated(created.id);
@@ -632,6 +650,21 @@ function NewQuotationModal({
       }
     >
       <ErrorBox error={error} />
+      {leads.length > 0 && (
+        <Field
+          label="Answering which enquiry"
+          hint="Optional, but it is what keeps the lead's status in step with this quotation"
+        >
+          <select value={form.leadId} onChange={(e) => setForm({ ...form, leadId: e.target.value })}>
+            <option value="">— none —</option>
+            {leads.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.companyName}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
       <Field label="Customer">
         <select
           value={form.customerId}
@@ -743,7 +776,7 @@ function ItemModal({
 
   return (
     <Modal
-      title={item ? 'Edit line' : 'Add line'}
+      title={item ? 'Modify line' : 'Add line'}
       onClose={onClose}
       footer={
         <>
@@ -857,7 +890,7 @@ function QuotationSettings({
   return (
     <Modal
       wide
-      title={`Edit ${quotation.number}`}
+      title={`Modify ${quotation.number}`}
       onClose={onClose}
       footer={
         <>

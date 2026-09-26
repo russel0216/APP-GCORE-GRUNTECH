@@ -396,7 +396,6 @@ function RaiseInvoiceModal({
 
 export function InvoiceDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const toast = useToast();
   const { can } = useAuth();
   const [row, setRow] = useState<Invoice | null>(null);
@@ -431,11 +430,6 @@ export function InvoiceDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-fin/ar')}>
-          ← Receivables
-        </button>
-      </div>
 
       <div className="page-head">
         <div>
@@ -469,7 +463,7 @@ export function InvoiceDetail() {
           )}
           {row.ewtAmount > 0 && can('gfin.ar.edit_all') && (
             <button className="btn btn-sm" onClick={() => setCertificate(true)}>
-              {row.ewtCertificateNo ? 'Edit BIR 2307' : 'Record BIR 2307'}
+              {row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307'}
             </button>
           )}
         </div>

@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { api, setToken, type Me } from './api';
+import { applyAppearance, normalise } from './appearance';
 
 interface AuthValue {
   me: Me | null;
@@ -29,7 +30,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
-      setMe(await api.get<Me>('/auth/me'));
+      const next = await api.get<Me>('/auth/me');
+      setMe(next);
+      // The stored appearance, now that we have the server's copy rather than
+      // the cached one main.tsx painted with.
+      applyAppearance(normalise(next.appearance));
     } catch {
       setMe(null);
     } finally {

@@ -11,7 +11,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import { ApiError } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 
 // ── Toasts ───────────────────────────────────────────────────────────────────
 
@@ -448,4 +448,55 @@ export function initials(name: string): string {
     .slice(0, 2)
     .map((p) => p[0]?.toUpperCase() ?? '')
     .join('');
+}
+
+/**
+ * The one avatar, everywhere someone's picture appears — the topbar, the
+ * Account page, and anywhere else that follows. `photoId` is an Attachment
+ * id, never a URL: the file is behind `/attachments/file/:id`, which needs
+ * the bearer token, so a bare `<img src>` can't reach it. This fetches the
+ * bytes once per id and renders them as an object URL, falling back to the
+ * initials disc — unchanged — when there is no photo or the fetch fails.
+ */
+export function Avatar({
+  name,
+  photoId,
+  size = 30,
+}: {
+  name: string;
+  photoId?: string | null;
+  size?: number;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!photoId) {
+      setUrl(null);
+      return;
+    }
+    let current: string | null = null;
+    let cancelled = false;
+    api
+      .getBlob(`/attachments/file/${photoId}`)
+      .then((blob) => {
+        if (cancelled) return;
+        current = URL.createObjectURL(blob);
+        setUrl(current);
+      })
+      .catch(() => setUrl(null));
+    return () => {
+      cancelled = true;
+      if (current) URL.revokeObjectURL(current);
+    };
+  }, [photoId]);
+
+  return (
+    <span className="avatar" style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}>
+      {url ? (
+        <img src={url} alt="" className="avatar-img" />
+      ) : (
+        initials(name)
+      )}
+    </span>
+  );
 }

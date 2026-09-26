@@ -138,7 +138,7 @@ export function ReportTemplates() {
                       </td>
                       <td className="right">
                         <button className="btn btn-ghost btn-sm" onClick={() => setEditing(t)}>
-                          {editable && t.isCurrent ? 'Edit' : 'View'}
+                          {editable && t.isCurrent ? 'Modify' : 'View'}
                         </button>
                       </td>
                     </tr>

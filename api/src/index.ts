@@ -9,6 +9,7 @@ import { env } from './env';
 import { connectDb, prisma } from './prisma';
 import { errorMiddleware, notFound } from './http/kit';
 import { authRoutes } from './routes/auth';
+import { appearanceRoutes } from './routes/appearance';
 import { userRoutes, roleRoutes, departmentRoutes } from './routes/users';
 import {
   companyRoutes,
@@ -118,6 +119,7 @@ app.use('/api/numbering', numberingRoutes);
 app.use('/api/workflows', workflowRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/settings', settingRoutes);
+app.use('/api/appearance', appearanceRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/approvals', approvalRoutes);

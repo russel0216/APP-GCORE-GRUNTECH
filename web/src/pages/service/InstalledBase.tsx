@@ -312,7 +312,7 @@ function AssetModal({
 
   return (
     <Modal
-      title={asset ? `Edit ${asset.code}` : 'Register equipment'}
+      title={asset ? `Modify ${asset.code}` : 'Register equipment'}
       onClose={onClose}
       wide
       footer={
@@ -473,7 +473,6 @@ interface AssetDetail extends Asset {
 
 export function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const { can } = useAuth();
   const [row, setRow] = useState<AssetDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -498,11 +497,6 @@ export function AssetDetailPage() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-ops/installed-base')}>
-          ← Installed base
-        </button>
-      </div>
 
       <div className="page-head">
         <div>
@@ -525,7 +519,7 @@ export function AssetDetailPage() {
         </div>
         {can('gops.installed_base.edit_all') && (
           <button className="btn btn-sm" onClick={() => setEditing(true)}>
-            Edit
+            Modify
           </button>
         )}
       </div>

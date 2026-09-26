@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api, qs, SHIPPED_PHASE, type ListResult } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { CommandPalette } from './CommandPalette';
-import { initials, relativeTime } from './ui';
+import { Avatar, relativeTime } from './ui';
 import { Icon, sectionIcon } from './Icon';
+import { LayoutEditor } from './LayoutEditor';
 
 interface Notification {
   id: string;
@@ -130,18 +132,78 @@ export function Shell() {
   const insights = me?.menu.find((m) => m.key === 'insights');
   const admin = me?.menu.find((m) => m.key === 'admin');
 
-  const activeKey = (() => {
+  const activeSub = (() => {
     if (!activeModule) return null;
-    let best: { key: string; length: number } | null = null;
+    let best: { key: string; length: number; path: string; label: string } | null = null;
     for (const sub of activeModule.submodules) {
       const matches =
         location.pathname === sub.path || location.pathname.startsWith(`${sub.path}/`);
       if (matches && (!best || sub.path.length > best.length)) {
-        best = { key: sub.key, length: sub.path.length };
+        best = { key: sub.key, length: sub.path.length, path: sub.path, label: sub.label };
       }
     }
-    return best?.key ?? null;
+    return best;
   })();
+  const activeKey = activeSub?.key ?? null;
+
+  /*
+    Anywhere deeper than the menu entry it belongs to — a record, a new form —
+    gets one way back to that entry's list. Drawn here, once, so every screen
+    has it and no screen draws its own.
+  */
+  const backTo =
+    activeSub && location.pathname.startsWith(`${activeSub.path}/`) ? activeSub : null;
+
+  /*
+    It sits with the page's own buttons — Edit, Mark complete — rather than on
+    a line of its own above the title. The page draws that row, so Shell finds
+    it once the page has rendered and puts the button in with a portal. A page
+    whose header has no buttons gets it at the header's right edge; a page with
+    no header at all keeps it above the content, where it was.
+  */
+  const mainRef = useRef<HTMLElement | null>(null);
+  const [backSlot, setBackSlot] = useState<HTMLElement | null>(null);
+  const [noHeader, setNoHeader] = useState(false);
+  useEffect(() => {
+    setBackSlot(null);
+    setNoHeader(false);
+    const main = mainRef.current;
+    if (!backTo || !main) return;
+    let current: HTMLElement | null = null;
+    const place = () => {
+      if (current?.isConnected) return;
+      const head = main.querySelector<HTMLElement>('.page-head, .record-head');
+      if (!head) return;
+      const actions = head.querySelector<HTMLElement>(
+        ':scope > .row, :scope .record-head-actions',
+      );
+      const slot = document.createElement('span');
+      slot.className = 'back-slot';
+      if (actions) actions.prepend(slot);
+      else head.append(slot);
+      current = slot;
+      setBackSlot(slot);
+      setNoHeader(false);
+    };
+    place();
+    const observer = new MutationObserver(place);
+    observer.observe(main, { childList: true, subtree: true });
+    // Still nothing once the page has had time to load: no header to join.
+    const timer = window.setTimeout(() => {
+      if (!current?.isConnected) setNoHeader(true);
+    }, 800);
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+      current?.remove();
+    };
+  }, [backTo?.path, location.pathname]);
+
+  const backLink = backTo && (
+    <Link className="btn back-link" to={backTo.path}>
+      ← Back to {backTo.label}
+    </Link>
+  );
 
   /**
    * The sidebar, cut into the headings the registry declares.
@@ -277,8 +339,8 @@ export function Shell() {
           )}
         </button>
 
-        <button className="avatar" onClick={() => navigate('/account')} title={me?.user.name}>
-          {initials(me?.user.name ?? '?')}
+        <button className="avatar-btn" onClick={() => navigate('/account')} title={me?.user.name}>
+          <Avatar name={me?.user.name ?? '?'} photoId={me?.user.photoPath} />
         </button>
 
         <button className="btn btn-ghost btn-sm" onClick={signOut}>
@@ -524,9 +586,18 @@ export function Shell() {
           </nav>
         )}
 
-          <main className="content" id="content" tabIndex={-1}>
+          {/*
+            data-route is what scopes a layout edit to the screen it was made
+            on. Without it a nudge to "the second card in the first panel"
+            would follow you onto every other page that happens to have one.
+          */}
+          <main ref={mainRef} className="content" id="content" tabIndex={-1} data-route={location.pathname}>
+            {backLink && backSlot && createPortal(backLink, backSlot)}
+            {backLink && !backSlot && noHeader && <div className="back-fallback">{backLink}</div>}
             <Outlet />
           </main>
+
+          <LayoutEditor />
         </div>
       </div>
 

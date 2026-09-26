@@ -117,7 +117,7 @@ export function Categories() {
                     {mayEdit && (
                       <td>
                         <button className="btn btn-sm" onClick={() => setEditingCost(c)}>
-                          Edit
+                          Modify
                         </button>
                       </td>
                     )}
@@ -172,7 +172,7 @@ export function Categories() {
                       {mayEdit && (
                         <td>
                           <button className="btn btn-sm" onClick={() => setEditingItem(c)}>
-                            Edit
+                            Modify
                           </button>
                         </td>
                       )}
@@ -259,7 +259,7 @@ function CostCategoryModal({
 
   return (
     <Modal
-      title={category ? `Edit ${category.name}` : 'Add cost category'}
+      title={category ? `Modify ${category.name}` : 'Add cost category'}
       onClose={onClose}
       footer={
         <>
@@ -356,7 +356,7 @@ function ItemCategoryModal({
 
   return (
     <Modal
-      title={category ? `Edit ${category.name}` : 'Add item category'}
+      title={category ? `Modify ${category.name}` : 'Add item category'}
       onClose={onClose}
       footer={
         <>
@@ -511,7 +511,7 @@ export function Warehouses() {
               {mayEdit && (
                 <div className="row">
                   <button className="btn btn-sm" onClick={() => setEditing(w)}>
-                    Edit
+                    Modify
                   </button>
                   <button className="btn btn-sm" onClick={() => setAddingLocation(w)}>
                     + Location
@@ -603,7 +603,7 @@ function WarehouseModal({
 
   return (
     <Modal
-      title={warehouse ? `Edit ${warehouse.name}` : 'Add warehouse'}
+      title={warehouse ? `Modify ${warehouse.name}` : 'Add warehouse'}
       onClose={onClose}
       footer={
         <>

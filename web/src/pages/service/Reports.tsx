@@ -471,7 +471,6 @@ function NewReportModal({
 
 export function ServiceReportDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const toast = useToast();
   const { me } = useAuth();
   const [row, setRow] = useState<Report | null>(null);
@@ -569,11 +568,6 @@ export function ServiceReportDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/g-ops/service-reports')}>
-          ← Service reports
-        </button>
-      </div>
 
       <div className="page-head">
         <div>

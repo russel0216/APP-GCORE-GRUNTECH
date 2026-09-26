@@ -1,10 +1,105 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, getToken, SHIPPED_PHASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { ErrorBox, Field, Loading, useToast } from '../components/ui';
+import { Avatar, ErrorBox, Field, Loading, useToast } from '../components/ui';
 
 // ── Account ──────────────────────────────────────────────────────────────────
+
+/**
+ * The photo card.
+ *
+ * A plain upload here is cosmetic — it never runs through `describeFace` and
+ * can never become a face-match candidate (see the comment on `/auth/photo`
+ * in api/src/routes/auth.ts). Capturing your face live at the Clock screen
+ * goes the other way and overwrites this with that verified photo, which is
+ * why the note below points there instead of duplicating a camera here.
+ */
+function ProfilePhoto() {
+  const { me, refresh } = useAuth();
+  const toast = useToast();
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function upload(file: File) {
+    if (!file.type.startsWith('image/')) {
+      setError(new Error('Choose an image file'));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.set('photo', file);
+      await api.post('/auth/photo', form);
+      await refresh();
+      toast('ok', 'Photo updated');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.del('/auth/photo');
+      await refresh();
+      toast('ok', 'Photo removed');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3 className="card-title">Profile photo</h3>
+      <ErrorBox error={error} />
+      <div className="row" style={{ gap: 16, alignItems: 'center' }}>
+        <Avatar name={me?.user.name ?? '?'} photoId={me?.user.photoPath} size={72} />
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={() => fileRef.current?.click()}
+            >
+              {me?.user.photoPath ? 'Replace photo' : 'Upload photo'}
+            </button>
+            {me?.user.photoPath && (
+              <button type="button" className="btn btn-sm btn-ghost" disabled={busy} onClick={remove}>
+                Remove
+              </button>
+            )}
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="visually-hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void upload(file);
+            }}
+          />
+          <p className="faint" style={{ margin: 0, fontSize: 'var(--fs-xs)' }}>
+            Shown beside your name across G-Core. If you clock in by face,
+            capturing it at the <Link to="/g-hr/clock">Clock screen</Link>{' '}
+            sets this too, from that verified photo — do that instead of a
+            plain upload if you want the two to match.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function Account() {
   const { me, signOut } = useAuth();
@@ -45,6 +140,8 @@ export function Account() {
       </div>
 
       <div className="grid grid-2">
+        <ProfilePhoto />
+
         <div className="card">
           <h3 className="card-title">Details</h3>
           <div className="stack">

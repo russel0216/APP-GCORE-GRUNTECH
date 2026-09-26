@@ -98,14 +98,14 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
       { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
       { key: 'pipeline', group: 'Sales', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
-      { key: 'projects', group: 'Delivery', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
+      { key: 'projects', group: 'Project', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       // Plans live inside the project workspace; the menu entry opens the
       // register across all jobs.
-      { key: 'plans', group: 'Delivery', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, note: 'Managed from a project’s Plans tab' },
-      { key: 'budget_monitoring', group: 'Delivery', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4 },
-      { key: 'purchase_requests', group: 'Delivery', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
-      { key: 'budget_requests', group: 'Delivery', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
-      { key: 'progress_billing', group: 'Delivery', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
+      { key: 'plans', group: 'Project', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, note: 'Managed from a project’s Plans tab' },
+      { key: 'budget_monitoring', group: 'Project', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4 },
+      { key: 'purchase_requests', group: 'Project', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
+      { key: 'budget_requests', group: 'Project', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
+      { key: 'progress_billing', group: 'Project', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
       { key: 'costing', group: 'Sales', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
@@ -237,6 +237,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'templates', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1, note: 'PDF layouts ship in Phase 1; service report form templates in Phase 8' },
       { key: 'audit', group: 'Records', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
       { key: 'settings', group: 'Configuration', label: 'System Settings', path: '/admin/settings', actions: ['view_all', 'edit_all'], phase: 1 },
+      { key: 'appearance', group: 'Configuration', label: 'Appearance & Layout', path: '/admin/appearance', actions: ['view_all', 'edit_all'], phase: 1, note: 'Spacing, type, colour and layout of every screen' },
     ],
   },
 ];

@@ -146,6 +146,7 @@ const leadSchema = z.object({
   contactPerson: z.string().trim().optional().nullable(),
   contactEmail: z.string().trim().email('Enter a valid email').optional().nullable().or(z.literal('')),
   contactPhone: z.string().trim().optional().nullable(),
+  address: z.string().trim().optional().nullable(),
   source: z.string().trim().optional().nullable(),
   description: z.string().optional().nullable(),
   assignedToId: z.string().optional(),
@@ -185,6 +186,7 @@ leadRoutes.post(
           contactPerson: body.contactPerson || null,
           contactEmail: body.contactEmail || null,
           contactPhone: body.contactPhone || null,
+        address: body.address || null,
           source: body.source || null,
           description: body.description || null,
           assignedToId,
@@ -242,6 +244,7 @@ leadRoutes.patch(
       'contactPerson',
       'contactEmail',
       'contactPhone',
+      'address',
       'source',
       'description',
       'nextAction',
@@ -1100,15 +1103,33 @@ activityRoutes.get(
   '/',
   require_('gops.calendar.view_all'),
   handler(async (req, res) => {
+    const assignedToId = req.query.assignedToId ? String(req.query.assignedToId) : undefined;
+
+    /*
+      Two questions, one table.
+
+      The calendar asks "what is happening between these dates" and wants a
+      window. A record asks "what has anyone ever done about this", and a
+      window is exactly wrong for it — the call that mattered was in March.
+      Naming a record drops the window and returns its whole history, newest
+      first, because a log is read from the top.
+    */
+    const leadId = req.query.leadId ? String(req.query.leadId) : undefined;
+    const quotationId = req.query.quotationId ? String(req.query.quotationId) : undefined;
+    const customerId = req.query.customerId ? String(req.query.customerId) : undefined;
+    const forRecord = leadId || quotationId || customerId;
+
     const from = req.query.from ? new Date(String(req.query.from)) : new Date();
     const to = req.query.to
       ? new Date(String(req.query.to))
       : new Date(from.getTime() + 14 * 86400000);
-    const assignedToId = req.query.assignedToId ? String(req.query.assignedToId) : undefined;
 
     const rows = await prisma.salesActivity.findMany({
       where: {
-        startsAt: { gte: from, lte: to },
+        ...(forRecord ? {} : { startsAt: { gte: from, lte: to } }),
+        ...(leadId ? { leadId } : {}),
+        ...(quotationId ? { quotationId } : {}),
+        ...(customerId ? { customerId } : {}),
         ...(assignedToId ? { assignedToId } : {}),
       },
       include: {
@@ -1117,7 +1138,7 @@ activityRoutes.get(
         quotation: { select: { id: true, number: true } },
         customer: { select: { id: true, name: true } },
       },
-      orderBy: { startsAt: 'asc' },
+      orderBy: { startsAt: forRecord ? 'desc' : 'asc' },
     });
     res.json(rows);
   }),
@@ -1157,6 +1178,16 @@ activityRoutes.post(
         customerId: body.customerId || null,
         startsAt: new Date(body.startsAt),
         durationMinutes: body.durationMinutes,
+        /*
+          The schema has accepted a status since this was written and the
+          create never wrote one, so everything came back PLANNED. Nothing
+          noticed while the only caller was the calendar, which books things
+          that have not happened — logging a call you have just made is the
+          first use that says DONE, and it was silently recorded as still
+          owed. `completedAt` is set here the same way the patch sets it.
+        */
+        status: body.status ?? 'PLANNED',
+        completedAt: body.status === 'DONE' ? new Date() : null,
       },
     });
 

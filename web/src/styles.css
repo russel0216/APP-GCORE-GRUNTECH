@@ -60,6 +60,15 @@
   --tint-rgb: 255 255 255;
   --shade-rgb: 0 0 0;
   --topbar-bg: rgb(6 8 7 / 0.94);
+  /*
+    The inside of a text field. Darker than any surface token on the dark
+    theme and plain white on the light one, which is why it is its own token
+    rather than a surface — and why it must be a token at all: it was two
+    hardcoded hexes reached by two separate lists of input types, and an
+    input written without a `type` matched the dark one and missed the light
+    one, so it came out black on a daylight screen.
+  */
+  --field-bg: #050706;
 
   /*
     Spacing, on a 4px base. Before these existed the app used fourteen
@@ -99,6 +108,37 @@
   --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 16px;
+
+  /*
+    Structure. These were literals until the Appearance screen needed them:
+    the top bar's height alone was written out in six places, so changing it
+    meant changing six rules and finding out later which one was missed.
+    Everything that positions against the chrome now reads it from here.
+  */
+  --topbar-h: 54px;
+  --topbar-pad: 18px;
+  --sidebar-w: 232px;
+  --sidebar-sections-w: 196px;
+  --rail-w: 60px;
+  --content-pad-y: 22px;
+  --content-pad-x: 26px;
+  --content-pad-bottom: 60px;
+  --card-pad-y: var(--s-4);
+  --card-pad-x: var(--s-5);
+  /* Below this the page title stops sharing its row with the controls beside it. */
+  --page-head-basis: 22rem;
+  /*
+    The strip a chart keeps clear down its right-hand side.
+
+    The funnel spends it on the drop-off percentage; the donut's legend has
+    nothing to put there and simply leaves it empty. They both reserve it so
+    that a value in one lines up with a value in the other — two charts
+    stacked in the same column with their numbers a few pixels apart read as
+    a mistake, because they are.
+  */
+  --chart-gutter: 48px;
+  --home-max-w: 1180px;
+  --wordmark-h: clamp(96px, 22vh, 260px);
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
   --display: 'Orbitron', system-ui, sans-serif;
   --body: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -318,16 +358,26 @@ th:focus-visible {
   box-shadow: 0 0 0 3px rgb(var(--danger-rgb) / 0.2);
 }
 
-input[type='text'],
-input[type='email'],
-input[type='password'],
-input[type='number'],
-input[type='date'],
-input[type='datetime-local'],
+/*
+  Every text-like control, matched by what it is NOT.
+
+  This was a list of `input[type='text']`, `input[type='email']` and so on —
+  and an attribute selector only matches when the attribute is written. An
+  `<input>` with no type IS a text input, and 275 of them across the app had
+  none, so none of this reached them: no width, no padding, no border, no
+  background. They rendered at the browser's default of about twenty
+  characters, which is why one field in a form came out narrow while the one
+  beside it filled the row.
+
+  Excluding the types that must keep their own shape is the version that
+  cannot fall out of step: a control added later is styled unless it is a
+  checkbox, a radio, a file picker or a button.
+*/
+input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='range']):not([type='color']):not([type='submit']):not([type='button']):not([type='reset']):not([type='image']),
 select,
 textarea {
   width: 100%;
-  background: #050706;
+  background: var(--field-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   /* 9px gave a 36px control. 10px gives 38px, and on a touch screen the rule
@@ -343,12 +393,7 @@ textarea {
   engineer filling in a receiving slip on a tablet is exactly that case.
 */
 @media (pointer: coarse) {
-  input[type='text'],
-  input[type='email'],
-  input[type='password'],
-  input[type='number'],
-  input[type='date'],
-  input[type='datetime-local'],
+  input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='range']):not([type='color']):not([type='submit']):not([type='button']):not([type='reset']):not([type='image']),
   select,
   .btn {
     min-height: 44px;
@@ -383,7 +428,7 @@ input:-webkit-autofill:focus,
 select:-webkit-autofill,
 textarea:-webkit-autofill {
   -webkit-text-fill-color: var(--text);
-  -webkit-box-shadow: 0 0 0 1000px #050706 inset;
+  -webkit-box-shadow: 0 0 0 1000px var(--field-bg) inset;
   caret-color: var(--text);
   transition: background-color 9999s ease-in-out 0s;
 }
@@ -481,6 +526,15 @@ textarea {
   font-size: var(--fs-sm);
 }
 
+/* A quick-range button ("This month" / "This year") when its range is the
+   one currently showing — otherwise a row of buttons that all look pressable
+   gives no sense of which one you're actually looking at. */
+.btn-active {
+  border-color: var(--neon);
+  color: var(--neon);
+  background: rgb(var(--neon-rgb) / 0.1);
+}
+
 /*
   A button that is only an icon needs an accessible name, which it carries as
   aria-label - and a square target, which it did not have.
@@ -510,8 +564,8 @@ textarea {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 0 18px;
-  height: 54px;
+  padding: 0 var(--topbar-pad);
+  height: var(--topbar-h);
   background: var(--topbar-bg);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
@@ -598,8 +652,27 @@ textarea {
   place-items: center;
   font-weight: 700;
   font-size: 12px;
-  cursor: pointer;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* A real photo fills the same disc the initials sat in — same size, same
+   crop, so swapping one for the other never reflows anything around it. */
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* The topbar and Account page put an <Avatar> inside a clickable control.
+   The circle's own look already comes from .avatar; this just strips the
+   button chrome around it, without touching :focus-visible, which is global. */
+.avatar-btn {
   border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 999px;
 }
 
 .shell-body {
@@ -609,7 +682,7 @@ textarea {
 }
 
 .sidebar {
-  width: 232px;
+  width: var(--sidebar-w);
   flex-shrink: 0;
   border-right: 1px solid var(--line);
   background: var(--surface);
@@ -617,12 +690,12 @@ textarea {
   /* Sticky, and exactly as tall as what is left under the top bar, so it stays
      level with the second line beside it instead of scrolling away from it. */
   position: sticky;
-  top: 54px;
+  top: var(--topbar-h);
   align-self: flex-start;
   /* A fixed height, not a max: sized to its content the panel stopped under
      the last menu item and left a seam of page colour beside a long record,
      which read as the sidebar having run out rather than as a short menu. */
-  height: calc(100vh - 54px);
+  height: calc(100vh - var(--topbar-h));
   overflow-y: auto;
 }
 
@@ -631,7 +704,7 @@ textarea {
   twenty-three screens, and the space is worth more to a costing sheet.
 */
 .sidebar-sections {
-  width: 196px;
+  width: var(--sidebar-sections-w);
 }
 
 .sidebar-sections .nav-item {
@@ -718,7 +791,7 @@ textarea {
 .content {
   flex: 1;
   min-width: 0;
-  padding: 22px 26px 60px;
+  padding: var(--content-pad-y) var(--content-pad-x) var(--content-pad-bottom);
   overflow-x: auto;
 }
 
@@ -742,6 +815,17 @@ textarea {
   min-width: 0;
 }
 
+/*
+  The title block takes whatever is left after the actions beside it, rather
+  than all of it. Without this the description — which lost its 70ch cap so it
+  could run the full width when it is alone — claimed the whole row and pushed
+  a date picker or a button onto its own line. The 22rem basis is the point
+  below which sharing the row stops being readable, so it wraps instead.
+*/
+.page-head > :first-child {
+  flex: 1 1 var(--page-head-basis);
+}
+
 .page-head h1 {
   margin: 0;
   font-family: var(--display);
@@ -756,7 +840,10 @@ textarea {
   margin: var(--s-1) 0 0;
   color: var(--muted);
   font-size: var(--fs-md);
-  max-width: 70ch;
+  /* No max-width. 70ch read fine beside an action button, but a screen like
+     G-OPS with no button left the line stranded a third of the way across a
+     wide monitor — .page-head's own flex-wrap already breaks it sensibly
+     alongside a button when one is present, so the cap wasn't load-bearing. */
 }
 
 @media (max-width: 640px) {
@@ -790,7 +877,7 @@ textarea {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: var(--s-4) var(--s-5);
+  padding: var(--card-pad-y) var(--card-pad-x);
   box-shadow: var(--shadow-sm);
 }
 
@@ -842,8 +929,31 @@ a.card:hover {
   gap: var(--s-4);
 }
 
+/*
+  Two columns, evenly. Not `repeat(auto-fit, minmax(300px, 1fr))`, which is
+  what this was and does not mean two of anything — it means "as many 300px
+  columns as fit", which on a wide screen is four or five.
+
+  Where every child is an ordinary card, auto-fit collapsed the spare tracks
+  and it happened to come out as two. Where one child spans the full width —
+  a lead's description, a record's table, five screens do this — the spare
+  tracks are no longer empty, so nothing collapses, and the two cards above
+  were left squeezed into the first two of four with the rest of the row
+  blank beside them.
+
+  `minmax(0, 1fr)` rather than `1fr` so a long unbroken value cannot push its
+  column wider than its share.
+*/
 .grid-2 {
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* Two columns of a sensible width need about 640px between them. Below that
+   they stack, which is what the cards were already doing on a phone. */
+@media (max-width: 640px) {
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
 }
 
 .grid-3 {
@@ -867,6 +977,30 @@ a.card:hover {
   gap: var(--s-3);
 }
 
+/*
+  A stack whose children share its height rather than sitting at their own.
+
+  The dashboards put a chart in one grid column and two tiles in the other.
+  The stack is already the row's height — grid items stretch — and so are the
+  tiles WHENEVER THE TILES ARE THE TALLER SIDE, which with today's content
+  they are: two of them come to more than the funnel beside them, so they set
+  the row and there is nothing to grow into. Measured across six widths, this
+  rule currently changes nothing.
+
+  It is here for when that stops being true — a chart with more rows, or a
+  tile that loses its subtext — at which point the tiles would otherwise sit
+  at their 96px minimum and leave the bottom of the column blank beside a
+  taller chart. `flex: 1` keeps the first level with the top of the chart and
+  the last level with its bottom either way.
+*/
+.stack.fill {
+  height: 100%;
+}
+
+.stack.fill > * {
+  flex: 1;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -875,9 +1009,29 @@ a.card:hover {
   color: var(--faint);
 }
 
+/*
+  Code, numbers and references — a document number, a serial, a selector.
+
+  The size is RELATIVE, not 12px. A fixed size meant this class changed two
+  things at once: inside a card's 14px body text a document number dropped to
+  12px, so the first row of a detail card read as a different, smaller style
+  than the six rows under it. It also ignored the type scale entirely — turn
+  every text size up in Appearance and the mono values stayed where they were.
+
+  0.92em is the optical correction: a monospace face sets wider and reads
+  larger than Inter at the same size, so matching the number exactly makes it
+  look bigger than its neighbours. Tables land on ~12px as before; inside body
+  text it now sits level with the text around it.
+*/
 .mono {
   font-family: var(--mono);
-  font-size: 12px;
+  /*
+    `em` compounds. Nested inside something already reduced it went to 10.5px,
+    under the 11px floor the rest of the app treats as the smallest readable
+    size — so the relative size is clamped against that token rather than
+    allowed to shrink indefinitely.
+  */
+  font-size: max(0.92em, var(--fs-xs));
 }
 
 .right {
@@ -1296,7 +1450,7 @@ table.data .mono {
 /* Notification drawer */
 .drawer {
   position: fixed;
-  top: 54px;
+  top: var(--topbar-h);
   right: 14px;
   z-index: 60;
   width: 370px;
@@ -1630,7 +1784,7 @@ hr.rule {
   inset: 0;
   display: grid;
   place-items: center;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text);
   text-shadow: 0 0 4px rgb(var(--shade-rgb) / 0.8);
 }
@@ -1769,7 +1923,7 @@ hr.rule {
 */
 .nav-bars {
   position: sticky;
-  top: 54px;
+  top: var(--topbar-h);
   z-index: 31;
 }
 
@@ -1809,7 +1963,7 @@ hr.rule {
   scrollbar-width: none;
   /* Stays put when the page scrolls, level with the sidebar beside it. */
   position: sticky;
-  top: 54px;
+  top: var(--topbar-h);
   z-index: 29;
 }
 
@@ -1872,7 +2026,7 @@ hr.rule {
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 
@@ -2087,9 +2241,9 @@ hr.rule {
   is exactly the space that is left.
 */
 .home {
-  max-width: 1180px;
+  max-width: var(--home-max-w);
   margin: 0 auto;
-  min-height: calc(100vh - 54px - 22px - var(--s-4));
+  min-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) - var(--s-4));
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -2108,8 +2262,12 @@ hr.rule {
 
 .home-wordmark img {
   /* Height-led, not width-led: this is the element that has to yield first
-     when the viewport is short. */
-  height: clamp(74px, 15vh, 180px);
+     when the viewport is short. Half again as large as the original 15vh —
+     the wordmark is what the page is announcing and was reading as a label
+     above the cards, but 30vh pushed the module grid off a 900px viewport
+     and brought back the scroll the landing page was just fixed to avoid.
+     22vh grows it without re-breaking that. */
+  height: var(--wordmark-h);
   width: auto;
   max-width: 82vw;
   /* Drawn on black like the division marks, so it blends with the page rather
@@ -2215,7 +2373,7 @@ hr.rule {
 /* The blurb is the first thing to go on a short screen: the division name and
    its mark already say which door this is. */
 .module-blurb {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   text-align: center;
   max-width: 280px;
@@ -2455,7 +2613,7 @@ a.bar-row:hover .bar-label {
 
 .funnel-row {
   display: grid;
-  grid-template-columns: minmax(110px, 170px) 1fr auto 48px;
+  grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto var(--chart-gutter);
   align-items: center;
   gap: var(--s-3);
   font-size: var(--fs-md);
@@ -2568,6 +2726,17 @@ a.funnel-row:hover .funnel-label {
   align-items: center;
   gap: var(--s-2);
   color: var(--muted);
+}
+
+/*
+  The legend's own right-hand gutter, so its counts sit on the same line as
+  the funnel's values in the panel above rather than a gutter's width apart.
+*/
+.donut-legend li {
+  /* The gutter AND the grid gap in front of it: the funnel's value sits one
+     gap short of its gutter column, so matching only the gutter left the two
+     sets of numbers exactly one gap apart. */
+  padding-right: calc(var(--chart-gutter) + var(--s-3));
 }
 
 .donut-legend strong {
@@ -3315,7 +3484,7 @@ a.icon-row:hover {
 }
 
 .sidebar.railed {
-  width: 60px;
+  width: var(--rail-w);
 }
 
 .sidebar.railed .nav-label,
@@ -3405,6 +3574,7 @@ a.icon-row:hover {
 
   --focus-ring: 0 0 0 2px #fff, 0 0 0 4px var(--magenta);
   --topbar-bg: rgb(255 255 255 / 0.92);
+  --field-bg: #fff;
 }
 
 /* The attribute sits on <html>, so body and every surface below it follow. */
@@ -3425,24 +3595,7 @@ a.icon-row:hover {
   text-shadow: none;
 }
 
-/* Inputs are white-on-white without this — the dark theme's near-black field
-   colour is the one value that cannot come from a surface token. */
-[data-theme='day'] input[type='text'],
-[data-theme='day'] input[type='email'],
-[data-theme='day'] input[type='password'],
-[data-theme='day'] input[type='number'],
-[data-theme='day'] input[type='date'],
-[data-theme='day'] input[type='datetime-local'],
-[data-theme='day'] select,
-[data-theme='day'] textarea {
-  background: #fff;
-}
-
-[data-theme='day'] input:-webkit-autofill,
-[data-theme='day'] input:-webkit-autofill:hover,
-[data-theme='day'] input:-webkit-autofill:focus {
-  -webkit-box-shadow: 0 0 0 1000px #fff inset;
-}
+/* The field colour now comes from --field-bg, which each theme sets. */
 
 /* A field label in neon-dim was styled for a dark card; in daylight it is a
    label like any other. */
@@ -3453,4 +3606,843 @@ a.icon-row:hover {
 /* The primary button keeps magenta but needs white type on it either way. */
 [data-theme='day'] .btn-primary {
   box-shadow: none;
+}
+
+/* ───────────────────── Appearance & Layout screen ──────────────────────── */
+/*
+  The design-system editor. Its own layout deliberately uses the same tokens
+  it is editing, so setting the spacing scale to something absurd makes this
+  screen absurd too — which is the honest preview, and the fastest way to
+  notice you have gone too far.
+*/
+
+/* A card heading that opens and closes its section. */
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+}
+
+.disclosure .card-title {
+  margin: 0;
+}
+
+.disclosure::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.disclosure[aria-expanded='true']::before {
+  transform: rotate(90deg);
+}
+
+.token-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.token-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.2fr);
+  gap: var(--s-4);
+  align-items: start;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
+}
+
+.token-row:nth-child(odd) {
+  background: var(--surface-2);
+}
+
+/* An overridden setting is marked, so "what have I actually changed" is
+   answerable by looking rather than by remembering. */
+.token-row.changed {
+  border-left-color: var(--neon);
+}
+
+.token-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.token-label label {
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+.token-label code {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+}
+
+.token-hint {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.token-control {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.token-control input[type='text'] {
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.token-control input.token-wide {
+  width: 100%;
+  min-width: 200px;
+  flex: 1;
+}
+
+.token-control input[type='range'] {
+  flex: 1;
+  min-width: 90px;
+  accent-color: var(--neon);
+}
+
+.token-swatch {
+  width: 34px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* The generated stylesheet, shown back. */
+.code-block {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 340px;
+}
+
+@media (max-width: 720px) {
+  .token-row {
+    grid-template-columns: 1fr;
+    gap: var(--s-2);
+  }
+}
+
+/* ─────────────────────────── Layout editor ─────────────────────────────── */
+/*
+  Drag-to-move and drag-to-resize, over the live page.
+
+  Everything here is prefixed `le-` and carries `.le-ui`, which is how the
+  editor knows not to try to edit itself: the click handler ignores anything
+  inside a `.le-ui`. All of it sits above the app on its own stacking level
+  and is inert to the page underneath except where it deliberately is not.
+*/
+
+.le-launch {
+  position: fixed;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  /* Above a modal (100): a dialog is opened normally and edited once it is
+     up, so the way in has to be reachable while one is on screen. Under the
+     toasts (200), which report what just happened and outrank everything. */
+  z-index: 150;
+  padding: 8px var(--s-4);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+}
+
+.le-launch:hover {
+  color: var(--neon);
+  border-color: var(--neon);
+}
+
+/* A border round the viewport, so edit mode is never a surprise. */
+.le-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 151;
+  pointer-events: none;
+  border: 2px solid var(--magenta);
+}
+
+/*
+  The alignment grid.
+
+  Under the selection box and over the page, so the dots read as a surface
+  the cards are sitting on. Inert to the pointer — it is a guide, and a guide
+  you can click is a guide that eats your clicks.
+*/
+.le-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 152;
+  pointer-events: none;
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    rgb(var(--magenta-rgb) / 0.38) 1px,
+    transparent 0
+  );
+}
+
+/* The selection box. It takes the pointer, because dragging it is the gesture. */
+.le-select {
+  position: fixed;
+  z-index: 158;
+  border: 2px solid var(--magenta);
+  background: rgb(var(--magenta-rgb) / 0.08);
+  cursor: grab;
+}
+
+.le-select.busy {
+  cursor: grabbing;
+}
+
+.le-tag {
+  position: absolute;
+  top: -22px;
+  left: -2px;
+  background: var(--magenta);
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.le-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--surface);
+  border: 2px solid var(--magenta);
+  border-radius: 2px;
+}
+
+.le-nw { top: -6px; left: -6px; cursor: nwse-resize; }
+.le-n  { top: -6px; left: calc(50% - 5px); cursor: ns-resize; }
+.le-ne { top: -6px; right: -6px; cursor: nesw-resize; }
+.le-e  { top: calc(50% - 5px); right: -6px; cursor: ew-resize; }
+.le-se { bottom: -6px; right: -6px; cursor: nwse-resize; }
+.le-s  { bottom: -6px; left: calc(50% - 5px); cursor: ns-resize; }
+.le-sw { bottom: -6px; left: -6px; cursor: nesw-resize; }
+.le-w  { top: calc(50% - 5px); left: -6px; cursor: ew-resize; }
+
+.le-panel {
+  position: fixed;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  z-index: 160;
+  width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-md);
+}
+
+/*
+  Out of the way, three ways.
+
+  `dodged`  the selection is under the panel's usual corner, so it takes the
+            other one. A panel sitting on top of the card you are trying to
+            pick up is a card you cannot pick up.
+  `rolled`  rolled up by hand, to a title bar. The controls are not needed
+            while you are dragging, and the page underneath usually is.
+  `gesturing` a drag is in progress: faded and transparent to the pointer, so
+            it can never swallow the end of a drag that passes over it.
+*/
+.le-panel {
+  transition: left 0.18s ease, right 0.18s ease, opacity 0.12s ease;
+}
+
+.le-panel.dodged {
+  left: var(--s-4);
+  right: auto;
+}
+
+.le-panel.rolled > *:not(.le-panel-head) {
+  display: none;
+}
+
+.le-panel.gesturing {
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+/* The roll-up chevron, left of the title. */
+.le-roll {
+  background: none;
+  border: none;
+  padding: 0 var(--s-1) 0 0;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+
+.le-roll:hover {
+  color: var(--text);
+}
+
+/* The title keeps the chevron company on the left, controls on the right. */
+.le-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.le-panel-head,
+.le-panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+/*
+  Save stays in sight.
+
+  The panel scrolls once its controls outgrow 70vh, and Save is the last
+  thing in it — so the type controls pushed it below the fold, where it was
+  neither clickable nor findable. Both ends are pinned: the title (which
+  carries undo and Done) to the top, the buttons to the bottom, and only the
+  controls between them move.
+*/
+.le-panel-head {
+  position: sticky;
+  top: calc(var(--s-4) * -1);
+  z-index: 1;
+  background: var(--surface);
+  padding-top: var(--s-2);
+  margin-top: calc(var(--s-2) * -1);
+}
+
+.le-panel-foot {
+  position: sticky;
+  bottom: calc(var(--s-4) * -1);
+  z-index: 1;
+  background: var(--surface);
+  padding: var(--s-2) 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.le-hint,
+.le-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.le-picked {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.le-picked code {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.le-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.le-changes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.le-changes li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.le-changes code {
+  font-family: var(--mono);
+}
+
+/* The key legend. Two columns, so the keys line up and can be scanned. */
+.le-keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--s-3);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.le-keys dt {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.le-keys dd {
+  margin: 0;
+}
+
+/* ───────────────────── Lead pipeline progress ──────────────────────────── */
+/*
+  Where a lead has got to, as a bar rather than as a word.
+
+  The stages are a fixed run from New to Won, so the fill is honest: a lead
+  three stages in really is a third of the way through the process, whatever
+  its odds of closing. Probability lives in the Commercial card and is a
+  different question.
+*/
+.lead-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.lead-progress-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.lead-now {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-top: var(--s-1);
+  font-size: var(--fs-xs);
+}
+
+.lead-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.lead-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--neon);
+  transition: width 0.3s ease;
+}
+
+/* Won fills the lot; the other two are states, not positions, so they take
+   the whole bar in their own colour and say so rather than pretending to a
+   percentage nobody recorded. */
+.lead-track.won .lead-fill {
+  background: var(--ok);
+}
+
+.lead-track.held .lead-fill {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--warn),
+    var(--warn) 6px,
+    rgb(var(--warn-rgb) / 0.45) 6px,
+    rgb(var(--warn-rgb) / 0.45) 12px
+  );
+}
+
+.lead-track.lost .lead-fill {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--danger),
+    var(--danger) 6px,
+    rgb(var(--danger-rgb) / 0.4) 6px,
+    rgb(var(--danger-rgb) / 0.4) 12px
+  );
+}
+
+/* The stage names under the bar, each one a way to move the lead there. */
+.lead-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.lead-stage button,
+.lead-stage span {
+  display: inline-block;
+  padding: 4px var(--s-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: none;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  cursor: default;
+}
+
+.lead-stage button {
+  cursor: pointer;
+}
+
+.lead-stage button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--line);
+}
+
+/* Passed: it happened, so it reads as settled rather than as available. */
+.lead-stage.done button,
+.lead-stage.done span {
+  color: var(--muted);
+}
+
+/* The one it is on. */
+.lead-stage.here span {
+  background: rgb(var(--neon-rgb) / 0.12);
+  border-color: var(--neon);
+  color: var(--neon);
+  font-weight: 600;
+}
+
+/* Off the pipeline entirely — every stage is equally hypothetical. */
+.lead-stage.dimmed button,
+.lead-stage.dimmed span {
+  color: var(--faint);
+}
+
+/* A destructive action that is not the primary one on the screen. */
+.btn-danger-ghost {
+  color: var(--danger);
+  border-color: rgb(var(--danger-rgb) / 0.4);
+}
+
+.btn-danger-ghost:hover:not(:disabled) {
+  background: rgb(var(--danger-rgb) / 0.1);
+  border-color: var(--danger);
+}
+
+/* The type controls in the layout editor. */
+.le-type {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-2) 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.le-readout {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  min-width: 34px;
+  text-align: center;
+}
+
+/* A colour, as itself — a swatch says what a name cannot. */
+.le-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+}
+
+.le-swatch.on {
+  outline: 2px solid var(--magenta);
+  outline-offset: 1px;
+}
+
+/* ────────────────────────── Attachments ────────────────────────────────── */
+/*
+  Files on a record. A list, not a gallery: what matters is the name, who put
+  it there and when — a thumbnail of a scope of work tells you nothing.
+*/
+.attach-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  list-style: none;
+  margin: 0 0 var(--s-3);
+  padding: 0;
+}
+
+.attach-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  color: var(--muted);
+}
+
+.attach-row:hover {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+
+.attach-name {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-name:hover {
+  color: var(--neon);
+  text-decoration: underline;
+}
+
+.attach-meta {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* Somewhere to drop a file, which is how most people expect to attach one. */
+.attach-drop {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+}
+
+.attach-drop.over {
+  border-color: var(--neon);
+  background: rgb(var(--neon-rgb) / 0.06);
+}
+
+@media (max-width: 640px) {
+  .attach-meta {
+    display: none;
+  }
+}
+
+/* ─────────────────────── Activity log on a record ──────────────────────── */
+.activity-form {
+  padding: var(--s-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--s-3);
+}
+
+.activity-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.activity-toggle input {
+  width: auto;
+}
+
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  list-style: none;
+  margin: 0 0 var(--s-3);
+  padding: 0;
+}
+
+.activity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+/* What is still owed, marked so it reads before the history does. */
+.activity-row.planned {
+  border-left-color: var(--warn);
+}
+
+.activity-row.off {
+  opacity: 0.55;
+}
+
+.activity-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.activity-body strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.activity-notes {
+  font-size: var(--fs-md);
+  white-space: pre-wrap;
+}
+
+.activity-meta {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+/* ───────────────────── Type-ahead lookup field ─────────────────────────── */
+/*
+  Search-as-you-type with a way out at the bottom: the thing you are looking
+  for, or permission to say it does not exist yet. A select of every customer
+  cannot offer the second, which is why a lead's company was free text and the
+  same firm ended up on file three times.
+*/
+.lookup {
+  position: relative;
+}
+
+.lookup-tick {
+  position: absolute;
+  right: var(--s-3);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: var(--fs-xs);
+  color: var(--ok);
+  pointer-events: none;
+}
+
+.lookup-menu {
+  position: absolute;
+  z-index: 5;
+  left: 0;
+  right: 0;
+  top: calc(100% + 2px);
+  max-height: 240px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: var(--s-1);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.lookup-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--s-2) var(--s-3);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.lookup-menu button:hover,
+.lookup-menu button:focus-visible {
+  background: var(--surface-2);
+}
+
+/* The escape hatch reads as a different kind of thing to the matches. */
+.lookup-new {
+  border-top: 1px solid var(--line-soft);
+  margin-top: var(--s-1);
+  padding-top: var(--s-1);
+}
+
+.lookup-new button {
+  color: var(--neon);
+  font-size: var(--fs-md);
+}
+
+/* The one way back from a record to its list — drawn by Shell, never per page.
+   It joins the header's own button row, so it takes that row's size. */
+.back-slot {
+  display: contents;
+}
+.page-head > .back-slot {
+  display: flex;
+  align-items: center;
+}
+.back-fallback {
+  margin-bottom: var(--s-3);
+}
+
+/* "Nothing yet" for a section of a record page, where a full empty state
+   would be taller than the thing it is standing in for. */
+.collection-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-sm);
 }

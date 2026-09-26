@@ -277,7 +277,7 @@ function WorkflowEditor({
   return (
     <Modal
       wide
-      title={workflow ? `Edit ${workflow.name}` : 'Add workflow'}
+      title={workflow ? `Modify ${workflow.name}` : 'Add workflow'}
       onClose={onClose}
       footer={
         <>

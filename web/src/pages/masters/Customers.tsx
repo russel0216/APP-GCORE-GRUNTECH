@@ -33,7 +33,6 @@ export function Customers() {
   const [reload, setReload] = useState(0);
 
   const columns: Column<CustomerRow>[] = [
-    { key: 'code', label: 'Code', sortKey: 'code', width: '150px', render: (c) => <span className="mono">{c.code}</span> },
     {
       key: 'name',
       label: 'Customer',
@@ -226,7 +225,7 @@ export function CustomerForm({
   return (
     <Modal
       wide
-      title={customer ? `Edit ${customer.name}` : 'Add customer'}
+      title={customer ? `Modify ${customer.name}` : 'Add customer'}
       onClose={onClose}
       footer={
         <>

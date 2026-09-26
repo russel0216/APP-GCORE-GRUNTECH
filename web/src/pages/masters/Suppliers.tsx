@@ -236,7 +236,7 @@ export function SupplierDetail() {
         {mayEdit && (
           <div className="row">
             <button className="btn" onClick={() => setEditing(true)}>
-              Edit
+              Modify
             </button>
             {can('gchain.suppliers.delete') && (
               <button className="btn btn-danger" onClick={remove}>
@@ -311,7 +311,7 @@ export function SupplierDetail() {
                       {mayEdit && (
                         <td>
                           <button className="btn btn-sm" onClick={() => setContactModal(c)}>
-                            Edit
+                            Modify
                           </button>
                         </td>
                       )}
@@ -431,7 +431,7 @@ function SupplierForm({
   return (
     <Modal
       wide
-      title={supplier ? `Edit ${supplier.name}` : 'Add supplier'}
+      title={supplier ? `Modify ${supplier.name}` : 'Add supplier'}
       onClose={onClose}
       footer={
         <>
@@ -553,7 +553,7 @@ function SupplierContactModal({
 
   return (
     <Modal
-      title={contact ? `Edit ${contact.name}` : 'Add contact'}
+      title={contact ? `Modify ${contact.name}` : 'Add contact'}
       onClose={onClose}
       footer={
         <>
