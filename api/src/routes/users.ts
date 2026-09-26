@@ -83,6 +83,72 @@ userRoutes.get(
   }),
 );
 
+// ── Lookup — a people picker, not the admin list ─────────────────────────────
+
+/*
+  Naming a colleague is not the admin right. Six pages used to fill their
+  person pickers from the admin-gated list above, so a salesperson assigning
+  a lead or a supervisor inviting people to a meeting needed admin.users —
+  the /overtime/chargeable precedent, in the other direction. This returns
+  names only, select-only, for active users, and sits ABOVE /:id or Express
+  reads "lookup" as an id.
+
+  `holding=<permission key>` narrows to the people who actually hold that
+  right — through a role or an ALLOW override, and not taken away by a DENY
+  override — which is what the trainer and evaluator pickers ask. Super
+  admins hold everything, as can() says they do.
+*/
+userRoutes.get(
+  '/lookup',
+  handler(async (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const holding = String(req.query.holding ?? '').trim();
+
+    const where: Prisma.UserWhereInput = { isActive: true };
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { position: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+    if (holding) {
+      where.AND = [
+        {
+          OR: [
+            { isSuperAdmin: true },
+            {
+              AND: [
+                {
+                  OR: [
+                    { roles: { some: { role: { permissions: { some: { permission: { key: holding } } } } } } },
+                    { overrides: { some: { effect: 'ALLOW', permission: { key: holding } } } },
+                  ],
+                },
+                { NOT: { overrides: { some: { effect: 'DENY', permission: { key: holding } } } } },
+              ],
+            },
+          ],
+        },
+      ];
+    }
+
+    const rows = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        position: true,
+        department: { select: { id: true, name: true } },
+      },
+      orderBy: [{ department: { name: 'asc' } }, { name: 'asc' }],
+      take: 200,
+    });
+    res.json(rows);
+  }),
+);
+
 // ── Read one, with effective permissions ─────────────────────────────────────
 
 userRoutes.get(

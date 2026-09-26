@@ -44,7 +44,8 @@ customerRoutes.get(
       ];
     }
     if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.filters.industry) where.industry = q.filters.industry;
+    // Industry is a reference row now (Phase 10); the list filter takes its code.
+    if (q.filters.industry) where.industry = { code: String(q.filters.industry) };
     if (q.scope === 'mine') where.createdById = me.id;
 
     const [rows, total] = await Promise.all([
@@ -274,7 +275,7 @@ const customerSchema = z.object({
   name: z.string().trim().min(2, 'Company name is required'),
   legalName: z.string().trim().optional().nullable(),
   tin: z.string().trim().optional().nullable(),
-  industry: z.string().trim().optional().nullable(),
+  industryId: z.string().optional().nullable(),
   paymentTerms: z.string().trim().optional().nullable(),
   creditLimit: z.number().nonnegative().optional().nullable(),
   phone: z.string().trim().optional().nullable(),
@@ -304,7 +305,7 @@ customerRoutes.post(
           name: body.name,
           legalName: body.legalName || null,
           tin: body.tin || null,
-          industry: body.industry || null,
+          industryId: body.industryId || null,
           paymentTerms: body.paymentTerms || null,
           creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null,
           phone: body.phone || null,
@@ -350,7 +351,7 @@ customerRoutes.patch(
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.legalName !== undefined ? { legalName: body.legalName || null } : {}),
         ...(body.tin !== undefined ? { tin: body.tin || null } : {}),
-        ...(body.industry !== undefined ? { industry: body.industry || null } : {}),
+        ...(body.industryId !== undefined ? { industryId: body.industryId || null } : {}),
         ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
         ...(body.creditLimit !== undefined
           ? { creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null }

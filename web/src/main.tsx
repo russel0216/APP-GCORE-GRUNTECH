@@ -3,6 +3,26 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { applyAppearance, cachedAppearance } from './lib/appearance';
 import './styles.css';
+/*
+  One stylesheet per package, after the base so a package's rules win a tie.
+  Each holds only what its screens add; tokens come from styles.css and
+  nothing in these files is a literal colour.
+*/
+import './styles/calendar.css';
+import './styles/pipeline.css';
+import './styles/brief.css';
+import './styles/masters.css';
+import './styles/numbering.css';
+import './styles/finance.css';
+import './styles/service.css';
+import './styles/plantilla.css';
+import './styles/meetings.css';
+import './styles/evaluations.css';
+import './styles/academy.css';
+import './styles/workspace.css';
+import './styles/delivery.css';
+import './styles/procurement.css';
+import './styles/hr-audit.css';
 
 /*
   Before React draws anything. The server's copy arrives with /auth/me a

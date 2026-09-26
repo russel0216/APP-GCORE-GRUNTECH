@@ -10,7 +10,11 @@ import { can, type ResolvedUser } from '../permissions/resolve';
  * that has to know about everything.
  *
  * Providers declare the permission needed to see their results, so search can
- * never leak a record the user could not open.
+ * never leak a record the user could not open. A provider may name several
+ * keys — view_all and view_own — and an `ownWhere` that narrows its query
+ * when the caller holds only the own-scope key: a salesperson finds their
+ * own leads from Ctrl+K, and nobody else's. It is a call of can(), not a
+ * change to it, and the list screens already show them exactly these rows.
  */
 
 export interface SearchHit {
@@ -24,9 +28,19 @@ export interface SearchHit {
 export interface SearchProvider {
   kind: string;
   label: string;
-  /** Permission required to include this provider's hits. */
-  permission: string;
-  search: (term: string, user: ResolvedUser, limit: number) => Promise<SearchHit[]>;
+  /** Permission(s) that include this provider's hits — any one suffices. */
+  permission: string | string[];
+  /**
+   * Applied when the caller holds only a `.view_own` key from `permission`.
+   * The provider spreads it into its own where — the shape is its table's.
+   */
+  ownWhere?: (user: ResolvedUser) => Record<string, unknown>;
+  search: (
+    term: string,
+    user: ResolvedUser,
+    limit: number,
+    own?: Record<string, unknown>,
+  ) => Promise<SearchHit[]>;
 }
 
 const providers: SearchProvider[] = [];
@@ -39,6 +53,26 @@ export function searchProviders(): SearchProvider[] {
   return providers;
 }
 
+function permissionsOf(p: SearchProvider): string[] {
+  return Array.isArray(p.permission) ? p.permission : [p.permission];
+}
+
+/** Whether this user sees this provider's hits at all. */
+export function canSearch(user: ResolvedUser, p: SearchProvider): boolean {
+  return permissionsOf(p).some((key) => can(user, key));
+}
+
+/**
+ * The own-scope narrowing for this user, or undefined for the full set: a
+ * user who holds none of the provider's non-own keys sees only their own.
+ * A super admin passes every can(), so they are never narrowed.
+ */
+function ownScope(user: ResolvedUser, p: SearchProvider): Record<string, unknown> | undefined {
+  if (!p.ownWhere) return undefined;
+  const full = permissionsOf(p).filter((key) => !key.endsWith('.view_own'));
+  return full.some((key) => can(user, key)) ? undefined : p.ownWhere(user);
+}
+
 export async function globalSearch(
   term: string,
   user: ResolvedUser,
@@ -47,10 +81,10 @@ export async function globalSearch(
   const q = term.trim();
   if (q.length < 2) return [];
 
-  const allowed = providers.filter((p) => can(user, p.permission));
+  const allowed = providers.filter((p) => canSearch(user, p));
   const results = await Promise.all(
     allowed.map((p) =>
-      p.search(q, user, limitPerKind).catch((err) => {
+      p.search(q, user, limitPerKind, ownScope(user, p)).catch((err) => {
         console.error(`Search provider "${p.kind}" failed:`, err);
         return [] as SearchHit[];
       }),
@@ -107,13 +141,13 @@ registerSearch({
         ],
       },
       take: limit,
-      select: { id: true, code: true, name: true, industry: true, isActive: true },
+      select: { id: true, code: true, name: true, industry: { select: { code: true } }, isActive: true },
     });
     return rows.map((r) => ({
       kind: 'customer',
       id: r.id,
       title: r.name,
-      subtitle: [r.code, r.industry, r.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
+      subtitle: [r.code, r.industry?.code, r.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
       link: `/g-ops/customers/${r.id}`,
     }));
   },
@@ -200,14 +234,18 @@ registerSearch({
 });
 
 // ── Phase 3: sales ───────────────────────────────────────────────────────────
+// Own scope mirrors each list route: a lead belongs to its assignee, a
+// quotation and a costing to their owner, a project to its manager.
 
 registerSearch({
   kind: 'lead',
   label: 'Leads',
-  permission: 'gops.leads.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.leads.view_all', 'gops.leads.view_own'],
+  ownWhere: (user) => ({ assignedToId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.lead.findMany({
       where: {
+        ...own,
         OR: [
           { companyName: { contains: term, mode: 'insensitive' } },
           { number: { contains: term, mode: 'insensitive' } },
@@ -231,10 +269,12 @@ registerSearch({
 registerSearch({
   kind: 'quotation',
   label: 'Quotations',
-  permission: 'gops.quotations.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.quotations.view_all', 'gops.quotations.view_own'],
+  ownWhere: (user) => ({ ownerId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.quotation.findMany({
       where: {
+        ...own,
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { subject: { contains: term, mode: 'insensitive' } },
@@ -264,10 +304,12 @@ registerSearch({
 registerSearch({
   kind: 'costing',
   label: 'Costings',
-  permission: 'gops.costing.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.costing.view_all', 'gops.costing.view_own'],
+  ownWhere: (user) => ({ ownerId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.costing.findMany({
       where: {
+        ...own,
         OR: [
           { number: { contains: term, mode: 'insensitive' } },
           { title: { contains: term, mode: 'insensitive' } },
@@ -296,10 +338,12 @@ registerSearch({
 registerSearch({
   kind: 'job',
   label: 'Projects',
-  permission: 'gops.projects.view_all',
-  search: async (term, _user, limit) => {
+  permission: ['gops.projects.view_all', 'gops.projects.view_own'],
+  ownWhere: (user) => ({ projectManagerId: user.id }),
+  search: async (term, _user, limit, own) => {
     const rows = await prisma.job.findMany({
       where: {
+        ...own,
         OR: [
           { name: { contains: term, mode: 'insensitive' } },
           { number: { contains: term, mode: 'insensitive' } },
@@ -390,7 +434,9 @@ registerSearch({
       id: r.id,
       title: r.subject,
       subtitle: `${r.documentNumber ?? r.documentType} · ${r.status}`,
-      link: r.link ?? `/my-work/approvals/${r.id}`,
+      // A request with no record link lands on the queue, which is the one
+      // page that can act on it — not on a URL the app does not render.
+      link: r.link ?? '/my-work',
     }));
   },
 });

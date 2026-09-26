@@ -24,7 +24,9 @@ import { Leads, LeadDetail } from './pages/sales/Leads';
 import { Costings } from './pages/sales/Costings';
 import { CostingDetailPage } from './pages/sales/CostingDetail';
 import { Quotations, QuotationDetail } from './pages/sales/Quotations';
-import { SalesCalendar, Pipeline } from './pages/sales/CalendarPipeline';
+import { SalesCalendar } from './pages/sales/Calendar';
+import { Pipeline } from './pages/sales/Pipeline';
+import { Partners, PartnerDetail } from './pages/sales/Partners';
 import { Projects } from './pages/delivery/Projects';
 import { ProjectWorkspace } from './pages/delivery/ProjectWorkspace';
 import {
@@ -60,9 +62,19 @@ import { Leave } from './pages/hr/Leave';
 import { Overtime, OvertimeDetail } from './pages/hr/Overtime';
 import { HrSettingsPage } from './pages/hr/Settings';
 import { HrReports } from './pages/hr/Reports';
+import { Plantilla } from './pages/hr/Plantilla';
+import { Clearances, ClearanceDetail } from './pages/hr/Clearances';
+import { Meetings, MeetingDetail } from './pages/hr/Meetings';
+import { Evaluations, EvaluationDetail } from './pages/hr/Evaluations';
+import { Courses } from './pages/hr/academy/Courses';
+import { TrainingCalendar } from './pages/hr/academy/TrainingCalendar';
+import { Sessions, SessionDetail } from './pages/hr/academy/Sessions';
+import { Passport } from './pages/hr/academy/Passport';
+import { Passports } from './pages/hr/academy/Passports';
 import { Receivables, InvoiceDetail, Payments } from './pages/finance/Receivables';
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
+import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
 import {
   FinanceDashboard,
   FinanceReports,
@@ -72,7 +84,9 @@ import {
 } from './pages/finance/Reports';
 import { InstalledBase, AssetDetailPage } from './pages/service/InstalledBase';
 import { ServiceContracts, ContractDetail } from './pages/service/Contracts';
-import { ServiceReports, ServiceReportDetail, PmSchedule, Renewals } from './pages/service/Reports';
+import { ServiceReports, ServiceReportDetail, Renewals } from './pages/service/Reports';
+import { ServiceSchedule } from './pages/service/Schedule';
+import { JobOrders, JobOrderDetail } from './pages/service/JobOrders';
 import {
   ReportTemplates,
   AftermarketDashboard,
@@ -376,6 +390,24 @@ function Routed() {
             </Guard>
           }
         />
+        {/* Principals and OEM brands Gruntech represents — a supplier flagged
+            as a partner, viewed from Sales. */}
+        <Route
+          path="/g-ops/partners"
+          element={
+            <Guard permission="gops.partners.view_all">
+              <Partners />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/partners/:id"
+          element={
+            <Guard permission="gops.partners.view_all">
+              <PartnerDetail />
+            </Guard>
+          }
+        />
 
         {/* Delivery (Phase 4) */}
         <Route
@@ -494,10 +526,35 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* The detail page under both modules too, for the same reason: a
+            project manager who raised a PR from the Delivery menu opens it
+            from the Delivery menu, and either module's permission is enough. */}
+        <Route
+          path="/g-ops/purchase-requests/:id"
+          element={
+            <GuardAny
+              permissions={[
+                'gops.purchase_requests.view_all',
+                'gops.purchase_requests.view_own',
+                'gchain.purchase_requests.view_all',
+                'gchain.purchase_requests.view_own',
+              ]}
+            >
+              <PurchaseRequestDetail />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-chain/purchase-requests/:id"
           element={
-            <GuardAny permissions={['gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own']}>
+            <GuardAny
+              permissions={[
+                'gops.purchase_requests.view_all',
+                'gops.purchase_requests.view_own',
+                'gchain.purchase_requests.view_all',
+                'gchain.purchase_requests.view_own',
+              ]}
+            >
               <PurchaseRequestDetail />
             </GuardAny>
           }
@@ -635,6 +692,16 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* A leave request has a URL of its own, so an approval notification
+            lands on the request rather than on the register. */}
+        <Route
+          path="/g-hr/leave/:id"
+          element={
+            <GuardAny permissions={['ghr.leave.view_all', 'ghr.leave.view_own']}>
+              <Leave />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-hr/overtime"
           element={
@@ -665,6 +732,121 @@ function Routed() {
             <Guard permission="ghr.settings.view_all">
               <HrSettingsPage />
             </Guard>
+          }
+        />
+        {/* Hire-to-separate: the plantilla, evaluations, clearances and
+            meetings. All before the /g-hr/* catch-all below. */}
+        <Route
+          path="/g-hr/plantilla"
+          element={
+            <Guard permission="ghr.plantilla.view_all">
+              <Plantilla />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/clearances"
+          element={
+            <GuardAny permissions={['ghr.clearances.view_all', 'ghr.clearances.view_own']}>
+              <Clearances />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/clearances/:id"
+          element={
+            <GuardAny permissions={['ghr.clearances.view_all', 'ghr.clearances.view_own']}>
+              <ClearanceDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/meetings"
+          element={
+            <GuardAny permissions={['ghr.meetings.view_all', 'ghr.meetings.view_own']}>
+              <Meetings />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/meetings/:id"
+          element={
+            <GuardAny permissions={['ghr.meetings.view_all', 'ghr.meetings.view_own']}>
+              <MeetingDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/evaluations"
+          element={
+            <GuardAny permissions={['ghr.evaluations.view_all', 'ghr.evaluations.view_own']}>
+              <Evaluations />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/evaluations/:id"
+          element={
+            <GuardAny permissions={['ghr.evaluations.view_all', 'ghr.evaluations.view_own']}>
+              <EvaluationDetail />
+            </GuardAny>
+          }
+        />
+        {/* Gruntech Academy */}
+        <Route
+          path="/g-hr/academy/courses"
+          element={
+            <Guard permission="ghr.courses.view_all">
+              <Courses />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/academy/calendar"
+          element={
+            <Guard permission="ghr.training_calendar.view_all">
+              <TrainingCalendar />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/academy/sessions"
+          element={
+            <GuardAny permissions={['ghr.training_sessions.view_all', 'ghr.training_sessions.view_own']}>
+              <Sessions />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/academy/sessions/:id"
+          element={
+            <GuardAny permissions={['ghr.training_sessions.view_all', 'ghr.training_sessions.view_own']}>
+              <SessionDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/academy/passport"
+          element={
+            <GuardAny permissions={['ghr.passport.view_own', 'ghr.passports.view_all']}>
+              <Passport />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-hr/academy/passports"
+          element={
+            <Guard permission="ghr.passports.view_all">
+              <Passports />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-hr/academy/passports/:employeeId"
+          element={
+            <GuardAny permissions={['ghr.passports.view_all', 'ghr.passport.view_own']}>
+              <Passport />
+            </GuardAny>
           }
         />
 
@@ -722,6 +904,23 @@ function Routed() {
           element={
             <GuardAny permissions={['gfin.expenses.view_all', 'gfin.expenses.view_own']}>
               <ExpenseClaimDetail />
+            </GuardAny>
+          }
+        />
+        {/* Money issued before it is spent; liquidated through an expense claim. */}
+        <Route
+          path="/g-fin/cash-advances"
+          element={
+            <GuardAny permissions={['gfin.cash_advances.view_all', 'gfin.cash_advances.view_own']}>
+              <CashAdvances />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-fin/cash-advances/:id"
+          element={
+            <GuardAny permissions={['gfin.cash_advances.view_all', 'gfin.cash_advances.view_own']}>
+              <CashAdvanceDetail />
             </GuardAny>
           }
         />
@@ -811,8 +1010,26 @@ function Routed() {
           path="/g-ops/visits"
           element={
             <Guard permission="gops.visits.view_all">
-              <PmSchedule />
+              <ServiceSchedule />
             </Guard>
+          }
+        />
+        {/* A job order is the authorisation for one visit — one order, one
+            visit, one report. */}
+        <Route
+          path="/g-ops/job-orders"
+          element={
+            <GuardAny permissions={['gops.job_orders.view_all', 'gops.job_orders.view_own']}>
+              <JobOrders />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/job-orders/:id"
+          element={
+            <GuardAny permissions={['gops.job_orders.view_all', 'gops.job_orders.view_own']}>
+              <JobOrderDetail />
+            </GuardAny>
           }
         />
         <Route
@@ -954,7 +1171,17 @@ function Routed() {
 
         {/* Screens whose module ships in a later phase — their access and
             numbering are already configurable, so this is a signpost, not a 404. */}
-        <Route path="/admin/templates" element={<ComingSoon />} />
+        {/* Document Templates is the service report template editor — the
+            registry lists it under Admin as well as Aftermarket, and it used to
+            fall through to ComingSoon from here. */}
+        <Route
+          path="/admin/templates"
+          element={
+            <Guard permission="admin.templates.view_all">
+              <ReportTemplates />
+            </Guard>
+          }
+        />
         <Route path="/g-ops/*" element={<ComingSoon />} />
         <Route path="/g-hr/*" element={<ComingSoon />} />
         <Route path="/g-hr" element={<ComingSoon />} />

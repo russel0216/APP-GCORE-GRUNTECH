@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, getToken } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import {
   Empty,
@@ -1302,12 +1302,4 @@ function NewPlanModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
       </p>
     </Modal>
   );
-}
-
-/** Opens a PDF that needs the bearer token. */
-export function openPdf(path: string, onError: () => void) {
-  fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })
-    .then((r) => r.blob())
-    .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-    .catch(onError);
 }

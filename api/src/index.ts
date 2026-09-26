@@ -83,6 +83,20 @@ import {
 } from './routes/aftermarket';
 import { insightRoutes } from './routes/insights';
 import { gopsRoutes } from './routes/gops';
+import { chainRoutes } from './routes/chain';
+import { partnerRoutes } from './routes/partners';
+import { advanceRoutes } from './routes/advances';
+import { jobOrderRoutes } from './routes/jobOrders';
+import { positionRoutes } from './routes/positions';
+import { clearanceRoutes, turnoverReportRoutes } from './routes/clearances';
+import { meetingRoutes } from './routes/meetings';
+import { evaluationRoutes } from './routes/evaluations';
+import {
+  courseRoutes,
+  sessionRoutes,
+  passportRoutes,
+  academySettingsRoutes,
+} from './routes/academy';
 
 const app = express();
 
@@ -143,6 +157,7 @@ app.use('/api/costings', costingRoutes);
 app.use('/api/quotations', quotationRoutes);
 app.use('/api/activities', activityRoutes);
 app.use('/api/pipeline', pipelineRoutes);
+app.use('/api/partners', partnerRoutes);
 
 // Delivery (Phase 4)
 app.use('/api/jobs', jobRoutes);
@@ -159,6 +174,7 @@ app.use('/api/receivings', receivingRoutes);
 app.use('/api/stock-issues', stockIssueRoutes);
 app.use('/api/borrow-slips', borrowRoutes);
 app.use('/api/inventory', inventoryRoutes);
+app.use('/api/gchain', chainRoutes);
 
 // G-HR (Phase 6)
 app.use('/api/clock', clockRoutes);
@@ -166,12 +182,24 @@ app.use('/api/attendance', attendanceRoutes);
 app.use('/api/leave', leaveRoutes);
 app.use('/api/overtime', overtimeRoutes);
 app.use('/api/hr-settings', hrSettingsRoutes);
+app.use('/api/positions', positionRoutes);
+app.use('/api/clearances', clearanceRoutes);
+// The turnover report shares the hr-reports prefix; it mounts first so its
+// own paths are matched before hrReportRoutes gets a look.
+app.use('/api/hr-reports', turnoverReportRoutes);
 app.use('/api/hr-reports', hrReportRoutes);
+app.use('/api/meetings', meetingRoutes);
+app.use('/api/evaluations', evaluationRoutes);
+app.use('/api/courses', courseRoutes);
+app.use('/api/training-sessions', sessionRoutes);
+app.use('/api/passports', passportRoutes);
+app.use('/api/academy-settings', academySettingsRoutes);
 
 // G-FIN (Phase 7)
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/supplier-bills', billRoutes);
 app.use('/api/expense-claims', expenseRoutes);
+app.use('/api/cash-advances', advanceRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/finance-reports', financeReportRoutes);
 app.use('/api/finance-settings', financeSettingsRoutes);
@@ -180,6 +208,7 @@ app.use('/api/finance-settings', financeSettingsRoutes);
 app.use('/api/installed-assets', assetRoutes);
 app.use('/api/service-contracts', contractRoutes);
 app.use('/api/service-visits', visitRoutes);
+app.use('/api/job-orders', jobOrderRoutes);
 app.use('/api/report-templates', templateRoutes);
 app.use('/api/service-reports', serviceReportRoutes);
 app.use('/api/aftermarket', aftermarketRoutes);

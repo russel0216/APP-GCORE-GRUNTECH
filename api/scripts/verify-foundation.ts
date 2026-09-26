@@ -18,7 +18,16 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
-import { nextNumber } from '../src/shared/numbering';
+import { allPermissions } from '../src/permissions/registry';
+import {
+  nextNumber,
+  previewNext,
+  employeeToken,
+  periodKeyFor,
+  scopedPeriodKey,
+  renderPattern,
+} from '../src/shared/numbering';
+import { redact } from '../src/shared/audit';
 import {
   submitForApproval,
   act,
@@ -74,6 +83,7 @@ async function cleanup() {
   }
   await prisma.auditLog.deleteMany({ where: { entityId: { startsWith: TAG } } });
   await prisma.approvalWorkflow.deleteMany({ where: { documentType: { startsWith: TAG } } });
+  await prisma.numberSequence.deleteMany({ where: { documentType: { startsWith: TAG } } });
   await prisma.role.deleteMany({ where: { key: { startsWith: TAG } } });
 }
 
@@ -148,15 +158,43 @@ async function main() {
   check('sales sees quotations in their menu', salesScreens.includes('gops.quotations'));
   check('sales does not see admin screens', !salesScreens.some((s) => s.startsWith('admin.')));
 
+  // The hire-to-separate screens reach HR through the registry, not through a
+  // hand-written menu — so the menu is the assertion.
+  const hrResolved = (await resolveUser(hrPerson.id))!;
+  const hrScreens = menuFor(hrResolved).flatMap((m) => m.submodules.map((s) => `${m.key}.${s.key}`));
+  for (const screen of ['ghr.plantilla', 'ghr.clearances', 'ghr.evaluations', 'ghr.courses']) {
+    check(`hr sees ${screen} in their menu`, hrScreens.includes(screen));
+  }
+
+  // A clearance is signed off through the engine; a plantilla position is
+  // master data. The registry must only mint the approve right where a
+  // document actually routes.
+  const permissionKeys = new Set(allPermissions().map((p) => p.key));
+  check('the registry defines ghr.clearances.approve', permissionKeys.has('ghr.clearances.approve'));
+  check('and does not define ghr.plantilla.approve', !permissionKeys.has('ghr.plantilla.approve'));
+
   // ── 2. Document numbering ──────────────────────────────────────────────────
   console.log('\nNumbering');
 
-  const first = await nextNumber('quotation');
-  check('number matches the configured pattern', /^GT-QT-\d{4}-\d{4}$/.test(first), first);
+  // The purchase order carries the stock company-wide yearly pattern. (The
+  // quotation used to be the specimen here, until it took the house scheme —
+  // per-author, per-month — which has its own cases below.)
+  const first = await nextNumber('purchase_order');
+  check('number matches the configured pattern', /^GT-PO-\d{4}-\d{4}$/.test(first), first);
 
-  // Concurrency is the failure mode that matters: two people saving a quotation
+  const thisYear = String(new Date().getFullYear());
+  const poCounter = await prisma.numberSequence.findUnique({
+    where: { documentType_periodKey: { documentType: 'purchase_order', periodKey: thisYear } },
+  });
+  check(
+    'a company-wide yearly counter is keyed by the bare year',
+    poCounter !== null && poCounter.lastNumber >= 1,
+    poCounter ? `${poCounter.periodKey} → ${poCounter.lastNumber}` : 'no counter row',
+  );
+
+  // Concurrency is the failure mode that matters: two people saving a document
   // at the same moment must not receive the same number.
-  const concurrent = await Promise.all(Array.from({ length: 25 }, () => nextNumber('quotation')));
+  const concurrent = await Promise.all(Array.from({ length: 25 }, () => nextNumber('purchase_order')));
   check(
     '25 concurrent numbers are all unique',
     new Set(concurrent).size === 25,
@@ -165,6 +203,127 @@ async function main() {
 
   const codes = await Promise.all([nextNumber('purchase_order'), nextNumber('invoice')]);
   check('each document type has its own counter', /GT-PO-/.test(codes[0]) && /GT-INV-/.test(codes[1]));
+
+  // The token chain, off the database. These are the examples the contract
+  // gives, so a change to any of them is a change to every number issued.
+  check(
+    '{EMP} is the last run of digits, padded to three',
+    employeeToken('GT-EMP-2026-0007') === '007' &&
+      employeeToken('12') === '012' &&
+      employeeToken('1234') === '1234',
+    [employeeToken('GT-EMP-2026-0007'), employeeToken('12'), employeeToken('1234')].join(' '),
+  );
+  check(
+    'an author with no employee number is 000, not an error',
+    employeeToken(null) === '000' && employeeToken('no-digits') === '000',
+  );
+  const sept = new Date(2026, 8, 17, 9, 13);
+  check(
+    'a period key is the year, the month, or nothing',
+    periodKeyFor('YEAR', sept) === '2026' && periodKeyFor('MONTH', sept) === '2026-09' && periodKeyFor('NONE', sept) === '',
+    [periodKeyFor('YEAR', sept), periodKeyFor('MONTH', sept), periodKeyFor('NONE', sept)].join(' | '),
+  );
+  check(
+    'an OWNER counter carries the author in its key',
+    scopedPeriodKey('MONTH', 'OWNER', sept, '007') === '2026-09@007' &&
+      scopedPeriodKey('MONTH', 'GLOBAL', sept, '007') === '2026-09',
+  );
+  check(
+    'the house quotation scheme renders as employee, yy, mm, seq',
+    renderPattern('{EMP}{YY}{MM}{SEQ}', { prefix: 'GT', typeCode: 'QT', seq: 1, padding: 3, at: sept, emp: '007' }) ===
+      '0072609001',
+    renderPattern('{EMP}{YY}{MM}{SEQ}', { prefix: 'GT', typeCode: 'QT', seq: 1, padding: 3, at: sept, emp: '007' }),
+  );
+
+  // The new document types are seeded with the stock pattern. Issued inside a
+  // transaction that is rolled back, so the run leaves their counters alone.
+  const ROLLBACK = new Error('verify — roll back');
+  const newTypes = [
+    'position',
+    'cash_advance',
+    'job_order',
+    'clearance',
+    'meeting',
+    'evaluation',
+    'training_session',
+    'training_certification',
+  ];
+  const issued: Record<string, string> = {};
+  await prisma
+    .$transaction(async (tx) => {
+      for (const type of newTypes) issued[type] = await nextNumber(type, tx);
+      throw ROLLBACK;
+    })
+    .catch((err) => {
+      if (err !== ROLLBACK) throw err;
+    });
+  for (const type of newTypes) {
+    check(
+      `${type} numbers on the stock pattern`,
+      /^GT-(POS|CA|JO|CLR|MTG|EVAL|TS|TC)-\d{4}-\d{4}$/.test(issued[type] ?? ''),
+      issued[type] ?? 'nothing issued',
+    );
+  }
+
+  // Per-author counters. A throwaway type carrying the quotation's house
+  // scheme, so the assertion does not depend on how this database's real
+  // quotation template happens to be configured.
+  await prisma.numberSequence.create({
+    data: {
+      documentType: `${TAG}_owner`,
+      label: 'Verify — per-author monthly',
+      pattern: '{EMP}{YY}{MM}{SEQ}',
+      typeCode: 'VQ',
+      period: 'MONTH',
+      scope: 'OWNER',
+      padding: 3,
+    },
+  });
+  const preview = await previewNext(`${TAG}_owner`, { employeeNo: 'GT-EMP-2026-0007', at: sept });
+  const own1 = await nextNumber(`${TAG}_owner`, prisma, { employeeNo: 'GT-EMP-2026-0007', at: sept });
+  const own2 = await nextNumber(`${TAG}_owner`, prisma, { employeeNo: 'GT-EMP-2026-0007', at: sept });
+  const other = await nextNumber(`${TAG}_owner`, prisma, { employeeNo: 'GT-EMP-2026-0008', at: sept });
+  check('an author’s run starts at 001', own1 === '0072609001', own1);
+  check('and continues for the same author', own2 === '0072609002', own2);
+  check('a colleague’s run is their own', other === '0082609001', other);
+  check('the preview said what was then issued', preview.number === own1, `${preview.number} vs ${own1}`);
+  check('and the preview names the counter it read', preview.periodKey === '2026-09@007', preview.periodKey);
+  const ownerCounter = await prisma.numberSequence.findUnique({
+    where: { documentType_periodKey: { documentType: `${TAG}_owner`, periodKey: '2026-09@007' } },
+  });
+  check('the counter row is keyed by month and author', ownerCounter?.lastNumber === 2, `${ownerCounter?.lastNumber}`);
+  const nextMonth = await nextNumber(`${TAG}_owner`, prisma, {
+    employeeNo: 'GT-EMP-2026-0007',
+    at: new Date(2026, 9, 1),
+  });
+  check('a new month restarts the run', nextMonth === '0072610001', nextMonth);
+
+  // An author with no employee record still gets a number — under 000, which
+  // is visible on the document rather than silently borrowing someone's run.
+  const unlinked = await nextNumber(`${TAG}_owner`, prisma, { ownerId: salesUser.id, at: sept });
+  check('an unlinked author numbers under 000', unlinked === '0002609001', unlinked);
+
+  // An OWNER counter whose pattern cannot show the owner would hand two people
+  // the same number. Refused before anything is written.
+  await prisma.numberSequence.create({
+    data: {
+      documentType: `${TAG}_owner_blind`,
+      label: 'Verify — per-author without {EMP}',
+      pattern: '{PREFIX}-{TYPE}-{SEQ}',
+      typeCode: 'VB',
+      period: 'NONE',
+      scope: 'OWNER',
+    },
+  });
+  await expectRejection(
+    'a per-author counter without {EMP} in its pattern is refused',
+    () => nextNumber(`${TAG}_owner_blind`, prisma, { employeeNo: '7' }),
+    'needs {EMP}',
+  );
+  check(
+    'and nothing was written for it',
+    (await prisma.numberSequence.count({ where: { documentType: `${TAG}_owner_blind` } })) === 1,
+  );
 
   // ── 3. The approval engine ─────────────────────────────────────────────────
   console.log('\nApproval engine');
@@ -398,6 +557,26 @@ async function main() {
     trail.map((t) => t.action).join(' → ') || 'nothing recorded',
   );
   check('the decision records who made it', trail.some((t) => t.summary?.includes('Verify Supervisor')));
+
+  // Pay data and statutory numbers must never reach the audit log — the log is
+  // readable by anyone holding admin.audit.view_all, which is not the same
+  // right as ghr.employee_rates.view_all.
+  const stripped = redact({
+    name: 'Verify Employee',
+    dailyRate: 1,
+    burdenMultiplier: 1,
+    sssNo: 'x',
+    philhealthNo: 'x',
+    pagibigNo: 'x',
+    tin: 'x',
+  });
+  const payKeys = ['dailyRate', 'burdenMultiplier', 'sssNo', 'philhealthNo', 'pagibigNo', 'tin'];
+  check(
+    'redact() strips pay data and statutory numbers',
+    payKeys.every((k) => !(k in stripped)),
+    payKeys.filter((k) => k in stripped).join(', ') || 'none leaked',
+  );
+  check('and keeps the honest fields', stripped.name === 'Verify Employee');
 
   // ── 7. PDF engine ──────────────────────────────────────────────────────────
   console.log('\nDocument engine');

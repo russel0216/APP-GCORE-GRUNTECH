@@ -1818,14 +1818,14 @@ hr.rule {
   justify-content: space-between;
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .cal-head strong {
-  font-size: 16px;
+  font-size: var(--fs-lg);
   color: var(--text);
 }
 
@@ -1841,13 +1841,23 @@ hr.rule {
   gap: 5px;
 }
 
+/*
+  A <button> now rather than a div with onClick (rule 13), so the reset comes
+  first and the chip's own look is layered over it.
+*/
 .cal-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  font: inherit;
+  color: var(--text);
   padding: 6px 8px;
   border-radius: 7px;
   background: var(--surface-2);
   border-left: 2px solid var(--magenta);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .cal-item:hover {
@@ -1857,6 +1867,152 @@ hr.rule {
 .cal-item.done {
   opacity: 0.5;
   border-left-color: var(--neon);
+}
+
+/* ─────────────────────────────── People picker ─────────────────────────── */
+/*
+  components/PeoplePicker.tsx. Chips for who is chosen, a search box, then
+  the grouped checkbox rows. Everything a colour here is a token, so it reads
+  the same on the day theme without a second block.
+*/
+.people-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.people-picker .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+.people-picker .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--radius-sm);
+  background: rgb(var(--neon-rgb) / 0.12);
+  border: 1px solid rgb(var(--neon-rgb) / 0.3);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.people-picker .chip-remove {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-base);
+  line-height: 1;
+  padding: 0 var(--s-1);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.people-picker .chip-remove:hover {
+  color: var(--danger);
+}
+
+.people-picker .picker-note {
+  font-size: var(--fs-xs);
+}
+
+.people-picker .rows {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.people-picker .group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.people-picker .person {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: var(--s-2);
+  align-items: center;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  font-size: var(--fs-md);
+}
+
+.people-picker .person:last-child {
+  border-bottom: 0;
+}
+
+.people-picker .person:hover {
+  background: var(--surface-2);
+}
+
+.people-picker .person.on {
+  background: rgb(var(--neon-rgb) / 0.08);
+}
+
+.people-picker .person input {
+  margin: 0;
+}
+
+.people-picker .person-sub {
+  grid-column: 2;
+  font-size: var(--fs-xs);
+}
+
+/* ─────────────────────────────── Meet link ─────────────────────────────── */
+/* components/MeetLink.tsx — the pasted Google Meet link on a meeting or session. */
+.meet-link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.meet-link-row {
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.meet-link-url {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.meet-link-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.meet-link-edit p {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.meet-link-edit .row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-list-actions {
+  margin-top: var(--s-3);
 }
 
 /* ─────────────────────────────── Pipeline ──────────────────────────────── */

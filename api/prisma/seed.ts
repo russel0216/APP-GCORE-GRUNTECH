@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
-import { DOCUMENT_TYPES } from '../src/shared/numbering';
+import { DOCUMENT_TYPES, nextNumber } from '../src/shared/numbering';
 
 const prisma = new PrismaClient();
 
@@ -35,10 +35,15 @@ const ROLES: RoleSeed[] = [
     key: 'executive',
     name: 'Executive / Management',
     description: 'Sees everything across the business, approves at the top band, changes nothing operationally',
-    only: allPermissions()
-      .filter((p) => ['view_all', 'export', 'approve'].includes(p.action))
-      .map((p) => p.key)
-      .filter((k) => !k.startsWith('admin.')),
+    only: [
+      ...allPermissions()
+        .filter((p) => ['view_all', 'export', 'approve'].includes(p.action))
+        .map((p) => p.key)
+        .filter((k) => !k.startsWith('admin.')),
+      // The one thing management does operationally: call a meeting.
+      'ghr.meetings.create',
+      'ghr.meetings.edit_own',
+    ],
   },
   {
     key: 'sales',
@@ -54,6 +59,15 @@ const ROLES: RoleSeed[] = [
       'gops.dashboard.view_all',
       'gops.pipeline.view_all',
       'gops.projects.view_all',
+      // A partner's catalogue and price list are what a salesperson sells from.
+      'gops.partners.view_all',
+      'gops.partners.export',
+      // Sales takes the service call and raises the job order for it.
+      ...VIEW_OWN_SELF('gops', 'job_orders'),
+      'gops.job_orders.export',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -67,6 +81,7 @@ const ROLES: RoleSeed[] = [
       ['gops', 'quotations'],
       ['gops', 'pipeline'],
       ['gops', 'costing'],
+      ['gops', 'partners'],
     ],
     only: [
       'gops.dashboard.view_all',
@@ -75,6 +90,13 @@ const ROLES: RoleSeed[] = [
       // The pipeline analytics are their own numbers, seen whole.
       'insights.pipeline.view_all',
       'insights.pipeline.export',
+      ...VIEW_OWN_SELF('gops', 'job_orders'),
+      'gops.job_orders.view_all',
+      'gops.job_orders.export',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'evaluations'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -99,11 +121,21 @@ const ROLES: RoleSeed[] = [
       'gops.installed_base.view_all',
       'gops.visits.view_all',
       'gops.quotations.view_all',
+      'gops.job_orders.view_all',
       'gchain.purchase_requests.view_all',
+      // A PM raises stock-replenishment requests too, not only direct-to-job
+      // ones from the project workspace.
+      'gchain.purchase_requests.create',
+      'gchain.purchase_requests.edit_own',
+      'gchain.purchase_requests.view_own',
       'gchain.purchase_orders.view_all',
       'gchain.inventory.view_all',
       'gfin.budget_vs_actual.view_all',
       'ghr.overtime.approve',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'evaluations'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -115,9 +147,13 @@ const ROLES: RoleSeed[] = [
       'gops.plans.view_all',
       ...VIEW_OWN_SELF('gops', 'progress_billing'),
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
       'gops.budget_monitoring.view_all',
       'gops.customers.view_all',
       'gchain.inventory.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -135,6 +171,7 @@ const ROLES: RoleSeed[] = [
       'gops.customers.view_all',
       'gchain.inventory.view_all',
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
       // They are the ones on site, so they are the ones who can say what is
       // actually installed and what its serial number is.
       'gops.aftermarket.view_all',
@@ -144,6 +181,15 @@ const ROLES: RoleSeed[] = [
       'gops.visits.view_all',
       'gops.report_templates.view_all',
       'gops.renewals.view_all',
+      'gops.partners.view_all',
+      // An engineer taking the call raises the job order; the service manager
+      // accepts it.
+      'gops.job_orders.view_all',
+      'gops.job_orders.create',
+      'gops.job_orders.edit_own',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -161,6 +207,7 @@ const ROLES: RoleSeed[] = [
       ['gops', 'service_contracts'],
       ['gops', 'installed_base'],
       ['gops', 'service_costing'],
+      ['gops', 'job_orders'],
     ],
     only: [
       'gops.aftermarket.view_all',
@@ -172,8 +219,15 @@ const ROLES: RoleSeed[] = [
       'gops.customers.view_all',
       'gops.quotations.view_all',
       'gops.costing.view_all',
+      'gops.partners.view_all',
+      'gops.partners.export',
       'gchain.inventory.view_all',
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
+      ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'evaluations'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -193,6 +247,10 @@ const ROLES: RoleSeed[] = [
       'gchain.purchase_requests.edit_all',
       'gchain.inventory.view_all',
       'gops.projects.view_all',
+      'gops.partners.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -212,6 +270,11 @@ const ROLES: RoleSeed[] = [
       'gchain.purchase_orders.view_all',
       'gchain.reports.view_all',
       'gchain.reports.export',
+      // The warehouse clears a leaver's tools and borrow slips.
+      'ghr.clearances.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -228,6 +291,7 @@ const ROLES: RoleSeed[] = [
       ['gfin', 'dashboard'],
       ['gfin', 'settings'],
       ['gfin', 'payments'],
+      ['gfin', 'cash_advances'],
     ],
     only: [
       'insights.dashboard.view_all',
@@ -238,11 +302,16 @@ const ROLES: RoleSeed[] = [
       'gops.projects.view_all',
       'gops.progress_billing.view_all',
       'gops.customers.view_all',
+      // A job order is what a service invoice will be raised against.
+      'gops.job_orders.view_all',
       'gchain.purchase_orders.view_all',
       'gchain.receiving.view_all',
       // Finance costs labour, so it needs the rates — model §4.4.
       'ghr.employees.view_all',
       'ghr.employee_rates.view_all',
+      // Finance clears a leaver's unpaid claims and advances.
+      'ghr.clearances.view_all',
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -259,10 +328,12 @@ const ROLES: RoleSeed[] = [
       'gfin.ap.edit_all',
       'gfin.ap.export',
       'gfin.expenses.view_all',
+      'gfin.cash_advances.view_all',
       'gfin.reports.view_all',
       'gfin.reports.export',
       'gops.projects.view_all',
       'gchain.receiving.view_all',
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
   {
@@ -277,8 +348,23 @@ const ROLES: RoleSeed[] = [
       ['ghr', 'reports'],
       ['ghr', 'settings'],
       ['ghr', 'dashboard'],
+      ['ghr', 'plantilla'],
+      ['ghr', 'clearances'],
+      ['ghr', 'evaluations'],
+      ['ghr', 'meetings'],
+      ['ghr', 'courses'],
+      ['ghr', 'training_calendar'],
+      ['ghr', 'training_sessions'],
+      ['ghr', 'passports'],
     ],
-    only: ['ghr.clock.view_own', 'ghr.clock.create'],
+    only: [
+      'ghr.clock.view_own',
+      'ghr.clock.create',
+      'ghr.passport.view_own',
+      'ghr.passport.create',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+    ],
   },
   {
     key: 'supervisor',
@@ -294,6 +380,18 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('ghr', 'overtime'),
       'ghr.overtime.view_all',
       'ghr.overtime.approve',
+      // First sign-off on a leaver's clearance; writes the evaluations of
+      // their own probationers.
+      'ghr.clearances.view_all',
+      'ghr.clearances.approve',
+      ...VIEW_OWN_SELF('ghr', 'evaluations'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+      'ghr.training_calendar.view_all',
+      'ghr.passports.view_all',
+      'ghr.passport.view_own',
+      'ghr.passport.create',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
     ],
   },
   {
@@ -305,6 +403,42 @@ const ROLES: RoleSeed[] = [
       'ghr.clock.create',
       ...VIEW_OWN_SELF('ghr', 'leave'),
       ...VIEW_OWN_SELF('ghr', 'overtime'),
+      // A leaver raises their own clearance; an evaluation is read once
+      // approved, never written by its subject.
+      'ghr.clearances.view_own',
+      'ghr.clearances.create',
+      'ghr.evaluations.view_own',
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+      'ghr.training_calendar.view_all',
+      'ghr.passport.view_own',
+      'ghr.passport.create',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+    ],
+  },
+  {
+    // Runs Gruntech Academy sessions. A role of its own because the people
+    // who train are engineers and managers first — the right to schedule a
+    // session and mark who passed is added to whatever else they hold.
+    key: 'trainer',
+    name: 'Trainer',
+    description: 'Schedules and runs Gruntech Academy sessions, records attendance and results',
+    only: [
+      'ghr.courses.view_all',
+      'ghr.training_calendar.view_all',
+      'ghr.training_sessions.view_own',
+      'ghr.training_sessions.view_all',
+      'ghr.training_sessions.create',
+      'ghr.training_sessions.edit_own',
+      'ghr.training_sessions.export',
+      'ghr.passports.view_all',
+      'ghr.passport.view_own',
+      'ghr.passport.create',
+      'ghr.clock.view_own',
+      'ghr.clock.create',
+      ...VIEW_OWN_SELF('ghr', 'leave'),
+      ...VIEW_OWN_SELF('ghr', 'overtime'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
     ],
   },
 ];
@@ -449,7 +583,115 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
     ],
   },
+  {
+    documentType: 'cash_advance',
+    // Finance approves because finance releases the cash and must have said
+    // yes before the voucher exists. Not routed to the requester's own role.
+    name: 'Cash advance — supervisor then finance',
+    steps: [
+      { sequence: 1, name: 'Supervisor approval', approverType: 'SUPERVISOR' },
+      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
+    ],
+  },
+  {
+    documentType: 'job_order',
+    // Raised by sales or an engineer taking the call; accepted by the person who
+    // owns the schedule and stands behind the charging decision.
+    name: 'Job order — service manager',
+    steps: [{ sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' }],
+  },
+  {
+    // The requester is the LEAVER's own login whenever one exists, so step 1 is
+    // their supervisor and the engine's self-approval rule keeps them off their
+    // own form. HR raises it only for a login-less employee — then step 1 is
+    // HR's supervisor, which is why the HR step wants two holders.
+    documentType: 'clearance',
+    name: 'Clearance — supervisor, finance, then HR',
+    steps: [
+      { sequence: 1, name: 'Supervisor sign-off', approverType: 'SUPERVISOR' },
+      { sequence: 2, name: 'Finance — no outstanding accountabilities', approverType: 'ROLE', roleKey: 'finance' },
+      { sequence: 3, name: 'HR clearance', approverType: 'HR' },
+    ],
+  },
+  {
+    // The supervisor WRITES the evaluation, so their submission is their
+    // sign-off and step 1 must not be SUPERVISOR (it would resolve to the
+    // requester's own manager, or — for an HR-raised evaluation of an
+    // unsupervised employee — back to the requester: the budget-request fault).
+    documentType: 'evaluation',
+    name: 'Employee evaluation — HR then management',
+    steps: [
+      { sequence: 1, name: 'HR review', approverType: 'HR' },
+      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+  },
+  {
+    // An employee raises it; HR verifies. Never SUPERVISOR — a supervisor's own
+    // certificate would route to their manager, who is not who checks these.
+    documentType: 'training_certification',
+    name: 'Training certification — HR verification',
+    steps: [{ sequence: 1, name: 'HR verification', approverType: 'HR' }],
+  },
 ];
+
+/**
+ * Links every employee whose free-text `position` names nothing in the
+ * plantilla to a Position row, creating the row from the text on first sight.
+ *
+ * Idempotent: only rows with no `positionId` are touched, and a title already
+ * in the plantilla is reused rather than duplicated. The authorised headcount
+ * is the number of active holders, so day one prints 100% filled and 0
+ * vacant — nothing is authorised beyond what exists until HR edits it. An
+ * employee with an empty position stays unclassified.
+ */
+async function backfillPositions() {
+  const unlinked = await prisma.employee.findMany({
+    where: { positionId: null, position: { not: null } },
+    select: { id: true, position: true, departmentId: true, isActive: true },
+  });
+
+  // Group by the trimmed, case-folded title; the first holder's spelling wins.
+  const byTitle = new Map<string, { title: string; holders: typeof unlinked }>();
+  for (const e of unlinked) {
+    const title = (e.position ?? '').trim();
+    if (!title) continue;
+    const key = title.toLowerCase();
+    const group = byTitle.get(key) ?? { title, holders: [] };
+    group.holders.push(e);
+    byTitle.set(key, group);
+  }
+
+  let linked = 0;
+  let positions = 0;
+  for (const { title, holders } of byTitle.values()) {
+    await prisma.$transaction(async (tx) => {
+      let position = await tx.position.findFirst({
+        where: { title: { equals: title, mode: 'insensitive' } },
+      });
+      if (!position) {
+        const active = holders.filter((h) => h.isActive);
+        const departments = new Set(active.map((h) => h.departmentId));
+        position = await tx.position.create({
+          data: {
+            code: await nextNumber('position', tx),
+            title,
+            // The department only when every active holder shares one.
+            departmentId: departments.size === 1 ? [...departments][0] : null,
+            authorisedHeadcount: active.length,
+          },
+        });
+      }
+      const { count } = await tx.employee.updateMany({
+        where: { id: { in: holders.map((h) => h.id) } },
+        data: { positionId: position.id },
+      });
+      linked += count;
+      positions += 1;
+    });
+  }
+
+  if (linked) console.log(`  · Plantilla: linked ${linked} employee(s) to ${positions} position(s)`);
+}
 
 async function main() {
   console.log('Seeding G-CORE…\n');
@@ -557,23 +799,46 @@ async function main() {
   );
 
   // ── Numbering ──────────────────────────────────────────────────────────────
+  // A type's own default (the quotation's per-salesperson monthly pattern)
+  // applies only to a fresh database: `update` is the label alone, so a
+  // pattern an administrator configured is never overwritten.
+  const STOCK_NUMBERING = {
+    pattern: '{PREFIX}-{TYPE}-{YYYY}-{SEQ}',
+    padding: 4,
+    period: 'YEAR',
+    scope: 'GLOBAL',
+  } as const;
+  const ownDefault: string[] = [];
   for (const dt of DOCUMENT_TYPES) {
+    if (dt.defaults) ownDefault.push(dt.type);
     await prisma.numberSequence.upsert({
       where: { documentType_periodKey: { documentType: dt.type, periodKey: '' } },
       create: {
         documentType: dt.type,
         label: dt.label,
         typeCode: dt.code,
-        pattern: '{PREFIX}-{TYPE}-{YYYY}-{SEQ}',
-        period: 'YEAR',
+        ...(dt.defaults ?? STOCK_NUMBERING),
         periodKey: '',
-        padding: 4,
         lastNumber: 0,
       },
       update: { label: dt.label },
     });
   }
-  console.log(`  ✓ Numbering (${DOCUMENT_TYPES.length} document types)`);
+  console.log(
+    `  ✓ Numbering (${DOCUMENT_TYPES.length} document types${
+      ownDefault.length ? `; own default on ${ownDefault.join(', ')}` : ''
+    })`,
+  );
+
+  // Quotation.expectedClosing arrived after quotations existed. Copy the lead's
+  // date onto any quotation still without one — nulls only, so a date a
+  // salesperson set is never overwritten and every later run is a no-op.
+  const backfilled = await prisma.$executeRawUnsafe(
+    `UPDATE "Quotation" q SET "expectedClosing" = l."expectedClosing"
+       FROM "Lead" l
+      WHERE q."leadId" = l.id AND q."expectedClosing" IS NULL AND l."expectedClosing" IS NOT NULL`,
+  );
+  if (backfilled) console.log(`  · Copied the lead's expected closing onto ${backfilled} quotation(s)`);
 
   // ── Approval workflows ─────────────────────────────────────────────────────
   const roleByKey = new Map(
@@ -656,6 +921,9 @@ async function main() {
   }
   console.log('  ✓ Departments');
 
+  // ── Plantilla ──────────────────────────────────────────────────────────────
+  await backfillPositions();
+
   // ── Cost categories ────────────────────────────────────────────────────────
   // The five buckets every costing, budget and cost-ledger row is grouped by
   // (model §5.1). Marked isSystem so they cannot be deleted out from under the
@@ -692,6 +960,24 @@ async function main() {
     await prisma.itemCategory.upsert({ where: { code: c.code }, create: c, update: {} });
   }
   console.log('  ✓ Item categories (9)');
+
+  // ── Industries ─────────────────────────────────────────────────────────────
+  // The owner's five customer classifications. Same contract as the cost
+  // categories: system rows cannot be deleted, the labels stay editable.
+  for (const [i, ind] of [
+    { code: 'HI', name: 'Healthcare Industry' },
+    { code: 'BI', name: 'Building Industry' },
+    { code: 'UI', name: 'Utility Industry' },
+    { code: 'GI', name: 'General Industry' },
+    { code: 'SI', name: 'Special Industry' },
+  ].entries()) {
+    await prisma.industry.upsert({
+      where: { code: ind.code },
+      create: { ...ind, sortOrder: i, isSystem: true },
+      update: { isSystem: true },
+    });
+  }
+  console.log('  ✓ Industries (5)');
 
   // ── Warehouse ──────────────────────────────────────────────────────────────
   await prisma.warehouse.upsert({
@@ -735,11 +1021,80 @@ async function main() {
         overtimeMultiplier: 1.25,
         hoursPerDay: 8,
         faceThreshold: 0.6,
+        // Probation: the statutory six months, evaluated at the third and
+        // fifth, with HR told two weeks ahead. Ratings are out of five.
+        probationMonths: 6,
+        evaluationMilestoneMonths: [3, 5],
+        evaluationNoticeDays: 14,
+        ratingScale: 5,
+        ratingLabels: ['Unsatisfactory', 'Needs improvement', 'Meets expectations', 'Exceeds expectations', 'Outstanding'],
       },
     },
     update: {},
   });
   console.log('  ✓ HR rules');
+
+  // ── Clearance checklist ────────────────────────────────────────────────────
+  // The company-property lines on a leaver's clearance. The rest of the
+  // checklist is built from records the system already holds (open borrow
+  // slips, unpaid claims, pending filings) and needs no seed.
+  await prisma.setting.upsert({
+    where: { key: 'hr.clearanceChecklist' },
+    create: {
+      key: 'hr.clearanceChecklist',
+      description: 'Company property and accountabilities a leaver turns over, by the area that clears each',
+      value: [
+        { area: 'ADMIN', description: 'Laptop, charger and peripherals returned' },
+        { area: 'ADMIN', description: 'Company mobile phone and SIM returned' },
+        { area: 'HR', description: 'Company ID and access cards surrendered' },
+        { area: 'HR', description: 'Uniforms and PPE returned' },
+        { area: 'WAREHOUSE', description: 'Tools and test instruments returned to the warehouse' },
+        { area: 'SUPERVISOR', description: 'Keys, site passes and vehicle handed over' },
+        { area: 'FINANCE', description: 'Documents, files and work in progress turned over; no unliquidated advances' },
+      ],
+    },
+    update: {},
+  });
+  console.log('  ✓ Clearance checklist');
+
+  // ── Evaluation criteria ────────────────────────────────────────────────────
+  // What a probationer or trainee is rated on. An evaluation SNAPSHOTS these
+  // lines when it is created, so editing the list later never rewrites a
+  // rating already given.
+  await prisma.setting.upsert({
+    where: { key: 'hr.evaluationCriteria' },
+    create: {
+      key: 'hr.evaluationCriteria',
+      description: 'Criteria a probationary or trainee evaluation is scored on, with weights',
+      value: [
+        { key: 'QUAL', name: 'Quality of work', description: 'Accuracy, thoroughness and adherence to standards', appliesTo: 'BOTH', weight: 1, sortOrder: 1, isActive: true },
+        { key: 'PROD', name: 'Productivity', description: 'Output against what the role expects, and meeting deadlines', appliesTo: 'BOTH', weight: 1, sortOrder: 2, isActive: true },
+        { key: 'KNOW', name: 'Job knowledge', description: 'Technical skill and understanding of the work', appliesTo: 'BOTH', weight: 1, sortOrder: 3, isActive: true },
+        { key: 'ATT', name: 'Attendance and punctuality', description: 'Reliability in reporting for work and on time', appliesTo: 'BOTH', weight: 1, sortOrder: 4, isActive: true },
+        { key: 'TEAM', name: 'Teamwork', description: 'Cooperation with colleagues, supervisors and customers', appliesTo: 'BOTH', weight: 1, sortOrder: 5, isActive: true },
+        { key: 'INIT', name: 'Initiative', description: 'Acting without being told and taking ownership', appliesTo: 'BOTH', weight: 1, sortOrder: 6, isActive: true },
+        { key: 'LEARN', name: 'Learning progress', description: 'How far the trainee has come against the training plan', appliesTo: 'TRAINEE', weight: 1, sortOrder: 7, isActive: true },
+      ],
+    },
+    update: {},
+  });
+  console.log('  ✓ Evaluation criteria');
+
+  // ── Academy rules ──────────────────────────────────────────────────────────
+  await prisma.setting.upsert({
+    where: { key: 'academy.rules' },
+    create: {
+      key: 'academy.rules',
+      description: 'Certification expiry warning, self-enrolment and the course categories',
+      value: {
+        expiryWarningDays: 60,
+        allowSelfEnrolment: true,
+        categories: ['Safety', 'Technical', 'Quality', 'Compliance', 'Soft skills'],
+      },
+    },
+    update: {},
+  });
+  console.log('  ✓ Academy rules');
 
   // ── Finance rules ──────────────────────────────────────────────────────────
   // Supplier withholding follows the usual BIR schedule — 1% on goods, 2% on

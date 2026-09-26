@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, getToken } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -37,15 +37,6 @@ export { statusTone };
 
 /** `humanise` under the name G-CHAIN already calls it. */
 export const label = humanise;
-
-
-
-export function openPdf(path: string, onError: () => void) {
-  fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })
-    .then((r) => r.blob())
-    .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-    .catch(onError);
-}
 
 interface PrRow {
   id: string;

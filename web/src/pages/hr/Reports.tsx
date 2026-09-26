@@ -52,7 +52,7 @@ export function HrReports() {
         </div>
       </div>
 
-      <div className="scope-switch" style={{ marginBottom: 16 }}>
+      <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
         <button className={tab === 'overtime' ? 'active' : ''} onClick={() => setTab('overtime')}>
           Overtime by project
         </button>

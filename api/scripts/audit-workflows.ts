@@ -29,6 +29,14 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   // step back to finance is the same fault the budget-request and
   // purchase-order workflows both shipped with.
   supplier_bill: ['finance', 'procurement'],
+  cash_advance: ['employee', 'project_engineer', 'service_engineer', 'sales', 'project_manager', 'finance'],
+  job_order: ['sales', 'sales_manager', 'service_engineer'],
+  // HR raises a clearance for an employee with no login, and an evaluation
+  // for one with no supervisor — so HR is a requester on both, and a lone HR
+  // holder would be approving their own work.
+  clearance: ['employee', 'hr'],
+  evaluation: ['supervisor', 'project_manager', 'service_manager', 'sales_manager', 'hr'],
+  training_certification: ['employee', 'trainer', 'supervisor', 'project_engineer', 'service_engineer'],
 };
 
 async function main() {
@@ -92,6 +100,17 @@ async function main() {
       }
       if (step.approverType === 'HR' && hrHolders === 0) {
         issues.push(`step ${step.sequence} "${step.name}" routes to HR, which nobody holds`);
+      }
+      // The HR-typed version of the single-holder fault: on a document HR
+      // sometimes raises, one HR holder is the requester and the approver.
+      if (
+        step.approverType === 'HR' &&
+        hrHolders === 1 &&
+        (TYPICAL_REQUESTER[wf.documentType] ?? []).includes('hr')
+      ) {
+        issues.push(
+          `step ${step.sequence} "${step.name}" routes to HR, which only one person holds — when HR raises this document they would be approving their own work`,
+        );
       }
       if (step.approverType === 'SUPERVISOR' && hrHolders === 0 && unsupervised > 0) {
         issues.push(

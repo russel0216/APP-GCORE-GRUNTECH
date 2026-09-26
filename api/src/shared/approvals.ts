@@ -141,7 +141,11 @@ export async function approversForStep(
   }
 }
 
-async function usersInRole(roleKey: string, tx: Prisma.TransactionClient): Promise<string[]> {
+/** Active users holding a role, by key. HR fallbacks and the clearance sweep read it. */
+export async function usersInRole(
+  roleKey: string,
+  tx: Prisma.TransactionClient = prisma,
+): Promise<string[]> {
   const role = await tx.role.findUnique({
     where: { key: roleKey },
     include: { users: { where: { user: { isActive: true } }, select: { userId: true } } },
@@ -359,15 +363,21 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
 
 // ── Reading ──────────────────────────────────────────────────────────────────
 
-/** Everything currently sitting in one user's approval queue. */
-export async function pendingFor(userId: string): Promise<ApprovalRequest[]> {
+/**
+ * Everything currently sitting in one user's approval queue — with who raised
+ * it, because an approver deciding on subject and amount alone is deciding
+ * blind.
+ */
+export async function pendingFor(
+  userId: string,
+): Promise<(ApprovalRequest & { requester: { name: string } })[]> {
   const pending = await prisma.approvalRequest.findMany({
     where: { status: 'PENDING' },
     include: { workflow: { include: { steps: true } }, requester: { select: { name: true } } },
     orderBy: { createdAt: 'asc' },
   });
 
-  const mine: ApprovalRequest[] = [];
+  const mine: (ApprovalRequest & { requester: { name: string } })[] = [];
   for (const request of pending) {
     if (request.requesterId === userId) continue; // never your own
     const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);

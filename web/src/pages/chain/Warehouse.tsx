@@ -15,7 +15,8 @@ import {
   useToast,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
-import { label, openPdf, statusTone } from './PurchaseRequests';
+import { openPdf } from '../../lib/api';
+import { label, statusTone } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING

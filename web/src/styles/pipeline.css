@@ -1,0 +1,236 @@
+/*
+  Pipeline board states (pages/sales/Pipeline.tsx, package P3).
+
+  The column, card and head rules live in styles.css; this file adds what the
+  board DOES — drag, drop, refuse, collapse, forecast, lanes, the Move menu.
+  The KPI row reuses .kpi-grid from styles.css. Tokens only.
+*/
+
+/* ── Cards ────────────────────────────────────────────────────────────────── */
+
+.pipe-card[draggable='true'] {
+  cursor: grab;
+}
+
+.pipe-card[draggable='true']:active {
+  cursor: grabbing;
+}
+
+.pipe-card.dragging {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
+.pipe-card .pipe-card-title {
+  font-size: var(--fs-md);
+}
+
+.pipe-card .pipe-card-sub {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  margin: var(--s-1) 0;
+}
+
+.pipe-card .pipe-card-amount {
+  font-size: var(--fs-sm);
+}
+
+.pipe-card .pipe-card-owner {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  margin-top: var(--s-1);
+}
+
+/* Days in stage. Past the expected dwell it turns amber, with the number
+   always printed so the colour is never the only signal. */
+.pipe-age {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.pipe-age.stale {
+  color: var(--warn);
+}
+
+/* ── Columns ──────────────────────────────────────────────────────────────── */
+
+/* A drop target under a dragged card. */
+.pipe-col.over {
+  border-color: var(--neon);
+  background: rgb(var(--neon-rgb) / 0.06);
+}
+
+/* A drop the rules refuse — WON without an approved revision, a lead into a
+   quotation-only stage. The reason prints in .pipe-refusal. */
+.pipe-col.refused {
+  border-color: var(--danger);
+  background: rgb(var(--danger-rgb) / 0.06);
+}
+
+.pipe-refusal {
+  padding: var(--s-2);
+  margin-top: var(--s-2);
+  border-radius: var(--radius-sm);
+  background: rgb(var(--danger-rgb) / 0.12);
+  color: var(--danger);
+  font-size: var(--fs-xs);
+}
+
+.pipe-col.collapsed {
+  min-height: 0;
+}
+
+.pipe-col.collapsed .pipe-body,
+.pipe-col.collapsed .pipe-total {
+  display: none;
+}
+
+/* The forecast column: read-only, never a drop target. */
+.pipe-col.forecast {
+  border-style: dashed;
+  background: rgb(var(--tint-rgb) / 0.02);
+}
+
+.pipe-col.forecast .pipe-head strong {
+  color: var(--neon-dim);
+}
+
+.pipe-head-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.pipe-head .pipe-collapse {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  padding: 0 var(--s-1);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.pipe-total.weighted {
+  font-size: var(--fs-xs);
+}
+
+/* ── Lanes (group by salesperson) ─────────────────────────────────────────── */
+
+.pipe-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.pipe-lane {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--s-3);
+}
+
+.pipe-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.pipe-lane-head strong {
+  color: var(--text);
+}
+
+.pipe-lane-totals {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.pipe-lane .pipeline {
+  padding-bottom: 0;
+}
+
+/* ── Move menu ────────────────────────────────────────────────────────────── */
+
+.pipe-menu-wrap {
+  position: relative;
+}
+
+.pipe-menu {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  right: 0;
+  min-width: 200px;
+  margin-top: var(--s-1);
+  padding: var(--s-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md);
+}
+
+.pipe-menu [role='menuitem'] {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.pipe-menu [role='menuitem']:hover,
+.pipe-menu [role='menuitem']:focus-visible {
+  background: var(--surface-3);
+}
+
+.pipe-menu [role='menuitem'][aria-disabled='true'] {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.pipe-menu .pipe-menu-why {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+/* ── Toolbar and views ────────────────────────────────────────────────────── */
+
+.pipe-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.pipe-popover {
+  position: absolute;
+  z-index: 20;
+  margin-top: var(--s-1);
+  min-width: 260px;
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md);
+}
+
+/* Screen-reader announcements for moves. */
+.pipe-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

@@ -14,7 +14,8 @@ import {
   useToast,
 } from '../../components/ui';
 import { ProgressBar } from '../delivery/Projects';
-import { label, openPdf, statusTone } from './PurchaseRequests';
+import { openPdf } from '../../lib/api';
+import { label, statusTone } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
 //  CANVASS

@@ -107,13 +107,16 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'budget_requests', group: 'Project', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
       { key: 'progress_billing', group: 'Project', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
       { key: 'costing', group: 'Sales', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
+      { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
+        note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, sizing apps. One supplier record, seen from Sales.' },
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
       // did we put in that hospital, and when does its warranty run out".
       { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
       { key: 'installed_base', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED, phase: 8 },
       { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED, phase: 8 },
-      { key: 'visits', group: 'Aftermarket', label: 'PM Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Uses the Preventive Maintenance permissions to schedule and report' },
+      { key: 'job_orders', group: 'Aftermarket', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_APPROVABLE, phase: 8, note: 'A request for service work; approval schedules the visit' },
+      { key: 'visits', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Every visit on one calendar; scheduling and reporting use the Preventive Maintenance permissions' },
       { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
       { key: 'report_templates', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },
       { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
@@ -142,6 +145,11 @@ export const REGISTRY: ModuleDef[] = [
       },
       { key: 'leave', group: 'My day', label: 'Leave', path: '/g-hr/leave', actions: OWNED_APPROVABLE, phase: 6 },
       { key: 'overtime', group: 'My day', label: 'Overtime', path: '/g-hr/overtime', actions: OWNED_APPROVABLE, phase: 6 },
+      // An internal meeting with invitees. Sits in 'My day' because it is a
+      // thing that happens to a person's day, not an HR control. The Meet link
+      // is pasted from the organiser's own Google account — G-Core holds no
+      // Google credentials and sends no email (shared/calendar-links.ts).
+      { key: 'meetings', group: 'My day', label: 'Meetings', path: '/g-hr/meetings', actions: OWNED, phase: 6 },
       { key: 'employees', group: 'Records', label: 'Employees', path: '/g-hr/employees', actions: SHARED, phase: 2 },
       // Pay data is separated from the employee record on purpose. A project
       // manager needs headcount and assignment; they must not see salaries.
@@ -154,6 +162,23 @@ export const REGISTRY: ModuleDef[] = [
         phase: 2,
         note: 'Controls visibility of daily rate, burden and statutory numbers on the employee record',
       },
+      // The authorised staffing pattern: positions per department, how many of
+      // each are approved, who fills them and what is vacant. Filled/vacant are
+      // counted off active employees, never stored.
+      { key: 'plantilla', group: 'Records', label: 'Plantilla', path: '/g-hr/plantilla', actions: SHARED, phase: 6 },
+      // Pay data and evaluations are the two things on an employee a colleague
+      // must not see; both live behind their own key rather than under employees.
+      { key: 'evaluations', group: 'People', label: 'Evaluations', path: '/g-hr/evaluations', actions: OWNED_APPROVABLE, phase: 6, note: 'Probationary and trainee evaluations — the evaluator owns the record; the person evaluated reads it once approved' },
+      // Turnover of accountabilities before someone leaves, cleared by the area
+      // that owns each item and signed off through the approval engine. The
+      // screen opens with the 12-month turnover figures so the label is true.
+      { key: 'clearances', group: 'People', label: 'Turnover & Clearance', path: '/g-hr/clearances', actions: OWNED_APPROVABLE, phase: 6 },
+      // Gruntech Academy.
+      { key: 'courses', group: 'Academy', label: 'Courses', path: '/g-hr/academy/courses', actions: SHARED, phase: 6, note: 'Course master, and which departments and positions must hold each course' },
+      { key: 'training_calendar', group: 'Academy', label: 'Training Calendar', path: '/g-hr/academy/calendar', actions: READ, phase: 6 },
+      { key: 'training_sessions', group: 'Academy', label: 'Training Sessions', path: '/g-hr/academy/sessions', actions: OWNED, phase: 6, note: 'Create is the Trainer right — schedule, enrol and complete a session; Edit Own covers sessions you train' },
+      { key: 'passport', group: 'Academy', label: 'My Training Passport', path: '/g-hr/academy/passport', actions: ['view_own', 'create'], phase: 6, note: 'Create lets an employee enter an external certification for HR to verify' },
+      { key: 'passports', group: 'Academy', label: 'Training Passports', path: '/g-hr/academy/passports', actions: [...SHARED, 'approve'], phase: 6, note: 'Every employee’s passport; verify external certifications; record training directly' },
       { key: 'reports', group: 'Administration', label: 'HR Reports', path: '/g-hr/reports', actions: READ, phase: 6 },
       { key: 'settings', group: 'Administration', label: 'HR Settings', path: '/g-hr/settings', actions: ['view_all', 'edit_all'], phase: 6 },
     ],
@@ -167,6 +192,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: [...SHARED, 'approve'], phase: 7 },
       { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: [...SHARED, 'approve'], phase: 7 },
       { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED_APPROVABLE, phase: 7 },
+      { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_APPROVABLE, phase: 7 },
       // Every movement of money, in or out. Recording one is gated by the A/R
       // or A/P create permission depending on direction — seeing the register
       // is its own, lesser right.
@@ -233,8 +259,9 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'workflows', group: 'Process', label: 'Approval Workflows', path: '/admin/workflows', actions: SHARED, phase: 1 },
       { key: 'company', group: 'Configuration', label: 'Company Settings', path: '/admin/company', actions: ['view_all', 'edit_all'], phase: 1 },
       { key: 'numbering', group: 'Process', label: 'Numbering', path: '/admin/numbering', actions: ['view_all', 'edit_all'], phase: 1 },
-      { key: 'categories', group: 'Configuration', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost categories and item categories' },
-      { key: 'templates', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1, note: 'PDF layouts ship in Phase 1; service report form templates in Phase 8' },
+      { key: 'categories', group: 'Configuration', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost, item and industry categories' },
+      { key: 'templates', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1,
+        note: 'Service report form templates (Phase 8). PDF layouts are code and have no editor.' },
       { key: 'audit', group: 'Records', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
       { key: 'settings', group: 'Configuration', label: 'System Settings', path: '/admin/settings', actions: ['view_all', 'edit_all'], phase: 1 },
       { key: 'appearance', group: 'Configuration', label: 'Appearance & Layout', path: '/admin/appearance', actions: ['view_all', 'edit_all'], phase: 1, note: 'Spacing, type, colour and layout of every screen' },

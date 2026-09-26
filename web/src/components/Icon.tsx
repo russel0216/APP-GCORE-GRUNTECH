@@ -37,6 +37,7 @@ export type IconName =
   | 'layers'
   | 'truck'
   | 'image'
+  | 'book'
   | 'panel';
 
 /** Path data only — the wrapper supplies the canvas and the stroke. */
@@ -67,6 +68,8 @@ const PATHS: Record<IconName, string> = {
   // everybody reads as "image" without a label.
   image: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m0 11 4.5-4.5 3 3L15 11l5 5M9 9.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0',
   panel: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m6 0v14',
+  // An open book: two pages meeting at the spine, for the Academy.
+  book: 'M12 7c-1.5-1.5-4-2-9-2v13c5 0 7.5.5 9 2m0-13c1.5-1.5 4-2 9-2v13c-5 0-7.5.5-9 2m0-13v13',
 };
 
 /**
@@ -94,6 +97,7 @@ const SECTION_ICONS: Record<string, IconName> = {
   Warehouse: 'box',
   'Master data': 'layers',
   People: 'people',
+  Academy: 'book',
   Process: 'check',
   Configuration: 'gear',
 };

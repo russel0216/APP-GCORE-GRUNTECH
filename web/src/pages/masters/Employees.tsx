@@ -8,6 +8,7 @@ import { Checkbox, ErrorBox, Field, Modal, formatDate, formatMoney, useToast } f
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
   { value: 'PROBATIONARY', label: 'Probationary' },
+  { value: 'TRAINEE', label: 'Trainee' },
   { value: 'PROJECT_BASED', label: 'Project-based' },
   { value: 'CONTRACTUAL', label: 'Contractual' },
   { value: 'PART_TIME', label: 'Part-time' },
@@ -24,6 +25,8 @@ interface EmployeeRow {
   employmentType: string;
   dateHired: string | null;
   dateRegularized: string | null;
+  /** When probation or training is due to end — the evaluation clock. */
+  periodEndDate: string | null;
   dateSeparated: string | null;
   mobile: string | null;
   personalEmail: string | null;
@@ -253,6 +256,7 @@ function EmployeeForm({
     employmentType: employee?.employmentType ?? 'REGULAR',
     dateHired: employee?.dateHired?.slice(0, 10) ?? '',
     dateRegularized: employee?.dateRegularized?.slice(0, 10) ?? '',
+    periodEndDate: employee?.periodEndDate?.slice(0, 10) ?? '',
     dateSeparated: employee?.dateSeparated?.slice(0, 10) ?? '',
     mobile: employee?.mobile ?? '',
     personalEmail: employee?.personalEmail ?? '',
@@ -314,6 +318,12 @@ function EmployeeForm({
         employmentType: form.employmentType,
         dateHired: form.dateHired || null,
         dateRegularized: form.dateRegularized || null,
+        // Only meaningful on a probationer or trainee; cleared otherwise so a
+        // regularised employee does not carry a stale end date around.
+        periodEndDate:
+          ['PROBATIONARY', 'TRAINEE'].includes(form.employmentType) && form.periodEndDate
+            ? form.periodEndDate
+            : null,
         dateSeparated: form.dateSeparated || null,
         mobile: form.mobile || null,
         personalEmail: form.personalEmail || null,
@@ -511,6 +521,18 @@ function EmployeeForm({
                 onChange={(e) => setForm({ ...form, dateRegularized: e.target.value })}
               />
             </Field>
+            {['PROBATIONARY', 'TRAINEE'].includes(form.employmentType) && (
+              <Field
+                label="Probation / training ends"
+                hint="Evaluations are scheduled against this date. Leave blank to use the HR default."
+              >
+                <input
+                  type="date"
+                  value={form.periodEndDate}
+                  onChange={(e) => setForm({ ...form, periodEndDate: e.target.value })}
+                />
+              </Field>
+            )}
             <Field label="Date separated" hint="Leave blank while employed">
               <input
                 type="date"

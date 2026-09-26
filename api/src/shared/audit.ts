@@ -23,7 +23,8 @@ export type AuditAction =
   | 'EXECUTED'
   | 'COMPLETED'
   | 'SIGNED_IN'
-  | 'EXPORTED';
+  | 'EXPORTED'
+  | 'SEPARATED';
 
 export interface AuditInput {
   entityType: string;
@@ -66,10 +67,23 @@ export async function audit(
 
 /**
  * Strips fields that must never reach the audit log or an API response.
- * Password hashes are the obvious one; employee cost rates will join this list
- * when Phase 6 lands (model §4.4).
+ * Password hashes are the obvious one. The employee pay data and statutory
+ * numbers are the other (model §4.4): an audit row is readable by anyone
+ * holding admin.audit, which is not the same people as ghr.employee_rates.
  */
-const REDACTED = new Set(['passwordHash', 'password', 'token', 'costRate', 'salary']);
+const REDACTED = new Set([
+  'passwordHash',
+  'password',
+  'token',
+  'costRate',
+  'salary',
+  'dailyRate',
+  'burdenMultiplier',
+  'sssNo',
+  'philhealthNo',
+  'pagibigNo',
+  'tin',
+]);
 
 export function redact<T extends Record<string, unknown>>(obj: T): Partial<T> {
   const out: Record<string, unknown> = {};

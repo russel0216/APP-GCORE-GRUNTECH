@@ -15,7 +15,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { ProgressBar } from './Projects';
-import { openPdf } from './ProjectWorkspace';
+import { openPdf } from '../../lib/api';
 
 // ════════════════════════════════════════════════════════════════════
 //  LIST

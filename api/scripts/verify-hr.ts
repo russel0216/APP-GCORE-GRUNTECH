@@ -40,6 +40,7 @@ import {
   leaveBalance,
   faceDistance,
   matchFace,
+  attendanceDay,
   dayKey,
   toMinutes,
   fromMinutes,
@@ -872,6 +873,20 @@ async function main() {
       'HR can, and sees the whole active headcount',
       hrPeek.status === 200 && typeof (hrPeek.body.summary as Record<string, number>)?.absent === 'number',
       `${hrPeek.status} ${JSON.stringify(hrPeek.body.summary ?? {}).slice(0, 140)}`,
+    );
+
+    /*
+      The dashboard's figures are attendanceDay() in shared/hr.ts, and the
+      Insights brief prints the same counts from the same function. The route
+      must be that function and nothing more — compared as JSON, so a Date
+      here and its ISO string there are the same thing.
+    */
+    const direct = JSON.parse(JSON.stringify(await attendanceDay(new Date()))) as Record<string, unknown>;
+    const again = await api(hrToken, 'GET', '/attendance/dashboard');
+    check(
+      'GET /attendance/dashboard is attendanceDay(today), byte for byte',
+      again.status === 200 && JSON.stringify(again.body) === JSON.stringify(direct),
+      `${again.status} ${JSON.stringify(again.body.summary ?? {})} vs ${JSON.stringify(direct.summary ?? {})}`,
     );
 
     const balances = await api(workerToken, 'GET', `/leave/balances?employeeId=${other.id}`);

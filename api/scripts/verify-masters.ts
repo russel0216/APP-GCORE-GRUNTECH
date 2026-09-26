@@ -353,7 +353,6 @@ async function buildCustomerSpec() {
     build: async (row) => ({
       code: row['Code'] || '',
       name: required(row, 'Name'),
-      industry: optional(row, 'Industry'),
       creditLimit: decimal(row, 'Credit Limit'),
       isActive: bool(row, 'Active'),
       contacts: row['Contact Name']

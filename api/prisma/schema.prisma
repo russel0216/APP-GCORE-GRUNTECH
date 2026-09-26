@@ -52,8 +52,9 @@ model User {
   workflowStepsTargeting ApprovalStep[]    @relation("StepUser")
 
   employee         Employee?
-  customersCreated Customer[] @relation("CustomerCreator")
-  suppliersCreated Supplier[] @relation("SupplierCreator")
+  customersCreated Customer[]        @relation("CustomerCreator")
+  suppliersCreated Supplier[]        @relation("SupplierCreator")
+  partnerResources PartnerResource[] @relation("PartnerResourceCreator")
 
   leadsAssigned     Lead[]              @relation("LeadAssignee")
   leadsCreated      Lead[]              @relation("LeadCreator")
@@ -61,6 +62,19 @@ model User {
   quotationsOwned   Quotation[]         @relation("QuotationOwner")
   revisionsApproved QuotationRevision[] @relation("RevisionApprover")
   activities        SalesActivity[]     @relation("ActivityAssignee")
+
+  clearancesRaised       EmployeeClearance[]  @relation("ClearanceRaiser")
+  clearancesReceived     EmployeeClearance[]  @relation("ClearanceReceiver")
+  clearanceItemsCleared  ClearanceItem[]      @relation("ClearanceClearer")
+  meetingsOrganized      Meeting[]            @relation("MeetingOrganizer")
+  meetingInvites         MeetingInvitee[]     @relation("MeetingInvitee")
+  evaluationsGiven       EmployeeEvaluation[] @relation("Evaluator")
+  evaluationsScheduled   EmployeeEvaluation[] @relation("EvaluationScheduler")
+  sessionsTrained        TrainingSession[]    @relation("SessionTrainer")
+  sessionsCreated        TrainingSession[]    @relation("SessionCreator")
+  attendeesEnrolled      TrainingAttendee[]   @relation("AttendeeEnroller")
+  trainingVerified       TrainingRecord[]     @relation("TrainingVerifier")
+  trainingRecordsCreated TrainingRecord[]     @relation("TrainingRecordAuthor")
 
   jobsManaged     Job[]            @relation("JobManager")
   jobsCreated     Job[]            @relation("JobCreator")
@@ -90,12 +104,15 @@ model User {
   expenseClaims    ExpenseClaim[] @relation("Claimant")
   paymentsRecorded Payment[]      @relation("PaymentRecorder")
   reimbursements   Payment[]      @relation("Payee")
+  cashAdvances     CashAdvance[]  @relation("AdvanceRequester")
 
-  assetsCreated     InstalledAsset[]  @relation("AssetCreator")
-  contractsCreated  ServiceContract[] @relation("ContractCreator")
-  visitsAssigned    ServiceVisit[]    @relation("VisitEngineer")
-  templatesAuthored ReportTemplate[]  @relation("TemplateAuthor")
-  reportsPerformed  ServiceReport[]   @relation("ReportAuthor")
+  assetsCreated      InstalledAsset[]  @relation("AssetCreator")
+  contractsCreated   ServiceContract[] @relation("ContractCreator")
+  visitsAssigned     ServiceVisit[]    @relation("VisitEngineer")
+  templatesAuthored  ReportTemplate[]  @relation("TemplateAuthor")
+  reportsPerformed   ServiceReport[]   @relation("ReportAuthor")
+  jobOrdersRequested JobOrder[]        @relation("JobOrderRequester")
+  jobOrdersAssigned  JobOrder[]        @relation("JobOrderEngineer")
 
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
@@ -106,12 +123,14 @@ model User {
 }
 
 model Department {
-  id        String     @id @default(cuid())
-  code      String     @unique
-  name      String
-  users     User[]
-  employees Employee[]
-  createdAt DateTime   @default(now())
+  id                 String              @id @default(cuid())
+  code               String              @unique
+  name               String
+  users              User[]
+  employees          Employee[]
+  positions          Position[]
+  courseRequirements CourseRequirement[]
+  createdAt          DateTime            @default(now())
 }
 
 model Role {
@@ -225,10 +244,20 @@ model Setting {
 
 enum SequencePeriod {
   YEAR
+  MONTH
   NONE
 }
 
+/// GLOBAL: one counter per period. OWNER: one counter per period per author.
+enum SequenceScope {
+  GLOBAL
+  OWNER
+}
+
 /// Configurable document numbering (model §7).
+/// periodKey is composed: YEAR → "2026", MONTH → "2026-09", NONE → "";
+/// scope OWNER appends "@" + the author's 3-digit employee token, e.g.
+/// "2026-09@001". The template row is always periodKey "".
 model NumberSequence {
   id           String         @id @default(cuid())
   documentType String
@@ -236,6 +265,7 @@ model NumberSequence {
   pattern      String         @default("{PREFIX}-{TYPE}-{YYYY}-{SEQ}")
   typeCode     String
   period       SequencePeriod @default(YEAR)
+  scope        SequenceScope  @default(GLOBAL)
   periodKey    String         @default("")
   padding      Int            @default(4)
   lastNumber   Int            @default(0)
@@ -417,20 +447,21 @@ model AuditLog {
 // ════════════════════════════════════════════════════════════════════
 
 model Customer {
-  id           String   @id @default(cuid())
-  code         String   @unique
+  id           String    @id @default(cuid())
+  code         String    @unique
   name         String
   legalName    String?
   tin          String?
-  industry     String?
+  industryId   String?
+  industry     Industry? @relation(fields: [industryId], references: [id], onDelete: Restrict)
   /// Free text, e.g. "30 days", "50% down, balance on turnover".
   paymentTerms String?
-  creditLimit  Decimal? @db.Decimal(18, 2)
+  creditLimit  Decimal?  @db.Decimal(18, 2)
   phone        String?
   email        String?
   website      String?
   notes        String?
-  isActive     Boolean  @default(true)
+  isActive     Boolean   @default(true)
 
   /// Who entered it. Supports the Mine/All switch on the list; customers
   /// themselves are shared data that anyone with access may edit.
@@ -450,12 +481,14 @@ model Customer {
   assets         InstalledAsset[]
   visits         ServiceVisit[]
   serviceReports ServiceReport[]
+  jobOrders      JobOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([isActive])
   @@index([name])
+  @@index([industryId])
 }
 
 /// "Sometimes they have multiple contact in a single customer."
@@ -476,6 +509,7 @@ model CustomerContact {
   sites      CustomerSite[]
   quotations Quotation[]
   jobs       Job[]
+  jobOrders  JobOrder[]
 
   @@index([customerId])
 }
@@ -504,8 +538,23 @@ model CustomerSite {
   assets         InstalledAsset[]
   visits         ServiceVisit[]
   serviceReports ServiceReport[]
+  jobOrders      JobOrder[]
 
   @@index([customerId])
+}
+
+/// Customer industry classification — the owner's five codes. Same shape as
+/// CostCategory: seeded, system rows undeletable, labels editable.
+model Industry {
+  id        String     @id @default(cuid())
+  code      String     @unique // HI, BI, UI, GI, SI — 2–4 uppercase letters
+  name      String
+  sortOrder Int        @default(0)
+  isSystem  Boolean    @default(false)
+  isActive  Boolean    @default(true)
+  customers Customer[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 }
 
 model Supplier {
@@ -525,6 +574,13 @@ model Supplier {
   notes        String?
   isActive     Boolean @default(true)
 
+  /// A principal whose equipment Gruntech sells and services — surfaced in
+  /// G-OPS › Sales › Partners. Still one supplier record.
+  isPartner    Boolean           @default(false)
+  brand        String?
+  partnerSince DateTime?         @db.Date
+  resources    PartnerResource[]
+
   createdById String?
   createdBy   User?   @relation("SupplierCreator", fields: [createdById], references: [id], onDelete: SetNull)
 
@@ -540,6 +596,7 @@ model Supplier {
 
   @@index([isActive])
   @@index([name])
+  @@index([isPartner])
 }
 
 model SupplierContact {
@@ -559,12 +616,44 @@ model SupplierContact {
   @@index([supplierId])
 }
 
+enum PartnerResourceKind {
+  CATALOGUE
+  PRICE_LIST
+  SIZING_APP
+  OTHER
+}
+
+/// A catalogue, price list or sizing tool a partner publishes. EITHER an uploaded
+/// file (one Attachment with entityType 'partner_resource', entityId = this id)
+/// OR an external URL, or both. Files stay in the one attachment service.
+model PartnerResource {
+  id          String              @id @default(cuid())
+  supplierId  String
+  supplier    Supplier            @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  kind        PartnerResourceKind
+  title       String
+  description String?
+  /// http(s) only — validated on write, opened in a new tab.
+  url         String?
+  validFrom   DateTime?           @db.Date
+  validUntil  DateTime?           @db.Date
+  sortOrder   Int                 @default(0)
+  isActive    Boolean             @default(true)
+  createdById String?
+  createdBy   User?               @relation("PartnerResourceCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([supplierId, kind])
+}
+
 enum EmploymentType {
   REGULAR
   PROBATIONARY
   PROJECT_BASED
   CONTRACTUAL
   PART_TIME
+  TRAINEE
 }
 
 /// The person. `User` is their login; not every employee needs one, and the
@@ -587,11 +676,20 @@ model Employee {
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   position     String?
+  /// The plantilla slot. `position` (the string) is a MIRROR of positionRef.title,
+  /// written only by setEmployeePosition() in shared/plantilla.ts; it stays free
+  /// text only for an employee with no plantilla position (unclassified).
+  positionId   String?
+  positionRef  Position?   @relation(fields: [positionId], references: [id], onDelete: SetNull)
 
   employmentType  EmploymentType @default(REGULAR)
   dateHired       DateTime?      @db.Date
   dateRegularized DateTime?      @db.Date
   dateSeparated   DateTime?      @db.Date
+  /// End of the current probationary or training period. PROBATIONARY defaults
+  /// to dateHired + hr.rules.probationMonths when null; an EXTEND recommendation
+  /// writes here. A TRAINEE has no statutory period, so the route requires it.
+  periodEndDate   DateTime?      @db.Date
 
   mobile        String?
   personalEmail String?
@@ -624,8 +722,14 @@ model Employee {
   leaveRequests LeaveRequest[]
   overtime      OvertimeRequest[]
 
+  clearances          EmployeeClearance[]
+  evaluations         EmployeeEvaluation[]
+  trainingAttendances TrainingAttendee[]
+  trainingRecords     TrainingRecord[]
+
   @@index([isActive])
   @@index([lastName, firstName])
+  @@index([positionId])
 }
 
 /// The five cost buckets every costing, budget and cost-ledger row uses
@@ -649,6 +753,7 @@ model CostCategory {
   overtime       OvertimeRequest[]
   supplierBills  SupplierBill[]        @relation("BillCategory")
   expenseClaims  ExpenseClaim[]        @relation("ExpenseCategory")
+  cashAdvances   CashAdvance[]         @relation("AdvanceCategory")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -696,6 +801,12 @@ model Item {
   unit         String   @default("pcs")
   standardCost Decimal? @db.Decimal(18, 2)
   lastCost     Decimal? @db.Decimal(18, 2)
+
+  /// The partner's published list price. A PRICE, not a cost: standardCost and
+  /// lastCost stay behind gchain.items; this is what a salesperson may see.
+  listPrice         Decimal?  @db.Decimal(18, 2)
+  listPriceCurrency String?
+  listPriceAsOf     DateTime? @db.Date
 
   /// Stocked items carry balances and reorder levels; a service or a one-off
   /// fabricated part does not.
@@ -832,6 +943,7 @@ model Lead {
   notes          String?
 
   quotations Quotation[]
+  costings   Costing[]
   activities SalesActivity[]
 
   createdAt DateTime @default(now())
@@ -861,6 +973,9 @@ model Costing {
   siteId     String?
   site       CustomerSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
+  leadId String?
+  lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
   /// Record ownership — "View Category (My Costing, all Costing)".
   ownerId String
   owner   User   @relation("CostingOwner", fields: [ownerId], references: [id], onDelete: Restrict)
@@ -888,6 +1003,7 @@ model Costing {
 
   @@index([ownerId])
   @@index([status])
+  @@index([leadId])
 }
 
 /// One estimated cost, in one of the five buckets.
@@ -1001,12 +1117,17 @@ model Quotation {
   /// Salesperson's percentage to award, for the pipeline.
   probability Int @default(50)
 
-  submittedAt DateTime?
-  decidedAt   DateTime?
-  lostReason  String?
+  submittedAt     DateTime?
+  decidedAt       DateTime?
+  lostReason      String?
+  /// When the salesperson expects the decision. Copied from the lead when the
+  /// quotation is raised from one; editable on the quotation. The board's
+  /// forecast column reads this, so a quotation with no lead can still be forecast.
+  expectedClosing DateTime? @db.Date
 
   revisions  QuotationRevision[]
   activities SalesActivity[]
+  jobOrders  JobOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1198,9 +1319,11 @@ model Job {
   invoices         Invoice[]
   supplierBills    SupplierBill[]
   expenseClaims    ExpenseClaim[]
+  cashAdvances     CashAdvance[]
   installedAssets  InstalledAsset[]  @relation("AssetInstaller")
   serviceContract  ServiceContract?
   serviceReports   ServiceReport[]   @relation("ServiceReportJob")
+  jobOrders        JobOrder[]        @relation("JobOrderChargeTo")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2223,6 +2346,410 @@ model OvertimeRequest {
   @@index([jobId])
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  PLANTILLA — the authorised staffing pattern (G-HR)
+// ════════════════════════════════════════════════════════════════════
+
+/// A job title, the department it sits in and how many the company has
+/// approved. Filled and vacant are DERIVED by counting active employees on
+/// the position — never stored.
+model Position {
+  id                  String              @id @default(cuid())
+  code                String              @unique
+  title               String
+  departmentId        String?
+  department          Department?         @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  authorisedHeadcount Int                 @default(1)
+  description         String?
+  sortOrder           Int                 @default(0)
+  isActive            Boolean             @default(true)
+  employees           Employee[]
+  courseRequirements  CourseRequirement[]
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  @@index([departmentId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  CLEARANCE — turnover of accountabilities before someone leaves
+// ════════════════════════════════════════════════════════════════════
+
+enum SeparationReason {
+  RESIGNATION
+  END_OF_CONTRACT
+  END_OF_PROJECT
+  TERMINATION
+  RETIREMENT
+  AWOL
+  OTHER
+}
+
+enum ClearanceStatus {
+  OPEN
+  PENDING_APPROVAL
+  CLEARED
+  REJECTED
+  CANCELLED
+}
+
+/// Who clears an item — mapped to an existing right in areaRight().
+enum ClearanceArea {
+  SUPERVISOR
+  WAREHOUSE
+  FINANCE
+  HR
+  ADMIN
+}
+
+enum ClearanceItemStatus {
+  PENDING
+  CLEARED
+  WAIVED
+}
+
+/// The checklist is built from records the system already holds (open borrow
+/// slips, unpaid claims, pending filings, projects and people assigned to the
+/// leaver) plus the company-property list in HR Settings. Items that point at
+/// a record derive their status FROM that record on read. Approval of this
+/// document is what records the separation.
+model EmployeeClearance {
+  id             String           @id @default(cuid())
+  number         String           @unique
+  status         ClearanceStatus  @default(OPEN)
+  employeeId     String
+  employee       Employee         @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  reason         SeparationReason
+  lastWorkingDay DateTime         @db.Date
+  raisedById     String
+  raisedBy       User             @relation("ClearanceRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  /// Prints as "Received by" on the form.
+  handedOverToId String?
+  handedOverTo   User?            @relation("ClearanceReceiver", fields: [handedOverToId], references: [id], onDelete: SetNull)
+  notes          String?
+  submittedAt    DateTime?
+  clearedAt      DateTime?
+  items          ClearanceItem[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@index([employeeId, status])
+  @@index([status])
+}
+
+model ClearanceItem {
+  id          String              @id @default(cuid())
+  clearanceId String
+  clearance   EmployeeClearance   @relation(fields: [clearanceId], references: [id], onDelete: Cascade)
+  area        ClearanceArea
+  sortOrder   Int                 @default(0)
+  description String
+  /// Set when the item IS a record elsewhere: 'borrow_slip' | 'expense_claim' |
+  /// 'leave_request' | 'overtime_request' | 'job' | 'tasks' | 'leads' |
+  /// 'quotations' | 'visits' | 'activities' | 'approvals' | 'reports' |
+  /// 'sessions'. Its status is derived by syncClearanceItems(); it cannot be
+  /// cleared by hand, only waived with a written reason.
+  sourceType  String?
+  sourceId    String?
+  link        String?
+  status      ClearanceItemStatus @default(PENDING)
+  clearedById String?
+  clearedBy   User?               @relation("ClearanceClearer", fields: [clearedById], references: [id], onDelete: SetNull)
+  clearedAt   DateTime?
+  /// Mandatory on WAIVED.
+  remarks     String?
+
+  @@unique([clearanceId, sourceType, sourceId])
+  @@index([clearanceId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  MEETINGS — an internal meeting with invitees; the Meet link is pasted
+//  from the organiser's own Google account (G-Core holds no credentials)
+// ════════════════════════════════════════════════════════════════════
+
+enum InviteeResponse {
+  PENDING
+  ACCEPTED
+  TENTATIVE
+  DECLINED
+}
+
+model Meeting {
+  id               String           @id @default(cuid())
+  number           String           @unique
+  title            String
+  agenda           String?
+  location         String?
+  startsAt         DateTime
+  endsAt           DateTime
+  status           ActivityStatus   @default(PLANNED)
+  organizerId      String
+  organizer        User             @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
+  /// https://meet.google.com/abc-defg-hij — pasted back, never derived.
+  meetLink         String?
+  calendarEventUrl String?
+  /// Reserved for a Calendar API integration. Null until that ships.
+  googleEventId    String?
+  /// RFC 5545 SEQUENCE — bumped on every time change so a re-downloaded .ics
+  /// replaces the event instead of duplicating it.
+  icsSequence      Int              @default(0)
+  cancelReason     String?
+  invitees         MeetingInvitee[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([startsAt])
+  @@index([organizerId, startsAt])
+  @@index([status, startsAt])
+}
+
+model MeetingInvitee {
+  id          String          @id @default(cuid())
+  meetingId   String
+  meeting     Meeting         @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User            @relation("MeetingInvitee", fields: [userId], references: [id], onDelete: Cascade)
+  required    Boolean         @default(true)
+  response    InviteeResponse @default(PENDING)
+  respondedAt DateTime?
+  /// null = the in-app invitation has not been sent yet.
+  notifiedAt  DateTime?
+
+  @@unique([meetingId, userId])
+  @@index([userId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  EVALUATIONS — probationary and trainee feedback; approval regularises
+// ════════════════════════════════════════════════════════════════════
+
+enum EvaluationKind {
+  PROBATIONARY
+  TRAINEE
+}
+
+enum EvaluationStatus {
+  SCHEDULED
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+/// REGULARIZE / EXTEND / END for PROBATIONARY; ABSORB / END for TRAINEE.
+enum EvaluationRecommendation {
+  REGULARIZE
+  EXTEND
+  END
+  ABSORB
+}
+
+model EmployeeEvaluation {
+  id                          String                    @id @default(cuid())
+  number                      String                    @unique
+  kind                        EvaluationKind
+  status                      EvaluationStatus          @default(DRAFT)
+  /// 'MONTH_3' | 'MONTH_5' | 'END' | 'ADHOC'
+  milestone                   String
+  employeeId                  String
+  employee                    Employee                  @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  /// The record OWNER for canEditRecord.
+  evaluatorId                 String
+  evaluator                   User                      @relation("Evaluator", fields: [evaluatorId], references: [id], onDelete: Restrict)
+  scheduledById               String?
+  scheduledBy                 User?                     @relation("EvaluationScheduler", fields: [scheduledById], references: [id], onDelete: SetNull)
+  dueDate                     DateTime?                 @db.Date
+  periodFrom                  DateTime?                 @db.Date
+  periodTo                    DateTime?                 @db.Date
+  strengths                   String?
+  improvements                String?
+  comments                    String?
+  recommendation              EvaluationRecommendation?
+  effectiveDate               DateTime?                 @db.Date
+  extendedTo                  DateTime?                 @db.Date
+  /// Weighted mean of rated lines, 2dp. Not money.
+  score                       Decimal?                  @db.Decimal(5, 2)
+  submittedAt                 DateTime?
+  approvedAt                  DateTime?
+  employeeAcknowledgedAt      DateTime?
+  employeeAcknowledgementNote String?
+  lines                       EmployeeEvaluationLine[]
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+
+  @@index([employeeId, status])
+  @@index([evaluatorId, status])
+  @@index([status, dueDate])
+}
+
+/// A SNAPSHOT of the criterion (hr.evaluationCriteria) at creation, so a
+/// renamed or retired criterion never rewrites a signed form.
+model EmployeeEvaluationLine {
+  id           String             @id @default(cuid())
+  evaluationId String
+  evaluation   EmployeeEvaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  criterionKey String
+  sortOrder    Int
+  name         String
+  weight       Decimal            @db.Decimal(5, 2)
+  rating       Int?
+  remarks      String?
+
+  @@index([evaluationId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  GRUNTECH ACADEMY — courses, sessions and the training passport
+// ════════════════════════════════════════════════════════════════════
+
+enum SessionStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+enum AttendeeResult {
+  PENDING
+  PASSED
+  FAILED
+  NO_SHOW
+}
+
+enum TrainingSource {
+  SESSION
+  EXTERNAL
+}
+
+enum TrainingRecordStatus {
+  PENDING_VERIFICATION
+  VERIFIED
+  REJECTED
+}
+
+model Course {
+  id                 String              @id @default(cuid())
+  /// Human code typed by HR (SAF-01), not nextNumber.
+  code               String              @unique
+  title              String
+  category           String?
+  description        String?
+  hours              Decimal             @default(0) @db.Decimal(6, 2)
+  /// null = never expires. expiresAt = addMonths(completedAt, validityMonths).
+  validityMonths     Int?
+  requiresAssessment Boolean             @default(false)
+  isActive           Boolean             @default(true)
+  requirements       CourseRequirement[]
+  sessions           TrainingSession[]
+  records            TrainingRecord[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([isActive])
+}
+
+/// Both null = everyone; department only = everyone in it; position only =
+/// every holder of that plantilla position; both = the intersection.
+model CourseRequirement {
+  id           String      @id @default(cuid())
+  courseId     String
+  course       Course      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  positionId   String?
+  position     Position?   @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime    @default(now())
+
+  @@unique([courseId, departmentId, positionId])
+  @@index([departmentId])
+  @@index([positionId])
+}
+
+model TrainingSession {
+  id           String             @id @default(cuid())
+  number       String             @unique
+  status       SessionStatus      @default(SCHEDULED)
+  courseId     String
+  course       Course             @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  /// The OWNER for canEditRecord.
+  trainerId    String
+  trainer      User               @relation("SessionTrainer", fields: [trainerId], references: [id], onDelete: Restrict)
+  provider     String?
+  startsAt     DateTime
+  endsAt       DateTime
+  venue        String?
+  meetLink     String?
+  capacity     Int?
+  notes        String?
+  icsSequence  Int                @default(0)
+  completedAt  DateTime?
+  cancelReason String?
+  createdById  String?
+  createdBy    User?              @relation("SessionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  attendees    TrainingAttendee[]
+  records      TrainingRecord[]
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([startsAt])
+  @@index([trainerId, status])
+  @@index([courseId])
+}
+
+model TrainingAttendee {
+  id           String          @id @default(cuid())
+  sessionId    String
+  session      TrainingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  employeeId   String
+  employee     Employee        @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  result       AttendeeResult  @default(PENDING)
+  score        Decimal?        @db.Decimal(6, 2)
+  enrolledAt   DateTime        @default(now())
+  /// null = self-enrolled.
+  enrolledById String?
+  enrolledBy   User?           @relation("AttendeeEnroller", fields: [enrolledById], references: [id], onDelete: SetNull)
+
+  @@unique([sessionId, employeeId])
+  @@index([employeeId])
+}
+
+/// Expiry is NOT stored — CURRENT/EXPIRING/EXPIRED is derived from expiresAt on
+/// read (expiryState in shared/aftermarket.ts). `status` records verification.
+model TrainingRecord {
+  id             String               @id @default(cuid())
+  /// GT-TC-… for an EXTERNAL certification (the approval's handle); null for a
+  /// record written by a session completion.
+  number         String?              @unique
+  employeeId     String
+  employee       Employee             @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  courseId       String
+  course         Course               @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  source         TrainingSource
+  sessionId      String?
+  session        TrainingSession?     @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  status         TrainingRecordStatus
+  completedAt    DateTime             @db.Date
+  expiresAt      DateTime?            @db.Date
+  provider       String?
+  certificateNo  String?
+  notes          String?
+  verifiedById   String?
+  verifiedBy     User?                @relation("TrainingVerifier", fields: [verifiedById], references: [id], onDelete: SetNull)
+  verifiedAt     DateTime?
+  /// When the expiring-soon notice went out — reset to null when expiresAt changes.
+  expiryNoticeAt DateTime?
+  createdById    String?
+  createdBy      User?                @relation("TrainingRecordAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  @@unique([sessionId, employeeId])
+  @@index([employeeId, courseId])
+  @@index([expiresAt])
+  @@index([status])
+}
+
 /// Saved filters for the shared list pattern (model §8.4).
 model SavedFilter {
   id        String   @id @default(cuid())
@@ -2277,6 +2804,11 @@ model Invoice {
   /// than merely discouraged.
   progressBillingId String?          @unique
   progressBilling   ProgressBilling? @relation(fields: [progressBillingId], references: [id], onDelete: Restrict)
+
+  /// One invoice per chargeable job order — the same guarantee progressBillingId
+  /// gives billings.
+  jobOrderId String?   @unique
+  jobOrder   JobOrder? @relation(fields: [jobOrderId], references: [id], onDelete: Restrict)
 
   invoiceDate DateTime @db.Date
   dueDate     DateTime @db.Date
@@ -2440,6 +2972,8 @@ enum ExpenseStatus {
   REJECTED
   REIMBURSED
   CANCELLED
+  /// A liquidation the advance fully covered. Nothing is owed to the person.
+  SETTLED
 }
 
 /// Money someone spent out of their own pocket on the company's behalf.
@@ -2460,6 +2994,14 @@ model ExpenseClaim {
 
   costCategoryId String?
   costCategory   CostCategory? @relation("ExpenseCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  /// Set when this claim LIQUIDATES a cash advance. The lines are the receipts
+  /// against it; total − advance.amountReleased is the excess owed to the
+  /// person (settled here like any claim) or, when negative, the unspent cash
+  /// owed back (carried on the advance as REFUND_DUE). Not unique: a rejected
+  /// liquidation is re-filed; the route allows one LIVE claim per advance.
+  advanceId String?
+  advance   CashAdvance? @relation(fields: [advanceId], references: [id], onDelete: Restrict)
 
   claimDate DateTime @db.Date
   purpose   String
@@ -2483,6 +3025,7 @@ model ExpenseClaim {
   @@index([status])
   @@index([claimedById, status])
   @@index([jobId])
+  @@index([advanceId])
 }
 
 model ExpenseClaimLine {
@@ -2502,8 +3045,76 @@ model ExpenseClaimLine {
   @@index([claimId])
 }
 
+/// Money issued to a person BEFORE it is spent. It is a receivable from that
+/// person until an approved liquidation (an ExpenseClaim with advanceId) says
+/// what was spent. Nothing reaches a job's ledger until then; the liquidation
+/// posts INCURRED at the amount actually spent.
+enum CashAdvanceStatus {
+  DRAFT
+  PENDING_APPROVAL
+  /// Approved; finance has not yet handed the cash over.
+  APPROVED
+  /// Cash handed over; waiting for the liquidation.
+  RELEASED
+  /// Liquidation approved and the person still holds unspent cash.
+  REFUND_DUE
+  /// Liquidation approved and nothing is owed either way.
+  LIQUIDATED
+  REJECTED
+  CANCELLED
+}
+
+model CashAdvance {
+  id     String            @id @default(cuid())
+  number String            @unique
+  status CashAdvanceStatus @default(DRAFT)
+
+  requestedById String
+  requestedBy   User   @relation("AdvanceRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  /// Where the spend will be charged. Fixed for the liquidation that follows.
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  costCategoryId String?
+  costCategory   CostCategory? @relation("AdvanceCategory", fields: [costCategoryId], references: [id], onDelete: SetNull)
+
+  requestDate DateTime  @db.Date
+  neededBy    DateTime? @db.Date
+  purpose     String
+
+  amount Decimal @db.Decimal(18, 2)
+
+  /// Re-derived by refreshAdvance(): Σ DISBURSEMENT allocations. 0 or amount —
+  /// an advance is released in one voucher.
+  amountReleased Decimal @default(0) @db.Decimal(18, 2)
+  /// Re-derived by refreshAdvance(): the approved liquidation's total, else 0.
+  amountSpent    Decimal @default(0) @db.Decimal(18, 2)
+  /// Re-derived by refreshAdvance(): Σ RECEIPT allocations (unspent cash returned).
+  amountRefunded Decimal @default(0) @db.Decimal(18, 2)
+
+  /// releasedAt + finance.rules.advanceLiquidationDays, snapshotted at release.
+  liquidationDueDate DateTime? @db.Date
+
+  approvedAt   DateTime?
+  releasedAt   DateTime? @db.Date
+  liquidatedAt DateTime?
+  notes        String?
+
+  liquidations ExpenseClaim[]
+  allocations  PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([requestedById, status])
+  @@index([jobId])
+}
+
 enum PaymentKind {
-  /// Money in — a customer settling an invoice.
+  /// Money in — a customer settling an invoice, or a person returning unspent
+  /// cash from an advance. "Collections" means customer receipts only.
   RECEIPT
   /// Money out — a supplier bill or an expense reimbursement.
   DISBURSEMENT
@@ -2561,9 +3172,10 @@ model Payment {
   @@index([kind, paymentDate])
   @@index([customerId])
   @@index([supplierId])
+  @@index([payeeUserId])
 }
 
-/// A slice of a payment applied to one document. Exactly one of the three
+/// A slice of a payment applied to one document. Exactly one of the four
 /// document references is set.
 model PaymentAllocation {
   id        String  @id @default(cuid())
@@ -2579,6 +3191,12 @@ model PaymentAllocation {
   claimId String?
   claim   ExpenseClaim? @relation(fields: [claimId], references: [id], onDelete: Cascade)
 
+  /// A DISBURSEMENT allocation to an advance is the cash release; a RECEIPT
+  /// allocation to an advance is the refund of unspent cash. Direction comes
+  /// from Payment.kind, never from a second column.
+  advanceId String?
+  advance   CashAdvance? @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+
   amount Decimal @db.Decimal(18, 2)
 
   createdAt DateTime @default(now())
@@ -2587,6 +3205,7 @@ model PaymentAllocation {
   @@index([invoiceId])
   @@index([billId])
   @@index([claimId])
+  @@index([advanceId])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2659,6 +3278,7 @@ model InstalledAsset {
   contracts ServiceContractAsset[]
   visits    ServiceVisit[]
   reports   ServiceReport[]
+  jobOrders JobOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2714,9 +3334,10 @@ model ServiceContract {
   renewedFrom   ServiceContract? @relation("Renewal", fields: [renewedFromId], references: [id], onDelete: SetNull)
   renewedTo     ServiceContract? @relation("Renewal")
 
-  assets  ServiceContractAsset[]
-  visits  ServiceVisit[]
-  reports ServiceReport[]
+  assets    ServiceContractAsset[]
+  visits    ServiceVisit[]
+  reports   ServiceReport[]
+  jobOrders JobOrder[]
 
   createdById String
   createdBy   User   @relation("ContractCreator", fields: [createdById], references: [id], onDelete: Restrict)
@@ -2783,6 +3404,12 @@ model ServiceVisit {
   assignedToId String?
   assignedTo   User?   @relation("VisitEngineer", fields: [assignedToId], references: [id], onDelete: SetNull)
 
+  /// The job order this visit was scheduled from, when it was not generated
+  /// by a contract's PM schedule. A visit with a sequence is generated; a
+  /// visit without one is a call-out and survives regeneration.
+  jobOrderId String?   @unique
+  jobOrder   JobOrder? @relation(fields: [jobOrderId], references: [id], onDelete: SetNull)
+
   notes String?
 
   report ServiceReport?
@@ -2792,6 +3419,97 @@ model ServiceVisit {
 
   @@index([status, dueDate])
   @@index([contractId])
+  @@index([assignedToId, status])
+}
+
+enum JobOrderStatus {
+  DRAFT
+  PENDING_APPROVAL
+  /// Accepted; one ServiceVisit was scheduled from it.
+  APPROVED
+  /// The report on its visit was approved.
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum ChargeBasis {
+  WARRANTY
+  CONTRACT
+  CHARGEABLE
+  GOODWILL
+}
+
+/// A request, usually from sales, for service work to be done. The
+/// AUTHORISATION document: approval schedules exactly one ServiceVisit (the
+/// attendance record) and the engineer's approved ServiceReport (the evidence)
+/// completes it. It carries no cost of its own; cost reaches its jobId through
+/// PRs, stock issues, overtime and expense claims that quote that job.
+model JobOrder {
+  id     String         @id @default(cuid())
+  number String         @unique
+  status JobOrderStatus @default(DRAFT)
+  kind   ServiceKind    @default(CORRECTIVE)
+  urgent Boolean        @default(false)
+
+  customerId String
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  siteId     String?
+  site       CustomerSite?    @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  contactId  String?
+  contact    CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  assetId    String?
+  asset      InstalledAsset?  @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  title       String
+  description String
+  scope       String?
+
+  /// When the customer wants it. Becomes the visit's dueDate.
+  requestedFor DateTime @db.Date
+
+  /// The DECISION. Defaulted from the facts, overridable, checked at approval.
+  chargeBasis   ChargeBasis @default(CHARGEABLE)
+  /// The FACT: asset.warrantyEndsAt >= requestedFor, computed server-side.
+  underWarranty Boolean     @default(false)
+
+  contractId  String?
+  contract    ServiceContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  /// Charge-to job: the contract's job for CONTRACT, the installing project for
+  /// WARRANTY, the requester's choice (or null) otherwise.
+  jobId       String?
+  job         Job?             @relation("JobOrderChargeTo", fields: [jobId], references: [id], onDelete: SetNull)
+  quotationId String?
+  quotation   Quotation?       @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+
+  customerPoNumber String?
+  /// Agreed price for chargeable work; null = billed on completion (T&M).
+  amount           Decimal? @db.Decimal(18, 2)
+
+  requestedById String
+  requestedBy   User    @relation("JobOrderRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  assignedToId  String?
+  assignedTo    User?   @relation("JobOrderEngineer", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  customerAcknowledgedBy String?
+  customerAcknowledgedAt DateTime?
+
+  approvedAt   DateTime?
+  completedAt  DateTime? @db.Date
+  cancelledAt  DateTime?
+  cancelReason String?
+  notes        String?
+
+  visit   ServiceVisit?
+  invoice Invoice?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, requestedFor])
+  @@index([customerId])
+  @@index([assetId])
+  @@index([requestedById])
   @@index([assignedToId, status])
 }
 

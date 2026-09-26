@@ -22,6 +22,18 @@ export type NotificationType =
   | 'overtime.awaiting'
   | 'pm.due'
   | 'borrow.overdue'
+  | 'clearance.raised'
+  | 'clearance.cleared'
+  | 'meeting.invited'
+  | 'meeting.updated'
+  | 'meeting.cancelled'
+  | 'evaluation.due'
+  | 'training.enrolled'
+  | 'training.assigned'
+  | 'training.rescheduled'
+  | 'training.cancelled'
+  | 'training.completed'
+  | 'training.expiring'
   | 'system';
 
 export interface NotifyInput {

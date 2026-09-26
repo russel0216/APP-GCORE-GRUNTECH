@@ -107,6 +107,43 @@ export const api = {
   },
 };
 
+/**
+ * Opens a PDF that needs the bearer token in a new tab.
+ *
+ * `path` is the full `/api/...` path — this was lifted from two identical
+ * copies in PurchaseRequests.tsx and ProjectWorkspace.tsx whose callers all
+ * pass it that way, and changing the convention would have meant touching
+ * every print button for nothing.
+ */
+export function openPdf(path: string, onError: () => void): void {
+  fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })
+    .then((r) => r.blob())
+    .then((b) => window.open(URL.createObjectURL(b), '_blank'))
+    .catch(onError);
+}
+
+/**
+ * Saves an authenticated binary under a file name — an `.ics`, a CSV, an
+ * attendance sheet. `path` is API-relative like every `api.*` call, since it
+ * goes through `getBlob`.
+ */
+export async function downloadBlob(path: string, filename: string): Promise<void> {
+  const blob = await api.getBlob(path);
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    // The click has already started the save; the URL is not needed after it.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}
+
 // ── Shared shapes ────────────────────────────────────────────────────────────
 
 export interface ListResult<T> {

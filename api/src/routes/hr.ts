@@ -21,9 +21,13 @@ import { submitForApproval, onApprovalSettled } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { describeFace, faceEngineReady } from '../shared/face';
+import { toCsv } from '../shared/csv';
 import {
   hrSettings,
   saveHrSettings,
+  settingList,
+  myEmployee,
+  attendanceDay,
   matchFace,
   classifyArrival,
   workedMinutes,
@@ -51,14 +55,6 @@ function asDate(v: string | null | undefined): Date | null {
 /** A filter value from the URL, accepted only if it names a real enum member. */
 function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
   return value && value in e ? (value as T[keyof T]) : undefined;
-}
-
-/** The employee record behind the signed-in user, if there is one. */
-async function myEmployee(userId: string) {
-  return prisma.employee.findUnique({
-    where: { userId },
-    select: { id: true, firstName: true, lastName: true, employeeNo: true, isActive: true },
-  });
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -466,73 +462,15 @@ attendanceRoutes.get(
 /**
  * The HR dashboard for one day: present, late, on leave, absent, pending.
  *
- * Absent is derived rather than stored — it is every active employee with no
- * attendance row and no approved leave. Storing it would mean writing a row
- * for everyone every night, and being wrong whenever someone clocks in late.
+ * The figures are `attendanceDay()` in shared/hr.ts, unchanged — the Insights
+ * brief prints the same counts and must agree with this screen to the person.
  */
 attendanceRoutes.get(
   '/dashboard',
   require_('ghr.dashboard.view_all'),
   handler(async (req, res) => {
     const date = req.query.date ? new Date(String(req.query.date)) : new Date();
-    const key = dayKey(date);
-
-    const [employees, attendance, onLeave, pendingLeave, pendingOt] = await Promise.all([
-      prisma.employee.findMany({
-        where: { isActive: true },
-        select: {
-          id: true,
-          employeeNo: true,
-          firstName: true,
-          lastName: true,
-          position: true,
-          department: { select: { id: true, name: true } },
-        },
-        orderBy: { lastName: 'asc' },
-      }),
-      prisma.attendance.findMany({ where: { date: key } }),
-      prisma.leaveRequest.findMany({
-        where: { status: 'APPROVED', startDate: { lte: key }, endDate: { gte: key } },
-        include: { leaveType: { select: { name: true } } },
-      }),
-      prisma.leaveRequest.count({ where: { status: 'PENDING_APPROVAL' } }),
-      prisma.overtimeRequest.count({ where: { stage: { in: ['PRIOR', 'ACTUAL_FILED'] } } }),
-    ]);
-
-    const attendanceBy = new Map(attendance.map((a) => [a.employeeId, a]));
-    const leaveBy = new Map(onLeave.map((l) => [l.employeeId, l]));
-
-    const rows = employees.map((e) => {
-      const a = attendanceBy.get(e.id);
-      const l = leaveBy.get(e.id);
-      const status = a ? a.status : l ? 'ON_LEAVE' : 'ABSENT';
-      return {
-        employee: e,
-        status,
-        timeIn: a?.timeIn ?? null,
-        timeOut: a?.timeOut ?? null,
-        lateMinutes: a?.lateMinutes ?? 0,
-        workedHours: a ? Math.round((a.workedMinutes / 60) * 100) / 100 : 0,
-        method: a?.timeInMethod ?? null,
-        leaveType: l?.leaveType.name ?? null,
-      };
-    });
-
-    const count = (status: string) => rows.filter((r) => r.status === status).length;
-
-    res.json({
-      date: key,
-      headcount: employees.length,
-      summary: {
-        present: count('PRESENT'),
-        late: count('LATE'),
-        onLeave: count('ON_LEAVE'),
-        absent: count('ABSENT'),
-        halfDay: count('HALF_DAY'),
-        pendingApprovals: pendingLeave + pendingOt,
-      },
-      rows,
-    });
+    res.json(await attendanceDay(date));
   }),
 );
 
@@ -595,13 +533,7 @@ attendanceRoutes.get(
       r.notes ?? '',
     ]);
 
-    const csv = [header, ...lines]
-      .map((row) =>
-        row
-          .map((cell) => (/[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell))
-          .join(','),
-      )
-      .join('\r\n');
+    const csv = toCsv([header, ...lines]);
 
     await audit(
       {
@@ -1545,6 +1477,11 @@ hrSettingsRoutes.put(
         overtimeMultiplier: z.number().min(1).max(5).optional(),
         hoursPerDay: z.number().min(1).max(24).optional(),
         faceThreshold: z.number().min(0.3).max(0.9).optional(),
+        probationMonths: z.number().int().min(1).max(24).optional(),
+        evaluationMilestoneMonths: z.array(z.number().int().min(1).max(24)).max(6).optional(),
+        evaluationNoticeDays: z.number().int().min(0).max(90).optional(),
+        ratingScale: z.number().int().min(2).max(10).optional(),
+        ratingLabels: z.array(z.string().trim().min(1)).max(10).optional(),
       }),
       req.body,
     );
@@ -1557,12 +1494,111 @@ hrSettingsRoutes.put(
       throw badRequest('The working day ends before it starts');
     }
 
+    // The labels are the scale: one per point, checked against what will be
+    // stored rather than only what was sent, so changing one without the
+    // other cannot leave a rating with no name.
+    const current = await hrSettings();
+    const scale = body.ratingScale ?? current.ratingScale;
+    const labels = body.ratingLabels ?? current.ratingLabels;
+    if (labels.length !== scale) {
+      throw badRequest(`A ${scale}-point scale needs ${scale} labels — ${labels.length} given`);
+    }
+    if (body.evaluationMilestoneMonths) {
+      const months = body.evaluationMilestoneMonths;
+      const probation = body.probationMonths ?? current.probationMonths;
+      if (months.some((m, i) => i > 0 && m <= months[i - 1])) {
+        throw badRequest('Evaluation milestones must be in ascending order');
+      }
+      if (months.some((m) => m >= probation)) {
+        throw badRequest(`Every milestone must fall before the end of probation (${probation} months)`);
+      }
+    }
+
     const saved = await saveHrSettings(body);
     await audit(
       { entityType: 'setting', entityId: 'hr.rules', action: 'UPDATED', summary: 'Updated HR rules' },
       req,
     );
     res.json(saved);
+  }),
+);
+
+/*
+  HR's own lists — the clearance checklist and the evaluation criteria. Each
+  is a Setting holding a JSON array, edited through one card on HR Settings,
+  and each key carries its own row schema so the route is a whitelist: a key
+  that is not named here is not a list anyone can write.
+
+  The evaluation criteria are a list rather than a table on purpose: the
+  evaluation form snapshots each criterion's name and weight when it is
+  created, so a renamed or retired criterion never rewrites a signed form,
+  and a foreign key would have bought nothing but a fourth CRUD screen.
+*/
+const checklistRow = z.object({
+  area: z.enum(['SUPERVISOR', 'WAREHOUSE', 'FINANCE', 'HR', 'ADMIN']),
+  description: z.string().trim().min(3, 'Say what is to be returned or cleared'),
+});
+
+const criterionRow = z.object({
+  key: z.string().trim().regex(/^[A-Z0-9_]{2,12}$/, 'A key is 2–12 capitals, digits or underscores'),
+  name: z.string().trim().min(2),
+  description: z.string().trim().optional().nullable(),
+  appliesTo: z.enum(['PROBATIONARY', 'TRAINEE', 'BOTH']),
+  weight: z.number().min(0.1).max(10),
+  sortOrder: z.number().int(),
+  isActive: z.boolean(),
+});
+
+const SETTING_LISTS = {
+  'hr.clearanceChecklist': {
+    description: 'Company property and accountabilities every leaver clears, by area',
+    schema: z.array(checklistRow).max(40),
+  },
+  'hr.evaluationCriteria': {
+    description: 'What an evaluation rates, with weights — snapshotted onto each form',
+    schema: z.array(criterionRow).max(30),
+  },
+} as const;
+
+type SettingListKey = keyof typeof SETTING_LISTS;
+
+function settingListKey(raw: string): SettingListKey {
+  if (!(raw in SETTING_LISTS)) throw notFound(`"${raw}" is not an HR settings list`);
+  return raw as SettingListKey;
+}
+
+hrSettingsRoutes.get(
+  '/lists/:key',
+  require_('ghr.settings.view_all'),
+  handler(async (req, res) => {
+    const key = settingListKey(req.params.key);
+    res.json({ key, rows: await settingList<unknown>(key, []) });
+  }),
+);
+
+hrSettingsRoutes.put(
+  '/lists/:key',
+  require_('ghr.settings.edit_all'),
+  handler(async (req, res) => {
+    const key = settingListKey(req.params.key);
+    const { rows } = parseBody(z.object({ rows: SETTING_LISTS[key].schema }), req.body);
+
+    if (key === 'hr.evaluationCriteria') {
+      const keys = (rows as z.infer<typeof criterionRow>[]).map((r) => r.key);
+      const dup = keys.find((k, i) => keys.indexOf(k) !== i);
+      if (dup) throw badRequest(`Criterion key "${dup}" is used twice`);
+    }
+
+    await prisma.setting.upsert({
+      where: { key },
+      create: { key, value: rows as Prisma.InputJsonValue, description: SETTING_LISTS[key].description },
+      update: { value: rows as Prisma.InputJsonValue },
+    });
+    await audit(
+      { entityType: 'setting', entityId: key, action: 'UPDATED', summary: `Updated ${key} (${rows.length} rows)` },
+      req,
+    );
+    res.json({ key, rows });
   }),
 );
 

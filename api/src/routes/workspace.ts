@@ -4,11 +4,11 @@ import { z } from 'zod';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
-import { globalSearch, searchProviders } from '../shared/search';
+import { globalSearch, searchProviders, canSearch } from '../shared/search';
 import { act, historyFor, pendingFor } from '../shared/approvals';
 import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { renderDocument, formatDate } from '../shared/pdf';
-import { can } from '../permissions/resolve';
+import type { ResolvedUser } from '../permissions/resolve';
 
 // ════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -82,7 +82,7 @@ searchRoutes.get(
       term,
       hits: await globalSearch(term, me),
       kinds: searchProviders()
-        .filter((p) => can(me, p.permission))
+        .filter((p) => canSearch(me, p))
         .map((p) => ({ kind: p.kind, label: p.label })),
     });
   }),
@@ -100,7 +100,12 @@ approvalRoutes.get(
   handler(async (req, res) => {
     const rows = await pendingFor(currentUser(req).id);
     res.json(
-      rows.map((r) => ({ ...r, amount: r.amount ? Number(r.amount) : null })),
+      rows.map((r) => ({
+        ...r,
+        amount: r.amount ? Number(r.amount) : null,
+        // Who raised it, so the approver decides on more than a subject line.
+        requester: { name: r.requester.name },
+      })),
     );
   }),
 );
@@ -153,6 +158,56 @@ approvalRoutes.post(
 //  MY WORK  — the real home page (model §8)
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * One row of "today" on My Work: a meeting, a training session, a planned
+ * activity — anything with a start and an end that a person is expected at.
+ */
+export interface ScheduleItem {
+  kind: 'meeting' | 'training' | string;
+  id: string;
+  title: string;
+  startsAt: Date;
+  endsAt: Date;
+  /** App path of the record, always starting with `/`. */
+  link: string;
+  /** A join link when the thing happens online, else null. */
+  meetLink: string | null;
+  sub?: string;
+}
+
+export type ScheduleProvider = (
+  user: ResolvedUser,
+  window: { from: Date; to: Date },
+) => Promise<ScheduleItem[]>;
+
+const scheduleProviders: ScheduleProvider[] = [];
+
+/**
+ * The `registerSearch` pattern for today's schedule: Meetings and the Academy
+ * each register a provider from their own route module, and this file never
+ * learns what a session is. A verify script that wants a row here imports
+ * the module that registers it — otherwise the provider was never loaded.
+ */
+export function registerSchedule(fn: ScheduleProvider): void {
+  scheduleProviders.push(fn);
+}
+
+/** Every provider's rows for one window, in time order. */
+export async function scheduleFor(
+  user: ResolvedUser,
+  window: { from: Date; to: Date },
+): Promise<ScheduleItem[]> {
+  const results = await Promise.all(
+    scheduleProviders.map((fn) =>
+      fn(user, window).catch((err) => {
+        console.error('Schedule provider failed:', err);
+        return [] as ScheduleItem[];
+      }),
+    ),
+  );
+  return results.flat().sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
+}
+
 export const myWorkRoutes = Router();
 myWorkRoutes.use(authenticate);
 
@@ -161,7 +216,14 @@ myWorkRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
 
-    const [approvals, submitted, unread, recentActivity] = await Promise.all([
+    // Today on the server's clock — local midnight to the next one, a window
+    // over timestamps. (HR's dayKey() is a key for @db.Date columns, which is
+    // a different thing: it is UTC midnight of the local date.)
+    const now = new Date();
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dayEnd = new Date(dayStart.getTime() + 86400000);
+
+    const [approvals, submitted, unread, recentActivity, todaysSchedule] = await Promise.all([
       pendingFor(me.id),
       prisma.approvalRequest.findMany({
         where: { requesterId: me.id, status: 'PENDING' },
@@ -174,6 +236,7 @@ myWorkRoutes.get(
         orderBy: { at: 'desc' },
         take: 8,
       }),
+      scheduleFor(me, { from: dayStart, to: dayEnd }),
     ]);
 
     res.json({
@@ -196,9 +259,9 @@ myWorkRoutes.get(
       })),
       unreadNotifications: unread,
       recentActivity,
-      // Assigned work and today's schedule fill in as G-OPS lands in Phases 3–4.
+      // Assigned work fills in as the modules' own queries land here.
       assignedToMe: [],
-      todaysSchedule: [],
+      todaysSchedule,
     });
   }),
 );
@@ -329,6 +392,32 @@ savedFilterRoutes.post(
       },
     });
     res.status(201).json(row);
+  }),
+);
+
+/** Rename, re-point or share a view — the owner's only, scoped like delete. */
+savedFilterRoutes.patch(
+  '/:id',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({
+        name: z.string().min(1).optional(),
+        query: z.record(z.unknown()).optional(),
+        isShared: z.boolean().optional(),
+      }),
+      req.body,
+    );
+    const result = await prisma.savedFilter.updateMany({
+      where: { id: req.params.id, userId: me.id },
+      data: {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.query !== undefined ? { query: body.query as object } : {}),
+        ...(body.isShared !== undefined ? { isShared: body.isShared } : {}),
+      },
+    });
+    if (!result.count) throw notFound('Saved filter not found');
+    res.json(await prisma.savedFilter.findUnique({ where: { id: req.params.id } }));
   }),
 );
 

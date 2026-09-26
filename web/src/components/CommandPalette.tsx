@@ -107,10 +107,48 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     return [...map.entries()];
   }, [all]);
 
+  // One label per search provider `kind`. A kind missing here shows its raw
+  // string, which is how a new provider shipping without a label gets noticed.
   const labels: Record<string, string> = {
     nav: 'Go to',
     user: 'People',
     approval: 'Approvals',
+    customer: 'Customers',
+    supplier: 'Suppliers',
+    employee: 'Employees',
+    item: 'Items',
+    warehouse: 'Warehouses',
+    partner: 'Partners',
+    partner_resource: 'Partner documents',
+    lead: 'Leads',
+    quotation: 'Quotations',
+    costing: 'Costings',
+    job: 'Projects',
+    progress: 'Progress reports',
+    purchase_request: 'Purchase requests',
+    canvass: 'Canvass',
+    purchase_order: 'Purchase orders',
+    receiving: 'Receiving',
+    stock_issue: 'Stock issues',
+    borrow_slip: 'Borrow slips',
+    invoice: 'Invoices',
+    supplier_bill: 'Supplier bills',
+    expense_claim: 'Expense claims',
+    payment: 'Payments',
+    cash_advance: 'Cash advances',
+    installed_asset: 'Installed base',
+    service_contract: 'Service contracts',
+    service_report: 'Service reports',
+    service_visit: 'Visits',
+    job_order: 'Job orders',
+    overtime_request: 'Overtime',
+    leave_request: 'Leave',
+    position: 'Plantilla',
+    clearance: 'Clearances',
+    evaluation: 'Evaluations',
+    meeting: 'Meetings',
+    course: 'Courses',
+    training_session: 'Training',
   };
 
   return (

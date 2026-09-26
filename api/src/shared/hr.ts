@@ -33,6 +33,15 @@ export interface HrSettings {
   hoursPerDay: number;
   /** Face match threshold — lower is stricter. 0.6 is the face-api default. */
   faceThreshold: number;
+  /** Probation runs this long from dateHired when no period end is set. */
+  probationMonths: number;
+  /** Months into probation at which an evaluation falls due, before the end one. */
+  evaluationMilestoneMonths: number[];
+  /** Days before a milestone that HR is told an evaluation is due. */
+  evaluationNoticeDays: number;
+  /** Ratings run 1..ratingScale; one label per point. */
+  ratingScale: number;
+  ratingLabels: string[];
 }
 
 const DEFAULTS: HrSettings = {
@@ -46,6 +55,11 @@ const DEFAULTS: HrSettings = {
   overtimeMultiplier: 1.25,
   hoursPerDay: 8,
   faceThreshold: 0.6,
+  probationMonths: 6,
+  evaluationMilestoneMonths: [3, 5],
+  evaluationNoticeDays: 14,
+  ratingScale: 5,
+  ratingLabels: ['Unsatisfactory', 'Needs improvement', 'Meets expectations', 'Exceeds expectations', 'Outstanding'],
 };
 
 export async function hrSettings(): Promise<HrSettings> {
@@ -66,6 +80,42 @@ export async function saveHrSettings(value: Partial<HrSettings>): Promise<HrSett
     update: { value: merged },
   });
   return merged;
+}
+
+/**
+ * A Setting that holds a list — the clearance checklist, the evaluation
+ * criteria. Anything that is not an array (missing row, an older shape)
+ * yields the fallback, so a reader never has to guard the JSON itself.
+ */
+export async function settingList<T>(key: string, fallback: T[]): Promise<T[]> {
+  const row = await prisma.setting.findUnique({ where: { key } });
+  return Array.isArray(row?.value) ? (row.value as T[]) : fallback;
+}
+
+// ── The person behind the login ──────────────────────────────────────────────
+
+/**
+ * The employee record behind the signed-in user, if there is one.
+ *
+ * Employee is the person; User is the login (Phase 2). Every HR route that
+ * asks "whose leave, whose overtime, whose clearance" starts here, so what it
+ * selects is deliberately small and carries no pay data.
+ */
+export async function myEmployee(userId: string) {
+  return prisma.employee.findUnique({
+    where: { userId },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      employeeNo: true,
+      isActive: true,
+      userId: true,
+      departmentId: true,
+      positionId: true,
+      employmentType: true,
+    },
+  });
 }
 
 // ── Time helpers ─────────────────────────────────────────────────────────────
@@ -180,6 +230,113 @@ export function workedMinutes(timeIn: Date, timeOut: Date, settings: HrSettings)
   if (gross <= 0) return 0;
   // The break is only deducted from a day long enough to have taken one.
   return gross > settings.breakMinutes + 60 ? gross - settings.breakMinutes : gross;
+}
+
+// ── One day of attendance ────────────────────────────────────────────────────
+
+export interface AttendanceDayRow {
+  employee: {
+    id: string;
+    employeeNo: string;
+    firstName: string;
+    lastName: string;
+    position: string | null;
+    department: { id: string; name: string } | null;
+  };
+  status: string;
+  timeIn: Date | null;
+  timeOut: Date | null;
+  lateMinutes: number;
+  workedHours: number;
+  method: string | null;
+  leaveType: string | null;
+}
+
+export interface AttendanceDay {
+  date: Date;
+  headcount: number;
+  summary: {
+    present: number;
+    late: number;
+    onLeave: number;
+    absent: number;
+    halfDay: number;
+    pendingApprovals: number;
+  };
+  rows: AttendanceDayRow[];
+}
+
+/**
+ * The HR dashboard for one day: present, late, on leave, absent, pending.
+ *
+ * Absent is derived rather than stored — it is every active employee with no
+ * attendance row and no approved leave. Storing it would mean writing a row
+ * for everyone every night, and being wrong whenever someone clocks in late.
+ *
+ * Shared because the Insights brief prints these counts and must agree with
+ * the HR dashboard to the person; the day is HR's local `dayKey`, never a
+ * UTC one.
+ */
+export async function attendanceDay(date: Date): Promise<AttendanceDay> {
+  const key = dayKey(date);
+
+  const [employees, attendance, onLeave, pendingLeave, pendingOt, pendingEvaluations] = await Promise.all([
+    prisma.employee.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        employeeNo: true,
+        firstName: true,
+        lastName: true,
+        position: true,
+        department: { select: { id: true, name: true } },
+      },
+      orderBy: { lastName: 'asc' },
+    }),
+    prisma.attendance.findMany({ where: { date: key } }),
+    prisma.leaveRequest.findMany({
+      where: { status: 'APPROVED', startDate: { lte: key }, endDate: { gte: key } },
+      include: { leaveType: { select: { name: true } } },
+    }),
+    prisma.leaveRequest.count({ where: { status: 'PENDING_APPROVAL' } }),
+    prisma.overtimeRequest.count({ where: { stage: { in: ['PRIOR', 'ACTUAL_FILED'] } } }),
+    prisma.employeeEvaluation.count({ where: { status: 'PENDING_APPROVAL' } }),
+  ]);
+
+  const attendanceBy = new Map(attendance.map((a) => [a.employeeId, a]));
+  const leaveBy = new Map(onLeave.map((l) => [l.employeeId, l]));
+
+  const rows: AttendanceDayRow[] = employees.map((e) => {
+    const a = attendanceBy.get(e.id);
+    const l = leaveBy.get(e.id);
+    const status = a ? a.status : l ? 'ON_LEAVE' : 'ABSENT';
+    return {
+      employee: e,
+      status,
+      timeIn: a?.timeIn ?? null,
+      timeOut: a?.timeOut ?? null,
+      lateMinutes: a?.lateMinutes ?? 0,
+      workedHours: a ? Math.round((a.workedMinutes / 60) * 100) / 100 : 0,
+      method: a?.timeInMethod ?? null,
+      leaveType: l?.leaveType.name ?? null,
+    };
+  });
+
+  const count = (status: string) => rows.filter((r) => r.status === status).length;
+
+  return {
+    date: key,
+    headcount: employees.length,
+    summary: {
+      present: count('PRESENT'),
+      late: count('LATE'),
+      onLeave: count('ON_LEAVE'),
+      absent: count('ABSENT'),
+      halfDay: count('HALF_DAY'),
+      pendingApprovals: pendingLeave + pendingOt + pendingEvaluations,
+    },
+    rows,
+  };
 }
 
 // ── Overtime hours ───────────────────────────────────────────────────────────

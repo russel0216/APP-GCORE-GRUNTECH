@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { StatusBadge } from './ui';
+import { StatusBadge, type Tone } from './ui';
 
 /**
  * The header on a single-record page.
@@ -33,6 +33,8 @@ export interface RecordHeaderProps {
    * quotation has a contract value. They are not the same number.
    */
   amountLabel?: string;
+  /** A module's own statuses, forwarded to `statusTone()` — see rule 12. */
+  statusExtra?: Record<string, Tone>;
   actions?: ReactNode;
 }
 
@@ -43,6 +45,7 @@ export function RecordHeader({
   status,
   amount,
   amountLabel,
+  statusExtra,
   actions,
 }: RecordHeaderProps) {
   return (
@@ -52,7 +55,7 @@ export function RecordHeader({
           <span className="record-head-kind">
             {type} • <strong>{code}</strong>
           </span>
-          <StatusBadge status={status} />
+          <StatusBadge status={status} extra={statusExtra} />
         </div>
         <h1>{title}</h1>
       </div>

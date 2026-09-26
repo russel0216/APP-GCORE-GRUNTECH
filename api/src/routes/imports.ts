@@ -13,10 +13,10 @@ import {
   optional,
   decimal,
   bool,
-  date,
   oneOf,
   type ImportSpec,
 } from '../shared/csv';
+import { employeesImport } from './imports/employees';
 
 /**
  * CSV import for the master records.
@@ -80,7 +80,6 @@ const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
     name: required(row, 'Name'),
     legalName: optional(row, 'Legal Name'),
     tin: optional(row, 'TIN'),
-    industry: optional(row, 'Industry'),
     paymentTerms: optional(row, 'Payment Terms'),
     creditLimit: decimal(row, 'Credit Limit'),
     phone: optional(row, 'Phone'),
@@ -178,65 +177,6 @@ const supplierSpec: ImportSpec<Prisma.SupplierCreateInput> = {
   }),
 };
 
-const EMPLOYMENT_TYPES = ['REGULAR', 'PROBATIONARY', 'PROJECT_BASED', 'CONTRACTUAL', 'PART_TIME'] as const;
-
-const employeeSpec: ImportSpec<Prisma.EmployeeCreateInput> = {
-  entity: 'employees',
-  label: 'Employees',
-  columns: [
-    { header: 'Employee No', required: true, example: 'GT-EMP-2026-0001' },
-    { header: 'Last Name', required: true, example: 'Santos' },
-    { header: 'First Name', required: true, example: 'Juan' },
-    { header: 'Middle Name', example: 'Dela Cruz' },
-    { header: 'Position', example: 'Project Engineer' },
-    { header: 'Department', example: 'Engineering', hint: 'Must match a department name' },
-    {
-      header: 'Employment Type',
-      example: 'REGULAR',
-      hint: 'REGULAR, PROBATIONARY, PROJECT_BASED, CONTRACTUAL or PART_TIME',
-    },
-    { header: 'Date Hired', example: '2024-03-01', hint: 'YYYY-MM-DD' },
-    { header: 'Mobile', example: '+63 917 000 0000' },
-    { header: 'Personal Email', example: 'juan.santos@email.com' },
-    { header: 'Address', example: '' },
-    { header: 'Birth Date', example: '1992-07-14' },
-    { header: 'Emergency Contact', example: 'Ana Santos' },
-    { header: 'Emergency Phone', example: '+63 917 111 1111' },
-    { header: 'Active', example: 'Yes' },
-  ],
-  existing: async (row) => {
-    const found = await prisma.employee.findUnique({ where: { employeeNo: row['Employee No'] } });
-    return found?.id ?? null;
-  },
-  build: async (row) => {
-    let departmentId: string | null = null;
-    if (row['Department']) {
-      const dept = await prisma.department.findFirst({
-        where: { name: { equals: row['Department'], mode: 'insensitive' } },
-      });
-      if (!dept) throw new Error(`Department "${row['Department']}" does not exist`);
-      departmentId = dept.id;
-    }
-    return {
-      employeeNo: required(row, 'Employee No'),
-      lastName: required(row, 'Last Name'),
-      firstName: required(row, 'First Name'),
-      middleName: optional(row, 'Middle Name'),
-      position: optional(row, 'Position'),
-      department: departmentId ? { connect: { id: departmentId } } : undefined,
-      employmentType: oneOf(row, 'Employment Type', EMPLOYMENT_TYPES, 'REGULAR'),
-      dateHired: date(row, 'Date Hired'),
-      mobile: optional(row, 'Mobile'),
-      personalEmail: optional(row, 'Personal Email'),
-      address: optional(row, 'Address'),
-      birthDate: date(row, 'Birth Date'),
-      emergencyContactName: optional(row, 'Emergency Contact'),
-      emergencyContactPhone: optional(row, 'Emergency Phone'),
-      isActive: bool(row, 'Active'),
-    };
-  },
-};
-
 const ITEM_TYPES = ['MATERIAL', 'EQUIPMENT', 'CONSUMABLE', 'SERVICE', 'TOOL'] as const;
 
 const itemSpec: ImportSpec<Prisma.ItemCreateInput> = {
@@ -321,7 +261,7 @@ const itemSpec: ImportSpec<Prisma.ItemCreateInput> = {
 
 // ── Wiring ───────────────────────────────────────────────────────────────────
 
-interface Registered {
+export interface Registered {
   spec: ImportSpec<never>;
   permission: string;
   write: (records: { record: never; existingId: string | null }[]) => Promise<void>;
@@ -377,24 +317,7 @@ const REGISTRY: Record<string, Registered> = {
       }
     },
   },
-  employees: {
-    spec: employeeSpec as ImportSpec<never>,
-    permission: 'ghr.employees.create',
-    write: async (records) => {
-      for (const { record, existingId } of records as unknown as {
-        record: Prisma.EmployeeCreateInput;
-        existingId: string | null;
-      }[]) {
-        if (existingId) {
-          const { employeeNo, ...fields } = record;
-          void employeeNo;
-          await prisma.employee.update({ where: { id: existingId }, data: fields });
-        } else {
-          await prisma.employee.create({ data: record });
-        }
-      }
-    },
-  },
+  employees: employeesImport,
   items: {
     spec: itemSpec as ImportSpec<never>,
     permission: 'gchain.items.create',
