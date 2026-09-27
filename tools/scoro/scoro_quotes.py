@@ -44,7 +44,9 @@ for n, d, s, e in spans:
     found.setdefault(n, (d, s, e))   # the first copy wins if two PDFs repeat a quote
 
 MONEY = re.compile(r'^-?[\d,]+\.\d{2}$')
-QTY = re.compile(r'^(-?[\d,]*\.?\d+)\s+(\S.*)$')      # "2 set", "1 lot", "0.5 lot"
+# "2 set", "1 lot", "0.5 lot" — or a bare "1": some salespeople left the unit
+# blank, and a line is still only a line item when two amounts follow it.
+QTY = re.compile(r'^(-?[\d,]*\.?\d+)(?:\s+(\S.*))?$')
 STOP = re.compile(r'^(Sub Total Price|Total Price|VAT|Discount|Delivery:|I trust that|Sincerely)', re.I)
 
 
@@ -67,8 +69,9 @@ def body_lines(doc, first, last, number):
         except ValueError:
             pass
         for l in lines:
-            if not l or l == number or re.fullmatch(r'\d{1,2}', l):
-                continue   # blanks, page numbers
+            if not l or l == number:
+                continue   # blanks; a lone page number is left to parse_lines,
+                           # because a unit-less quantity looks exactly like one
             if 'INDUSTRIAL UTILITY SOLUTIONS' in l or 'WWW.GRUNTECHNOLOGY.COM' in l:
                 continue
             out.append(l)
@@ -88,10 +91,13 @@ def parse_lines(lines):
             qty = money(q.group(1)) or Decimal(1)
             title = block[0] if block else ''
             desc = '\n'.join(block[1:]).strip()
-            items.append({'title': title, 'description': desc, 'quantity': str(qty), 'unit': q.group(2).strip(),
+            items.append({'title': title, 'description': desc, 'quantity': str(qty), 'unit': (q.group(2) or '').strip(),
                           'unitPrice': str(money(lines[i + 1])), 'amount': str(money(lines[i + 2]))})
             block = []
             i += 3
+            continue
+        if re.fullmatch(r'\d{1,2}', l):
+            i += 1           # a page number: a lone number with no amounts after it
             continue
         block.append(l)
         i += 1
