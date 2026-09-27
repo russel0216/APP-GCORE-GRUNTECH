@@ -18,10 +18,12 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: gcore
-      # CHANGE THIS before the first `up`. The password is baked into the
-      # volume on creation, so changing it afterwards means destroying the
-      # volume and restoring from a dump.
-      POSTGRES_PASSWORD: CHANGE_ME_BEFORE_FIRST_START
+      # Read from deploy\.env (GCORE_DB_PASSWORD=...), which git ignores, so
+      # the password is never committed and a `git pull` never collides with
+      # it. Compose loads that file by itself because it sits beside this one.
+      # Set it before the first `up`: the password is baked into the volume on
+      # creation, so changing it afterwards means restoring from a dump.
+      POSTGRES_PASSWORD: ${GCORE_DB_PASSWORD:?Set GCORE_DB_PASSWORD in deploy/.env before starting the database}
       POSTGRES_DB: gcore
     ports:
       # 5435 on the host. 5433 is gasion_db, 5434 is nephroplus_db and 5432 is any

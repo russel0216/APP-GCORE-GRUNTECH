@@ -48,6 +48,12 @@ if ($envText -notmatch 'JWT_SECRET\s*=\s*"[^"]{32,}"') {
 if ($envText -notmatch 'NODE_ENV\s*=\s*production') { throw 'api\.env does not set NODE_ENV=production.' }
 Write-Host '    api\.env looks like a production configuration.' -ForegroundColor Green
 
+$dbEnv = "$root\deploy\.env"
+if (-not (Test-Path $dbEnv) -or ((Get-Content $dbEnv -Raw) -notmatch 'GCORE_DB_PASSWORD\s*=\s*\S{16,}')) {
+    throw "deploy\.env is missing or has no GCORE_DB_PASSWORD (16+ characters). It must hold the same password as DATABASE_URL in api\.env."
+}
+Write-Host '    deploy\.env holds the database password.' -ForegroundColor Green
+
 # -- 2. Data directories, outside the repository ------------------------------
 Step 'create data directories'
 foreach ($d in @("$root\data", "$root\data\uploads", "$root\data\logs")) {

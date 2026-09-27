@@ -97,8 +97,15 @@ docker compose -f docker-compose.prod.yml up -d
 This creates a container named `gcore-gruntech-db` on host port 5435 with its
 own volume. It does not touch `gasion_db`.
 
-Set a real password in `docker-compose.prod.yml` **before** the first `up` —
-changing it afterwards means recreating the volume.
+Set the password **before** the first `up`, in `deploy\.env` (git ignores it):
+
+```
+GCORE_DB_PASSWORD=<a long random hex string>
+```
+
+The compose file reads it from there, so the password is never committed and
+`git pull` never collides with it. Changing it after the first `up` means
+recreating the volume.
 
 ### 4. Configuration
 
