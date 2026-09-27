@@ -474,8 +474,10 @@ type FigureDef = { module: SummaryModule; label: string; kind: FigureKind; basis
  * Every query string here is a filter the target DataList DECLARES (DataList
  * seeds its filters from declared URL keys only): ar/ap `outstanding` and
  * `overdue`, expenses / leave / purchase-requests / cash-advances / the
- * attendance register `status`, borrow-slips `overdue`. A figure whose list
- * has no matching filter links to the unfiltered list or its dashboard.
+ * attendance register / progress reports / service contracts `status`,
+ * projects `status` + `type` (the count is PROJECT jobs only), purchase-orders
+ * `awaiting`, borrow-slips `overdue`. A figure whose list has no matching
+ * filter links to the unfiltered list or its dashboard.
  */
 export const SUMMARY_FIGURES: Record<string, FigureDef> = {
   // G-OPS — counts, like the G-OPS dashboard. No "won": the G-OPS dashboard
@@ -484,14 +486,14 @@ export const SUMMARY_FIGURES: Record<string, FigureDef> = {
   enquiriesInPlay: { module: 'gops', label: 'Enquiries in play', kind: 'count', basis: 'range', to: '/g-ops/leads' },
   quotationsOut: { module: 'gops', label: 'Quotations out', kind: 'count', basis: 'range', to: '/g-ops/quotations' },
   quotationsNegotiating: { module: 'gops', label: 'Quotations in negotiation', kind: 'count', basis: 'range', to: '/g-ops/quotations' },
-  projectsInProgress: { module: 'gops', label: 'Projects in progress', kind: 'count', basis: 'live', to: '/g-ops/projects' },
-  projectsOnHold: { module: 'gops', label: 'Projects on hold', kind: 'count', basis: 'live', to: '/g-ops/projects' },
-  reportsAwaitingApproval: { module: 'gops', label: 'Progress reports awaiting approval', kind: 'count', basis: 'live', to: '/g-ops/progress' },
-  contractsRunning: { module: 'gops', label: 'Service contracts running', kind: 'count', basis: 'live', to: '/g-ops/service-contracts' },
+  projectsInProgress: { module: 'gops', label: 'Projects in progress', kind: 'count', basis: 'live', to: '/g-ops/projects?status=IN_PROGRESS&type=PROJECT' },
+  projectsOnHold: { module: 'gops', label: 'Projects on hold', kind: 'count', basis: 'live', to: '/g-ops/projects?status=ON_HOLD&type=PROJECT' },
+  reportsAwaitingApproval: { module: 'gops', label: 'Progress reports awaiting approval', kind: 'count', basis: 'live', to: '/g-ops/progress?status=SUBMITTED' },
+  contractsRunning: { module: 'gops', label: 'Service contracts running', kind: 'count', basis: 'live', to: '/g-ops/service-contracts?status=ACTIVE' },
   pmAccomplished: { module: 'gops', label: 'PM visits done', kind: 'count', basis: 'range', to: '/g-ops/visits' },
   // G-CHAIN — the four figures the G-CHAIN dashboard shows, nothing it does not.
   requestsAwaitingApproval: { module: 'gchain', label: 'Purchase requests awaiting approval', kind: 'count', basis: 'live', to: '/g-chain/purchase-requests?status=PENDING_APPROVAL' },
-  ordersAwaitingDelivery: { module: 'gchain', label: 'Orders awaiting delivery', kind: 'count', basis: 'live', to: '/g-chain/purchase-orders' },
+  ordersAwaitingDelivery: { module: 'gchain', label: 'Orders awaiting delivery', kind: 'count', basis: 'live', to: '/g-chain/purchase-orders?awaiting=true' },
   borrowSlipsOverdue: { module: 'gchain', label: 'Borrow slips overdue', kind: 'count', basis: 'live', to: '/g-chain/borrow-slips?overdue=true' },
   stockValue: { module: 'gchain', label: 'Stock on hand', kind: 'money', basis: 'live', to: '/g-chain/inventory' },
   // G-HR — counts only, never a person.

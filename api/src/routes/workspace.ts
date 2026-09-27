@@ -6,7 +6,13 @@ import { handler, parseBody, listQuery, listResult, notFound, badRequest } from 
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
 import { act, historyFor, pendingFor } from '../shared/approvals';
-import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
+import {
+  upload,
+  saveAttachment,
+  attachmentPath,
+  deleteAttachment,
+  mayAccessAttachments,
+} from '../shared/attachments';
 import { renderDocument, formatDate } from '../shared/pdf';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/aftermarket';
@@ -613,6 +619,10 @@ attachmentRoutes.get(
   handler(async (req, res) => {
     const row = await prisma.attachment.findUnique({ where: { id: req.params.id } });
     if (!row) throw notFound('Attachment not found');
+    // Knowing a file's id is not the same right as seeing the record it is on.
+    if (!(await mayAccessAttachments(currentUser(req), row.entityType, row.entityId))) {
+      throw notFound('Attachment not found');
+    }
 
     const full = attachmentPath(row.storedName);
     if (!fs.existsSync(full)) throw notFound('The stored file is missing from disk');
@@ -626,8 +636,17 @@ attachmentRoutes.get(
   }),
 );
 
+/** Refuses before multer writes anything to disk, so a refused upload leaves no stray file. */
+const guardRecord = handler(async (req, _res, next) => {
+  if (!(await mayAccessAttachments(currentUser(req), req.params.entityType, req.params.entityId))) {
+    throw notFound('Record not found');
+  }
+  next();
+});
+
 attachmentRoutes.get(
   '/:entityType/:entityId',
+  guardRecord,
   handler(async (req, res) => {
     const rows = await prisma.attachment.findMany({
       where: { entityType: req.params.entityType, entityId: req.params.entityId },
@@ -640,6 +659,7 @@ attachmentRoutes.get(
 
 attachmentRoutes.post(
   '/:entityType/:entityId',
+  guardRecord,
   upload.array('files', 20),
   handler(async (req, res) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];

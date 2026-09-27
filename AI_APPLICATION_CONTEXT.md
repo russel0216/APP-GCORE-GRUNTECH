@@ -2,7 +2,10 @@
 
 Context for an AI reviewer who has not worked on this codebase before.
 
-Everything below was read out of the source at commit `ff764f8`. Where a thing
+Everything below was read out of the source at commit `ff764f8`, and the
+navigation, counts, numbering, verification and HR sections were brought up to
+date for Phase 10 on 2026-09-27 (the rules behind the Phase 10 screens are in
+`CLAUDE.md` "Phase 10 notes" and model §4.7). Where a thing
 the reader might expect does **not** exist, this document says so explicitly
 rather than leaving a gap that could be mistaken for an oversight — those
 sections are marked **Does not exist**.
@@ -38,9 +41,10 @@ separate deployment of a predecessor system. Company name, logo, address, TIN
 and tax rates are configurable because they print on documents — that is
 branding, not multi-tenancy. Do not introduce tenant scoping.
 
-**Size.** ~21,900 lines of API TypeScript, ~30,800 lines of web TypeScript, a
-2,889-line Prisma schema with **83 models and 43 enums**, and a 2,527-line
-stylesheet.
+**Size.** At `ff764f8`: ~21,900 lines of API TypeScript, ~30,800 lines of web
+TypeScript and a 2,527-line stylesheet. After Phase 10 the Prisma schema has
+**99 models and 60 enums**, and each Phase 10 package added its own stylesheet
+under `web/src/styles/` (tokens only), imported after `styles.css`.
 
 ---
 
@@ -76,10 +80,10 @@ this app should not assume a component library is available.
 /
 ├── api/
 │   ├── prisma/
-│   │   ├── schema.prisma          83 models, 43 enums — the whole data model
-│   │   └── seed.ts                14 roles, their permissions, approval workflows
+│   │   ├── schema.prisma          99 models, 60 enums — the whole data model
+│   │   └── seed.ts                15 roles, their permissions, approval workflows
 │   ├── scripts/
-│   │   ├── verify-<phase>.ts      9 scripts, 495 assertions (see §11)
+│   │   ├── verify-<area>.ts       20 scripts, 1,577 assertions (see §11)
 │   │   ├── audit-workflows.ts     read-only check for unroutable approvals
 │   │   ├── sandbox.ts             creates 12 demo users and a worked example
 │   │   └── reset-password.ts      console recovery for a locked account
@@ -89,8 +93,8 @@ this app should not assume a component library is available.
 │       ├── permissions/
 │       │   ├── registry.ts        THE SOURCE OF THE MENU AND THE PERMISSIONS
 │       │   └── resolve.ts         resolveUser, can, canEditRecord, menuFor
-│       ├── routes/                18 route files, one per business area
-│       ├── shared/                14 cross-cutting services (see below)
+│       ├── routes/                ~30 route files, one per business area
+│       ├── shared/                ~26 cross-cutting services (see below)
 │       └── index.ts               mounts every route group
 │
 ├── web/
@@ -107,7 +111,7 @@ this app should not assume a component library is available.
 │   ├── GAP-ANALYSIS.md
 │   └── UI-IMPROVEMENT-PLAN.md
 ├── deploy/                        PowerShell/bash deployment scripts
-└── CLAUDE.md                      15 standing rules for anyone editing this repo
+└── CLAUDE.md                      16 standing rules for anyone editing this repo
 ```
 
 **`api/src/shared/` — the cross-cutting services.** These matter more than the
@@ -116,16 +120,20 @@ route files, because the rules of the business live in them:
 | File | What it owns |
 |---|---|
 | `approvals.ts` | The **single** approval engine. Every document type routes through it |
-| `numbering.ts` | `nextNumber(type, tx)` — 30 document types, concurrency-safe |
+| `numbering.ts` | `nextNumber(type, tx, ctx?)` — 38 document types, concurrency-safe; yearly, monthly or never, company-wide or per employee (`{EMP}`); the quotation uses the house scheme `{EMP}{YY}{MM}{SEQ}` → `0012609001` |
 | `pdf.ts` | `renderDocument(...)` — every printable document in the app |
 | `audit.ts` | `audit(...)` and `redact()` |
 | `notifications.ts`, `attachments.ts`, `search.ts`, `csv.ts` | as named |
 | `inventory.ts` | moving weighted average, stock movement |
-| `finance.ts` | `settleable()`, `refreshSettlement()` — what "outstanding" means |
-| `hr.ts` | leave balances, overtime cost arithmetic |
+| `finance.ts` | `settleable()`, `refreshSettlement()`, `refreshAdvance()`, `claimPayable()`, `financePosition()` — what "outstanding" and "working position" mean |
+| `hr.ts` | leave balances, overtime cost arithmetic, `attendanceDay()` (the HR dashboard) |
 | `face.ts` | `describeFace()` — server-side descriptor for the time clock |
-| `aftermarket.ts` | PM schedule generation, `sweepOverdue()` |
+| `aftermarket.ts` | PM schedule generation, `sweepOverdue()`, `coverageFor()` |
 | `insights.ts` | the reporting aggregations |
+| `pipeline.ts`, `activities.ts` | `quotationValue()`, the board and its move rules; `activityWhere()` |
+| `gops.ts`, `chain.ts`, `day.ts` | `gopsOverview()`, `chainOverview()` / `stockOnHand()`, Manila day keys |
+| `plantilla.ts`, `clearance.ts`, `evaluations.ts`, `meetings.ts`, `academy.ts` | hire-to-separate: derived filled/vacant, clearance items, due evaluations, meeting visibility, the training passport |
+| `partners.ts`, `calendar-links.ts` | partner price list (prices, never costs); `.ics` and Google Calendar hand-offs |
 
 **`web/src/pages/` folder names do not match module names.** This trips people
 up:
@@ -147,20 +155,23 @@ Six modules exist, defined in `api/src/permissions/registry.ts`. That file is
 the single source for both the `Permission` rows and the navigation — there is
 no separate menu definition anywhere.
 
-### G-OPS — Operations (23 screens)
+### G-OPS — Operations (25 screens)
 Sales, project delivery and aftermarket under one roof, because in this
-business they are one continuous process. Covers leads, customers, costings,
-quotations, projects, budgets, progress reporting, progress billing, the
-installed base, service contracts, preventive-maintenance scheduling and
-service reports.
+business they are one continuous process. Covers leads, customers, partners,
+costings, quotations, the pipeline board, projects, budgets, progress reporting,
+progress billing, the installed base, service contracts, job orders, the
+Service Schedule and service reports.
 
-### G-HR — Human Resources (9 screens)
-Time clock (with face recognition), attendance, leave, overtime, the employee
-register and pay-rate data. **No payroll** — see §11.
+### G-HR — Human Resources (20 screens)
+Time clock (with face recognition), attendance, leave, overtime, meetings, the
+employee register and pay-rate data, the plantilla, probation evaluations,
+turnover and clearance, and the Academy (courses, training calendar and
+sessions, training passports). **No payroll** — see §11.
 
-### G-FIN — Finance (9 screens)
-Accounts receivable, accounts payable, expense claims, payments, cash flow,
-budget vs actual, reports, and finance's own settings. **Operations-driven
+### G-FIN — Finance (11 screens)
+Accounts receivable, accounts payable, expense claims, cash advances and their
+liquidation, payments, cash flow, budget vs actual, reports, and finance's own
+settings. **Operations-driven
 only: no general ledger, no chart of accounts, no fixed assets, no tax
 filing.** This is a stated, settled decision.
 
@@ -174,7 +185,7 @@ inventory analytics, performance. **Adds no tables.** Every figure is read off
 documents the other modules record. The router ends with middleware that
 refuses any non-GET request, and there is a test for it.
 
-### Admin — Configuration (9 screens)
+### Admin — Configuration (10 screens)
 Users, roles & permissions, approval workflows, numbering, categories, company
 settings, system settings, audit logs, document templates.
 
@@ -185,10 +196,12 @@ settings, system settings, audit logs, document templates.
   (supplier → us), *Stock Issuance* (warehouse → job) and *Borrow Slips* (tools
   out and back). There is no vehicle, route, driver or shipment tracking.
 - **Payroll.** Explicitly out of scope.
-- **HR performance appraisal.** Insights' "Performance" screen reports
-  operational output (approval bottlenecks, throughput), not staff appraisal.
-  This is deliberate: aggregating attendance into a management league table
-  would turn a payroll record into a surveillance tool.
+- **General HR performance appraisal.** G-HR › Evaluations exists only for
+  probationary and trainee milestones (regularise, extend, absorb, end), and a
+  rating never reaches the audit log or Ctrl+K. Insights' "Performance" screen
+  reports operational output (approval bottlenecks, throughput), not staff
+  appraisal. This is deliberate: aggregating attendance into a management league
+  table would turn a payroll record into a surveillance tool.
 
 ---
 
@@ -208,11 +221,12 @@ G-CORE launcher  (/)  — four division cards + My Work summary
 │   ├── Sales
 │   │   ├── Leads                       /g-ops/leads
 │   │   ├── Customers                   /g-ops/customers
-│   │   ├── Calendar                    /g-ops/calendar
+│   │   ├── Calendar                    /g-ops/calendar   (week / month; view and position in the URL)
 │   │   ├── Quotations                  /g-ops/quotations
-│   │   ├── Sales Pipeline              /g-ops/pipeline
-│   │   └── Costing                     /g-ops/costing
-│   ├── Delivery
+│   │   ├── Sales Pipeline              /g-ops/pipeline   (board over leads + quotations)
+│   │   ├── Costing                     /g-ops/costing
+│   │   └── Partners                    /g-ops/partners
+│   ├── Project
 │   │   ├── Projects                    /g-ops/projects
 │   │   ├── Approved Plans              /g-ops/plans
 │   │   ├── Budget Monitoring           /g-ops/budget-monitoring
@@ -223,7 +237,8 @@ G-CORE launcher  (/)  — four division cards + My Work summary
 │   │   ├── Aftermarket                 /g-ops/aftermarket
 │   │   ├── Installed Base              /g-ops/installed-base
 │   │   ├── Service Contracts           /g-ops/service-contracts
-│   │   ├── PM Schedule                 /g-ops/visits
+│   │   ├── Job Orders                  /g-ops/job-orders
+│   │   ├── Service Schedule            /g-ops/visits     (every visit; month / list)
 │   │   ├── Renewals                    /g-ops/renewals
 │   │   └── Service Costing             /g-ops/service-costing
 │   └── Service reports
@@ -237,11 +252,22 @@ G-CORE launcher  (/)  — four division cards + My Work summary
 │   ├── My day
 │   │   ├── Clock In/Out                /g-hr/clock
 │   │   ├── Leave                       /g-hr/leave
-│   │   └── Overtime                    /g-hr/overtime
+│   │   ├── Overtime                    /g-hr/overtime
+│   │   └── Meetings                    /g-hr/meetings
 │   ├── Records
 │   │   ├── Attendance                  /g-hr/attendance
 │   │   ├── Employees                   /g-hr/employees
-│   │   └── Employee Pay Rates          /g-hr/employees   (same screen, gates pay data)
+│   │   ├── Employee Pay Rates          /g-hr/employees   (same screen, gates pay data)
+│   │   └── Plantilla                   /g-hr/plantilla
+│   ├── People
+│   │   ├── Evaluations                 /g-hr/evaluations
+│   │   └── Turnover & Clearance        /g-hr/clearances
+│   ├── Academy
+│   │   ├── Courses                     /g-hr/academy/courses
+│   │   ├── Training Calendar           /g-hr/academy/calendar
+│   │   ├── Training Sessions           /g-hr/academy/sessions
+│   │   ├── My Training Passport        /g-hr/academy/passport
+│   │   └── Training Passports          /g-hr/academy/passports
 │   └── Administration
 │       ├── HR Reports                  /g-hr/reports
 │       └── HR Settings                 /g-hr/settings
@@ -253,7 +279,8 @@ G-CORE launcher  (/)  — four division cards + My Work summary
 │   │   └── Payments                    /g-fin/payments
 │   ├── Money out
 │   │   ├── Accounts Payable            /g-fin/ap
-│   │   └── Expenses                    /g-fin/expenses
+│   │   ├── Expenses                    /g-fin/expenses
+│   │   └── Cash Advances               /g-fin/cash-advances
 │   ├── Analysis
 │   │   ├── Cash Flow                   /g-fin/cash-flow
 │   │   ├── Budget vs Actual            /g-fin/budget-vs-actual
@@ -292,10 +319,11 @@ G-CORE launcher  (/)  — four division cards + My Work summary
     │                  └── Roles & Permissions  /admin/roles
     ├── Process        ├── Approval Workflows   /admin/workflows
     │                  ├── Numbering            /admin/numbering
-    │                  └── Document Templates   /admin/templates   ← NOT BUILT
+    │                  └── Document Templates   /admin/templates   (the service report template editor)
     ├── Configuration  ├── Company Settings     /admin/company
-    │                  ├── Categories           /admin/categories
-    │                  └── System Settings      /admin/settings
+    │                  ├── Categories           /admin/categories  (cost, item, industry)
+    │                  ├── System Settings      /admin/settings
+    │                  └── Appearance & Layout  /admin/appearance
     └── Records        └── Audit Logs           /admin/audit
 ```
 
@@ -304,15 +332,19 @@ G-CORE launcher  (/)  — four division cards + My Work summary
 
 **Notes for a reviewer:**
 - Some screens are reached only from inside a record, not from the menu — the
-  **Project Workspace** (`/g-ops/projects/:id`, eight tabs including Tasks),
+  **Project Workspace** (`/g-ops/projects/:id`, twelve tabs including Tasks, Finance and Service),
   **Customer 360** (`/g-ops/customers/:id`), quotation/costing/billing detail
   pages, and the **S-Curve**.
 - **Purchase Requests appears in two modules** (`/g-ops/purchase-requests` and
   `/g-chain/purchase-requests`). Same screen, two paths, two permission sets —
   deliberate: a project manager raises one, procurement works it.
-- **`/admin/templates` is the only menu entry with no screen.** It renders a
-  "Not built yet" placeholder. PDF layouts are code inside `renderDocument()`,
-  not configurable data.
+- **`/admin/templates` opens the service report template editor** (the same
+  screen as G-OPS › Report Templates). PDF layouts are code inside
+  `renderDocument()`, not configurable data.
+- Records that open by URL: `/g-hr/leave/:id`, `/g-hr/overtime/:id`,
+  `/g-hr/employees/:id`, `/admin/users/:id`, `/g-ops/visits?visit=<id>`,
+  `/g-fin/payments?payment=<id>`. A list's search, scope, page and declared
+  filters are in its URL too (CLAUDE.md rule 16).
 
 ---
 
@@ -419,6 +451,13 @@ OvertimeRequest ──► [prior approval]  →  PRIOR_APPROVED   (moves NO mone
   attendance row and no approved leave.
 - **Chain ends at overtime.** There is no payroll run, no payslip, no statutory
   remittance.
+- **Hire to separate** (Phase 10, model §4.7): `Position` (the plantilla; filled
+  and vacant are counted, never stored) → `EmployeeEvaluation` (probation
+  milestones; regularisation only after HR *and* executive approve) →
+  `TrainingRecord` (the training passport is derived from these) →
+  `EmployeeClearance` → `ClearanceItem` (items derive their status from the
+  records they point at; approval records the separation) → turnover, which is
+  arithmetic over employee dates with no table of its own.
 
 ### 6.5 Aftermarket
 
@@ -456,13 +495,16 @@ Every document type routes through **one engine** (`shared/approvals.ts`).
 - Workflows are selected by document type **and amount band**.
 - Seeded workflows: leave, overtime (prior + actual), purchase request (two
   amount bands), budget request, quotation, purchase order, supplier bill (two
-  bands), expense, commissioning report, PM report, inspection report.
+  bands), expense, commissioning report, PM report, inspection report, and from
+  Phase 10 cash advance (supervisor → finance), job order (service manager),
+  clearance (supervisor → finance → HR), evaluation (HR → executive) and
+  training certification (HR). Meetings deliberately have no workflow.
 
 ---
 
 ## 7. Database / data relationships
 
-83 models. The ones that carry the business:
+99 models. The ones that carry the business:
 
 **Identity & access:** `User` (login, `supervisorId` self-relation), `Role`,
 `Permission`, `RolePermission`, `UserRole`, `UserPermissionOverride` (ALLOW or
@@ -475,7 +517,9 @@ config), `NumberSequence`, `ApprovalWorkflow` → `ApprovalStep` →
 
 **Masters:** `Customer` → `CustomerContact`, `CustomerSite`; `Supplier` →
 `SupplierContact`; `Employee`; `Item` + `ItemCategory`; `CostCategory` (five
-system rows, undeletable); `Warehouse` → `Location`.
+system rows, undeletable); `Warehouse` → `Location`; `Industry` (five system
+rows; required on a customer); `PartnerResource` (a partner is a `Supplier`
+with `isPartner`); `Position` (the plantilla).
 
 **Sales:** `Lead`, `Costing` → `CostingLine` / `ScopeSection` → `ScopeTask`,
 `Quotation` → `QuotationRevision` → `QuotationItem`, `SalesActivity`.
@@ -491,13 +535,18 @@ projectManager), `JobScopeItem`, **`JobCostEntry`**, `BudgetRequest`,
 `BorrowSlipItem`, `InventoryBalance`, `InventoryTransaction`.
 
 **HR:** `FaceEnrollment`, `Attendance`, `LeaveType`, `LeaveBalance`,
-`LeaveRequest`, `OvertimeRequest`.
+`LeaveRequest`, `OvertimeRequest`, `EmployeeClearance` → `ClearanceItem`,
+`Meeting` → `MeetingInvitee`, `EmployeeEvaluation` → `EmployeeEvaluationLine`,
+`Course` → `CourseRequirement`, `TrainingSession` → `TrainingAttendee`,
+`TrainingRecord`.
 
 **Finance:** `Invoice` → `InvoiceLine`, `SupplierBill` → `SupplierBillLine`,
-`ExpenseClaim` → `ExpenseClaimLine`, `Payment` → `PaymentAllocation`.
+`ExpenseClaim` → `ExpenseClaimLine` (a liquidation is a claim with
+`advanceId`), `CashAdvance`, `Payment` → `PaymentAllocation`.
 
 **Aftermarket:** `InstalledAsset`, `ServiceContract` → `ServiceContractAsset`,
-`ServiceVisit`, `ReportTemplate`, `ServiceReport`.
+`ServiceVisit`, `ReportTemplate`, `ServiceReport`, `JobOrder` (one order → one
+visit → one report → at most one invoice).
 
 ### Relationships worth knowing before touching anything
 
@@ -505,7 +554,8 @@ projectManager), `JobScopeItem`, **`JobCostEntry`**, `BudgetRequest`,
   all hang off it.
 - **`JobCostEntry` is the single ledger.** `sourceType`/`sourceId` says which
   document caused each row. Budget Monitoring is a view over this table.
-- **`Invoice.progressBillingId` is `@unique`** — one invoice per billing.
+- **`Invoice.progressBillingId` and `Invoice.jobOrderId` are `@unique`** — one
+  invoice per billing, one per job order.
 - **A service contract's `jobId`** is how aftermarket reuses all the delivery
   machinery.
 - **`Employee` ↔ `User` is 1:1 and optional** — a labourer may have no login.
@@ -533,7 +583,7 @@ invoice so an old document still prints the tax it was issued under.
 ### How permission works
 
 A permission key is `module.submodule.action`, e.g. `gops.quotations.edit_own`.
-**299 permissions** are generated from the registry — they are never written by
+**372 permissions** are generated from the registry — they are never written by
 hand.
 
 Eight actions: `view_own`, `view_all`, `create`, `edit_own`, `edit_all`,
@@ -553,7 +603,7 @@ menu can never show a screen the user cannot open.
 **Record ownership is real:** `canEditRecord(user, module, sub, ownerId)` —
 "only the author can edit the quotation; super admin can edit all".
 
-### The 14 seeded roles
+### The 15 seeded roles
 
 | Key | Name | Broadly |
 |---|---|---|
@@ -570,9 +620,11 @@ menu can never show a screen the user cannot open.
 | `accounting` | Accounting | Finance, read-weighted |
 | `hr` | HR | Employees, attendance, leave, overtime, pay rates, HR settings |
 | `supervisor` | Supervisor | Approves own reports' leave and overtime |
-| `employee` | Employee | Clocks in, files leave and overtime, sees only their own |
+| `employee` | Employee | Clocks in, files leave, overtime, claims and cash advances, sees only their own |
+| `trainer` | Trainer | Schedules and completes training sessions; completing one verifies the attendees' training |
 
-Seeded super admin: `admin@gruntech.com`.
+Seeded super admin: `admin@gruntech.com` (created by the seed only on a fresh
+database).
 
 **The seed's grant rule** (worth knowing before changing it): a role/permission
 pair the seed has **never offered** is granted; a pair it **has** offered before
@@ -705,7 +757,9 @@ on without migrating history. **This is the open question with the highest
 carrying cost** — it gets more expensive the longer real billing data
 accumulates.
 
-**Not built:** `/admin/templates` renders a placeholder.
+**Open owner decisions from Phase 10** are listed in model §14 (attachments
+have no per-record guard; an inactive supervisor still receives approvals;
+own-scope on some detail routes; and others).
 
 **Technical:**
 
@@ -713,8 +767,8 @@ accumulates.
   validation — 18 sites across 7 route files.** A typo in a URL returns **500**
   rather than 400 or an ignored filter. This is a known, unfixed robustness bug.
 - The web bundle is a single ~730 kB chunk (~172 kB gzipped). No code splitting.
-- No automated front-end tests. Verification is 495 API-level assertions across
-  nine `verify-*.ts` scripts, plus manual browser checks.
+- No automated front-end tests. Verification is 1,577 API-level assertions
+  across twenty `verify-*.ts` scripts, plus manual browser checks.
 - `npm audit` flags `deepmerge-ts` (high) reached through the **Prisma CLI's**
   config loader — a dev-time dependency not in the server's runtime path.
   Prisma 7 drops it but adds an unused `mysql2` advisory, so the tree is pinned
@@ -855,11 +909,11 @@ these are places to look.
 2. The hand-off points between modules (PR → PO → receiving → bill). Each is a
    different screen in a different module; how much manual navigation that costs
    is worth measuring.
-3. Whether the Project Workspace's eight tabs are the right cut, and whether
+3. Whether the Project Workspace's twelve tabs are the right cut, and whether
    anything in them is hard to find.
 
 **Navigation**
-4. G-OPS carries 23 screens under five sections. Worth checking the section
+4. G-OPS carries 25 screens under five sections. Worth checking the section
    names read the way the business speaks.
 5. Screens reachable only from inside a record (S-Curve, Customer 360, detail
    pages) — whether users can find them.
@@ -895,7 +949,7 @@ these are places to look.
 
 Read in this order:
 
-1. **`CLAUDE.md`** — the 15 standing rules. Non-negotiable.
+1. **`CLAUDE.md`** — the 16 standing rules and the per-phase notes. Non-negotiable.
 2. **`docs/BUSINESS-OPERATIONS-MODEL.md`** — the specification.
 3. **`api/src/permissions/registry.ts`** — the menu and every permission.
 4. **`api/prisma/schema.prisma`** — the data model.
@@ -911,15 +965,16 @@ cd api && npm run dev         # API on 5100
 cd web && npm run dev         # web on 5173
 ```
 
-Seeded admin: `admin@gruntech.com`. `api/scripts/sandbox.ts` creates twelve
+Seeded admin: `admin@gruntech.com` (the seed sets `ChangeMe!2026` only when it
+creates the account on a fresh database). `api/scripts/sandbox.ts` creates twelve
 demo users (password `Sandbox!2026`) and a worked example job.
 
 Verify nothing is broken:
 
 ```bash
-cd api && for s in foundation masters sales delivery chain hr finance aftermarket insights; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-495 assertions. `verify-hr`, `verify-finance`, `verify-aftermarket` and
-`verify-insights` need the API running — they check route guards over HTTP and
-say so loudly rather than skipping if it is down.
+1,577 assertions. Only `verify-foundation`, `verify-masters` and `verify-sales`
+run without the API; the other seventeen check route guards over HTTP and say so
+loudly rather than skipping if it is down.

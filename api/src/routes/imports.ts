@@ -18,6 +18,7 @@ import {
   type ImportSpec,
 } from '../shared/csv';
 import { employeesImport } from './imports/employees';
+import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
 
 /**
@@ -534,6 +535,7 @@ const REGISTRY: Record<string, Registered> = {
     permission: 'gchain.items.create',
     write: itemWrite as unknown as Registered['write'],
   },
+  courses: courseImport,
 };
 
 importRoutes.get(

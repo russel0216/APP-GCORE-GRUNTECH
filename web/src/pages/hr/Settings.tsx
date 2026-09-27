@@ -3,6 +3,9 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
 import type { LeaveType } from './Leave';
+import { ProbationCard } from './settings/ProbationCard';
+import { ClearanceChecklistCard } from './settings/ClearanceChecklistCard';
+import { AcademyCard } from './settings/AcademyCard';
 
 /**
  * HR settings — the working day, the breaks, the overtime premium, the leave
@@ -12,6 +15,10 @@ import type { LeaveType } from './Leave';
  * is a legal minimum somebody may choose to beat, and the match threshold is a
  * judgement about how often a genuine person is turned away versus how often a
  * stranger gets through. HR owns all of it.
+ *
+ * Below them sit the cards other rules live on — probation and evaluations,
+ * the clearance checklist, the Academy. Each loads and saves its own keys, so
+ * the Save at the top of this page never writes over one of them.
  */
 
 interface HrSettings {
@@ -25,6 +32,29 @@ interface HrSettings {
   overtimeMultiplier: number;
   hoursPerDay: number;
   faceThreshold: number;
+}
+
+/**
+ * The keys the form on this page edits, and so the only keys it sends.
+ * `GET /hr-settings` also returns the probation rules, which ProbationCard
+ * saves on its own; PUTting the whole object loaded at mount would write
+ * those stale values back over a change just saved on that card.
+ */
+const EDITED_KEYS = [
+  'workStart',
+  'workEnd',
+  'graceMinutes',
+  'breakMinutes',
+  'dinnerBreakStart',
+  'dinnerBreakEnd',
+  'dinnerBreakMinutes',
+  'overtimeMultiplier',
+  'hoursPerDay',
+  'faceThreshold',
+] as const satisfies readonly (keyof HrSettings)[];
+
+function edited(s: HrSettings): HrSettings {
+  return Object.fromEntries(EDITED_KEYS.map((k) => [k, s[k]])) as unknown as HrSettings;
 }
 
 export function HrSettingsPage() {
@@ -44,7 +74,7 @@ export function HrSettingsPage() {
         api.get<HrSettings>('/hr-settings'),
         api.get<LeaveType[]>('/leave/types'),
       ]);
-      setSettings(s);
+      setSettings(edited(s));
       setTypes(t);
     } catch (err) {
       setError(err);
@@ -60,7 +90,7 @@ export function HrSettingsPage() {
     setBusy(true);
     setError(null);
     try {
-      setSettings(await api.put<HrSettings>('/hr-settings', settings));
+      setSettings(edited(await api.put<HrSettings>('/hr-settings', edited(settings))));
       toast('ok', 'HR rules saved');
     } catch (err) {
       setError(err);
@@ -248,8 +278,19 @@ export function HrSettingsPage() {
                   {types.map((t) => (
                     <tr
                       key={t.id}
-                      style={editable ? { cursor: 'pointer' } : undefined}
+                      className={editable ? 'clickable' : undefined}
+                      tabIndex={editable ? 0 : undefined}
                       onClick={editable ? () => setEditingType(t) : undefined}
+                      onKeyDown={
+                        editable
+                          ? (e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                setEditingType(t);
+                              }
+                            }
+                          : undefined
+                      }
                     >
                       <td>
                         {t.name} <span className="faint mono">{t.code}</span>
@@ -266,7 +307,7 @@ export function HrSettingsPage() {
             {editable && (
               <button
                 className="btn btn-sm"
-                style={{ marginTop: 12 }}
+                style={{ marginTop: 'var(--s-3)' }}
                 onClick={() =>
                   setEditingType({ code: '', name: '', daysPerYear: 0, isPaid: true, requiresProof: false, isActive: true })
                 }
@@ -277,6 +318,13 @@ export function HrSettingsPage() {
           </div>
         </div>
       </fieldset>
+
+      <ProbationCard />
+
+      <div className="grid grid-2">
+        <ClearanceChecklistCard />
+        <AcademyCard />
+      </div>
 
       {editingType && (
         <LeaveTypeModal
@@ -387,7 +435,7 @@ function LeaveTypeModal({
         label="Available to file against"
       />
       {value.id && (
-        <div className="alert info" style={{ marginTop: 10, marginBottom: 0 }}>
+        <div className="alert info" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
           Changing the yearly allotment affects balances created from now on. Existing balance rows
           keep the entitlement they were opened with.
         </div>

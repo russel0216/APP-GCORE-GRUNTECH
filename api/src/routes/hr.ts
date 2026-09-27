@@ -24,6 +24,7 @@ import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { describeFace, faceEngineReady } from '../shared/face';
 import { toCsv } from '../shared/csv';
+import { sweepSeparations } from '../shared/clearance';
 import {
   hrSettings,
   saveHrSettings,
@@ -327,6 +328,12 @@ clockRoutes.post(
     const me = currentUser(req);
     const body = parseBody(clockSchema, req.body);
     const settings = await hrSettings();
+
+    // Somebody separated yesterday is still flagged active until a sweep runs,
+    // and nothing else guarantees one ran today. Narrowed to the caller: this
+    // route only needs their own flag to be true, and an HR screen sweeps the
+    // rest when it opens.
+    await sweepSeparations(undefined, { userId: me.id });
 
     const mine = await myEmployee(me.id);
     if (!mine) throw badRequest('Your account is not linked to an employee record');

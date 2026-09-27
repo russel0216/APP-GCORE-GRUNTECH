@@ -535,7 +535,7 @@ export function CompanyOverview() {
               : 'visits on schedule'
           }
           tone={data.aftermarket.visitsOverdue > 0 ? 'var(--warn)' : undefined}
-          to="/g-ops/service-contracts"
+          to="/g-ops/service-contracts?status=ACTIVE"
         />
         <Tile label="Headcount" value={data.people.headcount} sub="active employees" to="/g-hr" />
         <Tile

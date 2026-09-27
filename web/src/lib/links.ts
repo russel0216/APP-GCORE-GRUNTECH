@@ -69,6 +69,7 @@ const QUERY: Record<string, string> = {
   disbursement: '/g-fin/payments?payment=',
   sales_activity: '/g-ops/calendar?activity=',
   activity: '/g-ops/calendar?activity=',
+  course: '/g-hr/academy/courses?course=',
 };
 
 /** Types with a screen but no per-record URL — the list or the settings page. */
@@ -77,7 +78,10 @@ const SCREEN: Record<string, string> = {
   cost_category: '/admin/categories',
   industry: '/admin/categories',
   position: '/g-hr/plantilla',
-  course: '/g-hr/academy/courses',
+  // A record or certificate lives on its holder's passport; the id here is
+  // the record's, not the employee's, so the register is as close as it gets.
+  training_record: '/g-hr/academy/passports',
+  training_certification: '/g-hr/academy/passports',
   budget_request: '/g-ops/budget-requests',
   attendance: '/g-hr/attendance',
   report_template: '/g-ops/report-templates',
@@ -110,7 +114,7 @@ export function recordLink(entityType: string, id: string): string | null {
   if (type in DETAIL) return id ? `${DETAIL[type]}/${encodeURIComponent(id)}` : DETAIL[type];
   if (type in QUERY) return id ? `${QUERY[type]}${encodeURIComponent(id)}` : null;
   if (type in SCREEN) return SCREEN[type];
-  // partner_resource, training_record, training_certification: they live
-  // inside another record's page and carry no address of their own.
+  // partner_resource: it lives inside its partner's page and carries no
+  // address of its own.
   return null;
 }

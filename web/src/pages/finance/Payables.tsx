@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -92,9 +92,12 @@ interface UnbilledReceiving {
 export function Payables() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const toast = useToast();
+  const [params, setParams] = useSearchParams();
   const [queue, setQueue] = useState<UnbilledReceiving[] | null>(null);
   const [creating, setCreating] = useState<UnbilledReceiving | 'blank' | null>(null);
   const [reload, setReload] = useState(0);
+  const fromReceiving = params.get('fromReceiving');
 
   const loadQueue = useCallback(async () => {
     try {
@@ -107,6 +110,34 @@ export function Payables() {
   useEffect(() => {
     loadQueue();
   }, [loadQueue, reload]);
+
+  function clearHandoff() {
+    if (!params.has('fromReceiving')) return;
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('fromReceiving');
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  /*
+    `?fromReceiving=<id>` — the receiving's "Enter supplier bill" lands here.
+    It opens the same form as the queue's "Enter bill", taken from the queue
+    so the figures are the ones the queue would have offered. A receiving that
+    is not in the queue has been billed already (or is not ours to bill), and
+    saying so beats opening a blank form that would bill it twice.
+  */
+  useEffect(() => {
+    if (!fromReceiving || !queue) return;
+    const match = queue.find((r) => r.id === fromReceiving);
+    if (match && can('gfin.ap.create')) setCreating(match);
+    else if (!match) toast('error', 'That receiving is not waiting on a bill — it may already have one');
+    clearHandoff();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromReceiving, queue]);
 
   const columns: Column<Bill>[] = [
     {
@@ -356,7 +387,7 @@ function NewBillModal({
 
   useEffect(() => {
     api.get<{ rows: { id: string; name: string }[] }>('/suppliers?pageSize=200').then((d) => setSuppliers(d.rows)).catch(() => {});
-    api.get<typeof jobs>('/jobs/lookup').then(setJobs).catch(() => {});
+    api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
     api.get<{ id: string; name: string }[]>('/reference/cost-categories').then(setCategories).catch(() => {});
     api
       .get<{ defaultTermsDays: number; supplierEwtGoods: number; supplierEwtServices: number; vatRate: number }>(

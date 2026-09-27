@@ -18,6 +18,7 @@ import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissio
 import { env } from '../env';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
+import { registerAttachmentGuard } from '../shared/attachments';
 import { notify, type NotifyInput } from '../shared/notifications';
 import { registerSearch } from '../shared/search';
 import { onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
@@ -1451,6 +1452,16 @@ sessionRoutes.delete(
 // ════════════════════════════════════════════════════════════════════
 
 export const passportRoutes = Router();
+
+// A certificate scan is the holder's, and HR's who verify it.
+registerAttachmentGuard('training_record', async (user, id) => {
+  if (can(user, 'ghr.passports.view_all') || can(user, 'ghr.passports.approve')) return true;
+  const rec = await prisma.trainingRecord.findUnique({
+    where: { id },
+    select: { employee: { select: { userId: true } } },
+  });
+  return !!rec && rec.employee.userId === user.id;
+});
 passportRoutes.use(authenticate);
 
 const TC_LINK = (employeeId: string) => PASSPORT_LINK(employeeId);

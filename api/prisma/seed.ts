@@ -1,7 +1,9 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
-import { DOCUMENT_TYPES, nextNumber } from '../src/shared/numbering';
+import { DOCUMENT_TYPES } from '../src/shared/numbering';
+import { backfillPositions } from '../src/shared/plantilla';
+import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
 
@@ -634,65 +636,6 @@ const WORKFLOWS: WorkflowSeed[] = [
   },
 ];
 
-/**
- * Links every employee whose free-text `position` names nothing in the
- * plantilla to a Position row, creating the row from the text on first sight.
- *
- * Idempotent: only rows with no `positionId` are touched, and a title already
- * in the plantilla is reused rather than duplicated. The authorised headcount
- * is the number of active holders, so day one prints 100% filled and 0
- * vacant — nothing is authorised beyond what exists until HR edits it. An
- * employee with an empty position stays unclassified.
- */
-async function backfillPositions() {
-  const unlinked = await prisma.employee.findMany({
-    where: { positionId: null, position: { not: null } },
-    select: { id: true, position: true, departmentId: true, isActive: true },
-  });
-
-  // Group by the trimmed, case-folded title; the first holder's spelling wins.
-  const byTitle = new Map<string, { title: string; holders: typeof unlinked }>();
-  for (const e of unlinked) {
-    const title = (e.position ?? '').trim();
-    if (!title) continue;
-    const key = title.toLowerCase();
-    const group = byTitle.get(key) ?? { title, holders: [] };
-    group.holders.push(e);
-    byTitle.set(key, group);
-  }
-
-  let linked = 0;
-  let positions = 0;
-  for (const { title, holders } of byTitle.values()) {
-    await prisma.$transaction(async (tx) => {
-      let position = await tx.position.findFirst({
-        where: { title: { equals: title, mode: 'insensitive' } },
-      });
-      if (!position) {
-        const active = holders.filter((h) => h.isActive);
-        const departments = new Set(active.map((h) => h.departmentId));
-        position = await tx.position.create({
-          data: {
-            code: await nextNumber('position', tx),
-            title,
-            // The department only when every active holder shares one.
-            departmentId: departments.size === 1 ? [...departments][0] : null,
-            authorisedHeadcount: active.length,
-          },
-        });
-      }
-      const { count } = await tx.employee.updateMany({
-        where: { id: { in: holders.map((h) => h.id) } },
-        data: { positionId: position.id },
-      });
-      linked += count;
-      positions += 1;
-    });
-  }
-
-  if (linked) console.log(`  · Plantilla: linked ${linked} employee(s) to ${positions} position(s)`);
-}
-
 async function main() {
   console.log('Seeding G-CORE…\n');
 
@@ -922,7 +865,13 @@ async function main() {
   console.log('  ✓ Departments');
 
   // ── Plantilla ──────────────────────────────────────────────────────────────
-  await backfillPositions();
+  // One definition, shared with the API: every employee whose free-text
+  // position names nothing in the plantilla is linked to a Position of that
+  // title. Idempotent — a second run links nobody and prints nothing.
+  {
+    const { linked, positions } = await backfillPositions();
+    if (linked) console.log(`  · Plantilla: linked ${linked} employee(s) to ${positions} position(s)`);
+  }
 
   // ── Cost categories ────────────────────────────────────────────────────────
   // The five buckets every costing, budget and cost-ledger row is grouped by
@@ -1327,4 +1276,5 @@ main()
     console.error(err);
     process.exit(1);
   })
-  .finally(() => prisma.$disconnect());
+  // backfillPositions() runs on the API's own client, so close that one too.
+  .finally(() => Promise.all([prisma.$disconnect(), sharedPrisma.$disconnect()]));

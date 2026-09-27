@@ -1374,6 +1374,11 @@ activityRoutes.patch(
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
           ...(body.location !== undefined ? { location: body.location || null } : {}),
           ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId } : {}),
+          // The modal sends all three links on Modify; without these a
+          // re-linked activity silently kept its old lead, quotation or customer.
+          ...(body.leadId !== undefined ? { leadId: body.leadId || null } : {}),
+          ...(body.quotationId !== undefined ? { quotationId: body.quotationId || null } : {}),
+          ...(body.customerId !== undefined ? { customerId: body.customerId || null } : {}),
           ...(body.startsAt !== undefined ? { startsAt: new Date(body.startsAt) } : {}),
           ...(body.durationMinutes !== undefined ? { durationMinutes: body.durationMinutes } : {}),
           ...(body.status !== undefined

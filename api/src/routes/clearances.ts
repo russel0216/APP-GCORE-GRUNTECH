@@ -17,6 +17,7 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { can, canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
+import { registerAttachmentGuard } from '../shared/attachments';
 import { notify } from '../shared/notifications';
 import {
   submitForApproval,
@@ -123,6 +124,17 @@ async function loadClearance(id: string): Promise<Header> {
 /** "Mine" for view_own: I raised it, or it is about me. */
 const isMine = (me: { id: string }, c: { raisedById: string; employee: { userId: string | null } }) =>
   c.raisedById === me.id || c.employee.userId === me.id;
+
+// A clearance's files (resignation letter, quitclaim) follow the clearance.
+registerAttachmentGuard('clearance', async (user, id) => {
+  if (can(user, 'ghr.clearances.view_all')) return true;
+  if (!can(user, 'ghr.clearances.view_own')) return false;
+  const c = await prisma.employeeClearance.findUnique({
+    where: { id },
+    select: { raisedById: true, employee: { select: { userId: true } } },
+  });
+  return !!c && isMine(user, c);
+});
 
 function assertCanView(me: ReturnType<typeof currentUser>, c: Header) {
   if (can(me, 'ghr.clearances.view_all')) return;

@@ -18,6 +18,7 @@ import { can } from '../permissions/resolve';
 import { env } from '../env';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
+import { registerAttachmentGuard } from '../shared/attachments';
 import { notify, type NotifyInput } from '../shared/notifications';
 import { registerSearch } from '../shared/search';
 import { registerSchedule } from './workspace';
@@ -49,6 +50,11 @@ import {
  */
 
 export const meetingRoutes = Router();
+
+// Minutes and decks are seen by whoever can see the meeting.
+registerAttachmentGuard('meeting', async (user, id) =>
+  (await prisma.meeting.count({ where: { id, ...visibleWhere(user) } })) > 0,
+);
 meetingRoutes.use(authenticate);
 
 const VIEW = ['ghr.meetings.view_own', 'ghr.meetings.view_all'];

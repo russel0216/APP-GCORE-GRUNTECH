@@ -41,10 +41,12 @@ export function Costings() {
   const [creating, setCreating] = useState(false);
   const [reload, setReload] = useState(0);
 
-  // "Start costing" on a lead lands here as ?new=1&leadId=… and opens the form
-  // prefilled from that lead. The two params are cleared when the form closes
-  // so a refresh, or the browser's back button, does not reopen it.
+  // "Start costing" on a lead lands here as ?new=1&leadId=…(&customerId=…),
+  // and Customer 360's "New costing" as ?new=1&customerId=…; either opens the
+  // form prefilled. The params are cleared when the form closes so a refresh,
+  // or the browser's back button, does not reopen it.
   const presetLeadId = params.get('leadId') ?? undefined;
+  const presetCustomerId = params.get('customerId') ?? undefined;
   const openFromUrl = params.get('new') === '1' && can('gops.costing.create');
   useEffect(() => {
     if (openFromUrl) setCreating(true);
@@ -52,10 +54,11 @@ export function Costings() {
 
   function closeForm() {
     setCreating(false);
-    if (params.has('new') || params.has('leadId')) {
+    if (params.has('new') || params.has('leadId') || params.has('customerId')) {
       const next = new URLSearchParams(params);
       next.delete('new');
       next.delete('leadId');
+      next.delete('customerId');
       setParams(next, { replace: true });
     }
   }
@@ -142,6 +145,7 @@ export function Costings() {
       {creating && (
         <CostingForm
           leadId={presetLeadId}
+          customerId={presetCustomerId}
           onClose={closeForm}
           onSaved={(id) => {
             closeForm();
@@ -184,12 +188,15 @@ function titleFromLead(lead: LeadPreset): string {
 export function CostingForm({
   costing,
   leadId,
+  customerId,
   onClose,
   onSaved,
 }: {
   costing?: CostingRow;
   /** Start from this lead: customer, site and title are prefilled and the link is kept. */
   leadId?: string;
+  /** Start for this customer — Customer 360's hand-off, or the lead's own customer. */
+  customerId?: string;
   onClose: () => void;
   onSaved: (id: string) => void;
 }) {
@@ -201,7 +208,7 @@ export function CostingForm({
   const [lead, setLead] = useState<LeadPreset | null>(null);
   const [form, setForm] = useState({
     title: costing?.title ?? '',
-    customerId: costing?.customer?.id ?? '',
+    customerId: costing?.customer?.id ?? customerId ?? '',
     siteId: '',
     markupPct: '15',
     durationDays: costing?.durationDays?.toString() ?? '',

@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Loading, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -348,7 +349,8 @@ function EmployeeForm({
   const seeRates = can('ghr.employee_rates.view_all');
   const setRates = can('ghr.employee_rates.edit_all');
 
-  const [tab, setTab] = useState<'person' | 'employment' | 'pay'>('person');
+  const [tab, setTab] = useState<'person' | 'employment' | 'pay' | 'evaluations'>('person');
+  const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [users, setUsers] = useState<{ id: string; name: string; email: string }[]>([]);
@@ -559,6 +561,11 @@ function EmployeeForm({
               Pay &amp; statutory
             </button>
           )}
+          {seeEvaluations && (
+            <button className={tab === 'evaluations' ? 'active' : ''} onClick={() => setTab('evaluations')}>
+              Evaluations
+            </button>
+          )}
         </div>
       </div>
 
@@ -623,32 +630,39 @@ function EmployeeForm({
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
-            <Field
-              label="Position"
-              hint="From the plantilla. Pick none to type a title that has no authorised slot yet."
-            >
-              <select
-                value={form.positionId}
-                onChange={(e) => {
-                  const next = positions.find((p) => p.id === e.target.value);
-                  setForm({
-                    ...form,
-                    positionId: e.target.value,
-                    // A position that sits in a department suggests it.
-                    departmentId:
-                      next?.departmentId && !form.departmentId ? next.departmentId : form.departmentId,
-                  });
-                }}
+            <div>
+              <Field
+                label="Position"
+                hint="From the plantilla. Pick none to type a title that has no authorised slot yet."
               >
-                <option value="">— none (unclassified) —</option>
-                {positionOptions.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.title}
-                    {p.departmentName ? ` · ${p.departmentName}` : ''} ({p.filled}/{p.authorisedHeadcount})
-                  </option>
-                ))}
-              </select>
-            </Field>
+                <select
+                  value={form.positionId}
+                  onChange={(e) => {
+                    const next = positions.find((p) => p.id === e.target.value);
+                    setForm({
+                      ...form,
+                      positionId: e.target.value,
+                      // A position that sits in a department suggests it.
+                      departmentId:
+                        next?.departmentId && !form.departmentId ? next.departmentId : form.departmentId,
+                    });
+                  }}
+                >
+                  <option value="">— none (unclassified) —</option>
+                  {positionOptions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.title}
+                      {p.departmentName ? ` · ${p.departmentName}` : ''} ({p.filled}/{p.authorisedHeadcount})
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {employee && can('ghr.passports.view_all') && (
+                <p className="muted">
+                  <Link to={`/g-hr/academy/passports/${employee.id}`}>Training passport →</Link>
+                </p>
+              )}
+            </div>
             {form.positionId ? (
               <Field label="Title" hint="Set by the plantilla — rename it there">
                 <input
@@ -756,6 +770,14 @@ function EmployeeForm({
             label="Active — inactive employees drop out of attendance and assignment"
           />
         </>
+      )}
+
+      {tab === 'evaluations' && seeEvaluations && employee && (
+        <EmployeeEvaluationsTab
+          employeeId={employee.id}
+          employmentType={employee.employmentType}
+          dateRegularized={employee.dateRegularized}
+        />
       )}
 
       {tab === 'pay' && seeRates && (

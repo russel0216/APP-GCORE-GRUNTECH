@@ -238,16 +238,19 @@ async function main() {
   // The new document types are seeded with the stock pattern. Issued inside a
   // transaction that is rolled back, so the run leaves their counters alone.
   const ROLLBACK = new Error('verify — roll back');
-  const newTypes = [
-    'position',
-    'cash_advance',
-    'job_order',
-    'clearance',
-    'meeting',
-    'evaluation',
-    'training_session',
-    'training_certification',
-  ];
+  // Each type against its OWN code: one shared alternation would pass a cash
+  // advance numbered GT-JO-…, which is exactly the mix-up worth catching.
+  const newTypeCodes: Record<string, string> = {
+    position: 'POS',
+    cash_advance: 'CA',
+    job_order: 'JO',
+    clearance: 'CLR',
+    meeting: 'MTG',
+    evaluation: 'EVAL',
+    training_session: 'TS',
+    training_certification: 'TC',
+  };
+  const newTypes = Object.keys(newTypeCodes);
   const issued: Record<string, string> = {};
   await prisma
     .$transaction(async (tx) => {
@@ -259,8 +262,8 @@ async function main() {
     });
   for (const type of newTypes) {
     check(
-      `${type} numbers on the stock pattern`,
-      /^GT-(POS|CA|JO|CLR|MTG|EVAL|TS|TC)-\d{4}-\d{4}$/.test(issued[type] ?? ''),
+      `${type} numbers on the stock pattern (GT-${newTypeCodes[type]}-yyyy-nnnn)`,
+      new RegExp(`^GT-${newTypeCodes[type]}-\\d{4}-\\d{4}$`).test(issued[type] ?? ''),
       issued[type] ?? 'nothing issued',
     );
   }

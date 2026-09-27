@@ -16,6 +16,7 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { can, canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
+import { registerAttachmentGuard } from '../shared/attachments';
 import { notify } from '../shared/notifications';
 import {
   submitForApproval,
@@ -59,6 +60,15 @@ import {
  */
 
 export const evaluationRoutes = Router();
+
+// The attached form or memo is read by exactly who may read the evaluation.
+registerAttachmentGuard('evaluation', async (user, id) => {
+  const ev = await prisma.employeeEvaluation.findUnique({
+    where: { id },
+    select: { status: true, evaluatorId: true, scheduledById: true, employee: { select: { userId: true } } },
+  });
+  return !!ev && visibleTo(user, ev);
+});
 evaluationRoutes.use(authenticate);
 
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? null : Number(v));

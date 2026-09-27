@@ -5,6 +5,7 @@ import multer from 'multer';
 import { env } from '../env';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
+import type { ResolvedUser } from '../permissions/resolve';
 
 /**
  * One attachment service for every module (model §7).
@@ -96,4 +97,34 @@ export async function deleteAttachment(id: string): Promise<void> {
   } catch {
     /* the row is gone; a stray file on disk is not worth failing the request */
   }
+}
+
+/*
+  Who may read, or add to, the files on a record.
+
+  The attachment routes are generic — one pair of URLs for every entity type —
+  so on their own they only know that the caller is signed in. That was enough
+  while every attached record was one a colleague could open anyway; it stops
+  being enough for an evaluation, a clearance or a training certificate, where
+  the file IS the sensitive part. The module that owns such a record registers
+  the same visibility rule its own detail route applies, and the attachment
+  routes ask it before listing, serving or accepting a file. A type nobody
+  registered keeps the old behaviour: any signed-in user.
+*/
+export type AttachmentGuard = (user: ResolvedUser, entityId: string) => Promise<boolean>;
+
+const guards = new Map<string, AttachmentGuard>();
+
+export function registerAttachmentGuard(entityType: string, guard: AttachmentGuard): void {
+  guards.set(entityType, guard);
+}
+
+export async function mayAccessAttachments(
+  user: ResolvedUser,
+  entityType: string,
+  entityId: string,
+): Promise<boolean> {
+  const guard = guards.get(entityType);
+  if (!guard || user.isSuperAdmin) return true;
+  return guard(user, entityId);
 }

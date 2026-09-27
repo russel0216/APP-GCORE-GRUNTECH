@@ -224,6 +224,7 @@ export function ProgressReports() {
             label: 'Status',
             options: [
               { value: 'DRAFT', label: 'Draft' },
+              { value: 'SUBMITTED', label: 'Awaiting approval' },
               { value: 'APPROVED', label: 'Approved' },
             ],
           },

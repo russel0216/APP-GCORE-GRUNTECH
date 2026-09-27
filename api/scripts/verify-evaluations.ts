@@ -479,6 +479,33 @@ async function main() {
   const pdfEarly = await api(tok.subject, 'GET', `/evaluations/${ev1.id}/pdf`);
   check('nor can the subject print it (404)', pdfEarly.status === 404, String(pdfEarly.status));
 
+  // The generic attachment routes ask the evaluation's own visibility rule
+  // (registerAttachmentGuard), so a file on it is no easier to reach than it.
+  const fileRow = await prisma.attachment.create({
+    data: {
+      entityType: 'evaluation',
+      entityId: ev1.id,
+      fileName: `${TAG}-memo.pdf`,
+      storedName: `${TAG}-not-on-disk.pdf`,
+      mimeType: 'application/pdf',
+      size: 1,
+      uploadedById: hr.id,
+    },
+  });
+  const byFiles = await api(tok.bystander, 'GET', `/attachments/evaluation/${ev1.id}`);
+  check('a colleague cannot list the files on it (404)', byFiles.status === 404, String(byFiles.status));
+  const supFiles = await api(tok.supervisor, 'GET', `/attachments/evaluation/${ev1.id}`);
+  check('the evaluator can', supFiles.status === 200 && supFiles.text.includes(fileRow.id), String(supFiles.status));
+  const byFile = await api(tok.bystander, 'GET', `/attachments/file/${fileRow.id}`);
+  check('nor fetch one by its id', byFile.status === 404 && /Attachment not found/.test(String(byFile.body.error)), `${byFile.status} ${byFile.body.error}`);
+  const subjFile = await api(tok.subject, 'GET', `/attachments/file/${fileRow.id}`);
+  check('nor can the subject while it is unapproved', subjFile.status === 404 && /Attachment not found/.test(String(subjFile.body.error)), `${subjFile.status} ${subjFile.body.error}`);
+  const supFile = await api(tok.supervisor, 'GET', `/attachments/file/${fileRow.id}`);
+  check('the evaluator gets past the guard (here to the missing-file 404)', /missing from disk/.test(String(supFile.body.error)), `${supFile.status} ${supFile.body.error}`);
+  const byUpload = await api(tok.bystander, 'POST', `/attachments/evaluation/${ev1.id}`);
+  check('and a colleague cannot add a file to it (404)', byUpload.status === 404, String(byUpload.status));
+  await prisma.attachment.delete({ where: { id: fileRow.id } });
+
   const subjectUser = (await resolveUser(subject.id))!;
   const supUser = (await resolveUser(supervisor.id))!;
   const hrUser = (await resolveUser(hr.id))!;

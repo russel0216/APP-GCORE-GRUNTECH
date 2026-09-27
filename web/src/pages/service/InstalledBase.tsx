@@ -257,7 +257,7 @@ function AssetModal({
 
   useEffect(() => {
     api.get<{ rows: { id: string; name: string }[] }>('/customers?pageSize=200').then((d) => setCustomers(d.rows)).catch(() => {});
-    api.get<typeof jobs>('/jobs/lookup').then(setJobs).catch(() => {});
+    api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
     api.get<{ defaultWarrantyMonths: number }>('/aftermarket/settings').then(setSettings).catch(() => {});
   }, []);
 

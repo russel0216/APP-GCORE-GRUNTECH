@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf, parseDay, todayLocal, weekDays } from '../../lib/day';
-import { ErrorBox, Field, Modal, statusTone, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, statusTone, useToast } from '../../components/ui';
+import { KIND_LABEL } from '../service/Reports';
 import {
   CalendarToolbar,
   MonthCalendar,
@@ -61,6 +62,43 @@ function toEvent(a: Activity): CalendarEvent {
   };
 }
 
+/** The slice of a service visit the sales calendar shows. */
+interface ServiceVisitChip {
+  id: string;
+  kind: string;
+  status: string;
+  dueDate: string;
+  customer: { id: string; name: string };
+  site: { id: string; name: string } | null;
+  asset: { id: string; code: string; name: string } | null;
+  assignedTo: { id: string; name: string } | null;
+}
+
+/** Visit chips share the grid with activities; the prefix keeps their ids apart. */
+const VISIT_PREFIX = 'visit:';
+
+/*
+  A service visit is context here, not sales work: somebody selling to a
+  customer wants to know an engineer is on their site on Thursday, but it is
+  not theirs to book or move. So the series is quiet — no tone, dimmed — and
+  every chip says "Service" in words, so it reads without colour, and opens
+  the visit on the Service Schedule rather than the activity form.
+*/
+function visitToEvent(v: ServiceVisitChip): CalendarEvent {
+  return {
+    id: `${VISIT_PREFIX}${v.id}`,
+    // A visit is due on a day, not at a time: all-day, sorts first.
+    date: v.dueDate.slice(0, 10),
+    time: null,
+    label: `Service · ${v.customer.name}`,
+    detail: `${KIND_LABEL[v.kind] ?? v.kind} · ${v.asset?.name ?? v.site?.name ?? 'site'} · ${
+      v.assignedTo?.name ?? 'unassigned'
+    }`,
+    tone: '',
+    done: true,
+  };
+}
+
 /** Local wall-clock value for a datetime-local input. */
 function toLocalInput(d: Date): string {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -77,9 +115,16 @@ function toLocalInput(d: Date): string {
  */
 export function SalesCalendar() {
   const toast = useToast();
+  const { can } = useAuth();
+  const navigate = useNavigate();
   const nav = useCalendarNav({ defaultView: 'week' });
   const [params, setParams] = useSearchParams();
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [visits, setVisits] = useState<ServiceVisitChip[]>([]);
+  // On by default for anyone who may see the schedule; `?visits=0` hides it,
+  // in the URL like the view, so a shared link shows what its sender saw.
+  const canVisits = can('gops.visits.view_all');
+  const showVisits = canVisits && params.get('visits') !== '0';
   const [people, setPeople] = useState<Person[]>([]);
   const [who, setWho] = useState('');
   const [loading, setLoading] = useState(true);
@@ -111,6 +156,56 @@ export function SalesCalendar() {
     // from/to are memoised on windowKey; the key is what names the window.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowKey, who, tick]);
+
+  /*
+    The service series. Not filtered by "whose activities": that picker lists
+    the people booked on THIS calendar, and visits belong to engineers, so
+    filtering by a salesperson would only ever empty it. Reports with no
+    visit are history rather than schedule, and stay on the Service Schedule.
+  */
+  useEffect(() => {
+    if (!showVisits) {
+      setVisits([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<{ visits: ServiceVisitChip[] }>(
+        `/service-visits/calendar${qs({ from: dayKeyOf(from), to: dayKeyOf(to), includeReports: 'false' })}`,
+      )
+      .then((feed) => {
+        if (!cancelled) setVisits(feed.visits);
+      })
+      // The activities are the page; a schedule that will not load leaves them standing.
+      .catch(() => {
+        if (!cancelled) setVisits([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowKey, showVisits]);
+
+  function toggleVisits(on: boolean) {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (on) next.delete('visits');
+        else next.set('visits', '0');
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  function openEvent(id: string) {
+    if (id.startsWith(VISIT_PREFIX)) {
+      navigate(`/g-ops/visits${qs({ visit: id.slice(VISIT_PREFIX.length) })}`);
+      return;
+    }
+    const a = byId.get(id);
+    if (a) setEditing(a);
+  }
 
   useEffect(() => {
     api
@@ -169,7 +264,10 @@ export function SalesCalendar() {
     }
   }
 
-  const events = useMemo(() => activities.map(toEvent), [activities]);
+  const events = useMemo(
+    () => [...activities.map(toEvent), ...visits.map(visitToEvent)],
+    [activities, visits],
+  );
   const byId = useMemo(() => new Map(activities.map((a) => [a.id, a])), [activities]);
   const today = todayLocal();
   const days = useMemo(() => weekDays(nav.week), [nav.week]);
@@ -214,6 +312,9 @@ export function SalesCalendar() {
             </option>
           ))}
         </select>
+        {canVisits && (
+          <Checkbox checked={showVisits} onChange={toggleVisits} label="Show service visits" />
+        )}
       </CalendarToolbar>
 
       <ErrorBox error={error} />
@@ -225,10 +326,7 @@ export function SalesCalendar() {
           loading={loading}
           itemNoun={{ one: 'activity', many: 'activities' }}
           onDayClick={nav.goToWeekOf}
-          onEventClick={(e) => {
-            const a = byId.get(e.id);
-            if (a) setEditing(a);
-          }}
+          onEventClick={(e) => openEvent(e.id)}
         />
       ) : (
         <div className="calendar-week" aria-busy={loading ? 'true' : undefined}>
@@ -263,11 +361,10 @@ export function SalesCalendar() {
                       <button
                         key={e.id}
                         type="button"
-                        className={`cal-item${e.done ? ' done' : ''}`}
-                        onClick={() => {
-                          const a = byId.get(e.id);
-                          if (a) setEditing(a);
-                        }}
+                        className={`cal-item${e.done ? ' done' : ''}${
+                          e.id.startsWith(VISIT_PREFIX) ? ' service' : ''
+                        }`}
+                        onClick={() => openEvent(e.id)}
                       >
                         <span className="mono cal-item-time">{e.time}</span>
                         <span>{e.label}</span>

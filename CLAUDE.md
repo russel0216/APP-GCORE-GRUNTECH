@@ -27,9 +27,11 @@ four databases and four copies of "customer".
 4. **Cost posts only when every step has approved.** Overtime is the live
    example: supervisor *and* HR. Subscribe to the settled event; never post on an
    intermediate approval.
-5. **Numbers come from `nextNumber(documentType, tx)`.** Never format a document
-   number by hand. Pass the caller's transaction so a rollback does not burn a
-   number.
+5. **Numbers come from `nextNumber(documentType, tx, ctx?)`.** Never format a
+   document number by hand. Pass the caller's transaction so a rollback does not
+   burn a number, and pass `{ ownerId }` in `ctx` for anything whose pattern may
+   carry `{EMP}` (the quotation's does). `ctx` is a `NumberContext`
+   (`{ at?, ownerId?, employeeNo? }`), never a bare `Date`.
 6. **Every printable document goes through `renderDocument(...)`.** Uniform PDFs
    across all menus is an explicit requirement. A module supplies sections; it
    never draws a header, sign-off block, footer or page number. The layout is
@@ -93,27 +95,53 @@ four databases and four copies of "customer".
     `?kind=` was never read, leaving all three menus showing every report. One
     screen serving several menu entries takes `initialFilters` on `DataList` and
     keeps each entry's own path.
+16. **A DataList's state lives in the URL, and only for keys it declares.**
+    `?q=`, `?scope=`, `?page=` and `?<key>=` for every key in the screen's
+    `filters` are read on mount and written back with `replace`; undeclared keys
+    (`new`, `customerId`, `visit`, `tab`…) are left untouched, so a list never
+    eats another screen's deep-link parameter. The URL beats `initialFilters`,
+    and a value equal to the route's preset is not written, so a preset menu
+    entry keeps the path the registry declares (rule 15). The API query still
+    says `search=`; only the browser URL says `q=`. A link such as
+    `/g-fin/ar?overdue=true` filters only if that DataList **declares**
+    `overdue` — link to declared keys only, and when a dashboard tile links to a
+    list, the tile's count and the filtered list's total must come from the same
+    query (the G-CHAIN "awaiting delivery" tile and `?awaiting=true` are asserted
+    equal). A page mounting two DataLists at once passes `urlState={false}` on
+    one of them, or they share `?page=`.
 
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales delivery chain hr finance aftermarket insights; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-495 assertions across permission resolution, numbering concurrency, the approval
-engine, the overtime two-step rule, amount bands, the audit trail, the PDF
-engine and the sign-offs, margins and money it prints, CSV parsing, the import contract, Phase 3's money paths (contract
-amount, schedule-of-values reconciliation, VAT both ways, revision immutability)
-Phase 6's HR arithmetic and face pipeline, Phase 7's tax, aging and allocation
-arithmetic, Phase 8's schedule dates and template versioning, and Phase 9's
-reconciliation between the reports and the records. `verify-hr.ts`,
-`verify-finance.ts`, `verify-aftermarket.ts` and `verify-insights.ts` need the
-API running: their route guards are checked over HTTP, and they say so loudly
-rather than skipping them if the API is down. All create their own records and clean
-up. Run them after touching anything in
+**1,583 assertions across twenty scripts** (counted 2026-09-27): foundation 104,
+masters 54, sales 64, costing 40, pipeline 44, calendar 38, numbering 46,
+partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
+evaluations 119, academy 97, finance 133, aftermarket 166, insights 92,
+insights-brief 43, workspace 39. They cover permission resolution, numbering
+concurrency and the per-employee counters, the approval engine, the overtime
+two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
+margins and money it prints, CSV parsing, the import contract, Phase 3's money
+paths (contract amount, schedule-of-values reconciliation, VAT both ways,
+revision immutability), Phase 6's HR arithmetic and face pipeline, Phase 7's
+tax, aging and allocation arithmetic, Phase 8's schedule dates and template
+versioning, Phase 9's reconciliation between the reports and the records, and
+Phase 10's rules listed below.
+
+**Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
+API.** The other seventeen check route guards and responses over HTTP against
+`http://localhost:5100`, and say so loudly — a failed "API is not reachable"
+line — rather than skipping them if the API is down or restarting (under
+`tsx watch` an edit elsewhere restarts it mid-run; rerun that script). All create
+their own records and clean up. Run them after touching anything in
 `api/src/shared/` or `api/src/permissions/`. Add cases when you add a shared
 service — the services have no click-path to test them, which is exactly why
-these scripts exist.
+these scripts exist. A script that needs a module's `onApprovalSettled`,
+`registerSearch` or `registerSchedule` side effect imports that route module
+(`verify-academy` imports `routes/academy`, `verify-numbering` imports
+`issuedThisPeriod` from `routes/admin`).
 
 `npx tsx scripts/audit-workflows.ts` is a separate read-only check: it reports
 any workflow step routed to a role nobody holds, or to the role that normally
@@ -135,7 +163,11 @@ docker compose up -d
 Postgres is on host port **5433**, not 5432, so it cannot collide with an
 existing local install. Then `cd api && npm run dev` and `cd web && npm run dev`.
 
-Seeded admin: `admin@gruntech.com` / `ChangeMe!2026`.
+Seeded admin: the seed creates `admin@gruntech.com` / `ChangeMe!2026` (or
+`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) **only on a fresh database** — when
+the account already exists it is left alone. The local dev database's admin
+password has since been changed, so that pair will not sign in here; use
+`npx tsx scripts/reset-password.ts admin@gruntech.com` if you need in.
 
 Re-running `npm run seed` is safe, and the rule it follows is worth knowing
 before you change it:
@@ -209,15 +241,19 @@ the tree is pinned to Prisma 6.19.3. Re-evaluate when Prisma 7 stabilises.
 
 ## Build order
 
-**All nine phases are built.** The sequence in
-`docs/BUSINESS-OPERATIONS-MODEL.md` §11 is complete.
+**All ten phases are built.** The sequence in
+`docs/BUSINESS-OPERATIONS-MODEL.md` §11 is complete; Phase 10 added depth across
+every division (hire-to-separate, cash advances, job orders, the pipeline board,
+partners, the numbering house scheme and more — see "Phase 10 notes" below and
+model §4.7).
 
 What is left is not more phases. It is: deploying to the server under the
 constraints below, assigning the seeded roles to real people (run
 `scripts/audit-workflows.ts` — approvals route to roles, and an unheld role
 means documents stall), entering real master data, and the two open questions
 in model §14 (retention/downpayment, and whether Gruntech withholds from
-suppliers). Treat further work as changes to a live system rather than as
+suppliers) plus the Phase 10 decisions listed there. Treat further work as
+changes to a live system rather than as
 phases: add a case to the matching `verify-*.ts` for anything that touches
 `api/src/shared/`.
 
@@ -434,10 +470,12 @@ are permission-configurable — that is deliberate, not a stub left behind.
   `verify-insights.ts` asserts profitability against the ledger read directly,
   and the company overview against the sales report. Add a reconciliation
   assertion whenever you add a figure that also appears somewhere else.
-- **A quotation's value is its latest APPROVED revision, else its latest.** The
-  overview briefly counted only approved ones and showed an open quotation as
-  worth nothing while Sales Analytics showed its real value. Two screens
-  disagreeing is the bug this module is most prone to.
+- **A quotation's value is its latest APPROVED revision, else its latest** —
+  `quotationValue()` in `shared/pipeline.ts`, and nothing else. The overview
+  briefly counted only approved ones and showed an open quotation as worth
+  nothing while Sales Analytics showed its real value. Two screens disagreeing
+  is the bug this module is most prone to; there used to be five inline copies
+  of this rule.
 - **Say when a number is not yet meaningful.** `tooEarly` flags a job that has
   spent under 20% of its budget, because its running margin is ~100% and that is
   true and useless. Screens lead with EXPECTED margin, which comes from the
@@ -455,3 +493,390 @@ are permission-configurable — that is deliberate, not a stub left behind.
   go out.** An export that failed to be logged should not have happened.
 - **Each role gets the cross-cutting view its job needs**; only `executive` sees
   all of them, because Insights aggregates margin.
+
+## Phase 10 notes worth carrying forward
+
+Phase 10 added depth to every division rather than a new one. The rules below
+are grouped by area; the model doc carries the business version (§4.1, §4.5,
+§4.6, §4.7, §7, §13).
+
+### Shared seams
+
+- **Manila calendar keys live in `shared/day.ts`** (`manilaDayKey`,
+  `manilaMonthKey`). Deep links and forecast columns bucket on these, never on
+  the host clock, because the server's clock is not the business's day.
+  Numbering keeps its local-getter `{YYYY}`/`{MM}`.
+- **"Today" in My Work is a timestamp window**, local midnight to the next, not
+  `dayKey()`. `dayKey()` is a key for `@db.Date` columns (UTC midnight of the
+  local date) and would put the boundary at 08:00 Manila. A provider comparing a
+  DATE column to that window asks for a padded range and filters in code, because
+  comparing a DATE to a timestamp truncates the edges.
+- **`registerSchedule(fn)` in `routes/workspace.ts` is the seam for "today"**;
+  Meetings, the Academy and the Service Schedule register from their own
+  modules. The `/my-work` row contract is `{ id, kind, title, subtitle?, when?,
+  overdue?, link }` with `link` starting `/` — a new source of work adds a query
+  and a mapper, never a new section shape.
+- **Search providers may declare `permission: string[]` and `ownWhere(user)`**;
+  own-scope narrowing applies only when the caller holds none of the provider's
+  non-`view_own` keys. A provider without it shows every record to a `view_own`
+  holder.
+- **`GET /users/lookup?q=&holding=` is the people picker** — authenticated only,
+  names only, declared above `/:id`. Never feed a picker from the admin-gated
+  `/users`; the salesperson or engineer using the form cannot read it.
+  `/employees/lookup` answers at most 50 rows — a picker that needs everyone adds
+  a search box, as the Academy's does.
+- **HR lists are Settings, whitelisted by route**: `GET/PUT
+  /hr-settings/lists/:key` for `hr.clearanceChecklist` and
+  `hr.evaluationCriteria`, each with its own zod row schema. A screen renders
+  settings from the merged `GET /hr-settings`, never the raw row, because the
+  seed's `update: {}` means an existing install has none of the newer keys
+  stored. A settings card PUTs only the keys it edits — sending the whole object
+  it loaded writes stale keys back over another card's save.
+- **`redact()` strips `dailyRate, burdenMultiplier, sssNo, philhealthNo,
+  pagibigNo, tin`.** Anything that audits an employee goes through it.
+- **A `recordLink()` of null prints text, never a link** — a link that lands on
+  "Not built yet" is worse than none. `ComingSoon` matches on
+  `useLocation().pathname`, most specific wins.
+- **`openAttachment()` in `components/Attachments.tsx` is the one way to open a
+  stored file** outside the Attachments card (bearer token → blob). The
+  attachment routes check authentication only, not per-record visibility — an
+  open owner decision (model §14), not something to paper over per screen.
+- **The deploy scripts seed after `prisma generate`**, not straight after
+  `db push`: the seed runs through the generated client, and that is the first
+  point where the client matches the schema.
+- **The seed's numbering loop creates with `dt.defaults ?? STOCK_NUMBERING` but
+  updates only `{ label }`**, so an administrator's pattern is never
+  overwritten. Industries are seeded like cost categories (`isSystem`). The
+  new `trainer` role and every Phase 10 role/permission pair reach existing
+  installs through the never-offered rule above.
+- **`audit-workflows.ts` knows the typical requester** of `cash_advance`,
+  `job_order`, `clearance`, `evaluation` and `training_certification`, and also
+  reports an HR step on a document HR sometimes raises while only one person
+  holds `hr` — the HR-typed version of the single-holder fault.
+- **Employee routes live in `routes/employees.ts`, the employee import in
+  `routes/imports/employees.ts`.** `imports.ts` exports `Registered`, so a module
+  (the Academy's `courseImport`) is wired into `REGISTRY` with one line.
+- **Shared web pieces from Phase 10**: `PeoplePicker` (pure UI over
+  `{ id, name, sub?, group? }[]`), `MeetLink`, `SettingListCard` (the
+  `/hr-settings/lists/:key` editor), `RecordHeader`'s `statusExtra`,
+  `openPdf(fullPath)` and `downloadBlob(apiPath, filename)` in `lib/api.ts`. A
+  package's own styles go in one file under `web/src/styles/`, imported from
+  `main.tsx` after `styles.css`, tokens only.
+
+### Numbering
+
+- **An OWNER-scoped counter keys its rows `2026-09@007`**; the template row is
+  `periodKey ''`. `{EMP}` is the last run of digits in the employee number padded
+  to three, `000` for an unlinked login; `Employee.employeeNo` wins over
+  `User.employeeNo`.
+- **An existing database keeps its configured pattern.** The seed only creates a
+  missing template; `PUT /numbering/:type` is the only thing that changes one. A
+  dev database older than the house scheme still issues `GT-QT-…` until an
+  administrator sets the quotation pattern once — verify scripts use throwaway
+  types so they pass either way.
+- **Changing period or scope starts a fresh run and keeps the old counters.**
+  Rows keyed for a period the type no longer uses stop being matched; they are
+  the record of what was issued, so never "clean them up".
+- **Three collision rules are enforced when a pattern is saved** (zod issues on
+  `pattern`): per employee needs `{EMP}`, monthly needs `{MM}` and a year,
+  yearly needs a year. `nextNumber` refuses the first again at issue time; the
+  other two it cannot tell from a deliberate choice, so the PUT is the only
+  guard.
+- **"Issued this period" is a sum** — `issuedThisPeriod()` in `routes/admin.ts`
+  adds the current key and every `<current>@<emp>` row. The screen's figure must
+  equal it; `verify-numbering.ts` asserts it for every type.
+- **Samples on Admin › Numbering carry the viewer's own `{EMP}` digits**, and a
+  template that cannot issue shows a `problem` instead of failing the screen —
+  the administrator is the one who can fix it.
+
+### Masters and partners
+
+- **Industry is a reference row, like `CostCategory`.** The five seeded rows are
+  `isSystem`: undeletable and never recoded, because reports group by the code.
+  Required on every new customer and deliberately not `.nullable()` on PATCH, so
+  a classified customer can never be unclassified. Reclassifying never
+  regenerates the customer code — identifiers do not move under the quotations
+  and invoices that print them. A lead's industry is its customer's; do not add
+  `industryId` to Lead, it would be a second copy that drifts.
+- **A partner IS a supplier with `isPartner`**, set and cleared only through
+  `/api/partners` so "who made this a partner" is audited in one place.
+  Removing a partner keeps the supplier and its resources; `DELETE
+  /suppliers/:id` refuses while `isPartner` is true, because the cascade would
+  drop catalogues G-CHAIN never shows.
+- **Partner links are http(s) only** (`safeHttpUrl()` on the server, and the
+  client only ever turns an http(s) string into an `href`). That is what keeps
+  `javascript:` out of a link a salesperson clicks.
+- **The price list is prices, never costs.** `partnerPriceList()` uses a strict
+  `select`, never `include`, and `verify-partners.ts` asserts the response bytes
+  contain neither `standardCost` nor `lastCost`. Switching to `include`
+  reintroduces the leak.
+- **Customer 360 and Supplier 360 are a window, never a way around.** Each
+  collection loads only when the caller holds the list permission of the screen
+  it comes from, and arrives as `[]` otherwise. Add a collection the same way —
+  never unconditionally.
+- **An import that matches on a non-unique name refuses rather than guesses** —
+  the items import's Preferred Supplier matching two suppliers (a principal and
+  its distributor sharing a brand) is an error, not a silent pick.
+
+### Sales: board, calendar, costing
+
+- **A lead with a quotation is never a board card**, and every quotation value
+  is `quotationValue()` — Insights, the board, Customer 360 and job orders call
+  it rather than a fourth lambda.
+- **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
+  `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
+  come from `allowedTargets()` on the same rules. Do not add a board-only move
+  endpoint or re-implement the rules in a page — three screens would then refuse
+  different things.
+- **`buildBoard()` is pure; `GET /pipeline` only fetches.** Test board arithmetic
+  in `verify-sales.ts` and reconciliation in `verify-pipeline.ts`. Weighted sums
+  round once at the end; summing rounded cards drifts. The CSV twin is
+  `/api/pipeline/board.csv` — Express never hands the router `/api/pipeline.csv`.
+- **Every calendar renders through `components/MonthCalendar.tsx`.** Callers hand
+  it `CalendarEvent`s already bucketed on a local day key (`dayKeyOf`) and toned
+  through `statusTone(status, extra)`. Do not draw a second grid or put a
+  status-to-colour rule in a caller.
+- **Calendar view and position live in the URL** (`?view=&month=&week=`,
+  `?date=` as an alias), never in localStorage — a calendar that opens on the
+  month you last looked at opens on the wrong month.
+- **Fetch on `nav.windowKey`, never on `from`/`to`**, and `to` is the last grid
+  day at 23:59:59.999 local: the API's `lte` is inclusive, and a window ending on
+  midnight counts that instant in two windows. `verify-calendar.ts` proves a
+  boundary activity lands in exactly one.
+- **Never `new Date('YYYY-MM-DD')` in the browser** — that is 08:00 Manila. Use
+  `parseDay`/`dayKeyOf` from `web/src/lib/day.ts`, which is DOM-free so the verify
+  script can import it.
+- **One roving tab stop per calendar grid**, and DOM focus follows only keyboard
+  moves, so a toolbar click leaves the person on the button they pressed.
+- **`activityWhere()` in `shared/activities.ts` is the one rule** for which sales
+  activities a query means (inclusive `lte`, 14-day default). Activity writes are
+  audited like every other write.
+- **"Start costing" moves a lead forwards only** (from NEW, CONTACTED, QUALIFIED
+  or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
+  unknown lead burns no number. `PATCH { leadId }` is a correction and moves
+  nothing.
+- **A duplicated costing copies the numbers and not the history** — DRAFT, owned
+  by the copier, no lead, revisions or jobs, totals recomputed through
+  `recalc(tx)` rather than copied, so it can never carry a figure its own lines
+  do not add up to.
+
+### Delivery and procurement
+
+- **A job's customer is its costing's customer**; `POST /jobs` refuses another.
+  **A renewal is one transaction**: `renewedFromContractId` forces
+  SERVICE_CONTRACT and writes the DRAFT contract with the job, so a refused
+  renewal leaves no job behind. `renewalTerm()` keeps whole-month terms whole.
+- **Turnover registers equipment, then moves the status** — never a TURNED_OVER
+  job with nothing in the installed base.
+- **`GET /jobs/lookup` excludes COMPLETED and TURNED_OVER** unless
+  `?includeClosed=true`; equipment registration and supplier bills need it.
+- **Cross-module cards are hidden, not empty, without their `view_all`**, and a
+  card reading another module's list with `?jobId=` re-checks each row's job on
+  the client, so a register that has not learned the filter shows nothing rather
+  than every project's documents.
+- **Overtime on a project shows the posted amount only**, never the rate, even
+  though the list endpoint returns it.
+- **A PO is edited only while DRAFT, by its author or `edit_all`**
+  (`canEditRecord` in `poForEdit()`), and every edit audits. A direct-to-job PO
+  line must name its cost category (`requireCategory()`) — without it the
+  approved order commits nothing for that line. An order from an awarded canvass
+  keeps its supplier; the link is derived (`awardedCanvass()`), there is no
+  `canvassId`.
+- **Stock value is `stockOnHand()` everywhere** — the G-CHAIN dashboard,
+  `/inventory/reports/summary` and Insights. **A dashboard never prints a zero
+  it could not count**: `chainOverview()` returns `null` for a figure the caller
+  cannot open, and the tile prints "—".
+- **Supplier bills appear on a PO or receiving only for `gfin.ap.view_all`**
+  (`billsVisible`); a link to a bill the reader cannot open is a 403 waiting to
+  happen.
+
+### Aftermarket: Service Schedule and job orders
+
+- **`regenerateSchedule` only touches GENERATED visits** (`sequence: { not:
+  null }` in both the delete and the kept count). A hand-booked call-out or a job
+  order's visit has no sequence and must survive; this `where` is the one place
+  such a visit could be deleted silently — do not simplify it.
+- **`GET /service-visits/calendar` is a range feed** (≤ 62 days, runs
+  `sweepOverdue()` first) and `GET /service-visits/:id` is what every `?visit=`
+  link depends on. Both sit above the other visit routes — the
+  `/overtime/chargeable` route-order trap.
+- **Overdue is derived, missed is swept.** Cancelling a visit requires a written
+  reason. A visit takes exactly one report (a second is a 400, not a
+  unique-constraint 500), and the report takes the visit's facts.
+- **A returned (REJECTED) service report is edited and resubmitted**; freezing it
+  left its visit unable ever to complete.
+- **Job-order approval creates exactly one visit**, in the same transaction:
+  `settleJobOrder` is guarded on PENDING_APPROVAL and claims the row with a
+  conditional `updateMany`, so a double settle schedules nothing twice. The order
+  completes in the existing `onReportSettled` — no second path.
+- **Cover is `coverageFor(assetId, date)`**: CONTRACT, else WARRANTY, else
+  CHARGEABLE, from facts on the requested date. **A job order posts no cost**;
+  cost reaches its `jobId` through overtime, PRs, stock issues and claims.
+- **The amount taken from a quotation is its SUBTOTAL** — the invoice adds VAT,
+  so the total would tax the work twice.
+- **`/job-orders/options` feeds the form's pickers** behind the form's own
+  permission, because a salesperson holds no Installed Base permission.
+- **Section photos** are attachments on `service_report` with entityId
+  `<reportId>~<sectionKey>`; `GET /service-reports/:id` returns them by prefix.
+
+### Finance: cash advances and liquidation
+
+- **`refreshAdvance(tx, id)` is the only thing that decides an advance's figures
+  and status**, re-derived from DISBURSEMENT and RECEIPT allocations and the
+  approved liquidation, never incremented — so deleting a payment rolls it back
+  exactly. Direction comes from `Payment.kind` (`allocationKind()`), never a
+  second column.
+- **An advance is released in one voucher**; `POST /payments` refuses anything
+  but exactly its outstanding. The liquidation deadline is snapshotted at
+  release from `finance.rules.advanceLiquidationDays`, so a settings change never
+  moves a deadline already given.
+- **`claimPayable(row) = max(0, total − advance.amountReleased)`** — everything
+  that asks what is still owed on a claim goes through it, or the person is owed
+  their advance twice. SETTLED is terminal.
+- **Both settle handlers are idempotent and exported** (`settleExpense`,
+  `settleAdvance`): a repeated settlement posts, notifies and audits nothing.
+- **An expense claim is submitted with `requesterId: claim.claimedById`**, not
+  whoever pressed the button — otherwise a super admin submitting for somebody
+  could approve a claim they did not file. A refused submit reverts to DRAFT.
+- **A refund is cash in, never a collection**: every "collected" aggregate
+  filters `customerId: { not: null }`.
+- **`financePosition(today)` in `shared/finance.ts` is the one definition of the
+  working position** (receivable − payable − reimbursable − advancesToRelease).
+  G-FIN's dashboard and Insights both read it; the cash forecast's totals equal
+  it and both verify scripts assert that.
+- **`GET /cash-advances/for-job/:jobId` is budget monitoring, not finance** —
+  it requires `gops.budget_monitoring.view_all` and lives in `advances.ts` so
+  `jobs.ts` imports nothing from finance. `/expense-claims/chargeable` is what
+  the claim and advance forms load, not `/jobs/lookup`, which filers cannot see.
+- **`Invoice.jobOrderId` is unique**, and `POST /invoices { jobOrderId }` refuses
+  a warranty/contract order, an uncompleted one and a second invoice.
+
+### HR: leave and overtime by id
+
+- **A single leave or overtime record is readable by `view_all`, the owner, or an
+  approver of that document** (`mayReadHrRecord` / `isApproverOf` in `hr.ts`).
+  The approver door exists because a `view_own` supervisor must open what they
+  are asked to decide. `GET /overtime/:id` had no own-scope check at all before.
+- **`canCancel` / `canFileActual` mirror the POST routes' own checks** — change
+  the flag with the route, or an approver is offered a button the route refuses.
+- **A leave submit the engine refuses reverts to DRAFT**, never PENDING with no
+  approval behind it. Every HR filing write audits.
+
+### Hire-to-separate: plantilla, clearance, turnover
+
+- **Filled and vacant are counted, never stored.** `plantillaSummary()` is the
+  one definition; `Position` must never get a filled or vacant column.
+  Over-complement is shown, not refused — refusing would block a real hire.
+- **`Employee.position` is a mirror with one writer** — `positionFields()` /
+  `setEmployeePosition()` and `mirrorPositionTitle()`. `verify-plantilla.ts`
+  asserts the mirror for every linked employee in the database. A position anyone
+  has held is deactivated, not deleted.
+- **The import resolves in `build` and creates in `write`**, because `runImport`
+  calls `build` on every dry run; a dry run creates no position and burns no
+  number.
+- **Clearance items that point at a record derive their status from it**
+  (`scanAccountabilities()` / `syncClearanceItems()` on every GET and on submit).
+  A derived item is waived with a reason, never cleared by hand; the leaver never
+  clears their own.
+- **Who may clear is one function, `areaRight()`**, used by the route and by the
+  screen's `canClear` map. The requester is the leaver's own login where one
+  exists, so step 1 is *their* supervisor and the self-approval rule keeps them
+  off their own form; `hrSignsOwnWork()` refuses a submit when the raiser is the
+  only HR holder.
+- **Approval records the separation, and nothing else does.** The settle
+  subscriber sets `dateSeparated` and deactivates employee and login once the day
+  has passed; `sweepSeparations()` (on read) closes a login only behind a CLEARED
+  clearance and otherwise asks an admin — a hand-typed date is one keystroke.
+  Errors in the subscriber are logged, never thrown: the approval is the record
+  of fact.
+- **Turnover is arithmetic over employee dates, no table** — `turnover()` feeds
+  the report, its CSV, the register strip and the dashboard, so they cannot
+  disagree. An employee with no hire date counts from record creation, and the
+  report says so.
+- **`DELETE /employees/:id` 409s** once the employee has a clearance, evaluation,
+  training record or attendance row — deactivate instead.
+
+### Evaluations
+
+- **Regularisation is an approved document, not a field edit** — the employee row
+  changes only in the `onApprovalSettled('evaluation')` subscriber, after HR
+  *and* executive. ABSORB keeps `dateHired`; END changes nothing and tells HR to
+  raise a clearance.
+- **Due is derived on read** (`dueEvaluations()` / `milestonesFor()`); an
+  evaluation covers a milestone only if its `dueDate` is on or after it, which is
+  what makes an EXTEND bring END due again. Reading `/due` notifies HR once per
+  milestone, deduplicated on the link — there is no scheduler.
+- **`visibleTo()` is the one rule**: the subject sees their evaluation only once
+  APPROVED, and anybody else gets a **404, not a 403** — "there is an evaluation
+  about you" is itself information.
+- **The subject can never approve their own evaluation** — `/submit` refuses when
+  any step's approvers include them, and the subscriber refuses to apply an
+  approval any of whose actions they took, because roles change between
+  submission and decision.
+- **Ratings never reach the audit log** (a summary, null before/after —
+  asserted), because admins read the audit trail and a rating is not between
+  them. **Evaluations have no search provider**, deliberately.
+- **Criteria are snapshotted onto `EmployeeEvaluationLine`** when the form opens;
+  a key is permanent (rename freely, never reuse). The score is the weighted mean
+  of RATED lines only. A RETURNED evaluation goes back to DRAFT; REJECTED closes
+  it. There is no DELETE route although `ghr.evaluations.delete` exists — a
+  numbered document is cancelled.
+
+### Meetings
+
+- **A meeting has no workflow, no PDF and no money**; it reuses `ActivityStatus`
+  rather than a fourth vocabulary for the same three words.
+- **G-Core holds no Google credentials.** `parseGoogleLink` is the only thing
+  that decides what was pasted; `googleEventId` stays null until a Calendar
+  integration is deliberately built.
+- **Invitations go out on "Send invitations", never on save**
+  (`MeetingInvitee.notifiedAt`). A time change bumps `icsSequence` and tells only
+  those already told; cancelling bumps it too so the `.ics` withdraws the event
+  under the same UID. The UID is the row id — never change it.
+- **Once invitations went out a meeting cannot be deleted** (409, for `delete`
+  holders too) — it is cancelled with a reason, because the record is what those
+  people were told.
+- **Visibility is one function, `visibleWhere(user)`**; a `view_own` holder who is
+  not on the list gets a 404. Only the invitee answers for themselves.
+
+### Academy
+
+- **The passport is derived, never kept** — `lineState()`, `readinessFor()` and
+  `teamReadiness()` are the only arithmetic, and expiry uses `expiryState()` from
+  `shared/aftermarket.ts` (the warranty rule). Requirements match by id, never by
+  title.
+- **The record that answers for a course is the one that lasts longest**
+  (`bestRecord`), so a renewal supersedes without deleting.
+- **Two doors write a `TrainingRecord`**: `completeSession` (VERIFIED, number
+  null, final; `@@unique([sessionId, employeeId])` makes completing twice
+  impossible) and the external certificate through `training_certification`
+  (`pickWorkflow` checked before `nextNumber` so a missing workflow burns no
+  number). HR never records their own.
+- **Changing a course's validity never rewrites an expiry on file** — the VAT
+  snapshot principle.
+- **The trainer is the owner** (`canEditRecord` on `trainerId`) and must hold
+  `ghr.training_sessions.create`. **The calendar is company-wide; results are
+  not** — someone who sees a session only through the calendar sees who is going
+  and their own result.
+- **Cancel, don't delete** a session anyone is enrolled on; a time or course
+  change bumps the `.ics` sequence and tells attendees. Expiry notices are swept
+  on read, once per record, claimed with a conditional `updateMany`.
+
+### Insights
+
+- **The brief reconciles to the module dashboards through their own functions**
+  — `gopsOverview`, `chainOverview`, `attendanceDay`, `financePosition`. Change the
+  shared function, never the brief; `verify-insights-brief.ts` asserts each figure
+  against the module's endpoint. `attendanceDay()` IS the HR dashboard.
+- **A figure the caller may not see is omitted, never sent as 0.** Each line
+  needs that module's `*.dashboard.view_all`; the summary CSV needs
+  `insights.dashboard.export` plus each module's `*.dashboard.export` — seeing a
+  number is not the right to take a file of it away.
+- **`parseRange().to` is 23:59:59.999Z of the last day**; midnight dropped the
+  last day for timestamp-dated documents. G-OPS period figures keep
+  `periodWhere`'s server-clock end of day (verify-aftermarket pins
+  `/gops/overview`); three day conventions, never mixed in one line.
+- **CSV columns are appended, never reordered**, so a sheet built on an export
+  keeps working.
+- **Industry reporting puts UNCLASSIFIED last**, and the industry table sums to
+  the report's own totals — asserted.

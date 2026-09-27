@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -218,7 +218,28 @@ interface LeadRow {
 export function Leads() {
   const { can } = useAuth();
   const navigate = useNavigate();
-  const [creating, setCreating] = useState(false);
+  const [params, setParams] = useSearchParams();
+  /*
+    `?new=1&customerId=` opens the form already linked to that customer —
+    Customer 360's "New lead" lands here. The URL is the hand-off, the same
+    way Quotations reads it, so there is no second create form anywhere.
+  */
+  const presetCustomerId = params.get('customerId') ?? undefined;
+  const [creating, setCreating] = useState(() => !!params.get('new') && can('gops.leads.create'));
+
+  function closeCreate() {
+    setCreating(false);
+    if (params.has('new')) {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          for (const k of ['new', 'customerId']) next.delete(k);
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }
   const [reload, setReload] = useState(0);
   const [people, setPeople] = useState<Person[]>([]);
 
@@ -322,11 +343,12 @@ export function Leads() {
       {creating && (
         <LeadForm
           people={people}
-          onClose={() => setCreating(false)}
+          presetCustomerId={params.has('new') ? presetCustomerId : undefined}
+          onClose={closeCreate}
           onSaved={(id) => {
             setCreating(false);
             setReload((r) => r + 1);
-            navigate(`/g-ops/leads/${id}`);
+            navigate(`/g-ops/leads/${id}`, { replace: params.has('new') });
           }}
         />
       )}
@@ -692,11 +714,14 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 export function LeadForm({
   lead,
   people,
+  presetCustomerId,
   onClose,
   onSaved,
 }: {
   lead?: LeadRow;
   people: Person[];
+  /** A new lead for a customer already on file (`?new=1&customerId=`). */
+  presetCustomerId?: string;
   onClose: () => void;
   onSaved: (id: string) => void;
 }) {
@@ -779,15 +804,17 @@ export function LeadForm({
    * person who sent this enquiry is often not the person on the customer
    * record, and the site is often not the one the work is for.
    */
-  async function adoptCustomer(c: { id: string; name: string }) {
-    setForm((f) => ({ ...f, customerId: c.id, companyName: c.name }));
+  async function adoptCustomer(c: { id: string; name?: string }) {
+    setForm((f) => ({ ...f, customerId: c.id, companyName: c.name ?? f.companyName }));
     setPicking(false);
     setMatches([]);
     try {
       const full = await api.get<{
+        name: string;
         contacts: { name: string; email: string | null; phone: string | null; mobile: string | null }[];
         sites: { address: string | null; city: string | null }[];
       }>(`/customers/${c.id}`);
+      if (!c.name) setForm((f) => ({ ...f, companyName: f.companyName || full.name }));
       const contact = full.contacts[0];
       const site = full.sites[0];
       setForm((f) => ({
@@ -802,6 +829,12 @@ export function LeadForm({
       /* the lead is still valid without the customer's details */
     }
   }
+
+  // Arriving from Customer 360: link the customer before anything is typed.
+  useEffect(() => {
+    if (!lead && presetCustomerId) void adoptCustomer({ id: presetCustomerId });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lead, presetCustomerId]);
 
   /** No match: the enquiry is from somebody not on file yet. */
   async function createCustomer() {

@@ -21,7 +21,7 @@ previous implementation traces back to its absence.
 | Users, supervisors, departments | `/admin/users` |
 | Roles + granular permissions + per-person overrides | `/admin/roles` |
 | Company settings (drives every PDF) | `/admin/company` |
-| Document numbering, 26 document types | `/admin/numbering` |
+| Document numbering, 38 document types — yearly, monthly or per-employee counters; quotations use the house scheme `0012609001` | `/admin/numbering` |
 | Approval engine, one for every document type | `/admin/workflows` |
 | Audit log | `/admin/audit` |
 | Notification centre with deep links | bell in the top bar |
@@ -35,12 +35,12 @@ previous implementation traces back to its absence.
 
 | Capability | Where |
 |---|---|
-| Customers, multiple contacts, multiple sites | `/g-ops/customers` |
+| Customers, multiple contacts, multiple sites, classified by industry | `/g-ops/customers` |
 | **Customer 360** — one workspace per customer | `/g-ops/customers/:id` |
-| Suppliers and their contacts | `/g-chain/suppliers` |
+| Suppliers and their contacts; **Supplier 360** | `/g-chain/suppliers` |
 | Employees, with pay behind its own permission | `/g-hr/employees` |
 | Item master, typed and costed | `/g-chain/items` |
-| Cost categories (the five buckets) + item categories | `/admin/categories` |
+| Cost categories (the five buckets) + item categories + industries | `/admin/categories` |
 | Warehouses and locations | `/g-chain/warehouses` |
 | **CSV import** for all four masters | Import button on each list |
 
@@ -49,20 +49,21 @@ previous implementation traces back to its absence.
 | Capability | Where |
 |---|---|
 | Leads, assignable, with status and weighted value | `/g-ops/leads` |
-| **Costing** — five cost buckets, markup, contract amount | `/g-ops/costing` |
+| **Costing** — five cost buckets, markup, contract amount; started from a lead, or duplicated | `/g-ops/costing` |
 | **Schedule of values** — scope of work that billing is measured against | Costing → Scope of work |
 | Quotations with preserved revisions | `/g-ops/quotations` |
 | Quotation approval through the shared engine | Submit for approval |
 | Quotation and costing PDFs | Print on either screen |
 | Sales calendar — a week per screen, or the month, with the view and position in the URL | `/g-ops/calendar` |
-| Pipeline with weighted value | `/g-ops/pipeline` |
+| **Pipeline board** over leads and quotations — move by drag or keyboard, this-month forecast, CSV | `/g-ops/pipeline` |
+| **Partners** — principals' catalogues, price lists and sizing tools | `/g-ops/partners` |
 
 **Phase 4 — Delivery.** Job → budget → progress → billing.
 
 | Capability | Where |
 |---|---|
 | Projects created from a costing | `/g-ops/projects` |
-| **Project workspace** — one page, eight tabs | `/g-ops/projects/:id` |
+| **Project workspace** — one page, twelve tabs, linked down to every PR, PO, invoice, advance and service record | `/g-ops/projects/:id` |
 | **Four-state cost ledger** — budgeted / committed / incurred / consumed | Project → Budget |
 | Budget requests, approved through the shared engine | `/g-ops/budget-requests` |
 | Schedule of values, snapshotted from the costing | Project → Scope |
@@ -124,9 +125,10 @@ previous implementation traces back to its absence.
 | Register everything a turned-over project installed, in one go | Installed base → from a project |
 | Service contracts — cover, frequency, what is covered | `/g-ops/service-contracts` |
 | **PM schedule written from the contract** | Contract → Activate and schedule |
-| Every visit, assigned and tracked | `/g-ops/visits` |
+| **Service Schedule** — every visit on one calendar, month or list | `/g-ops/visits` |
+| **Job orders** — call-outs and repairs; approval schedules the visit, a chargeable one is invoiced once | `/g-ops/job-orders` |
 | **Report templates as data**, versioned | `/g-ops/report-templates` |
-| Commissioning, PM, inspection and corrective reports | `/g-ops/service-reports` |
+| Commissioning, PM and inspection reports | `/g-ops/commissioning`, `/g-ops/pm`, `/g-ops/inspections` |
 | **Renewals** — contracts ending and warranties lapsing | `/g-ops/renewals` |
 | Service costing | `/g-ops/service-costing` |
 
@@ -134,7 +136,7 @@ previous implementation traces back to its absence.
 
 | Capability | Where |
 |---|---|
-| **Company overview** — the whole business on one screen | `/insights` |
+| **Company overview** — the company at a glance, one line per division, then the whole business on one screen | `/insights` |
 | Twelve-month trend: won, billed, collected, cost | Overview |
 | **Project profitability** with a watchlist | `/insights/profitability` |
 | **Sales analytics** — funnel, win rates, weighted pipeline | `/insights/pipeline` |
@@ -143,11 +145,27 @@ previous implementation traces back to its absence.
 | Performance and the approval bottleneck | `/insights/performance` |
 | A CSV twin of every report | Export on each screen |
 
-Insights adds **no tables**. Every figure is read off documents the other eight
+Insights adds **no tables**. Every figure is read off documents the other
 phases record, which is the only way a management report can never disagree
-with the records behind it. Their
-**access and numbering are already configurable**, so the surrounding
-configuration is in place before the screen arrives.
+with the records behind it.
+
+**Phase 10 — Depth.** Following a person from hire to separation, money handed
+out before it is spent, and service work outside a contract.
+
+| Capability | Where |
+|---|---|
+| **Plantilla** — authorised positions, filled and vacant counted live | `/g-hr/plantilla` |
+| **Evaluations** — probation and trainee milestones; regularisation by approval | `/g-hr/evaluations` |
+| **Turnover & clearance** — clearance by area, separation, turnover rate | `/g-hr/clearances` |
+| **Meetings** — invitees, pasted Meet link, `.ics`, month view | `/g-hr/meetings` |
+| **Academy** — courses, training calendar and sessions, training passports and readiness | `/g-hr/academy/…` |
+| **Cash advances** — request, release, liquidate, refund | `/g-fin/cash-advances` |
+| **My Work** filled from every module — awaiting me, assigned, today, drafts, renewals | `/my-work` |
+| Leave, overtime and users open by link | `/g-hr/leave/:id`, `/g-hr/overtime/:id`, `/admin/users/:id` |
+| Every list's search, scope, page and filters in the URL | any list screen |
+
+The business rules behind these are in the model doc (§4.1, §4.5, §4.6, §4.7)
+and in CLAUDE.md's "Phase 10 notes".
 
 ### The costing → billing backbone
 
@@ -223,9 +241,12 @@ Then open http://localhost:5173.
 | Health | http://localhost:5100/api/health |
 | Postgres | localhost:**5433** (5433, not 5432, so it cannot collide with an existing local Postgres) |
 
-First sign-in: `admin@gruntech.com` / `ChangeMe!2026` — **change it immediately**
-under Account. Override the defaults with `SEED_ADMIN_EMAIL` and
-`SEED_ADMIN_PASSWORD` before running the seed if you prefer.
+First sign-in on a fresh database: `admin@gruntech.com` / `ChangeMe!2026` —
+**change it immediately** under Account. Override the defaults with
+`SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` before running the seed if you
+prefer. The seed creates that account only when it does not exist, so on a
+database whose admin password has been changed, re-seeding does not reset it
+(see "Locked out" below).
 
 ### Verifying the foundation
 
@@ -238,7 +259,7 @@ drives them the way a Phase 3 module will:
 cd api && npx tsx scripts/verify-foundation.ts
 ```
 
-40 assertions: role inheritance and per-person overrides, record ownership,
+104 assertions: role inheritance and per-person overrides, record ownership,
 menu derivation, numbering under concurrency, approval routing and notification,
 segregation of duties, the overtime two-step rule, amount bands, the audit trail
 and PDF pagination.
@@ -247,7 +268,7 @@ and PDF pagination.
 cd api && npx tsx scripts/verify-masters.ts
 ```
 
-40 assertions for Phase 2: CSV parsing (quoted commas, embedded newlines,
+54 assertions for Phase 2: CSV parsing (quoted commas, embedded newlines,
 doubled quotes, Excel's BOM), the import contract (dry run writes nothing, one
 bad row blocks the file, re-import updates rather than duplicates), the
 permission gate on employee pay, master numbering under concurrency, and that
@@ -257,17 +278,18 @@ global search never returns a record kind the user cannot open.
 cd api && npx tsx scripts/verify-sales.ts
 ```
 
-28 assertions for Phase 3, concentrated on the money: how the contract amount
+64 assertions for Phase 3, concentrated on the money: how the contract amount
 is reached, that margin is profit over contract and not over cost, that the
 schedule of values reconciles to the centavo on an awkward figure, VAT computed
 both inclusive and exclusive, record ownership, that an author cannot approve
-their own quotation, and that a superseded revision keeps its own totals.
+their own quotation, that a superseded revision keeps its own totals, and the
+pipeline board's arithmetic.
 
 ```bash
 cd api && npx tsx scripts/verify-delivery.ts
 ```
 
-39 assertions for Phase 4: that the schedule of values is snapshotted and does
+78 assertions for Phase 4: that the schedule of values is snapshotted and does
 not move when the costing is later edited, the four-state budget arithmetic
 (including that consumed is not subtracted twice), that a budget request only
 moves the budget after every approval, that earned value is weighted by scope
@@ -279,7 +301,7 @@ lines share a time basis.
 cd api && npx tsx scripts/verify-chain.ts
 ```
 
-35 assertions for Phase 5, mostly about not counting money twice: the moving
+63 assertions for Phase 5, mostly about not counting money twice: the moving
 average (a receipt moves it, an issue does not), that a warehouse cannot issue
 or lend what it does not have, that issuing an order releases the request's
 commitment, that receiving releases the order's, that a direct-to-job receipt is
@@ -290,7 +312,7 @@ on top of incurred.
 cd api && npx tsx scripts/verify-hr.ts
 ```
 
-69 assertions for Phase 6. The arithmetic first — lateness against the grace
+104 assertions for Phase 6. The arithmetic first — lateness against the grace
 period, the dinner break deducted only from overtime that actually spans it,
 weekends excluded from leave, half days read off the times. Then the two rules
 this phase exists for: that a leave balance is drawn down on approval and never
@@ -309,7 +331,7 @@ authorisation, an unexplained variance — are checked over HTTP.
 cd api && npx tsx scripts/verify-finance.ts
 ```
 
-64 assertions for Phase 7, almost all of them about three things. That **EWT is
+133 assertions for Phase 7, almost all of them about three things. That **EWT is
 withheld on the gross and not on the VAT**, and that an invoice paid to its net
 collectible reads as paid rather than as short by the withheld amount. That a
 **supplier bill matched to a receiving posts no job cost** — the receiving
@@ -321,7 +343,7 @@ that no longer owes that much.
 cd api && npx tsx scripts/verify-aftermarket.ts
 ```
 
-75 assertions for Phase 8. Mostly dates, because that is what this phase is:
+166 assertions for Phase 8. Mostly dates, because that is what this phase is:
 that a quarterly contract signed in January is first visited in April rather
 than on day one, that a visit falling past the end date is dropped rather than
 squeezed in, and that three months after 31 January is 30 April. Then the two
@@ -333,7 +355,7 @@ immutable**, so a report from two years ago still renders the way it was signed.
 cd api && npx tsx scripts/verify-insights.ts
 ```
 
-80 assertions for Phase 9. Since it adds no records, they are about the thing a
+92 assertions for Phase 9. Since it adds no records, they are about the thing a
 reporting layer gets wrong instead: **reconciliation**. Profitability read
 through the report equals the ledger read directly, to the centavo, on awkward
 figures. The company overview and the sales report show the same pipeline
@@ -341,8 +363,33 @@ total. A job that has spent 1% of its budget is flagged as too early to judge
 rather than reporting a 99% margin. Slow-moving stock ranks by value, not age.
 And the whole module refuses to write anything at all.
 
-All nine create their own records and clean up after themselves. Run them after
-touching anything in `api/src/shared/` or `api/src/permissions/`.
+Phase 10 added eleven more, one per area, each named for what it covers:
+
+| Script | Assertions | What it holds to |
+|---|---|---|
+| `verify-costing` | 40 | "Start costing" moves a lead forwards only; a duplicate copies numbers, not history |
+| `verify-pipeline` | 44 | the board reconciles to Sales Analytics to the centavo; the move rules over HTTP |
+| `verify-calendar` | 38 | calendar windows never count a boundary instant twice; edge months |
+| `verify-numbering` | 46 | per-employee monthly counters, the collision rules, "issued this period" |
+| `verify-partners` | 82 | a partner is a supplier; the price list never carries a cost |
+| `verify-plantilla` | 91 | filled/vacant derived; clearance items derive from records; separation on approval |
+| `verify-meetings` | 86 | invitations on send, not save; `.ics` sequence; visibility |
+| `verify-evaluations` | 113 | regularisation only after every approval; the subject never approves or peeks |
+| `verify-academy` | 97 | the passport is derived; two doors write a training record |
+| `verify-insights-brief` | 43 | every brief figure equals the module dashboard's own |
+| `verify-workspace` | 39 | My Work fills from every module; every row links to a record |
+
+**1,577 assertions across twenty scripts.** Run them all:
+
+```bash
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
+```
+
+Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
+API; the other seventeen check route guards over HTTP and fail loudly if the API
+is not running. All twenty create their own records and clean up after
+themselves. Run them after touching anything in `api/src/shared/` or
+`api/src/permissions/`.
 
 ### Checking your approval routing
 

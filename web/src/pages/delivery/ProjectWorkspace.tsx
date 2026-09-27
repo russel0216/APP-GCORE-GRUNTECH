@@ -1871,9 +1871,7 @@ function BudgetRequestRowView({
       {open && (
         <tr className="del-expand-row">
           <td colSpan={7} id={`br-approval-${row.id}`}>
-            <div className="del-approval-compact">
-              <DocumentApproval documentType="budget_request" documentId={row.id} />
-            </div>
+            <DocumentApproval documentType="budget_request" documentId={row.id} compact />
           </td>
         </tr>
       )}

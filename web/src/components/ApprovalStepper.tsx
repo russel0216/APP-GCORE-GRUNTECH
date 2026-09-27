@@ -115,10 +115,17 @@ export function DocumentApproval({
   documentId,
   /** Bump to re-read after a submit elsewhere on the page. */
   reloadToken = 0,
+  /**
+   * Drawn inside something that is already a container — an expanded table
+   * row, a panel — rather than as a card of its own: no card chrome, so it
+   * does not sit as a box within a box.
+   */
+  compact = false,
 }: {
   documentType: string;
   documentId: string;
   reloadToken?: number;
+  compact?: boolean;
 }) {
   const [requests, setRequests] = useState<Request[] | null>(null);
 
@@ -205,7 +212,7 @@ export function DocumentApproval({
           : 'warn';
 
   return (
-    <section className="card panel-block" aria-label="Approval">
+    <section className={compact ? 'panel-block' : 'card panel-block'} aria-label="Approval">
       <div className="panel-head">
         <h3 className="card-title">Approval</h3>
         <span className={`badge ${tone}`}>{outcome}</span>

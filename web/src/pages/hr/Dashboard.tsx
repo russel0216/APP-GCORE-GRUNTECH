@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, getToken, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -12,6 +13,9 @@ import {
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { todayLocal } from '../../lib/day';
+import { PeopleTiles } from './dashboard/PeopleTiles';
+import { ReadinessTile } from './dashboard/ReadinessTile';
+import { EvaluationsDuePanel, EvaluationsDueStat } from './dashboard/EvaluationsDuePanel';
 
 /**
  * The HR dashboard — "Attendance dashboard showing Present / Late / On Leave /
@@ -20,6 +24,11 @@ import { todayLocal } from '../../lib/day';
  * Absent is worked out rather than stored: it is every active employee with no
  * attendance row and no approved leave covering the day. Writing an absence
  * row overnight would be wrong the moment somebody clocked in late.
+ *
+ * Below the day sit the people pieces — plantilla and separations, training
+ * readiness, evaluations due. Each reads the endpoint its own screen reads and
+ * renders nothing for somebody without the right to it, so this page mounts
+ * them without checking permissions itself.
  */
 
 const STATUS_TONE: Record<string, string> = {
@@ -70,6 +79,8 @@ interface Dashboard {
 }
 
 export function HrDashboard() {
+  const { can } = useAuth();
+  const openEmployee = can('ghr.employees.view_all');
   const [date, setDate] = useState(today());
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -157,11 +168,14 @@ export function HrDashboard() {
         {
           label: 'Pending approvals',
           icon: 'document' as const,
-          more: 'Open My Work',
+          more: 'Open leave',
           value: data.summary.pendingApprovals,
-          sub: data.summary.pendingApprovals > 0 ? 'leave and overtime waiting' : 'queue is clear',
+          sub:
+            data.summary.pendingApprovals > 0
+              ? 'leave, overtime and evaluations waiting'
+              : 'queue is clear',
           accent: data.summary.pendingApprovals > 0 ? ('warn' as const) : ('quiet' as const),
-          to: '/my-work',
+          to: '/g-hr/leave?status=PENDING_APPROVAL',
         },
       ]
     : [];
@@ -174,7 +188,8 @@ export function HrDashboard() {
           <p>
             Who is in, who is late, who is on leave and who has not appeared — for one day at a
             time. Absence is inferred from the other three, so it corrects itself the moment
-            somebody clocks in.
+            somebody clocks in. Below the day: the plantilla, who is due an evaluation, how
+            ready the team is, and who is on the way out.
           </p>
         </div>
         <div className="row">
@@ -213,6 +228,13 @@ export function HrDashboard() {
             ))}
           </div>
 
+          <PeopleTiles />
+
+          <div className="kpi-grid">
+            <ReadinessTile />
+            <EvaluationsDueStat />
+          </div>
+
           <div className="card">
             <h3 className="card-title">
               {data.headcount} active employee{data.headcount === 1 ? '' : 's'}
@@ -235,7 +257,15 @@ export function HrDashboard() {
                     <tr key={r.employee.id}>
                       <td>
                         <div>
-                          {r.employee.lastName}, {r.employee.firstName}
+                          {openEmployee ? (
+                            <Link to={`/g-hr/employees/${r.employee.id}`}>
+                              {r.employee.lastName}, {r.employee.firstName}
+                            </Link>
+                          ) : (
+                            <>
+                              {r.employee.lastName}, {r.employee.firstName}
+                            </>
+                          )}
                         </div>
                         <div className="faint">
                           {r.employee.employeeNo}
@@ -279,6 +309,8 @@ export function HrDashboard() {
               </table>
             </div>
           </div>
+
+          <EvaluationsDuePanel />
         </>
       )}
 
