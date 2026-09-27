@@ -56,13 +56,15 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
   { type: 'position', code: 'POS', label: 'Position code' },
 
   { type: 'lead', code: 'LEAD', label: 'Lead' },
-  // The house scheme: author's employee digits, year, month, running number —
-  // `0072609001` is employee 007's first quotation of September 2026.
+  // The house scheme: author's employee digits, year, month, running number.
+  // The count runs through the YEAR and restarts each January, as it did in
+  // SCORO — `0012609059` is employee 001's 59th quotation of 2026, issued in
+  // September. The month is printed, never counted.
   {
     type: 'quotation',
     code: 'QT',
     label: 'Quotation',
-    defaults: { pattern: '{EMP}{YY}{MM}{SEQ}', padding: 3, period: 'MONTH', scope: 'OWNER' },
+    defaults: { pattern: '{EMP}{YY}{MM}{SEQ}', padding: 3, period: 'YEAR', scope: 'OWNER' },
   },
   { type: 'costing', code: 'COST', label: 'Costing' },
   { type: 'project', code: 'PRJ', label: 'Project' },

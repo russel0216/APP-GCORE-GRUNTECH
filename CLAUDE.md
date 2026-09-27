@@ -899,10 +899,17 @@ the detail.
   button — one function, dry run by default. Re-import upserts on
   `(source, sourceId)` and never clears `continuedQuotationId`. A quote with
   `pdf: null` is archived without an attachment.
-- **Counters continue SCORO's numbering, and are only ever raised.** A SCORO
-  number seeds `<YYYY-MM>@<code>` only when it is a house number — 3-digit code,
-  YYMM, 3-digit sequence — whose YYMM equals the quote's own date, for the
-  current month onward. Keyed per CODE, not per owner: salespeople issued
+- **The quotation count runs through the YEAR and restarts each January**, as
+  SCORO's did (`0012609059` is employee 001's 59th quotation of 2026); the month
+  is printed, never counted. The seed's default is `{EMP}{YY}{MM}{SEQ}`, YEAR,
+  OWNER — an installation seeded before that keeps MONTH until an administrator
+  changes it in Admin › Numbering.
+- **Counters continue SCORO's numbering, and are only ever raised.** The key
+  follows the template's period: YEAR seeds `<YYYY>@<code>` from every house
+  number of the current year (`parseYearNumber` — code and year must match the
+  quote's date, the month part only has to be a month, because SCORO's month
+  part often lagged); MONTH seeds `<YYYY-MM>@<code>` from house numbers whose
+  YYMM equals the quote's own date, for the current month onward. Keyed per CODE, not per owner: salespeople issued
   numbers under colleagues' codes, and every such number must stay unissuable.
   SCORO dropped leading zeros on some (`12609060` is `0012609060`), so 8/9-digit
   numbers are padded before the date test. Numbers that fail (Camille's

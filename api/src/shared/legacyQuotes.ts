@@ -292,12 +292,34 @@ export interface CounterPlan {
  * issued into them, so there is nothing to continue. Keyed by the number's
  * code, whoever the owner was.
  */
+/**
+ * The counter rows the import raises, one per employee code.
+ *
+ * `period` is the quotation template's: MONTH keys `<YYYY-MM>@<code>` from
+ * house numbers of the current month onward; YEAR keys `<YYYY>@<code>` from
+ * every house number of the current year onward, because SCORO's count ran
+ * through the year and restarted each January (Carter's 0012609059 is his
+ * 59th of 2026). In a yearly run a number whose month part lags its date
+ * (0012004011 dated in March) still used that count, so only the code and the
+ * year must agree with the date. `month` is always the current month, which is
+ * what the "next number" in the report is printed for.
+ */
 export function counterTargets(
   quotes: { number: string; date: string | null | undefined }[],
   currentMonth: string,
+  period: 'MONTH' | 'YEAR' | 'NONE' = 'MONTH',
 ): Map<string, { month: string; emp: string; seq: number }> {
   const out = new Map<string, { month: string; emp: string; seq: number }>();
+  const currentYear = currentMonth.slice(0, 4);
   for (const q of quotes) {
+    if (period === 'YEAR') {
+      const p = parseYearNumber(q.number, q.date);
+      if (!p || p.year < currentYear) continue;
+      const key = `${p.year}@${p.emp}`;
+      const prev = out.get(key);
+      if (!prev || p.seq > prev.seq) out.set(key, { month: currentMonth, emp: p.emp, seq: p.seq });
+      continue;
+    }
     const p = parseHouseNumber(q.number, q.date);
     if (!p || p.month < currentMonth) continue;
     const key = `${p.month}@${p.emp}`;
@@ -305,6 +327,23 @@ export function counterTargets(
     if (!prev || p.seq > prev.seq) out.set(key, { month: p.month, emp: p.emp, seq: p.seq });
   }
   return out;
+}
+
+/**
+ * A house-shaped number read for a YEARLY run: code, year and count, with the
+ * month part only required to be a month. The year must be the quote's own —
+ * that is still what stops Camille's 8326090163 (code 832, "year 60") from
+ * reading as anything — and dropped zeros are restored as in parseHouseNumber.
+ */
+export function parseYearNumber(number: string, date: string | null | undefined): { emp: string; year: string; seq: number } | null {
+  const digits = number.trim();
+  const m = HOUSE_NUMBER.exec(/^\d{8,9}$/.test(digits) ? digits.padStart(10, '0') : digits);
+  if (!m) return null;
+  const d = /^(\d{2})(\d{2})-/.exec((date ?? '').trim());
+  if (!d || m[2] !== d[2]) return null;
+  const mm = Number(m[3]);
+  if (mm < 1 || mm > 12) return null;
+  return { emp: m[1], year: `${d[1]}${m[2]}`, seq: Number(m[4]) };
 }
 
 export async function planCounters(
@@ -593,14 +632,14 @@ export async function importBundle(dir: string, opts: ImportOptions): Promise<Im
     .filter((q) => !parseHouseNumber(q.number, q.date))
     .map((q) => ({ number: q.number, date: q.date, owner: q.owner }))
     .sort((a, b) => a.number.localeCompare(b.number));
-  const targets = counterTargets(importable, manilaMonthKey(now));
   const template = await prisma.numberSequence.findFirst({ where: { documentType: counterType, periodKey: '' } });
+  const targets = counterTargets(importable, manilaMonthKey(now), template?.period ?? 'MONTH');
   const counterTemplate = template
     ? {
         pattern: template.pattern,
         period: template.period,
         scope: template.scope,
-        houseScheme: template.period === 'MONTH' && template.scope === 'OWNER' && template.pattern.includes('{EMP}'),
+        houseScheme: template.period !== 'NONE' && template.scope === 'OWNER' && template.pattern.includes('{EMP}'),
       }
     : null;
   if (!template && targets.size) {

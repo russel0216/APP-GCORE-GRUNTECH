@@ -30,6 +30,7 @@ import {
   LEGACY_QUOTE_ENTITY,
   MSG_LINK_CUSTOMER,
   counterTargets,
+  parseYearNumber,
   importBundle,
   isOpenStatus,
   outcomeFor,
@@ -290,6 +291,25 @@ async function main() {
       { number: '12609060', date: '2026-09-24' },   // Daniel's, under Carter's code
     ], '2026-09');
     check("a colleague's zero-dropped number raises that code's counter", t.get('2026-09@001')?.seq === 60, JSON.stringify([...t]));
+  }
+  // SCORO's count ran through the year: with a YEAR template the counter is
+  // `<YYYY>@<code>` and carries every month's numbers, including a number whose
+  // month part lags its date, and earlier years are closed.
+  {
+    const quotes = [
+      { number: '0012601001', date: '2026-01-05' },
+      { number: '0012604011', date: '2026-03-04' },   // month part lags its date
+      { number: '0012609059', date: '2026-09-24' },
+      { number: '12609060', date: '2026-09-24' },     // zero-dropped
+      { number: '0012512099', date: '2025-12-20' },   // last year: closed
+      { number: '8326090163', date: '2026-09-25' },   // Camille's run: code 832 "year 60"
+    ];
+    const t = counterTargets(quotes, '2026-09', 'YEAR');
+    check('a yearly count keys <YYYY>@<code> with the year\'s highest number', t.get('2026@001')?.seq === 60 && t.size === 1, JSON.stringify([...t]));
+    check('its report prints the next number for the current month', t.get('2026@001')?.month === '2026-09');
+    check('a lagging month part still counts in a yearly run', parseYearNumber('0012604011', '2026-03-04')?.seq === 11);
+    check('the year must still be the quote\'s own', parseYearNumber('0012609059', '2025-09-24') === null && parseYearNumber('8326090163', '2026-09-25') === null);
+    check('a new year starts a new counter', counterTargets([{ number: '0012701004', date: '2027-01-08' }], '2026-09', 'YEAR').get('2027@001')?.seq === 4);
   }
   check('a month 13 is not a month', parseHouseNumber('0012613001', '2026-13-01') === null);
   check('a house number needs its own date', parseHouseNumber('0012609059', '') === null && parseHouseNumber('0012609059', '2026-08-31') === null);
@@ -716,8 +736,8 @@ async function main() {
     check('the real bundle dry-runs to completion with 191 quotes', real.totals.quotes === 191, String(real.totals.quotes));
     check('and every one has its PDF', real.totals.missingPdf === 0, String(real.totals.missingPdf));
     check(
-      'Carter Gasiong\'s September counter would continue from 59',
-      real.counters.some((c) => c.periodKey === '2026-09@001' && c.scoroSeq === 59) || month !== '2026-09',
+      'Carter Gasiong\'s counter would continue from 59 (keyed by the template\'s period)',
+      real.counters.some((c) => (c.periodKey === '2026-09@001' || c.periodKey === '2026@001') && c.scoroSeq === 59) || month !== '2026-09',
       JSON.stringify(real.counters),
     );
     check('and it wrote nothing', (await prisma.legacyQuote.count()) === lqAll && (await prisma.numberSequence.count()) === seqAll);
