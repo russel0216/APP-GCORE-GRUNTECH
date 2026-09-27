@@ -24,10 +24,11 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME_BEFORE_FIRST_START
       POSTGRES_DB: gcore
     ports:
-      # 5434 on the host. 5433 is gasion_db and 5432 is any local install.
+      # 5435 on the host. 5433 is gasion_db, 5434 is nephroplus_db and 5432 is any
+      # local install (and the stopped ionview_postgres).
       # Bound to loopback only: nothing reaches this database except from this
       # machine, and the app is the only thing on this machine that wants it.
-      - "127.0.0.1:5434:5432"
+      - "127.0.0.1:5435:5432"
     volumes:
       - gcore-gruntech-pgdata:/var/lib/postgresql/data
     healthcheck:

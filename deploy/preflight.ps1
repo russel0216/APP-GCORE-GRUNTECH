@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Continue'
 # which tells them nothing about what is wrong.
 $root = Split-Path -Parent $PSScriptRoot
 $apiPort     = 5100
-$dbPort      = 5434
+$dbPort      = 5435   # 5434 is nephroplus_db, 5433 gasion_db
 $task        = 'GCoreGruntechApi'
 $dbContainer = 'gcore-gruntech-db'
 

@@ -309,7 +309,7 @@ times.
 - Restart only by PID, by port, or via the `GCoreGruntechApi` scheduled task.
 
 G-Core owns `C:\G-CORE-GRUNTECH`, port **5100**, the `GCoreGruntechApi` task,
-the `gcore-gruntech-db` container on **5434**, and the `gcore-gruntech` tunnel.
+the `gcore-gruntech-db` container on **5435**, and the `gcore-gruntech` tunnel.
 Nothing else on that machine. Full detail in `deploy/README.md`.
 
 ---

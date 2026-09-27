@@ -11,7 +11,7 @@ Internet → https://gruntech.gcore.tech → Cloudflare edge (HTTPS)
                                         │        existing Windows service)
                               Node API :5100  ──►  /api  AND  the web app
                                         │
-                              Postgres :5434  (own container, own volume)
+                              Postgres :5435  (own container, own volume)
 ```
 
 ---
@@ -28,7 +28,7 @@ rule below exists because of one of those.
 | `Get-Process node \| Stop-Process` | Same thing in PowerShell. |
 | Stop or reconfigure the **`Cloudflared` Windows service** | That service is gasiontech's tunnel. G-Core Gruntech gets its own tunnel process. |
 | `pm2 kill` / `pm2 delete all` / `pm2 startup` | PM2 on that host belongs to the vision system. These scripts never call PM2 except to *read* its status. |
-| Run the repo's root `docker-compose.yml` | It publishes **5433**, which is already `gasion_db`. Use `deploy/docker-compose.prod.yml`, which uses 5434 and its own volume. |
+| Run the repo's root `docker-compose.yml` | It publishes **5433**, which is already `gasion_db`. Use `deploy/docker-compose.prod.yml`, which uses 5435 and its own volume. |
 
 **What G-Core Gruntech owns, and nothing else:**
 
@@ -37,7 +37,7 @@ rule below exists because of one of those.
 | Code | `C:\G-CORE-GRUNTECH` |
 | API port | **5100** |
 | Scheduled task | **`GCoreGruntechApi`** |
-| Postgres container | **`gcore-gruntech-db`** on host port **5434** |
+| Postgres container | **`gcore-gruntech-db`** on host port **5435** |
 | Tunnel | **`gcore-gruntech`** → `gruntech.gcore.tech` |
 | Backups | `C:\backups\gcore-gruntech`, task `GCoreGruntechBackup` |
 | Uploads | `C:\G-CORE-GRUNTECH\data\uploads` |
@@ -94,7 +94,7 @@ cd C:\G-CORE-GRUNTECH\deploy
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-This creates a container named `gcore-gruntech-db` on host port 5434 with its
+This creates a container named `gcore-gruntech-db` on host port 5435 with its
 own volume. It does not touch `gasion_db`.
 
 Set a real password in `docker-compose.prod.yml` **before** the first `up` —

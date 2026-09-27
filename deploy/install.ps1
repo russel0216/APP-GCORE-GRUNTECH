@@ -68,7 +68,7 @@ for ($i = 1; $i -le 30; $i++) {
     Start-Sleep -Seconds 2
 }
 if (-not $ready) { throw 'The database did not become ready. Check: docker logs gcore-gruntech-db' }
-Write-Host '    database is up on 127.0.0.1:5434' -ForegroundColor Green
+Write-Host '    database is up on 127.0.0.1:5435' -ForegroundColor Green
 
 # -- 4. Build -----------------------------------------------------------------
 Step 'install api dependencies'
@@ -137,7 +137,7 @@ Installed.
 
   Local          http://localhost:$apiPort
   Task           $task
-  Database       gcore-gruntech-db on 127.0.0.1:5434
+  Database       gcore-gruntech-db on 127.0.0.1:5435
   Data           $root\data
   Logs           $root\data\logs\api.log
 

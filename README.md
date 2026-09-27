@@ -432,7 +432,7 @@ there is a reasonable thing to do.
 | `install.ps1` | First time only. Refuses to run if the preflight fails. |
 | `rebuild.ps1` / `rebuild.sh` | Every deploy after that. Restarts **only** our scheduled task. |
 | `backup.ps1` | Nightly database dump and uploads archive, 30-day retention. |
-| `docker-compose.prod.yml` | Our own Postgres — port 5434, own volume. **Not** the repo root compose file, which would collide with `gasion_db` on 5433. |
+| `docker-compose.prod.yml` | Our own Postgres — port 5435, own volume. **Not** the repo root compose file, which would collide with `gasion_db` on 5433. |
 | `cloudflared-config.yml` | Our own tunnel. **Never** `cloudflared service install` on that host. |
 
 G-Core Gruntech owns exactly this and nothing else: `C:\G-CORE-GRUNTECH`, port
