@@ -3,17 +3,21 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { RecordHeader } from '../../components/RecordHeader';
+import { DocumentApproval } from '../../components/ApprovalStepper';
 import {
   Checkbox,
   ErrorBox,
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatMoney,
+  humanise,
   useToast,
 } from '../../components/ui';
-import { RecordPaymentModal, tone, label } from './Receivables';
+import { RecordPaymentModal, CellLink, paymentLink } from './Receivables';
 import { todayLocal } from '../../lib/day';
 
 /**
@@ -109,7 +113,6 @@ export function Payables() {
       key: 'number',
       label: 'Number',
       sortKey: 'number',
-      width: '150px',
       render: (r) => (
         <div>
           <span className="mono">{r.number}</span>
@@ -122,10 +125,19 @@ export function Payables() {
       label: 'Supplier',
       render: (r) => (
         <div>
-          <div>{r.supplier.name}</div>
+          <div>
+            <CellLink to={`/g-chain/suppliers/${r.supplier.id}`}>{r.supplier.name}</CellLink>
+          </div>
           <div className="faint">
             {r.job ? `${r.job.number} — ${r.job.name}` : 'No project'}
-            {r.receiving && ` · ${r.receiving.number}`}
+            {r.receiving && (
+              <>
+                {' · '}
+                <CellLink to={`/g-chain/receiving/${r.receiving.id}`} className="mono">
+                  {r.receiving.number}
+                </CellLink>
+              </>
+            )}
           </div>
         </div>
       ),
@@ -176,12 +188,12 @@ export function Payables() {
       optional: true,
       render: (r) =>
         r.postedToJob ? (
-          <span className="badge ok" title="This bill was the first time that cost appeared">
-            charged
+          <span title="This bill was the first time that cost appeared">
+            <StatusBadge status="CHARGED" extra={{ CHARGED: 'ok' }} label="charged" />
           </span>
         ) : r.receiving ? (
-          <span className="badge" title={`${r.receiving.number} already incurred it`}>
-            already incurred
+          <span title={`${r.receiving.number} already incurred it`}>
+            <StatusBadge status="INCURRED" extra={{ INCURRED: '' }} label="already incurred" />
           </span>
         ) : (
           <span className="faint">—</span>
@@ -190,7 +202,7 @@ export function Payables() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <span className={`badge ${tone(r.status)}`}>{label(r.status)}</span>,
+      render: (r) => <StatusBadge status={r.status} />,
     },
   ];
 
@@ -239,10 +251,14 @@ export function Payables() {
                 {queue.map((r) => (
                   <tr key={r.id}>
                     <td>
-                      <span className="mono">{r.number}</span>
+                      <Link to={`/g-chain/receiving/${r.id}`} className="mono">
+                        {r.number}
+                      </Link>
                       <div className="faint">{formatDate(r.receivedDate)}</div>
                     </td>
-                    <td>{r.order.supplier.name}</td>
+                    <td>
+                      <Link to={`/g-chain/suppliers/${r.order.supplier.id}`}>{r.order.supplier.name}</Link>
+                    </td>
                     <td className="faint">
                       {r.order.job ? `${r.order.job.number} — ${r.order.job.name}` : 'Stock'}
                     </td>
@@ -498,22 +514,16 @@ function NewBillModal({
         </Field>
       </div>
 
-      <h4 style={{ marginTop: 18, marginBottom: 8 }}>Lines</h4>
+      <h4 className="fin-section-title">Lines</h4>
       <div className="table-wrap">
         <table className="data">
           <thead>
             <tr>
               <th>Description</th>
-              <th className="right" style={{ width: 90 }}>
-                Qty
-              </th>
-              <th className="right" style={{ width: 140 }}>
-                Unit price
-              </th>
-              <th className="right" style={{ width: 120 }}>
-                Amount
-              </th>
-              <th style={{ width: 40 }} />
+              <th className="right">Qty</th>
+              <th className="right">Unit price</th>
+              <th className="right">Amount</th>
+              <th className="fin-col-tight" />
             </tr>
           </thead>
           <tbody>
@@ -539,7 +549,7 @@ function NewBillModal({
                       next[i] = { ...l, quantity: Number(e.target.value) };
                       setLines(next);
                     }}
-                    style={{ textAlign: 'right' }}
+                    className="fin-amount-input"
                   />
                 </td>
                 <td>
@@ -552,7 +562,7 @@ function NewBillModal({
                       next[i] = { ...l, unitPrice: Number(e.target.value) };
                       setLines(next);
                     }}
-                    style={{ textAlign: 'right' }}
+                    className="fin-amount-input"
                   />
                 </td>
                 <td className="right mono">{formatMoney(l.quantity * l.unitPrice)}</td>
@@ -560,6 +570,7 @@ function NewBillModal({
                   {lines.length > 1 && (
                     <button
                       className="btn btn-ghost btn-sm"
+                      aria-label={`Remove line ${i + 1}`}
                       onClick={() => setLines(lines.filter((_, j) => j !== i))}
                     >
                       ✕
@@ -572,14 +583,13 @@ function NewBillModal({
         </table>
       </div>
       <button
-        className="btn btn-sm"
-        style={{ marginTop: 8 }}
+        className="btn btn-sm fin-gap-top-sm"
         onClick={() => setLines([...lines, { description: '', quantity: 1, unitPrice: 0 }])}
       >
         + Add a line
       </button>
 
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
+      <div className="grid grid-2 fin-gap-top">
         <div>
           <Checkbox
             checked={form.vatInclusive}
@@ -652,7 +662,7 @@ export function BillDetail() {
     load();
   }, [load]);
 
-  if (error) return <ErrorBox error={error} />;
+  if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
   async function submit() {
@@ -667,43 +677,63 @@ export function BillDetail() {
 
   return (
     <div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            <span className="mono">{row.number}</span>{' '}
-            <span className={`badge ${tone(row.status)}`}>{label(row.status)}</span>
-          </h1>
-          <p>
-            {row.supplier.name}
-            {row.supplierInvoiceNo && <> · their ref {row.supplierInvoiceNo}</>}
-            {row.job && (
-              <>
-                {' · '}
-                <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-                  {row.job.number}
-                </Link>
-              </>
-            )}
-          </p>
-        </div>
-        <div className="row">
-          {row.status === 'DRAFT' && can('gfin.ap.create') && (
-            <button className="btn btn-primary btn-sm" onClick={submit}>
-              Submit for approval
-            </button>
-          )}
-          {(row.status === 'APPROVED' || row.status === 'PARTIALLY_PAID') && can('gfin.ap.create') && (
-            <button className="btn btn-primary btn-sm" onClick={() => setPaying(true)}>
-              Record payment
-            </button>
-          )}
-        </div>
+      <div className="breadcrumb">
+        <Link to="/g-fin/ap">Accounts Payable</Link>
+        <span className="sep">›</span>
+        <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
+        <span className="sep">›</span>
+        <span className="mono">{row.number}</span>
       </div>
+
+      <RecordHeader
+        type="Supplier Bill"
+        code={row.number}
+        title={row.supplier.name}
+        status={row.status}
+        amount={formatMoney(row.netPayable)}
+        // What leaves the bank, after whatever Gruntech withholds.
+        amountLabel="Net payable"
+        actions={
+          <>
+            {row.status === 'DRAFT' && can('gfin.ap.create') && (
+              <button className="btn btn-primary" onClick={submit}>
+                Submit for approval
+              </button>
+            )}
+            {(row.status === 'APPROVED' || row.status === 'PARTIALLY_PAID') && can('gfin.ap.create') && (
+              <button className="btn btn-primary" onClick={() => setPaying(true)}>
+                Record payment
+              </button>
+            )}
+          </>
+        }
+      />
+
+      <p className="record-head-meta fin-gap-bottom">
+        <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
+        {row.supplierInvoiceNo && <> · their ref {row.supplierInvoiceNo}</>}
+        {row.job && (
+          <>
+            {' · '}
+            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+              {row.job.number}
+            </Link>{' '}
+            {row.job.name}
+          </>
+        )}
+      </p>
+
+      <DocumentApproval documentType="supplier_bill" documentId={row.id} />
+
+      <ErrorBox error={error} />
 
       {row.receiving ? (
         <div className="alert info">
-          Matched to <span className="mono">{row.receiving.number}</span>, received{' '}
+          Matched to{' '}
+          <Link to={`/g-chain/receiving/${row.receiving.id}`} className="mono">
+            {row.receiving.number}
+          </Link>
+          , received{' '}
           {formatDate(row.receiving.receivedDate)}. The project was charged then — approving this
           bill makes it payable and charges nothing further.
         </div>
@@ -746,7 +776,7 @@ export function BillDetail() {
             </table>
           </div>
 
-          <dl className="kv" style={{ marginTop: 14 }}>
+          <dl className="kv fin-gap-top">
             <dt>Subtotal</dt>
             <dd className="mono">{formatMoney(row.subtotal)}</dd>
             <dt>VAT {(row.vatRate * 100).toFixed(0)}%</dt>
@@ -809,9 +839,7 @@ export function BillDetail() {
           <div className="card">
             <h3 className="card-title">Payments</h3>
             {!row.allocations?.length ? (
-              <p className="muted" style={{ marginBottom: 0 }}>
-                Nothing paid yet.
-              </p>
+              <p className="muted fin-flush">Nothing paid yet.</p>
             ) : (
               <div className="table-wrap">
                 <table className="data">
@@ -819,10 +847,11 @@ export function BillDetail() {
                     {row.allocations.map((a) => (
                       <tr key={a.id}>
                         <td>
-                          <span className="mono">{a.payment.number}</span>
+                          <Link to={paymentLink(a.payment.id)} className="mono">
+                            {a.payment.number}
+                          </Link>
                           <div className="faint">
-                            {formatDate(a.payment.paymentDate)} ·{' '}
-                            {a.payment.method.toLowerCase().replace(/_/g, ' ')}
+                            {formatDate(a.payment.paymentDate)} · {humanise(a.payment.method)}
                           </div>
                         </td>
                         <td className="right mono">{formatMoney(a.amount)}</td>

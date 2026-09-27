@@ -12,7 +12,10 @@ import {
   badRequest,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { registerSearch } from '../shared/search';
+import { stockOnHand } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { renderDocument, formatMoney, formatDate } from '../shared/pdf';
@@ -51,6 +54,9 @@ receivingRoutes.get(
     const q = listQuery(req);
     const where: Prisma.ReceivingWhereInput = {};
     if (q.filters.orderId) where.orderId = q.filters.orderId;
+    // A receiving has no job of its own — it inherits its order's. The job
+    // workspace's Procurement tab lists a project's deliveries through this.
+    if (q.filters.jobId) where.order = { jobId: q.filters.jobId };
     if (q.search) {
       where.OR = [
         { number: { contains: q.search, mode: 'insensitive' } },
@@ -108,6 +114,7 @@ receivingRoutes.get(
   '/:id',
   require_('gchain.receiving.view_all'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const receiving = await prisma.receiving.findUnique({
       where: { id: req.params.id },
       include: {
@@ -119,6 +126,12 @@ receivingRoutes.get(
         },
         warehouse: { select: { id: true, name: true } },
         receivedBy: { select: { id: true, name: true } },
+        // The bill that covers these goods. Its presence is what stops the
+        // bill posting job cost a second time (Phase 7), so it is worth seeing.
+        bills: {
+          orderBy: { billDate: 'desc' },
+          select: { id: true, number: true, status: true },
+        },
         items: {
           include: {
             orderItem: {
@@ -134,8 +147,12 @@ receivingRoutes.get(
     });
     if (!receiving) throw notFound('Receiving report not found');
 
+    // Finance's register, listed only to those who can open it.
+    const seesBills = can(me, 'gfin.ap.view_all');
     res.json({
       ...receiving,
+      bills: seesBills ? receiving.bills : [],
+      billsVisible: seesBills,
       order: { ...receiving.order, total: num(receiving.order.total) },
       items: receiving.items.map((i) => ({
         ...i,
@@ -676,6 +693,7 @@ borrowRoutes.get(
     const q = listQuery(req);
     const where: Prisma.BorrowSlipWhereInput = {};
     if (q.filters.status) where.status = q.filters.status as Prisma.EnumBorrowStatusFilter['equals'];
+    if (q.filters.jobId) where.jobId = q.filters.jobId;
     if (q.filters.overdue === 'true') {
       where.status = { in: ['OUT', 'PARTIALLY_RETURNED'] };
       where.dueAt = { lt: new Date() };
@@ -1053,7 +1071,15 @@ inventoryRoutes.get(
     });
 
     const byWarehouse = new Map<string, { name: string; items: number; value: number }>();
-    const reorder: { item: string; code: string; warehouse: string; available: number; reorderLevel: number }[] = [];
+    const reorder: {
+      itemId: string;
+      warehouseId: string;
+      item: string;
+      code: string;
+      warehouse: string;
+      available: number;
+      reorderLevel: number;
+    }[] = [];
 
     for (const b of balances) {
       const quantity = num(b.quantity);
@@ -1067,6 +1093,8 @@ inventoryRoutes.get(
       const available = cents(quantity - num(b.borrowedQty));
       if (level !== null && available <= level) {
         reorder.push({
+          itemId: b.item.id,
+          warehouseId: b.warehouseId,
           item: b.item.name,
           code: b.item.code,
           warehouse: b.warehouse.name,
@@ -1076,13 +1104,18 @@ inventoryRoutes.get(
       }
     }
 
-    const overdueBorrows = await prisma.borrowSlip.count({
-      where: { status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: new Date() } },
-    });
+    const [overdueBorrows, stock] = await Promise.all([
+      prisma.borrowSlip.count({
+        where: { status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: new Date() } },
+      }),
+      // Stock value is decided once, in shared/chain.ts — the same figure the
+      // G-CHAIN dashboard and the Insights brief print.
+      stockOnHand(),
+    ]);
 
     res.json({
       warehouses: [...byWarehouse.entries()].map(([id, v]) => ({ id, ...v })),
-      totalValue: cents([...byWarehouse.values()].reduce((s, w) => s + w.value, 0)),
+      totalValue: stock.value,
       reorder,
       overdueBorrows,
     });
@@ -1152,3 +1185,121 @@ stockIssueRoutes.get(
     res.send(pdf);
   }),
 );
+
+// ── Global search ────────────────────────────────────────────────────────────
+// Warehouse documents by number. These registers are view_all-only, so there
+// is no own scope to narrow to. Numbers and names only.
+
+registerSearch({
+  kind: 'receiving',
+  label: 'Receiving',
+  permission: 'gchain.receiving.view_all',
+  async search(term, _user, limit) {
+    const rows = await prisma.receiving.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { deliveryRefNo: { contains: term, mode: 'insensitive' } },
+          { order: { number: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      orderBy: { receivedDate: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        number: true,
+        order: { select: { number: true, supplier: { select: { name: true } } } },
+      },
+    });
+    return rows.map((r) => ({
+      kind: 'receiving',
+      id: r.id,
+      title: `${r.number} — ${r.order.supplier.name}`,
+      subtitle: `Against ${r.order.number}`,
+      link: `/g-chain/receiving/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'stock_issue',
+  label: 'Stock issues',
+  permission: 'gchain.stock_issuance.view_all',
+  async search(term, _user, limit) {
+    const rows = await prisma.stockIssue.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { purpose: { contains: term, mode: 'insensitive' } },
+          { job: { number: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { id: true, number: true, purpose: true, status: true, job: { select: { number: true } } },
+    });
+    return rows.map((r) => ({
+      kind: 'stock_issue',
+      id: r.id,
+      title: `${r.number} — ${r.purpose}`,
+      subtitle: [r.job?.number, r.status.toLowerCase()].filter(Boolean).join(' · '),
+      link: `/g-chain/stock-issuance/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'borrow_slip',
+  label: 'Borrow slips',
+  permission: 'gchain.borrow_slips.view_all',
+  async search(term, _user, limit) {
+    const rows = await prisma.borrowSlip.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { borrowerName: { contains: term, mode: 'insensitive' } },
+          { purpose: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { id: true, number: true, borrowerName: true, purpose: true, status: true },
+    });
+    return rows.map((r) => ({
+      kind: 'borrow_slip',
+      id: r.id,
+      title: `${r.number} — ${r.borrowerName}`,
+      subtitle: `${r.purpose} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
+      link: `/g-chain/borrow-slips/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'warehouse',
+  label: 'Warehouses',
+  permission: 'gchain.warehouses.view_all',
+  async search(term, _user, limit) {
+    const rows = await prisma.warehouse.findMany({
+      where: {
+        OR: [
+          { code: { contains: term, mode: 'insensitive' } },
+          { name: { contains: term, mode: 'insensitive' } },
+          { city: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      orderBy: { name: 'asc' },
+      take: limit,
+      select: { id: true, code: true, name: true, city: true },
+    });
+    // Warehouses have no per-record page — the master list is the screen the
+    // same permission opens (links.ts maps `warehouse` there too).
+    return rows.map((r) => ({
+      kind: 'warehouse',
+      id: r.id,
+      title: `${r.code} — ${r.name}`,
+      subtitle: r.city ?? undefined,
+      link: '/g-chain/warehouses',
+    }));
+  },
+});

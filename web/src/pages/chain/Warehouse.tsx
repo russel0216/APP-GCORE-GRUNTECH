@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -9,6 +9,7 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatDateTime,
   formatMoney,
@@ -16,7 +17,7 @@ import {
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { openPdf } from '../../lib/api';
-import { label, statusTone } from './PurchaseRequests';
+import { label } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING
@@ -92,6 +93,7 @@ export function Receivings() {
 
 export function ReceivingDetail() {
   const { id } = useParams<{ id: string }>();
+  const { can } = useAuth();
   const [rec, setRec] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -108,7 +110,19 @@ export function ReceivingDetail() {
   if (loading) return <Loading />;
   if (!rec) return <ErrorBox error={error ?? new Error('Not found')} />;
 
-  const order = rec.order as { id: string; number: string; kind: string; supplier: { name: string }; job: { id: string; number: string; name: string } | null };
+  const order = rec.order as {
+    id: string;
+    number: string;
+    kind: string;
+    supplier: { id: string; name: string };
+    job: { id: string; number: string; name: string } | null;
+  };
+  // Empty unless the caller holds gfin.ap.view_all (billsVisible says which).
+  const bills = (rec.bills ?? []) as { id: string; number: string; status: string }[];
+  const billsVisible = rec.billsVisible === true;
+  // One bill per delivery is the norm; offer to enter it until one exists.
+  // Someone who cannot see bills can still enter one — the AP screen decides.
+  const canEnterBill = can('gfin.ap.create') && (!billsVisible || bills.length === 0);
   const items = rec.items as {
     id: string;
     quantity: number;
@@ -139,10 +153,36 @@ export function ReceivingDetail() {
         <div>
           <h1>Receiving {String(rec.number)}</h1>
           <p>
-            {order.supplier.name} · {formatDate(String(rec.receivedDate))}
+            <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link> ·{' '}
+            {formatDate(String(rec.receivedDate))}
             {(rec.warehouse as { name: string } | null) ? ` · into ${(rec.warehouse as { name: string }).name}` : ''}
+            {bills.length > 0 && (
+              <>
+                {' '}
+                · billed as{' '}
+                {bills.map((b, n) => (
+                  <span key={b.id}>
+                    {n > 0 && ', '}
+                    <Link to={`/g-fin/ap/${b.id}`} className="mono">
+                      {b.number}
+                    </Link>{' '}
+                    <StatusBadge status={b.status} />
+                  </span>
+                ))}
+              </>
+            )}
           </p>
         </div>
+        {canEnterBill && (
+          <div className="row">
+            {/* The bill picks up the supplier, order and these goods from the
+                receiving, and — because it names the receiving — posts no job
+                cost a second time. */}
+            <Link to={`/g-fin/ap?fromReceiving=${String(rec.id)}`} className="btn btn-primary">
+              Enter supplier bill
+            </Link>
+          </div>
+        )}
       </div>
 
       <ErrorBox error={error} />
@@ -242,7 +282,7 @@ export function StockIssues() {
     {
       key: 'status',
       label: 'Status',
-      render: (i) => <span className={`badge ${statusTone(i.status)}`}>{label(i.status)}</span>,
+      render: (i) => <StatusBadge status={i.status} />,
     },
   ];
 
@@ -455,8 +495,8 @@ export function StockIssueDetail() {
           <p>
             {warehouse.name}
             {job ? ` → ${job.number}` : ''} · {formatDate(String(issue.issueDate))}
-            <span className={`badge ${statusTone(String(issue.status))}`} style={{ marginLeft: 8 }}>
-              {label(String(issue.status))}
+            <span className="proc-pill-gap">
+              <StatusBadge status={String(issue.status)} />
             </span>
           </p>
         </div>
@@ -503,7 +543,7 @@ export function StockIssueDetail() {
                   <th className="right">Qty</th>
                   <th className="right">Unit cost</th>
                   <th className="right">Amount</th>
-                  {isDraft && <th style={{ width: 60 }} />}
+                  {isDraft && <th className="proc-col-actions" aria-label="Actions" />}
                 </tr>
               </thead>
               <tbody>
@@ -709,7 +749,7 @@ export function BorrowSlips() {
       label: 'Due back',
       sortKey: 'dueAt',
       render: (b) => (
-        <span style={{ color: b.isOverdue ? 'var(--danger)' : undefined }}>
+        <span className={b.isOverdue ? 'proc-over' : undefined}>
           {formatDate(b.dueAt)}
           {b.isOverdue && <div className="faint">{b.daysOverdue}d overdue</div>}
         </span>
@@ -898,13 +938,12 @@ function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated
         <input value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} />
       </Field>
 
-      <div className="faint" style={{ fontSize: 11, marginBottom: 8 }}>
-        ITEMS
-      </div>
+      <div className="section-label proc-borrow-label">Items</div>
       {lines.map((l, i) => (
-        <div key={i} className="row" style={{ marginBottom: 8 }}>
+        <div key={i} className="row proc-borrow-line">
           <select
-            style={{ flex: 1 }}
+            className="proc-grow"
+            aria-label={`Item ${i + 1}`}
             value={l.itemId}
             onChange={(e) => setLines(lines.map((x, n) => (n === i ? { ...x, itemId: e.target.value } : x)))}
           >
@@ -920,7 +959,8 @@ function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated
           <input
             type="number"
             step="0.001"
-            style={{ width: 110 }}
+            className="proc-qty"
+            aria-label={`Quantity of item ${i + 1}`}
             value={l.quantity}
             onChange={(e) => setLines(lines.map((x, n) => (n === i ? { ...x, quantity: e.target.value } : x)))}
           />
@@ -1010,8 +1050,8 @@ export function BorrowSlipDetail() {
           <p>
             {String(slip.purpose)}
             {job ? ` · ${job.number}` : ''} · due {formatDate(String(slip.dueAt))}
-            <span className={`badge ${done ? 'ok' : 'warn'}`} style={{ marginLeft: 8 }}>
-              {label(String(slip.status))}
+            <span className="proc-pill-gap">
+              <StatusBadge status={String(slip.status)} extra={{ RETURNED: 'ok' }} />
             </span>
           </p>
         </div>
@@ -1030,9 +1070,7 @@ export function BorrowSlipDetail() {
                 <th className="right">Back</th>
                 <th className="right">Still out</th>
                 {!done && can('gchain.borrow_slips.edit_all') && (
-                  <th className="right" style={{ width: 130 }}>
-                    Returning now
-                  </th>
+                  <th className="right proc-col-input">Returning now</th>
                 )}
               </tr>
             </thead>
@@ -1052,11 +1090,11 @@ export function BorrowSlipDetail() {
                   {!done && can('gchain.borrow_slips.edit_all') && (
                     <td>
                       <input
-                        className="mono"
+                        className="mono proc-cell-input"
                         type="number"
                         step="0.001"
                         max={i.outstandingQty}
-                        style={{ textAlign: 'right', padding: '5px 7px' }}
+                        aria-label="Quantity returning now"
                         value={returns[i.id] ?? ''}
                         onChange={(e) => setReturns({ ...returns, [i.id]: e.target.value })}
                       />
@@ -1069,7 +1107,7 @@ export function BorrowSlipDetail() {
         </div>
 
         {!done && can('gchain.borrow_slips.edit_all') && (
-          <div className="row" style={{ marginTop: 14 }}>
+          <div className="row proc-card-note">
             <button className="btn btn-ok" onClick={receiveBack}>
               Receive back into stock
             </button>
@@ -1146,9 +1184,7 @@ export function Inventory() {
       label: 'Available',
       align: 'right',
       render: (s) => (
-        <span className="mono" style={{ color: s.needsReorder ? 'var(--warn)' : undefined }}>
-          {s.available}
-        </span>
+        <span className={`mono${s.needsReorder ? ' proc-short' : ''}`}>{s.available}</span>
       ),
     },
     {
@@ -1208,19 +1244,20 @@ export function Inventory() {
 
 export function StockCard() {
   const { itemId } = useParams<{ itemId: string }>();
+  const [params] = useSearchParams();
+  const warehouseId = params.get('warehouseId');
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
     if (!itemId) return;
-    const warehouseId = new URLSearchParams(window.location.search).get('warehouseId');
     api
       .get<Record<string, unknown>>(`/inventory/${itemId}/card${qs({ warehouseId })}`)
       .then(setData)
       .catch(setError)
       .finally(() => setLoading(false));
-  }, [itemId]);
+  }, [itemId, warehouseId]);
 
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error ?? new Error('Not found')} />;
@@ -1266,20 +1303,26 @@ export function StockCard() {
 
       <ErrorBox error={error} />
 
-      <div className="grid grid-3" style={{ marginBottom: 18 }}>
+      {warehouseId && (
+        <p className="muted">
+          One warehouse only. <Link to={`/g-chain/inventory/${itemId}`}>Show every warehouse</Link>
+        </p>
+      )}
+
+      <div className="kpi-grid proc-stats">
         {balances.map((b) => (
-          <div key={b.id} className="card">
-            <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-              {b.warehouse.name.toUpperCase()}
-            </div>
-            <div style={{ fontSize: 20, marginTop: 6, fontWeight: 600 }}>
-              {b.quantity} <span className="faint" style={{ fontSize: 13 }}>{item.unit}</span>
-            </div>
-            <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>
-              {formatMoney(b.averageCost)} average · {formatMoney(b.value)} value
-              {b.borrowedQty > 0 && ` · ${b.borrowedQty} on loan`}
-            </div>
-          </div>
+          <Stat
+            key={b.id}
+            label={b.warehouse.name}
+            value={
+              <>
+                {b.quantity} <span className="faint proc-balance-unit">{item.unit}</span>
+              </>
+            }
+            sub={`${formatMoney(b.averageCost)} average · ${formatMoney(b.value)} value${
+              b.borrowedQty > 0 ? ` · ${b.borrowedQty} on loan` : ''
+            }`}
+          />
         ))}
       </div>
 
@@ -1292,7 +1335,7 @@ export function StockCard() {
             <table className="data">
               <thead>
                 <tr>
-                  <th style={{ width: 180 }}>When</th>
+                  <th className="proc-col-when">When</th>
                   <th>Type</th>
                   <th>Reference</th>
                   <th>Warehouse</th>
@@ -1315,7 +1358,7 @@ export function StockCard() {
                     </td>
                     <td className="mono faint">{m.sourceNumber ?? m.sourceType}</td>
                     <td>{m.warehouse.name}</td>
-                    <td className="right mono" style={{ color: m.quantity > 0 ? 'var(--neon)' : 'var(--danger)' }}>
+                    <td className={`right mono ${m.quantity > 0 ? 'proc-best' : 'proc-over'}`}>
                       {m.quantity > 0 ? '+' : ''}
                       {m.quantity}
                     </td>
@@ -1336,11 +1379,18 @@ export function StockCard() {
 // ── Reports ──────────────────────────────────────────────────────────────────
 
 export function ChainReports() {
-  const navigate = useNavigate();
   const [data, setData] = useState<{
     warehouses: { id: string; name: string; items: number; value: number }[];
     totalValue: number;
-    reorder: { item: string; code: string; warehouse: string; available: number; reorderLevel: number }[];
+    reorder: {
+      itemId: string;
+      warehouseId: string;
+      item: string;
+      code: string;
+      warehouse: string;
+      available: number;
+      reorderLevel: number;
+    }[];
     overdueBorrows: number;
   } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1366,35 +1416,32 @@ export function ChainReports() {
         </div>
       </div>
 
-      <div className="grid grid-3" style={{ marginBottom: 18 }}>
-        <div className="card">
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            STOCK VALUE
-          </div>
-          <div style={{ fontSize: 20, marginTop: 6, fontWeight: 600, color: 'var(--neon)' }}>
-            {formatMoney(data.totalValue)}
-          </div>
-        </div>
-        <div className="card">
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            BELOW REORDER LEVEL
-          </div>
-          <div style={{ fontSize: 20, marginTop: 6, fontWeight: 600, color: data.reorder.length ? 'var(--warn)' : undefined }}>
-            {data.reorder.length}
-          </div>
-        </div>
-        <div
-          className="card"
-          style={{ cursor: data.overdueBorrows ? 'pointer' : undefined }}
-          onClick={() => data.overdueBorrows && navigate('/g-chain/borrow-slips?overdue=true')}
-        >
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            OVERDUE BORROW SLIPS
-          </div>
-          <div style={{ fontSize: 20, marginTop: 6, fontWeight: 600, color: data.overdueBorrows ? 'var(--danger)' : undefined }}>
-            {data.overdueBorrows}
-          </div>
-        </div>
+      <div className="kpi-grid proc-stats">
+        <Stat
+          label="Stock value"
+          value={formatMoney(data.totalValue)}
+          sub="on hand, at moving average cost"
+          accent="neon"
+          figure
+          more="Open inventory"
+          to="/g-chain/inventory"
+        />
+        <Stat
+          label="Below reorder level"
+          value={data.reorder.length}
+          sub={data.reorder.length ? 'listed below' : 'everything above its level'}
+          accent={data.reorder.length ? 'warn' : 'quiet'}
+          more="Open reorder list"
+          to="/g-chain/inventory?needsReorder=true"
+        />
+        <Stat
+          label="Overdue borrow slips"
+          value={data.overdueBorrows}
+          sub={data.overdueBorrows ? 'tools out past their return date' : 'everything back on time'}
+          accent={data.overdueBorrows ? 'danger' : 'quiet'}
+          more="Open overdue slips"
+          to="/g-chain/borrow-slips?overdue=true"
+        />
       </div>
 
       <div className="grid grid-2">
@@ -1442,16 +1489,16 @@ export function ChainReports() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.reorder.map((r, i) => (
-                    <tr key={i}>
+                  {data.reorder.map((r) => (
+                    <tr key={`${r.itemId}-${r.warehouseId}`}>
                       <td>
-                        <div>{r.item}</div>
+                        {/* The stock card for that item in that store — where
+                            the reorder decision is actually made. */}
+                        <Link to={`/g-chain/inventory/${r.itemId}?warehouseId=${r.warehouseId}`}>{r.item}</Link>
                         <div className="faint mono">{r.code}</div>
                       </td>
                       <td>{r.warehouse}</td>
-                      <td className="right mono" style={{ color: 'var(--warn)' }}>
-                        {r.available}
-                      </td>
+                      <td className="right mono proc-short">{r.available}</td>
                       <td className="right mono faint">{r.reorderLevel}</td>
                     </tr>
                   ))}
@@ -1465,56 +1512,88 @@ export function ChainReports() {
   );
 }
 
-/** G-CHAIN landing — the pipeline at a glance. */
+interface ChainOverview {
+  requestsAwaitingApproval: number | null;
+  ordersAwaitingDelivery: number | null;
+  borrowSlipsOverdue: number | null;
+  stock: { value: number; lines: number } | null;
+}
+
+/** What a tile says when the caller cannot open the list behind it. */
+const NOT_YOURS = 'not in your access — ask an administrator if you need it';
+
+/**
+ * G-CHAIN landing — the pipeline at a glance.
+ *
+ * Reads `GET /gchain/overview`, where the figures are decided once
+ * (shared/chain.ts). It used to fire four list calls and swallow any failure,
+ * so one 403 turned three tiles into a confident zero. A figure the caller
+ * cannot see now comes back null and prints "—" with a note, never 0.
+ */
 export function ChainDashboard() {
-  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [data, setData] = useState<ChainOverview | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
-    Promise.all([
-      api.get<{ total: number }>('/purchase-requests?pageSize=1&status=PENDING_APPROVAL'),
-      api.get<{ total: number }>('/purchase-orders?pageSize=1&status=ISSUED'),
-      api.get<{ total: number }>('/purchase-orders?pageSize=1&status=PARTIALLY_RECEIVED'),
-      api.get<{ total: number }>('/borrow-slips?pageSize=1&overdue=true'),
-    ])
-      .then(([pr, issued, partial, overdue]) =>
-        setCounts({
-          pendingPrs: pr.total,
-          awaitingDelivery: issued.total + partial.total,
-          overdueBorrows: overdue.total,
-        }),
-      )
-      .catch(() => {});
+    api.get<ChainOverview>('/gchain/overview').then(setData).catch(setError);
   }, []);
 
+  if (error) return <ErrorBox error={error} />;
+  if (!data) return <Loading />;
+
+  const count = (n: number | null) => n ?? 0;
   const tiles = [
     {
       label: 'Requests awaiting approval',
       icon: 'document' as const,
       more: 'Open requests',
-      value: counts.pendingPrs ?? 0,
-      sub: (counts.pendingPrs ?? 0) > 0 ? 'nothing can be ordered until these clear' : 'queue is clear',
-      accent: (counts.pendingPrs ?? 0) > 0 ? ('warn' as const) : ('quiet' as const),
+      value: data.requestsAwaitingApproval,
+      sub:
+        data.requestsAwaitingApproval === null
+          ? NOT_YOURS
+          : count(data.requestsAwaitingApproval) > 0
+            ? 'nothing can be ordered until these clear'
+            : 'queue is clear',
+      accent: count(data.requestsAwaitingApproval) > 0 ? ('warn' as const) : ('quiet' as const),
       to: '/g-chain/purchase-requests?status=PENDING_APPROVAL',
     },
     {
       label: 'Orders awaiting delivery',
       icon: 'cart' as const,
       more: 'Open orders',
-      value: counts.awaitingDelivery ?? 0,
-      sub: 'issued or part-received',
-      accent: (counts.awaitingDelivery ?? 0) > 0 ? ('info' as const) : ('quiet' as const),
-      to: '/g-chain/purchase-orders',
+      value: data.ordersAwaitingDelivery,
+      sub: data.ordersAwaitingDelivery === null ? NOT_YOURS : 'issued or part-received',
+      accent: count(data.ordersAwaitingDelivery) > 0 ? ('info' as const) : ('quiet' as const),
+      to: '/g-chain/purchase-orders?awaiting=true',
     },
     {
       label: 'Overdue borrow slips',
       icon: 'wrench' as const,
       more: 'Open borrow slips',
-      value: counts.overdueBorrows ?? 0,
-      sub: (counts.overdueBorrows ?? 0) > 0 ? 'tools out past their return date' : 'everything back on time',
-      accent: (counts.overdueBorrows ?? 0) > 0 ? ('danger' as const) : ('quiet' as const),
-      to: '/g-chain/borrow-slips',
+      value: data.borrowSlipsOverdue,
+      sub:
+        data.borrowSlipsOverdue === null
+          ? NOT_YOURS
+          : count(data.borrowSlipsOverdue) > 0
+            ? 'tools out past their return date'
+            : 'everything back on time',
+      accent: count(data.borrowSlipsOverdue) > 0 ? ('danger' as const) : ('quiet' as const),
+      to: '/g-chain/borrow-slips?overdue=true',
+    },
+    {
+      label: 'Stock on hand',
+      icon: 'box' as const,
+      more: 'Open inventory',
+      value: data.stock ? formatMoney(data.stock.value) : null,
+      sub: data.stock
+        ? `${data.stock.lines} item line${data.stock.lines === 1 ? '' : 's'}, at moving average cost`
+        : NOT_YOURS,
+      accent: 'quiet' as const,
+      figure: true,
+      to: '/g-chain/inventory',
     },
   ];
+  const hidden = tiles.filter((t) => t.value === null).length;
 
   return (
     <div>
@@ -1537,22 +1616,29 @@ export function ChainDashboard() {
             sub={t.sub}
             accent={t.accent}
             icon={t.icon}
-            more={t.more}
-            to={t.to}
+            figure={'figure' in t ? t.figure : undefined}
+            // A tile whose list the caller cannot open is not a link.
+            more={t.value === null ? undefined : t.more}
+            to={t.value === null ? undefined : t.to}
           />
         ))}
       </div>
+      {hidden > 0 && (
+        <p className="faint proc-tile-note">
+          A dash means the list behind that figure is outside your access — it is not zero.
+        </p>
+      )}
 
       <div className="card">
         <h3 className="card-title">How the money flows</h3>
-        <div className="stack" style={{ fontSize: 13 }}>
+        <div className="stack proc-flow">
           <div>
-            <strong style={{ color: 'var(--neon)' }}>Direct to job</strong> — approving the request{' '}
+            <strong>Direct to job</strong> — approving the request{' '}
             <em>commits</em> the budget at estimated prices; issuing the order replaces that with the
             agreed price; receiving the goods turns it into <em>incurred</em> cost.
           </div>
           <div>
-            <strong style={{ color: 'var(--neon)' }}>Stock replenishment</strong> — nothing touches a
+            <strong>Stock replenishment</strong> — nothing touches a
             project. Receiving adds to inventory at cost; issuing to a job charges it at the moving
             average.
           </div>

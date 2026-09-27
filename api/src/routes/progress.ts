@@ -749,6 +749,9 @@ async function loadBilling(id: string) {
       },
       progressReport: { select: { id: true, number: true, reportNo: true, periodFrom: true, periodTo: true } },
       lines: { include: { scopeItem: true }, orderBy: { scopeItem: { sortOrder: 'asc' } } },
+      // The billing's onward link. Numbers and status only — the invoice's
+      // money is Finance's to show, and it was copied from this billing anyway.
+      invoice: { select: { id: true, number: true, status: true } },
     },
   });
 }

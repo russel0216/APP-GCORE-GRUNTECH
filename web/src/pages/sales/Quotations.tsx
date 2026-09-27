@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, getToken } from '../../lib/api';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { api, getToken, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { DocumentApproval } from '../../components/ApprovalStepper';
+import { ActivityLog } from '../../components/ActivityLog';
+import { Stat } from '../../components/charts';
 import {
   Checkbox,
   Empty,
@@ -10,11 +13,14 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatDateTime,
   formatMoney,
   useToast,
+  type Tone,
 } from '../../components/ui';
+import { LostReasonModal } from './LostReasonModal';
 
 const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -24,13 +30,30 @@ const OUTCOMES = [
   { value: 'LOST', label: 'Lost' },
 ];
 
-function outcomeTone(o: string) {
-  return o === 'WON' ? 'ok' : o === 'LOST' ? 'danger' : o === 'OPEN' ? 'warn' : 'info';
-}
+/**
+ * A quotation's outcome on the shared pill (rule 12). OPEN reads as "somebody
+ * owes an answer" rather than the built-in neutral — what the old local
+ * `outcomeTone` said — and the rest are the built-in lifecycle colours.
+ */
+export const QUOTATION_OUTCOME_TONES: Record<string, Tone> = { OPEN: 'warn' };
 
-function revisionTone(s: string) {
-  return s === 'APPROVED' ? 'ok' : s === 'REJECTED' ? 'danger' : s === 'PENDING_APPROVAL' ? 'warn' : '';
-}
+/** A superseded revision is history, not a failure — neutral, not red. */
+const REVISION_TONES: Record<string, Tone> = { SUPERSEDED: '' };
+
+/**
+ * Where an outcome may go from here — the legal moves only, so the page never
+ * offers a button the server will refuse. The server holds the same rules
+ * (`assertOutcomeChange` in api/src/shared/pipeline.ts); WON additionally
+ * needs an approved revision and LOST a reason, both handled below.
+ */
+const NEXT_OUTCOMES: Record<string, string[]> = {
+  OPEN: ['SUBMITTED', 'NEGOTIATION', 'LOST'],
+  SUBMITTED: ['NEGOTIATION', 'WON', 'LOST'],
+  NEGOTIATION: ['WON', 'LOST'],
+  // Reopening is allowed until a project exists (see the WON block).
+  WON: ['NEGOTIATION'],
+  LOST: ['NEGOTIATION'],
+};
 
 interface QuotationRow {
   id: string;
@@ -44,11 +67,48 @@ interface QuotationRow {
   latest: { revision: number; status: string; total: number; updatedAt: string } | null;
 }
 
+/** What `?new=1&…` asks the create modal to start from. */
+export interface QuotationPreset {
+  leadId?: string;
+  costingId?: string;
+  customerId?: string;
+}
+
 export function Quotations() {
   const { can } = useAuth();
   const navigate = useNavigate();
-  const [creating, setCreating] = useState(false);
+  const [params, setParams] = useSearchParams();
   const [reload, setReload] = useState(0);
+
+  /*
+    `?new=1&leadId=&costingId=&customerId=` opens the create modal already
+    filled in. The lead page's "Create quotation", the costing's "Create
+    quotation" and Customer 360's "New quotation" all land here; the URL is
+    the hand-off, so there is no second create form anywhere.
+  */
+  const [creating, setCreating] = useState<QuotationPreset | null>(() =>
+    params.get('new') && can('gops.quotations.create')
+      ? {
+          leadId: params.get('leadId') ?? undefined,
+          costingId: params.get('costingId') ?? undefined,
+          customerId: params.get('customerId') ?? undefined,
+        }
+      : null,
+  );
+
+  function closeCreate() {
+    setCreating(null);
+    if (params.has('new')) {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          for (const k of ['new', 'leadId', 'costingId', 'customerId']) next.delete(k);
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }
 
   const columns: Column<QuotationRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (q) => <span className="mono">{q.number}</span> },
@@ -69,10 +129,7 @@ export function Quotations() {
       render: (q) =>
         q.latest ? (
           <span>
-            R{q.latest.revision}{' '}
-            <span className={`badge ${revisionTone(q.latest.status)}`}>
-              {q.latest.status.toLowerCase().replace(/_/g, ' ')}
-            </span>
+            R{q.latest.revision} <StatusBadge status={q.latest.status} extra={REVISION_TONES} />
           </span>
         ) : (
           <span className="faint">—</span>
@@ -90,7 +147,7 @@ export function Quotations() {
     {
       key: 'outcome',
       label: 'Outcome',
-      render: (q) => <span className={`badge ${outcomeTone(q.outcome)}`}>{q.outcome}</span>,
+      render: (q) => <StatusBadge status={q.outcome} extra={QUOTATION_OUTCOME_TONES} />,
     },
   ];
 
@@ -119,7 +176,7 @@ export function Quotations() {
         filters={[{ key: 'outcome', label: 'Outcome', options: OUTCOMES }]}
         actions={
           can('gops.quotations.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+            <button className="btn btn-primary btn-sm" onClick={() => setCreating({})}>
               + New quotation
             </button>
           ) : null
@@ -128,11 +185,12 @@ export function Quotations() {
 
       {creating && (
         <NewQuotationModal
-          onClose={() => setCreating(false)}
+          preset={creating}
+          onClose={closeCreate}
           onCreated={(id) => {
-            setCreating(false);
+            setCreating(null);
             setReload((r) => r + 1);
-            navigate(`/g-ops/quotations/${id}`);
+            navigate(`/g-ops/quotations/${id}`, { replace: params.has('new') });
           }}
         />
       )}
@@ -169,6 +227,8 @@ interface Revision {
   items: Item[];
   costing: { id: string; number: string; title: string; contractValue: number; totalCost: number } | null;
   approvedBy: { id: string; name: string } | null;
+  /** The project this revision became, if any (Job.quotationRevisionId). */
+  jobs: { id: string; number: string; name: string; status: string }[];
 }
 
 interface QuotationDetail {
@@ -179,6 +239,7 @@ interface QuotationDetail {
   probability: number;
   lostReason: string | null;
   submittedAt: string | null;
+  expectedClosing: string | null;
   canEdit: boolean;
   customer: { id: string; name: string; code: string };
   contact: { id: string; name: string } | null;
@@ -190,6 +251,7 @@ interface QuotationDetail {
 
 export function QuotationDetail() {
   const { id } = useParams<{ id: string }>();
+  const { can } = useAuth();
   const toast = useToast();
 
   const [quotation, setQuotation] = useState<QuotationDetail | null>(null);
@@ -198,6 +260,8 @@ export function QuotationDetail() {
   const [error, setError] = useState<unknown>(null);
   const [itemModal, setItemModal] = useState<Item | 'new' | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [losing, setLosing] = useState(false);
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -206,6 +270,7 @@ export function QuotationDetail() {
       setQuotation(q);
       setSelected((prev) => prev ?? q.revisions[0]?.id ?? null);
       setError(null);
+      setReload((r) => r + 1);
     } catch (err) {
       setError(err);
     } finally {
@@ -222,6 +287,8 @@ export function QuotationDetail() {
 
   const revision = quotation.revisions.find((r) => r.id === selected) ?? quotation.revisions[0];
   const editable = quotation.canEdit && revision?.status === 'DRAFT';
+  const approved = quotation.revisions.find((r) => r.status === 'APPROVED') ?? null;
+  const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
 
   async function act(fn: () => Promise<unknown>, message: string) {
     try {
@@ -233,6 +300,14 @@ export function QuotationDetail() {
     }
   }
 
+  /** Throws on refusal so LostReasonModal keeps the reason and shows why. */
+  async function markLost(reason: string) {
+    await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: reason });
+    setLosing(false);
+    toast('ok', `${quotation!.number} marked lost`);
+    await load();
+  }
+
   function printPdf() {
     if (!revision) return;
     fetch(`/api/quotations/${quotation!.id}/revisions/${revision.id}/pdf`, {
@@ -242,6 +317,11 @@ export function QuotationDetail() {
       .then((b) => window.open(URL.createObjectURL(b), '_blank'))
       .catch(() => toast('error', 'Could not render the quotation'));
   }
+
+  // A quotation that became a project stays won — no moves at all.
+  const moves = (quotation.outcome === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[quotation.outcome] ?? [])).map(
+    (o) => ({ value: o, label: OUTCOMES.find((x) => x.value === o)?.label ?? o }),
+  );
 
   return (
     <div>
@@ -264,6 +344,12 @@ export function QuotationDetail() {
             <Link to={`/g-ops/costing/${revision.costing.id}`}>{revision.costing.number}</Link>
           </>
         )}
+        {jobs.map((j) => (
+          <span key={j.id}>
+            <span className="sep">›</span>
+            <Link to={`/g-ops/projects/${j.id}`}>{j.number}</Link>
+          </span>
+        ))}
       </div>
 
       <div className="page-head">
@@ -272,8 +358,8 @@ export function QuotationDetail() {
           <p>
             <Link to={`/g-ops/customers/${quotation.customer.id}`}>{quotation.customer.name}</Link>
             {quotation.site ? ` · ${quotation.site.name}` : ''} · {quotation.owner.name}
-            <span className={`badge ${outcomeTone(quotation.outcome)}`} style={{ marginLeft: 8 }}>
-              {quotation.outcome}
+            <span className="sales-after-text">
+              <StatusBadge status={quotation.outcome} extra={QUOTATION_OUTCOME_TONES} />
             </span>
           </p>
         </div>
@@ -300,17 +386,15 @@ export function QuotationDetail() {
       <ErrorBox error={error} />
 
       {/* Every revision, newest first. Clicking one shows what was sent then. */}
-      <div className="row" style={{ marginBottom: 16, gap: 7 }}>
+      <div className="row sales-revisions">
         {quotation.revisions.map((r) => (
           <button
             key={r.id}
             className={`btn btn-sm${r.id === revision?.id ? ' btn-primary' : ''}`}
             onClick={() => setSelected(r.id)}
+            aria-pressed={r.id === revision?.id}
           >
-            R{r.revision}
-            <span className={`badge ${revisionTone(r.status)}`} style={{ marginLeft: 6 }}>
-              {r.status.toLowerCase().replace(/_/g, ' ')}
-            </span>
+            R{r.revision} <StatusBadge status={r.status} extra={REVISION_TONES} />
           </button>
         ))}
       </div>
@@ -336,29 +420,24 @@ export function QuotationDetail() {
             </div>
           )}
 
-          <div className="grid grid-4" style={{ marginBottom: 18 }}>
-            <Stat label="Subtotal" value={formatMoney(revision.subtotal)} />
-            <Stat label={`VAT ${(revision.vatRate * 100).toFixed(0)}%`} value={formatMoney(revision.vatAmount)} />
-            <Stat label="Total" value={formatMoney(revision.total)} accent />
+          {/* Who has this revision, and since when — the one approval rail. */}
+          <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
+
+          <div className="kpi-grid">
+            <Stat label="Subtotal" value={formatMoney(revision.subtotal)} figure />
             <Stat
-              label="Margin"
-              value={
-                revision.costing ? (
-                  <MarginFromCosting costing={revision.costing} />
-                ) : (
-                  <span className="faint" style={{ fontSize: 13 }}>
-                    no costing linked
-                  </span>
-                )
-              }
+              label={`VAT ${(revision.vatRate * 100).toFixed(0)}%`}
+              value={formatMoney(revision.vatAmount)}
+              figure
+              sub={revision.vatInclusive ? 'backed out of the prices' : 'added on'}
             />
+            <Stat label="Total" value={formatMoney(revision.total)} figure accent="neon" />
+            <MarginStat costing={revision.costing} />
           </div>
 
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
-              <h3 className="card-title" style={{ margin: 0 }}>
-                Lines
-              </h3>
+          <div className="card sales-card-gap">
+            <div className="row sales-card-head">
+              <h3 className="card-title">Lines</h3>
               {editable && (
                 <div className="row">
                   {revision.costing && (
@@ -390,7 +469,7 @@ export function QuotationDetail() {
                 hint={
                   revision.costing
                     ? 'Use “Fill from costing” to bring in the scope sections you already priced.'
-                    : 'Link a costing under Edit, then fill the lines from its scope of work.'
+                    : 'Link a costing under Modify, then fill the lines from its scope of work.'
                 }
               />
             ) : (
@@ -398,13 +477,13 @@ export function QuotationDetail() {
                 <table className="data">
                   <thead>
                     <tr>
-                      <th style={{ width: 40 }}>#</th>
+                      <th className="sales-col-num">#</th>
                       <th>Description</th>
                       <th className="right">Qty</th>
                       <th>Unit</th>
                       <th className="right">Unit price</th>
                       <th className="right">Amount</th>
-                      {editable && <th style={{ width: 60 }} />}
+                      {editable && <th className="sales-col-action" />}
                     </tr>
                   </thead>
                   <tbody>
@@ -431,7 +510,7 @@ export function QuotationDetail() {
             )}
 
             {editable && revision.items.length > 0 && (
-              <div className="row" style={{ marginTop: 14 }}>
+              <div className="row sales-card-foot">
                 <button
                   className="btn btn-ok"
                   onClick={() =>
@@ -457,39 +536,67 @@ export function QuotationDetail() {
               <Row label="Valid for" value={`${revision.validityDays} days`} />
               <Row label="VAT" value={revision.vatInclusive ? 'Inclusive of VAT' : 'Exclusive — added on'} />
               <Row label="Raised" value={formatDate(revision.createdAt)} />
+              <Row label="Expected closing" value={formatDate(quotation.expectedClosing)} />
             </div>
 
             <div className="card">
               <h3 className="card-title">Outcome</h3>
-              <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+              <p className="muted sales-blurb">
                 Recording the outcome here also moves the lead, so the pipeline stays honest without
                 keeping two statuses in step.
               </p>
-              {quotation.canEdit && (
+              {quotation.outcome === 'LOST' && (
+                <Row label="Lost because" value={quotation.lostReason} />
+              )}
+              {quotation.canEdit && moves.length > 0 && (
                 <div className="row">
-                  {OUTCOMES.filter((o) => o.value !== quotation.outcome).map((o) => (
-                    <button
-                      key={o.value}
-                      className="btn btn-sm"
-                      onClick={() =>
-                        act(
-                          () => api.patch(`/quotations/${quotation.id}`, { outcome: o.value }),
-                          `Marked ${o.label.toLowerCase()}`,
-                        )
-                      }
-                    >
-                      {o.label}
-                    </button>
-                  ))}
+                  {moves.map((o) => {
+                    if (o.value === 'LOST') {
+                      return (
+                        <button key={o.value} className="btn btn-sm btn-danger-ghost" onClick={() => setLosing(true)}>
+                          Lost…
+                        </button>
+                      );
+                    }
+                    const needsApproval = o.value === 'WON' && !approved;
+                    const reopening = quotation.outcome === 'WON' || quotation.outcome === 'LOST';
+                    return (
+                      <button
+                        key={o.value}
+                        className={`btn btn-sm${o.value === 'WON' ? ' btn-ok' : ''}`}
+                        disabled={needsApproval}
+                        title={
+                          needsApproval
+                            ? 'Only an approved revision can be won — submit it for approval first'
+                            : undefined
+                        }
+                        onClick={() =>
+                          act(
+                            () => api.patch(`/quotations/${quotation.id}`, { outcome: o.value }),
+                            reopening ? 'Reopened' : `Marked ${o.label.toLowerCase()}`,
+                          )
+                        }
+                      >
+                        {reopening ? 'Reopen' : o.label}
+                      </button>
+                    );
+                  })}
                 </div>
+              )}
+              {quotation.canEdit && quotation.outcome !== 'WON' && !approved && (
+                <p className="faint sales-hint">
+                  Won is available once a revision is approved — only the approved revision becomes
+                  a project.
+                </p>
               )}
               {quotation.outcome === 'WON' && (
-                <div className="alert ok" style={{ marginTop: 12, marginBottom: 0 }}>
-                  Won. Converting this into a project ships in Phase 4 — the approved revision's
-                  costing carries the budget and the schedule of values across.
-                </div>
+                <WonBlock quotation={quotation} approved={approved} jobs={jobs} can={can} />
               )}
             </div>
+          </div>
+
+          <div className="sales-card-gap">
+            <ActivityLog quotationId={quotation.id} canEdit={quotation.canEdit} />
           </div>
         </>
       )}
@@ -518,36 +625,116 @@ export function QuotationDetail() {
           }}
         />
       )}
+
+      {losing && (
+        <LostReasonModal
+          what={quotation.number}
+          initial={quotation.lostReason ?? ''}
+          onClose={() => setLosing(false)}
+          onSave={markLost}
+        />
+      )}
     </div>
   );
 }
 
-function MarginFromCosting({ costing }: { costing: { contractValue: number; totalCost: number } }) {
-  const profit = costing.contractValue - costing.totalCost;
-  const pct = costing.contractValue > 0 ? profit / costing.contractValue : 0;
-  const tone = pct < 0 ? 'danger' : pct < 0.1 ? 'warn' : 'ok';
-  return <span className={`badge ${tone}`}>{(pct * 100).toFixed(1)}%</span>;
+/**
+ * What happens after a win. A quotation that became a project says so and
+ * links to it; one that has not offers the next step — a project from the
+ * approved revision's costing, or a job order for service work — so a won
+ * quotation waiting on somebody is distinguishable from one already delivered.
+ */
+function WonBlock({
+  quotation,
+  approved,
+  jobs,
+  can,
+}: {
+  quotation: QuotationDetail;
+  approved: Revision | null;
+  jobs: { id: string; number: string; name: string; status: string }[];
+  can: (permission: string) => boolean;
+}) {
+  if (jobs.length > 0) {
+    return (
+      <div className="alert ok sales-won">
+        Delivered as{' '}
+        {jobs.map((j, i) => (
+          <span key={j.id}>
+            {i > 0 && ', '}
+            <Link to={`/g-ops/projects/${j.id}`} className="mono">
+              {j.number}
+            </Link>{' '}
+            {j.name} <StatusBadge status={j.status} />
+          </span>
+        ))}
+        . It stays won while the project exists.
+      </div>
+    );
+  }
+  const canProject = !!approved && can('gops.projects.create');
+  const canJobOrder = can('gops.job_orders.create');
+  return (
+    <div className="alert ok sales-won">
+      <div>
+        Won.{' '}
+        {approved
+          ? `R${approved.revision} is the approved revision — its costing carries the budget and the schedule of values into the project.`
+          : 'No revision is approved, so there is nothing to build a project from yet.'}
+      </div>
+      {(canProject || canJobOrder) && (
+        <div className="row sales-won-actions">
+          {canProject && (
+            <Link
+              className="btn btn-sm btn-primary"
+              to={`/g-ops/projects${qs({
+                new: 1,
+                costingId: approved?.costing?.id,
+                quotationRevisionId: approved?.id,
+              })}`}
+            >
+              Create project ›
+            </Link>
+          )}
+          {canJobOrder && (
+            <Link
+              className="btn btn-sm"
+              to={`/g-ops/job-orders${qs({
+                new: 1,
+                customerId: quotation.customer.id,
+                siteId: quotation.site?.id,
+                quotationId: quotation.id,
+              })}`}
+            >
+              Request job order
+            </Link>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
-function Stat({ label, value, accent }: { label: string; value: React.ReactNode; accent?: boolean }) {
+function MarginStat({ costing }: { costing: { contractValue: number; totalCost: number } | null }) {
+  if (!costing) return <Stat label="Margin" value="—" sub="no costing linked" />;
+  const profit = costing.contractValue - costing.totalCost;
+  const pct = costing.contractValue > 0 ? profit / costing.contractValue : 0;
+  const accent = pct < 0 ? 'danger' : pct < 0.1 ? 'warn' : 'ok';
   return (
-    <div className="card">
-      <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-        {label.toUpperCase()}
-      </div>
-      <div style={{ fontSize: 20, marginTop: 6, fontWeight: 600, color: accent ? 'var(--neon)' : 'var(--text)' }}>
-        {value}
-      </div>
-    </div>
+    <Stat
+      label="Margin"
+      value={`${(pct * 100).toFixed(1)}%`}
+      figure
+      accent={accent}
+      sub={`${formatMoney(profit)} on the costing${pct < 0 ? ' — below cost' : pct < 0.1 ? ' — under 10%' : ''}`}
+    />
   );
 }
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--line-soft)' }}>
-      <span className="faint" style={{ width: 130, flexShrink: 0, fontSize: 12 }}>
-        {label}
-      </span>
+    <div className="sales-row">
+      <span className="sales-row-label">{label}</span>
       <span>{value || <span className="faint">—</span>}</span>
     </div>
   );
@@ -555,10 +742,33 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 
 // ── Modals ───────────────────────────────────────────────────────────────────
 
-function NewQuotationModal({
+interface LeadForQuote {
+  id: string;
+  companyName: string;
+  description: string | null;
+  contactPerson: string | null;
+  expectedClosing: string | null;
+  customer: { id: string; name: string } | null;
+  site: { id: string; name: string } | null;
+  costings: { id: string; number: string; title: string; status: string }[];
+}
+
+/**
+ * The one "new quotation" form — the list's button, the lead page, the
+ * costing page, Customer 360 and the pipeline board's "+ New" all open this.
+ *
+ * `preset` is what the caller already knows. Naming a lead fills in the
+ * customer, the site, the attention line (the lead's contact by name, else
+ * the customer's primary), the subject (the enquiry's first line), the
+ * expected close and the lead's latest costing. Every one stays editable —
+ * "nothing is retyped" is not the same as "nothing can be changed".
+ */
+export function NewQuotationModal({
+  preset = {},
   onClose,
   onCreated,
 }: {
+  preset?: QuotationPreset;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -570,9 +780,31 @@ function NewQuotationModal({
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
   const [costings, setCostings] = useState<{ id: string; number: string; title: string }[]>([]);
   const [leads, setLeads] = useState<{ id: string; companyName: string; status: string }[]>([]);
+  const [lead, setLead] = useState<LeadForQuote | null>(null);
+  /*
+    Records the preset names that the lookups (recent 50, open leads) may not
+    include. Kept apart and merged at render, so a lookup that answers after
+    the preset cannot wipe them out.
+  */
+  const [pinnedCustomers, setPinnedCustomers] = useState<{ id: string; name: string }[]>([]);
+  const [pinnedCostings, setPinnedCostings] = useState<{ id: string; number: string; title: string }[]>([]);
+  const [preview, setPreview] = useState<{
+    number: string;
+    employeeNo: string | null;
+    linked: boolean;
+    usesEmployeeDigits: boolean;
+  } | null>(null);
   const [form, setForm] = useState({
-    customerId: '', contactId: '', siteId: '', subject: '', costingId: '', leadId: '',
+    customerId: preset.customerId ?? '',
+    contactId: '',
+    siteId: '',
+    subject: '',
+    costingId: preset.costingId ?? '',
+    leadId: preset.leadId ?? '',
+    expectedClosing: '',
   });
+  /** The contact to pick once the customer's contacts arrive, by name. */
+  const [wantContact, setWantContact] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
@@ -580,10 +812,9 @@ function NewQuotationModal({
     /*
       Leads still open, so a quotation can say which enquiry it answers.
 
-      This moved here from a button on the lead screen. The link is not
-      decoration: a quotation's outcome writes the lead's status back, so a
-      quotation raised without one leaves its lead sitting at whatever stage
-      somebody last set by hand.
+      The link is not decoration: a quotation's outcome writes the lead's
+      status back, so a quotation raised without one leaves its lead sitting
+      at whatever stage somebody last set by hand.
     */
     api
       .get<{ rows: { id: string; companyName: string; status: string }[] }>(
@@ -591,7 +822,84 @@ function NewQuotationModal({
       )
       .then((r) => setLeads(r.rows))
       .catch(() => {});
+    /*
+      The number this quotation will get, before it is saved. It carries the
+      author's own employee digits, so it is worth seeing — and an account not
+      linked to an employee record numbers under 000, which is better said
+      here than discovered on the printout.
+    */
+    api
+      .get<NonNullable<typeof preview>>('/quotations/next-number')
+      .then(setPreview)
+      .catch(() => setPreview(null));
   }, []);
+
+  /** Take what the lead already knows. Only fills; the form stays editable. */
+  const adoptLead = useCallback(async (leadId: string) => {
+    if (!leadId) {
+      setLead(null);
+      return;
+    }
+    try {
+      const l = await api.get<LeadForQuote>(`/leads/${leadId}`);
+      setLead(l);
+      const firstLine = (l.description ?? '').split('\n')[0].trim();
+      setForm((f) => ({
+        ...f,
+        leadId,
+        customerId: l.customer?.id ?? f.customerId,
+        siteId: l.customer ? (l.site?.id ?? '') : f.siteId,
+        subject: f.subject || firstLine.slice(0, 120),
+        expectedClosing: l.expectedClosing ? l.expectedClosing.slice(0, 10) : f.expectedClosing,
+        costingId: f.costingId || l.costings[0]?.id || '',
+      }));
+      setWantContact(l.contactPerson);
+      // A lead's costing or customer may not be in the lookups; make sure they show.
+      setPinnedCostings((list) => [...l.costings, ...list]);
+      if (l.customer) setPinnedCustomers((list) => [l.customer!, ...list]);
+    } catch (err) {
+      setError(err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (preset.leadId) void adoptLead(preset.leadId);
+  }, [preset.leadId, adoptLead]);
+
+  /*
+    Raised from a costing ("Create quotation" on the costing page): the
+    costing names the customer, the site, the subject and — when it was
+    started from a lead — the lead, which then fills in the rest.
+  */
+  useEffect(() => {
+    if (!preset.costingId || preset.leadId) return;
+    api
+      .get<{
+        id: string;
+        number: string;
+        title: string;
+        customer: { id: string; name: string } | null;
+        site: { id: string; name: string } | null;
+        lead: { id: string } | null;
+      }>(`/costings/${preset.costingId}`)
+      .then((c) => {
+        setPinnedCostings((list) => [{ id: c.id, number: c.number, title: c.title }, ...list]);
+        if (c.customer) setPinnedCustomers((list) => [c.customer!, ...list]);
+        setForm((f) => ({
+          ...f,
+          costingId: c.id,
+          customerId: f.customerId || c.customer?.id || '',
+          siteId: f.siteId || c.site?.id || '',
+          subject: f.subject || c.title,
+        }));
+        if (c.lead) {
+          setForm((f) => ({ ...f, leadId: c.lead!.id }));
+          void adoptLead(c.lead.id);
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preset.costingId, preset.leadId, adoptLead]);
 
   useEffect(() => {
     if (!form.customerId) {
@@ -606,29 +914,51 @@ function NewQuotationModal({
       .then((c) => {
         setContacts(c.contacts);
         setSites(c.sites);
+        // Contacts arrive primary first, so the fallback is the primary one.
+        setForm((f) => {
+          if (f.contactId) return f;
+          const byName = wantContact
+            ? c.contacts.find((x) => x.name.trim().toLowerCase() === wantContact.trim().toLowerCase())
+            : undefined;
+          return { ...f, contactId: (byName ?? c.contacts[0])?.id ?? '' };
+        });
       })
       .catch(() => {});
-  }, [form.customerId]);
+  }, [form.customerId, wantContact]);
 
   async function create() {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.post<{ id: string }>('/quotations', {
-        customerId: form.customerId,
+      const created = await api.post<{ id: string; number: string }>('/quotations', {
+        // Left empty, the server takes the lead's customer.
+        customerId: form.customerId || null,
         contactId: form.contactId || null,
         siteId: form.siteId || null,
         subject: form.subject,
         costingId: form.costingId || null,
         leadId: form.leadId || null,
+        expectedClosing: form.expectedClosing || null,
       });
-      toast('ok', 'Quotation created');
+      toast('ok', `Quotation ${created.number ?? ''} created`.replace('  ', ' '));
       onCreated(created.id);
     } catch (err) {
       setError(err);
       setBusy(false);
     }
   }
+
+  const leadWithoutCustomer = !!lead && !lead.customer;
+  const merge = <T extends { id: string }>(pinned: T[], list: T[]) => {
+    const seen = new Set<string>();
+    return [...pinned, ...list].filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
+  };
+  const customerOptions = merge(pinnedCustomers, customers);
+  const costingOptions = merge(pinnedCostings, costings);
+  const leadOptions =
+    lead && !leads.some((l) => l.id === lead.id)
+      ? [{ id: lead.id, companyName: lead.companyName, status: '' }, ...leads]
+      : leads;
 
   return (
     <Modal
@@ -642,7 +972,7 @@ function NewQuotationModal({
           <button
             className="btn btn-primary"
             onClick={create}
-            disabled={busy || !form.customerId || form.subject.length < 2}
+            disabled={busy || !form.customerId || form.subject.trim().length < 2}
           >
             {busy ? 'Creating…' : 'Create'}
           </button>
@@ -650,14 +980,42 @@ function NewQuotationModal({
       }
     >
       <ErrorBox error={error} />
-      {leads.length > 0 && (
+
+      <div className="sales-row">
+        <span className="sales-row-label">Number</span>
+        <span>
+          {preview ? (
+            <>
+              <span className="mono">{preview.number}</span>{' '}
+              <span className="faint">— the next one; issued when you save</span>
+            </>
+          ) : (
+            <span className="faint">issued when you save</span>
+          )}
+        </span>
+      </div>
+      {preview && preview.usesEmployeeDigits && !preview.linked && (
+        <div className="alert info">
+          Your account is not linked to an employee record, so this number carries 000 where your
+          employee digits would be. HR can link it under G-HR › Employees.
+        </div>
+      )}
+
+      {leadOptions.length > 0 && (
         <Field
           label="Answering which enquiry"
-          hint="Optional, but it is what keeps the lead's status in step with this quotation"
+          hint="Optional, but it is what keeps the lead's status in step with this quotation — and it fills in the rest"
         >
-          <select value={form.leadId} onChange={(e) => setForm({ ...form, leadId: e.target.value })}>
+          <select
+            value={form.leadId}
+            onChange={(e) => {
+              const leadId = e.target.value;
+              setForm((f) => ({ ...f, leadId }));
+              void adoptLead(leadId);
+            }}
+          >
             <option value="">— none —</option>
-            {leads.map((l) => (
+            {leadOptions.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.companyName}
               </option>
@@ -665,13 +1023,19 @@ function NewQuotationModal({
           </select>
         </Field>
       )}
-      <Field label="Customer">
+      {leadWithoutCustomer && (
+        <div className="alert warn">
+          This lead is not linked to a customer yet. Pick the customer below, or open the lead,
+          Modify, and pick or add the company first.
+        </div>
+      )}
+      <Field label="Customer" required>
         <select
           value={form.customerId}
           onChange={(e) => setForm({ ...form, customerId: e.target.value, contactId: '', siteId: '' })}
         >
           <option value="">— choose —</option>
-          {customers.map((c) => (
+          {customerOptions.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
             </option>
@@ -702,19 +1066,28 @@ function NewQuotationModal({
           </select>
         </Field>
       )}
-      <Field label="Subject">
+      <Field label="Subject" required>
         <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
       </Field>
-      <Field label="Costing" hint="Links the pricing to what you actually estimated">
-        <select value={form.costingId} onChange={(e) => setForm({ ...form, costingId: e.target.value })}>
-          <option value="">— none yet —</option>
-          {costings.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.number} — {c.title}
-            </option>
-          ))}
-        </select>
-      </Field>
+      <div className="grid grid-2">
+        <Field label="Costing" hint="Links the pricing to what you actually estimated">
+          <select value={form.costingId} onChange={(e) => setForm({ ...form, costingId: e.target.value })}>
+            <option value="">— none yet —</option>
+            {costingOptions.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.number} — {c.title}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Expected closing" hint="When you expect the decision — the pipeline forecast reads it">
+          <input
+            type="date"
+            value={form.expectedClosing}
+            onChange={(e) => setForm({ ...form, expectedClosing: e.target.value })}
+          />
+        </Field>
+      </div>
     </Modal>
   );
 }
@@ -785,7 +1158,7 @@ function ItemModal({
               Remove
             </button>
           )}
-          <div style={{ flex: 1 }} />
+          <div className="sales-spacer" />
           <button className="btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>
@@ -824,7 +1197,7 @@ function ItemModal({
           />
         </Field>
       </div>
-      <div className="alert info" style={{ marginBottom: 0 }}>
+      <div className="alert info sales-flush">
         Line amount: <strong>{formatMoney(amount)}</strong>
       </div>
     </Modal>
@@ -849,6 +1222,7 @@ function QuotationSettings({
   const [form, setForm] = useState({
     subject: quotation.subject,
     probability: quotation.probability.toString(),
+    expectedClosing: quotation.expectedClosing?.slice(0, 10) ?? '',
     costingId: revision.costing?.id ?? '',
     validityDays: revision.validityDays.toString(),
     terms: revision.terms ?? '',
@@ -869,6 +1243,7 @@ function QuotationSettings({
       await api.patch(`/quotations/${quotation.id}`, {
         subject: form.subject,
         probability: Number(form.probability),
+        expectedClosing: form.expectedClosing || null,
       });
       if (editableRevision) {
         await api.patch(`/quotations/${quotation.id}/revisions/${revision.id}`, {
@@ -907,7 +1282,8 @@ function QuotationSettings({
       {!editableRevision && (
         <div className="alert info">
           Revision {revision.revision} is {revision.status.toLowerCase().replace(/_/g, ' ')}, so its
-          commercial terms are locked. Only the subject and probability can change here.
+          commercial terms are locked. Only the subject, probability and expected closing can change
+          here.
         </div>
       )}
 
@@ -915,13 +1291,20 @@ function QuotationSettings({
         <Field label="Subject">
           <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
         </Field>
-        <Field label="Probability %">
+        <Field label="Probability %" hint="Your own read — the weighted pipeline multiplies by it">
           <input
             type="number"
             min={0}
             max={100}
             value={form.probability}
             onChange={(e) => setForm({ ...form, probability: e.target.value })}
+          />
+        </Field>
+        <Field label="Expected closing" hint="When you expect the decision — the pipeline forecast reads it">
+          <input
+            type="date"
+            value={form.expectedClosing}
+            onChange={(e) => setForm({ ...form, expectedClosing: e.target.value })}
           />
         </Field>
         <Field label="Costing" hint="Where the price and the margin come from">

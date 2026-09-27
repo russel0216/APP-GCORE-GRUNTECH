@@ -1,1 +1,179 @@
-/* Gruntech Academy: courses, sessions, passports — package D. Tokens only. */
+/*
+  Gruntech Academy — courses, sessions, the calendar and passports
+  (package D, pages/hr/academy/*, hr/settings/AcademyCard, hr/dashboard/ReadinessTile).
+
+  Loaded after styles.css. Tokens only: spacing from --s-*, type from --fs-*,
+  colour from the theme variables, so the day theme is covered by the same
+  rules and nothing here is a literal colour or a pixel value. The month grid
+  is the shared MonthCalendar and brings its own rules from calendar.css —
+  there is no academy grid here, deliberately.
+*/
+
+/* ── Shared page furniture ───────────────────────────────────────────────── */
+
+.academy-meta {
+  margin: 0 0 var(--s-4);
+  color: var(--muted);
+  font-size: var(--fs-md);
+}
+
+.academy-meta strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.academy-body {
+  align-items: start;
+  margin-bottom: var(--s-4);
+}
+
+.academy-section {
+  margin-bottom: var(--s-4);
+}
+
+.academy-split {
+  justify-content: space-between;
+  margin-bottom: var(--s-3);
+}
+
+.academy-flush {
+  margin: 0;
+}
+
+.academy-prose {
+  margin: var(--s-3) 0 0;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  white-space: pre-wrap;
+}
+
+.academy-actions {
+  margin-top: var(--s-3);
+}
+
+.academy-attachments {
+  margin-top: var(--s-4);
+}
+
+.academy-list {
+  margin: 0;
+  padding-left: var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  font-size: var(--fs-md);
+}
+
+/* A form that turns read-only by disabling its fieldset keeps no frame. */
+.academy-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.academy-checks {
+  gap: var(--s-5);
+  margin-bottom: var(--s-3);
+}
+
+.academy-tabs {
+  margin-bottom: var(--s-4);
+}
+
+/* ── Attendees and results ───────────────────────────────────────────────── */
+
+.academy-col-actions {
+  width: var(--s-8);
+}
+
+.academy-score {
+  width: 6em;
+  text-align: right;
+}
+
+.academy-attendees select {
+  min-width: 10em;
+}
+
+/* The employee search above the shared PeoplePicker. */
+.academy-picker {
+  gap: var(--s-2);
+}
+
+/* ── Passport records ────────────────────────────────────────────────────── */
+
+.academy-row-actions {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: var(--s-1);
+}
+
+.academy-expand > td {
+  background: var(--surface-2);
+  padding: var(--s-3) var(--s-4);
+}
+
+/* ── Training calendar: the grid, and "This month" beside it ─────────────── */
+
+.academy-calendar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16em, 22em);
+  gap: var(--s-4);
+  align-items: start;
+}
+
+.academy-calendar-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+.academy-month-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+/* A whole row that opens the session — a real button, keyboard and all. */
+.academy-month-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.academy-month-item:hover {
+  background: var(--surface-2);
+}
+
+.academy-month-title {
+  font-weight: 600;
+}
+
+.academy-month-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+@media (max-width: 70em) {
+  .academy-calendar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

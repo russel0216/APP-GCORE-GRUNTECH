@@ -155,14 +155,43 @@ costingRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
-    res.json(
-      await prisma.costing.findMany({
-        where: onlyOwn ? { ownerId: me.id } : {},
-        select: { id: true, number: true, title: true, contractValue: true },
-        orderBy: { createdAt: 'desc' },
-        take: 50,
-      }),
-    );
+    const where: Prisma.CostingWhereInput = onlyOwn ? { ownerId: me.id } : {};
+
+    // `?status=FINAL` (or a comma list) lets a picker leave DRAFT costings out —
+    // a project is built on a final costing, and a picker that offers drafts
+    // offers budgets that are still moving. `?q=` narrows by number, title or
+    // customer, the same three fields the list searches.
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+    const statuses = status
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter((s): s is 'DRAFT' | 'FINAL' => s === 'DRAFT' || s === 'FINAL');
+    if (statuses.length === 1) where.status = statuses[0];
+    else if (statuses.length > 1) where.status = { in: statuses };
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (q) {
+      where.OR = [
+        { title: { contains: q, mode: 'insensitive' } },
+        { number: { contains: q, mode: 'insensitive' } },
+        { customer: { name: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
+
+    const rows = await prisma.costing.findMany({
+      where,
+      select: {
+        id: true,
+        number: true,
+        title: true,
+        status: true,
+        contractValue: true,
+        customer: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    res.json(rows.map((r) => ({ ...r, contractValue: num(r.contractValue) })));
   }),
 );
 
@@ -175,6 +204,7 @@ async function loadFull(id: string) {
       customer: { select: { id: true, name: true, code: true } },
       site: { select: { id: true, name: true } },
       owner: { select: { id: true, name: true } },
+      lead: { select: { id: true, number: true, companyName: true, status: true } },
       lines: {
         orderBy: { sortOrder: 'asc' },
         include: {
@@ -193,6 +223,13 @@ async function loadFull(id: string) {
           status: true,
           quotation: { select: { id: true, number: true, subject: true } },
         },
+      },
+      // Where the costing went: the jobs built on it. Rendered as the "next
+      // step" on the page, so a costing that already became a project says so
+      // instead of offering to create a second one.
+      jobs: {
+        select: { id: true, number: true, name: true, status: true, type: true },
+        orderBy: { createdAt: 'desc' },
       },
     },
   });
@@ -223,10 +260,19 @@ costingRoutes.get(
 
 // ── Create / update ──────────────────────────────────────────────────────────
 
+/**
+ * The lead stages a new costing advances from. Anything at or past COSTING is
+ * left alone — re-costing a lead in NEGOTIATION is normal and must not reset
+ * where the salesperson has got to.
+ */
+const LEAD_STAGES_BEFORE_COSTING = new Set(['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT']);
+
 const costingSchema = z.object({
   title: z.string().trim().min(2, 'Give the costing a title'),
   customerId: z.string().optional().nullable(),
   siteId: z.string().optional().nullable(),
+  /** The lead this costing answers. Set on creation from "Start costing". */
+  leadId: z.string().optional().nullable(),
   markupPct: z.number().min(0).max(5).optional(),
   discountAmount: z.number().min(0).optional(),
   durationDays: z.number().int().min(0).optional().nullable(),
@@ -242,14 +288,29 @@ costingRoutes.post(
     const me = currentUser(req);
     const body = parseBody(costingSchema, req.body);
 
-    const costing = await prisma.$transaction(async (tx) => {
+    const { costing, leadMoved } = await prisma.$transaction(async (tx) => {
+      // "Start costing" from a lead. The costing takes the lead's customer and
+      // site unless the body names its own, and the lead advances to COSTING —
+      // but only from the stages before it. A lead already in NEGOTIATION, or
+      // WON, must not be dragged backwards because somebody re-costed it.
+      let lead: { id: string; number: string; customerId: string | null; siteId: string | null; status: string } | null =
+        null;
+      if (body.leadId) {
+        lead = await tx.lead.findUnique({
+          where: { id: body.leadId },
+          select: { id: true, number: true, customerId: true, siteId: true, status: true },
+        });
+        if (!lead) throw notFound('Lead not found');
+      }
+
       const number = await nextNumber('costing', tx);
-      return tx.costing.create({
+      const created = await tx.costing.create({
         data: {
           number,
           title: body.title,
-          customerId: body.customerId || null,
-          siteId: body.siteId || null,
+          customerId: body.customerId || lead?.customerId || null,
+          siteId: body.siteId || (body.customerId ? null : lead?.siteId) || null,
+          leadId: lead?.id ?? null,
           ownerId: me.id,
           markupPct: d(body.markupPct ?? 0),
           discountAmount: d(body.discountAmount ?? 0),
@@ -258,6 +319,13 @@ costingRoutes.post(
           terms: body.terms || null,
         },
       });
+
+      let moved = false;
+      if (lead && LEAD_STAGES_BEFORE_COSTING.has(lead.status)) {
+        await tx.lead.update({ where: { id: lead.id }, data: { status: 'COSTING' } });
+        moved = true;
+      }
+      return { costing: created, leadMoved: moved ? lead : null };
     });
 
     await audit(
@@ -265,10 +333,23 @@ costingRoutes.post(
         entityType: 'costing',
         entityId: costing.id,
         action: 'CREATED',
-        summary: `Created costing ${costing.number} — ${costing.title}`,
+        summary: `Created costing ${costing.number} — ${costing.title}${
+          costing.leadId ? ` (from lead)` : ''
+        }`,
       },
       req,
     );
+    if (leadMoved) {
+      await audit(
+        {
+          entityType: 'lead',
+          entityId: leadMoved.id,
+          action: 'UPDATED',
+          summary: `Lead ${leadMoved.number} moved to COSTING — costing ${costing.number} started`,
+        },
+        req,
+      );
+    }
     res.status(201).json(present(costing as unknown as Record<string, unknown>));
   }),
 );
@@ -320,6 +401,11 @@ costingRoutes.patch(
     }
     if (body.siteId !== undefined) {
       data.site = body.siteId ? { connect: { id: body.siteId } } : { disconnect: true };
+    }
+    // Re-linking a costing to a lead is a correction, not a handoff: the lead's
+    // stage only moves when a costing is STARTED from it (POST).
+    if (body.leadId !== undefined) {
+      data.lead = body.leadId ? { connect: { id: body.leadId } } : { disconnect: true };
     }
 
     await prisma.costing.update({ where: { id: req.params.id }, data });
@@ -373,6 +459,122 @@ costingRoutes.delete(
       req,
     );
     res.json({ ok: true });
+  }),
+);
+
+// ── Duplicate ────────────────────────────────────────────────────────────────
+
+/**
+ * A fresh DRAFT copy of a costing: header, cost lines, scope sections and
+ * their tasks, under a new number and owned by whoever asked.
+ *
+ * This is how a service contract is renewed (model §4.5): the old contract's
+ * costing is copied at last year's prices, repriced, and a new contract is
+ * built on the copy. The prices are copied deliberately and the page says so —
+ * a renewal that silently kept them would be a price freeze nobody decided on.
+ *
+ * What is NOT copied: the lead link (a copy answers no lead), the quotation
+ * revisions and jobs built on the original (they are the original's history),
+ * and the status (a copy is always a draft — its numbers are about to change).
+ */
+costingRoutes.post(
+  '/:id/duplicate',
+  require_('gops.costing.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(
+      z.object({ title: z.string().trim().min(2).optional() }),
+      req.body ?? {},
+    );
+
+    const source = await prisma.costing.findUnique({
+      where: { id: req.params.id },
+      include: {
+        lines: { orderBy: { sortOrder: 'asc' } },
+        scopeSections: {
+          orderBy: { sortOrder: 'asc' },
+          include: { tasks: { orderBy: { sortOrder: 'asc' } } },
+        },
+      },
+    });
+    if (!source) throw notFound('Costing not found');
+    // Copying is reading: someone who may only see their own costings may only
+    // copy their own.
+    if (
+      !me.isSuperAdmin &&
+      !me.permissions.has('gops.costing.view_all') &&
+      source.ownerId !== me.id
+    ) {
+      throw forbidden('This costing belongs to someone else');
+    }
+
+    const copyId = await prisma.$transaction(async (tx) => {
+      const number = await nextNumber('costing', tx);
+      const copy = await tx.costing.create({
+        data: {
+          number,
+          title: body.title ?? source.title,
+          status: 'DRAFT',
+          customerId: source.customerId,
+          siteId: source.siteId,
+          ownerId: me.id,
+          markupPct: source.markupPct,
+          discountAmount: source.discountAmount,
+          durationDays: source.durationDays,
+          notes: source.notes,
+          terms: source.terms,
+          lines: {
+            create: source.lines.map((l) => ({
+              costCategoryId: l.costCategoryId,
+              itemId: l.itemId,
+              description: l.description,
+              quantity: l.quantity,
+              unit: l.unit,
+              unitCost: l.unitCost,
+              amount: l.amount,
+              sortOrder: l.sortOrder,
+            })),
+          },
+          scopeSections: {
+            create: source.scopeSections.map((s) => ({
+              kind: s.kind,
+              name: s.name,
+              description: s.description,
+              durationDays: s.durationDays,
+              value: s.value,
+              sortOrder: s.sortOrder,
+              tasks: {
+                create: s.tasks.map((t) => ({
+                  name: t.name,
+                  durationDays: t.durationDays,
+                  sortOrder: t.sortOrder,
+                })),
+              },
+            })),
+          },
+        },
+      });
+      // Totals are recomputed from the copied lines rather than copied, so the
+      // copy can never carry a figure its own lines do not add up to.
+      await recalc(copy.id, tx);
+      return copy.id;
+    });
+
+    const copy = await loadFull(copyId);
+    await audit(
+      {
+        entityType: 'costing',
+        entityId: copyId,
+        action: 'CREATED',
+        summary: `Duplicated costing ${source.number} as ${copy!.number} — ${copy!.title}`,
+      },
+      req,
+    );
+    res.status(201).json({
+      ...present(copy as unknown as Record<string, unknown>),
+      canEdit: true,
+      duplicatedFrom: { id: source.id, number: source.number },
+    });
   }),
 );
 

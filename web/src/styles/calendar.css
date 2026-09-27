@@ -20,6 +20,26 @@ button.cal-head {
   cursor: pointer;
 }
 
+button.cal-head[aria-pressed='true'] {
+  color: var(--text);
+}
+
+/* The day "+ Schedule" will propose: picked by clicking its head. */
+.cal-day.focused {
+  border-color: var(--neon-dim);
+}
+
+/* The person filter sits at its own width in the toolbar. */
+.cal-person {
+  width: auto;
+}
+
+/* Search box over a select, for the pickers that grow without bound. */
+.cal-picker {
+  display: grid;
+  gap: var(--s-1);
+}
+
 /* Three stacked spans inside the chip button: time, subject, who. */
 .cal-item > span {
   display: block;
@@ -110,10 +130,14 @@ button.cal-head {
   color: var(--muted);
 }
 
+.mcal-wd-short {
+  display: none;
+}
+
 .mcal-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  grid-auto-rows: minmax(96px, auto);
+  grid-auto-rows: minmax(calc(var(--s-8) * 2 + var(--s-4)), auto);
 }
 
 .mcal-row {
@@ -289,8 +313,16 @@ button.cal-head {
     letter-spacing: 0;
   }
 
+  .mcal-wd-long {
+    display: none;
+  }
+
+  .mcal-wd-short {
+    display: inline;
+  }
+
   .mcal-grid {
-    grid-auto-rows: minmax(56px, auto);
+    grid-auto-rows: minmax(calc(var(--s-8) + var(--s-4)), auto);
   }
 
   .mcal-cell {

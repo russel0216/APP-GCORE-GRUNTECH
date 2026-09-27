@@ -13,6 +13,7 @@ import {
   badRequest,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
+import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 
@@ -103,12 +104,98 @@ supplierRoutes.get(
       },
     });
     if (!supplier) throw notFound('Supplier not found');
+
+    /*
+      Supplier 360 — the same rule as the customer page: each collection sits
+      behind the permission of the screen it comes from and arrives empty when
+      the caller cannot open that screen. A window onto those modules, never a
+      way around them.
+    */
+    const me = currentUser(req);
+    const supplierId = supplier.id;
+    const [purchaseOrders, receivings, bills, payments] = await Promise.all([
+      can(me, 'gchain.purchase_orders.view_all')
+        ? prisma.purchaseOrder.findMany({
+            where: { supplierId },
+            orderBy: { orderDate: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              kind: true,
+              orderDate: true,
+              deliveryDate: true,
+              total: true,
+              job: { select: { id: true, number: true, name: true } },
+            },
+          })
+        : [],
+      can(me, 'gchain.receiving.view_all')
+        ? prisma.receiving.findMany({
+            where: { order: { supplierId } },
+            orderBy: { receivedDate: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              receivedDate: true,
+              deliveryRefNo: true,
+              order: { select: { id: true, number: true } },
+              receivedBy: { select: { id: true, name: true } },
+              _count: { select: { items: true } },
+            },
+          })
+        : [],
+      can(me, 'gfin.ap.view_all')
+        ? prisma.supplierBill.findMany({
+            where: { supplierId },
+            orderBy: { billDate: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              billDate: true,
+              dueDate: true,
+              supplierInvoiceNo: true,
+              total: true,
+              netPayable: true,
+              amountPaid: true,
+            },
+          })
+        : [],
+      can(me, 'gfin.payments.view_all') || can(me, 'gfin.ap.view_all')
+        ? prisma.payment.findMany({
+            where: { supplierId },
+            orderBy: { paymentDate: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              kind: true,
+              method: true,
+              paymentDate: true,
+              amount: true,
+              reference: true,
+              clearedAt: true,
+            },
+          })
+        : [],
+    ]);
+
     res.json({
       ...supplier,
-      // Filled by Phase 5 (POs, receiving) and Phase 7 (payables).
-      purchaseOrders: [],
-      receivings: [],
-      bills: [],
+      purchaseOrders: purchaseOrders.map((o) => ({ ...o, total: Number(o.total) })),
+      receivings: receivings.map((r) => ({ ...r, lineCount: r._count.items })),
+      bills: bills.map((b) => ({
+        ...b,
+        total: Number(b.total),
+        netPayable: Number(b.netPayable),
+        amountPaid: Number(b.amountPaid),
+        outstanding: Number(b.netPayable) - Number(b.amountPaid),
+      })),
+      payments: payments.map((p) => ({ ...p, amount: Number(p.amount) })),
     });
   }),
 );
@@ -118,6 +205,11 @@ const supplierSchema = z.object({
   name: z.string().trim().min(2, 'Supplier name is required'),
   legalName: z.string().trim().optional().nullable(),
   tin: z.string().trim().optional().nullable(),
+  // Partner fields procurement may correct. `isPartner` itself is NOT
+  // accepted here — the flag has one owner, /api/partners, so "who made this
+  // a partner" is auditable in one place.
+  brand: z.string().trim().optional().nullable(),
+  partnerSince: z.coerce.date().optional().nullable(),
   category: z.string().trim().optional().nullable(),
   paymentTerms: z.string().trim().optional().nullable(),
   address: z.string().trim().optional().nullable(),
@@ -147,6 +239,8 @@ supplierRoutes.post(
           name: body.name,
           legalName: body.legalName || null,
           tin: body.tin || null,
+          brand: body.brand || null,
+          partnerSince: body.partnerSince ?? null,
           category: body.category || null,
           paymentTerms: body.paymentTerms || null,
           address: body.address || null,
@@ -194,6 +288,7 @@ supplierRoutes.patch(
       'name',
       'legalName',
       'tin',
+      'brand',
       'category',
       'paymentTerms',
       'address',
@@ -205,6 +300,7 @@ supplierRoutes.patch(
     ] as const) {
       if (body[key] !== undefined) (data as Record<string, unknown>)[key] = body[key] || null;
     }
+    if (body.partnerSince !== undefined) data.partnerSince = body.partnerSince ?? null;
     if (body.isActive !== undefined) data.isActive = body.isActive;
 
     const supplier = await prisma.supplier.update({ where: { id: req.params.id }, data });
@@ -232,6 +328,13 @@ supplierRoutes.delete(
       include: { _count: { select: { preferredItems: true } } },
     });
     if (!supplier) throw notFound('Supplier not found');
+    // Deleting cascades its catalogues and price lists, which G-CHAIN never
+    // shows — refuse while Sales still lists it as a partner.
+    if (supplier.isPartner) {
+      throw badRequest(
+        'This supplier is a Sales partner — remove it from G-OPS › Partners first, or deactivate it',
+      );
+    }
     if (supplier._count.preferredItems > 0) {
       throw badRequest(
         `${supplier._count.preferredItems} item(s) name this as their preferred supplier — clear those first, or deactivate instead`,
@@ -351,7 +454,7 @@ itemRoutes.use(authenticate);
 
 function itemNumbers(row: Record<string, unknown>): Record<string, unknown> {
   const out = { ...row };
-  for (const f of ['standardCost', 'lastCost', 'minStock', 'reorderLevel']) {
+  for (const f of ['standardCost', 'lastCost', 'listPrice', 'minStock', 'reorderLevel']) {
     if (out[f] != null) out[f] = Number(out[f]);
   }
   return out;
@@ -415,7 +518,7 @@ itemRoutes.get(
               }
             : {}),
         },
-        select: { id: true, code: true, name: true, unit: true, standardCost: true },
+        select: { id: true, code: true, name: true, unit: true, standardCost: true, listPrice: true },
         orderBy: { name: 'asc' },
         take: 25,
       }),
@@ -452,6 +555,17 @@ const itemSchema = z.object({
   costCategoryId: z.string().optional().nullable(),
   unit: z.string().trim().min(1).default('pcs'),
   standardCost: z.number().nonnegative().optional().nullable(),
+  // The partner's published list price — a PRICE, shown to Sales, never a cost.
+  listPrice: z.number().nonnegative().optional().nullable(),
+  listPriceCurrency: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]{3}$/, 'Currency is a three-letter code, e.g. USD')
+    .optional()
+    .nullable()
+    .or(z.literal('')),
+  listPriceAsOf: z.coerce.date().optional().nullable(),
   isStocked: z.boolean().default(true),
   minStock: z.number().nonnegative().optional().nullable(),
   reorderLevel: z.number().nonnegative().optional().nullable(),
@@ -484,6 +598,9 @@ itemRoutes.post(
           costCategoryId: body.costCategoryId || null,
           unit: body.unit,
           standardCost: dec(body.standardCost),
+          listPrice: dec(body.listPrice),
+          listPriceCurrency: body.listPriceCurrency || null,
+          listPriceAsOf: body.listPriceAsOf ?? null,
           isStocked: body.isStocked,
           minStock: dec(body.minStock),
           reorderLevel: dec(body.reorderLevel),
@@ -532,9 +649,11 @@ itemRoutes.patch(
     if (body.unit !== undefined) data.unit = body.unit;
     if (body.isStocked !== undefined) data.isStocked = body.isStocked;
     if (body.isActive !== undefined) data.isActive = body.isActive;
-    for (const f of ['standardCost', 'minStock', 'reorderLevel'] as const) {
+    for (const f of ['standardCost', 'listPrice', 'minStock', 'reorderLevel'] as const) {
       if (body[f] !== undefined) data[f] = dec(body[f]);
     }
+    if (body.listPriceCurrency !== undefined) data.listPriceCurrency = body.listPriceCurrency || null;
+    if (body.listPriceAsOf !== undefined) data.listPriceAsOf = body.listPriceAsOf ?? null;
 
     const item = await prisma.item.update({ where: { id: req.params.id }, data });
     await audit(
@@ -734,6 +853,122 @@ referenceRoutes.delete(
       throw badRequest('Remove or move the sub-categories first');
     }
     await prisma.itemCategory.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  }),
+);
+
+// ── Industries ───────────────────────────────────────────────────────────────
+// The owner's five customer classifications (HI, BI, UI, GI, SI). Same shape
+// as cost categories: seeded, system rows undeletable, labels editable. Any
+// authenticated user may read them — the customer form and the list filter
+// need the list under gops.customers.* alone.
+
+referenceRoutes.get(
+  '/industries',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    res.json(
+      await prisma.industry.findMany({
+        where: activeOnly ? { isActive: true } : {},
+        include: { _count: { select: { customers: true } } },
+        orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+      }),
+    );
+  }),
+);
+
+const industrySchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]{2,4}$/, 'Two to four letters'),
+  name: z.string().trim().min(2),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+referenceRoutes.post(
+  '/industries',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(industrySchema, req.body);
+    if (await prisma.industry.findUnique({ where: { code: body.code } })) {
+      throw conflict(`Industry "${body.code}" already exists`);
+    }
+    const created = await prisma.industry.create({ data: body });
+    await audit(
+      {
+        entityType: 'industry',
+        entityId: created.id,
+        action: 'CREATED',
+        summary: `Created industry ${created.code} — ${created.name}`,
+      },
+      req,
+    );
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/industries/:id',
+  require_('admin.categories.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(industrySchema.partial(), req.body);
+    const before = await prisma.industry.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Industry not found');
+    // Reports group by the code and the owner may put it in customer codes one
+    // day; the label is free to change, the code of a standard row is not.
+    if (before.isSystem && body.code && body.code !== before.code) {
+      throw badRequest('A standard industry keeps its code — you can rename it instead');
+    }
+    if (body.code && body.code !== before.code) {
+      if (await prisma.industry.findUnique({ where: { code: body.code } })) {
+        throw conflict(`Industry "${body.code}" already exists`);
+      }
+    }
+    const updated = await prisma.industry.update({ where: { id: before.id }, data: body });
+    await audit(
+      {
+        entityType: 'industry',
+        entityId: updated.id,
+        action: 'UPDATED',
+        summary: `Updated industry ${updated.code} — ${updated.name}`,
+        before,
+        after: updated,
+      },
+      req,
+    );
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/industries/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const industry = await prisma.industry.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { customers: true } } },
+    });
+    if (!industry) throw notFound('Industry not found');
+    if (industry.isSystem) {
+      throw badRequest('The five standard industries cannot be deleted — deactivate one instead');
+    }
+    if (industry._count.customers > 0) {
+      throw badRequest(`${industry._count.customers} customer(s) still carry this industry`);
+    }
+    await prisma.industry.delete({ where: { id: industry.id } });
+    await audit(
+      {
+        entityType: 'industry',
+        entityId: industry.id,
+        action: 'DELETED',
+        summary: `Deleted industry ${industry.code} — ${industry.name}`,
+        before: industry,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );

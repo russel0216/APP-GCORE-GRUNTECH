@@ -12,6 +12,11 @@ import { badRequest } from '../http/kit';
  * and every customer looks like a late payer (model §5.4).
  *
  * So: outstanding is always measured against NET COLLECTIBLE.
+ *
+ * Phase 10 adds the cash advance, and with it a second rule of the same
+ * shape: **a liquidation is settled against what the person is still owed**,
+ * which is the receipts less the cash they were already handed. A liquidation
+ * measured against its own total would owe the person their advance twice.
  */
 
 type Tx = Prisma.TransactionClient | typeof prisma;
@@ -81,6 +86,17 @@ export interface FinanceSettings {
   supplierEwtServices: number;
   /** Aging buckets, in days. The last bucket is "and over". */
   agingBuckets: number[];
+  /**
+   * Days a person has to liquidate a cash advance, counted from the day the
+   * cash was handed over — the payment date, cleared or not. Snapshotted onto
+   * the advance at release, so changing it never moves a deadline already set.
+   */
+  advanceLiquidationDays: number;
+  /**
+   * Refuse a new advance to somebody still holding an unliquidated one. Staff
+   * on two trips in one week will be refused until finance turns this off.
+   */
+  blockAdvanceWhileUnliquidated: boolean;
 }
 
 const DEFAULTS: FinanceSettings = {
@@ -88,6 +104,8 @@ const DEFAULTS: FinanceSettings = {
   supplierEwtGoods: 0.01,
   supplierEwtServices: 0.02,
   agingBuckets: [30, 60, 90],
+  advanceLiquidationDays: 30,
+  blockAdvanceWhileUnliquidated: true,
 };
 
 export async function financeSettings(): Promise<FinanceSettings> {
@@ -103,7 +121,7 @@ export async function saveFinanceSettings(value: Partial<FinanceSettings>): Prom
     create: {
       key: 'finance.rules',
       value: merged as unknown as Prisma.InputJsonValue,
-      description: 'Payment terms, supplier withholding rates and aging buckets',
+      description: 'Payment terms, supplier withholding rates, aging buckets and cash-advance rules',
     },
     update: { value: merged as unknown as Prisma.InputJsonValue },
   });
@@ -128,7 +146,25 @@ export function daysBetween(from: Date, to: Date): number {
 
 // ── Allocation ───────────────────────────────────────────────────────────────
 
-export type SettleableKind = 'invoice' | 'bill' | 'claim';
+/**
+ * What a claim is settled against.
+ *
+ * A plain claim: its total. A liquidation: its total less the cash the person
+ * was already handed, floored at zero — the receipts cover the advance and
+ * the excess, if any, is what is still owed to them. Unspent cash goes the
+ * other way and is carried on the advance, never here. For a plain claim this
+ * is exactly `total`, so nothing that existed before this function moved.
+ */
+export function claimPayable(row: {
+  total: Prisma.Decimal | number;
+  advance?: { amountReleased: Prisma.Decimal | number } | null;
+}): number {
+  const total = Number(row.total);
+  const released = row.advance ? Number(row.advance.amountReleased) : 0;
+  return cents(Math.max(0, total - released));
+}
+
+export type SettleableKind = 'invoice' | 'bill' | 'claim' | 'advance' | 'advance_refund';
 
 export interface Settleable {
   kind: SettleableKind;
@@ -144,7 +180,9 @@ export interface Settleable {
  * What is still owed on one document.
  *
  * For an invoice that is `netCollectible − collected`, never
- * `invoiceTotal − collected`.
+ * `invoiceTotal − collected`. For an advance it is the amount not yet handed
+ * over (APPROVED only — nothing is owed on a draft); for an advance refund it
+ * is the unspent cash not yet returned (REFUND_DUE only).
  */
 export async function settleable(
   kind: SettleableKind,
@@ -165,11 +203,119 @@ export async function settleable(
     const paid = num(row.amountPaid);
     return { kind, id, number: row.number, payable, paid, outstanding: cents(payable - paid) };
   }
-  const row = await tx.expenseClaim.findUnique({ where: { id } });
+  if (kind === 'advance') {
+    const row = await tx.cashAdvance.findUnique({ where: { id } });
+    if (!row) return null;
+    const payable = num(row.amount);
+    const paid = num(row.amountReleased);
+    return {
+      kind,
+      id,
+      number: row.number,
+      payable,
+      paid,
+      outstanding: row.status === 'APPROVED' ? cents(payable - paid) : 0,
+    };
+  }
+  if (kind === 'advance_refund') {
+    const row = await tx.cashAdvance.findUnique({ where: { id } });
+    if (!row) return null;
+    // Nothing is owed back until a liquidation has said what was spent.
+    const payable = row.liquidatedAt ? cents(Math.max(0, num(row.amountReleased) - num(row.amountSpent))) : 0;
+    const paid = num(row.amountRefunded);
+    return {
+      kind,
+      id,
+      number: row.number,
+      payable,
+      paid,
+      outstanding: row.status === 'REFUND_DUE' ? cents(payable - paid) : 0,
+    };
+  }
+  const row = await tx.expenseClaim.findUnique({ where: { id }, include: { advance: true } });
   if (!row) return null;
-  const payable = num(row.total);
+  const payable = claimPayable(row);
   const paid = num(row.amountPaid);
   return { kind, id, number: row.number, payable, paid, outstanding: cents(payable - paid) };
+}
+
+/**
+ * The ONE function that decides an advance's figures and its status.
+ *
+ * Every figure on the advance is a cache re-derived from the rows around it:
+ * released is the sum of DISBURSEMENT allocations, refunded the sum of RECEIPT
+ * allocations, spent the approved liquidation's total. Nothing increments
+ * them, so reversing a payment or re-filing a liquidation cannot leave a
+ * stale balance behind. DRAFT, PENDING_APPROVAL, REJECTED and CANCELLED are
+ * left alone — those are decisions, not arithmetic.
+ */
+export async function refreshAdvance(
+  tx: Tx,
+  id: string,
+): Promise<{ paid: number; outstanding: number; status: string }> {
+  const row = await tx.cashAdvance.findUnique({ where: { id } });
+  if (!row) throw badRequest('Cash advance not found');
+
+  const allocations = await tx.paymentAllocation.findMany({
+    where: { advanceId: id },
+    select: { amount: true, payment: { select: { kind: true, paymentDate: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  const releases = allocations.filter((a) => a.payment.kind === 'DISBURSEMENT');
+  const released = cents(releases.reduce((s, a) => s + num(a.amount), 0));
+  const refunded = cents(
+    allocations.filter((a) => a.payment.kind === 'RECEIPT').reduce((s, a) => s + num(a.amount), 0),
+  );
+
+  const liquidation = await tx.expenseClaim.findFirst({
+    where: { advanceId: id, status: { in: ['APPROVED', 'SETTLED', 'REIMBURSED'] } },
+    orderBy: { approvedAt: 'desc' },
+    select: { total: true, approvedAt: true },
+  });
+  const spent = liquidation ? num(liquidation.total) : 0;
+  const liquidatedAt = liquidation ? liquidation.approvedAt : null;
+  const amount = num(row.amount);
+
+  const frozen = ['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status);
+  let status: string = row.status;
+  if (!frozen) {
+    if (!liquidation) {
+      status = released + 0.005 >= amount ? 'RELEASED' : 'APPROVED';
+    } else {
+      const refundDue = cents(Math.max(0, released - spent));
+      status = refundDue - refunded > 0.005 ? 'REFUND_DUE' : 'LIQUIDATED';
+    }
+  }
+
+  // The liquidation clock starts when the person holds the cash, cheque or
+  // not — so the release payment's date, not the day it cleared.
+  const isReleased = !frozen && status !== 'APPROVED';
+  const releasedAt = isReleased ? (row.releasedAt ?? releases[0]?.payment.paymentDate ?? dayKey(new Date())) : null;
+  let liquidationDueDate: Date | null = null;
+  if (releasedAt) {
+    if (row.liquidationDueDate) liquidationDueDate = row.liquidationDueDate;
+    else {
+      const settings = await financeSettings();
+      liquidationDueDate = addDays(releasedAt, settings.advanceLiquidationDays);
+    }
+  }
+
+  await tx.cashAdvance.update({
+    where: { id },
+    data: {
+      amountReleased: D(released),
+      amountRefunded: D(refunded),
+      amountSpent: D(spent),
+      liquidatedAt,
+      releasedAt,
+      liquidationDueDate,
+      status: status as never,
+    },
+  });
+
+  const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : amount;
+  const paid = status === 'REFUND_DUE' ? refunded : released;
+  return { paid, outstanding: cents(payable - paid), status };
 }
 
 /**
@@ -184,6 +330,8 @@ export async function refreshSettlement(
   kind: SettleableKind,
   id: string,
 ): Promise<{ paid: number; outstanding: number; status: string }> {
+  if (kind === 'advance' || kind === 'advance_refund') return refreshAdvance(tx, id);
+
   const where =
     kind === 'invoice' ? { invoiceId: id } : kind === 'bill' ? { billId: id } : { claimId: id };
   const sum = await tx.paymentAllocation.aggregate({ where, _sum: { amount: true } });
@@ -231,20 +379,126 @@ export async function refreshSettlement(
     return { paid, outstanding: cents(payable - paid), status };
   }
 
-  const row = await tx.expenseClaim.findUnique({ where: { id } });
+  const row = await tx.expenseClaim.findUnique({ where: { id }, include: { advance: true } });
   if (!row) throw badRequest('Expense claim not found');
-  const payable = num(row.total);
+  const payable = claimPayable(row);
+  // SETTLED is terminal: the advance covered every receipt, so there is
+  // nothing to reimburse and no payment can move it. A payable of zero on an
+  // APPROVED claim likewise stays where it is.
   const status =
     row.status === 'APPROVED' || row.status === 'REIMBURSED'
-      ? paid + 0.005 >= payable && paid > 0
-        ? 'REIMBURSED'
-        : 'APPROVED'
+      ? payable === 0
+        ? row.status
+        : paid + 0.005 >= payable && paid > 0
+          ? 'REIMBURSED'
+          : 'APPROVED'
       : row.status;
   await tx.expenseClaim.update({
     where: { id },
     data: { amountPaid: D(paid), status: status as never },
   });
   return { paid, outstanding: cents(payable - paid), status };
+}
+
+// ── The position ─────────────────────────────────────────────────────────────
+
+export interface FinancePosition {
+  receivable: number;
+  receivableOverdue: number;
+  payable: number;
+  payableOverdue: number;
+  /** Approved claims and liquidations not yet paid back, at what is still owed. */
+  reimbursable: number;
+  /** Withheld at source and not yet certificated. Real money, never overdue. */
+  withheldAwaitingCertificate: number;
+  /** Approved advances finance has not yet handed over. */
+  advancesToRelease: number;
+  /** Cash out with people, waiting on a liquidation. */
+  advancesInHand: number;
+  /** Receivable less everything owed — suppliers, staff, and cash promised. */
+  workingPosition: number;
+}
+
+/**
+ * Where the company stands, decided once.
+ *
+ * G-FIN's dashboard and Insights' company overview both print a working
+ * position, and for a while they disagreed because each summed its own
+ * documents. Every consumer reads this instead. The queries are the
+ * dashboard's own, moved here unchanged.
+ */
+export async function financePosition(today: Date): Promise<FinancePosition> {
+  const [openInvoices, openBills, openClaims, openAdvances] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
+      select: { dueDate: true, netCollectible: true, amountCollected: true, ewtAmount: true, ewtCertificateNo: true },
+    }),
+    prisma.supplierBill.findMany({
+      where: { status: { in: ['APPROVED', 'PARTIALLY_PAID'] } },
+      select: { dueDate: true, netPayable: true, amountPaid: true },
+    }),
+    prisma.expenseClaim.findMany({
+      where: { status: 'APPROVED' },
+      select: { total: true, amountPaid: true, advance: { select: { amountReleased: true } } },
+    }),
+    prisma.cashAdvance.findMany({
+      where: { status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE'] } },
+      select: { status: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
+    }),
+  ]);
+
+  const receivable = cents(
+    openInvoices.reduce((s, i) => s + (num(i.netCollectible) - num(i.amountCollected)), 0),
+  );
+  const receivableOverdue = cents(
+    openInvoices
+      .filter((i) => i.dueDate < today)
+      .reduce((s, i) => s + (num(i.netCollectible) - num(i.amountCollected)), 0),
+  );
+  const payable = cents(openBills.reduce((s, b) => s + (num(b.netPayable) - num(b.amountPaid)), 0));
+  const payableOverdue = cents(
+    openBills.filter((b) => b.dueDate < today).reduce((s, b) => s + (num(b.netPayable) - num(b.amountPaid)), 0),
+  );
+  const reimbursable = cents(
+    openClaims.reduce((s, c) => s + Math.max(0, claimPayable(c) - num(c.amountPaid)), 0),
+  );
+  const advancesToRelease = cents(
+    openAdvances
+      .filter((a) => a.status === 'APPROVED')
+      .reduce((s, a) => s + Math.max(0, num(a.amount) - num(a.amountReleased)), 0),
+  );
+  // Released and not yet accounted for: the full amount while the liquidation
+  // is pending, the unreturned remainder once it says what was spent.
+  const advancesInHand = cents(
+    openAdvances
+      .filter((a) => a.status !== 'APPROVED')
+      .reduce(
+        (s, a) =>
+          s +
+          (a.status === 'RELEASED'
+            ? num(a.amountReleased)
+            : Math.max(0, num(a.amountReleased) - num(a.amountSpent) - num(a.amountRefunded))),
+        0,
+      ),
+  );
+
+  return {
+    receivable,
+    receivableOverdue,
+    payable,
+    payableOverdue,
+    reimbursable,
+    withheldAwaitingCertificate: cents(
+      openInvoices.filter((i) => !i.ewtCertificateNo).reduce((s, i) => s + num(i.ewtAmount), 0),
+    ),
+    advancesToRelease,
+    advancesInHand,
+    // Receivable minus everything owed. Not a bank balance — G-Core does not
+    // hold one — but the number that says whether collections are keeping up.
+    // An approved advance is cash promised, so it counts against the position
+    // before the voucher exists.
+    workingPosition: cents(receivable - payable - reimbursable - advancesToRelease),
+  };
 }
 
 // ── Aging ────────────────────────────────────────────────────────────────────

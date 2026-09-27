@@ -28,6 +28,39 @@ interface Attachment {
   uploadedBy: { id: string; name: string } | null;
 }
 
+/**
+ * Opens a stored file. The route needs the bearer token, so the bytes are
+ * fetched and handed to the browser as a blob — pointing a link straight at
+ * the URL gets a 401. Images and PDFs open in a tab; anything the browser
+ * cannot show downloads under its original name.
+ *
+ * Exported so a screen that shows a file outside this card — a partner's
+ * catalogue — opens it the same way rather than keeping a second copy of the
+ * token-bearing idiom. Resolves false when the file could not be opened.
+ */
+export async function openAttachment(file: { id: string; fileName: string; mimeType: string }): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/attachments/file/${file.id}`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new Error('refused');
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    if (file.mimeType.startsWith('image/') || file.mimeType === 'application/pdf') {
+      a.target = '_blank';
+      a.rel = 'noopener';
+    } else {
+      a.download = file.fileName;
+    }
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Bytes as somebody would say them. */
 function readableSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -89,31 +122,8 @@ export function Attachments({
     }
   }
 
-  /**
-   * Opening one needs the bearer token, so the bytes are fetched and handed to
-   * the browser as a blob — pointing a link straight at the URL gets a 401.
-   */
   async function open(row: Attachment) {
-    try {
-      const res = await fetch(`/api/attachments/file/${row.id}`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
-      });
-      if (!res.ok) throw new Error('refused');
-      const url = URL.createObjectURL(await res.blob());
-      const a = document.createElement('a');
-      a.href = url;
-      // Images and PDFs open; anything else the browser cannot show downloads.
-      if (row.mimeType.startsWith('image/') || row.mimeType === 'application/pdf') {
-        a.target = '_blank';
-        a.rel = 'noopener';
-      } else {
-        a.download = row.fileName;
-      }
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    } catch {
-      toast('error', 'That file could not be opened');
-    }
+    if (!(await openAttachment(row))) toast('error', 'That file could not be opened');
   }
 
   async function remove(row: Attachment) {

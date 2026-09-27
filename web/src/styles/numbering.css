@@ -1,1 +1,78 @@
-/* Admin Numbering and Company settings — package P4. Tokens only. */
+/*
+  Admin › Numbering and Company Settings — package P4. Tokens only.
+
+  Every colour here is a token, so the day theme in styles.css restyles these
+  rules without a second block: nothing below names a raw colour or a pixel.
+*/
+
+/* ── Numbering table ──────────────────────────────────────────────────────── */
+
+/* The Modify column shrinks to its button rather than taking a fixed width. */
+table.data th.numbering-actions,
+table.data td.numbering-actions {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* The next number a type would issue — the one figure worth a highlight. */
+.numbering-next {
+  color: var(--neon);
+}
+
+/* A type that cannot issue (a per-employee counter whose pattern lost its
+   {EMP}) says why, in the same cell the number would have been. */
+.numbering-problem {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+/* "per employee" under Yearly / Monthly / Never. */
+.numbering-scope {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.numbering-legend {
+  font-size: var(--fs-sm);
+  margin-top: var(--s-3);
+  line-height: 1.6;
+}
+
+/* Which employee number the samples were rendered for. */
+.numbering-for {
+  font-size: var(--fs-sm);
+  margin-top: var(--s-2);
+}
+
+/* ── Editor ───────────────────────────────────────────────────────────────── */
+
+/* The preview sits last in the modal body, so it drops the alert's bottom
+   margin instead of leaving a gap above the footer. */
+.numbering-preview {
+  margin-bottom: 0;
+}
+
+.numbering-preview .numbering-caption {
+  display: block;
+  font-size: var(--fs-sm);
+  margin-top: var(--s-1);
+}
+
+/* ── Company settings ─────────────────────────────────────────────────────── */
+
+.company-actions {
+  margin-top: var(--s-5);
+}
+
+.company-logo-name {
+  font-size: var(--fs-xs);
+}
+
+.company-note {
+  margin-bottom: 0;
+}
+
+.company-file-input {
+  display: none;
+}

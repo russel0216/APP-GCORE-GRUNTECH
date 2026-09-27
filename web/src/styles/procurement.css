@@ -1,1 +1,130 @@
-/* Procurement chain: PO editing, receiving, chain dashboard — package PROC. Tokens only. */
+/* Procurement chain: PO editing, receiving, chain dashboard — package PROC. Tokens only.
+   Every colour here is a theme token, so light and dark both follow styles.css. */
+
+/* A card that is followed by another card on a record page. */
+.proc-card {
+  margin-bottom: var(--s-4);
+}
+
+/* Card heading with an action on the right ("Order lines" … "+ Add line"). */
+.proc-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.proc-card-head .card-title {
+  margin: 0;
+}
+
+/* The line under a record header: kind, counterparty, project. */
+.proc-meta {
+  margin-bottom: var(--s-4);
+}
+
+/* Stat row on a record page. */
+.proc-stats {
+  margin-bottom: var(--s-5);
+}
+
+/* An alert that closes a card — no trailing gap inside the card. */
+.proc-card-note {
+  margin-top: var(--s-3);
+  margin-bottom: 0;
+}
+
+/* A pill sitting after a heading or a name. */
+.proc-pill-gap {
+  margin-left: var(--s-2);
+}
+
+/* Figures that carry meaning. Every one also says it in words or with a sign,
+   so none of these is the only signal. */
+.proc-best {
+  color: var(--neon);
+}
+.proc-short {
+  color: var(--warn);
+}
+.proc-over {
+  color: var(--danger);
+}
+
+/* Number inputs inside a table cell. */
+.proc-cell-input {
+  text-align: right;
+  padding: var(--s-1) var(--s-2);
+}
+.proc-col-input {
+  width: calc(var(--s-8) * 3.5);
+}
+.proc-col-actions {
+  width: calc(var(--s-8) * 4);
+}
+.proc-col-when {
+  width: calc(var(--s-8) * 4.5);
+}
+
+/* Row actions: Modify · Remove, right-aligned and never wrapping apart. */
+.proc-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-1);
+  flex-wrap: nowrap;
+}
+
+/* A list of linked documents in a card ("Supplier bills", "Billed as"). */
+.proc-links {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.proc-link-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+}
+.proc-link-row .proc-push {
+  margin-left: auto;
+}
+
+/* Small print under a modal or a table. */
+.proc-small {
+  font-size: var(--fs-sm);
+}
+
+/* Explanatory copy in the dashboard's "how the money flows" card. */
+.proc-flow {
+  font-size: var(--fs-md);
+}
+.proc-flow strong {
+  color: var(--neon);
+}
+
+/* A figure the caller cannot see: said plainly, not printed as zero. */
+.proc-tile-note {
+  margin-top: var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+/* Stock card per-warehouse balance tile. */
+.proc-balance-unit {
+  font-size: var(--fs-md);
+}
+
+/* Borrow slip: one row per item being lent. */
+.proc-borrow-label {
+  margin-top: var(--s-2);
+}
+.proc-borrow-line {
+  margin-bottom: var(--s-2);
+}
+.proc-grow {
+  flex: 1;
+  min-width: 0;
+}
+.proc-qty {
+  width: calc(var(--s-8) * 2.75);
+}

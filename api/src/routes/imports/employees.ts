@@ -1,11 +1,20 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma';
 import { required, optional, bool, date, oneOf, type ImportSpec } from '../../shared/csv';
+import { nextNumber } from '../../shared/numbering';
+import { positionFields, setEmployeePosition } from '../../shared/plantilla';
 import type { Registered } from '../imports';
 
 /**
  * CSV import for employees — the spec, the duplicate key and the writer,
  * registered by ../imports.ts under the `employees` entity.
+ *
+ * The Position column is matched to the plantilla by title. `build` only
+ * RESOLVES it — `runImport` calls build on every dry run, and a dry run that
+ * created positions would not be a dry run. An unknown title is created in
+ * `write`, inside the row's transaction, with 0 authorised: it then shows as
+ * over-complement on the Plantilla screen until HR sets the count, rather
+ * than failing the row the way an unknown department does.
  */
 
 const EMPLOYMENT_TYPES = [
@@ -17,7 +26,12 @@ const EMPLOYMENT_TYPES = [
   'TRAINEE',
 ] as const;
 
-const employeeSpec: ImportSpec<Prisma.EmployeeCreateInput> = {
+interface EmployeeImportRecord {
+  data: Prisma.EmployeeUncheckedCreateInput;
+  position: { positionId: string | null; newTitle: string | null; departmentId: string | null };
+}
+
+const employeeSpec: ImportSpec<EmployeeImportRecord> = {
   entity: 'employees',
   label: 'Employees',
   columns: [
@@ -25,7 +39,11 @@ const employeeSpec: ImportSpec<Prisma.EmployeeCreateInput> = {
     { header: 'Last Name', required: true, example: 'Santos' },
     { header: 'First Name', required: true, example: 'Juan' },
     { header: 'Middle Name', example: 'Dela Cruz' },
-    { header: 'Position', example: 'Project Engineer' },
+    {
+      header: 'Position',
+      example: 'Project Engineer',
+      hint: 'Matched to the plantilla by title; an unknown title is added with 0 authorised and shows as over-complement until HR sets the count',
+    },
     { header: 'Department', example: 'Engineering', hint: 'Must match a department name' },
     {
       header: 'Employment Type',
@@ -59,42 +77,83 @@ const employeeSpec: ImportSpec<Prisma.EmployeeCreateInput> = {
       if (!dept) throw new Error(`Department "${row['Department']}" does not exist`);
       departmentId = dept.id;
     }
+
+    // Resolve only. Creation waits for `write`.
+    const title = optional(row, 'Position');
+    let positionId: string | null = null;
+    let newTitle: string | null = null;
+    if (title) {
+      const found = await prisma.position.findFirst({
+        where: { title: { equals: title, mode: 'insensitive' } },
+        select: { id: true, isActive: true },
+      });
+      if (found?.isActive) positionId = found.id;
+      else if (found) throw new Error(`Position "${title}" is inactive — reactivate it in the Plantilla first`);
+      else newTitle = title;
+    }
+
     return {
-      employeeNo: required(row, 'Employee No'),
-      lastName: required(row, 'Last Name'),
-      firstName: required(row, 'First Name'),
-      middleName: optional(row, 'Middle Name'),
-      position: optional(row, 'Position'),
-      department: departmentId ? { connect: { id: departmentId } } : undefined,
-      employmentType: oneOf(row, 'Employment Type', EMPLOYMENT_TYPES, 'REGULAR'),
-      dateHired: date(row, 'Date Hired'),
-      periodEndDate: date(row, 'Period Ends'),
-      mobile: optional(row, 'Mobile'),
-      personalEmail: optional(row, 'Personal Email'),
-      address: optional(row, 'Address'),
-      birthDate: date(row, 'Birth Date'),
-      emergencyContactName: optional(row, 'Emergency Contact'),
-      emergencyContactPhone: optional(row, 'Emergency Phone'),
-      isActive: bool(row, 'Active'),
+      data: {
+        employeeNo: required(row, 'Employee No'),
+        lastName: required(row, 'Last Name'),
+        firstName: required(row, 'First Name'),
+        middleName: optional(row, 'Middle Name'),
+        departmentId,
+        employmentType: oneOf(row, 'Employment Type', EMPLOYMENT_TYPES, 'REGULAR'),
+        dateHired: date(row, 'Date Hired'),
+        periodEndDate: date(row, 'Period Ends'),
+        mobile: optional(row, 'Mobile'),
+        personalEmail: optional(row, 'Personal Email'),
+        address: optional(row, 'Address'),
+        birthDate: date(row, 'Birth Date'),
+        emergencyContactName: optional(row, 'Emergency Contact'),
+        emergencyContactPhone: optional(row, 'Emergency Phone'),
+        isActive: bool(row, 'Active'),
+      },
+      position: { positionId, newTitle, departmentId },
     };
   },
 };
 
 export const employeesImport: Registered = {
-  spec: employeeSpec as ImportSpec<never>,
+  spec: employeeSpec as unknown as ImportSpec<never>,
   permission: 'ghr.employees.create',
   write: async (records) => {
     for (const { record, existingId } of records as unknown as {
-      record: Prisma.EmployeeCreateInput;
+      record: EmployeeImportRecord;
       existingId: string | null;
     }[]) {
-      if (existingId) {
-        const { employeeNo, ...fields } = record;
-        void employeeNo;
-        await prisma.employee.update({ where: { id: existingId }, data: fields });
-      } else {
-        await prisma.employee.create({ data: record });
-      }
+      await prisma.$transaction(async (tx) => {
+        let positionId = record.position.positionId;
+        if (!positionId && record.position.newTitle) {
+          // A second row in the same file may have created it a moment ago.
+          const found = await tx.position.findFirst({
+            where: { title: { equals: record.position.newTitle, mode: 'insensitive' } },
+            select: { id: true },
+          });
+          positionId =
+            found?.id ??
+            (
+              await tx.position.create({
+                data: {
+                  code: await nextNumber('position', tx),
+                  title: record.position.newTitle,
+                  departmentId: record.position.departmentId,
+                  authorisedHeadcount: 0,
+                },
+              })
+            ).id;
+        }
+        if (existingId) {
+          const { employeeNo, ...rest } = record.data;
+          void employeeNo;
+          await tx.employee.update({ where: { id: existingId }, data: rest });
+          // Through the one writer of the mirror, whether linked or not.
+          await setEmployeePosition(tx, existingId, positionId, null);
+        } else {
+          await tx.employee.create({ data: { ...record.data, ...(await positionFields(tx, positionId, null)) } });
+        }
+      });
     }
   },
 };

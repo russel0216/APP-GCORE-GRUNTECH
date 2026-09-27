@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { api, SHIPPED_PHASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { recordLink } from '../lib/links';
 import { Loading, formatMoney, relativeTime } from '../components/ui';
+import { clockTime, kindLabel, type ScheduleRow, type WorkRow } from './MyWork';
 
 /**
  * The launcher.
@@ -16,6 +18,9 @@ import { Loading, formatMoney, relativeTime } from '../components/ui';
  * Below the grid is My Work. A launcher tells you where the departments are;
  * My Work tells you what the business needs from you today, which is the shift
  * from a menu-driven system to a process-driven one (model §8).
+ *
+ * Every row on the cards is a <Link>: they were <div onClick> once, which a
+ * keyboard could not reach (rule 13).
  */
 
 /** The four divisions, in the order the original landing page had them. */
@@ -35,6 +40,7 @@ interface MyWork {
     amount: number | null;
     link: string | null;
     createdAt: string;
+    requester?: { name: string };
   }[];
   myPendingSubmissions: {
     id: string;
@@ -48,17 +54,20 @@ interface MyWork {
   recentActivity: {
     id: string;
     entityType: string;
+    entityId: string;
     action: string;
     summary: string | null;
     at: string;
   }[];
-  assignedToMe: unknown[];
-  todaysSchedule: unknown[];
+  assignedToMe: WorkRow[];
+  todaysSchedule: ScheduleRow[];
+  myDrafts: WorkRow[];
 }
+
+const PREVIEW = 3;
 
 export function Home() {
   const { me } = useAuth();
-  const navigate = useNavigate();
   const [work, setWork] = useState<MyWork | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -79,6 +88,8 @@ export function Home() {
 
   const company = me?.company?.name ?? 'Gruntechnology Corp';
   const waiting = work?.awaitingMyApproval.length ?? 0;
+  const assigned = work?.assignedToMe ?? [];
+  const today = work?.todaysSchedule ?? [];
 
   return (
     <div className="home">
@@ -122,7 +133,7 @@ export function Home() {
         <div className="home-work-head">
           <h2>My Work</h2>
           {waiting > 0 && <span className="badge warn">{waiting} waiting on you</span>}
-          <div style={{ flex: 1 }} />
+          <div className="home-work-spacer" />
           <Link to="/my-work" className="btn btn-sm">
             Open My Work
           </Link>
@@ -133,37 +144,29 @@ export function Home() {
         ) : !work ? (
           <div className="card muted">My Work could not be loaded.</div>
         ) : (
-          <div className="grid grid-4">
+          <div className="grid home-work-grid">
             <div className="card">
               <h3 className="card-title">
                 Awaiting my approval
-                {waiting > 0 && (
-                  <span className="badge warn" style={{ marginLeft: 8 }}>
-                    {waiting}
-                  </span>
-                )}
+                {waiting > 0 && <span className="badge warn card-title-count">{waiting}</span>}
               </h3>
               {waiting === 0 ? (
                 <div className="muted">Nothing is waiting on you.</div>
               ) : (
                 <div className="stack">
-                  {work.awaitingMyApproval.slice(0, 3).map((a) => (
-                    <div
-                      key={a.id}
-                      className="row"
-                      style={{ justifyContent: 'space-between', cursor: 'pointer' }}
-                      onClick={() => navigate(a.link ?? '/my-work')}
-                    >
-                      <div>
-                        <div>{a.subject}</div>
-                        <div className="faint mono">
-                          {a.documentNumber ?? a.documentType} · {relativeTime(a.createdAt)}
-                        </div>
-                      </div>
+                  {work.awaitingMyApproval.slice(0, PREVIEW).map((a) => (
+                    <Link key={a.id} to={a.link ?? '/my-work'} className="row home-row">
+                      <span className="home-row-main">
+                        <span className="home-row-title">{a.subject}</span>
+                        <span className="faint mono">
+                          {a.documentNumber ?? a.documentType}
+                          {a.requester?.name ? ` · ${a.requester.name}` : ''} · {relativeTime(a.createdAt)}
+                        </span>
+                      </span>
                       {a.amount !== null && <span className="mono">{formatMoney(a.amount)}</span>}
-                    </div>
+                    </Link>
                   ))}
-                  {waiting > 3 && <div className="faint">and {waiting - 3} more…</div>}
+                  {waiting > PREVIEW && <div className="faint">and {waiting - PREVIEW} more…</div>}
                 </div>
               )}
             </div>
@@ -174,24 +177,70 @@ export function Home() {
                 <div className="muted">You have nothing waiting on someone else.</div>
               ) : (
                 <div className="stack">
-                  {work.myPendingSubmissions.slice(0, 3).map((s) => (
-                    <div key={s.id}>
-                      <div>{s.subject}</div>
-                      <div className="faint mono">
+                  {work.myPendingSubmissions.slice(0, PREVIEW).map((s) => (
+                    <Link key={s.id} to={s.link ?? '/my-work'} className="home-row">
+                      <span className="home-row-title">{s.subject}</span>
+                      <span className="faint mono">
                         {s.documentNumber ?? s.documentType} · sent {relativeTime(s.createdAt)}
-                      </div>
-                    </div>
+                      </span>
+                    </Link>
                   ))}
+                  {work.myPendingSubmissions.length > PREVIEW && (
+                    <div className="faint">and {work.myPendingSubmissions.length - PREVIEW} more…</div>
+                  )}
                 </div>
               )}
             </div>
 
             <div className="card">
-              <h3 className="card-title">Assigned to me</h3>
-              {work.assignedToMe.length === 0 ? (
+              <h3 className="card-title">
+                Assigned to me
+                {assigned.length > 0 && <span className="badge card-title-count">{assigned.length}</span>}
+              </h3>
+              {assigned.length === 0 ? (
                 <div className="muted">Nothing assigned to you right now.</div>
               ) : (
-                <div className="muted">{work.assignedToMe.length} item(s) — see My Work.</div>
+                <div className="stack">
+                  {assigned.slice(0, PREVIEW).map((r) => (
+                    <Link key={`${r.kind}:${r.id}`} to={r.link} className="home-row">
+                      <span className="home-row-title">
+                        {r.title}
+                        {r.overdue && <span className="badge danger work-overdue-tag">overdue</span>}
+                      </span>
+                      <span className="faint mono">
+                        {kindLabel(r.kind)}
+                        {r.subtitle ? ` · ${r.subtitle}` : ''}
+                      </span>
+                    </Link>
+                  ))}
+                  {assigned.length > PREVIEW && <div className="faint">and {assigned.length - PREVIEW} more…</div>}
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <h3 className="card-title">
+                Today
+                {today.length > 0 && <span className="badge info card-title-count">{today.length}</span>}
+              </h3>
+              {today.length === 0 ? (
+                <div className="muted">Nothing scheduled today.</div>
+              ) : (
+                <div className="stack">
+                  {today.slice(0, PREVIEW).map((s) => (
+                    <Link key={`${s.kind}:${s.id}`} to={s.link} className="row home-row">
+                      <span className="mono today-time">{clockTime(s.startsAt)}</span>
+                      <span className="home-row-main">
+                        <span className="home-row-title">{s.title}</span>
+                        <span className="faint">
+                          {kindLabel(s.kind)}
+                          {s.sub ? ` · ${s.sub}` : ''}
+                        </span>
+                      </span>
+                    </Link>
+                  ))}
+                  {today.length > PREVIEW && <div className="faint">and {today.length - PREVIEW} more…</div>}
+                </div>
               )}
             </div>
 
@@ -201,12 +250,21 @@ export function Home() {
                 <div className="muted">Nothing yet.</div>
               ) : (
                 <div className="stack">
-                  {work.recentActivity.slice(0, 3).map((a) => (
-                    <div key={a.id}>
-                      <div>{a.summary ?? `${a.action} ${a.entityType}`}</div>
-                      <div className="faint">{relativeTime(a.at)}</div>
-                    </div>
-                  ))}
+                  {work.recentActivity.slice(0, PREVIEW).map((a) => {
+                    const text = a.summary ?? `${a.action} ${a.entityType}`;
+                    const link = recordLink(a.entityType, a.entityId);
+                    return link ? (
+                      <Link key={a.id} to={link} className="home-row">
+                        <span className="home-row-title">{text}</span>
+                        <span className="faint">{relativeTime(a.at)}</span>
+                      </Link>
+                    ) : (
+                      <div key={a.id} className="home-row">
+                        <span className="home-row-title">{text}</span>
+                        <span className="faint">{relativeTime(a.at)}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

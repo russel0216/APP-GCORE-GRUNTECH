@@ -1,1 +1,96 @@
-/* Meetings — package B. Tokens only. */
+/*
+  Meetings — G-HR › My day (package B, pages/hr/Meetings.tsx).
+
+  Loaded after styles.css. Tokens only: spacing from --s-*, type from --fs-*,
+  colour from the theme variables, so the day theme is covered by the same
+  rules and nothing here is a literal colour or a pixel value. The month view
+  is the shared MonthCalendar and brings its own rules from calendar.css —
+  there is no meetings grid here, deliberately.
+*/
+
+/* ── List page head: List/Month switch beside the primary button ─────────── */
+
+.meetings-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.meetings-month {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+/* ── Detail ──────────────────────────────────────────────────────────────── */
+
+/* When · length · organiser · place — one line under the header. */
+.meeting-meta {
+  margin: 0 0 var(--s-4);
+  color: var(--muted);
+  font-size: var(--fs-md);
+}
+
+.meeting-meta strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* A card head with its action on the right; wraps rather than overflowing. */
+.meeting-split {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.meeting-card-head {
+  margin-bottom: var(--s-3);
+}
+
+.meeting-flush {
+  margin: 0;
+}
+
+.meeting-respond {
+  margin-bottom: var(--s-4);
+}
+
+.respond-group {
+  flex-wrap: wrap;
+}
+
+.meeting-body {
+  align-items: start;
+  margin-bottom: var(--s-4);
+}
+
+/* Agendas are written as lines; keep them as lines. */
+.meeting-agenda {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--fs-base);
+  line-height: 1.55;
+}
+
+.meeting-invitees td {
+  vertical-align: top;
+}
+
+.meeting-col-actions {
+  width: var(--s-7);
+}
+
+.meeting-required {
+  margin-top: var(--s-3);
+}
+
+.meeting-attachments {
+  margin-top: var(--s-4);
+}
+
+@media (max-width: 860px) {
+  .meeting-body {
+    grid-template-columns: 1fr;
+  }
+}

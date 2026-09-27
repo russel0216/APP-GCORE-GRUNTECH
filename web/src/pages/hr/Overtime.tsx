@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { DocumentApproval } from '../../components/ApprovalStepper';
 import {
-  statusTone,
+  StatusBadge,
+  type Tone,
   Checkbox,
   ErrorBox,
   Field,
@@ -46,7 +48,11 @@ const STAGE_LABEL = Object.fromEntries(STAGES.map((s) => [s.value, s.label]));
  * - only the filing does. That is the reason for an override rather than a
  * tenth copy of the whole mapping.
  */
-const tone = (stage: string) => statusTone(stage, { PRIOR_APPROVED: 'info' });
+const STAGE_TONES: Record<string, Tone> = { PRIOR_APPROVED: 'info' };
+
+function StageBadge({ stage }: { stage: string }) {
+  return <StatusBadge status={stage} extra={STAGE_TONES} label={STAGE_LABEL[stage]} />;
+}
 
 interface OtRow {
   id: string;
@@ -153,7 +159,7 @@ export function Overtime() {
     {
       key: 'stage',
       label: 'Stage',
-      render: (r) => <span className={`badge ${tone(r.stage)}`}>{STAGE_LABEL[r.stage] ?? r.stage}</span>,
+      render: (r) => <StageBadge stage={r.stage} />,
     },
   ];
 
@@ -254,10 +260,22 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
 
   useEffect(() => {
     api
-      .get<{ jobs: typeof jobs; categories: typeof categories }>('/overtime/chargeable')
+      .get<{
+        jobs: typeof jobs;
+        categories: typeof categories;
+        defaults?: { jobId: string | null; costCategoryId: string | null };
+      }>('/overtime/chargeable')
       .then((d) => {
         setJobs(d.jobs);
         setCategories(d.categories);
+        // The job and budget line of this person's last filing, while that job
+        // is still open — overtime runs in streaks on one job. Only filled in
+        // if the person has not already picked something.
+        setForm((f) => ({
+          ...f,
+          jobId: f.jobId || d.defaults?.jobId || '',
+          costCategoryId: f.costCategoryId || d.defaults?.costCategoryId || '',
+        }));
       })
       .catch(() => {});
   }, []);
@@ -344,7 +362,7 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
       />
 
       {preview && (
-        <div className="alert info" style={{ marginTop: 10 }}>
+        <div className="alert info hraud-gap-above">
           <strong>{preview.hours}</strong> hour{preview.hours === 1 ? '' : 's'}
           {preview.breakDeducted && preview.hours > 0 && ' after the break'}.
           {preview.rate?.missingRate ? (
@@ -407,18 +425,29 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
 
 // ── The record ───────────────────────────────────────────────────────────────
 
+type OtDetail = OtRow & {
+  rate: Preview['rate'];
+  variance: number | null;
+  canFileActual: boolean;
+  canCancel: boolean;
+};
+
+/** Stages at which the actual filing has been made, so its chain exists. */
+const ACTUAL_FILED_STAGES = ['ACTUAL_FILED', 'APPROVED'];
+
 export function OvertimeDetail() {
   const { id } = useParams<{ id: string }>();
+  const { can } = useAuth();
   const toast = useToast();
-  const [row, setRow] = useState<(OtRow & { rate: Preview['rate']; variance: number | null }) | null>(
-    null,
-  );
+  const [row, setRow] = useState<OtDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [filingActual, setFilingActual] = useState(false);
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     try {
-      setRow(await api.get(`/overtime/${id}`));
+      setRow(await api.get<OtDetail>(`/overtime/${id}`));
+      setReload((r) => r + 1);
     } catch (err) {
       setError(err);
     }
@@ -428,10 +457,14 @@ export function OvertimeDetail() {
     load();
   }, [load]);
 
-  if (error) return <ErrorBox error={error} />;
+  if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
   const variance = row.actualHours != null ? row.actualHours - row.estimatedHours : null;
+  // A rejection can come at either stage; the actual chain exists only if the
+  // hours were filed.
+  const actualFiled = ACTUAL_FILED_STAGES.includes(row.stage) || row.actualHours != null;
+  const employeeName = `${row.employee.firstName} ${row.employee.lastName}`;
 
   async function cancel() {
     try {
@@ -445,24 +478,27 @@ export function OvertimeDetail() {
 
   return (
     <div>
-
       <div className="page-head">
         <div>
           <h1>
-            <span className="mono">{row.number}</span>{' '}
-            <span className={`badge ${tone(row.stage)}`}>{STAGE_LABEL[row.stage] ?? row.stage}</span>
+            <span className="mono">{row.number}</span> <StageBadge stage={row.stage} />
           </h1>
           <p>
-            {row.employee.firstName} {row.employee.lastName} · {formatDate(row.date)}
+            {can('ghr.employees.view_all') ? (
+              <Link to={`/g-hr/employees/${row.employee.id}`}>{employeeName}</Link>
+            ) : (
+              employeeName
+            )}{' '}
+            · {formatDate(row.date)}
           </p>
         </div>
         <div className="row">
-          {row.stage === 'PRIOR_APPROVED' && (
+          {row.canFileActual && (
             <button className="btn btn-primary btn-sm" onClick={() => setFilingActual(true)}>
               File the actual hours
             </button>
           )}
-          {row.stage !== 'APPROVED' && row.stage !== 'CANCELLED' && (
+          {row.canCancel && (
             <button className="btn btn-danger btn-sm" onClick={cancel}>
               Cancel
             </button>
@@ -470,10 +506,12 @@ export function OvertimeDetail() {
         </div>
       </div>
 
+      <ErrorBox error={error} />
+
       {row.stage === 'PRIOR' && (
         <div className="alert warn">
-          Not authorised yet. Wait for your supervisor before working — the actual hours cannot be
-          filed until this is granted.
+          Not authorised yet. Wait for the approval below before working — the actual hours cannot
+          be filed until this is granted.
         </div>
       )}
       {row.stage === 'PRIOR_APPROVED' && (
@@ -484,10 +522,38 @@ export function OvertimeDetail() {
       )}
       {row.stage === 'ACTUAL_FILED' && (
         <div className="alert info">
-          With the approvers. The supervisor who directed the work signs first, then HR. The
-          project is charged when — and only when — both have approved.
+          The project is charged when — and only when — every step of the actual filing's approval
+          below has approved.
         </div>
       )}
+
+      {/*
+        Two approvals against one record, read from the engine rather than
+        described: who authorised the work, and who is sitting on the hours.
+        The route printed here used to be the workflow's configuration stated
+        as fact — "the supervisor, then HR" — which stops being true the day
+        somebody edits the workflow.
+      */}
+      <div className="grid grid-2 hraud-chains">
+        <div>
+          <h2 className="hraud-chain-label">Before the work — authorisation</h2>
+          <DocumentApproval documentType="overtime_prior" documentId={row.id} reloadToken={reload} />
+        </div>
+        <div>
+          <h2 className="hraud-chain-label">After the work — the hours</h2>
+          {actualFiled ? (
+            <DocumentApproval
+              documentType="overtime_request"
+              documentId={row.id}
+              reloadToken={reload}
+            />
+          ) : (
+            <p className="muted hraud-flush">
+              Not filed yet — this approval starts when the actual hours are filed.
+            </p>
+          )}
+        </div>
+      </div>
 
       <div className="grid grid-2">
         <div className="card">
@@ -511,9 +577,7 @@ export function OvertimeDetail() {
         <div className="card">
           <h3 className="card-title">Actual</h3>
           {row.actualHours == null ? (
-            <p className="muted" style={{ marginBottom: 0 }}>
-              Not filed yet.
-            </p>
+            <p className="muted hraud-flush">Not filed yet.</p>
           ) : (
             <dl className="kv">
               <dt>Times</dt>
@@ -545,7 +609,15 @@ export function OvertimeDetail() {
           <dl className="kv">
             <dt>Project</dt>
             <dd>
-              <span className="mono">{row.job.number}</span> — {row.job.name}
+              {can('gops.projects.view_all') || can('gops.projects.view_own') ? (
+                <Link to={`/g-ops/projects/${row.job.id}`}>
+                  <span className="mono">{row.job.number}</span> — {row.job.name}
+                </Link>
+              ) : (
+                <>
+                  <span className="mono">{row.job.number}</span> — {row.job.name}
+                </>
+              )}
             </dd>
             <dt>Budget line</dt>
             <dd>{row.costCategory?.name ?? '—'}</dd>
@@ -561,20 +633,20 @@ export function OvertimeDetail() {
               {row.amount != null ? (
                 formatMoney(row.amount)
               ) : (
-                <span className="faint">nothing yet — both approvals are needed</span>
+                <span className="faint">nothing yet — every approval step is needed</span>
               )}
             </dd>
             <dt>Posted</dt>
             <dd>{row.postedAt ? formatDate(row.postedAt) : <span className="faint">not posted</span>}</dd>
           </dl>
         ) : (
-          <p className="muted" style={{ marginBottom: 0 }}>
+          <p className="muted hraud-flush">
             No project chosen, so nothing is charged to a budget. The hours are still approved for
             payroll.
           </p>
         )}
         {row.rate?.missingRate && (
-          <div className="alert warn" style={{ marginTop: 12, marginBottom: 0 }}>
+          <div className="alert warn hraud-after hraud-flush">
             {row.employee.firstName} has no daily rate on file, so the project cannot be charged.
             HR sets it on the employee record.
           </div>
@@ -685,7 +757,7 @@ function ActualModal({
       />
 
       {preview && (
-        <div className={`alert ${needsNote ? 'warn' : 'info'}`} style={{ marginTop: 10 }}>
+        <div className={`alert ${needsNote ? 'warn' : 'info'} hraud-gap-above`}>
           <strong>{preview.hours}</strong> hours
           {needsNote ? (
             <>

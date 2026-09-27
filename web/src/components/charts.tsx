@@ -6,7 +6,8 @@ import { IconBadge, type IconName } from './Icon';
  * The chart set.
  *
  * Hand-rolled SVG and CSS, no charting library — the same reason the rest of
- * this app has no UI framework, and these are four shapes rather than forty.
+ * this app has no UI framework, and these are a handful of shapes rather than
+ * forty. `Brief` — a chart of sentences — is the newest.
  *
  * Three near-identical bars already existed before this file: `ProgressBar`
  * with `.meter` in Projects, `Bar` with `.mini-bar` in Insights, and
@@ -396,6 +397,84 @@ export function Meter({ pct, tone }: { pct: number; tone?: string }) {
     <div className="meter" title={`${pct.toFixed(1)}%`}>
       <div className={`meter-fill${tone ? ` ${tone}` : ''}`} style={{ width: `${clamped}%` }} />
       <span className="meter-label mono">{pct.toFixed(1)}%</span>
+    </div>
+  );
+}
+
+// ── Brief ────────────────────────────────────────────────────────────────────
+
+/** A run of words, or a figure. A figure with `to` opens the list it counted. */
+export interface BriefPart {
+  text?: string;
+  value?: string;
+  to?: string;
+  tone?: Tone;
+  /** What the figure is, for a screen reader and the hover title — "Receivable overdue". */
+  label?: string;
+}
+
+/** One sentence-with-figures, tagged with the division it describes. */
+export interface BriefLine {
+  key: string;
+  tag: string;
+  /** The division's own dashboard — the tag links there. */
+  to: string;
+  tone?: Tone;
+  /** A quieter second line: when the figures were read, or whose they are. */
+  hint?: string;
+  parts: BriefPart[];
+}
+
+/**
+ * A chart of sentences.
+ *
+ *   G-FIN   Customers owe PHP 1,562,200.00 (PHP 90,000.00 overdue); …
+ *
+ * Belongs here with the other shapes because it follows their two rules: the
+ * words carry the meaning and colour only adds to them (a figure is toned
+ * only when it is non-zero and worth a look), and an empty brief says
+ * "nothing yet". Every tag and every figure is a `<Link>`, so the whole brief
+ * is reachable from a keyboard and each number opens the list behind it.
+ */
+export function Brief({ lines, caption }: { lines: BriefLine[]; caption?: string }) {
+  const shown = lines.filter((l) => l.parts.some((p) => p.value !== undefined));
+  if (shown.length === 0) return <Empty caption={caption} />;
+
+  return (
+    <div className="chart">
+      {caption && <div className="chart-caption">{caption}</div>}
+      <ul className="brief">
+        {shown.map((l) => (
+          <li key={l.key} className="brief-row">
+            <Link
+              to={l.to}
+              className="brief-tag"
+              style={l.tone ? { color: TONE_VAR[l.tone] } : undefined}
+            >
+              {l.tag}
+            </Link>
+            <div>
+              <p className="brief-text">
+                {l.parts.map((p, i) => {
+                  if (p.value === undefined) return <span key={i}>{p.text}</span>;
+                  const style = p.tone ? { color: TONE_VAR[p.tone] } : undefined;
+                  const name = p.label ? `${p.label}: ${p.value}` : undefined;
+                  return p.to ? (
+                    <Link key={i} to={p.to} className="brief-figure" style={style} title={p.label} aria-label={name}>
+                      {p.value}
+                    </Link>
+                  ) : (
+                    <strong key={i} className="brief-figure" style={style} title={p.label}>
+                      {p.value}
+                    </strong>
+                  );
+                })}
+              </p>
+              {l.hint && <span className="brief-hint">{l.hint}</span>}
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

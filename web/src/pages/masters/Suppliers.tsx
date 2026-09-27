@@ -11,9 +11,14 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
+  formatDate,
   formatDateTime,
+  formatMoney,
+  humanise,
   useToast,
 } from '../../components/ui';
+import { Collection, Detail } from './Customer360';
 
 interface SupplierRow {
   id: string;
@@ -31,6 +36,71 @@ interface SupplierRow {
   notes: string | null;
   isActive: boolean;
   contactCount: number;
+  /** Set only through G-OPS › Partners — one owner for the flag. */
+  isPartner: boolean;
+  brand: string | null;
+  partnerSince: string | null;
+}
+
+/*
+  Supplier 360: each collection arrives behind the permission of the screen it
+  comes from, and empty when the caller cannot open that screen.
+*/
+interface PoLine {
+  id: string;
+  number: string;
+  status: string;
+  kind: string;
+  orderDate: string;
+  deliveryDate: string | null;
+  total: number;
+  job: { id: string; number: string; name: string } | null;
+}
+
+interface ReceivingLine {
+  id: string;
+  number: string;
+  receivedDate: string;
+  deliveryRefNo: string | null;
+  order: { id: string; number: string };
+  receivedBy: { id: string; name: string } | null;
+  lineCount: number;
+}
+
+interface BillLine {
+  id: string;
+  number: string;
+  status: string;
+  billDate: string;
+  dueDate: string | null;
+  supplierInvoiceNo: string | null;
+  total: number;
+  netPayable: number;
+  outstanding: number;
+}
+
+interface PaymentLine {
+  id: string;
+  number: string;
+  method: string;
+  paymentDate: string;
+  amount: number;
+  reference: string | null;
+  clearedAt: string | null;
+}
+
+type SupplierDetailData = SupplierRow & {
+  contacts: SupplierContact[];
+  createdAt: string;
+  purchaseOrders?: PoLine[];
+  receivings?: ReceivingLine[];
+  bills?: BillLine[];
+  payments?: PaymentLine[];
+};
+
+/** The partner flag as a pill — a classification, rendered through the one badge. */
+function PartnerBadge() {
+  return <StatusBadge status="PARTNER" extra={{ PARTNER: 'info' }} label="Partner" />;
 }
 
 interface SupplierContact {
@@ -52,14 +122,21 @@ export function Suppliers() {
   const [reload, setReload] = useState(0);
 
   const columns: Column<SupplierRow>[] = [
-    { key: 'code', label: 'Code', sortKey: 'code', width: '150px', render: (s) => <span className="mono">{s.code}</span> },
+    { key: 'code', label: 'Code', sortKey: 'code', render: (s) => <span className="mono">{s.code}</span> },
     {
       key: 'name',
       label: 'Supplier',
       sortKey: 'name',
       render: (s) => (
         <div>
-          <div>{s.name}</div>
+          <div>
+            {s.name}
+            {s.isPartner && (
+              <span className="m-inline">
+                <PartnerBadge />
+              </span>
+            )}
+          </div>
           {s.legalName && s.legalName !== s.name && <div className="faint">{s.legalName}</div>}
         </div>
       ),
@@ -79,9 +156,7 @@ export function Suppliers() {
     {
       key: 'isActive',
       label: 'Status',
-      render: (s) => (
-        <span className={`badge ${s.isActive ? 'ok' : ''}`}>{s.isActive ? 'Active' : 'Inactive'}</span>
-      ),
+      render: (s) => <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
     },
   ];
 
@@ -172,7 +247,7 @@ export function SupplierDetail() {
   const { can } = useAuth();
   const toast = useToast();
 
-  const [supplier, setSupplier] = useState<(SupplierRow & { contacts: SupplierContact[]; createdAt: string }) | null>(null);
+  const [supplier, setSupplier] = useState<SupplierDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
@@ -226,25 +301,35 @@ export function SupplierDetail() {
           <h1>{supplier.name}</h1>
           <p>
             {supplier.category ?? 'No category recorded'}
+            {supplier.isPartner && (
+              <span className="m-inline">
+                <PartnerBadge />
+              </span>
+            )}
             {!supplier.isActive && (
-              <span className="badge danger" style={{ marginLeft: 8 }}>
-                Inactive
+              <span className="m-inline">
+                <StatusBadge status="INACTIVE" extra={{ INACTIVE: 'danger' }} />
               </span>
             )}
           </p>
         </div>
-        {mayEdit && (
-          <div className="row">
+        <div className="row">
+          {supplier.isPartner && can('gops.partners.view_all') && (
+            <Link className="btn btn-sm" to={`/g-ops/partners/${supplier.id}`}>
+              Open in Sales › Partners
+            </Link>
+          )}
+          {mayEdit && (
             <button className="btn" onClick={() => setEditing(true)}>
               Modify
             </button>
-            {can('gchain.suppliers.delete') && (
-              <button className="btn btn-danger" onClick={remove}>
-                Delete
-              </button>
-            )}
-          </div>
-        )}
+          )}
+          {mayEdit && can('gchain.suppliers.delete') && (
+            <button className="btn btn-danger" onClick={remove}>
+              Delete
+            </button>
+          )}
+        </div>
       </div>
 
       <ErrorBox error={error} />
@@ -252,28 +337,37 @@ export function SupplierDetail() {
       <div className="grid grid-2">
         <div className="card">
           <h3 className="card-title">Details</h3>
-          <Row label="Code" value={<span className="mono">{supplier.code}</span>} />
-          <Row label="Registered name" value={supplier.legalName} />
-          <Row label="TIN" value={supplier.tin} />
-          <Row label="Supplies" value={supplier.category} />
-          <Row label="Payment terms" value={supplier.paymentTerms} />
-          <Row label="Added" value={formatDateTime(supplier.createdAt)} />
+          <dl className="m-details">
+            <Detail label="Code" value={<span className="mono">{supplier.code}</span>} />
+            <Detail label="Registered name" value={supplier.legalName} />
+            <Detail label="TIN" value={supplier.tin} />
+            <Detail label="Supplies" value={supplier.category} />
+            <Detail label="Payment terms" value={supplier.paymentTerms} />
+            {supplier.isPartner && <Detail label="Brand" value={supplier.brand} />}
+            {supplier.isPartner && (
+              <Detail
+                label="Partner since"
+                value={supplier.partnerSince ? formatDate(supplier.partnerSince) : null}
+              />
+            )}
+            <Detail label="Added" value={formatDateTime(supplier.createdAt)} />
+          </dl>
         </div>
 
         <div className="card">
           <h3 className="card-title">Contact</h3>
-          <Row label="Address" value={supplier.address} />
-          <Row label="City" value={supplier.city} />
-          <Row label="Phone" value={supplier.phone} />
-          <Row label="Email" value={supplier.email} />
-          <Row label="Website" value={supplier.website} />
+          <dl className="m-details">
+            <Detail label="Address" value={supplier.address} />
+            <Detail label="City" value={supplier.city} />
+            <Detail label="Phone" value={supplier.phone} />
+            <Detail label="Email" value={supplier.email} />
+            <Detail label="Website" value={supplier.website} />
+          </dl>
         </div>
 
-        <div className="card" style={{ gridColumn: '1 / -1' }}>
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 className="card-title" style={{ margin: 0 }}>
-              People
-            </h3>
+        <div className="card m-span-all">
+          <div className="m-card-head">
+            <h3 className="card-title">People</h3>
             {mayEdit && (
               <button className="btn btn-primary btn-sm" onClick={() => setContactModal('new')}>
                 + Add contact
@@ -291,7 +385,7 @@ export function SupplierDetail() {
                     <th>Position</th>
                     <th>Email</th>
                     <th>Mobile</th>
-                    {mayEdit && <th style={{ width: 70 }} />}
+                    {mayEdit && <th className="m-col-action" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -299,17 +393,13 @@ export function SupplierDetail() {
                     <tr key={c.id}>
                       <td>
                         {c.name}
-                        {c.isPrimary && (
-                          <span className="badge ok" style={{ marginLeft: 7 }}>
-                            primary
-                          </span>
-                        )}
+                        {c.isPrimary && <span className="badge ok m-inline">primary</span>}
                       </td>
                       <td>{c.position ?? '—'}</td>
                       <td className="mono">{c.email ?? '—'}</td>
                       <td>{c.mobile ?? '—'}</td>
                       {mayEdit && (
-                        <td>
+                        <td className="m-col-action">
                           <button className="btn btn-sm" onClick={() => setContactModal(c)}>
                             Modify
                           </button>
@@ -323,12 +413,108 @@ export function SupplierDetail() {
           )}
         </div>
 
-        <div className="card" style={{ gridColumn: '1 / -1' }}>
-          <Empty
-            title="Purchase orders, receiving and payables ship in Phases 5 and 7"
-            hint="This supplier's ordering history and outstanding bills will appear here."
-          />
-        </div>
+      </div>
+
+      <div className="stack m-supplier-history">
+        <Collection
+          title="Purchase orders"
+          count={(supplier.purchaseOrders ?? []).length}
+          empty="Nothing ordered from this supplier yet."
+          head={['Number', 'Ordered', 'Kind', 'For project', 'Deliver by', 'Total', 'Status']}
+        >
+          {(supplier.purchaseOrders ?? []).map((o) => (
+            <tr key={o.id}>
+              <td>
+                <Link className="mono" to={`/g-chain/purchase-orders/${o.id}`}>
+                  {o.number}
+                </Link>
+              </td>
+              <td>{formatDate(o.orderDate)}</td>
+              <td>{o.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock'}</td>
+              <td>{o.job ? `${o.job.number} — ${o.job.name}` : '—'}</td>
+              <td>{formatDate(o.deliveryDate)}</td>
+              <td className="num">{formatMoney(o.total)}</td>
+              <td>
+                <StatusBadge status={o.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Receiving"
+          count={(supplier.receivings ?? []).length}
+          empty="Nothing received from this supplier yet."
+          head={['Number', 'Received', 'Against PO', 'Delivery ref.', 'Lines', 'Received by']}
+        >
+          {(supplier.receivings ?? []).map((r) => (
+            <tr key={r.id}>
+              <td>
+                <Link className="mono" to={`/g-chain/receiving/${r.id}`}>
+                  {r.number}
+                </Link>
+              </td>
+              <td>{formatDate(r.receivedDate)}</td>
+              <td className="mono">{r.order.number}</td>
+              <td>{r.deliveryRefNo ?? '—'}</td>
+              <td className="num">{r.lineCount}</td>
+              <td>{r.receivedBy?.name ?? '—'}</td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Bills"
+          count={(supplier.bills ?? []).length}
+          empty="No bills from this supplier on record."
+          head={['Number', 'Their invoice', 'Billed', 'Due', 'Net payable', 'Outstanding', 'Status']}
+        >
+          {(supplier.bills ?? []).map((b) => (
+            <tr key={b.id}>
+              <td>
+                <Link className="mono" to={`/g-fin/ap/${b.id}`}>
+                  {b.number}
+                </Link>
+              </td>
+              <td>{b.supplierInvoiceNo ?? '—'}</td>
+              <td>{formatDate(b.billDate)}</td>
+              <td>{formatDate(b.dueDate)}</td>
+              <td className="num">{formatMoney(b.netPayable)}</td>
+              <td className="num">{formatMoney(b.outstanding)}</td>
+              <td>
+                <StatusBadge status={b.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Payments"
+          count={(supplier.payments ?? []).length}
+          empty="Nothing paid to this supplier yet."
+          head={['Number', 'Date', 'Method', 'Reference', 'Amount', 'Cleared']}
+        >
+          {(supplier.payments ?? []).map((p) => (
+            <tr key={p.id}>
+              <td>
+                <Link className="mono" to={`/g-fin/payments?payment=${encodeURIComponent(p.id)}`}>
+                  {p.number}
+                </Link>
+              </td>
+              <td>{formatDate(p.paymentDate)}</td>
+              <td>{humanise(p.method)}</td>
+              <td>{p.reference ?? '—'}</td>
+              <td className="num">{formatMoney(p.amount)}</td>
+              <td>
+                {p.clearedAt ? (
+                  formatDate(p.clearedAt)
+                ) : (
+                  <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="Not cleared" />
+                )}
+              </td>
+            </tr>
+          ))}
+        </Collection>
       </div>
 
       {editing && (
@@ -353,17 +539,6 @@ export function SupplierDetail() {
           }}
         />
       )}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--line-soft)' }}>
-      <span className="faint" style={{ width: 150, flexShrink: 0, fontSize: 12 }}>
-        {label}
-      </span>
-      <span>{value || <span className="faint">—</span>}</span>
     </div>
   );
 }
@@ -395,6 +570,8 @@ function SupplierForm({
     email: supplier?.email ?? '',
     website: supplier?.website ?? '',
     notes: supplier?.notes ?? '',
+    brand: supplier?.brand ?? '',
+    partnerSince: supplier?.partnerSince ? supplier.partnerSince.slice(0, 10) : '',
     isActive: supplier?.isActive ?? true,
   });
 
@@ -415,6 +592,8 @@ function SupplierForm({
         email: form.email || null,
         website: form.website || null,
         notes: form.notes || null,
+        brand: form.brand || null,
+        partnerSince: form.partnerSince || null,
         isActive: form.isActive,
       };
       const saved = supplier
@@ -484,6 +663,25 @@ function SupplierForm({
       <Field label="Website">
         <input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} />
       </Field>
+      <div className="grid grid-2">
+        <Field label="Brand" hint="Trading name when it differs — Atlas Copco for Atlas Copco (Philippines) Inc.">
+          <input value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} />
+        </Field>
+        <Field
+          label="Partner since"
+          hint={
+            supplier?.isPartner
+              ? 'This supplier is a Sales partner'
+              : 'Only meaningful once Sales adds this supplier under G-OPS › Partners'
+          }
+        >
+          <input
+            type="date"
+            value={form.partnerSince}
+            onChange={(e) => setForm({ ...form, partnerSince: e.target.value })}
+          />
+        </Field>
+      </div>
       <Field label="Notes">
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
       </Field>

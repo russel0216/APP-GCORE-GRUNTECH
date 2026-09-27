@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, getToken } from '../../lib/api';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import {
   Empty,
@@ -8,10 +8,11 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatMoney,
   useToast,
 } from '../../components/ui';
-import { CostingForm, MarginBadge, type CostingRow } from './Costings';
+import { COSTING_TONES, CostingForm, MarginBadge, type CostingRow } from './Costings';
 
 /**
  * The costing workspace.
@@ -67,12 +68,16 @@ interface CostingDetail extends CostingRow {
   lines: CostLine[];
   scopeSections: ScopeSection[];
   site: Ref | null;
+  /** The lead this costing was started from, when it was. */
+  lead: { id: string; number: string; companyName: string; status: string } | null;
   quotationRevisions: {
     id: string;
     revision: number;
     status: string;
     quotation: { id: string; number: string; subject: string };
   }[];
+  /** The jobs built on this costing — a project or a service contract. */
+  jobs: { id: string; number: string; name: string; status: string; type: string }[];
 }
 
 const KINDS = [
@@ -87,6 +92,7 @@ export function CostingDetailPage() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const [params] = useSearchParams();
 
   const [costing, setCosting] = useState<CostingDetail | null>(null);
   const [categories, setCategories] = useState<Ref[]>([]);
@@ -94,8 +100,22 @@ export function CostingDetailPage() {
   const [error, setError] = useState<unknown>(null);
   const [tab, setTab] = useState<'cost' | 'scope' | 'summary'>('cost');
   const [editing, setEditing] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
   const [lineModal, setLineModal] = useState<CostLine | 'new' | null>(null);
   const [sectionModal, setSectionModal] = useState<ScopeSection | 'new' | null>(null);
+
+  // A renewal arrives as ?renewFrom=<contract id>: the Contracts screen has
+  // just duplicated the old contract's costing and sent the user here to
+  // reprice it. The banner names the old contract when it can be read.
+  const renewFrom = params.get('renewFrom');
+  const [renewedContract, setRenewedContract] = useState<{ id: string; number: string } | null>(null);
+  useEffect(() => {
+    if (!renewFrom) return;
+    api
+      .get<{ id: string; number: string }>(`/service-contracts/${renewFrom}`)
+      .then((c) => setRenewedContract({ id: c.id, number: c.number }))
+      .catch(() => setRenewedContract(null));
+  }, [renewFrom]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -141,10 +161,22 @@ export function CostingDetailPage() {
   }
 
   function printPdf() {
-    fetch(`/api/costings/${costing!.id}/pdf`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then((r) => r.blob())
-      .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-      .catch(() => toast('error', 'Could not render the costing sheet'));
+    openPdf(`/api/costings/${costing!.id}/pdf`, () => toast('error', 'Could not render the costing sheet'));
+  }
+
+  /** A fresh draft copy under a new number, then straight to it. */
+  async function duplicate() {
+    if (!costing) return;
+    setDuplicating(true);
+    try {
+      const copy = await api.post<{ id: string; number: string }>(`/costings/${costing.id}/duplicate`);
+      toast('ok', `Copied as ${copy.number}`);
+      navigate(`/g-ops/costing/${copy.id}`);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setDuplicating(false);
+    }
   }
 
   async function remove() {
@@ -170,6 +202,17 @@ export function CostingDetailPage() {
 
   const scopeDrift = Math.round((costing.scopeTotal - costing.contractValue) * 100) / 100;
 
+  // The next-step links. A project is built on a FINAL costing (the API
+  // refuses a draft), and a service contract is a job of that type — so the
+  // renewal path is the project path with the type and the old contract on it.
+  const isFinal = costing.status === 'FINAL';
+  const projectHref = renewFrom
+    ? `/g-ops/projects?new=1&costingId=${costing.id}&type=SERVICE_CONTRACT&renewFrom=${renewFrom}`
+    : `/g-ops/projects?new=1&costingId=${costing.id}`;
+  const quotationHref = `/g-ops/quotations?new=1&costingId=${costing.id}`;
+  const canCreateProject = can('gops.projects.create');
+  const canCreateQuotation = can('gops.quotations.create');
+
   return (
     <div>
       <div className="breadcrumb">
@@ -192,10 +235,26 @@ export function CostingDetailPage() {
         <div>
           <h1>{costing.title}</h1>
           <p>
-            {costing.customer?.name ?? 'No customer linked'}
+            {costing.customer ? (
+              can('gops.customers.view_all') ? (
+                <Link to={`/g-ops/customers/${costing.customer.id}`}>{costing.customer.name}</Link>
+              ) : (
+                costing.customer.name
+              )
+            ) : (
+              'No customer linked'
+            )}
             {costing.site ? ` · ${costing.site.name}` : ''} · prepared by {costing.owner.name}
-            <span className={`badge ${costing.status === 'FINAL' ? 'ok' : 'warn'}`} style={{ marginLeft: 8 }}>
-              {costing.status === 'FINAL' ? 'Final' : 'Draft'}
+            {costing.lead && (
+              <>
+                {' · from lead '}
+                <Link to={`/g-ops/leads/${costing.lead.id}`} className="mono">
+                  {costing.lead.number}
+                </Link>
+              </>
+            )}
+            <span style={{ marginLeft: 'var(--s-2)' }}>
+              <StatusBadge status={costing.status} extra={COSTING_TONES} />
             </span>
           </p>
         </div>
@@ -203,6 +262,11 @@ export function CostingDetailPage() {
           <button className="btn" onClick={printPdf}>
             Print
           </button>
+          {can('gops.costing.create') && (
+            <button className="btn" onClick={duplicate} disabled={duplicating}>
+              {duplicating ? 'Copying…' : 'Duplicate'}
+            </button>
+          )}
           {costing.canEdit && costing.status === 'DRAFT' && (
             <>
               <button className="btn" onClick={() => setEditing(true)}>
@@ -228,15 +292,37 @@ export function CostingDetailPage() {
 
       <ErrorBox error={error} />
 
+      {renewFrom && (
+        <div className="alert warn">
+          Renewal of{' '}
+          {renewedContract ? (
+            <Link to={`/g-ops/service-contracts/${renewedContract.id}`} className="mono">
+              {renewedContract.number}
+            </Link>
+          ) : (
+            'the previous service contract'
+          )}{' '}
+          — copied at last year's prices. Reprice the lines, mark the costing final, then{' '}
+          {isFinal && canCreateProject ? (
+            <Link to={projectHref} className="btn btn-primary btn-sm">
+              Create service contract
+            </Link>
+          ) : (
+            <strong>Create service contract</strong>
+          )}
+          .
+        </div>
+      )}
+
       {/* The headline numbers, always visible — this is what the page is for. */}
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
         <Stat label="Estimated cost" value={formatMoney(costing.totalCost)} />
         <Stat label="Contract value" value={formatMoney(costing.contractValue)} accent />
         <Stat label="Gross profit" value={formatMoney(costing.grossProfit)} />
         <Stat label="Gross margin" value={<MarginBadge pct={costing.grossMarginPct} />} />
       </div>
 
-      <div className="scope-switch" style={{ marginBottom: 16 }}>
+      <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
         <button className={tab === 'cost' ? 'active' : ''} onClick={() => setTab('cost')}>
           Cost ({costing.lines.length})
         </button>
@@ -250,7 +336,7 @@ export function CostingDetailPage() {
 
       {tab === 'cost' && (
         <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
+          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-3)' }}>
             <h3 className="card-title" style={{ margin: 0 }}>
               Estimated cost
             </h3>
@@ -276,7 +362,7 @@ export function CostingDetailPage() {
                     <th>Unit</th>
                     <th className="right">Unit cost</th>
                     <th className="right">Amount</th>
-                    {editable && <th style={{ width: 60 }} />}
+                    {editable && <th />}
                   </tr>
                 </thead>
                 <tbody>
@@ -285,14 +371,14 @@ export function CostingDetailPage() {
                       <tr key={bucket.category.id} style={{ background: 'var(--surface-2)' }}>
                         <td colSpan={editable ? 6 : 5}>
                           <strong style={{ color: 'var(--neon-dim)' }}>{bucket.category.name}</strong>
-                          <span className="faint" style={{ marginLeft: 10 }}>
+                          <span className="faint" style={{ marginLeft: 'var(--s-3)' }}>
                             {formatMoney(bucket.total)}
                           </span>
                         </td>
                       </tr>
                       {bucket.lines.map((line) => (
                         <tr key={line.id}>
-                          <td style={{ paddingLeft: 24 }}>
+                          <td style={{ paddingLeft: 'var(--s-6)' }}>
                             {line.description}
                             {line.item && <div className="faint mono">{line.item.code}</div>}
                           </td>
@@ -329,7 +415,7 @@ export function CostingDetailPage() {
 
       {tab === 'scope' && (
         <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
+          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 'var(--s-3)' }}>
             <h3 className="card-title" style={{ margin: 0 }}>
               Scope of work — schedule of values
             </h3>
@@ -345,7 +431,7 @@ export function CostingDetailPage() {
             )}
           </div>
 
-          <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+          <p className="muted" style={{ marginTop: 0, fontSize: 'var(--fs-md)' }}>
             These sections are billed against. Their total must equal the contract value, or
             progress billing will not add up.
           </p>
@@ -361,13 +447,13 @@ export function CostingDetailPage() {
                 <table className="data">
                   <thead>
                     <tr>
-                      <th style={{ width: 40 }}>#</th>
+                      <th>#</th>
                       <th>Scope</th>
                       <th>Type</th>
                       <th className="right">Duration</th>
                       <th className="right">Value</th>
                       <th className="right">% of contract</th>
-                      {editable && <th style={{ width: 60 }} />}
+                      {editable && <th />}
                     </tr>
                   </thead>
                   <tbody>
@@ -378,7 +464,7 @@ export function CostingDetailPage() {
                           <div>{s.name}</div>
                           {s.description && <div className="faint">{s.description}</div>}
                           {s.tasks.length > 0 && (
-                            <div className="faint" style={{ marginTop: 4 }}>
+                            <div className="faint" style={{ marginTop: 'var(--s-1)' }}>
                               {s.tasks.map((t) => `· ${t.name}`).join('  ')}
                             </div>
                           )}
@@ -414,7 +500,7 @@ export function CostingDetailPage() {
               </div>
 
               {Math.abs(scopeDrift) > 0.009 && (
-                <div className="alert error" style={{ marginTop: 12, marginBottom: 0 }}>
+                <div className="alert error" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
                   The scope sections total {formatMoney(costing.scopeTotal)}, but the contract value
                   is {formatMoney(costing.contractValue)} —{' '}
                   {scopeDrift > 0 ? 'over' : 'under'} by {formatMoney(Math.abs(scopeDrift))}.
@@ -422,7 +508,7 @@ export function CostingDetailPage() {
                 </div>
               )}
               {Math.abs(scopeDrift) <= 0.009 && costing.scopeSections.length > 0 && (
-                <div className="alert ok" style={{ marginTop: 12, marginBottom: 0 }}>
+                <div className="alert ok" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
                   The schedule of values matches the contract value. This is what progress billing
                   will bill against.
                 </div>
@@ -452,7 +538,7 @@ export function CostingDetailPage() {
                 />
               </tbody>
             </table>
-            <p className="faint" style={{ fontSize: 12, marginBottom: 0 }}>
+            <p className="faint" style={{ fontSize: 'var(--fs-sm)', marginBottom: 0 }}>
               Margin is profit over the contract value, not over cost — the two are different
               numbers and only this one is what the business calls margin.
             </p>
@@ -460,30 +546,64 @@ export function CostingDetailPage() {
 
           <div className="card">
             <h3 className="card-title">Where this goes next</h3>
+
+            <div className="section-label">QUOTATIONS</div>
             {costing.quotationRevisions.length === 0 ? (
               <p className="muted" style={{ marginTop: 0 }}>
-                Not yet attached to a quotation. Create a quotation and link this costing — the
-                scope sections can then fill the quotation's lines in one click.
+                Not yet attached to a quotation. The scope sections can fill the quotation's lines
+                in one click.
               </p>
             ) : (
-              <div className="stack">
+              <div className="stack" style={{ marginBottom: 'var(--s-3)' }}>
                 {costing.quotationRevisions.map((r) => (
                   <Link key={r.id} to={`/g-ops/quotations/${r.quotation.id}`} className="row">
                     <span className="mono">
                       {r.quotation.number} R{r.revision}
                     </span>
-                    <span className="badge">{r.status}</span>
+                    <StatusBadge status={r.status} />
                     <span className="muted">{r.quotation.subject}</span>
                   </Link>
                 ))}
               </div>
             )}
+            {canCreateQuotation && (
+              <Link to={quotationHref} className="btn btn-sm">
+                Create quotation
+              </Link>
+            )}
+
+            <hr className="rule" />
+            <div className="section-label">PROJECTS</div>
+            {costing.jobs.length === 0 ? (
+              <p className="muted" style={{ marginTop: 0 }}>
+                {isFinal
+                  ? 'No project built on this costing yet.'
+                  : 'A project is built on a final costing — mark this one final first.'}
+              </p>
+            ) : (
+              <div className="stack" style={{ marginBottom: 'var(--s-3)' }}>
+                {costing.jobs.map((j) => (
+                  <Link key={j.id} to={`/g-ops/projects/${j.id}`} className="row">
+                    <span className="mono">{j.number}</span>
+                    <StatusBadge status={j.status} />
+                    <span className="muted">
+                      {j.name}
+                      {j.type === 'SERVICE_CONTRACT' ? ' · service contract' : ''}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            )}
+            {isFinal && canCreateProject && (
+              <Link to={projectHref} className="btn btn-sm">
+                {renewFrom ? 'Create service contract' : 'Create project'}
+              </Link>
+            )}
+
             {costing.notes && (
               <>
                 <hr className="rule" />
-                <div className="section-label">
-                  NOTES
-                </div>
+                <div className="section-label">NOTES</div>
                 <div style={{ whiteSpace: 'pre-wrap' }}>{costing.notes}</div>
               </>
             )}
@@ -533,13 +653,13 @@ export function CostingDetailPage() {
 function Stat({ label, value, accent }: { label: string; value: React.ReactNode; accent?: boolean }) {
   return (
     <div className="card">
-      <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
+      <div className="faint" style={{ fontSize: 'var(--fs-xs)', letterSpacing: '0.08em' }}>
         {label.toUpperCase()}
       </div>
       <div
         style={{
-          fontSize: 20,
-          marginTop: 6,
+          fontSize: 'var(--fs-xl)',
+          marginTop: 'var(--s-2)',
           fontWeight: 600,
           color: accent ? 'var(--neon)' : 'var(--text)',
         }}
@@ -854,7 +974,7 @@ function SectionModal({
       {section && (
         <>
           <hr className="rule" />
-          <div className="faint" style={{ fontSize: 11, marginBottom: 8 }}>
+          <div className="faint" style={{ fontSize: 'var(--fs-xs)', marginBottom: 'var(--s-2)' }}>
             TASKS
           </div>
           {section.tasks.length === 0 ? (
@@ -862,7 +982,7 @@ function SectionModal({
               No tasks yet.
             </p>
           ) : (
-            <div className="stack" style={{ marginBottom: 10 }}>
+            <div className="stack" style={{ marginBottom: 'var(--s-3)' }}>
               {section.tasks.map((t) => (
                 <div key={t.id} className="row" style={{ justifyContent: 'space-between' }}>
                   <span>{t.name}</span>

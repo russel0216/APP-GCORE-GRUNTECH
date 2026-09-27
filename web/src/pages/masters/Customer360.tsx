@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { ActivityLog } from '../../components/ActivityLog';
 import {
   Checkbox,
   Empty,
@@ -13,20 +14,24 @@ import {
   formatDate,
   formatDateTime,
   formatMoney,
+  humanise,
   useToast,
 } from '../../components/ui';
-import { CustomerForm, type CustomerRow } from './Customers';
+import { CustomerForm, IndustryLabel, type CustomerRow } from './Customers';
 
 /**
  * Customer 360 (model §3).
  *
  * One record workspace instead of menu-hopping: the customer, their people,
- * their sites, and — as later phases land — their quotations, projects,
- * invoices and service history, all reachable without leaving the page.
+ * their sites, and everything the business has done with them — leads,
+ * quotations, projects, job orders, service cover, installed equipment,
+ * service reports, invoices and payments — each reachable without leaving the
+ * page, and each a link to the record itself.
  *
- * The later tabs are rendered now, empty, with the phase that fills them. That
- * is deliberate: it shows the shape of what the system is becoming rather than
- * hiding it until the day it works.
+ * Every collection arrives from the server behind the permission of the
+ * screen it comes from. A collection the caller cannot see comes back empty,
+ * which reads the same as having none: this page is a window onto those
+ * modules, never a way around them.
  */
 
 interface Contact {
@@ -94,6 +99,66 @@ interface ContractLine {
   job: { id: string; number: string; name: string };
 }
 
+interface LeadLine {
+  id: string;
+  number: string;
+  status: string;
+  description: string | null;
+  estimatedValue: number | null;
+  expectedClosing: string | null;
+  nextActionDate: string | null;
+  createdAt: string;
+  assignedTo: { id: string; name: string } | null;
+}
+
+interface AssetLine {
+  id: string;
+  code: string;
+  name: string;
+  status: string;
+  manufacturer: string | null;
+  model: string | null;
+  serialNo: string | null;
+  warrantyEndsAt: string | null;
+  site: { id: string; name: string } | null;
+}
+
+interface ReportLine {
+  id: string;
+  number: string;
+  kind: string;
+  status: string;
+  performedAt: string | null;
+  billable: boolean;
+  underWarranty: boolean;
+  asset: { id: string; name: string } | null;
+  performedBy: { id: string; name: string } | null;
+}
+
+interface PaymentLine {
+  id: string;
+  number: string;
+  kind: string;
+  method: string;
+  paymentDate: string;
+  amount: number;
+  reference: string | null;
+  clearedAt: string | null;
+}
+
+interface JobOrderLine {
+  id: string;
+  number: string;
+  status: string;
+  kind: string;
+  title: string;
+  urgent: boolean;
+  chargeBasis: string;
+  requestedFor: string;
+  amount: number | null;
+  assignedTo: { id: string; name: string } | null;
+}
+
 interface Customer360 extends CustomerRow {
   createdAt: string;
   updatedAt: string;
@@ -103,7 +168,31 @@ interface Customer360 extends CustomerRow {
   projects: ProjectLine[];
   invoices: InvoiceLine[];
   serviceContracts: ContractLine[];
+  // Optional so a response from before these collections existed still renders.
+  leads?: LeadLine[];
+  installedAssets?: AssetLine[];
+  serviceReports?: ReportLine[];
+  payments?: PaymentLine[];
+  jobOrders?: JobOrderLine[];
 }
+
+interface HistoryRow {
+  id: string;
+  action: string;
+  summary: string | null;
+  actorName: string | null;
+  at: string;
+}
+
+/** Audit verbs are not statuses — every one of them is neutral. */
+const ACTION_TONES = { CREATED: '', UPDATED: '', DELETED: '', EXPORTED: '', APPROVED: '', REJECTED: '' } as const;
+
+const REPORT_KIND: Record<string, string> = {
+  COMMISSIONING: 'Commissioning',
+  PREVENTIVE_MAINTENANCE: 'Preventive maintenance',
+  INSPECTION: 'Inspection',
+  CORRECTIVE: 'Corrective',
+};
 
 export function Customer360Page() {
   const { id } = useParams<{ id: string }>();
@@ -117,7 +206,7 @@ export function Customer360Page() {
   const [editing, setEditing] = useState(false);
   const [contactModal, setContactModal] = useState<Contact | 'new' | null>(null);
   const [siteModal, setSiteModal] = useState<Site | 'new' | null>(null);
-  const [activity, setActivity] = useState<{ id: string; action: string; summary: string | null; actorName: string | null; at: string }[]>([]);
+  const [history, setHistory] = useState<HistoryRow[]>([]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -139,9 +228,9 @@ export function Customer360Page() {
   useEffect(() => {
     if (!id) return;
     api
-      .get<typeof activity>(`/audit/customer/${id}`)
-      .then(setActivity)
-      .catch(() => setActivity([]));
+      .get<HistoryRow[]>(`/audit/customer/${id}`)
+      .then(setHistory)
+      .catch(() => setHistory([]));
   }, [id]);
 
   const mayEdit = can('gops.customers.edit_all');
@@ -160,6 +249,27 @@ export function Customer360Page() {
     }
   }
 
+  const leads = customer.leads ?? [];
+  const installedAssets = customer.installedAssets ?? [];
+  const serviceReports = customer.serviceReports ?? [];
+  const payments = customer.payments ?? [];
+  const jobOrders = customer.jobOrders ?? [];
+  const forCustomer = `new=1&customerId=${encodeURIComponent(customer.id)}`;
+
+  // Handoffs: start the next document already pointed at this customer.
+  const shortcuts: { to: string; label: string }[] = [
+    ...(can('gops.leads.create') ? [{ to: `/g-ops/leads?${forCustomer}`, label: 'New lead' }] : []),
+    ...(can('gops.quotations.create') ? [{ to: `/g-ops/quotations?${forCustomer}`, label: 'New quotation' }] : []),
+    ...(can('gops.costing.create') ? [{ to: `/g-ops/costing?${forCustomer}`, label: 'New costing' }] : []),
+    ...(can('gops.job_orders.create')
+      ? [{ to: `/g-ops/job-orders?${forCustomer}`, label: 'Request job order' }]
+      : []),
+  ];
+
+  const subtitle = [customer.legalName && customer.legalName !== customer.name ? customer.legalName : null]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
     <div>
       <div className="breadcrumb">
@@ -174,28 +284,32 @@ export function Customer360Page() {
         <div>
           <h1>{customer.name}</h1>
           <p>
-            {[customer.industry, customer.legalName !== customer.name ? customer.legalName : null]
-              .filter(Boolean)
-              .join(' · ') || 'No industry recorded'}
+            <IndustryLabel industry={customer.industry} />
+            {subtitle && <span className="muted"> · {subtitle}</span>}
             {!customer.isActive && (
-              <span className="badge danger" style={{ marginLeft: 8 }}>
-                Inactive
+              <span className="m-inline">
+                <StatusBadge status="INACTIVE" extra={{ INACTIVE: 'danger' }} />
               </span>
             )}
           </p>
         </div>
-        {mayEdit && (
-          <div className="row">
+        <div className="row m-shortcuts">
+          {shortcuts.map((s) => (
+            <Link key={s.to} className="btn btn-sm" to={s.to}>
+              {s.label}
+            </Link>
+          ))}
+          {mayEdit && (
             <button className="btn" onClick={() => setEditing(true)}>
               Modify
             </button>
-            {can('gops.customers.delete') && (
-              <button className="btn btn-danger" onClick={remove}>
-                Delete
-              </button>
-            )}
-          </div>
-        )}
+          )}
+          {mayEdit && can('gops.customers.delete') && (
+            <button className="btn btn-danger" onClick={remove}>
+              Delete
+            </button>
+          )}
+        </div>
       </div>
 
       <ErrorBox error={error} />
@@ -204,11 +318,11 @@ export function Customer360Page() {
         <div className="grid grid-2">
           <div className="card">
             <h3 className="card-title">Company</h3>
-            <dl style={{ margin: 0 }}>
+            <dl className="m-details">
               <Detail label="Code" value={<span className="mono">{customer.code}</span>} />
               <Detail label="Registered name" value={customer.legalName} />
               <Detail label="TIN" value={customer.tin} />
-              <Detail label="Industry" value={customer.industry} />
+              <Detail label="Industry" value={<IndustryLabel industry={customer.industry} />} />
               <Detail label="Phone" value={customer.phone} />
               <Detail label="Email" value={customer.email} />
               <Detail label="Website" value={customer.website} />
@@ -217,7 +331,7 @@ export function Customer360Page() {
 
           <div className="card">
             <h3 className="card-title">Commercial</h3>
-            <dl style={{ margin: 0 }}>
+            <dl className="m-details">
               <Detail label="Payment terms" value={customer.paymentTerms} />
               <Detail
                 label="Credit limit"
@@ -231,18 +345,16 @@ export function Customer360Page() {
           </div>
 
           {customer.notes && (
-            <div className="card" style={{ gridColumn: '1 / -1' }}>
+            <div className="card m-span-all">
               <h3 className="card-title">Notes</h3>
-              <div style={{ whiteSpace: 'pre-wrap' }}>{customer.notes}</div>
+              <div className="m-prewrap">{customer.notes}</div>
             </div>
           )}
         </div>
 
         <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 className="card-title" style={{ margin: 0 }}>
-              Contacts
-            </h3>
+          <div className="m-card-head">
+            <h3 className="card-title">Contacts</h3>
             {mayEdit && (
               <button className="btn btn-primary btn-sm" onClick={() => setContactModal('new')}>
                 + Add contact
@@ -265,7 +377,7 @@ export function Customer360Page() {
                     <th>Email</th>
                     <th>Phone</th>
                     <th>Mobile</th>
-                    {mayEdit && <th style={{ width: 70 }} />}
+                    {mayEdit && <th className="m-col-action" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -273,18 +385,14 @@ export function Customer360Page() {
                     <tr key={c.id}>
                       <td>
                         {c.name}
-                        {c.isPrimary && (
-                          <span className="badge ok" style={{ marginLeft: 7 }}>
-                            primary
-                          </span>
-                        )}
+                        {c.isPrimary && <span className="badge ok m-inline">primary</span>}
                       </td>
                       <td>{c.position ?? '—'}</td>
                       <td className="mono">{c.email ?? '—'}</td>
                       <td>{c.phone ?? '—'}</td>
                       <td>{c.mobile ?? '—'}</td>
                       {mayEdit && (
-                        <td>
+                        <td className="m-col-action">
                           <button className="btn btn-sm" onClick={() => setContactModal(c)}>
                             Modify
                           </button>
@@ -299,10 +407,8 @@ export function Customer360Page() {
         </div>
 
         <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 className="card-title" style={{ margin: 0 }}>
-              Sites
-            </h3>
+          <div className="m-card-head">
+            <h3 className="card-title">Sites</h3>
             {mayEdit && (
               <button className="btn btn-primary btn-sm" onClick={() => setSiteModal('new')}>
                 + Add site
@@ -325,7 +431,7 @@ export function Customer360Page() {
                     <th>City</th>
                     <th>Site contact</th>
                     <th>Status</th>
-                    {mayEdit && <th style={{ width: 70 }} />}
+                    {mayEdit && <th className="m-col-action" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -336,12 +442,10 @@ export function Customer360Page() {
                       <td>{[s.city, s.region].filter(Boolean).join(', ') || '—'}</td>
                       <td>{s.contact?.name ?? '—'}</td>
                       <td>
-                        <span className={`badge ${s.isActive ? 'ok' : ''}`}>
-                          {s.isActive ? 'Active' : 'Inactive'}
-                        </span>
+                        <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                       </td>
                       {mayEdit && (
-                        <td>
+                        <td className="m-col-action">
                           <button className="btn btn-sm" onClick={() => setSiteModal(s)}>
                             Modify
                           </button>
@@ -354,6 +458,31 @@ export function Customer360Page() {
             </div>
           )}
         </div>
+
+        {/* Leads ARE the opportunities — there is no separate Opportunity record. */}
+        <Collection
+          title="Leads"
+          count={leads.length}
+          empty="No leads recorded for this customer."
+          head={['Number', 'Enquiry', 'Assigned to', 'Est. value', 'Expected closing', 'Status']}
+        >
+          {leads.map((l) => (
+            <tr key={l.id}>
+              <td>
+                <Link className="mono" to={`/g-ops/leads/${l.id}`}>
+                  {l.number}
+                </Link>
+              </td>
+              <td>{l.description ?? '—'}</td>
+              <td>{l.assignedTo?.name ?? <span className="faint">unassigned</span>}</td>
+              <td className="num">{l.estimatedValue === null ? '—' : formatMoney(l.estimatedValue)}</td>
+              <td>{formatDate(l.expectedClosing)}</td>
+              <td>
+                <StatusBadge status={l.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
 
         <Collection
           title="Quotations"
@@ -369,7 +498,7 @@ export function Customer360Page() {
                 </Link>
               </td>
               <td>{q.subject}</td>
-              <td>{q.revisionNo === null ? '—' : `Rev ${q.revisionNo} · ${q.revisionStatus}`}</td>
+              <td>{q.revisionNo === null ? '—' : `Rev ${q.revisionNo} · ${humanise(q.revisionStatus ?? '')}`}</td>
               <td className="num">{q.total === null ? '—' : formatMoney(q.total)}</td>
               <td>
                 <StatusBadge status={q.outcome} />
@@ -404,25 +533,33 @@ export function Customer360Page() {
         </Collection>
 
         <Collection
-          title="Invoices"
-          count={customer.invoices.length}
-          empty="Nothing invoiced yet."
-          head={['Number', 'Issued', 'Due', 'Invoiced', 'Collectible', 'Outstanding', 'Status']}
+          title="Job orders"
+          count={jobOrders.length}
+          empty="No service work has been requested for this customer."
+          head={['Number', 'Work', 'Needed by', 'Charged as', 'Engineer', 'Status']}
         >
-          {customer.invoices.map((i) => (
-            <tr key={i.id}>
+          {jobOrders.map((j) => (
+            <tr key={j.id}>
               <td>
-                <Link className="mono" to={`/g-fin/ar/${i.id}`}>
-                  {i.number}
+                <Link className="mono" to={`/g-ops/job-orders/${j.id}`}>
+                  {j.number}
                 </Link>
               </td>
-              <td>{formatDate(i.invoiceDate)}</td>
-              <td>{formatDate(i.dueDate)}</td>
-              <td className="num">{formatMoney(i.invoiceTotal)}</td>
-              <td className="num">{formatMoney(i.netCollectible)}</td>
-              <td className="num">{formatMoney(i.outstanding)}</td>
               <td>
-                <StatusBadge status={i.status} />
+                {j.title}
+                <span className="m-subname">
+                  {REPORT_KIND[j.kind] ?? humanise(j.kind)}
+                  {j.urgent ? ' · urgent' : ''}
+                </span>
+              </td>
+              <td>{formatDate(j.requestedFor)}</td>
+              <td>
+                {humanise(j.chargeBasis)}
+                {j.amount !== null && <span className="m-subname">{formatMoney(j.amount)}</span>}
+              </td>
+              <td>{j.assignedTo?.name ?? <span className="faint">unassigned</span>}</td>
+              <td>
+                <StatusBadge status={j.status} />
               </td>
             </tr>
           ))}
@@ -452,27 +589,141 @@ export function Customer360Page() {
           ))}
         </Collection>
 
+        <Collection
+          title="Installed base"
+          count={installedAssets.length}
+          empty="No equipment of ours is recorded at this customer."
+          head={['Code', 'Equipment', 'Make / model', 'Site', 'Warranty until', 'Status']}
+        >
+          {installedAssets.map((a) => (
+            <tr key={a.id}>
+              <td>
+                <Link className="mono" to={`/g-ops/installed-base/${a.id}`}>
+                  {a.code}
+                </Link>
+              </td>
+              <td>
+                {a.name}
+                {a.serialNo && <span className="m-subname mono">S/N {a.serialNo}</span>}
+              </td>
+              <td>{[a.manufacturer, a.model].filter(Boolean).join(' ') || '—'}</td>
+              <td>{a.site?.name ?? '—'}</td>
+              <td>{formatDate(a.warrantyEndsAt)}</td>
+              <td>
+                <StatusBadge status={a.status} extra={{ INACTIVE: 'warn', DECOMMISSIONED: '' }} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Service reports"
+          count={serviceReports.length}
+          empty="No service reports filed for this customer."
+          head={['Number', 'Kind', 'Equipment', 'Performed', 'By', 'Status']}
+        >
+          {serviceReports.map((r) => (
+            <tr key={r.id}>
+              <td>
+                <Link className="mono" to={`/g-ops/service-reports/${r.id}`}>
+                  {r.number}
+                </Link>
+              </td>
+              <td>
+                {REPORT_KIND[r.kind] ?? humanise(r.kind)}
+                {r.underWarranty && <span className="m-subname">under warranty</span>}
+              </td>
+              <td>{r.asset?.name ?? '—'}</td>
+              <td>{formatDate(r.performedAt)}</td>
+              <td>{r.performedBy?.name ?? '—'}</td>
+              <td>
+                <StatusBadge status={r.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Invoices"
+          count={customer.invoices.length}
+          empty="Nothing invoiced yet."
+          head={['Number', 'Issued', 'Due', 'Invoiced', 'Collectible', 'Outstanding', 'Status']}
+        >
+          {customer.invoices.map((i) => (
+            <tr key={i.id}>
+              <td>
+                <Link className="mono" to={`/g-fin/ar/${i.id}`}>
+                  {i.number}
+                </Link>
+              </td>
+              <td>{formatDate(i.invoiceDate)}</td>
+              <td>{formatDate(i.dueDate)}</td>
+              <td className="num">{formatMoney(i.invoiceTotal)}</td>
+              <td className="num">{formatMoney(i.netCollectible)}</td>
+              <td className="num">{formatMoney(i.outstanding)}</td>
+              <td>
+                <StatusBadge status={i.status} />
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        <Collection
+          title="Payments"
+          count={payments.length}
+          empty="No payments recorded from this customer."
+          head={['Number', 'Date', 'Method', 'Reference', 'Amount', 'Cleared']}
+        >
+          {payments.map((p) => (
+            <tr key={p.id}>
+              <td>
+                <Link className="mono" to={`/g-fin/payments?payment=${encodeURIComponent(p.id)}`}>
+                  {p.number}
+                </Link>
+              </td>
+              <td>{formatDate(p.paymentDate)}</td>
+              <td>{humanise(p.method)}</td>
+              <td>{p.reference ?? '—'}</td>
+              <td className="num">{formatMoney(p.amount)}</td>
+              <td>
+                {p.clearedAt ? (
+                  formatDate(p.clearedAt)
+                ) : (
+                  <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="Not cleared" />
+                )}
+              </td>
+            </tr>
+          ))}
+        </Collection>
+
+        {can('gops.calendar.view_all') && (
+          <div className="card">
+            <h3 className="card-title">Activity</h3>
+            <ActivityLog customerId={customer.id} />
+          </div>
+        )}
+
         <div className="card">
-          <h3 className="card-title">Activity</h3>
-          {activity.length === 0 ? (
-            <Empty title="No recorded activity" />
+          <h3 className="card-title">History</h3>
+          {history.length === 0 ? (
+            <p className="collection-empty">No recorded changes.</p>
           ) : (
             <div className="table-wrap">
               <table className="data">
                 <thead>
                   <tr>
-                    <th style={{ width: 190 }}>When</th>
-                    <th style={{ width: 110 }}>Action</th>
+                    <th>When</th>
+                    <th>Action</th>
                     <th>Who</th>
                     <th>Detail</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {activity.map((a) => (
+                  {history.map((a) => (
                     <tr key={a.id}>
                       <td className="muted">{formatDateTime(a.at)}</td>
                       <td>
-                        <span className="badge">{a.action}</span>
+                        <StatusBadge status={a.action} extra={ACTION_TONES} />
                       </td>
                       <td>{a.actorName ?? '—'}</td>
                       <td>{a.summary ?? '—'}</td>
@@ -525,15 +776,10 @@ export function Customer360Page() {
 }
 
 /**
- * One collection of the customer's history — quotations, projects, invoices,
- * service cover. Same card, same table, same empty line, so the page reads as
- * one document rather than four screens stacked.
- *
- * A collection the caller may not see arrives empty from the server, which is
- * the same as having none: the 360 view is a window onto those modules and
- * never a way around their permissions.
+ * One collection of the customer's history. Same card, same table, same empty
+ * line, so the page reads as one document rather than nine screens stacked.
  */
-function Collection({
+export function Collection({
   title,
   count,
   empty,
@@ -544,7 +790,7 @@ function Collection({
   count: number;
   empty: string;
   head: string[];
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div className="card">
@@ -553,7 +799,7 @@ function Collection({
         {count > 0 && <span className="badge">{count}</span>}
       </h3>
       {count === 0 ? (
-        /* One faint line, not a full empty state: four of those stacked turned
+        /* One faint line, not a full empty state: nine of those stacked turned
            a customer with no history into a page of blank panels. */
         <p className="collection-empty">{empty}</p>
       ) : (
@@ -574,13 +820,11 @@ function Collection({
   );
 }
 
-function Detail({ label, value }: { label: string; value: React.ReactNode }) {
+export function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--line-soft)' }}>
-      <dt className="faint" style={{ width: 150, flexShrink: 0, fontSize: 12 }}>
-        {label}
-      </dt>
-      <dd style={{ margin: 0 }}>{value || <span className="faint">—</span>}</dd>
+    <div>
+      <dt>{label}</dt>
+      <dd>{value || <span className="faint">—</span>}</dd>
     </div>
   );
 }

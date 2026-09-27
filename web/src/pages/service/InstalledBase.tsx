@@ -8,9 +8,14 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   useToast,
+  type Tone,
 } from '../../components/ui';
+import { KIND_LABEL } from './Reports';
+import { VisitBadge } from './Schedule';
+import { BasisBadge } from './JobOrders';
 
 /**
  * The installed base — what Gruntech put in, where it stands, and when its
@@ -21,12 +26,17 @@ import {
  * hospital, and when does the free repair stop".
  */
 
-export const WARRANTY_TONE: Record<string, string> = {
+/** Warranty STATE, not a document status — passed to StatusBadge as its own map. */
+export const WARRANTY_TONE: Record<string, Tone> = {
   ACTIVE: 'ok',
   EXPIRING: 'warn',
   EXPIRED: 'danger',
   NONE: '',
 };
+
+function WarrantyBadge({ state }: { state: string }) {
+  return <StatusBadge status={state} extra={WARRANTY_TONE} label={WARRANTY_LABEL[state]} />;
+}
 
 export const WARRANTY_LABEL: Record<string, string> = {
   ACTIVE: 'in warranty',
@@ -122,9 +132,7 @@ export function InstalledBase() {
       sortKey: 'warrantyEndsAt',
       render: (r) => (
         <div>
-          <span className={`badge ${WARRANTY_TONE[r.warranty] ?? ''}`}>
-            {WARRANTY_LABEL[r.warranty]}
-          </span>
+          <WarrantyBadge state={r.warranty} />
           {r.warrantyEndsAt && (
             <div className="faint">
               {r.warranty === 'EXPIRED'
@@ -138,11 +146,7 @@ export function InstalledBase() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => (
-        <span className={`badge ${r.status === 'ACTIVE' ? 'ok' : ''}`}>
-          {r.status.toLowerCase()}
-        </span>
-      ),
+      render: (r) => <StatusBadge status={r.status} extra={{ INACTIVE: '', DECOMMISSIONED: '' }} />,
       optional: true,
     },
   ];
@@ -168,7 +172,7 @@ export function InstalledBase() {
         reloadToken={reload}
         searchPlaceholder="Search code, name, serial, model, customer…"
         emptyTitle="Nothing registered yet"
-        emptyHint="Register what a project installed from its workspace, or add a machine here."
+        emptyHint="A project registers what it installed when it is turned over, from its workspace. Or add a machine here."
         onRowClick={(r) => navigate(`/g-ops/installed-base/${r.id}`)}
         filters={[
           {
@@ -468,12 +472,22 @@ interface AssetDetail extends Asset {
     findings: string | null;
     performedBy: { id: string; name: string };
   }[];
-  upcomingVisits: { id: string; number: string; dueDate: string; kind: string }[];
+  upcomingVisits: { id: string; number: string; dueDate: string; kind: string; status: string }[];
+  jobOrders: {
+    id: string;
+    number: string;
+    kind: string;
+    status: string;
+    title: string;
+    requestedFor: string;
+    chargeBasis: string;
+  }[];
 }
 
 export function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { can } = useAuth();
+  const { can, canView } = useAuth();
+  const navigate = useNavigate();
   const [row, setRow] = useState<AssetDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
@@ -501,13 +515,15 @@ export function AssetDetailPage() {
       <div className="page-head">
         <div>
           <h1>
-            {row.name}{' '}
-            <span className={`badge ${WARRANTY_TONE[row.warranty] ?? ''}`}>
-              {WARRANTY_LABEL[row.warranty]}
-            </span>
+            {row.name} <WarrantyBadge state={row.warranty} />
           </h1>
           <p>
-            <span className="mono">{row.code}</span> · {row.customer.name}
+            <span className="mono">{row.code}</span> ·{' '}
+            {can('gops.customers.view_all') ? (
+              <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+            ) : (
+              row.customer.name
+            )}
             {row.site && ` · ${row.site.name}`}
             {row.serialNo && (
               <>
@@ -517,11 +533,23 @@ export function AssetDetailPage() {
             )}
           </p>
         </div>
-        {can('gops.installed_base.edit_all') && (
-          <button className="btn btn-sm" onClick={() => setEditing(true)}>
-            Modify
-          </button>
-        )}
+        <div className="row">
+          {can('gops.job_orders.create') && (
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() =>
+                navigate(`/g-ops/job-orders?new=1&customerId=${row.customer.id}&assetId=${row.id}`)
+              }
+            >
+              Request service
+            </button>
+          )}
+          {can('gops.installed_base.edit_all') && (
+            <button className="btn btn-sm" onClick={() => setEditing(true)}>
+              Modify
+            </button>
+          )}
+        </div>
       </div>
 
       {row.warranty === 'EXPIRING' && !covered && (
@@ -564,6 +592,19 @@ export function AssetDetailPage() {
                 <span className="faint">not recorded</span>
               )}
             </dd>
+            {row.item && (
+              <>
+                <dt>Catalogue item</dt>
+                <dd>
+                  {can('gchain.items.view_all') ? (
+                    <Link to={`/g-chain/items/${row.item.id}`}>{row.item.name}</Link>
+                  ) : (
+                    row.item.name
+                  )}{' '}
+                  <span className="faint mono">{row.item.code}</span>
+                </dd>
+              </>
+            )}
             {row.notes && (
               <>
                 <dt>Notes</dt>
@@ -577,13 +618,11 @@ export function AssetDetailPage() {
           <div className="card">
             <h3 className="card-title">Cover</h3>
             {row.contracts.length === 0 ? (
-              <p className="muted" style={{ marginBottom: 0 }}>
-                No service contract has ever covered this machine.
-              </p>
+              <p className="muted">No service contract has ever covered this machine.</p>
             ) : (
               <div className="stack">
                 {row.contracts.map((c) => (
-                  <div key={c.id} className="row" style={{ justifyContent: 'space-between' }}>
+                  <div key={c.id} className="svc-line">
                     <span>
                       <Link to={`/g-ops/service-contracts/${c.id}`} className="mono">
                         {c.number}
@@ -592,35 +631,93 @@ export function AssetDetailPage() {
                         {formatDate(c.startsAt)} → {formatDate(c.endsAt)}
                       </div>
                     </span>
-                    <span className={`badge ${c.status === 'ACTIVE' ? 'ok' : ''}`}>
-                      {c.status.toLowerCase()}
-                    </span>
+                    <StatusBadge status={c.status} extra={{ RENEWED: 'info' }} />
                   </div>
                 ))}
               </div>
             )}
           </div>
 
-          {row.upcomingVisits.length > 0 && (
-            <div className="card">
+          <div className="card">
+            <div className="panel-head">
               <h3 className="card-title">Next visits</h3>
+              {canView('gops', 'visits') && (
+                <Link to={`/g-ops/visits?mode=list&assetId=${row.id}`}>All visits</Link>
+              )}
+            </div>
+            {row.upcomingVisits.length === 0 ? (
+              <p className="muted">Nothing booked for this machine.</p>
+            ) : (
               <div className="stack">
                 {row.upcomingVisits.map((v) => (
-                  <div key={v.id} className="row" style={{ justifyContent: 'space-between' }}>
-                    <span className="mono">{v.number}</span>
-                    <span className="faint">{formatDate(v.dueDate)}</span>
+                  <div key={v.id} className="svc-line">
+                    <span>
+                      <Link to={`/g-ops/visits?visit=${v.id}`} className="mono">
+                        {v.number}
+                      </Link>{' '}
+                      <span className="faint">{KIND_LABEL[v.kind] ?? v.kind}</span>
+                    </span>
+                    <span>
+                      <span className="faint">{formatDate(v.dueDate)}</span>{' '}
+                      {v.status === 'MISSED' && <VisitBadge visit={{ status: v.status, overdue: false }} />}
+                    </span>
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {(canView('gops', 'job_orders') || can('gops.job_orders.create')) && (
+        <div className="card">
+          <h3 className="card-title">Job orders</h3>
+          {row.jobOrders.length === 0 ? (
+            <p className="muted">No service requested for this machine yet.</p>
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Order</th>
+                    <th>Job</th>
+                    <th>Wanted</th>
+                    <th>Covered by</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {row.jobOrders.map((j) => (
+                    <tr key={j.id}>
+                      <td>
+                        <Link to={`/g-ops/job-orders/${j.id}`} className="mono">
+                          {j.number}
+                        </Link>
+                      </td>
+                      <td>
+                        {j.title}
+                        <div className="faint">{KIND_LABEL[j.kind] ?? j.kind}</div>
+                      </td>
+                      <td>{formatDate(j.requestedFor)}</td>
+                      <td>
+                        <BasisBadge basis={j.chargeBasis} />
+                      </td>
+                      <td>
+                        <StatusBadge status={j.status} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
-      </div>
+      )}
 
       <div className="card">
         <h3 className="card-title">Service history</h3>
         {row.reports.length === 0 ? (
-          <p className="muted" style={{ marginBottom: 0 }}>
+          <p className="muted">
             Nothing has been reported against this machine yet.
           </p>
         ) : (
@@ -644,14 +741,12 @@ export function AssetDetailPage() {
                         {r.number}
                       </Link>
                     </td>
-                    <td className="faint">{r.kind.toLowerCase().replace(/_/g, ' ')}</td>
+                    <td className="faint">{KIND_LABEL[r.kind] ?? r.kind}</td>
                     <td>{formatDate(r.performedAt)}</td>
                     <td className="faint">{r.performedBy.name}</td>
                     <td className="faint">{r.findings ?? '—'}</td>
                     <td>
-                      <span className={`badge ${r.status === 'APPROVED' ? 'ok' : r.status === 'REJECTED' ? 'danger' : 'warn'}`}>
-                        {r.status.toLowerCase().replace(/_/g, ' ')}
-                      </span>
+                      <StatusBadge status={r.status} />
                     </td>
                   </tr>
                 ))}

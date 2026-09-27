@@ -1,1 +1,179 @@
-/* Service schedule, visit sheet, job orders — package SVC. Tokens only. */
+/* Service schedule, visit sheet, job orders — package SVC. Tokens only.
+
+   Colours come from the theme tokens, so the day theme is covered by the same
+   rules; nothing here is a literal colour or a raw pixel length. */
+
+/* ── Schedule filter bar ──────────────────────────────────────────────────── */
+
+.svc-filters select {
+  width: auto;
+}
+
+.svc-filters .checkbox {
+  margin: 0;
+}
+
+/* ── Legend: every swatch sits beside its word, so colour is never the only cue */
+
+ul.svc-legend {
+  list-style: none;
+  padding: 0;
+}
+
+.svc-legend li {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The swatch repeats the chip's left edge: tone on the edge, a tint behind. */
+.svc-swatch {
+  display: inline-block;
+  width: var(--s-3);
+  height: var(--s-3);
+  margin-right: var(--s-1);
+  border-radius: var(--s-1);
+  border-left: 3px solid var(--magenta);
+  background: rgb(var(--magenta-rgb) / 0.15);
+}
+
+.svc-swatch.info {
+  border-left-color: var(--info);
+  background: rgb(var(--info-rgb) / 0.15);
+}
+
+.svc-swatch.warn {
+  border-left-color: var(--warn);
+  background: rgb(var(--warn-rgb) / 0.15);
+}
+
+.svc-swatch.ok {
+  border-left-color: var(--ok);
+  background: rgb(var(--neon-rgb) / 0.15);
+}
+
+.svc-swatch.danger {
+  border-left-color: var(--danger);
+  background: rgb(var(--danger-rgb) / 0.15);
+}
+
+/* Cancelled visits and reports with no visit: an untoned chip, dimmed. */
+.svc-swatch.plain {
+  opacity: 0.55;
+}
+
+/* An alert carrying its own buttons — the one-day list, a cancelled visit. */
+.svc-day-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.svc-day-note > span {
+  flex: 1 1 auto;
+}
+
+/* ── Visit sheet ──────────────────────────────────────────────────────────── */
+
+.svc-sheet-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.svc-cancel {
+  display: grid;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.svc-notes {
+  white-space: pre-wrap;
+  font-size: var(--fs-sm);
+  margin-top: var(--s-2);
+}
+
+/* ── Report form ──────────────────────────────────────────────────────────── */
+
+/* A yes/no field lines up with the inputs beside it. */
+.svc-check-cell {
+  align-self: end;
+  padding-bottom: var(--s-3);
+}
+
+.svc-span-all {
+  grid-column: 1 / -1;
+}
+
+/* ── Shared page parts ────────────────────────────────────────────────────── */
+
+.svc-kpis {
+  margin-bottom: var(--s-5);
+}
+
+.svc-subhead {
+  margin: var(--s-5) 0 var(--s-2);
+  font-size: var(--fs-md);
+}
+
+.svc-footnote {
+  margin: var(--s-3) 0 0;
+}
+
+.svc-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-3);
+}
+
+/* Equipment chooser on the contract cover form: a real checkbox in a label. */
+.svc-scroll {
+  max-height: calc(var(--s-8) * 7);
+  overflow-y: auto;
+}
+
+.svc-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  cursor: pointer;
+}
+
+.svc-pick input {
+  width: auto;
+  margin-top: var(--s-1);
+}
+
+.svc-pick-name {
+  display: block;
+}
+
+.svc-pick .faint {
+  display: block;
+}
+
+/* ── Job order ────────────────────────────────────────────────────────────── */
+
+.svc-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-4);
+}
+
+.svc-text {
+  white-space: pre-wrap;
+  margin: 0 0 var(--s-2);
+}
+
+@media (max-width: 860px) {
+  .svc-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}

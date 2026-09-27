@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -7,6 +8,7 @@ import {
   ErrorBox,
   Field,
   Modal,
+  StatusBadge,
   formatDateTime,
   useToast,
 } from '../../components/ui';
@@ -54,9 +56,17 @@ interface PermissionCatalog {
   }[];
 }
 
+const BASE = '/admin/users';
+
 export function Users() {
   const { can } = useAuth();
-  const [editing, setEditing] = useState<string | 'new' | null>(null);
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  // Adding someone is a local modal; an existing person has a URL, so a search
+  // hit or a link from an employee record opens their editor directly.
+  const [adding, setAdding] = useState(false);
+  const editing: string | null = adding ? 'new' : (id ?? null);
   const [reload, setReload] = useState(0);
   const [roles, setRoles] = useState<Role[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -76,7 +86,7 @@ export function Users() {
           <div>
             {u.name}
             {u.isSuperAdmin && (
-              <span className="badge info" style={{ marginLeft: 7 }}>
+              <span className="badge info hraud-inline-gap">
                 Super Admin
               </span>
             )}
@@ -94,7 +104,7 @@ export function Users() {
         u.roles.length === 0 ? (
           <span className="faint">none</span>
         ) : (
-          <div className="row" style={{ gap: 4 }}>
+          <div className="row hraud-tight">
             {u.roles.map((r) => (
               <span key={r.key} className="badge">
                 {r.name}
@@ -109,7 +119,7 @@ export function Users() {
       key: 'isActive',
       label: 'Status',
       render: (u) => (
-        <span className={`badge ${u.isActive ? 'ok' : 'danger'}`}>{u.isActive ? 'Active' : 'Inactive'}</span>
+        <StatusBadge status={u.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: 'danger' }} />
       ),
     },
     {
@@ -120,6 +130,11 @@ export function Users() {
       optional: true,
     },
   ];
+
+  function close() {
+    if (adding) setAdding(false);
+    else navigate(`${BASE}${location.search}`);
+  }
 
   return (
     <div>
@@ -140,7 +155,7 @@ export function Users() {
         rowKey={(u) => u.id}
         searchPlaceholder="Search name, email, employee no…"
         reloadToken={reload}
-        onRowClick={(u) => setEditing(u.id)}
+        onRowClick={(u) => navigate(`${BASE}/${u.id}${location.search}`)}
         emptyTitle="No users match"
         filters={[
           {
@@ -155,7 +170,7 @@ export function Users() {
         ]}
         actions={
           can('admin.users.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
+            <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
               + Add user
             </button>
           ) : null
@@ -164,12 +179,13 @@ export function Users() {
 
       {editing && (
         <UserEditor
+          key={editing}
           id={editing}
           roles={roles}
           departments={departments}
-          onClose={() => setEditing(null)}
+          onClose={close}
           onSaved={() => {
-            setEditing(null);
+            close();
             setReload((r) => r + 1);
           }}
         />
@@ -305,12 +321,22 @@ function UserEditor({
     >
       <ErrorBox error={error} />
 
-      <div className="row" style={{ marginBottom: 16 }}>
+      <div className="row hraud-below">
         <div className="scope-switch">
-          <button className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>
+          <button
+            type="button"
+            className={tab === 'details' ? 'active' : ''}
+            aria-pressed={tab === 'details'}
+            onClick={() => setTab('details')}
+          >
             Details
           </button>
-          <button className={tab === 'access' ? 'active' : ''} onClick={() => setTab('access')}>
+          <button
+            type="button"
+            className={tab === 'access' ? 'active' : ''}
+            aria-pressed={tab === 'access'}
+            onClick={() => setTab('access')}
+          >
             Access
           </button>
         </div>
@@ -418,11 +444,11 @@ function UserEditor({
 
           <hr className="rule" />
 
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+          <div className="row hraud-spread hraud-below">
             <strong>Per-person overrides</strong>
-            <span className="faint" style={{ fontSize: 12 }}>
-              click to cycle: role default → <span style={{ color: 'var(--neon)' }}>allow</span> →{' '}
-              <span style={{ color: 'var(--danger)' }}>deny</span>
+            <span className="faint hraud-small">
+              click to cycle: role default → <span className="hraud-allow">allow</span> →{' '}
+              <span className="hraud-deny">deny</span>
             </span>
           </div>
 
@@ -433,28 +459,32 @@ function UserEditor({
               <div key={mod.key} className="perm-module">
                 <header>
                   <h4>{mod.label}</h4>
-                  <span className="faint" style={{ fontSize: 12 }}>
-                    {mod.blurb}
-                  </span>
+                  <span className="faint hraud-small">{mod.blurb}</span>
                 </header>
                 {mod.submodules.map((sub) => (
                   <div key={sub.key} className="perm-row">
                     <div className="name">
                       {sub.label}
-                      {sub.phase > 1 && <span className="tag" style={{ marginLeft: 6 }}>P{sub.phase}</span>}
+                      {sub.phase > 1 && <span className="tag hraud-inline-gap">P{sub.phase}</span>}
                     </div>
                     <div className="perm-actions">
                       {sub.actions.map((a) => {
                         const state = overrides[a.key];
+                        // A button, not a span: the chips were mouse-only, so an
+                        // override could not be set from a keyboard (rule 13).
                         return (
-                          <span
+                          <button
+                            type="button"
                             key={a.key}
                             className={`perm-chip${state === 'ALLOW' ? ' on' : state === 'DENY' ? ' deny' : ''}`}
                             onClick={() => cycle(a.key)}
                             title={a.key}
+                            aria-label={`${sub.label}: ${a.label} — ${
+                              state === 'ALLOW' ? 'allowed' : state === 'DENY' ? 'denied' : 'role default'
+                            }`}
                           >
                             {a.label}
-                          </span>
+                          </button>
                         );
                       })}
                     </div>

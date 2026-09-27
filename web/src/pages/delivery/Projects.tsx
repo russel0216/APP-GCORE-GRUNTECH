@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import { ErrorBox, Field, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import {
+  ErrorBox,
+  Field,
+  Modal,
+  StatusBadge,
+  formatDate,
+  formatMoney,
+  useToast,
+  type Tone,
+} from '../../components/ui';
 import { Meter as ProgressBar } from '../../components/charts';
 import { todayLocal } from '../../lib/day';
 
@@ -16,12 +25,28 @@ export const JOB_STATUSES = [
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
 
-export function jobStatusTone(s: string) {
-  if (s === 'COMPLETED' || s === 'TURNED_OVER') return 'ok';
-  if (s === 'CANCELLED') return 'danger';
-  if (s === 'ON_HOLD') return 'warn';
-  if (s === 'IN_PROGRESS') return 'info';
-  return '';
+/**
+ * A job's own statuses, as the `extra` map for the one StatusBadge. Work under
+ * way reads as information, a paused job as a warning; the rest follow the
+ * shared lifecycle rules.
+ */
+export const JOB_TONES: Record<string, Tone> = {
+  PLANNING: '',
+  IN_PROGRESS: 'info',
+  ON_HOLD: 'warn',
+  COMPLETED: 'ok',
+  TURNED_OVER: 'ok',
+};
+
+/** The status pill for a job, with its own wording. */
+export function JobStatus({ status }: { status: string }) {
+  return (
+    <StatusBadge
+      status={status}
+      extra={JOB_TONES}
+      label={JOB_STATUSES.find((s) => s.value === status)?.label}
+    />
+  );
 }
 
 /**
@@ -51,14 +76,51 @@ interface JobRow {
   targetEndDate: string | null;
 }
 
+/** What the URL can hand the new-project form — see NewJobModal. */
+export interface NewJobPreset {
+  costingId?: string;
+  quotationRevisionId?: string;
+  type?: string;
+  renewFrom?: string;
+}
+
+/** The URL keys the new-project form reads, removed again when it closes. */
+const PRESET_KEYS = ['new', 'costingId', 'quotationRevisionId', 'type', 'renewFrom'] as const;
+
 export function Projects() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const [creating, setCreating] = useState(false);
   const [reload, setReload] = useState(0);
 
+  /*
+    `?new=1` opens the form, prefilled from whatever came with it. The
+    quotation's "Create project", the costing's "Where this goes next" and a
+    contract renewal all land here, so nothing that is already on a record is
+    typed again (model §4.1).
+  */
+  const fromUrl = params.get('new') === '1' && can('gops.projects.create');
+  const preset: NewJobPreset = fromUrl
+    ? {
+        costingId: params.get('costingId') ?? undefined,
+        quotationRevisionId: params.get('quotationRevisionId') ?? undefined,
+        type: params.get('type') ?? undefined,
+        renewFrom: params.get('renewFrom') ?? undefined,
+      }
+    : {};
+
+  function closeForm() {
+    setCreating(false);
+    if (PRESET_KEYS.some((k) => params.has(k))) {
+      const next = new URLSearchParams(params);
+      for (const k of PRESET_KEYS) next.delete(k);
+      setParams(next, { replace: true });
+    }
+  }
+
   const columns: Column<JobRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (j) => <span className="mono">{j.number}</span> },
+    { key: 'number', label: 'Number', sortKey: 'number', render: (j) => <span className="mono">{j.number}</span> },
     {
       key: 'name',
       label: 'Project',
@@ -76,7 +138,6 @@ export function Projects() {
     {
       key: 'progress',
       label: 'Progress',
-      width: '130px',
       render: (j) => <ProgressBar pct={j.progressPct} />,
     },
     {
@@ -119,11 +180,7 @@ export function Projects() {
     {
       key: 'status',
       label: 'Status',
-      render: (j) => (
-        <span className={`badge ${jobStatusTone(j.status)}`}>
-          {JOB_STATUSES.find((s) => s.value === j.status)?.label ?? j.status}
-        </span>
-      ),
+      render: (j) => <JobStatus status={j.status} />,
     },
   ];
 
@@ -171,9 +228,10 @@ export function Projects() {
         }
       />
 
-      {creating && (
+      {(creating || fromUrl) && (
         <NewJobModal
-          onClose={() => setCreating(false)}
+          preset={preset}
+          onClose={closeForm}
           onCreated={(id) => {
             setCreating(false);
             setReload((r) => r + 1);
@@ -185,22 +243,63 @@ export function Projects() {
   );
 }
 
-function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
+interface CostingOption {
+  id: string;
+  number: string;
+  title: string;
+  contractValue: number;
+}
+
+interface CostingDetail {
+  id: string;
+  number: string;
+  title: string;
+  status: string;
+  contractValue: number;
+  customer: { id: string; name: string } | null;
+  site: { id: string; name: string } | null;
+  quotationRevisions: {
+    id: string;
+    revision: number;
+    status: string;
+    quotation: { id: string; number: string; subject: string };
+  }[];
+  jobs: { id: string; number: string; name: string; status: string }[];
+}
+
+interface PersonRow {
+  id: string;
+  name: string;
+  position: string | null;
+}
+
+function NewJobModal({
+  preset,
+  onClose,
+  onCreated,
+}: {
+  preset: NewJobPreset;
+  onClose: () => void;
+  onCreated: (id: string) => void;
+}) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [costings, setCostings] = useState<
-    { id: string; number: string; title: string; contractValue: number }[]
-  >([]);
+  const [costings, setCostings] = useState<CostingOption[]>([]);
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
-  const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
-  const [chosen, setChosen] = useState<{ contractValue: number } | null>(null);
+  const [people, setPeople] = useState<PersonRow[]>([]);
+  const [chosen, setChosen] = useState<CostingDetail | null>(null);
+  const [renewal, setRenewal] = useState<{ id: string; number: string } | null>(null);
 
+  const renewing = !!preset.renewFrom;
   const [form, setForm] = useState({
     costingId: '',
+    quotationRevisionId: preset.quotationRevisionId ?? '',
     name: '',
-    type: 'PROJECT',
+    // A renewal is a service contract whatever the URL says; the server forces
+    // it too.
+    type: renewing ? 'SERVICE_CONTRACT' : preset.type === 'SERVICE_CONTRACT' ? 'SERVICE_CONTRACT' : 'PROJECT',
     customerId: '',
     siteId: '',
     projectManagerId: '',
@@ -210,12 +309,24 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   });
 
   useEffect(() => {
-    api.get<typeof costings>('/costings/lookup').then(setCostings).catch(() => {});
+    // Final costings only: a draft's budget is still moving, and a project
+    // snapshots it. A preset costing is added below even if it is a draft, so
+    // the renewal flow (duplicate → reprice → create) can still land here.
+    api.get<CostingOption[]>('/costings/lookup?status=FINAL').then(setCostings).catch(() => {});
     api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
-    api
-      .get<{ rows: { id: string; name: string }[] }>('/users?pageSize=200')
-      .then((r) => setPeople(r.rows))
-      .catch(() => {});
+    api.get<PersonRow[]>('/users/lookup').then(setPeople).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (preset.costingId) void pickCosting(preset.costingId);
+    if (preset.renewFrom) {
+      api
+        .get<{ id: string; number: string }>(`/service-contracts/${preset.renewFrom}`)
+        .then((c) => setRenewal({ id: c.id, number: c.number }))
+        .catch(() => setRenewal(null));
+    }
+    // Run once, for the preset the form opened with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -229,7 +340,11 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
       .catch(() => setSites([]));
   }, [form.customerId]);
 
-  /** Choosing a costing pre-fills the name, customer and contract value. */
+  /**
+   * Choosing a costing fills the name, the customer and the site. The customer
+   * is then LOCKED: a project takes its customer from its costing, and the API
+   * refuses a mismatch — the form should not offer one.
+   */
   async function pickCosting(costingId: string) {
     setForm((f) => ({ ...f, costingId }));
     if (!costingId) {
@@ -237,18 +352,23 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
       return;
     }
     try {
-      const c = await api.get<{
-        title: string;
-        contractValue: number;
-        customer: { id: string } | null;
-        scopeSections: unknown[];
-        scopeTotal: number;
-      }>(`/costings/${costingId}`);
-      setChosen({ contractValue: c.contractValue });
+      const c = await api.get<CostingDetail>(`/costings/${costingId}`);
+      setChosen(c);
+      setCostings((list) =>
+        list.some((x) => x.id === c.id)
+          ? list
+          : [{ id: c.id, number: c.number, title: c.title, contractValue: c.contractValue }, ...list],
+      );
+      // The quotation this project delivers: the preset, else the costing's
+      // single approved revision when there is exactly one to choose.
+      const approved = c.quotationRevisions.filter((r) => r.status === 'APPROVED');
       setForm((f) => ({
         ...f,
         name: f.name || c.title,
-        customerId: f.customerId || c.customer?.id || '',
+        customerId: c.customer?.id ?? f.customerId,
+        siteId: c.site?.id ?? (c.customer ? '' : f.siteId),
+        quotationRevisionId:
+          f.quotationRevisionId || (approved.length === 1 ? approved[0].id : ''),
       }));
     } catch {
       /* the create call will report anything wrong */
@@ -259,8 +379,9 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
     setBusy(true);
     setError(null);
     try {
-      const created = await api.post<{ id: string }>('/jobs', {
+      const created = await api.post<{ id: string; serviceContractId: string | null }>('/jobs', {
         costingId: form.costingId,
+        quotationRevisionId: form.quotationRevisionId || null,
         name: form.name,
         type: form.type,
         customerId: form.customerId,
@@ -269,8 +390,14 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
         customerPoNumber: form.customerPoNumber || null,
         customerPoDate: form.customerPoDate || null,
         startDate: form.startDate || null,
+        renewedFromContractId: preset.renewFrom || null,
       });
-      toast('ok', 'Project created — budget and schedule of values carried over');
+      toast(
+        'ok',
+        created.serviceContractId
+          ? 'Renewal created — its coverage terms are drafted and wait to be activated'
+          : 'Project created — budget and schedule of values carried over',
+      );
       onCreated(created.id);
     } catch (err) {
       setError(err);
@@ -278,10 +405,14 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
     }
   }
 
+  const customerLocked = !!chosen?.customer;
+  const revision = chosen?.quotationRevisions.find((r) => r.id === form.quotationRevisionId) ?? null;
+  const approvedRevisions = chosen?.quotationRevisions.filter((r) => r.status === 'APPROVED') ?? [];
+
   return (
     <Modal
       wide
-      title="New project"
+      title={renewing ? 'Renew service contract' : 'New project'}
       onClose={onClose}
       footer={
         <>
@@ -293,19 +424,34 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
             onClick={create}
             disabled={busy || !form.costingId || !form.customerId || form.name.length < 2}
           >
-            {busy ? 'Creating…' : 'Create project'}
+            {busy ? 'Creating…' : renewing ? 'Create renewal' : 'Create project'}
           </button>
         </>
       }
     >
       <ErrorBox error={error} />
-      <p className="muted" style={{ marginTop: 0 }}>
+      <p className="muted del-lede">
         The costing's cost lines become the opening budget, and its scope sections become the
         schedule of values — snapshotted, so later edits to the costing cannot move the ground
         under reported progress.
       </p>
 
-      <Field label="Costing" hint="Its scope sections must already total the contract value">
+      {renewing && (
+        <div className="alert info">
+          Renewal of{' '}
+          {renewal ? (
+            <Link className="mono" to={`/g-ops/service-contracts/${renewal.id}`}>
+              {renewal.number}
+            </Link>
+          ) : (
+            'the expiring contract'
+          )}
+          . Its coverage terms — frequency, response time, exclusions and the equipment covered —
+          are copied into a draft contract starting the day after it ends.
+        </div>
+      )}
+
+      <Field label="Costing" hint="Final costings only. Its scope sections must already total the contract value">
         <select value={form.costingId} onChange={(e) => pickCosting(e.target.value)}>
           <option value="">— choose —</option>
           {costings.map((c) => (
@@ -319,6 +465,30 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
       {chosen && (
         <div className="alert info">
           Contract value: <strong>{formatMoney(chosen.contractValue)}</strong>
+          {chosen.status === 'DRAFT' && ' · this costing is still a draft; creating the project finalises it'}
+          {revision && (
+            <>
+              {' '}
+              · delivers{' '}
+              <Link className="mono" to={`/g-ops/quotations/${revision.quotation.id}`}>
+                {revision.quotation.number} R{revision.revision}
+              </Link>
+            </>
+          )}
+        </div>
+      )}
+      {chosen && chosen.jobs.length > 0 && (
+        <div className="alert warn">
+          This costing already produced{' '}
+          {chosen.jobs.map((j, i) => (
+            <span key={j.id}>
+              {i > 0 && ', '}
+              <Link className="mono" to={`/g-ops/projects/${j.id}`}>
+                {j.number}
+              </Link>
+            </span>
+          ))}
+          . A second project from it would budget the same work twice.
         </div>
       )}
 
@@ -327,23 +497,33 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </Field>
         <Field label="Type">
-          <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+          <select
+            value={form.type}
+            disabled={renewing}
+            onChange={(e) => setForm({ ...form, type: e.target.value })}
+          >
             <option value="PROJECT">Project</option>
             <option value="SERVICE_CONTRACT">Service contract</option>
           </select>
         </Field>
-        <Field label="Customer">
-          <select
-            value={form.customerId}
-            onChange={(e) => setForm({ ...form, customerId: e.target.value, siteId: '' })}
-          >
-            <option value="">— choose —</option>
-            {customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+        <Field label="Customer" hint={customerLocked ? 'Taken from the costing' : undefined}>
+          {customerLocked && chosen?.customer ? (
+            <div className="del-locked">
+              <Link to={`/g-ops/customers/${chosen.customer.id}`}>{chosen.customer.name}</Link>
+            </div>
+          ) : (
+            <select
+              value={form.customerId}
+              onChange={(e) => setForm({ ...form, customerId: e.target.value, siteId: '' })}
+            >
+              <option value="">— choose —</option>
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          )}
         </Field>
         <Field label="Site">
           <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
@@ -355,6 +535,21 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
             ))}
           </select>
         </Field>
+        {approvedRevisions.length > 1 && (
+          <Field label="Quotation" hint="The approved revision this project delivers">
+            <select
+              value={form.quotationRevisionId}
+              onChange={(e) => setForm({ ...form, quotationRevisionId: e.target.value })}
+            >
+              <option value="">— none —</option>
+              {approvedRevisions.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.quotation.number} R{r.revision}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Project manager">
           <select
             value={form.projectManagerId}
@@ -364,6 +559,7 @@ function NewJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
             {people.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
+                {p.position ? ` — ${p.position}` : ''}
               </option>
             ))}
           </select>

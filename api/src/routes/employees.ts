@@ -16,6 +16,8 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { can } from '../permissions/resolve';
+import { positionFields, setEmployeePosition } from '../shared/plantilla';
+import { sweepSeparations } from '../shared/clearance';
 
 // ════════════════════════════════════════════════════════════════════
 //  EMPLOYEES
@@ -58,6 +60,8 @@ employeeRoutes.get(
   '/',
   require_('ghr.employees.view_all'),
   handler(async (req, res) => {
+    // Sweep-on-read: anyone past their separation date drops out here.
+    await sweepSeparations();
     const me = currentUser(req);
     const seeRates = can(me, 'ghr.employee_rates.view_all');
     const q = listQuery(req);
@@ -76,12 +80,16 @@ employeeRoutes.get(
     if (q.filters.employmentType) {
       where.employmentType = q.filters.employmentType as Prisma.EnumEmploymentTypeFilter['equals'];
     }
+    // `none` = unclassified: an active employee with no plantilla position.
+    if (q.filters.positionId === 'none') where.positionId = null;
+    else if (q.filters.positionId) where.positionId = q.filters.positionId;
 
     const [rows, total] = await Promise.all([
       prisma.employee.findMany({
         where,
         include: {
           department: { select: { id: true, name: true } },
+          positionRef: { select: { id: true, code: true, title: true } },
           user: { select: { id: true, email: true, isActive: true } },
         },
         orderBy: orderBy(q, ['employeeNo', 'lastName', 'dateHired', 'createdAt'], {
@@ -162,6 +170,7 @@ employeeRoutes.get(
       where: { id: req.params.id },
       include: {
         department: { select: { id: true, name: true } },
+        positionRef: { select: { id: true, code: true, title: true } },
         user: {
           select: {
             id: true,
@@ -203,6 +212,8 @@ const employeeSchema = z.object({
   userId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   position: z.string().trim().optional().nullable(),
+  /** The plantilla slot; when set, `position` mirrors its title (shared/plantilla.ts). */
+  positionId: z.string().optional().nullable(),
   employmentType: z.enum(EMPLOYMENT_TYPES).default('REGULAR'),
   dateHired: z.string().optional().nullable(),
   dateRegularized: z.string().optional().nullable(),
@@ -279,7 +290,7 @@ employeeRoutes.post(
           suffix: body.suffix || null,
           userId: body.userId || null,
           departmentId: body.departmentId || null,
-          position: body.position || null,
+          ...(await positionFields(tx, body.positionId, body.position)),
           employmentType: body.employmentType,
           dateHired: asDate(body.dateHired),
           dateRegularized: asDate(body.dateRegularized),
@@ -341,7 +352,6 @@ employeeRoutes.patch(
       'lastName',
       'middleName',
       'suffix',
-      'position',
       'mobile',
       'personalEmail',
       'address',
@@ -365,7 +375,19 @@ employeeRoutes.patch(
       if (body[f] !== undefined) data[f] = asDate(body[f]);
     }
 
-    const employee = await prisma.employee.update({ where: { id: req.params.id }, data });
+    const employee = await prisma.$transaction(async (tx) => {
+      const updated = await tx.employee.update({ where: { id: req.params.id }, data });
+      // The position goes through the one writer of the mirror. A free-text
+      // title on an employee who holds a plantilla position is ignored: the
+      // title belongs to the position, and is changed there.
+      if (body.positionId !== undefined) {
+        return setEmployeePosition(tx, updated.id, body.positionId || null, body.position ?? before.position);
+      }
+      if (body.position !== undefined && !before.positionId) {
+        return setEmployeePosition(tx, updated.id, null, body.position);
+      }
+      return updated;
+    });
     await audit(
       {
         entityType: 'employee',

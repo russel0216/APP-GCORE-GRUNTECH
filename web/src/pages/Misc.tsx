@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { api, getToken, SHIPPED_PHASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Avatar, ErrorBox, Field, Loading, useToast } from '../components/ui';
@@ -61,10 +61,10 @@ function ProfilePhoto() {
     <div className="card">
       <h3 className="card-title">Profile photo</h3>
       <ErrorBox error={error} />
-      <div className="row" style={{ gap: 16, alignItems: 'center' }}>
+      <div className="row" style={{ gap: 'var(--s-4)', alignItems: 'center' }}>
         <Avatar name={me?.user.name ?? '?'} photoId={me?.user.photoPath} size={72} />
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="row" style={{ gap: 8 }}>
+        <div className="stack" style={{ gap: 'var(--s-2)' }}>
+          <div className="row" style={{ gap: 'var(--s-2)' }}>
             <button
               type="button"
               className="btn btn-sm"
@@ -167,7 +167,7 @@ export function Account() {
               <div className="section-label">
                 ROLES
               </div>
-              <div className="row" style={{ gap: 5 }}>
+              <div className="row" style={{ gap: 'var(--s-1)' }}>
                 {me?.user.isSuperAdmin && <span className="badge info">Super Admin</span>}
                 {me?.user.roles.length ? (
                   me.user.roles.map((r) => (
@@ -340,12 +340,20 @@ export function SystemSettings() {
 
 export function ComingSoon() {
   const { me } = useAuth();
-  const params = useParams();
-  const path = `/${params['*'] ?? ''}`;
+  /*
+    The full pathname, not the splat. This is mounted at `/g-hr/*`, whose
+    `params['*']` for `/g-hr/leave/abc` is `leave/abc` — a string no menu
+    path starts with, so every fall-through used to say "does not exist yet"
+    about screens that plainly did. The most specific match wins, the same
+    way the sidebar highlights (Phase 6 notes): `/g-hr` is a prefix of every
+    HR screen and must not claim them all.
+  */
+  const { pathname } = useLocation();
 
   const found = me?.menu
     .flatMap((m) => m.submodules.map((s) => ({ mod: m, sub: s })))
-    .find((x) => path.startsWith(x.sub.path));
+    .filter((x) => pathname === x.sub.path || pathname.startsWith(`${x.sub.path}/`))
+    .sort((a, b) => b.sub.path.length - a.sub.path.length)[0];
 
   return (
     <div>

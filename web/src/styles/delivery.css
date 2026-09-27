@@ -1,1 +1,150 @@
 /* Project workspace tabs, turnover, progress and billing links — package DEL. Tokens only. */
+
+/*
+  Every colour here is a token, so both themes follow without a second block:
+  the light theme redefines the same custom properties on :root.
+*/
+
+/* The workspace's section switch — thirteen tabs at most, so it wraps. */
+.del-tabs {
+  flex-wrap: wrap;
+  margin-bottom: var(--s-4);
+}
+
+/* A card's title with its one action on the right. */
+.del-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-3);
+}
+
+.del-card-head .card-title {
+  margin: 0;
+}
+
+/* The explanatory line under a card title. */
+.del-lede {
+  margin-top: 0;
+  font-size: var(--fs-md);
+}
+
+/* Small print at the foot of a card, and the "nothing here" sentence. */
+.del-note {
+  font-size: var(--fs-sm);
+  margin-bottom: 0;
+}
+
+.del-small {
+  font-size: var(--fs-sm);
+}
+
+.del-gap-top {
+  margin-top: var(--s-4);
+}
+
+.del-gap-bottom {
+  margin-bottom: var(--s-4);
+}
+
+.del-span-all {
+  grid-column: 1 / -1;
+}
+
+/* Narrative text keeps the line breaks it was written with. */
+.del-prose {
+  white-space: pre-wrap;
+}
+
+/* Words carry the meaning; the colour only repeats it. */
+.del-warn {
+  color: var(--warn);
+}
+
+.del-danger {
+  color: var(--danger);
+}
+
+/* Progress percentage inputs sit in a narrow numeric column. */
+.del-col-pct {
+  width: calc(var(--s-8) * 3);
+}
+
+.del-pct-input {
+  text-align: right;
+  padding: var(--s-1) var(--s-2);
+}
+
+/* The budget table's "Used" meter needs room for its printed percentage. */
+.del-col-meter {
+  min-width: calc(var(--s-8) * 3);
+}
+
+/* The billing summary reads as a short statement, not a full-width table. */
+.del-summary {
+  max-width: calc(var(--s-8) * 13);
+}
+
+/* A value the form will not let you change — the costing's customer. */
+.del-locked {
+  padding: var(--s-2) 0;
+}
+
+/* The row a disclosure opens beneath: plan files, a budget request's chain. */
+.del-expand-row > td {
+  background: var(--surface-2);
+  padding: var(--s-3);
+}
+
+.del-expand-row .card {
+  margin: 0;
+}
+
+/*
+  The approval chain, compact enough to sit inside a table row. The component
+  is the same one every approvable page shows; only its outer spacing changes.
+*/
+.del-approval-compact .panel-block {
+  margin: 0;
+  padding: var(--s-3);
+  box-shadow: none;
+}
+
+.del-approval-compact .panel-blurb {
+  font-size: var(--fs-sm);
+  margin-bottom: var(--s-2);
+}
+
+/* Turnover: one editable row per piece of equipment. */
+.del-turnover input {
+  width: 100%;
+  min-width: calc(var(--s-8) * 2.5);
+}
+
+.del-task-input {
+  max-width: calc(var(--s-8) * 10);
+}
+
+
+/* The S-curve: scales with its card; the legend sits centred beneath it. */
+.del-curve {
+  width: 100%;
+  height: auto;
+}
+
+.del-curve-empty {
+  text-align: center;
+}
+
+.del-curve-legend {
+  gap: var(--s-5);
+  justify-content: center;
+  margin-top: var(--s-1);
+}
+
+.del-curve-key {
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+}

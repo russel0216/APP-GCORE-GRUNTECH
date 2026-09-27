@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { Empty, ErrorBox, Field, Loading, formatDate, formatMoney } from '../../components/ui';
 import { Tile, RangePicker, ExportButton, Bar } from './Overview';
+import { BarList } from '../../components/charts';
 import { todayLocal } from '../../lib/day';
 
 /**
@@ -42,6 +43,20 @@ interface Pipeline {
     lost: number;
     winRatePct: number;
     medianDaysToDecide: number | null;
+  }[];
+  /** One row per industry — every active one, then any retired one still in use, Unclassified last. */
+  industries: {
+    code: string;
+    name: string;
+    leads: number;
+    quotations: number;
+    quotedValue: number;
+    won: number;
+    wonValue: number;
+    lost: number;
+    winRatePct: number;
+    openValue: number;
+    weightedValue: number;
   }[];
   sources: { source: string; leads: number; won: number; value: number }[];
   lostReasons: { reason: string; count: number }[];
@@ -108,7 +123,7 @@ export function SalesAnalytics() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
         <Tile
           label="Open pipeline"
           value={formatMoney(data.totals.openValue)}
@@ -144,11 +159,11 @@ export function SalesAnalytics() {
               <tbody>
                 {data.funnel.map((f) => (
                   <tr key={f.stage}>
-                    <td style={{ width: 110 }}>{f.stage}</td>
-                    <td className="right mono" style={{ width: 60 }}>
+                    <td style={{ width: 'calc(var(--s-8) * 3)' }}>{f.stage}</td>
+                    <td className="right mono" style={{ width: 'calc(var(--s-8) * 1.5)' }}>
                       {f.count}
                     </td>
-                    <td className="right mono faint" style={{ width: 130 }}>
+                    <td className="right mono faint" style={{ width: 'calc(var(--s-8) * 3.25)' }}>
                       {f.value ? formatMoney(f.value) : '—'}
                     </td>
                     <td>
@@ -157,9 +172,9 @@ export function SalesAnalytics() {
                         peak={funnelPeak}
                         tone={
                           f.stage === 'Won'
-                            ? 'rgba(57, 255, 157, 0.55)'
+                            ? 'rgb(var(--neon-rgb) / 0.55)'
                             : f.stage === 'Lost'
-                              ? 'rgba(255, 107, 138, 0.5)'
+                              ? 'rgb(var(--danger-rgb) / 0.5)'
                               : undefined
                         }
                       />
@@ -250,10 +265,72 @@ export function SalesAnalytics() {
             </table>
           </div>
         )}
-        <p className="faint" style={{ marginTop: 10, marginBottom: 0 }}>
+        <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
           A win rate counts only what has been decided. A quotation still sitting with a customer
           is neither a win nor a loss, and counting it as either flatters or punishes unfairly.
         </p>
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">By industry</h3>
+        <p className="muted">
+          A quotation belongs to its customer's industry, and so does a lead once it names a
+          customer. A lead with no customer yet, or a customer nobody has classified, reports as
+          Unclassified — which is the truth about it.
+        </p>
+        <BarList
+          caption="Won in range, by the customer's industry"
+          slices={data.industries.map((i) => ({
+            label: i.code === 'UNCLASSIFIED' ? i.name : `${i.code} · ${i.name}`,
+            value: i.wonValue,
+            display: formatMoney(i.wonValue),
+            tone: i.code === 'UNCLASSIFIED' ? 'muted' : 'neon',
+          }))}
+        />
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Industry</th>
+                <th className="right">Leads</th>
+                <th className="right">Quoted</th>
+                <th className="right">Won</th>
+                <th className="right">Won value</th>
+                <th className="right">Win rate</th>
+                <th className="right">Open</th>
+                <th className="right">Weighted</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.industries.map((i) => (
+                <tr key={i.code}>
+                  <td>
+                    {i.code === 'UNCLASSIFIED' ? (
+                      <span className="faint">{i.name}</span>
+                    ) : (
+                      <>
+                        <span className="mono">{i.code}</span> {i.name}
+                      </>
+                    )}
+                  </td>
+                  <td className="right mono">{i.leads}</td>
+                  <td className="right mono">{i.quotations}</td>
+                  <td className="right mono">{i.won}</td>
+                  <td className="right mono">{i.wonValue ? formatMoney(i.wonValue) : '—'}</td>
+                  <td className="right mono">
+                    {i.won + i.lost === 0 ? (
+                      <span className="faint">nothing decided</span>
+                    ) : (
+                      `${i.winRatePct.toFixed(0)}%`
+                    )}
+                  </td>
+                  <td className="right mono faint">{i.openValue ? formatMoney(i.openValue) : '—'}</td>
+                  <td className="right mono">{i.weightedValue ? formatMoney(i.weightedValue) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="grid grid-2">
@@ -320,7 +397,7 @@ export function SalesAnalytics() {
               </table>
             </div>
           )}
-          <p className="faint" style={{ marginTop: 10, marginBottom: 0 }}>
+          <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
             "Not recorded" is the most expensive answer on this list: a loss nobody explained
             cannot be learned from.
           </p>
@@ -332,27 +409,28 @@ export function SalesAnalytics() {
 
 // ── Cash forecast ────────────────────────────────────────────────────────────
 
+/** Money in and out per window. `advances` and `refunds` are cash advances — out when approved, back when unspent. */
+interface ForecastFigures {
+  invoiced: number;
+  unbilled: number;
+  refunds: number;
+  payable: number;
+  reimbursable: number;
+  committed: number;
+  advances: number;
+  net: number;
+}
+
 interface Forecast {
   asOf: string;
-  buckets: {
-    label: string;
-    invoiced: number;
-    unbilled: number;
-    payable: number;
-    reimbursable: number;
-    committed: number;
-    net: number;
-  }[];
+  buckets: (ForecastFigures & { label: string })[];
   cumulative: { label: string; net: number; cumulative: number }[];
-  totals: {
-    invoiced: number;
-    unbilled: number;
-    payable: number;
-    reimbursable: number;
-    committed: number;
-    net: number;
+  totals: ForecastFigures;
+  uncleared: {
+    in: number;
+    out: number;
+    rows: { id: string; number: string; kind: string; amount: number }[];
   };
-  uncleared: { in: number; out: number; rows: { number: string; kind: string; amount: number }[] };
   ourMove: {
     billingsAwaitingInvoice: number;
     billingsAwaitingInvoiceValue: number;
@@ -371,10 +449,9 @@ export function CashForecast() {
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
 
-  const peak = Math.max(
-    1,
-    ...data.buckets.flatMap((b) => [b.invoiced + b.unbilled, b.payable + b.reimbursable + b.committed]),
-  );
+  const moneyIn = (b: ForecastFigures) => b.invoiced + b.unbilled + b.refunds;
+  const moneyOut = (b: ForecastFigures) => b.payable + b.reimbursable + b.committed + b.advances;
+  const peak = Math.max(1, ...data.buckets.flatMap((b) => [moneyIn(b), moneyOut(b)]));
 
   return (
     <div>
@@ -390,8 +467,16 @@ export function CashForecast() {
         <ExportButton path="/insights/cash-forecast.csv" />
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
-        <Tile label="Invoiced, owed to us" value={formatMoney(data.totals.invoiced)} sub="waiting on customers" />
+      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+        <Tile
+          label="Invoiced, owed to us"
+          value={formatMoney(data.totals.invoiced)}
+          sub={
+            data.totals.refunds > 0
+              ? `waiting on customers, plus ${formatMoney(data.totals.refunds)} of unspent advances due back`
+              : 'waiting on customers'
+          }
+        />
         <Tile
           label="Earned, not invoiced"
           value={formatMoney(data.totals.unbilled)}
@@ -401,7 +486,7 @@ export function CashForecast() {
         <Tile
           label="Owed by us"
           value={formatMoney(data.totals.payable + data.totals.reimbursable)}
-          sub={`plus ${formatMoney(data.totals.committed)} committed on orders`}
+          sub={`suppliers and staff, plus ${formatMoney(data.totals.committed)} committed on orders and ${formatMoney(data.totals.advances)} in approved advances`}
         />
         <Tile
           label="Net position"
@@ -420,9 +505,11 @@ export function CashForecast() {
                 <th>When</th>
                 <th className="right">Invoiced</th>
                 <th className="right">Uninvoiced</th>
+                <th className="right">Refunds</th>
                 <th className="right">Payable</th>
                 <th className="right">Claims</th>
                 <th className="right">Committed</th>
+                <th className="right">Advances</th>
                 <th className="right">Net</th>
                 <th className="right">Running</th>
                 <th style={{ width: '22%' }} />
@@ -434,9 +521,11 @@ export function CashForecast() {
                   <td className={b.label === 'Overdue' ? 'warn' : ''}>{b.label}</td>
                   <td className="right mono">{b.invoiced ? formatMoney(b.invoiced) : '—'}</td>
                   <td className="right mono faint">{b.unbilled ? formatMoney(b.unbilled) : '—'}</td>
+                  <td className="right mono faint">{b.refunds ? formatMoney(b.refunds) : '—'}</td>
                   <td className="right mono">{b.payable ? formatMoney(b.payable) : '—'}</td>
                   <td className="right mono faint">{b.reimbursable ? formatMoney(b.reimbursable) : '—'}</td>
                   <td className="right mono faint">{b.committed ? formatMoney(b.committed) : '—'}</td>
+                  <td className="right mono faint">{b.advances ? formatMoney(b.advances) : '—'}</td>
                   <td className="right mono">
                     <span className={b.net < 0 ? 'warn' : ''}>{formatMoney(b.net)}</span>
                   </td>
@@ -446,12 +535,12 @@ export function CashForecast() {
                     </span>
                   </td>
                   <td>
-                    <div className="stack" style={{ gap: 3 }}>
-                      <Bar value={b.invoiced + b.unbilled} peak={peak} />
+                    <div className="stack" style={{ gap: 'var(--s-1)' }}>
+                      <Bar value={moneyIn(b)} peak={peak} />
                       <Bar
-                        value={b.payable + b.reimbursable + b.committed}
+                        value={moneyOut(b)}
                         peak={peak}
-                        tone="rgba(240, 180, 41, 0.5)"
+                        tone="rgb(var(--warn-rgb) / 0.5)"
                       />
                     </div>
                   </td>
@@ -460,9 +549,11 @@ export function CashForecast() {
             </tbody>
           </table>
         </div>
-        <p className="faint" style={{ marginTop: 10, marginBottom: 0 }}>
+        <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
           Committed is money promised on issued purchase orders that no supplier has billed for
           yet. It will land as a payable; leaving it out makes the position look better than it is.
+          Advances are approved cash advances not yet handed over, placed on the day they are
+          needed; refunds are unspent advance money due back by its liquidation date.
         </p>
       </div>
 
@@ -487,7 +578,9 @@ export function CashForecast() {
                     {data.ourMove.rows.map((r) => (
                       <tr key={r.id}>
                         <td>
-                          <span className="mono">{r.number}</span>
+                          <Link to={`/g-ops/billings/${r.id}`} className="mono">
+                            {r.number}
+                          </Link>
                           <div className="faint">
                             {r.customer} · {r.job}
                           </div>
@@ -501,7 +594,7 @@ export function CashForecast() {
                   </tbody>
                 </table>
               </div>
-              <Link className="btn btn-sm" to="/g-fin/ar" style={{ marginTop: 10 }}>
+              <Link className="btn btn-sm" to="/g-fin/ar" style={{ marginTop: 'var(--s-3)' }}>
                 Raise them
               </Link>
             </>
@@ -524,8 +617,12 @@ export function CashForecast() {
                 <table className="data">
                   <tbody>
                     {data.uncleared.rows.map((p) => (
-                      <tr key={p.number}>
-                        <td className="mono">{p.number}</td>
+                      <tr key={p.id}>
+                        <td>
+                          <Link to={`/g-fin/payments?payment=${encodeURIComponent(p.id)}`} className="mono">
+                            {p.number}
+                          </Link>
+                        </td>
                         <td className="right mono">
                           <span className={p.kind === 'RECEIPT' ? '' : 'warn'}>
                             {p.kind === 'RECEIPT' ? '+' : '−'}
@@ -615,7 +712,7 @@ export function InventoryAnalytics() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
         <Tile label="Stock value" value={formatMoney(data.totalValue)} sub={`${data.lines} item lines`} />
         <Tile
           label="Not moving"
@@ -654,10 +751,10 @@ export function InventoryAnalytics() {
                   {data.byCategory.map((c) => (
                     <tr key={c.category}>
                       <td>{c.category}</td>
-                      <td className="right mono faint" style={{ width: 60 }}>
+                      <td className="right mono faint" style={{ width: 'calc(var(--s-8) * 1.5)' }}>
                         {c.lines}
                       </td>
-                      <td className="right mono" style={{ width: 130 }}>
+                      <td className="right mono" style={{ width: 'calc(var(--s-8) * 3.25)' }}>
                         {formatMoney(c.value)}
                       </td>
                       <td style={{ width: '35%' }}>
@@ -796,6 +893,8 @@ interface Performance {
       waitingOn: string;
       step: string;
       waitingDays: number;
+      /** The document itself — null only for an approval raised before links were recorded. */
+      link: string | null;
     }[];
   };
 }
@@ -888,11 +987,11 @@ export function PerformanceReport() {
                 </tbody>
               </table>
             </div>
-            <details style={{ marginTop: 12 }}>
+            <details style={{ marginTop: 'var(--s-3)' }}>
               <summary className="faint" style={{ cursor: 'pointer' }}>
                 Every waiting document
               </summary>
-              <div className="table-wrap" style={{ marginTop: 10 }}>
+              <div className="table-wrap" style={{ marginTop: 'var(--s-3)' }}>
                 <table className="data">
                   <thead>
                     <tr>
@@ -907,7 +1006,13 @@ export function PerformanceReport() {
                     {data.bottleneck.rows.map((r) => (
                       <tr key={r.id}>
                         <td>
-                          <span className="mono">{r.documentNumber ?? r.documentType}</span>
+                          {r.link ? (
+                            <Link to={r.link} className="mono">
+                              {r.documentNumber ?? r.documentType}
+                            </Link>
+                          ) : (
+                            <span className="mono">{r.documentNumber ?? r.documentType}</span>
+                          )}
                           <div className="faint">{r.subject}</div>
                         </td>
                         <td className="faint">{r.requester}</td>
@@ -1041,7 +1146,7 @@ export function PerformanceReport() {
                 </tbody>
               </table>
             </div>
-            <p className="faint" style={{ marginTop: 10, marginBottom: 0 }}>
+            <p className="faint" style={{ marginTop: 'var(--s-3)', marginBottom: 0 }}>
               On time is only asked of jobs that finished and had a target date to finish by.
               Scoring somebody against a date nobody set is worse than not scoring them.
             </p>

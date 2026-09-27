@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
+import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../components/ui';
 
 // ════════════════════════════════════════════════════════════════════
-//  CATEGORIES — cost categories and item categories
+//  CATEGORIES — cost categories, item categories and industries
 // ════════════════════════════════════════════════════════════════════
 
 interface CostCategory {
@@ -14,6 +14,20 @@ interface CostCategory {
   sortOrder: number;
   isSystem: boolean;
   isActive: boolean;
+}
+
+/**
+ * A customer industry (HI, BI, UI, GI, SI). Exported: the customer form and
+ * the customer list filter read the same shape from GET /reference/industries.
+ */
+export interface Industry {
+  id: string;
+  code: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  _count?: { customers: number };
 }
 
 interface ItemCategory {
@@ -33,16 +47,20 @@ export function Categories() {
   const [error, setError] = useState<unknown>(null);
   const [editingCost, setEditingCost] = useState<CostCategory | 'new' | null>(null);
   const [editingItem, setEditingItem] = useState<ItemCategory | 'new' | null>(null);
+  const [industries, setIndustries] = useState<Industry[]>([]);
+  const [editingIndustry, setEditingIndustry] = useState<Industry | 'new' | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, i] = await Promise.all([
+      const [c, i, ind] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
+        api.get<Industry[]>('/reference/industries'),
       ]);
       setCost(c);
       setItems(i);
+      setIndustries(ind);
       setError(null);
     } catch (err) {
       setError(err);
@@ -67,7 +85,8 @@ export function Categories() {
           <p>
             Cost categories are the five buckets every costing, budget and cost-ledger row is
             grouped by. Item categories are how you organise the item master for browsing — they
-            have no effect on money.
+            have no effect on money. Industries classify customers — HI, BI, UI, GI, SI — so sales
+            can be counted by the market they come from.
           </p>
         </div>
       </div>
@@ -76,10 +95,8 @@ export function Categories() {
 
       <div className="grid grid-2">
         <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 className="card-title" style={{ margin: 0 }}>
-              Cost categories
-            </h3>
+          <div className="m-card-head">
+            <h3 className="card-title">Cost categories</h3>
             {can('admin.categories.create') && (
               <button className="btn btn-sm" onClick={() => setEditingCost('new')}>
                 + Add
@@ -91,10 +108,10 @@ export function Categories() {
             <table className="data">
               <thead>
                 <tr>
-                  <th style={{ width: 80 }}>Code</th>
+                  <th className="m-col-code">Code</th>
                   <th>Name</th>
-                  <th style={{ width: 90 }}>Status</th>
-                  {mayEdit && <th style={{ width: 70 }} />}
+                  <th>Status</th>
+                  {mayEdit && <th className="m-col-action" />}
                 </tr>
               </thead>
               <tbody>
@@ -103,16 +120,10 @@ export function Categories() {
                     <td className="mono">{c.code}</td>
                     <td>
                       {c.name}
-                      {c.isSystem && (
-                        <span className="badge" style={{ marginLeft: 7 }}>
-                          standard
-                        </span>
-                      )}
+                      {c.isSystem && <span className="badge m-inline">standard</span>}
                     </td>
                     <td>
-                      <span className={`badge ${c.isActive ? 'ok' : ''}`}>
-                        {c.isActive ? 'Active' : 'Inactive'}
-                      </span>
+                      <StatusBadge status={c.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                     </td>
                     {mayEdit && (
                       <td>
@@ -127,17 +138,15 @@ export function Categories() {
             </table>
           </div>
 
-          <p className="faint" style={{ fontSize: 12, marginBottom: 0 }}>
+          <p className="m-footnote">
             The five standard categories cannot be deleted — every budget and cost figure in the
             system is grouped by them. You can rename them.
           </p>
         </div>
 
         <div className="card">
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 className="card-title" style={{ margin: 0 }}>
-              Item categories
-            </h3>
+          <div className="m-card-head">
+            <h3 className="card-title">Item categories</h3>
             {can('admin.categories.create') && (
               <button className="btn btn-sm" onClick={() => setEditingItem('new')}>
                 + Add
@@ -152,12 +161,12 @@ export function Categories() {
               <table className="data">
                 <thead>
                   <tr>
-                    <th style={{ width: 80 }}>Code</th>
+                    <th className="m-col-code">Code</th>
                     <th>Name</th>
-                    <th style={{ width: 70 }} className="right">
+                    <th className="right">
                       Items
                     </th>
-                    {mayEdit && <th style={{ width: 70 }} />}
+                    {mayEdit && <th className="m-col-action" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -184,6 +193,82 @@ export function Categories() {
           )}
         </div>
       </div>
+
+      {/*
+        Industries: a five-row reference card, NOT a DataList. It is a short,
+        fixed list an administrator reads whole — paging, scope and export
+        would be furniture. Rule 9 governs list screens; this is a setting.
+      */}
+      <div className="card m-industries">
+        <div className="m-card-head">
+          <h3 className="card-title">Industries</h3>
+          {can('admin.categories.create') && (
+            <button className="btn btn-sm" onClick={() => setEditingIndustry('new')}>
+              + Add
+            </button>
+          )}
+        </div>
+
+        {industries.length === 0 ? (
+          <Empty
+            title="No industries yet"
+            hint="Run the seed to create the five standard ones — HI, BI, UI, GI and SI."
+          />
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th className="m-col-code">Code</th>
+                  <th>Name</th>
+                  <th className="right">Customers</th>
+                  <th>Status</th>
+                  {mayEdit && <th className="m-col-action" />}
+                </tr>
+              </thead>
+              <tbody>
+                {industries.map((ind) => (
+                  <tr key={ind.id}>
+                    <td className="mono">{ind.code}</td>
+                    <td>
+                      {ind.name}
+                      {ind.isSystem && <span className="badge m-inline">standard</span>}
+                    </td>
+                    <td className="right">{ind._count?.customers ?? 0}</td>
+                    <td>
+                      <StatusBadge status={ind.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
+                    </td>
+                    {mayEdit && (
+                      <td className="m-col-action">
+                        <button className="btn btn-sm" onClick={() => setEditingIndustry(ind)}>
+                          Modify
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p className="m-footnote">
+          Every new customer is filed under one of these. The five standard industries cannot be
+          deleted or recoded — reports group by the code — but you can rename them or add your own.
+        </p>
+      </div>
+
+      {editingIndustry && (
+        <IndustryModal
+          industry={editingIndustry === 'new' ? null : editingIndustry}
+          onClose={() => setEditingIndustry(null)}
+          onSaved={() => {
+            setEditingIndustry(null);
+            void load();
+            toast('ok', 'Saved');
+          }}
+        />
+      )}
 
       {editingCost && (
         <CostCategoryModal
@@ -304,6 +389,115 @@ function CostCategoryModal({
         />
       </Field>
       <Checkbox checked={form.isActive} onChange={(v) => setForm({ ...form, isActive: v })} label="Active" />
+    </Modal>
+  );
+}
+
+function IndustryModal({
+  industry,
+  onClose,
+  onSaved,
+}: {
+  industry: Industry | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    code: industry?.code ?? '',
+    name: industry?.name ?? '',
+    sortOrder: industry?.sortOrder ?? 99,
+    isActive: industry?.isActive ?? true,
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (industry) await api.patch(`/reference/industries/${industry.id}`, form);
+      else await api.post('/reference/industries', form);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!industry) return;
+    setBusy(true);
+    try {
+      await api.del(`/reference/industries/${industry.id}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const inUse = industry?._count?.customers ?? 0;
+  const valid = form.name.trim().length >= 2 && /^[A-Z]{2,4}$/.test(form.code);
+
+  return (
+    <Modal
+      title={industry ? `Modify ${industry.name}` : 'Add industry'}
+      onClose={onClose}
+      footer={
+        <>
+          {industry && !industry.isSystem && inUse === 0 && can('admin.categories.delete') && (
+            <button className="btn btn-danger" onClick={remove} disabled={busy}>
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !valid}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      {industry?.isSystem && (
+        <div className="alert info">
+          One of the five standard industries. Rename it freely; its code is fixed because reports
+          group customers by it.
+        </div>
+      )}
+      {industry && !industry.isSystem && inUse > 0 && (
+        <div className="alert info">
+          {inUse === 1 ? 'One customer carries' : `${inUse} customers carry`} this industry, so it
+          cannot be deleted — untick Active to stop it being offered for new customers.
+        </div>
+      )}
+      <Field label="Name" hint="e.g. Healthcare Industry">
+        <input value={form.name} autoFocus onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Code" hint="Two to four letters">
+        <input
+          className="mono"
+          value={form.code}
+          maxLength={4}
+          disabled={industry?.isSystem}
+          onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z]/g, '') })}
+        />
+      </Field>
+      <Field label="Sort order">
+        <input
+          type="number"
+          value={form.sortOrder}
+          onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })}
+        />
+      </Field>
+      <Checkbox
+        checked={form.isActive}
+        onChange={(v) => setForm({ ...form, isActive: v })}
+        label="Active — an inactive industry stays on its customers but is not offered for new ones"
+      />
     </Modal>
   );
 }

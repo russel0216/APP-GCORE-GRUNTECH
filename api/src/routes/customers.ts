@@ -15,7 +15,7 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { nextNumber } from '../shared/numbering';
+import { nextNumber, previewNext } from '../shared/numbering';
 
 export const customerRoutes = Router();
 customerRoutes.use(authenticate);
@@ -44,8 +44,12 @@ customerRoutes.get(
       ];
     }
     if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    // Industry is a reference row now (Phase 10); the list filter takes its code.
-    if (q.filters.industry) where.industry = { code: String(q.filters.industry) };
+    // Industry is a reference row; the filter takes its code, or 'none' for the
+    // customers nobody has classified yet — the list filter is how those get found.
+    if (q.filters.industry) {
+      if (q.filters.industry === 'none') where.industryId = null;
+      else where.industry = { code: String(q.filters.industry).toUpperCase() };
+    }
     if (q.scope === 'mine') where.createdById = me.id;
 
     const [rows, total] = await Promise.all([
@@ -53,6 +57,7 @@ customerRoutes.get(
         where,
         include: {
           createdBy: { select: { id: true, name: true } },
+          industry: { select: { id: true, code: true, name: true } },
           _count: { select: { contacts: true, sites: true } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
@@ -96,7 +101,7 @@ customerRoutes.get(
               }
             : {}),
         },
-        select: { id: true, code: true, name: true },
+        select: { id: true, code: true, name: true, industry: { select: { code: true } } },
         orderBy: { name: 'asc' },
         take: 25,
       }),
@@ -104,30 +109,18 @@ customerRoutes.get(
   }),
 );
 
-/** The next code, so the form can show it before anything is saved. */
+/**
+ * The next code, so the form can show it before anything is saved. The same
+ * template and counter lookup nextNumber() uses, without the reservation —
+ * a hand-rolled year key here once disagreed with a monthly template.
+ */
 customerRoutes.get(
   '/next-code',
   require_('gops.customers.create'),
-  handler(async (_req, res) => {
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const seq = await prisma.numberSequence.findFirst({
-      where: { documentType: 'customer', periodKey: String(new Date().getFullYear()) },
-    });
-    const template = await prisma.numberSequence.findFirst({
-      where: { documentType: 'customer', periodKey: '' },
-    });
-    const { previewNumber } = await import('../shared/numbering');
-    res.json({
-      code: previewNumber(
-        {
-          pattern: template?.pattern ?? '{PREFIX}-{TYPE}-{YYYY}-{SEQ}',
-          typeCode: template?.typeCode ?? 'CUST',
-          padding: template?.padding ?? 4,
-          lastNumber: seq?.lastNumber ?? 0,
-        },
-        company?.numberPrefix ?? 'GT',
-      ),
-    });
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const preview = await previewNext('customer', { ownerId: me.id });
+    res.json({ code: preview.number });
   }),
 );
 
@@ -136,10 +129,10 @@ customerRoutes.get(
 /**
  * Everything about one customer in one payload (model §3).
  *
- * The later-phase collections are returned as empty arrays rather than omitted,
- * so the 360 view renders its full shape from day one and each module fills its
- * own tab as it ships. That is the point of the view — a customer's whole
- * history in one place, not four screens to visit.
+ * Every collection is behind the permission that guards the screen it comes
+ * from, and arrives as an empty array when the caller cannot see it. That is
+ * the point of the view — a customer's whole history in one place, not five
+ * menus to visit — without becoming a way around those menus' permissions.
  */
 customerRoutes.get(
   '/:id',
@@ -149,6 +142,7 @@ customerRoutes.get(
       where: { id: req.params.id },
       include: {
         createdBy: { select: { id: true, name: true } },
+        industry: { select: { id: true, code: true, name: true } },
         contacts: { orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] },
         sites: {
           orderBy: { name: 'asc' },
@@ -167,7 +161,29 @@ customerRoutes.get(
     const me = currentUser(req);
     const customerId = customer.id;
 
-    const [quotations, projects, invoices, serviceContracts] = await Promise.all([
+    // Leads ARE the opportunities (Phase 3 note: no Opportunity entity). A
+    // salesperson with only view_own sees the ones assigned to them.
+    const leadWhere: Prisma.LeadWhereInput | null = can(me, 'gops.leads.view_all')
+      ? { customerId }
+      : can(me, 'gops.leads.view_own')
+        ? { customerId, assignedToId: me.id }
+        : null;
+    const anyReportView =
+      can(me, 'gops.pm_reports.view_all') ||
+      can(me, 'gops.commissioning_reports.view_all') ||
+      can(me, 'gops.inspection_reports.view_all');
+
+    const [
+      quotations,
+      projects,
+      invoices,
+      serviceContracts,
+      leads,
+      installedAssets,
+      serviceReports,
+      payments,
+      jobOrders,
+    ] = await Promise.all([
       can(me, 'gops.quotations.view_all')
         ? prisma.quotation.findMany({
             where: { customerId },
@@ -230,6 +246,96 @@ customerRoutes.get(
             },
           })
         : [],
+      leadWhere
+        ? prisma.lead.findMany({
+            where: leadWhere,
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              description: true,
+              estimatedValue: true,
+              expectedClosing: true,
+              nextActionDate: true,
+              createdAt: true,
+              assignedTo: { select: { id: true, name: true } },
+            },
+          })
+        : [],
+      can(me, 'gops.installed_base.view_all')
+        ? prisma.installedAsset.findMany({
+            where: { customerId },
+            orderBy: [{ status: 'asc' }, { name: 'asc' }],
+            take: 50,
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              status: true,
+              manufacturer: true,
+              model: true,
+              serialNo: true,
+              warrantyEndsAt: true,
+              site: { select: { id: true, name: true } },
+            },
+          })
+        : [],
+      anyReportView
+        ? prisma.serviceReport.findMany({
+            where: { customerId },
+            orderBy: { performedAt: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              kind: true,
+              status: true,
+              performedAt: true,
+              billable: true,
+              underWarranty: true,
+              asset: { select: { id: true, name: true } },
+              performedBy: { select: { id: true, name: true } },
+            },
+          })
+        : [],
+      can(me, 'gfin.payments.view_all') || can(me, 'gfin.ar.view_all')
+        ? prisma.payment.findMany({
+            where: { customerId },
+            orderBy: { paymentDate: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              kind: true,
+              method: true,
+              paymentDate: true,
+              amount: true,
+              reference: true,
+              clearedAt: true,
+            },
+          })
+        : [],
+      can(me, 'gops.job_orders.view_all')
+        ? prisma.jobOrder.findMany({
+            where: { customerId },
+            orderBy: { requestedFor: 'desc' },
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              kind: true,
+              title: true,
+              urgent: true,
+              chargeBasis: true,
+              requestedFor: true,
+              amount: true,
+              assignedTo: { select: { id: true, name: true } },
+            },
+          })
+        : [],
     ]);
 
     res.json({
@@ -259,14 +365,24 @@ customerRoutes.get(
         outstanding: Number(i.netCollectible) - Number(i.amountCollected),
       })),
       serviceContracts,
-      // Still empty: nothing reads them yet.
-      opportunities: [],
-      payments: [],
-      serviceReports: [],
-      documents: [],
+      leads: leads.map((l) => ({
+        ...l,
+        estimatedValue: l.estimatedValue == null ? null : Number(l.estimatedValue),
+      })),
+      installedAssets,
+      serviceReports,
+      payments: payments.map((p) => ({ ...p, amount: Number(p.amount) })),
+      jobOrders: jobOrders.map((j) => ({ ...j, amount: j.amount == null ? null : Number(j.amount) })),
     });
   }),
 );
+
+/** The industry a customer is filed under must exist and be in use. */
+async function activeIndustry(tx: Prisma.TransactionClient, industryId: string) {
+  const industry = await tx.industry.findUnique({ where: { id: industryId } });
+  if (!industry || !industry.isActive) throw badRequest('Choose an active industry');
+  return industry;
+}
 
 // ── Create / update / delete ─────────────────────────────────────────────────
 
@@ -275,7 +391,9 @@ const customerSchema = z.object({
   name: z.string().trim().min(2, 'Company name is required'),
   legalName: z.string().trim().optional().nullable(),
   tin: z.string().trim().optional().nullable(),
-  industryId: z.string().optional().nullable(),
+  // Required on create; `.partial()` makes it optional on PATCH, and it is
+  // deliberately not nullable, so a customer can never be unclassified again.
+  industryId: z.string().min(1, 'Choose an industry'),
   paymentTerms: z.string().trim().optional().nullable(),
   creditLimit: z.number().nonnegative().optional().nullable(),
   phone: z.string().trim().optional().nullable(),
@@ -292,20 +410,21 @@ customerRoutes.post(
     const me = currentUser(req);
     const body = parseBody(customerSchema, req.body);
 
-    const customer = await prisma.$transaction(async (tx) => {
+    const { customer, industry } = await prisma.$transaction(async (tx) => {
+      const industry = await activeIndustry(tx, body.industryId);
       // Only consume a number when none was supplied — an operator pasting
       // their own code should not silently burn a sequence value.
-      const code = body.code || (await nextNumber('customer', tx));
+      const code = body.code || (await nextNumber('customer', tx, { ownerId: me.id }));
       if (await tx.customer.findUnique({ where: { code } })) {
         throw conflict(`Customer code "${code}" is already in use`);
       }
-      return tx.customer.create({
+      const customer = await tx.customer.create({
         data: {
           code,
           name: body.name,
           legalName: body.legalName || null,
           tin: body.tin || null,
-          industryId: body.industryId || null,
+          industryId: industry.id,
           paymentTerms: body.paymentTerms || null,
           creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null,
           phone: body.phone || null,
@@ -316,6 +435,7 @@ customerRoutes.post(
           createdById: me.id,
         },
       });
+      return { customer, industry };
     });
 
     await audit(
@@ -323,7 +443,7 @@ customerRoutes.post(
         entityType: 'customer',
         entityId: customer.id,
         action: 'CREATED',
-        summary: `Created customer ${customer.code} — ${customer.name}`,
+        summary: `Created customer ${customer.code} — ${customer.name} (${industry.code})`,
       },
       req,
     );
@@ -343,6 +463,9 @@ customerRoutes.patch(
       const clash = await prisma.customer.findUnique({ where: { code: body.code } });
       if (clash) throw conflict(`Customer code "${body.code}" is already in use`);
     }
+    // Reclassifying never regenerates the code — identifiers do not move under
+    // the quotations and invoices that carry them. The audit row records it.
+    if (body.industryId !== undefined) await activeIndustry(prisma, body.industryId);
 
     const customer = await prisma.customer.update({
       where: { id: req.params.id },
@@ -351,7 +474,7 @@ customerRoutes.patch(
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.legalName !== undefined ? { legalName: body.legalName || null } : {}),
         ...(body.tin !== undefined ? { tin: body.tin || null } : {}),
-        ...(body.industryId !== undefined ? { industryId: body.industryId || null } : {}),
+        ...(body.industryId !== undefined ? { industryId: body.industryId } : {}),
         ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
         ...(body.creditLimit !== undefined
           ? { creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null }

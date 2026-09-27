@@ -1,7 +1,7 @@
 /**
  * Phase 4 verification — delivery.
  *
- *   npx tsx scripts/verify-delivery.ts
+ *   npx tsx scripts/verify-delivery.ts      (the API must be running)
  *
  * The arithmetic here is the most consequential in the system: what a project
  * is allowed to spend, how much of it has been earned, and how much may be
@@ -15,7 +15,8 @@ import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
-import { budgetPosition, sCurve } from '../src/routes/jobs';
+import { signToken } from '../src/auth/middleware';
+import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/jobs';
 
@@ -42,9 +43,18 @@ const d = (v: number) => new Prisma.Decimal(v);
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
 const TAG = 'ZZDELIV';
+const ROLE_PREFIX = 'zzdeliv-';
+const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // Children that RESTRICT their parent go first: invoices hold the job and the
+  // customer, quotations hold the customer and their owner, installed assets
+  // hold the customer.
+  await prisma.invoice.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
+  await prisma.installedAsset.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
+  await prisma.quotation.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
   const users = await prisma.user.findMany({
@@ -59,7 +69,86 @@ async function cleanup() {
     await prisma.auditLog.deleteMany({ where: { actorId: { in: ids } } });
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
+  await prisma.role.deleteMany({ where: { key: { startsWith: ROLE_PREFIX } } });
 }
+
+async function makeRole(key: string, permissionKeys: string[]) {
+  const permissions = await prisma.permission.findMany({
+    where: { key: { in: permissionKeys } },
+    select: { id: true, key: true },
+  });
+  if (permissions.length !== permissionKeys.length) {
+    const found = new Set(permissions.map((p) => p.key));
+    throw new Error(`Unknown permission(s): ${permissionKeys.filter((k) => !found.has(k)).join(', ')}`);
+  }
+  return prisma.role.create({
+    data: {
+      key: `${ROLE_PREFIX}${key}`,
+      name: `${TAG} ${key}`,
+      permissions: { create: permissions.map((p) => ({ permissionId: p.id })) },
+    },
+  });
+}
+
+interface HttpResult {
+  status: number;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  body: any;
+}
+
+async function http(token: string, method: string, path: string, body?: unknown): Promise<HttpResult> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await res.text();
+  let parsed: unknown = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = { raw: text };
+  }
+  return { status: res.status, body: parsed };
+}
+
+async function apiReachable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** A costing with a reconciled schedule of values, ready to become a job. */
+async function readyCosting(title: string, ownerId: string, customerId: string, value = 120_000) {
+  const [materials] = await prisma.costCategory.findMany({ orderBy: { sortOrder: 'asc' }, take: 1 });
+  return prisma.costing.create({
+    data: {
+      number: await nextNumber('costing'),
+      title: `${TAG} ${title}`,
+      ownerId,
+      customerId,
+      status: 'FINAL',
+      totalCost: d(value * 0.8),
+      contractValue: d(value),
+      lines: {
+        create: [
+          { costCategoryId: materials.id, description: 'Scope', quantity: d(1), unit: 'lot', unitCost: d(value * 0.8), amount: d(value * 0.8) },
+        ],
+      },
+      scopeSections: {
+        create: [{ kind: 'MAIN_WORK', name: `${TAG} ${title} scope`, value: d(value), durationDays: 30, sortOrder: 0 }],
+      },
+    },
+  });
+}
+
+const iso = (dt: Date | string) => new Date(dt).toISOString().slice(0, 10);
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
   const roles = await prisma.role.findMany({ where: { key: { in: roleKeys } } });
@@ -543,6 +632,359 @@ async function main() {
     ],
   });
   check('a progress billing prints', pdf.subarray(0, 5).toString() === '%PDF-');
+
+  // ── 10. Renewal term arithmetic ─────────────────────────────────────────────
+  console.log('\nRenewal term');
+
+  const monthly = renewalTerm({ startsAt: new Date('2025-10-01'), endsAt: new Date('2026-09-30') });
+  check(
+    'a renewal starts the day after the old contract ends',
+    iso(monthly.startsAt) === '2026-10-01',
+    iso(monthly.startsAt),
+  );
+  check(
+    'a whole-month term renews as the same number of months',
+    iso(monthly.endsAt) === '2027-09-30',
+    iso(monthly.endsAt),
+  );
+  const leap = renewalTerm({ startsAt: new Date('2027-03-01'), endsAt: new Date('2028-02-29') });
+  check(
+    'across a leap year it stays on month boundaries rather than drifting a day',
+    iso(leap.startsAt) === '2028-03-01' && iso(leap.endsAt) === '2029-02-28',
+    `${iso(leap.startsAt)} → ${iso(leap.endsAt)}`,
+  );
+  const odd = renewalTerm({ startsAt: new Date('2026-01-15'), endsAt: new Date('2026-07-20') });
+  const oddDays = (d0: { startsAt: Date; endsAt: Date }) =>
+    Math.round((d0.endsAt.getTime() - d0.startsAt.getTime()) / 86_400_000);
+  check(
+    'an odd-length term keeps its length in days',
+    oddDays(odd) === oddDays({ startsAt: new Date('2026-01-15'), endsAt: new Date('2026-07-20') }),
+    `${iso(odd.startsAt)} → ${iso(odd.endsAt)}`,
+  );
+
+  // ── 11. Over HTTP: prefills, the workspace reads, renewal ──────────────────
+  console.log('\nWorkspace and hand-offs (over HTTP)');
+
+  if (!(await apiReachable())) {
+    failed += 1;
+    console.log(
+      `  ✗ the API is not reachable at ${BASE} — the route cases were NOT verified.\n` +
+        '      Start it with "npm run dev" in api/ and run this script again.',
+    );
+  } else {
+    const deliveryRole = await makeRole('delivery', [
+      'gops.projects.view_all',
+      'gops.projects.create',
+      'gops.projects.edit_all',
+      'gops.costing.view_all',
+      'gops.progress_billing.view_all',
+      'gops.budget_monitoring.view_all',
+      'gops.service_contracts.create',
+      'gops.service_contracts.view_all',
+      'gops.installed_base.view_all',
+      'gchain.receiving.view_all',
+    ]);
+    const narrowRole = await makeRole('narrow', ['gops.projects.view_all', 'gops.projects.create']);
+    const lead = await prisma.user.create({
+      data: {
+        name: `${TAG} Delivery lead`,
+        email: 'lead@verifyd.local',
+        passwordHash: await bcrypt.hash('x', 10),
+        roles: { create: [{ roleId: deliveryRole.id }] },
+      },
+    });
+    const narrow = await prisma.user.create({
+      data: {
+        name: `${TAG} Narrow`,
+        email: 'narrow@verifyd.local',
+        passwordHash: await bcrypt.hash('x', 10),
+        roles: { create: [{ roleId: narrowRole.id }] },
+      },
+    });
+    const leadToken = signToken(lead.id, lead.email);
+    const narrowToken = signToken(narrow.id, narrow.email);
+
+    // (a) A project created from an approved quotation revision reads back
+    //     its quotation — Job.quotationRevisionId was dead before fix 14.
+    const qCosting = await readyCosting('Quoted plant', pm.id, customer.id);
+    const quotation = await prisma.quotation.create({
+      data: {
+        number: await nextNumber('quotation', prisma, { ownerId: pm.id }),
+        customerId: customer.id,
+        ownerId: pm.id,
+        subject: `${TAG} quoted plant`,
+        revisions: { create: [{ revision: 0, status: 'APPROVED', costingId: qCosting.id }] },
+      },
+      include: { revisions: true },
+    });
+    const created = await http(leadToken, 'POST', '/jobs', {
+      costingId: qCosting.id,
+      quotationRevisionId: quotation.revisions[0].id,
+      name: `${TAG} Quoted plant`,
+      customerId: customer.id,
+    });
+    check('POST /jobs with an approved revision → 201', created.status === 201, `${created.status} ${JSON.stringify(created.body).slice(0, 160)}`);
+    const quotedJobId: string | undefined = created.body.id;
+    const readBack = quotedJobId ? await http(leadToken, 'GET', `/jobs/${quotedJobId}`) : null;
+    check(
+      'the job reads back the quotation it delivers',
+      readBack?.body?.quotationRevision?.quotation?.number === quotation.number,
+      JSON.stringify(readBack?.body?.quotationRevision ?? null),
+    );
+    const costingRead = await http(leadToken, 'GET', `/costings/${qCosting.id}`);
+    check(
+      'GET /costings/:id lists the job built on it',
+      Array.isArray(costingRead.body.jobs) && costingRead.body.jobs.some((j: { id: string }) => j.id === quotedJobId),
+      JSON.stringify(costingRead.body.jobs ?? null).slice(0, 160),
+    );
+    check('a plain project answers serviceContractId null', created.body.serviceContractId === null);
+
+    // (b) The customer comes from the costing — a mismatch is refused.
+    const otherCustomer = await prisma.customer.create({ data: { code: `${TAG}-C2`, name: `${TAG} Other clinic` } });
+    const mismatch = await http(leadToken, 'POST', '/jobs', {
+      costingId: (await readyCosting('Mismatch', pm.id, customer.id)).id,
+      name: `${TAG} Mismatch`,
+      customerId: otherCustomer.id,
+    });
+    check(
+      "a job for a different customer than its costing's is refused",
+      mismatch.status === 400 && /different customer/.test(String(mismatch.body.error ?? mismatch.body.message ?? '')),
+      `${mismatch.status} ${JSON.stringify(mismatch.body).slice(0, 160)}`,
+    );
+
+    // (c) The job picker: open work by default, closed on request, ?q narrows.
+    await prisma.job.update({ where: { id: quotedJobId! }, data: { status: 'COMPLETED' } });
+    const openOnly = await http(leadToken, 'GET', `/jobs/lookup?q=${encodeURIComponent(`${TAG} Quoted`)}`);
+    const withClosed = await http(leadToken, 'GET', `/jobs/lookup?q=${encodeURIComponent(`${TAG} Quoted`)}&includeClosed=true`);
+    check(
+      'the job lookup leaves a COMPLETED job out by default',
+      Array.isArray(openOnly.body) && !openOnly.body.some((j: { id: string }) => j.id === quotedJobId),
+      JSON.stringify(openOnly.body).slice(0, 160),
+    );
+    check(
+      'and includes it with includeClosed=true',
+      Array.isArray(withClosed.body) && withClosed.body.some((j: { id: string }) => j.id === quotedJobId),
+    );
+    check(
+      '?q narrows the lookup to matching jobs',
+      Array.isArray(withClosed.body) && withClosed.body.every((j: { name: string; number: string }) => j.name.startsWith(TAG)),
+      `${withClosed.body.length} row(s)`,
+    );
+
+    // (d) Billing ↔ invoice: the billing names its invoice once one exists.
+    const before = await http(leadToken, 'GET', `/billings/${b1.id}`);
+    check('a billing not yet invoiced says invoice: null', before.status === 200 && before.body.invoice === null, JSON.stringify(before.body.invoice));
+    const invoice = await prisma.invoice.create({
+      data: {
+        number: await nextNumber('invoice'),
+        customerId: customer.id,
+        jobId: job.id,
+        progressBillingId: b1.id,
+        invoiceDate: new Date('2026-02-02'),
+        dueDate: new Date('2026-03-04'),
+        grossAmount: b1.grossAmount,
+        vatRate: b1.vatRate,
+        vatAmount: b1.vatAmount,
+        ewtRate: b1.ewtRate,
+        ewtAmount: b1.ewtAmount,
+        invoiceTotal: b1.invoiceTotal,
+        netCollectible: b1.netCollectible,
+        createdById: pm.id,
+      },
+    });
+    const after = await http(leadToken, 'GET', `/billings/${b1.id}`);
+    check(
+      'GET /billings/:id carries invoice.number after invoicing',
+      after.body.invoice?.number === invoice.number && after.body.invoice?.id === invoice.id,
+      JSON.stringify(after.body.invoice),
+    );
+
+    // (e) The ledger the Budget tab lists names the document behind each row.
+    const ledger = await http(leadToken, 'GET', `/jobs/${job.id}/ledger?pageSize=100`);
+    const brRow = (ledger.body.rows ?? []).find((r: { sourceType: string }) => r.sourceType === 'budget_request');
+    check(
+      "the ledger row for an approved budget request names the request",
+      brRow?.sourceId === br.id && brRow?.sourceNumber === br.number,
+      JSON.stringify(brRow ?? null).slice(0, 160),
+    );
+    const brList = await http(leadToken, 'GET', `/budget-requests?jobId=${job.id}`);
+    // The lead does not hold budget_requests — the tab hides the card for them.
+    check('budget requests stay behind their own permission', brList.status === 403, String(brList.status));
+
+    // (f) The receiving register narrows to the job (PROC's jobId filter):
+    //     every row it returns must belong to the job asked about.
+    const receivings = await http(leadToken, 'GET', `/receivings?jobId=${job.id}&pageSize=200`);
+    const foreign = (receivings.body.rows ?? []).filter(
+      (r: { order?: { job?: { id: string } | null } }) => r.order?.job?.id !== job.id,
+    );
+    check(
+      '/receivings?jobId= returns only that job’s receivings',
+      receivings.status === 200 && foreign.length === 0,
+      `${receivings.status}: ${foreign.length} row(s) from other jobs`,
+    );
+
+    // (g) Renewal: POST /jobs with renewedFromContractId drafts the new
+    //     coverage terms in the same transaction.
+    const assets = await Promise.all(
+      ['Oxygen generator', 'Air compressor'].map(async (name, i) =>
+        prisma.installedAsset.create({
+          data: {
+            code: await nextNumber('installed_asset'),
+            customerId: customer.id,
+            name: `${TAG} ${name}`,
+            serialNo: `${TAG}-SN-${i}`,
+          },
+        }),
+      ),
+    );
+    const oldCosting = await readyCosting('Service 2025', pm.id, customer.id, 60_000);
+    const oldJob = await prisma.job.create({
+      data: {
+        number: await nextNumber('project'),
+        type: 'SERVICE_CONTRACT',
+        name: `${TAG} Service 2025`,
+        customerId: customer.id,
+        costingId: oldCosting.id,
+        createdById: pm.id,
+        contractValue: d(60_000),
+      },
+    });
+    const oldContract = await prisma.serviceContract.create({
+      data: {
+        number: await nextNumber('service_contract'),
+        status: 'ACTIVE',
+        jobId: oldJob.id,
+        startsAt: new Date('2025-10-01'),
+        endsAt: new Date('2026-09-30'),
+        frequencyMonths: 3,
+        plannedVisits: 4,
+        responseTime: 'Next working day',
+        exclusions: `${TAG} consumables`,
+        coverageNotes: `${TAG} two units`,
+        createdById: pm.id,
+        assets: { create: assets.map((a) => ({ assetId: a.id })) },
+      },
+    });
+    const renewalCosting = await readyCosting('Service 2026', pm.id, customer.id, 66_000);
+
+    const refused = await http(narrowToken, 'POST', '/jobs', {
+      costingId: renewalCosting.id,
+      name: `${TAG} Service 2026 (narrow)`,
+      customerId: customer.id,
+      renewedFromContractId: oldContract.id,
+    });
+    check(
+      'renewing needs gops.service_contracts.create as well as project create → 403',
+      refused.status === 403,
+      `${refused.status} ${JSON.stringify(refused.body).slice(0, 120)}`,
+    );
+
+    const wrongCustomer = await http(leadToken, 'POST', '/jobs', {
+      costingId: (await readyCosting('Renewal elsewhere', pm.id, otherCustomer.id)).id,
+      name: `${TAG} Renewal elsewhere`,
+      customerId: otherCustomer.id,
+      renewedFromContractId: oldContract.id,
+    });
+    check("a renewal for another customer's contract is refused", wrongCustomer.status === 400, String(wrongCustomer.status));
+
+    const renewal = await http(leadToken, 'POST', '/jobs', {
+      costingId: renewalCosting.id,
+      name: `${TAG} Service 2026`,
+      type: 'PROJECT', // the server forces SERVICE_CONTRACT for a renewal
+      customerId: customer.id,
+      renewedFromContractId: oldContract.id,
+    });
+    check('POST /jobs with renewedFromContractId → 201', renewal.status === 201, `${renewal.status} ${JSON.stringify(renewal.body).slice(0, 200)}`);
+    check('the renewal job is a SERVICE_CONTRACT whatever was sent', renewal.body.type === 'SERVICE_CONTRACT', renewal.body.type);
+    check('and it answers the new contract id', typeof renewal.body.serviceContractId === 'string');
+
+    const drafted = renewal.body.serviceContractId
+      ? await prisma.serviceContract.findUnique({
+          where: { id: renewal.body.serviceContractId },
+          include: { assets: true },
+        })
+      : null;
+    check('the new contract is a DRAFT', drafted?.status === 'DRAFT', drafted?.status);
+    check('it belongs to the renewal job', drafted?.jobId === renewal.body.id);
+    check('it records what it renewed', drafted?.renewedFromId === oldContract.id);
+    check(
+      'its number comes from the service_contract sequence',
+      !!drafted && drafted.number !== oldContract.number && /\d/.test(drafted.number),
+      drafted?.number,
+    );
+    check(
+      'startsAt = the old endsAt + 1 day',
+      !!drafted && iso(drafted.startsAt) === '2026-10-01',
+      drafted ? iso(drafted.startsAt) : 'none',
+    );
+    check('the same term length', !!drafted && iso(drafted.endsAt) === '2027-09-30', drafted ? iso(drafted.endsAt) : 'none');
+    check('the same frequency', drafted?.frequencyMonths === 3);
+    // The first PM visit falls one interval AFTER cover starts and a visit
+    // past the end is dropped: Jan, Apr, Jul — the fourth would be 1 Oct 2027.
+    check(
+      'planned visits come from the schedule rule (quarterly over a year → 3)',
+      drafted?.plannedVisits === 3,
+      String(drafted?.plannedVisits),
+    );
+    check(
+      'response time, exclusions and coverage notes are copied',
+      drafted?.responseTime === 'Next working day' &&
+        drafted?.exclusions === `${TAG} consumables` &&
+        drafted?.coverageNotes === `${TAG} two units`,
+    );
+    const covered = new Set(drafted?.assets.map((a) => a.assetId));
+    check(
+      'the same equipment is covered',
+      covered.size === assets.length && assets.every((a) => covered.has(a.id)),
+      `${covered.size} of ${assets.length}`,
+    );
+    const oldAfter = await prisma.serviceContract.findUnique({ where: { id: oldContract.id } });
+    check('the old contract is left as it was until the renewal is activated', oldAfter?.status === 'ACTIVE', oldAfter?.status);
+
+    const again = await http(leadToken, 'POST', '/jobs', {
+      costingId: (await readyCosting('Service 2026 twice', pm.id, customer.id)).id,
+      name: `${TAG} Service 2026 twice`,
+      customerId: customer.id,
+      renewedFromContractId: oldContract.id,
+    });
+    check(
+      'renewing the same contract twice is refused',
+      again.status === 400 && /already been renewed/.test(String(again.body.error ?? again.body.message ?? '')),
+      `${again.status} ${JSON.stringify(again.body).slice(0, 120)}`,
+    );
+    const orphan = await prisma.job.findFirst({ where: { name: `${TAG} Service 2026 twice` } });
+    check('and the refusal leaves no job behind', orphan === null);
+
+    // (h) The workspace's Service tab: one read, each section behind its own
+    //     register's permission.
+    await prisma.installedAsset.update({ where: { id: assets[0].id }, data: { jobId: quotedJobId! } });
+    const svc = await http(leadToken, 'GET', `/jobs/${quotedJobId}/service`);
+    check(
+      'GET /jobs/:id/service lists the equipment the job installed',
+      svc.status === 200 && Array.isArray(svc.body.assets) && svc.body.assets.some((a: { id: string }) => a.id === assets[0].id),
+      `${svc.status} ${JSON.stringify(svc.body).slice(0, 160)}`,
+    );
+    const renewalSvc = await http(leadToken, 'GET', `/jobs/${renewal.body.id}/service`);
+    check(
+      "and a service job's coverage terms, with the contract it renews",
+      renewalSvc.body.contract?.id === renewal.body.serviceContractId &&
+        renewalSvc.body.contract?.renewedFrom?.id === oldContract.id &&
+        renewalSvc.body.contract?.assetCount === 2,
+      JSON.stringify(renewalSvc.body.contract ?? null).slice(0, 200),
+    );
+    const narrowSvc = await http(narrowToken, 'GET', `/jobs/${quotedJobId}/service`);
+    check(
+      'a caller without installed_base or service_contracts sees null sections, not empty ones',
+      narrowSvc.status === 200 && narrowSvc.body.assets === null && narrowSvc.body.contractVisible === false,
+      JSON.stringify(narrowSvc.body).slice(0, 160),
+    );
+    const detail = await http(leadToken, 'GET', `/jobs/${renewal.body.id}`);
+    check(
+      'the job detail names its coverage terms',
+      detail.body.serviceContract?.id === renewal.body.serviceContractId,
+      JSON.stringify(detail.body.serviceContract ?? null),
+    );
+  }
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

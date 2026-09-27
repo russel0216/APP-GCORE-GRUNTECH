@@ -9,13 +9,16 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { Stat } from '../../components/charts';
+import { DocumentApproval } from '../../components/ApprovalStepper';
+import { RecordHeader } from '../../components/RecordHeader';
 import { ProgressBar } from '../delivery/Projects';
 import { openPdf } from '../../lib/api';
-import { label, statusTone } from './PurchaseRequests';
 
 // ════════════════════════════════════════════════════════════════════
 //  CANVASS
@@ -63,7 +66,7 @@ export function Canvasses() {
     {
       key: 'status',
       label: 'Status',
-      render: (c) => <span className={`badge ${c.status === 'AWARDED' ? 'ok' : 'warn'}`}>{label(c.status)}</span>,
+      render: (c) => <StatusBadge status={c.status} extra={{ AWARDED: 'ok' }} />,
     },
   ];
 
@@ -190,8 +193,8 @@ export function CanvassDetail() {
           <p>
             {canvass.request.job ? `${canvass.request.job.number} · ` : ''}
             {canvass.suppliers.length} supplier{canvass.suppliers.length === 1 ? '' : 's'} quoting
-            <span className={`badge ${canvass.status === 'AWARDED' ? 'ok' : 'warn'}`} style={{ marginLeft: 8 }}>
-              {label(canvass.status)}
+            <span className="proc-pill-gap">
+              <StatusBadge status={canvass.status} extra={{ AWARDED: 'ok' }} />
             </span>
           </p>
         </div>
@@ -235,12 +238,8 @@ export function CanvassDetail() {
                   <th className="right">Estimate</th>
                   {canvass.suppliers.map((s) => (
                     <th key={s.id} className="right">
-                      {s.supplier.name}
-                      {s.isSelected && (
-                        <span className="badge ok" style={{ marginLeft: 6 }}>
-                          awarded
-                        </span>
-                      )}
+                      <Link to={`/g-chain/suppliers/${s.supplier.id}`}>{s.supplier.name}</Link>
+                      {s.isSelected && <span className="badge ok proc-pill-gap">awarded</span>}
                     </th>
                   ))}
                 </tr>
@@ -264,10 +263,8 @@ export function CanvassDetail() {
                         return (
                           <td
                             key={s.id}
-                            className="right mono"
-                            style={{
-                              color: price !== undefined && price === best ? 'var(--neon)' : undefined,
-                            }}
+                            className={`right mono${price !== undefined && price === best ? ' proc-best' : ''}`}
+                            title={price !== undefined && price === best ? 'Lowest quote for this line' : undefined}
                           >
                             {price === undefined ? <span className="faint">—</span> : formatMoney(price)}
                           </td>
@@ -283,8 +280,7 @@ export function CanvassDetail() {
                   {canvass.suppliers.map((s) => (
                     <td
                       key={s.id}
-                      className="right mono"
-                      style={{ color: s.id === canvass.lowestSupplierId ? 'var(--neon)' : undefined }}
+                      className={`right mono${s.id === canvass.lowestSupplierId ? ' proc-best' : ''}`}
                     >
                       <strong>{s.complete ? formatMoney(s.total) : <span className="faint">incomplete</span>}</strong>
                     </td>
@@ -315,7 +311,7 @@ export function CanvassDetail() {
                     <td colSpan={3} />
                     {canvass.suppliers.map((s) => (
                       <td key={s.id} className="right">
-                        <div className="row" style={{ justifyContent: 'flex-end', gap: 5 }}>
+                        <div className="proc-row-actions">
                           <button className="btn btn-sm" onClick={() => setQuoting(s)}>
                             Quote
                           </button>
@@ -337,7 +333,7 @@ export function CanvassDetail() {
         )}
 
         {canvass.lowestSupplierId && canvass.status === 'OPEN' && (
-          <div className="alert info" style={{ marginTop: 12, marginBottom: 0 }}>
+          <div className="alert info proc-card-note">
             Lowest complete quote:{' '}
             <strong>
               {canvass.suppliers.find((s) => s.id === canvass.lowestSupplierId)?.supplier.name}
@@ -515,7 +511,7 @@ function QuoteModal({
       }
     >
       <ErrorBox error={error} />
-      <p className="muted" style={{ marginTop: 0 }}>
+      <p className="muted">
         Leave a line blank if they did not quote it. An incomplete quote is excluded from the
         lowest-total comparison, because it is not a like-for-like offer.
       </p>
@@ -525,9 +521,7 @@ function QuoteModal({
             <tr>
               <th>Item</th>
               <th className="right">Qty</th>
-              <th className="right" style={{ width: 140 }}>
-                Unit price
-              </th>
+              <th className="right proc-col-input">Unit price</th>
               <th className="right">Amount</th>
             </tr>
           </thead>
@@ -540,10 +534,10 @@ function QuoteModal({
                 </td>
                 <td>
                   <input
-                    className="mono"
                     type="number"
                     step="0.01"
-                    style={{ textAlign: 'right', padding: '5px 7px' }}
+                    className="mono proc-cell-input"
+                    aria-label={`Unit price for ${i.description}`}
                     value={prices[i.id] ?? ''}
                     onChange={(e) => setPrices({ ...prices, [i.id]: e.target.value })}
                   />
@@ -626,7 +620,7 @@ export function PurchaseOrders() {
     {
       key: 'status',
       label: 'Status',
-      render: (o) => <span className={`badge ${statusTone(o.status)}`}>{label(o.status)}</span>,
+      render: (o) => <StatusBadge status={o.status} />,
     },
   ];
 
@@ -663,6 +657,9 @@ export function PurchaseOrders() {
               { value: 'RECEIVED', label: 'Received' },
             ],
           },
+          // The G-CHAIN dashboard's "Orders awaiting delivery" opens this —
+          // issued or part-received, the pair it counts.
+          { key: 'awaiting', label: 'Delivery', options: [{ value: 'true', label: 'Awaiting delivery' }] },
         ]}
         actions={
           can('gchain.purchase_orders.create') ? (
@@ -834,19 +831,30 @@ interface PoDetailData {
   warehouse: { id: string; name: string } | null;
   request: { id: string; number: string; purpose: string } | null;
   createdBy: { id: string; name: string };
-  items: {
-    id: string;
-    description: string;
-    quantity: number;
-    unit: string;
-    unitPrice: number;
-    amount: number;
-    receivedQty: number;
-    outstandingQty: number;
-    item: { id: string; code: string; name: string } | null;
-    costCategory: { id: string; name: string } | null;
-  }[];
+  items: PoLine[];
   receivings: { id: string; number: string; receivedDate: string; receivedBy: { name: string } }[];
+  /** Empty unless the caller holds gfin.ap.view_all — see `billsVisible`. */
+  bills: { id: string; number: string; status: string; total: number; dueDate: string }[];
+  billsVisible: boolean;
+  /** DRAFT and the caller may change it (edit_all, or its author with edit_own). */
+  canEdit: boolean;
+  /** Placed from this awarded canvass: the supplier is decided. */
+  fromCanvass: { id: string; number: string } | null;
+  /** The approver's reason, when the latest submission was rejected back to draft. */
+  returned: { by: string | null; comment: string | null; at: string | null } | null;
+}
+
+interface PoLine {
+  id: string;
+  description: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  amount: number;
+  receivedQty: number;
+  outstandingQty: number;
+  item: { id: string; code: string; name: string } | null;
+  costCategory: { id: string; name: string } | null;
 }
 
 export function PurchaseOrderDetail() {
@@ -859,11 +867,17 @@ export function PurchaseOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [receiving, setReceiving] = useState(false);
+  const [modifying, setModifying] = useState(false);
+  /** A line being edited, or 'new' for "+ Add line". */
+  const [lineEditing, setLineEditing] = useState<PoLine | 'new' | null>(null);
+  // Bumped on every load so the approval chain re-reads after a submit.
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
       setPo(await api.get<PoDetailData>(`/purchase-orders/${id}`));
+      setReload((n) => n + 1);
       setError(null);
     } catch (err) {
       setError(err);
@@ -890,7 +904,26 @@ export function PurchaseOrderDetail() {
     }
   }
 
+  async function removeLine(line: PoLine) {
+    if (!po) return;
+    try {
+      await api.del(`/purchase-orders/${po.id}/items/${line.id}`);
+      toast('ok', 'Line removed');
+      await load();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   const outstanding = po.items.reduce((s, i) => s + i.outstandingQty, 0);
+  const isDraft = po.status === 'DRAFT';
+  const billable = ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(po.status);
+
+  const addLineButton = po.canEdit ? (
+    <button className="btn btn-primary btn-sm" onClick={() => setLineEditing('new')}>
+      + Add line
+    </button>
+  ) : null;
 
   return (
     <div>
@@ -912,39 +945,81 @@ export function PurchaseOrderDetail() {
         <span className="mono">{po.number}</span>
       </div>
 
-      <div className="page-head">
-        <div>
-          <h1>{po.supplier.name}</h1>
-          <p>
-            {po.job ? `${po.job.number} — ${po.job.name}` : 'Stock replenishment'} ·{' '}
-            {formatDate(po.orderDate)}
-            <span className={`badge ${statusTone(po.status)}`} style={{ marginLeft: 8 }}>
-              {label(po.status)}
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          <button
-            className="btn"
-            onClick={() => openPdf(`/api/purchase-orders/${po.id}/pdf`, () => toast('error', 'Could not print'))}
-          >
-            Print
-          </button>
-          {po.status === 'DRAFT' && can('gchain.purchase_orders.create') && po.items.length > 0 && (
-            <button className="btn btn-ok" onClick={submit}>
-              Submit for approval
+      <RecordHeader
+        type="Purchase Order"
+        code={po.number}
+        title={po.supplier.name}
+        status={po.status}
+        amount={formatMoney(po.total)}
+        amountLabel="Order total"
+        actions={
+          <>
+            <button
+              className="btn"
+              onClick={() => openPdf(`/api/purchase-orders/${po.id}/pdf`, () => toast('error', 'Could not print'))}
+            >
+              Print
             </button>
-          )}
-          {(po.status === 'ISSUED' || po.status === 'PARTIALLY_RECEIVED') &&
-            can('gchain.receiving.create') && (
-              <button className="btn btn-primary" onClick={() => setReceiving(true)}>
-                Receive goods
+            {po.canEdit && (
+              <button className="btn" onClick={() => setModifying(true)}>
+                Modify
               </button>
             )}
-        </div>
-      </div>
+            {isDraft && can('gchain.purchase_orders.create') && po.items.length > 0 && (
+              <button className="btn btn-ok" onClick={submit}>
+                Submit for approval
+              </button>
+            )}
+            {(po.status === 'ISSUED' || po.status === 'PARTIALLY_RECEIVED') &&
+              can('gchain.receiving.create') && (
+                <button className="btn btn-primary" onClick={() => setReceiving(true)}>
+                  Receive goods
+                </button>
+              )}
+          </>
+        }
+      />
+
+      <p className="record-head-meta proc-meta">
+        <Link to={`/g-chain/suppliers/${po.supplier.id}`}>{po.supplier.name}</Link> ·{' '}
+        {po.job ? (
+          <Link to={`/g-ops/projects/${po.job.id}`}>
+            {po.job.number} — {po.job.name}
+          </Link>
+        ) : (
+          `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
+        )}{' '}
+        · ordered {formatDate(po.orderDate)}
+        {po.deliveryDate ? ` · required by ${formatDate(po.deliveryDate)}` : ''}
+        {po.fromCanvass && (
+          <>
+            {' '}
+            · awarded on <Link to={`/g-chain/canvass/${po.fromCanvass.id}`}>{po.fromCanvass.number}</Link>
+          </>
+        )}
+      </p>
+
+      <DocumentApproval documentType="purchase_order" documentId={po.id} reloadToken={reload} />
 
       <ErrorBox error={error} />
+
+      {isDraft && po.returned && (
+        <div className="alert error" role="status">
+          <strong>Returned by {po.returned.by ?? 'the approver'}</strong>
+          {po.returned.comment ? `: ${po.returned.comment}` : ' — no reason was given.'} Change what
+          they asked for, then submit it again.
+        </div>
+      )}
+      {isDraft && po.request && po.items.length > 0 && (
+        <div className="alert info">
+          Lines came over from {po.request.number} at its <strong>estimated</strong> prices. Set each
+          one to the price actually agreed with {po.supplier.name} before submitting — the approved
+          order is what commits the budget.
+        </div>
+      )}
+      {po.status === 'PENDING_APPROVAL' && (
+        <div className="alert info">With the approvers. It cannot be changed until they decide.</div>
+      )}
 
       {po.status === 'ISSUED' && po.kind === 'DIRECT_TO_JOB' && (
         <div className="alert ok">
@@ -953,15 +1028,39 @@ export function PurchaseOrderDetail() {
         </div>
       )}
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
-        <Stat label="Subtotal" value={formatMoney(po.subtotal)} />
-        <Stat label={`VAT ${(po.vatRate * 100).toFixed(0)}%`} value={formatMoney(po.vatAmount)} />
-        <Stat label="Total" value={formatMoney(po.total)} accent />
-        <Stat label="Outstanding" value={`${outstanding} units`} />
+      <div className="kpi-grid proc-stats">
+        <Stat label="Subtotal" value={formatMoney(po.subtotal)} figure />
+        <Stat
+          label={`VAT ${(po.vatRate * 100).toFixed(0)}%`}
+          value={formatMoney(po.vatAmount)}
+          sub={po.vatInclusive ? 'included in the prices' : 'added to the prices'}
+          figure
+        />
+        <Stat label="Total" value={formatMoney(po.total)} accent="neon" figure />
+        <Stat
+          label="Outstanding"
+          value={`${outstanding} units`}
+          sub={outstanding > 0 && !isDraft ? 'still to be delivered' : undefined}
+          figure
+        />
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3 className="card-title">Order lines</h3>
+      <div className="card proc-card">
+        <div className="proc-card-head">
+          <h3 className="card-title">Order lines</h3>
+          {po.items.length > 0 && addLineButton}
+        </div>
+        {po.items.length === 0 ? (
+          <Empty
+            title="No lines yet"
+            hint={
+              po.canEdit
+                ? 'An order cannot be submitted empty. Add what is being bought, at the agreed price.'
+                : 'Nothing has been added to this order.'
+            }
+            action={addLineButton ?? undefined}
+          />
+        ) : (
         <div className="table-wrap">
           <table className="data">
             <thead>
@@ -974,6 +1073,7 @@ export function PurchaseOrderDetail() {
                 <th className="right">Amount</th>
                 <th className="right">Received</th>
                 <th className="right">Outstanding</th>
+                {po.canEdit && <th className="proc-col-actions" aria-label="Actions" />}
               </tr>
             </thead>
             <tbody>
@@ -989,29 +1089,100 @@ export function PurchaseOrderDetail() {
                   <td className="right mono">{formatMoney(i.unitPrice)}</td>
                   <td className="right mono">{formatMoney(i.amount)}</td>
                   <td className="right mono">{i.receivedQty || <span className="faint">—</span>}</td>
-                  <td className="right mono" style={{ color: i.outstandingQty > 0 ? 'var(--warn)' : undefined }}>
+                  <td className={`right mono${i.outstandingQty > 0 && !isDraft ? ' proc-short' : ''}`}>
                     {i.outstandingQty || '—'}
                   </td>
+                  {po.canEdit && (
+                    <td>
+                      <div className="proc-row-actions">
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          aria-label={`Modify ${i.description}`}
+                          onClick={() => setLineEditing(i)}
+                        >
+                          Modify
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          aria-label={`Remove ${i.description}`}
+                          onClick={() => void removeLine(i)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
-      {po.receivings.length > 0 && (
-        <div className="card">
-          <h3 className="card-title">Receiving reports</h3>
-          <div className="stack">
-            {po.receivings.map((r) => (
-              <Link key={r.id} to={`/g-chain/receiving/${r.id}`} className="row">
-                <span className="mono">{r.number}</span>
-                <span>{formatDate(r.receivedDate)}</span>
-                <span className="faint">{r.receivedBy.name}</span>
-              </Link>
-            ))}
-          </div>
+      {(po.receivings.length > 0 || (po.billsVisible && (po.bills.length > 0 || billable))) && (
+        <div className="grid grid-2">
+          {po.receivings.length > 0 && (
+            <div className="card">
+              <h3 className="card-title">Receiving reports</h3>
+              <div className="proc-links">
+                {po.receivings.map((r) => (
+                  <Link key={r.id} to={`/g-chain/receiving/${r.id}`} className="proc-link-row">
+                    <span className="mono">{r.number}</span>
+                    <span>{formatDate(r.receivedDate)}</span>
+                    <span className="faint">{r.receivedBy.name}</span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+          {po.billsVisible && (po.bills.length > 0 || billable) && (
+            <div className="card">
+              <h3 className="card-title">Supplier bills</h3>
+              {po.bills.length === 0 ? (
+                <Empty
+                  title="Not billed yet"
+                  hint="Enter the supplier's invoice from the receiving report it covers."
+                />
+              ) : (
+                <div className="proc-links">
+                  {po.bills.map((b) => (
+                    <Link key={b.id} to={`/g-fin/ap/${b.id}`} className="proc-link-row">
+                      <span className="mono">{b.number}</span>
+                      <StatusBadge status={b.status} />
+                      <span className="faint">due {formatDate(b.dueDate)}</span>
+                      <span className="mono proc-push">{formatMoney(b.total)}</span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
+      )}
+
+      {modifying && (
+        <PoHeaderModal
+          po={po}
+          onClose={() => setModifying(false)}
+          onSaved={() => {
+            setModifying(false);
+            toast('ok', 'Order updated');
+            void load();
+          }}
+        />
+      )}
+
+      {lineEditing && (
+        <PoLineModal
+          po={po}
+          line={lineEditing === 'new' ? null : lineEditing}
+          onClose={() => setLineEditing(null)}
+          onSaved={() => {
+            setLineEditing(null);
+            void load();
+          }}
+        />
       )}
 
       {receiving && (
@@ -1025,16 +1196,280 @@ export function PurchaseOrderDetail() {
   );
 }
 
-function Stat({ label: l, value, accent }: { label: string; value: React.ReactNode; accent?: boolean }) {
+/** A date from the API as the `YYYY-MM-DD` a date input wants. */
+function dateInput(value: string | null): string {
+  return value ? value.slice(0, 10) : '';
+}
+
+/**
+ * The order header, while it is still a draft.
+ *
+ * The supplier is fixed when the order came from an awarded canvass — the
+ * prices on it are that supplier's quote, and the server refuses the swap.
+ */
+function PoHeaderModal({
+  po,
+  onClose,
+  onSaved,
+}: {
+  po: PoDetailData;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  const [form, setForm] = useState({
+    supplierId: po.supplier.id,
+    deliveryDate: dateInput(po.deliveryDate),
+    terms: po.terms ?? '',
+    deliverTo: po.deliverTo ?? '',
+    notes: po.notes ?? '',
+    vatInclusive: po.vatInclusive,
+  });
+
+  useEffect(() => {
+    api.get<typeof suppliers>('/suppliers/lookup').then(setSuppliers).catch(() => {});
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/purchase-orders/${po.id}`, {
+        ...(po.fromCanvass ? {} : { supplierId: form.supplierId }),
+        deliveryDate: form.deliveryDate || null,
+        terms: form.terms || null,
+        deliverTo: form.deliverTo || null,
+        notes: form.notes || null,
+        vatInclusive: form.vatInclusive,
+      });
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  // The current supplier stays pickable even if the lookup omits it.
+  const options = suppliers.some((s) => s.id === po.supplier.id)
+    ? suppliers
+    : [{ id: po.supplier.id, name: po.supplier.name }, ...suppliers];
+
   return (
-    <div className="card">
-      <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-        {l.toUpperCase()}
+    <Modal
+      title={`Modify ${po.number}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !form.supplierId}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      <Field
+        label="Supplier"
+        hint={po.fromCanvass ? `Awarded on ${po.fromCanvass.number} — raise a new canvass to change it` : undefined}
+      >
+        <select
+          value={form.supplierId}
+          disabled={!!po.fromCanvass}
+          onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
+        >
+          {options.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <div className="grid grid-2">
+        <Field label="Required by">
+          <input
+            type="date"
+            value={form.deliveryDate}
+            onChange={(e) => setForm({ ...form, deliveryDate: e.target.value })}
+          />
+        </Field>
+        <Field label="Terms" hint={po.supplier.paymentTerms ? `Supplier default: ${po.supplier.paymentTerms}` : undefined}>
+          <input value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} />
+        </Field>
       </div>
-      <div style={{ fontSize: 18, marginTop: 6, fontWeight: 600, color: accent ? 'var(--neon)' : 'var(--text)' }}>
-        {value}
+      <Field label="Deliver to" hint={po.warehouse ? `Blank prints ${po.warehouse.name}` : 'Site address, or blank'}>
+        <input value={form.deliverTo} onChange={(e) => setForm({ ...form, deliverTo: e.target.value })} />
+      </Field>
+      <Field label="Notes">
+        <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={form.vatInclusive}
+          onChange={(e) => setForm({ ...form, vatInclusive: e.target.checked })}
+        />
+        <span>Supplier prices include VAT</span>
+      </label>
+    </Modal>
+  );
+}
+
+/**
+ * Add or modify one order line.
+ *
+ * A direct-to-job line must name its budget line — the server refuses one
+ * without, because that is how the committed cost finds its category.
+ */
+function PoLineModal({
+  po,
+  line,
+  onClose,
+  onSaved,
+}: {
+  po: PoDetailData;
+  line: PoLine | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [items, setItems] = useState<
+    { id: string; code: string; name: string; unit: string; standardCost: string | number | null }[]
+  >([]);
+  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [form, setForm] = useState({
+    itemId: line?.item?.id ?? '',
+    costCategoryId: line?.costCategory?.id ?? '',
+    description: line?.description ?? '',
+    quantity: line ? String(line.quantity) : '1',
+    unit: line?.unit ?? 'pcs',
+    unitPrice: line ? String(line.unitPrice) : '',
+  });
+
+  useEffect(() => {
+    api.get<typeof items>('/items/lookup').then(setItems).catch(() => {});
+    api.get<typeof categories>('/reference/cost-categories').then(setCategories).catch(() => {});
+  }, []);
+
+  function pickItem(itemId: string) {
+    const item = items.find((i) => i.id === itemId);
+    setForm((f) => ({
+      ...f,
+      itemId,
+      description: item && !f.description ? item.name : f.description,
+      unit: item?.unit ?? f.unit,
+      unitPrice: item?.standardCost != null && !f.unitPrice ? String(item.standardCost) : f.unitPrice,
+    }));
+  }
+
+  const direct = po.kind === 'DIRECT_TO_JOB';
+  const needsCategory = direct && !form.costCategoryId;
+  const quantity = Number(form.quantity);
+  const price = Number(form.unitPrice || 0);
+  const valid = !!form.description.trim() && quantity > 0 && price >= 0 && !needsCategory;
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    const body = {
+      itemId: form.itemId || null,
+      costCategoryId: form.costCategoryId || null,
+      description: form.description.trim(),
+      quantity,
+      unit: form.unit.trim() || 'pcs',
+      unitPrice: price,
+    };
+    try {
+      if (line) await api.patch(`/purchase-orders/${po.id}/items/${line.id}`, body);
+      else await api.post(`/purchase-orders/${po.id}/items`, body);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={line ? 'Modify line' : 'Add a line'}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={busy || !valid}
+            title={needsCategory ? 'Choose the budget line first' : undefined}
+          >
+            {busy ? 'Saving…' : line ? 'Save' : 'Add'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      <Field label="Item" hint="Optional — picking one fills the rest in">
+        <select value={form.itemId} onChange={(e) => pickItem(e.target.value)}>
+          <option value="">— not from the item master —</option>
+          {items.map((i) => (
+            <option key={i.id} value={i.id}>
+              {i.code} — {i.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Description">
+        <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+      </Field>
+      {direct && (
+        <Field label="Budget line" hint="Required — which part of the project budget this is charged to">
+          <select
+            value={form.costCategoryId}
+            onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
+          >
+            <option value="">— choose —</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+      <div className="grid grid-3">
+        <Field label="Quantity">
+          <input
+            type="number"
+            step="0.001"
+            min="0"
+            value={form.quantity}
+            onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+          />
+        </Field>
+        <Field label="Unit">
+          <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+        </Field>
+        <Field label="Unit price" hint="The price agreed with the supplier">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            value={form.unitPrice}
+            onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
+          />
+        </Field>
       </div>
-    </div>
+      <div className="alert info proc-card-note">
+        Line amount: <strong>{formatMoney((quantity || 0) * price)}</strong>
+        {po.vatInclusive ? ' (VAT included)' : ' before VAT'}
+      </div>
+    </Modal>
   );
 }
 
@@ -1132,9 +1567,7 @@ function ReceiveModal({
               <th>Item</th>
               <th className="right">Ordered</th>
               <th className="right">Already in</th>
-              <th className="right" style={{ width: 130 }}>
-                Receiving now
-              </th>
+              <th className="right proc-col-input">Receiving now</th>
             </tr>
           </thead>
           <tbody>
@@ -1145,11 +1578,11 @@ function ReceiveModal({
                 <td className="right mono faint">{i.receivedQty}</td>
                 <td>
                   <input
-                    className="mono"
+                    className="mono proc-cell-input"
                     type="number"
                     step="0.001"
                     max={i.outstandingQty}
-                    style={{ textAlign: 'right', padding: '5px 7px' }}
+                    aria-label={`Quantity received of ${i.description}`}
                     value={quantities[i.id] ?? ''}
                     onChange={(e) => setQuantities({ ...quantities, [i.id]: e.target.value })}
                   />
@@ -1159,7 +1592,7 @@ function ReceiveModal({
           </tbody>
         </table>
       </div>
-      <p className="faint" style={{ fontSize: 12 }}>
+      <p className="faint proc-small">
         Receiving more than was ordered is refused — amend the order if the delivery is genuinely
         larger.
       </p>

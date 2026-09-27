@@ -3,8 +3,11 @@ import type { Request, Response } from 'express';
 
 import { prisma } from '../prisma';
 import { handler, badRequest } from '../http/kit';
-import { authenticate, require_ } from '../auth/middleware';
+import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
+import { financePosition, claimPayable } from '../shared/finance';
+import { stockOnHand } from '../shared/chain';
+import { quotationValue } from '../shared/pipeline';
 import {
   cents,
   num,
@@ -19,6 +22,10 @@ import {
   toCsv,
   FORECAST_WINDOWS,
   windowFor,
+  approvalBottleneck,
+  companySummary,
+  summaryCsvRows,
+  SUMMARY_CSV_HEADER,
   type ForecastBucket,
   type SalesPerson,
 } from '../shared/insights';
@@ -77,13 +84,20 @@ const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : 
  * Deliberately five numbers per division rather than fifty: a dashboard that
  * shows everything is read as wallpaper. Each figure links to the list behind
  * it, so the next question is one click away rather than an export.
+ *
+ * `summary` is the brief at the top of the screen — one line per division,
+ * each read through that division's own dashboard function. It rides on this
+ * response (one read, one snapshot) rather than a second request, and `asOf`
+ * is captured once so every live figure on the page is the same instant.
  */
 insightRoutes.get(
   '/dashboard',
   require_('insights.dashboard.view_all'),
   handler(async (req, res) => {
+    const me = currentUser(req);
+    const asOf = new Date();
     const range = parseRange(req.query.from as string, req.query.to as string);
-    const today = dayKey(new Date());
+    const today = dayKey(asOf);
     const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
 
     const [
@@ -94,26 +108,25 @@ insightRoutes.get(
       jobsDelivered,
       ledger,
       billedAgg,
-      invoicesOpen,
-      billsOpen,
+      position,
       collectedThisMonth,
       collectedInRange,
-      stockValue,
+      stock,
       contractsActive,
       visitsOverdue,
       pendingApprovals,
       headcount,
+      summary,
     ] = await Promise.all([
       prisma.quotation.findMany({
         where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } },
         select: {
           probability: true,
-          // Every revision, because the value of a quotation is its latest
-          // APPROVED revision and — where none has been approved yet — its
-          // latest. Counting only approved ones would show an open quotation
-          // as worth nothing, and would disagree with Sales Analytics, which
-          // is the one thing this module must never do.
-          revisions: { select: { total: true, status: true }, orderBy: { revision: 'desc' } },
+          // Every revision, because the value of a quotation is its APPROVED
+          // revision and — where none has been approved yet — its latest.
+          // quotationValue() decides it, for this screen, Sales Analytics and
+          // the sales board alike.
+          revisions: { select: { total: true, status: true, revision: true } },
         },
       }),
       prisma.quotation.count({ where: { outcome: 'WON', decidedAt: { gte: range.from, lte: range.to } } }),
@@ -131,55 +144,37 @@ insightRoutes.get(
         where: { status: { in: ['APPROVED', 'INVOICED'] }, billingDate: { gte: range.from, lte: range.to } },
         _sum: { grossAmount: true },
       }),
-      prisma.invoice.findMany({
-        where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
-        select: { netCollectible: true, amountCollected: true, dueDate: true },
-      }),
-      prisma.supplierBill.findMany({
-        where: { status: { in: ['APPROVED', 'PARTIALLY_PAID'] } },
-        select: { netPayable: true, amountPaid: true, dueDate: true },
-      }),
+      // The position is G-FIN's own, decided in shared/finance.ts. This screen
+      // used to sum its own invoices and bills and printed a working position
+      // the finance dashboard disagreed with.
+      financePosition(today),
+      // Customer receipts only. A person handing back unspent advance money is
+      // cash in, but it was never a collection.
       prisma.payment.aggregate({
-        where: { kind: 'RECEIPT', clearedAt: { gte: monthStart } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: monthStart } },
         _sum: { amount: true },
       }),
       prisma.payment.aggregate({
-        where: { kind: 'RECEIPT', clearedAt: { gte: range.from, lte: range.to } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: range.from, lte: range.to } },
         _sum: { amount: true },
       }),
-      prisma.inventoryBalance.findMany({
-        where: { quantity: { gt: 0 } },
-        select: { quantity: true, averageCost: true },
-      }),
+      stockOnHand(),
       prisma.serviceContract.count({ where: { status: 'ACTIVE' } }),
       prisma.serviceVisit.count({ where: { status: 'SCHEDULED', dueDate: { lte: today } } }),
       prisma.approvalRequest.count({ where: { status: 'PENDING' } }),
       prisma.employee.count({ where: { isActive: true } }),
+      companySummary(me, req.query, asOf),
     ]);
 
     const state = (s: string) => num(ledger.find((l) => l.state === s)?._sum.amount);
-    const receivable = cents(
-      invoicesOpen.reduce((sum, i) => sum + (num(i.netCollectible) - num(i.amountCollected)), 0),
-    );
-    const receivableOverdue = cents(
-      invoicesOpen
-        .filter((i) => i.dueDate < today)
-        .reduce((sum, i) => sum + (num(i.netCollectible) - num(i.amountCollected)), 0),
-    );
-    const payable = cents(
-      billsOpen.reduce((sum, b) => sum + (num(b.netPayable) - num(b.amountPaid)), 0),
-    );
 
     // Weighted by the salesperson's own read on the chance of award — the
     // honest way to total a pipeline, and the only figure anybody should plan
     // against.
-    const quotedValue = (q: (typeof pipelineOpen)[number]) =>
-      num((q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0])?.total);
-
     const weightedPipeline = cents(
-      pipelineOpen.reduce((sum, q) => sum + quotedValue(q) * (q.probability / 100), 0),
+      pipelineOpen.reduce((sum, q) => sum + quotationValue(q.revisions) * (q.probability / 100), 0),
     );
-    const openPipeline = cents(pipelineOpen.reduce((sum, q) => sum + quotedValue(q), 0));
+    const openPipeline = cents(pipelineOpen.reduce((sum, q) => sum + quotationValue(q.revisions), 0));
 
     const decided = quotationsWon + quotationsLost;
 
@@ -205,22 +200,44 @@ insightRoutes.get(
         billedInRange: num(billedAgg._sum.grossAmount),
       },
       finance: {
-        receivable,
-        receivableOverdue,
-        payable,
+        receivable: position.receivable,
+        receivableOverdue: position.receivableOverdue,
+        payable: position.payable,
+        payableOverdue: position.payableOverdue,
+        reimbursable: position.reimbursable,
+        advancesToRelease: position.advancesToRelease,
         collectedThisMonth: cents(num(collectedThisMonth._sum.amount)),
         collectedInRange: cents(num(collectedInRange._sum.amount)),
-        workingPosition: cents(receivable - payable),
+        // Receivable less everything owed — G-FIN's definition, to the centavo.
+        workingPosition: position.workingPosition,
       },
       chain: {
-        stockValue: cents(
-          stockValue.reduce((sum, b) => sum + num(b.quantity) * num(b.averageCost), 0),
-        ),
-        stockLines: stockValue.length,
+        stockValue: stock.value,
+        stockLines: stock.lines,
       },
       aftermarket: { contractsActive, visitsOverdue },
       people: { headcount, pendingApprovals },
+      summary,
     });
+  }),
+);
+
+/**
+ * The brief's CSV twin — one row per figure, with its basis, scope and the
+ * screen it opens.
+ *
+ * `insights.dashboard.export` to call it at all, and each module's rows also
+ * need that module's `*.dashboard.export`: holding a figure on screen is not
+ * the right to take a file of it away. Audited before the bytes go out, like
+ * every other export here.
+ */
+insightRoutes.get(
+  '/summary.csv',
+  require_('insights.dashboard.export'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const summary = await companySummary(me, req.query, new Date());
+    await sendCsv(req, res, 'company-summary', SUMMARY_CSV_HEADER, summaryCsvRows(summary, me));
   }),
 );
 
@@ -243,8 +260,9 @@ insightRoutes.get(
         where: { status: { in: ['APPROVED', 'INVOICED'] }, billingDate: { gte: start } },
         select: { billingDate: true, grossAmount: true },
       }),
+      // Customer receipts only — an advance refund is not a collection.
       prisma.payment.findMany({
-        where: { kind: 'RECEIPT', clearedAt: { gte: start } },
+        where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: start } },
         select: { clearedAt: true, amount: true },
       }),
       prisma.jobCostEntry.findMany({
@@ -258,7 +276,7 @@ insightRoutes.get(
         where: { outcome: 'WON', decidedAt: { gte: start } },
         select: {
           decidedAt: true,
-          revisions: { select: { total: true, status: true }, orderBy: { revision: 'desc' } },
+          revisions: { select: { total: true, status: true, revision: true } },
         },
       }),
     ]);
@@ -283,8 +301,7 @@ insightRoutes.get(
     }
     for (const q of quotations) {
       const k = monthKey(q.decidedAt!);
-      const value = num((q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0])?.total);
-      if (k in won) won[k] = cents(won[k] + value);
+      if (k in won) won[k] = cents(won[k] + quotationValue(q.revisions));
     }
 
     res.json({
@@ -404,13 +421,31 @@ insightRoutes.get(
 //  SALES ANALYTICS
 // ════════════════════════════════════════════════════════════════════
 
+/** The bucket a customer with no industry, or a lead with no customer, reports under. */
+const UNCLASSIFIED = { code: 'UNCLASSIFIED', name: 'Unclassified' };
+
+interface IndustryRow {
+  code: string;
+  name: string;
+  leads: number;
+  quotations: number;
+  quotedValue: number;
+  won: number;
+  wonValue: number;
+  lost: number;
+  winRatePct: number;
+  openValue: number;
+  weightedValue: number;
+}
+
 insightRoutes.get(
   '/pipeline',
   require_('insights.pipeline.view_all'),
   handler(async (req, res) => {
     const range = parseRange(req.query.from as string, req.query.to as string);
 
-    const [leads, quotations] = await Promise.all([
+    const industrySelect = { select: { code: true, name: true } } as const;
+    const [leads, quotations, activeIndustries] = await Promise.all([
       prisma.lead.findMany({
         where: { createdAt: { gte: range.from, lte: range.to } },
         select: {
@@ -421,6 +456,9 @@ insightRoutes.get(
           probability: true,
           createdAt: true,
           assignedTo: { select: { id: true, name: true } },
+          // A lead's industry is its customer's. A lead with no customer yet
+          // reports as Unclassified — which is the truth about it.
+          customer: { select: { industry: industrySelect } },
         },
       }),
       prisma.quotation.findMany({
@@ -434,19 +472,20 @@ insightRoutes.get(
           decidedAt: true,
           lostReason: true,
           createdAt: true,
-          customer: { select: { id: true, name: true } },
+          customer: { select: { id: true, name: true, industry: industrySelect } },
           owner: { select: { id: true, name: true } },
-          revisions: {
-            select: { total: true, status: true, revision: true },
-            orderBy: { revision: 'desc' },
-          },
+          revisions: { select: { total: true, status: true, revision: true } },
         },
+      }),
+      prisma.industry.findMany({
+        where: { isActive: true },
+        select: { code: true, name: true },
+        orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
       }),
     ]);
 
-    /** A quotation's value is its latest approved revision, else its latest. */
-    const valueOf = (q: (typeof quotations)[number]) =>
-      num((q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0])?.total);
+    /** A quotation's value: its approved revision, else its latest (shared/pipeline.ts). */
+    const valueOf = (q: (typeof quotations)[number]) => quotationValue(q.revisions);
 
     const decidedInRange = quotations.filter(
       (q) => q.decidedAt && q.decidedAt >= range.from && q.decidedAt <= range.to,
@@ -492,25 +531,70 @@ insightRoutes.get(
       return people.get(id)!;
     };
 
-    for (const lead of leads) touch(lead.assignedTo.id, lead.assignedTo.name).leads++;
+    // Per industry. Every active industry is listed, even at zero — a blank
+    // row is information ("nothing from utilities this year"). An inactive
+    // one appears only when a record still carries it, and Unclassified is
+    // always last. The sums of this table ARE the totals below; the
+    // verify script holds it to that.
+    const industries = new Map<string, IndustryRow>();
+    const industryRow = (industry: { code: string; name: string } | null | undefined) => {
+      const key = industry ?? UNCLASSIFIED;
+      let row = industries.get(key.code);
+      if (!row) {
+        row = {
+          code: key.code,
+          name: key.name,
+          leads: 0,
+          quotations: 0,
+          quotedValue: 0,
+          won: 0,
+          wonValue: 0,
+          lost: 0,
+          winRatePct: 0,
+          openValue: 0,
+          weightedValue: 0,
+        };
+        industries.set(key.code, row);
+      }
+      return row;
+    };
+    for (const industry of activeIndustries) industryRow(industry);
+
+    for (const lead of leads) {
+      touch(lead.assignedTo.id, lead.assignedTo.name).leads++;
+      industryRow(lead.customer?.industry).leads++;
+    }
 
     for (const q of quotations) {
       const person = touch(q.owner.id, q.owner.name);
+      const industry = industryRow(q.customer.industry);
+      const value = valueOf(q);
       const inRange = q.createdAt >= range.from && q.createdAt <= range.to;
       if (inRange) {
         person.quotations++;
-        person.quotedValue = cents(person.quotedValue + valueOf(q));
+        person.quotedValue = cents(person.quotedValue + value);
+        industry.quotations++;
+        industry.quotedValue = cents(industry.quotedValue + value);
       }
       if (q.decidedAt && q.decidedAt >= range.from && q.decidedAt <= range.to) {
         if (q.outcome === 'WON') {
           person.won++;
-          person.wonValue = cents(person.wonValue + valueOf(q));
+          person.wonValue = cents(person.wonValue + value);
+          industry.won++;
+          industry.wonValue = cents(industry.wonValue + value);
         }
-        if (q.outcome === 'LOST') person.lost++;
+        if (q.outcome === 'LOST') {
+          person.lost++;
+          industry.lost++;
+        }
         const from = q.submittedAt ?? q.createdAt;
         decideDays
           .get(q.owner.id)!
           .push(Math.max(0, Math.round((q.decidedAt.getTime() - from.getTime()) / 86_400_000)));
+      }
+      if (['OPEN', 'SUBMITTED', 'NEGOTIATION'].includes(q.outcome)) {
+        industry.openValue = cents(industry.openValue + value);
+        industry.weightedValue = cents(industry.weightedValue + value * (q.probability / 100));
       }
     }
     for (const person of people.values()) {
@@ -518,6 +602,9 @@ insightRoutes.get(
       person.winRatePct = pct(person.won, decided);
       person.medianDaysToDecide = median(decideDays.get(person.id) ?? []);
     }
+    for (const row of industries.values()) row.winRatePct = pct(row.won, row.won + row.lost);
+    const unclassified = industries.get(UNCLASSIFIED.code) ?? industryRow(UNCLASSIFIED);
+    industries.delete(UNCLASSIFIED.code);
 
     // Where the work comes from.
     const bySource = new Map<string, { source: string; leads: number; won: number; value: number }>();
@@ -562,6 +649,7 @@ insightRoutes.get(
         ),
       },
       people: [...people.values()].sort((a, b) => b.wonValue - a.wonValue),
+      industries: [...industries.values(), unclassified],
       sources: [...bySource.values()].sort((a, b) => b.leads - a.leads),
       lostReasons: [...lostReasons.entries()]
         .map(([reason, count]) => ({ reason, count }))
@@ -572,7 +660,7 @@ insightRoutes.get(
           id: q.id,
           number: q.number,
           subject: q.subject,
-          customer: q.customer,
+          customer: { id: q.customer.id, name: q.customer.name },
           owner: q.owner.name,
           outcome: q.outcome,
           probability: q.probability,
@@ -593,9 +681,9 @@ insightRoutes.get(
     const quotations = await prisma.quotation.findMany({
       where: { createdAt: { gte: range.from, lte: range.to } },
       include: {
-        customer: { select: { name: true } },
+        customer: { select: { name: true, industry: { select: { code: true, name: true } } } },
         owner: { select: { name: true } },
-        revisions: { select: { total: true, status: true, revision: true }, orderBy: { revision: 'desc' } },
+        revisions: { select: { total: true, status: true, revision: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -604,9 +692,11 @@ insightRoutes.get(
       req,
       res,
       'sales-pipeline',
-      ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason'],
+      // Industry is APPENDED, not slotted in beside Customer: a sheet somebody
+      // already built on this export keeps its columns where they were.
+      ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason', 'Industry'],
       quotations.map((q) => {
-        const value = num((q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0])?.total);
+        const value = quotationValue(q.revisions);
         return [
           q.number,
           q.subject,
@@ -620,6 +710,7 @@ insightRoutes.get(
           day(q.submittedAt),
           day(q.decidedAt),
           q.lostReason ?? '',
+          q.customer.industry ? `${q.customer.industry.code} ${q.customer.industry.name}` : UNCLASSIFIED.name,
         ];
       }),
     );
@@ -629,6 +720,184 @@ insightRoutes.get(
 // ════════════════════════════════════════════════════════════════════
 //  CASH FORECAST
 // ════════════════════════════════════════════════════════════════════
+
+/**
+ * Everything the forecast counts, one row per document, already placed on a
+ * day. The screen buckets these rows and the CSV prints them, so the two can
+ * never list different documents — the CSV used to carry invoices and bills
+ * only, while the screen also counted billings, claims, orders and advances.
+ */
+interface ForecastItem {
+  direction: 'In' | 'Out';
+  key: 'invoiced' | 'unbilled' | 'refunds' | 'payable' | 'reimbursable' | 'committed' | 'advances';
+  document: string;
+  party: string;
+  due: Date;
+  amount: number;
+}
+
+async function forecastItems(today: Date): Promise<ForecastItem[]> {
+  const [invoices, uninvoiced, bills, claims, openOrders, advances] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
+      select: {
+        number: true,
+        dueDate: true,
+        netCollectible: true,
+        amountCollected: true,
+        customer: { select: { name: true } },
+      },
+      orderBy: { dueDate: 'asc' },
+    }),
+    prisma.progressBilling.findMany({
+      where: { status: 'APPROVED', invoice: null },
+      select: {
+        number: true,
+        netCollectible: true,
+        job: { select: { customer: { select: { name: true } } } },
+      },
+    }),
+    prisma.supplierBill.findMany({
+      where: { status: { in: ['APPROVED', 'PARTIALLY_PAID'] } },
+      select: {
+        number: true,
+        dueDate: true,
+        netPayable: true,
+        amountPaid: true,
+        supplier: { select: { name: true } },
+      },
+      orderBy: { dueDate: 'asc' },
+    }),
+    prisma.expenseClaim.findMany({
+      where: { status: 'APPROVED' },
+      select: {
+        number: true,
+        claimDate: true,
+        total: true,
+        amountPaid: true,
+        // A liquidation is owed only its excess over the cash already handed
+        // over — claimPayable() decides it, exactly as G-FIN does.
+        advance: { select: { amountReleased: true } },
+        claimedBy: { select: { name: true } },
+      },
+    }),
+    prisma.purchaseOrder.findMany({
+      where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } },
+      select: {
+        number: true,
+        orderDate: true,
+        deliveryDate: true,
+        total: true,
+        supplier: { select: { name: true } },
+        bills: { select: { id: true } },
+      },
+    }),
+    prisma.cashAdvance.findMany({
+      where: { status: { in: ['APPROVED', 'REFUND_DUE'] } },
+      select: {
+        number: true,
+        status: true,
+        amount: true,
+        amountReleased: true,
+        amountSpent: true,
+        amountRefunded: true,
+        requestDate: true,
+        neededBy: true,
+        liquidationDueDate: true,
+        requestedBy: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const items: ForecastItem[] = [];
+  const push = (item: ForecastItem) => {
+    if (item.amount > 0.005) items.push(item);
+  };
+
+  for (const inv of invoices) {
+    push({
+      direction: 'In',
+      key: 'invoiced',
+      document: inv.number,
+      party: inv.customer.name,
+      due: inv.dueDate,
+      amount: cents(num(inv.netCollectible) - num(inv.amountCollected)),
+    });
+  }
+  // An approved billing not yet invoiced is treated as falling due on the
+  // day it would if somebody raised the invoice today — which is the point:
+  // it is only waiting on us.
+  for (const b of uninvoiced) {
+    push({
+      direction: 'In',
+      key: 'unbilled',
+      document: b.number,
+      party: b.job.customer.name,
+      due: today,
+      amount: num(b.netCollectible),
+    });
+  }
+  for (const bill of bills) {
+    push({
+      direction: 'Out',
+      key: 'payable',
+      document: bill.number,
+      party: bill.supplier.name,
+      due: bill.dueDate,
+      amount: cents(num(bill.netPayable) - num(bill.amountPaid)),
+    });
+  }
+  for (const claim of claims) {
+    push({
+      direction: 'Out',
+      key: 'reimbursable',
+      document: claim.number,
+      party: claim.claimedBy.name,
+      due: claim.claimDate,
+      amount: cents(claimPayable(claim) - num(claim.amountPaid)),
+    });
+  }
+  // A purchase order with no bill against it yet: committed money that will
+  // land as a payable once the supplier invoices.
+  for (const order of openOrders) {
+    if (order.bills.length) continue;
+    push({
+      direction: 'Out',
+      key: 'committed',
+      document: order.number,
+      party: order.supplier.name,
+      due: order.deliveryDate ?? order.orderDate,
+      amount: num(order.total),
+    });
+  }
+  // An approved advance goes out when the person needs it; unspent cash
+  // comes back by the liquidation deadline, or today if none is set. The
+  // same placement G-FIN's cash flow uses.
+  for (const adv of advances) {
+    if (adv.status === 'APPROVED') {
+      push({
+        direction: 'Out',
+        key: 'advances',
+        document: adv.number,
+        party: adv.requestedBy.name,
+        due: adv.neededBy ?? adv.requestDate,
+        amount: cents(num(adv.amount) - num(adv.amountReleased)),
+      });
+    } else {
+      push({
+        direction: 'In',
+        key: 'refunds',
+        document: adv.number,
+        party: adv.requestedBy.name,
+        due: adv.liquidationDueDate ?? today,
+        amount: cents(
+          Math.max(0, num(adv.amountReleased) - num(adv.amountSpent)) - num(adv.amountRefunded),
+        ),
+      });
+    }
+  }
+  return items;
+}
 
 /**
  * Money in and money out, by when it is due.
@@ -647,18 +916,8 @@ insightRoutes.get(
     const today = dayKey(new Date());
     const daysTo = (d: Date) => Math.floor((dayKey(d).getTime() - today.getTime()) / 86_400_000);
 
-    const [invoices, uninvoiced, bills, claims, openOrders, uncleared] = await Promise.all([
-      prisma.invoice.findMany({
-        where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
-        select: {
-          id: true,
-          number: true,
-          dueDate: true,
-          netCollectible: true,
-          amountCollected: true,
-          customer: { select: { name: true } },
-        },
-      }),
+    const [items, uninvoiced, uncleared] = await Promise.all([
+      forecastItems(today),
       prisma.progressBilling.findMany({
         where: { status: 'APPROVED', invoice: null },
         select: {
@@ -667,33 +926,6 @@ insightRoutes.get(
           billingDate: true,
           netCollectible: true,
           job: { select: { number: true, customer: { select: { name: true } } } },
-        },
-      }),
-      prisma.supplierBill.findMany({
-        where: { status: { in: ['APPROVED', 'PARTIALLY_PAID'] } },
-        select: {
-          id: true,
-          number: true,
-          dueDate: true,
-          netPayable: true,
-          amountPaid: true,
-          supplier: { select: { name: true } },
-        },
-      }),
-      prisma.expenseClaim.findMany({
-        where: { status: 'APPROVED' },
-        select: { id: true, number: true, claimDate: true, total: true, amountPaid: true },
-      }),
-      prisma.purchaseOrder.findMany({
-        where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } },
-        select: {
-          id: true,
-          number: true,
-          orderDate: true,
-          deliveryDate: true,
-          total: true,
-          supplier: { select: { name: true } },
-          bills: { select: { id: true } },
         },
       }),
       prisma.payment.findMany({
@@ -708,40 +940,23 @@ insightRoutes.get(
       toDay: Number.isFinite(w.to) ? w.to : null,
       invoiced: 0,
       unbilled: 0,
+      refunds: 0,
       payable: 0,
       reimbursable: 0,
       committed: 0,
+      advances: 0,
       net: 0,
     }));
 
-    const place = (dueDate: Date, amount: number, key: keyof ForecastBucket) => {
-      if (amount <= 0.005) return;
-      const i = windowFor(daysTo(dueDate));
-      if (i < 0) return;
-      (buckets[i][key] as number) = cents((buckets[i][key] as number) + amount);
-    };
-
-    for (const inv of invoices) {
-      place(inv.dueDate, cents(num(inv.netCollectible) - num(inv.amountCollected)), 'invoiced');
-    }
-    // An approved billing not yet invoiced is treated as falling due on the
-    // day it would if somebody raised the invoice today — which is the point:
-    // it is only waiting on us.
-    for (const b of uninvoiced) place(today, num(b.netCollectible), 'unbilled');
-    for (const bill of bills) {
-      place(bill.dueDate, cents(num(bill.netPayable) - num(bill.amountPaid)), 'payable');
-    }
-    for (const claim of claims) {
-      place(claim.claimDate, cents(num(claim.total) - num(claim.amountPaid)), 'reimbursable');
-    }
-    // A purchase order with no bill against it yet: committed money that will
-    // land as a payable once the supplier invoices.
-    for (const order of openOrders) {
-      if (order.bills.length) continue;
-      place(order.deliveryDate ?? order.orderDate, num(order.total), 'committed');
+    for (const item of items) {
+      const i = windowFor(daysTo(item.due));
+      if (i < 0) continue;
+      buckets[i][item.key] = cents(buckets[i][item.key] + item.amount);
     }
     for (const b of buckets) {
-      b.net = cents(b.invoiced + b.unbilled - b.payable - b.reimbursable - b.committed);
+      b.net = cents(
+        b.invoiced + b.unbilled + b.refunds - b.payable - b.reimbursable - b.committed - b.advances,
+      );
     }
 
     // A running position: each window's net, accumulated.
@@ -750,17 +965,20 @@ insightRoutes.get(
       running = cents(running + b.net);
       return { label: b.label, net: b.net, cumulative: running };
     });
+    const total = (key: ForecastItem['key']) => cents(buckets.reduce((s, b) => s + b[key], 0));
 
     res.json({
       asOf: today,
       buckets,
       cumulative,
       totals: {
-        invoiced: cents(buckets.reduce((s, b) => s + b.invoiced, 0)),
-        unbilled: cents(buckets.reduce((s, b) => s + b.unbilled, 0)),
-        payable: cents(buckets.reduce((s, b) => s + b.payable, 0)),
-        reimbursable: cents(buckets.reduce((s, b) => s + b.reimbursable, 0)),
-        committed: cents(buckets.reduce((s, b) => s + b.committed, 0)),
+        invoiced: total('invoiced'),
+        unbilled: total('unbilled'),
+        refunds: total('refunds'),
+        payable: total('payable'),
+        reimbursable: total('reimbursable'),
+        committed: total('committed'),
+        advances: total('advances'),
         net: running,
       },
       uncleared: {
@@ -794,42 +1012,21 @@ insightRoutes.get(
   require_('insights.cash.export'),
   handler(async (req, res) => {
     const today = dayKey(new Date());
-    const [invoices, bills] = await Promise.all([
-      prisma.invoice.findMany({
-        where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
-        include: { customer: { select: { name: true } } },
-        orderBy: { dueDate: 'asc' },
-      }),
-      prisma.supplierBill.findMany({
-        where: { status: { in: ['APPROVED', 'PARTIALLY_PAID'] } },
-        include: { supplier: { select: { name: true } } },
-        orderBy: { dueDate: 'asc' },
-      }),
-    ]);
-
-    const rows: (string | number)[][] = [];
-    for (const i of invoices) {
-      rows.push([
-        'In',
-        i.number,
-        i.customer.name,
-        day(i.dueDate),
-        money(cents(num(i.netCollectible) - num(i.amountCollected))),
-        Math.floor((dayKey(i.dueDate).getTime() - today.getTime()) / 86_400_000),
-      ]);
-    }
-    for (const b of bills) {
-      rows.push([
-        'Out',
-        b.number,
-        b.supplier.name,
-        day(b.dueDate),
-        money(cents(num(b.netPayable) - num(b.amountPaid))),
-        Math.floor((dayKey(b.dueDate).getTime() - today.getTime()) / 86_400_000),
-      ]);
-    }
-
-    await sendCsv(req, res, 'cash-forecast', ['Direction', 'Document', 'Party', 'Due', 'Amount', 'Days'], rows);
+    const items = (await forecastItems(today)).sort((a, b) => a.due.getTime() - b.due.getTime());
+    await sendCsv(
+      req,
+      res,
+      'cash-forecast',
+      ['Direction', 'Document', 'Party', 'Due', 'Amount', 'Days'],
+      items.map((i) => [
+        i.direction,
+        i.document,
+        i.party,
+        day(i.due),
+        money(i.amount),
+        Math.floor((dayKey(i.due).getTime() - today.getTime()) / 86_400_000),
+      ]),
+    );
   }),
 );
 
@@ -875,9 +1072,9 @@ insightRoutes.get(
       }),
     ]);
 
-    const totalValue = cents(
-      balances.reduce((s, b) => s + num(b.quantity) * num(b.averageCost), 0),
-    );
+    // Decided once, in shared/chain.ts — the G-CHAIN dashboard, the inventory
+    // summary and the company overview all print this same figure.
+    const totalValue = (await stockOnHand()).value;
 
     // By category, because "where is the money sitting" is the first question.
     const byCategory = new Map<string, { category: string; value: number; lines: number }>();
@@ -989,7 +1186,7 @@ insightRoutes.get(
         select: {
           outcome: true,
           owner: { select: { id: true, name: true } },
-          revisions: { select: { total: true, status: true, revision: true }, orderBy: { revision: 'desc' } },
+          revisions: { select: { total: true, status: true, revision: true } },
         },
       }),
       prisma.job.findMany({
@@ -1008,21 +1205,7 @@ insightRoutes.get(
         where: { performedAt: { gte: range.from, lte: range.to } },
         _count: { _all: true },
       }),
-      prisma.approvalRequest.findMany({
-        where: { status: 'PENDING' },
-        select: {
-          id: true,
-          documentType: true,
-          documentNumber: true,
-          subject: true,
-          amount: true,
-          createdAt: true,
-          currentSequence: true,
-          requester: { select: { name: true } },
-          workflow: { select: { name: true, steps: { include: { role: true, user: true } } } },
-        },
-        orderBy: { createdAt: 'asc' },
-      }),
+      approvalBottleneck(),
       prisma.progressBilling.groupBy({
         by: ['jobId'],
         where: { status: { in: ['APPROVED', 'INVOICED'] } },
@@ -1037,9 +1220,7 @@ insightRoutes.get(
       entry.raised++;
       if (q.outcome === 'WON') {
         entry.won++;
-        entry.wonValue = cents(
-          entry.wonValue + num((q.revisions.find((r) => r.status === 'APPROVED') ?? q.revisions[0])?.total),
-        );
+        entry.wonValue = cents(entry.wonValue + quotationValue(q.revisions));
       }
       sales.set(q.owner.id, entry);
     }
@@ -1114,22 +1295,9 @@ insightRoutes.get(
       };
     });
 
-    // The bottleneck. Who a document is waiting on, and for how long.
-    const today = Date.now();
-    const bottleneck = pending.map((p) => {
-      const step = p.workflow?.steps.find((s) => s.sequence === p.currentSequence);
-      return {
-        id: p.id,
-        documentType: p.documentType,
-        documentNumber: p.documentNumber,
-        subject: p.subject,
-        amount: p.amount ? num(p.amount) : null,
-        requester: p.requester.name,
-        waitingOn: step?.user?.name ?? step?.role?.name ?? step?.approverType.toLowerCase() ?? 'nobody',
-        step: step?.name ?? `Step ${p.currentSequence}`,
-        waitingDays: Math.floor((today - p.createdAt.getTime()) / 86_400_000),
-      };
-    });
+    // The bottleneck. Who a document is waiting on, and for how long — each
+    // row carrying the document's own link, so a stuck row opens.
+    const bottleneck = pending;
 
     const byApprover = new Map<string, { approver: string; count: number; oldestDays: number; value: number }>();
     for (const b of bottleneck) {
@@ -1161,34 +1329,24 @@ insightRoutes.get(
   '/performance.csv',
   require_('insights.performance.export'),
   handler(async (req, res) => {
-    const pending = await prisma.approvalRequest.findMany({
-      where: { status: 'PENDING' },
-      include: {
-        requester: { select: { name: true } },
-        workflow: { select: { name: true, steps: { include: { role: true, user: true } } } },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const today = Date.now();
+    const rows = await approvalBottleneck();
     await sendCsv(
       req,
       res,
       'approvals-waiting',
-      ['Document type', 'Number', 'Subject', 'Amount', 'Raised by', 'Waiting on', 'Step', 'Days waiting'],
-      pending.map((p) => {
-        const step = p.workflow?.steps.find((s) => s.sequence === p.currentSequence);
-        return [
-          p.documentType,
-          p.documentNumber ?? '',
-          p.subject,
-          p.amount ? money(num(p.amount)) : '',
-          p.requester.name,
-          step?.user?.name ?? step?.role?.name ?? step?.approverType.toLowerCase() ?? 'nobody',
-          step?.name ?? '',
-          Math.floor((today - p.createdAt.getTime()) / 86_400_000),
-        ];
-      }),
+      // Link is APPENDED so an existing sheet keeps its columns.
+      ['Document type', 'Number', 'Subject', 'Amount', 'Raised by', 'Waiting on', 'Step', 'Days waiting', 'Link'],
+      rows.map((r) => [
+        r.documentType,
+        r.documentNumber ?? '',
+        r.subject,
+        r.amount ? money(r.amount) : '',
+        r.requester,
+        r.waitingOn,
+        r.step,
+        r.waitingDays,
+        r.link ?? '',
+      ]),
     );
   }),
 );

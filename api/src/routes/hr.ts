@@ -17,7 +17,9 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, approversForStep } from '../shared/approvals';
+import { registerSearch } from '../shared/search';
+import { can, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { describeFace, faceEngineReady } from '../shared/face';
@@ -57,6 +59,46 @@ function asEnum<T extends Record<string, string>>(e: T, value: string | undefine
   return value && value in e ? (value as T[keyof T]) : undefined;
 }
 
+/**
+ * Whether one person may read one leave or overtime record.
+ *
+ * The list routes scope by owner; a single record needs the same answer, plus
+ * one more door: whoever the approval engine has put the document in front of.
+ * A supervisor holding only `.view_own` who is asked to decide a leave request
+ * must be able to open it — deciding on a notification's subject line alone is
+ * approving blind. Anyone else holding only the own-scope key gets a 403.
+ */
+async function mayReadHrRecord(
+  me: ResolvedUser,
+  viewAllKey: string,
+  ownerEmployeeId: string,
+  documentTypes: string[],
+  documentId: string,
+): Promise<boolean> {
+  if (can(me, viewAllKey)) return true;
+  const mine = await myEmployee(me.id);
+  if (mine && mine.id === ownerEmployeeId) return true;
+  return isApproverOf(me.id, documentTypes, documentId);
+}
+
+/** Has acted on, or is eligible to act on the current step of, this document. */
+async function isApproverOf(userId: string, documentTypes: string[], documentId: string): Promise<boolean> {
+  const requests = await prisma.approvalRequest.findMany({
+    where: { documentType: { in: documentTypes }, documentId },
+    include: {
+      actions: { select: { approverId: true } },
+      workflow: { include: { steps: true } },
+    },
+  });
+  for (const request of requests) {
+    if (request.actions.some((a) => a.approverId === userId)) return true;
+    if (request.status !== 'PENDING') continue;
+    const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
+    if (step && (await approversForStep(step, request.requesterId)).includes(userId)) return true;
+  }
+  return false;
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  CLOCK IN / OUT
 // ════════════════════════════════════════════════════════════════════
@@ -79,10 +121,30 @@ clockRoutes.get(
     const settings = await hrSettings();
 
     if (!employee) {
+      /*
+        Somebody who can open the employee register gets a way to fix it rather
+        than a message to pass on: the unlinked record that carries this login's
+        employee number, when there is one. Nobody else sees it — it names an
+        employee record, and the register is HR's.
+      */
+      let candidate: { id: string; employeeNo: string; name: string } | null = null;
+      if (can(me, 'ghr.employees.view_all')) {
+        const user = await prisma.user.findUnique({ where: { id: me.id }, select: { employeeNo: true } });
+        const match = user?.employeeNo
+          ? await prisma.employee.findFirst({
+              where: { employeeNo: user.employeeNo, userId: null },
+              select: { id: true, employeeNo: true, firstName: true, lastName: true },
+            })
+          : null;
+        if (match) {
+          candidate = { id: match.id, employeeNo: match.employeeNo, name: `${match.firstName} ${match.lastName}` };
+        }
+      }
       res.json({
         employee: null,
         message:
           'Your user account is not linked to an employee record, so attendance cannot be recorded. Ask HR to link it.',
+        candidate,
         settings,
       });
       return;
@@ -745,6 +807,53 @@ leaveRoutes.get(
   }),
 );
 
+/**
+ * One leave request, so an approval notification (`/g-hr/leave/:id`) lands on
+ * the request rather than on the register. The LAST GET on this router: the
+ * literal `/types` and `/balances` above must match before `/:id` can.
+ *
+ * Same shape as a list row, plus `proofNote` — the supporting documentation is
+ * what an approver of sick leave is actually deciding on.
+ */
+leaveRoutes.get(
+  '/:id',
+  requireAny('ghr.leave.view_all', 'ghr.leave.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const request = await prisma.leaveRequest.findUnique({
+      where: { id: req.params.id },
+      include: {
+        employee: { select: { id: true, employeeNo: true, firstName: true, lastName: true, userId: true } },
+        leaveType: { select: { id: true, name: true, isPaid: true } },
+      },
+    });
+    if (!request) throw notFound('Leave request not found');
+
+    const readable = await mayReadHrRecord(
+      me,
+      'ghr.leave.view_all',
+      request.employeeId,
+      ['leave_request'],
+      request.id,
+    );
+    if (!readable) throw forbidden('That is someone else’s leave request');
+
+    const own = request.employee.userId === me.id;
+    const { userId: _userId, ...employee } = request.employee;
+    res.json({
+      ...request,
+      employee,
+      days: num(request.days),
+      // Mirrors POST /:id/cancel exactly, so the button is never offered to
+      // somebody the route would refuse.
+      canCancel:
+        request.status !== 'CANCELLED' &&
+        request.status !== 'REJECTED' &&
+        (own || me.isSuperAdmin || me.permissions.has('ghr.leave.edit_all')),
+    });
+  }),
+);
+
 const leaveSchema = z.object({
   leaveTypeId: z.string().min(1, 'Which kind of leave?'),
   startDate: z.string().min(1, 'Start date is required'),
@@ -873,15 +982,31 @@ leaveRoutes.post(
       data: { status: 'PENDING_APPROVAL' },
     });
 
-    await submitForApproval({
-      documentType: 'leave_request',
-      documentId: request.id,
-      documentNumber: request.number,
-      subject: `${request.employee.firstName} ${request.employee.lastName} — ${num(request.days)} day(s) ${request.leaveType.name}`,
-      link: `/g-hr/leave/${request.id}`,
-      requesterId: me.id,
-    });
+    try {
+      await submitForApproval({
+        documentType: 'leave_request',
+        documentId: request.id,
+        documentNumber: request.number,
+        subject: `${request.employee.firstName} ${request.employee.lastName} — ${num(request.days)} day(s) ${request.leaveType.name}`,
+        link: `/g-hr/leave/${request.id}`,
+        requesterId: me.id,
+      });
+    } catch (err) {
+      // No workflow, or nobody to route to: the request goes back to DRAFT
+      // rather than reading "pending" with no approval behind it.
+      await prisma.leaveRequest.update({ where: { id: request.id }, data: { status: 'DRAFT' } });
+      throw err;
+    }
 
+    await audit(
+      {
+        entityType: 'leave_request',
+        entityId: request.id,
+        action: 'SUBMITTED',
+        summary: `${request.number} sent for approval`,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );
@@ -1064,8 +1189,10 @@ overtimeRoutes.get(
 overtimeRoutes.get(
   '/chargeable',
   require_('ghr.overtime.create'),
-  handler(async (_req, res) => {
-    const [jobs, categories] = await Promise.all([
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const mine = await myEmployee(me.id);
+    const [jobs, categories, last] = await Promise.all([
       prisma.job.findMany({
         where: { status: { notIn: ['CANCELLED', 'TURNED_OVER'] } },
         select: { id: true, number: true, name: true },
@@ -1077,8 +1204,33 @@ overtimeRoutes.get(
         select: { id: true, name: true },
         orderBy: { sortOrder: 'asc' },
       }),
+      mine
+        ? prisma.overtimeRequest.findFirst({
+            where: { employeeId: mine.id, jobId: { not: null }, stage: { not: 'CANCELLED' } },
+            orderBy: { createdAt: 'desc' },
+            select: { jobId: true, costCategoryId: true },
+          })
+        : null,
     ]);
-    res.json({ jobs, categories });
+
+    /*
+      What the filing form starts on. Overtime runs in streaks on one job — the
+      commissioning that overran on Monday overruns on Tuesday — so the job
+      and budget line of this person's last filing are the likeliest answer,
+      while that job is still chargeable. The budget line otherwise defaults to
+      labour, because overtime is labour whichever job it lands on.
+    */
+    const lastJobId = last?.jobId && jobs.some((j) => j.id === last.jobId) ? last.jobId : null;
+    const lastCategoryId =
+      lastJobId && last?.costCategoryId && categories.some((c) => c.id === last.costCategoryId)
+        ? last.costCategoryId
+        : null;
+    const labour = categories.find((c) => /labou?r/i.test(c.name)) ?? null;
+    res.json({
+      jobs,
+      categories,
+      defaults: { jobId: lastJobId, costCategoryId: lastCategoryId ?? labour?.id ?? null },
+    });
   }),
 );
 
@@ -1098,7 +1250,21 @@ overtimeRoutes.get(
     });
     if (!ot) throw notFound('Overtime request not found');
 
+    // The list is scoped to one's own filings; the record was not, so anyone
+    // holding only view_own could read a colleague's hours and burdened rate
+    // by id. Same rule as a leave request: owner, view_all, or an approver.
+    const me = currentUser(req);
+    const readable = await mayReadHrRecord(
+      me,
+      'ghr.overtime.view_all',
+      ot.employeeId,
+      ['overtime_prior', 'overtime_request'],
+      ot.id,
+    );
+    if (!readable) throw forbidden('That is someone else’s overtime');
+
     const rate = await overtimeRate(ot.employeeId);
+    const own = (await myEmployee(me.id))?.id === ot.employeeId;
     res.json({
       ...presentOt(ot),
       rate,
@@ -1107,6 +1273,14 @@ overtimeRoutes.get(
         ot.actualHours != null
           ? Math.round((num(ot.actualHours) - num(ot.estimatedHours)) * 100) / 100
           : null,
+      // Mirror POST /:id/actual and /:id/cancel, so an approver reading the
+      // filing is not offered buttons the routes would refuse.
+      canFileActual:
+        ot.stage === 'PRIOR_APPROVED' && (own || me.isSuperAdmin) && can(me, 'ghr.overtime.create'),
+      canCancel:
+        ot.stage !== 'APPROVED' &&
+        ot.stage !== 'CANCELLED' &&
+        (own || me.isSuperAdmin || me.permissions.has('ghr.overtime.edit_all')),
     });
   }),
 );
@@ -1322,6 +1496,17 @@ overtimeRoutes.post(
       requesterId: me.id,
     });
 
+    await audit(
+      {
+        entityType: 'overtime_request',
+        entityId: ot.id,
+        action: 'SUBMITTED',
+        summary: `${ot.number} actual hours filed — ${hours}h${
+          Math.abs(variance) > 0.01 ? ` (${variance > 0 ? '+' : ''}${variance}h vs estimate)` : ''
+        }`,
+      },
+      req,
+    );
     res.json(presentOt(updated));
   }),
 );
@@ -1429,6 +1614,7 @@ overtimeRoutes.post(
     if (ot.stage === 'APPROVED') {
       throw badRequest('This overtime has already been approved and charged — it cannot be cancelled');
     }
+    if (ot.stage === 'CANCELLED') throw badRequest('Already cancelled');
 
     await prisma.$transaction(async (tx) => {
       await tx.overtimeRequest.update({ where: { id: ot.id }, data: { stage: 'CANCELLED' } });
@@ -1442,9 +1628,95 @@ overtimeRoutes.post(
       });
     });
 
+    await audit(
+      {
+        entityType: 'overtime_request',
+        entityId: ot.id,
+        action: 'CANCELLED',
+        summary: `${ot.number} cancelled`,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );
+
+// ── Global search ─────────────────────────────────────────────────────────────
+// A leave or overtime filing is found by number, reason or the person's name.
+// Own scope mirrors the list routes: holding only `.view_own`, you find your
+// own filings and nobody else's.
+
+registerSearch({
+  kind: 'leave_request',
+  label: 'Leave',
+  permission: ['ghr.leave.view_all', 'ghr.leave.view_own'],
+  ownWhere: (user) => ({ employee: { userId: user.id } }),
+  search: async (term, _user, limit, own) => {
+    const rows = await prisma.leaveRequest.findMany({
+      where: {
+        ...own,
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { reason: { contains: term, mode: 'insensitive' } },
+          { employee: { firstName: { contains: term, mode: 'insensitive' } } },
+          { employee: { lastName: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        employee: { select: { firstName: true, lastName: true } },
+        leaveType: { select: { name: true } },
+      },
+    });
+    return rows.map((r) => ({
+      kind: 'leave_request',
+      id: r.id,
+      title: `${r.number} — ${r.employee.firstName} ${r.employee.lastName}`,
+      subtitle: `${r.leaveType.name} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
+      link: `/g-hr/leave/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'overtime_request',
+  label: 'Overtime',
+  permission: ['ghr.overtime.view_all', 'ghr.overtime.view_own'],
+  ownWhere: (user) => ({ employee: { userId: user.id } }),
+  search: async (term, _user, limit, own) => {
+    const rows = await prisma.overtimeRequest.findMany({
+      where: {
+        ...own,
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { reason: { contains: term, mode: 'insensitive' } },
+          { employee: { firstName: { contains: term, mode: 'insensitive' } } },
+          { employee: { lastName: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        number: true,
+        stage: true,
+        employee: { select: { firstName: true, lastName: true } },
+        job: { select: { number: true } },
+      },
+    });
+    return rows.map((r) => ({
+      kind: 'overtime_request',
+      id: r.id,
+      title: `${r.number} — ${r.employee.firstName} ${r.employee.lastName}`,
+      subtitle: [r.job?.number, r.stage.toLowerCase().replace(/_/g, ' ')].filter(Boolean).join(' · '),
+      link: `/g-hr/overtime/${r.id}`,
+    }));
+  },
+});
 
 // ════════════════════════════════════════════════════════════════════
 //  HR SETTINGS & REPORTS

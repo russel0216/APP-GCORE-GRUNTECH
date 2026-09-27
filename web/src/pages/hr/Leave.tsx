@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
-import { Checkbox, ErrorBox, Field, Modal, formatDate, useToast } from '../../components/ui';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { DocumentApproval } from '../../components/ApprovalStepper';
+import {
+  Checkbox,
+  ErrorBox,
+  Field,
+  Loading,
+  Modal,
+  StatusBadge,
+  formatDate,
+  formatDateTime,
+  useToast,
+} from '../../components/ui';
 
 /**
  * Leave — filing, balances and the approval that spends them.
@@ -19,10 +31,6 @@ const STATUSES = [
   { value: 'REJECTED', label: 'Rejected' },
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
-
-import { statusTone as tone } from '../../components/ui';
-
-const label = (s: string) => s.toLowerCase().replace(/_/g, ' ');
 
 export interface LeaveType {
   id: string;
@@ -60,12 +68,33 @@ interface LeaveRow {
   leaveType: { id: string; name: string; isPaid: boolean };
 }
 
+/** `GET /leave/:id` — a list row, plus what only the single record carries. */
+interface LeaveDetail extends LeaveRow {
+  proofNote: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+  canCancel: boolean;
+}
+
+interface EmployeeOption {
+  id: string;
+  employeeNo: string;
+  firstName: string;
+  lastName: string;
+}
+
+const BASE = '/g-hr/leave';
+
 export function Leave() {
   const { can } = useAuth();
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [filing, setFiling] = useState(false);
-  const [viewing, setViewing] = useState<LeaveRow | null>(null);
   const [reload, setReload] = useState(0);
   const [balances, setBalances] = useState<Balance[] | null>(null);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  const seesEveryone = can('ghr.leave.view_all');
 
   const loadBalances = useCallback(async () => {
     try {
@@ -79,6 +108,20 @@ export function Leave() {
   useEffect(() => {
     loadBalances();
   }, [loadBalances, reload]);
+
+  // Former employees included: leave history outlives the employment.
+  useEffect(() => {
+    if (!seesEveryone) return;
+    api
+      .get<EmployeeOption[]>('/employees/lookup')
+      .then(setEmployees)
+      .catch(() => setEmployees([]));
+  }, [seesEveryone]);
+
+  // The record's URL keeps the list's query string, so closing it returns to
+  // the same filtered, paged list rather than to page one.
+  const open = (row: LeaveRow) => navigate(`${BASE}/${row.id}${location.search}`);
+  const close = () => navigate(`${BASE}${location.search}`);
 
   const columns: Column<LeaveRow>[] = [
     {
@@ -130,9 +173,24 @@ export function Leave() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <span className={`badge ${tone(r.status)}`}>{label(r.status)}</span>,
+      render: (r) => <StatusBadge status={r.status} />,
     },
   ];
+
+  // The Employee filter is declared even before its options arrive, so a
+  // `?employeeId=` in the URL (a dashboard link, say) is honoured on the first
+  // fetch rather than dropped.
+  const filters: FilterDef[] = [{ key: 'status', label: 'Status', options: STATUSES }];
+  if (seesEveryone) {
+    filters.push({
+      key: 'employeeId',
+      label: 'Employee',
+      options: employees.map((e) => ({
+        value: e.id,
+        label: `${e.lastName}, ${e.firstName} (${e.employeeNo})`,
+      })),
+    });
+  }
 
   return (
     <div>
@@ -147,21 +205,18 @@ export function Leave() {
       </div>
 
       {balances && balances.length > 0 && (
-        <div className="grid grid-4" style={{ marginBottom: 18 }}>
+        <div className="grid grid-4 hraud-balances">
           {balances.map((b) => (
             <div key={b.leaveType.id} className="card">
-              <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
+              <div className="faint hraud-eyebrow">
                 {b.leaveType.name.toUpperCase()}
                 {!b.leaveType.isPaid && ' · UNPAID'}
               </div>
-              <div style={{ fontSize: 24, marginTop: 6, fontWeight: 600 }}>
+              <div className="hraud-balance-figure">
                 {b.remainingAfterPending}
-                <span className="faint" style={{ fontSize: 13, fontWeight: 400 }}>
-                  {' '}
-                  / {b.entitled + b.carriedOver}
-                </span>
+                <span className="faint hraud-balance-of"> / {b.entitled + b.carriedOver}</span>
               </div>
-              <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+              <div className="faint hraud-balance-note">
                 {b.used} used
                 {b.pending > 0 && ` · ${b.pending} awaiting a decision`}
               </div>
@@ -179,8 +234,8 @@ export function Leave() {
         reloadToken={reload}
         searchPlaceholder="Search number, reason, employee…"
         emptyTitle="No leave filed yet"
-        onRowClick={(r) => setViewing(r)}
-        filters={[{ key: 'status', label: 'Status', options: STATUSES }]}
+        onRowClick={open}
+        filters={filters}
         actions={
           can('ghr.leave.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
@@ -200,13 +255,13 @@ export function Leave() {
         />
       )}
 
-      {viewing && (
+      {id && (
         <LeaveDetailModal
-          row={viewing}
-          onClose={() => setViewing(null)}
+          id={id}
+          onClose={close}
           onChanged={() => {
-            setViewing(null);
             setReload((r) => r + 1);
+            close();
           }}
         />
       )}
@@ -363,7 +418,7 @@ function FileLeaveModal({ onClose, onFiled }: { onClose: () => void; onFiled: ()
       <Checkbox checked={half} onChange={setHalf} label="Part of a day" />
 
       {half && (
-        <div className="grid grid-2" style={{ marginTop: 10 }}>
+        <div className="grid grid-2 hraud-gap-above">
           <Field label="Leaving from" hint="An afternoon start means the morning was worked">
             <input
               type="time"
@@ -423,26 +478,42 @@ function FileLeaveModal({ onClose, onFiled }: { onClose: () => void; onFiled: ()
 // ── The single request ───────────────────────────────────────────────────────
 
 /**
- * Opened from the list, which already holds everything a leave request is.
- * Fetching it again would tell nobody anything new.
+ * Opened by URL — `/g-hr/leave/:id` — so an approval notification, a search
+ * hit and a row click all land on the same thing. Read from `GET /leave/:id`
+ * rather than from the list: the list may be filtered or paged past the row,
+ * and only the record carries the proof note an approver is deciding on.
  */
 function LeaveDetailModal({
-  row,
+  id,
   onClose,
   onChanged,
 }: {
-  row: LeaveRow;
+  id: string;
   onClose: () => void;
   onChanged: () => void;
 }) {
   const toast = useToast();
-  const { me } = useAuth();
+  const { can } = useAuth();
+  const [row, setRow] = useState<LeaveDetail | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const settled = row.status === 'CANCELLED' || row.status === 'REJECTED';
+  useEffect(() => {
+    let live = true;
+    setRow(null);
+    setLoadError(null);
+    api
+      .get<LeaveDetail>(`/leave/${id}`)
+      .then((r) => live && setRow(r))
+      .catch((err) => live && setLoadError(err));
+    return () => {
+      live = false;
+    };
+  }, [id]);
 
   async function cancel() {
+    if (!row) return;
     setBusy(true);
     setError(null);
     try {
@@ -462,14 +533,14 @@ function LeaveDetailModal({
 
   return (
     <Modal
-      title={row.number}
+      title={row?.number ?? 'Leave request'}
       onClose={onClose}
       footer={
         <>
           <button className="btn" onClick={onClose} disabled={busy}>
             Close
           </button>
-          {!settled && (
+          {row?.canCancel && (
             <button className="btn btn-danger" onClick={cancel} disabled={busy}>
               {busy ? 'Cancelling…' : 'Cancel this request'}
             </button>
@@ -477,49 +548,71 @@ function LeaveDetailModal({
         </>
       }
     >
-      <ErrorBox error={error} />
-      <dl className="kv">
-        <dt>Employee</dt>
-        <dd>
-          {row.employee.firstName} {row.employee.lastName}{' '}
-          <span className="faint mono">{row.employee.employeeNo}</span>
-        </dd>
-        <dt>Type</dt>
-        <dd>
-          {row.leaveType.name}
-          {!row.leaveType.isPaid && <span className="faint"> · unpaid</span>}
-        </dd>
-        <dt>From</dt>
-        <dd>
-          {formatDate(row.startDate)}
-          {row.startTime && <span className="mono"> {row.startTime}</span>}
-        </dd>
-        <dt>To</dt>
-        <dd>
-          {formatDate(row.endDate)}
-          {row.endTime && <span className="mono"> {row.endTime}</span>}
-        </dd>
-        <dt>Working days</dt>
-        <dd className="mono">{row.days}</dd>
-        <dt>Reason</dt>
-        <dd>{row.reason}</dd>
-        <dt>Status</dt>
-        <dd>
-          <span className={`badge ${tone(row.status)}`}>{label(row.status)}</span>
-        </dd>
-      </dl>
+      <ErrorBox error={error ?? loadError} />
+      {!row ? (
+        !loadError && <Loading />
+      ) : (
+        <>
+          <dl className="kv">
+            <dt>Employee</dt>
+            <dd>
+              {can('ghr.employees.view_all') ? (
+                <Link to={`/g-hr/employees/${row.employee.id}`}>
+                  {row.employee.firstName} {row.employee.lastName}
+                </Link>
+              ) : (
+                <>
+                  {row.employee.firstName} {row.employee.lastName}
+                </>
+              )}{' '}
+              <span className="faint mono">{row.employee.employeeNo}</span>
+            </dd>
+            <dt>Type</dt>
+            <dd>
+              {row.leaveType.name}
+              {!row.leaveType.isPaid && <span className="faint"> · unpaid</span>}
+            </dd>
+            <dt>From</dt>
+            <dd>
+              {formatDate(row.startDate)}
+              {row.startTime && <span className="mono"> {row.startTime}</span>}
+            </dd>
+            <dt>To</dt>
+            <dd>
+              {formatDate(row.endDate)}
+              {row.endTime && <span className="mono"> {row.endTime}</span>}
+            </dd>
+            <dt>Working days</dt>
+            <dd className="mono">{row.days}</dd>
+            <dt>Reason</dt>
+            <dd>{row.reason}</dd>
+            <dt>Supporting documentation</dt>
+            <dd>{row.proofNote ?? <span className="faint">none noted</span>}</dd>
+            <dt>Filed</dt>
+            <dd>{formatDateTime(row.createdAt)}</dd>
+            <dt>Status</dt>
+            <dd>
+              <StatusBadge status={row.status} />
+            </dd>
+          </dl>
 
-      {row.status === 'PENDING_APPROVAL' && (
-        <div className="alert info" style={{ marginTop: 14, marginBottom: 0 }}>
-          Awaiting a decision. {me?.user.name ? 'Approvers act on it from My Work.' : ''} Nothing has
-          been taken off the balance yet.
-        </div>
-      )}
-      {row.status === 'APPROVED' && (
-        <div className="alert ok" style={{ marginTop: 14, marginBottom: 0 }}>
-          Approved — {row.days} day{row.days === 1 ? '' : 's'} drawn from {row.leaveType.name}.
-          Cancelling gives them back.
-        </div>
+          {row.status === 'PENDING_APPROVAL' && (
+            <div className="alert info hraud-after">
+              Awaiting a decision — the chain below shows who has it. Nothing has been taken off
+              the balance yet.
+            </div>
+          )}
+          {row.status === 'APPROVED' && (
+            <div className="alert ok hraud-after">
+              Approved — {row.days} day{row.days === 1 ? '' : 's'} drawn from {row.leaveType.name}.
+              Cancelling gives them back.
+            </div>
+          )}
+
+          <div className="hraud-after">
+            <DocumentApproval documentType="leave_request" documentId={row.id} />
+          </div>
+        </>
       )}
     </Modal>
   );

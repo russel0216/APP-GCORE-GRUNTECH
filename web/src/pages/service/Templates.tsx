@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import {
@@ -9,9 +9,11 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { Stat } from '../../components/charts';
 import { KINDS, type Template, type TemplateField, type TemplateSection } from './Reports';
 
 /**
@@ -538,7 +540,8 @@ export function AftermarketDashboard() {
       value: data.visits.overdue,
       sub: `${data.visits.thisMonth} more due this month`,
       tone: data.visits.overdue > 0 ? 'var(--danger)' : undefined,
-      to: '/g-ops/visits?due=true',
+      // The list, not the month grid: "overdue" is a list of things to chase.
+      to: '/g-ops/visits?mode=list&due=true',
     },
   ];
 
@@ -559,17 +562,9 @@ export function AftermarketDashboard() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
+      <div className="kpi-grid svc-kpis">
         {tiles.map((t) => (
-          <Link key={t.label} to={t.to} className="card">
-            <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-              {t.label.toUpperCase()}
-            </div>
-            <div style={{ fontSize: 24, marginTop: 6, fontWeight: 600, color: t.tone }}>{t.value}</div>
-            <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-              {t.sub}
-            </div>
-          </Link>
+          <Stat key={t.label} label={t.label} value={t.value} hint={t.sub} tone={t.tone} to={t.to} />
         ))}
       </div>
 
@@ -626,7 +621,6 @@ export function AftermarketDashboard() {
  * would give it a second place to drift out of step.
  */
 export function ServiceCosting() {
-  const navigate = useNavigate();
   const [rows, setRows] = useState<
     {
       id: string;
@@ -691,21 +685,19 @@ export function ServiceCosting() {
                   const margin =
                     c.contractValue > 0 ? ((c.contractValue - c.totalCost) / c.contractValue) * 100 : 0;
                   return (
-                    <tr
-                      key={c.id}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => navigate(`/g-ops/costing/${c.id}`)}
-                    >
-                      <td className="mono">{c.number}</td>
+                    <tr key={c.id}>
+                      <td>
+                        <Link to={`/g-ops/costing/${c.id}`} className="mono">
+                          {c.number}
+                        </Link>
+                      </td>
                       <td>{c.title}</td>
                       <td className="faint">{c.customer?.name ?? '—'}</td>
                       <td className="right mono">{formatMoney(c.totalCost)}</td>
                       <td className="right mono">{formatMoney(c.contractValue)}</td>
                       <td className="right mono">{margin.toFixed(1)}%</td>
                       <td>
-                        <span className={`badge ${c.status === 'FINAL' ? 'ok' : ''}`}>
-                          {c.status.toLowerCase()}
-                        </span>
+                        <StatusBadge status={c.status} extra={{ FINAL: 'ok' }} />
                       </td>
                     </tr>
                   );

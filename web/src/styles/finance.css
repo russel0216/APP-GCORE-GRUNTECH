@@ -1,1 +1,93 @@
-/* Cash advances, liquidation, payments, finance reports — package FIN. Tokens only. */
+/* Cash advances, liquidation, payments, finance reports — package FIN. Tokens only.
+   Colour comes from the theme tokens, so both themes are covered by the
+   variables themselves; nothing here names a colour of its own. */
+
+/* Spacing that used to be inline pixel values across the finance screens. */
+.fin-gap-top {
+  margin-top: var(--s-4);
+}
+
+.fin-gap-top-sm {
+  margin-top: var(--s-2);
+}
+
+.fin-flush {
+  margin-bottom: 0;
+}
+
+.fin-gap-bottom {
+  margin-bottom: var(--s-4);
+}
+
+.fin-section-title {
+  margin: var(--s-5) 0 var(--s-2);
+}
+
+/* A money figure typed into a table cell reads the way it prints. */
+.fin-amount-input {
+  text-align: right;
+}
+
+/* A narrow action column (the ✕ that removes a line). */
+.fin-col-tight {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* A fieldset used only to disable a whole form at once. */
+.fin-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+/* Several record links in one cell — an allocation list, say. */
+.fin-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-2);
+}
+
+.fin-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+/* The settlement block on a claim or an advance: the figure that matters is
+   the last one, so it is set a step larger rather than coloured. */
+.fin-settlement dd.fin-settlement-total {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+/* The aging strip's small caption above each bucket. */
+.fin-bucket-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fin-bucket-count {
+  font-size: var(--fs-xs);
+  margin-top: var(--s-1);
+}
+
+/* The cash-flow table's bar column takes the space the figures leave. */
+.fin-flow-col {
+  width: 34%;
+}
+
+/* A read-only note under a form field group. */
+.fin-note {
+  font-size: var(--fs-sm);
+  color: var(--faint);
+  margin: var(--s-2) 0 0;
+}
+
+@media (max-width: 45em) {
+  .fin-flow-col {
+    width: auto;
+  }
+}

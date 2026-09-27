@@ -325,6 +325,49 @@ async function main() {
     (await prisma.numberSequence.count({ where: { documentType: `${TAG}_owner_blind` } })) === 1,
   );
 
+  // The template is the periodKey '' row. Before the rewrite an unfiltered
+  // findFirst could return an old year's counter instead — same type, but a
+  // stale pattern and somebody's lastNumber. Seed exactly that trap.
+  await prisma.numberSequence.create({
+    data: {
+      documentType: `${TAG}_tpl`,
+      label: 'Verify — template lookup',
+      pattern: '{PREFIX}-{TYPE}-{YYYY}-{SEQ}',
+      typeCode: 'VT',
+      period: 'YEAR',
+      scope: 'GLOBAL',
+      padding: 4,
+    },
+  });
+  await prisma.numberSequence.create({
+    data: {
+      documentType: `${TAG}_tpl`,
+      label: 'Verify — template lookup',
+      pattern: 'OLD-{SEQ}',
+      typeCode: 'VT',
+      period: 'YEAR',
+      scope: 'GLOBAL',
+      periodKey: '2019',
+      padding: 4,
+      lastNumber: 500,
+    },
+  });
+  const fromTemplate = await nextNumber(`${TAG}_tpl`, prisma, { at: sept });
+  check(
+    'a new period starts from the template row, not from an old counter',
+    fromTemplate === 'GT-VT-2026-0001',
+    fromTemplate,
+  );
+
+  // A company-wide pattern still tells a form whether its author is linked,
+  // so "you are not linked to an employee" can be said before it matters.
+  const globalPeek = await previewNext(`${TAG}_tpl`, { ownerId: salesUser.id, at: sept });
+  check(
+    'a preview on a company-wide pattern still reports the author’s link',
+    globalPeek.number === 'GT-VT-2026-0002' && globalPeek.linked === false && globalPeek.periodKey === '2026',
+    `${globalPeek.number} linked=${globalPeek.linked} key=${globalPeek.periodKey}`,
+  );
+
   // ── 3. The approval engine ─────────────────────────────────────────────────
   console.log('\nApproval engine');
 

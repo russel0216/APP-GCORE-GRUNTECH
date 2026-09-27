@@ -3,18 +3,21 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import {
-  statusTone,
   ErrorBox,
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatMoney,
   useToast,
+  type Tone,
 } from '../../components/ui';
 import type { Asset } from './InstalledBase';
-import { todayLocal } from '../../lib/day';
+import { monthOf, todayLocal } from '../../lib/day';
+import { VisitBadge } from './Schedule';
 
 /**
  * Service contracts.
@@ -35,7 +38,7 @@ const STATUSES = [
 ];
 
 /** RENEWED reads as information here, not as a settled-well outcome. */
-const tone = (status: string) => statusTone(status, { RENEWED: 'info' });
+const CONTRACT_TONES: Record<string, Tone> = { RENEWED: 'info' };
 
 interface Contract {
   id: string;
@@ -59,6 +62,8 @@ interface Contract {
     customer: { id: string; code: string; name: string };
     site: { id: string; name: string } | null;
     projectManager: { id: string; name: string } | null;
+    /** The costing a renewal starts from. */
+    costing: { id: string } | null;
   };
   assets: { id: string; code: string; name: string; serialNo: string | null }[];
 }
@@ -155,7 +160,7 @@ export function ServiceContracts() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <span className={`badge ${tone(r.status)}`}>{r.status.toLowerCase()}</span>,
+      render: (r) => <StatusBadge status={r.status} extra={CONTRACT_TONES} />,
     },
   ];
 
@@ -401,38 +406,43 @@ function CoverModal({
         </Field>
       </div>
 
-      <h4 style={{ marginTop: 18, marginBottom: 8 }}>
+      <h4 className="svc-subhead">
         What is covered — {chosen.size} of {assets.length} selected
       </h4>
       {assets.length === 0 ? (
-        <div className="alert warn" style={{ marginBottom: 0 }}>
+        <div className="alert warn">
           Nothing is registered against {job.customer.name} in the installed base. Register the
           equipment first — a contract covering nothing cannot be scheduled.
         </div>
       ) : (
-        <div className="table-wrap" style={{ maxHeight: 280, overflowY: 'auto' }}>
+        <div className="table-wrap svc-scroll">
           <table className="data">
             <tbody>
               {assets.map((a) => (
-                <tr
-                  key={a.id}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    const next = new Set(chosen);
-                    if (next.has(a.id)) next.delete(a.id);
-                    else next.add(a.id);
-                    setChosen(next);
-                  }}
-                >
-                  <td style={{ width: 34 }}>
-                    <input type="checkbox" readOnly checked={chosen.has(a.id)} />
-                  </td>
+                <tr key={a.id}>
                   <td>
-                    <div>{a.name}</div>
-                    <div className="faint mono">
-                      {a.code}
-                      {a.serialNo && ` · ${a.serialNo}`}
-                    </div>
+                    {/* A real checkbox in a label: the row used to take the
+                        click and the box was read-only, so no keyboard could
+                        choose anything. */}
+                    <label className="svc-pick">
+                      <input
+                        type="checkbox"
+                        checked={chosen.has(a.id)}
+                        onChange={() => {
+                          const next = new Set(chosen);
+                          if (next.has(a.id)) next.delete(a.id);
+                          else next.add(a.id);
+                          setChosen(next);
+                        }}
+                      />
+                      <span>
+                        <span className="svc-pick-name">{a.name}</span>
+                        <span className="faint mono">
+                          {a.code}
+                          {a.serialNo && ` · ${a.serialNo}`}
+                        </span>
+                      </span>
+                    </label>
                   </td>
                   <td className="right faint">{a.site?.name ?? '—'}</td>
                 </tr>
@@ -458,6 +468,7 @@ interface ContractDetail extends Contract {
     performedAt: string | null;
     assignedTo: { id: string; name: string } | null;
     report: { id: string; number: string; status: string } | null;
+    jobOrder: { id: string; number: string; status: string } | null;
   }[];
   renewedFrom: { id: string; number: string; endsAt: string } | null;
   renewedTo: { id: string; number: string; startsAt: string } | null;
@@ -467,6 +478,7 @@ interface ContractDetail extends Contract {
 export function ContractDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
+  const navigate = useNavigate();
   const { can } = useAuth();
   const [row, setRow] = useState<ContractDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -501,6 +513,37 @@ export function ContractDetail() {
     }
   }
 
+  /**
+   * Renewal is two deliberate steps (model §4.5): copy last year's costing,
+   * reprice it, then build the new contract on the copy. The copy carries
+   * `?renewFrom=` so the costing page says what it is renewing and the new
+   * contract links back to this one.
+   */
+  async function renew() {
+    if (!row?.job.costing) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const copy = await api.post<{ id: string; number: string }>(`/costings/${row.job.costing.id}/duplicate`, {});
+      toast('ok', `${copy.number} copied at last year's prices — reprice it`);
+      navigate(`/g-ops/costing/${copy.id}?renewFrom=${row.id}`);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const today = todayLocal();
+  const nextDue = row.visits.find((v) => v.status === 'SCHEDULED' && v.dueDate.slice(0, 10) >= today);
+  const calendarHref = `/g-ops/visits?contractId=${row.id}&month=${monthOf(nextDue ? nextDue.dueDate.slice(0, 10) : today)}`;
+  const canRenew =
+    !row.renewedTo &&
+    (row.expiry === 'EXPIRING' || row.expiry === 'EXPIRED' || row.status === 'EXPIRED') &&
+    row.status !== 'DRAFT' &&
+    row.status !== 'CANCELLED' &&
+    !!row.job.costing &&
+    can('gops.costing.create');
+
   return (
     <div>
 
@@ -508,10 +551,15 @@ export function ContractDetail() {
         <div>
           <h1>
             <span className="mono">{row.number}</span>{' '}
-            <span className={`badge ${tone(row.status)}`}>{row.status.toLowerCase()}</span>
+            <StatusBadge status={row.status} extra={CONTRACT_TONES} />
           </h1>
           <p>
-            {row.job.customer.name} ·{' '}
+            {can('gops.customers.view_all') ? (
+              <Link to={`/g-ops/customers/${row.job.customer.id}`}>{row.job.customer.name}</Link>
+            ) : (
+              row.job.customer.name
+            )}{' '}
+            ·{' '}
             <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
               {row.job.number}
             </Link>{' '}
@@ -537,13 +585,29 @@ export function ContractDetail() {
               Regenerate schedule
             </button>
           )}
+          {canRenew && (
+            <button className="btn btn-primary btn-sm" onClick={renew} disabled={busy}>
+              Renew
+            </button>
+          )}
         </div>
       </div>
 
+      {row.renewedFrom && (
+        <div className="alert info">
+          Renewal of{' '}
+          <Link to={`/g-ops/service-contracts/${row.renewedFrom.id}`} className="mono">
+            {row.renewedFrom.number}
+          </Link>
+          , which ended {formatDate(row.renewedFrom.endsAt)}.
+        </div>
+      )}
+
       {row.expiry === 'EXPIRING' && row.status === 'ACTIVE' && (
         <div className="alert warn">
-          This contract ends in {row.daysRemaining} days. Raise the renewal as a new service job
-          now — cover that lapses is cover somebody has to sell again from scratch.
+          This contract ends in {row.daysRemaining} days. Renew it now — cover that lapses is cover
+          somebody has to sell again from scratch.
+          {!canRenew && !can('gops.costing.create') && ' Whoever prices service work starts the renewal from here.'}
         </div>
       )}
       {row.renewedTo && (
@@ -556,24 +620,21 @@ export function ContractDetail() {
         </div>
       )}
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
-        {[
-          { label: 'Planned', value: row.progress.planned },
-          { label: 'Completed', value: row.progress.completed, tone: 'var(--neon)' },
-          { label: 'Remaining', value: row.progress.remaining },
-          { label: 'Missed', value: row.progress.missed, tone: 'var(--danger)' },
-        ].map((t) => (
-          <div key={t.label} className="card">
-            <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-              {t.label.toUpperCase()}
-            </div>
-            <div
-              style={{ fontSize: 24, marginTop: 6, fontWeight: 600, color: t.value > 0 ? t.tone : undefined }}
-            >
-              {t.value}
-            </div>
-          </div>
-        ))}
+      <div className="kpi-grid svc-kpis">
+        <Stat label="Planned" value={row.progress.planned} hint={`every ${row.frequencyMonths} month(s)`} />
+        <Stat
+          label="Completed"
+          value={row.progress.completed}
+          hint="report approved"
+          accent={row.progress.completed > 0 ? 'neon' : undefined}
+        />
+        <Stat label="Remaining" value={row.progress.remaining} hint="still to visit" />
+        <Stat
+          label="Missed"
+          value={row.progress.missed}
+          hint={row.progress.missed > 0 ? 'nobody reported them in time' : 'none'}
+          accent={row.progress.missed > 0 ? 'danger' : undefined}
+        />
       </div>
 
       <div className="grid grid-2">
@@ -604,7 +665,7 @@ export function ContractDetail() {
         <div className="card">
           <h3 className="card-title">Equipment covered ({row.assets.length})</h3>
           {row.assets.length === 0 ? (
-            <p className="muted" style={{ marginBottom: 0 }}>
+            <p className="muted">
               Nothing is covered. A schedule against nothing would send engineers to look at air.
             </p>
           ) : (
@@ -624,9 +685,12 @@ export function ContractDetail() {
       </div>
 
       <div className="card">
-        <h3 className="card-title">The PM schedule</h3>
+        <div className="panel-head">
+          <h3 className="card-title">The PM schedule</h3>
+          {row.visits.length > 0 && <Link to={calendarHref}>Open in calendar</Link>}
+        </div>
         {row.visits.length === 0 ? (
-          <p className="muted" style={{ marginBottom: 0 }}>
+          <p className="muted">
             No schedule yet. Activating the contract writes it.
           </p>
         ) : (
@@ -646,8 +710,21 @@ export function ContractDetail() {
                 {row.visits.map((v) => (
                   <tr key={v.id}>
                     <td>
-                      <span className="mono">{v.number}</span>
-                      {v.sequence && <div className="faint">visit {v.sequence}</div>}
+                      <Link to={`/g-ops/visits?visit=${v.id}`} className="mono">
+                        {v.number}
+                      </Link>
+                      {v.sequence ? (
+                        <div className="faint">visit {v.sequence}</div>
+                      ) : v.jobOrder ? (
+                        <div className="faint">
+                          job order{' '}
+                          <Link to={`/g-ops/job-orders/${v.jobOrder.id}`} className="mono">
+                            {v.jobOrder.number}
+                          </Link>
+                        </div>
+                      ) : (
+                        <div className="faint">call-out</div>
+                      )}
                     </td>
                     <td>{formatDate(v.dueDate)}</td>
                     <td className="faint">{v.assignedTo?.name ?? 'unassigned'}</td>
@@ -662,13 +739,9 @@ export function ContractDetail() {
                       )}
                     </td>
                     <td>
-                      <span
-                        className={`badge ${
-                          v.status === 'COMPLETED' ? 'ok' : v.status === 'MISSED' ? 'danger' : 'warn'
-                        }`}
-                      >
-                        {v.status.toLowerCase()}
-                      </span>
+                      <VisitBadge
+                        visit={{ status: v.status, overdue: v.status === 'SCHEDULED' && v.dueDate.slice(0, 10) < today }}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -676,9 +749,10 @@ export function ContractDetail() {
             </table>
           </div>
         )}
-        <p className="faint" style={{ marginTop: 12, marginBottom: 0 }}>
-          Regenerating the schedule rewrites only the visits nobody has attended. A completed or
-          missed visit is a record of what happened and is never erased.
+        <p className="faint svc-footnote">
+          Regenerating the schedule rewrites only the generated visits nobody has attended. A
+          completed or missed visit is a record of what happened, and a call-out — booked by hand
+          or by a job order — is not part of the plan; neither is ever erased.
         </p>
       </div>
     </div>

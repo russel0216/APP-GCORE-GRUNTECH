@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { RecordHeader } from '../../components/RecordHeader';
 import {
-  statusTone as tone,
   ErrorBox,
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatMoney,
+  humanise,
   useToast,
 } from '../../components/ui';
 import { todayLocal } from '../../lib/day';
@@ -32,10 +34,6 @@ export const INVOICE_STATUSES = [
   { value: 'PAID', label: 'Paid' },
   { value: 'CANCELLED', label: 'Cancelled' },
 ];
-
-export { tone };
-
-export const label = (s: string) => s.toLowerCase().replace(/_/g, ' ');
 
 export interface Invoice {
   id: string;
@@ -61,6 +59,7 @@ export interface Invoice {
   customer: { id: string; code: string; name: string };
   job: { id: string; number: string; name: string } | null;
   progressBilling: { id: string; number: string; billingNo: number } | null;
+  jobOrder: { id: string; number: string } | null;
   lines: { id: string; description: string; detail: string | null; amount: number }[];
   allocations?: {
     id: string;
@@ -88,11 +87,30 @@ interface UninvoicedBilling {
   waitingDays: number;
 }
 
+/**
+ * A link inside a clickable table row. The row opens its own record on click
+ * and on Enter; without this the link's own click and keypress would bubble
+ * up and open the row's record as well, or be swallowed by it.
+ */
+export function CellLink({ to, children, className }: { to: string; children: ReactNode; className?: string }) {
+  const stop = (e: MouseEvent | KeyboardEvent) => e.stopPropagation();
+  return (
+    <Link to={to} className={className} onClick={stop} onKeyDown={stop}>
+      {children}
+    </Link>
+  );
+}
+
+/** Where a payment's number opens: the register, with that payment's sheet up. */
+export const paymentLink = (id: string) => `/g-fin/payments?payment=${id}`;
+
 export function Receivables() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const [queue, setQueue] = useState<UninvoicedBilling[] | null>(null);
   const [raising, setRaising] = useState<UninvoicedBilling | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
 
   const loadQueue = useCallback(async () => {
@@ -107,12 +125,26 @@ export function Receivables() {
     loadQueue();
   }, [loadQueue, reload]);
 
+  // `?raise=<billingId>` — the billing page's "Raise invoice" lands here with
+  // the modal already open, rather than on a list to hunt through.
+  const raiseId = params.get('raise');
+  useEffect(() => {
+    if (!raiseId || !queue) return;
+    const match = queue.find((b) => b.id === raiseId);
+    if (match && can('gfin.ar.create')) setRaising(match);
+    else if (!match) {
+      setNotice('That billing is not waiting to be invoiced — it may already have an invoice, or not be approved yet.');
+    }
+    const next = new URLSearchParams(params);
+    next.delete('raise');
+    setParams(next, { replace: true });
+  }, [raiseId, queue, can, params, setParams]);
+
   const columns: Column<Invoice>[] = [
     {
       key: 'number',
       label: 'Number',
       sortKey: 'number',
-      width: '150px',
       render: (r) => <span className="mono">{r.number}</span>,
     },
     {
@@ -121,7 +153,9 @@ export function Receivables() {
       render: (r) => (
         <div>
           <div>{r.customer.name}</div>
-          <div className="faint">{r.job ? `${r.job.number} — ${r.job.name}` : 'No project'}</div>
+          <div className="faint">
+            {r.job ? `${r.job.number} — ${r.job.name}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project'}
+          </div>
         </div>
       ),
     },
@@ -179,7 +213,7 @@ export function Receivables() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <span className={`badge ${tone(r.status)}`}>{label(r.status)}</span>,
+      render: (r) => <StatusBadge status={r.status} />,
     },
   ];
 
@@ -195,6 +229,8 @@ export function Receivables() {
           </p>
         </div>
       </div>
+
+      {notice && <div className="alert warn">{notice}</div>}
 
       {queue && queue.length > 0 && (
         <div className="card">
@@ -221,13 +257,18 @@ export function Receivables() {
                 {queue.map((b) => (
                   <tr key={b.id}>
                     <td>
-                      <span className="mono">{b.number}</span>
+                      <Link to={`/g-ops/billings/${b.id}`} className="mono">
+                        {b.number}
+                      </Link>
                       <div className="faint">Billing #{b.billingNo}</div>
                     </td>
                     <td>
                       <div>{b.job.customer.name}</div>
                       <div className="faint">
-                        {b.job.number} — {b.job.name}
+                        <Link to={`/g-ops/projects/${b.job.id}`} className="mono">
+                          {b.job.number}
+                        </Link>{' '}
+                        — {b.job.name}
                       </div>
                     </td>
                     <td className="right mono">{formatMoney(b.invoiceTotal)}</td>
@@ -264,9 +305,7 @@ export function Receivables() {
           {
             key: 'outstanding',
             label: 'Balance',
-            options: [
-              { value: 'true', label: 'Outstanding only' },
-            ],
+            options: [{ value: 'true', label: 'Outstanding only' }],
           },
           { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
         ]}
@@ -363,7 +402,7 @@ function RaiseInvoiceModal({
         <dd className="mono">{formatMoney(billing.netCollectible)}</dd>
       </dl>
 
-      <div className="grid grid-2" style={{ marginTop: 14 }}>
+      <div className="grid grid-2 fin-gap-top">
         <Field label="Invoice date">
           <input
             type="date"
@@ -415,7 +454,7 @@ export function InvoiceDetail() {
     load();
   }, [load]);
 
-  if (error) return <ErrorBox error={error} />;
+  if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
   async function issue() {
@@ -430,44 +469,80 @@ export function InvoiceDetail() {
 
   return (
     <div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            <span className="mono">{row.number}</span>{' '}
-            <span className={`badge ${tone(row.status)}`}>{label(row.status)}</span>
-          </h1>
-          <p>
-            {row.customer.name}
-            {row.job && (
-              <>
-                {' · '}
-                <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-                  {row.job.number}
-                </Link>
-              </>
-            )}
-            {row.progressBilling && <> · from {row.progressBilling.number}</>}
-          </p>
-        </div>
-        <div className="row">
-          {row.status === 'DRAFT' && can('gfin.ar.edit_all') && (
-            <button className="btn btn-primary btn-sm" onClick={issue}>
-              Issue to customer
-            </button>
-          )}
-          {(row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID') && can('gfin.ar.create') && (
-            <button className="btn btn-primary btn-sm" onClick={() => setPaying(true)}>
-              Record collection
-            </button>
-          )}
-          {row.ewtAmount > 0 && can('gfin.ar.edit_all') && (
-            <button className="btn btn-sm" onClick={() => setCertificate(true)}>
-              {row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307'}
-            </button>
-          )}
-        </div>
+      <div className="breadcrumb">
+        <Link to="/g-fin/ar">Accounts Receivable</Link>
+        <span className="sep">›</span>
+        <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+        <span className="sep">›</span>
+        <span className="mono">{row.number}</span>
       </div>
+
+      <RecordHeader
+        type="Sales Invoice"
+        code={row.number}
+        title={row.customer.name}
+        status={row.status}
+        amount={formatMoney(row.netCollectible)}
+        // What will actually arrive, not what the invoice prints — see the
+        // header of this file.
+        amountLabel="Net collectible"
+        actions={
+          <>
+            <button
+              className="btn"
+              onClick={() => openPdf(`/api/invoices/${row.id}/pdf`, () => toast('error', 'Could not print'))}
+            >
+              Print
+            </button>
+            {row.status === 'DRAFT' && can('gfin.ar.edit_all') && (
+              <button className="btn btn-primary" onClick={issue}>
+                Issue to customer
+              </button>
+            )}
+            {(row.status === 'ISSUED' || row.status === 'PARTIALLY_PAID') && can('gfin.ar.create') && (
+              <button className="btn btn-primary" onClick={() => setPaying(true)}>
+                Record collection
+              </button>
+            )}
+            {row.ewtAmount > 0 && can('gfin.ar.edit_all') && (
+              <button className="btn" onClick={() => setCertificate(true)}>
+                {row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307'}
+              </button>
+            )}
+          </>
+        }
+      />
+
+      <p className="record-head-meta fin-gap-bottom">
+        <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+        {row.job && (
+          <>
+            {' · '}
+            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+              {row.job.number}
+            </Link>{' '}
+            {row.job.name}
+          </>
+        )}
+        {row.progressBilling && (
+          <>
+            {' · from '}
+            <Link to={`/g-ops/billings/${row.progressBilling.id}`} className="mono">
+              {row.progressBilling.number}
+            </Link>
+          </>
+        )}
+        {row.jobOrder && (
+          <>
+            {' · for job order '}
+            <Link to={`/g-ops/job-orders/${row.jobOrder.id}`} className="mono">
+              {row.jobOrder.number}
+            </Link>
+          </>
+        )}
+      </p>
+
+      <ErrorBox error={error} />
 
       {row.outstanding > 0 && row.daysOverdue > 0 && (
         <div className="alert warn">
@@ -494,7 +569,7 @@ export function InvoiceDetail() {
             </table>
           </div>
 
-          <dl className="kv" style={{ marginTop: 14 }}>
+          <dl className="kv fin-gap-top">
             <dt>Gross</dt>
             <dd className="mono">{formatMoney(row.grossAmount)}</dd>
             <dt>Add: VAT {(row.vatRate * 100).toFixed(0)}%</dt>
@@ -516,7 +591,7 @@ export function InvoiceDetail() {
           </dl>
 
           {row.ewtAmount > 0 && (
-            <div className={`alert ${row.ewtCertificateNo ? 'ok' : 'warn'}`} style={{ marginTop: 14, marginBottom: 0 }}>
+            <div className={`alert ${row.ewtCertificateNo ? 'ok' : 'warn'} fin-gap-top fin-flush`}>
               {row.ewtCertificateNo ? (
                 <>
                   BIR 2307 <span className="mono">{row.ewtCertificateNo}</span> received
@@ -563,9 +638,7 @@ export function InvoiceDetail() {
           <div className="card">
             <h3 className="card-title">Collections</h3>
             {!row.allocations?.length ? (
-              <p className="muted" style={{ marginBottom: 0 }}>
-                Nothing collected yet.
-              </p>
+              <p className="muted fin-flush">Nothing collected yet.</p>
             ) : (
               <div className="table-wrap">
                 <table className="data">
@@ -573,9 +646,11 @@ export function InvoiceDetail() {
                     {row.allocations.map((a) => (
                       <tr key={a.id}>
                         <td>
-                          <span className="mono">{a.payment.number}</span>
+                          <Link to={paymentLink(a.payment.id)} className="mono">
+                            {a.payment.number}
+                          </Link>
                           <div className="faint">
-                            {formatDate(a.payment.paymentDate)} · {a.payment.method.toLowerCase().replace(/_/g, ' ')}
+                            {formatDate(a.payment.paymentDate)} · {humanise(a.payment.method)}
                             {a.payment.reference && ` · ${a.payment.reference}`}
                           </div>
                         </td>
@@ -697,11 +772,28 @@ function CertificateModal({
 
 // ── Recording money ──────────────────────────────────────────────────────────
 
+/**
+ * What a payment settles.
+ *
+ * `advance` is the release of a cash advance (money out, all of it in one
+ * voucher); `advance_refund` is unspent advance money coming back (money in —
+ * but never a customer collection).
+ */
 export interface PayTarget {
-  kind: 'invoice' | 'bill' | 'claim';
+  kind: 'invoice' | 'bill' | 'claim' | 'advance' | 'advance_refund';
   id: string;
   number: string;
   outstanding: number;
+}
+
+/** Who the counterparty is, by what is being settled. */
+function partyFields(kind: PayTarget['kind'], partyId: string | undefined) {
+  return {
+    customerId: kind === 'invoice' ? partyId ?? null : null,
+    supplierId: kind === 'bill' ? partyId ?? null : null,
+    // A person: a reimbursement, an advance handed over, or unspent cash back.
+    payeeUserId: kind === 'claim' || kind === 'advance' || kind === 'advance_refund' ? partyId ?? null : null,
+  };
 }
 
 /**
@@ -730,8 +822,10 @@ export function RecordPaymentModal({
   const [allocations, setAllocations] = useState<Record<string, number>>({
     [target.id]: target.outstanding,
   });
+  const person = target.kind === 'claim' || target.kind === 'advance' || target.kind === 'advance_refund';
   const [form, setForm] = useState({
-    method: 'BANK_TRANSFER',
+    // Advances and refunds are usually cash across a desk; everything else a transfer.
+    method: target.kind === 'advance' || target.kind === 'advance_refund' ? 'CASH' : 'BANK_TRANSFER',
     paymentDate: todayLocal(),
     reference: '',
     bank: '',
@@ -740,7 +834,7 @@ export function RecordPaymentModal({
 
   useEffect(() => {
     api
-      .get<(PayTarget & { number: string; outstanding: number })[]>(
+      .get<{ id: string; number: string; outstanding: number }[]>(
         `/payments/open/${target.kind}${party ? `?partyId=${party.id}` : ''}`,
       )
       .then((rows) =>
@@ -753,10 +847,16 @@ export function RecordPaymentModal({
       .catch(() => {});
   }, [target.kind, target.id, party]);
 
+  const rows = [target, ...others];
   const total = Object.values(allocations).reduce((s, v) => s + (v || 0), 0);
-  const overApplied = [target, ...others].some(
-    (t) => (allocations[t.id] ?? 0) > t.outstanding + 0.005,
-  );
+  const overApplied = rows.some((t) => (allocations[t.id] ?? 0) > t.outstanding + 0.005);
+  // An advance goes out in one voucher: all of it, or none of it.
+  const partialRelease =
+    target.kind === 'advance' &&
+    rows.some((t) => {
+      const v = allocations[t.id] ?? 0;
+      return v > 0 && Math.abs(v - t.outstanding) > 0.005;
+    });
 
   async function save() {
     setBusy(true);
@@ -766,9 +866,7 @@ export function RecordPaymentModal({
         kind,
         method: form.method,
         paymentDate: form.paymentDate,
-        customerId: kind === 'RECEIPT' ? party?.id : null,
-        supplierId: kind === 'DISBURSEMENT' && target.kind === 'bill' ? party?.id : null,
-        payeeUserId: kind === 'DISBURSEMENT' && target.kind === 'claim' ? party?.id : null,
+        ...partyFields(target.kind, party?.id),
         reference: form.reference || null,
         bank: form.bank || null,
         notes: form.notes || null,
@@ -776,7 +874,16 @@ export function RecordPaymentModal({
           .filter(([, amount]) => amount > 0)
           .map(([id, amount]) => ({ kind: target.kind, id, amount })),
       });
-      toast('ok', kind === 'RECEIPT' ? 'Collection recorded' : 'Payment recorded');
+      toast(
+        'ok',
+        target.kind === 'advance'
+          ? 'Released — the liquidation clock has started'
+          : target.kind === 'advance_refund'
+            ? 'Refund recorded'
+            : kind === 'RECEIPT'
+              ? 'Collection recorded'
+              : 'Payment recorded',
+      );
       onSaved();
     } catch (err) {
       setError(err);
@@ -784,11 +891,18 @@ export function RecordPaymentModal({
     }
   }
 
-  const rows = [target, ...others];
+  const title =
+    target.kind === 'advance'
+      ? 'Release a cash advance'
+      : target.kind === 'advance_refund'
+        ? 'Record unspent cash returned'
+        : kind === 'RECEIPT'
+          ? 'Record a collection'
+          : 'Record a payment';
 
   return (
     <Modal
-      title={kind === 'RECEIPT' ? 'Record a collection' : 'Record a payment'}
+      title={title}
       onClose={onClose}
       wide
       footer={
@@ -799,7 +913,7 @@ export function RecordPaymentModal({
           <button
             className="btn btn-primary"
             onClick={save}
-            disabled={busy || total <= 0 || overApplied}
+            disabled={busy || total <= 0 || overApplied || partialRelease}
           >
             {busy ? 'Recording…' : `Record ${formatMoney(total)}`}
           </button>
@@ -807,6 +921,24 @@ export function RecordPaymentModal({
       }
     >
       <ErrorBox error={error} />
+
+      {party && (
+        <p className="muted">
+          {kind === 'RECEIPT' ? 'From' : 'To'} <strong>{party.name}</strong>
+        </p>
+      )}
+      {target.kind === 'advance' && (
+        <div className="alert info">
+          An advance is released in one voucher, for the whole amount. The person then has a set
+          number of days from this payment date to file the receipts as a liquidation.
+        </div>
+      )}
+      {target.kind === 'advance_refund' && (
+        <div className="alert info">
+          Unspent advance money coming back. It is cash in, but it is not a collection — it never
+          counts towards what customers have paid.
+        </div>
+      )}
 
       <div className="grid grid-2">
         <Field label="Date">
@@ -828,7 +960,7 @@ export function RecordPaymentModal({
       </div>
 
       <div className="grid grid-2">
-        <Field label="Reference" hint="Cheque number, transfer reference, OR number">
+        <Field label="Reference" hint="Cheque number, transfer reference, OR or voucher number">
           <input
             value={form.reference}
             onChange={(e) => setForm({ ...form, reference: e.target.value })}
@@ -846,16 +978,14 @@ export function RecordPaymentModal({
         </div>
       )}
 
-      <h4 style={{ marginTop: 18, marginBottom: 8 }}>What it settles</h4>
+      <h4 className="fin-section-title">What it settles</h4>
       <div className="table-wrap">
         <table className="data">
           <thead>
             <tr>
               <th>Document</th>
               <th className="right">Outstanding</th>
-              <th className="right" style={{ width: 160 }}>
-                Applying
-              </th>
+              <th className="right">Applying</th>
             </tr>
           </thead>
           <tbody>
@@ -867,13 +997,15 @@ export function RecordPaymentModal({
                   <input
                     type="number"
                     step="0.01"
+                    // An advance is all-or-nothing, so its only non-zero value is the whole of it.
                     min={0}
                     max={t.outstanding}
+                    aria-label={`Amount applied to ${t.number}`}
+                    className="fin-amount-input"
                     value={allocations[t.id] ?? ''}
                     onChange={(e) =>
                       setAllocations({ ...allocations, [t.id]: Number(e.target.value) })
                     }
-                    style={{ textAlign: 'right' }}
                   />
                 </td>
               </tr>
@@ -891,13 +1023,18 @@ export function RecordPaymentModal({
       </div>
 
       {overApplied && (
-        <div className="alert error" style={{ marginTop: 12, marginBottom: 0 }}>
+        <div className="alert error fin-gap-top fin-flush">
           One of these is being over-applied. A document cannot be paid more than it still owes.
         </div>
       )}
+      {partialRelease && (
+        <div className="alert error fin-gap-top fin-flush">
+          An advance is released in one voucher — release the whole amount or leave it at zero.
+        </div>
+      )}
       {rows.length === 1 && (
-        <p className="faint" style={{ marginTop: 10 }}>
-          Nothing else is open for this {kind === 'RECEIPT' ? 'customer' : 'payee'}.
+        <p className="faint fin-gap-top">
+          Nothing else is open for this {kind === 'RECEIPT' && !person ? 'customer' : person ? 'person' : 'payee'}.
         </p>
       )}
     </Modal>
@@ -905,6 +1042,15 @@ export function RecordPaymentModal({
 }
 
 // ── The payments register ────────────────────────────────────────────────────
+
+interface Allocation {
+  id: string;
+  amount: number;
+  invoice: { id: string; number: string } | null;
+  bill: { id: string; number: string } | null;
+  claim: { id: string; number: string } | null;
+  advance: { id: string; number: string } | null;
+}
 
 interface PaymentRow {
   id: string;
@@ -916,18 +1062,64 @@ interface PaymentRow {
   reference: string | null;
   bank: string | null;
   clearedAt: string | null;
+  notes?: string | null;
   customer: { id: string; name: string } | null;
   supplier: { id: string; name: string } | null;
   payeeUser: { id: string; name: string } | null;
   recordedBy: { id: string; name: string };
-  allocations: { id: string; amount: number }[];
+  allocations: Allocation[];
 }
+
+/** Where one allocation's document lives, and what to call it. */
+function allocationTarget(a: Allocation, paymentKind: string): { to: string; number: string; what: string } | null {
+  if (a.invoice) return { to: `/g-fin/ar/${a.invoice.id}`, number: a.invoice.number, what: 'Invoice' };
+  if (a.bill) return { to: `/g-fin/ap/${a.bill.id}`, number: a.bill.number, what: 'Supplier bill' };
+  if (a.claim) return { to: `/g-fin/expenses/${a.claim.id}`, number: a.claim.number, what: 'Expense claim' };
+  if (a.advance) {
+    return {
+      to: `/g-fin/cash-advances/${a.advance.id}`,
+      number: a.advance.number,
+      what: paymentKind === 'RECEIPT' ? 'Advance refund' : 'Advance release',
+    };
+  }
+  return null;
+}
+
+function AllocationLinks({ row }: { row: PaymentRow }) {
+  return (
+    <span className="fin-links">
+      {row.allocations.map((a) => {
+        const t = allocationTarget(a, row.kind);
+        return t ? (
+          <CellLink key={a.id} to={t.to} className="mono">
+            {t.number}
+          </CellLink>
+        ) : null;
+      })}
+    </span>
+  );
+}
+
+const partyName = (r: PaymentRow) => r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—';
 
 export function Payments() {
   const { can } = useAuth();
   const toast = useToast();
+  const [params, setParams] = useSearchParams();
   const [reload, setReload] = useState(0);
   const [error, setError] = useState<unknown>(null);
+
+  // The API clears on either edit right; the button follows the same rule, so
+  // payables staff can clear a supplier cheque the server would accept anyway.
+  const canClear = can('gfin.ar.edit_all') || can('gfin.ap.edit_all');
+  const openId = params.get('payment');
+
+  const open = (id: string | null) => {
+    const next = new URLSearchParams(params);
+    if (id) next.set('payment', id);
+    else next.delete('payment');
+    setParams(next, { replace: !id });
+  };
 
   async function clear(id: string) {
     try {
@@ -944,7 +1136,6 @@ export function Payments() {
       key: 'number',
       label: 'Number',
       sortKey: 'number',
-      width: '150px',
       render: (r) => <span className="mono">{r.number}</span>,
     },
     {
@@ -958,9 +1149,9 @@ export function Payments() {
       label: 'Who',
       render: (r) => (
         <div>
-          <div>{r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—'}</div>
+          <div>{partyName(r)}</div>
           <div className="faint">
-            {r.method.toLowerCase().replace(/_/g, ' ')}
+            {humanise(r.method)}
             {r.reference && ` · ${r.reference}`}
           </div>
         </div>
@@ -970,17 +1161,17 @@ export function Payments() {
       key: 'kind',
       label: 'Direction',
       render: (r) => (
-        <span className={`badge ${r.kind === 'RECEIPT' ? 'ok' : ''}`}>
-          {r.kind === 'RECEIPT' ? 'money in' : 'money out'}
-        </span>
+        <StatusBadge
+          status={r.kind}
+          extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }}
+          label={r.kind === 'RECEIPT' ? 'money in' : 'money out'}
+        />
       ),
     },
     {
       key: 'allocations',
       label: 'Settles',
-      align: 'right',
-      render: (r) => `${r.allocations.length} document${r.allocations.length === 1 ? '' : 's'}`,
-      optional: true,
+      render: (r) => <AllocationLinks row={r} />,
     },
     {
       key: 'amount',
@@ -996,15 +1187,16 @@ export function Payments() {
         r.clearedAt ? (
           <span className="faint">{formatDate(r.clearedAt)}</span>
         ) : (
-          <span className="row" style={{ gap: 6 }}>
-            <span className="badge warn">uncleared</span>
-            {can('gfin.ar.edit_all') && (
+          <span className="fin-inline">
+            <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="uncleared" />
+            {canClear && (
               <button
                 className="btn btn-ghost btn-sm"
                 onClick={(e) => {
                   e.stopPropagation();
                   clear(r.id);
                 }}
+                onKeyDown={(e) => e.stopPropagation()}
               >
                 clear
               </button>
@@ -1035,8 +1227,9 @@ export function Payments() {
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}
-        searchPlaceholder="Search number, reference, customer, supplier…"
+        searchPlaceholder="Search number, reference, customer, supplier, person…"
         emptyTitle="No payments recorded yet"
+        onRowClick={(r) => open(r.id)}
         filters={[
           {
             key: 'kind',
@@ -1049,6 +1242,170 @@ export function Payments() {
           { key: 'uncleared', label: 'Cleared', options: [{ value: 'true', label: 'Uncleared only' }] },
         ]}
       />
+
+      {openId && (
+        <PaymentDetailModal
+          id={openId}
+          canClear={canClear}
+          onClose={() => open(null)}
+          onChanged={() => setReload((r) => r + 1)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * One payment, opened by `?payment=<id>` — so a notification, a report row or
+ * an invoice's collection list can point straight at it.
+ */
+function PaymentDetailModal({
+  id,
+  canClear,
+  onClose,
+  onChanged,
+}: {
+  id: string;
+  canClear: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [row, setRow] = useState<PaymentRow | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setRow(await api.get<PaymentRow>(`/payments/${id}`));
+    } catch (err) {
+      setError(err);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function clear() {
+    setBusy(true);
+    try {
+      await api.post(`/payments/${id}/clear`);
+      toast('ok', 'Marked cleared');
+      await load();
+      onChanged();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={row ? `Payment ${row.number}` : 'Payment'}
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          {row && !row.clearedAt && canClear && (
+            <button className="btn" onClick={clear} disabled={busy}>
+              Mark cleared
+            </button>
+          )}
+          <button className="btn btn-primary" onClick={onClose}>
+            Close
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      {!row && !error && <Loading />}
+      {row && (
+        <>
+          <dl className="kv">
+            <dt>Direction</dt>
+            <dd>
+              <StatusBadge
+                status={row.kind}
+                extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }}
+                label={row.kind === 'RECEIPT' ? 'money in' : 'money out'}
+              />
+            </dd>
+            <dt>{row.kind === 'RECEIPT' ? 'From' : 'To'}</dt>
+            <dd>
+              {row.customer ? (
+                <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+              ) : row.supplier ? (
+                <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
+              ) : (
+                partyName(row)
+              )}
+            </dd>
+            <dt>Date</dt>
+            <dd>{formatDate(row.paymentDate)}</dd>
+            <dt>Amount</dt>
+            <dd className="mono">
+              <strong>{formatMoney(row.amount)}</strong>
+            </dd>
+            <dt>Method</dt>
+            <dd>{humanise(row.method)}</dd>
+            <dt>Reference</dt>
+            <dd className="mono">{row.reference ?? '—'}</dd>
+            <dt>Bank</dt>
+            <dd>{row.bank ?? '—'}</dd>
+            <dt>Cleared</dt>
+            <dd>
+              {row.clearedAt ? (
+                formatDate(row.clearedAt)
+              ) : (
+                <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="not yet — not cash until it clears" />
+              )}
+            </dd>
+            <dt>Recorded by</dt>
+            <dd>{row.recordedBy.name}</dd>
+            {row.notes && (
+              <>
+                <dt>Notes</dt>
+                <dd>{row.notes}</dd>
+              </>
+            )}
+          </dl>
+
+          <h4 className="fin-section-title">What it settled</h4>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Document</th>
+                  <th>Kind</th>
+                  <th className="right">Applied</th>
+                </tr>
+              </thead>
+              <tbody>
+                {row.allocations.map((a) => {
+                  const t = allocationTarget(a, row.kind);
+                  return (
+                    <tr key={a.id}>
+                      <td>
+                        {t ? (
+                          <Link to={t.to} className="mono">
+                            {t.number}
+                          </Link>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td className="faint">{t?.what ?? '—'}</td>
+                      <td className="right mono">{formatMoney(a.amount)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Modal>
   );
 }

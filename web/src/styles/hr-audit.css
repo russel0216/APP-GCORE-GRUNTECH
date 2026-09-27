@@ -1,1 +1,103 @@
 /* Leave detail, overtime steppers, users, clock — package HR-AUD. Tokens only. */
+
+/* ── Spacing helpers for these four screens ─────────────────────────────────
+   Each replaces an inline `style={{ margin… }}` the screens used to carry. */
+
+.hraud-gap-above {
+  margin-top: var(--s-2);
+}
+
+.hraud-after {
+  margin-top: var(--s-3);
+}
+
+.hraud-below {
+  margin-bottom: var(--s-3);
+}
+
+/* Last thing in a card: no trailing margin under it. */
+.hraud-flush {
+  margin-bottom: 0;
+}
+
+.hraud-inline-gap {
+  margin-left: var(--s-2);
+}
+
+.hraud-tight {
+  gap: var(--s-1);
+}
+
+.hraud-spread {
+  justify-content: space-between;
+}
+
+.hraud-small {
+  font-size: var(--fs-sm);
+}
+
+/* ── Leave balances ───────────────────────────────────────────────────────── */
+
+.hraud-balances {
+  margin-bottom: var(--s-5);
+}
+
+.hraud-eyebrow {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+}
+
+.hraud-balance-figure {
+  margin-top: var(--s-2);
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+}
+
+.hraud-balance-of {
+  font-size: var(--fs-md);
+  font-weight: 400;
+}
+
+.hraud-balance-note {
+  margin-top: var(--s-1);
+  font-size: var(--fs-xs);
+}
+
+/* ── Overtime: the two approval chains ────────────────────────────────────── */
+
+.hraud-chains {
+  margin-bottom: var(--s-4);
+  align-items: start;
+}
+
+.hraud-chain-label {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ── Users: permission chips are buttons now ──────────────────────────────── */
+
+button.perm-chip {
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: inherit;
+}
+
+.hraud-allow {
+  color: var(--neon);
+}
+
+.hraud-deny {
+  color: var(--danger);
+}
+
+/* ── Clock ────────────────────────────────────────────────────────────────── */
+
+.hraud-camera-note {
+  text-align: center;
+  padding: 0 var(--s-4);
+}

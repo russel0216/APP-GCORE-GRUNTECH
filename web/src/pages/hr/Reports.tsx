@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { Empty, ErrorBox, Field, Loading, formatMoney } from '../../components/ui';
 import { todayLocal } from '../../lib/day';
+import { TurnoverReport } from './reports/TurnoverReport';
 
 /**
  * HR reports.
  *
- * Two questions worth asking every month: what is overtime costing each
- * project, and how much leave is still owed. Both are read straight off the
- * approved records, so they cannot disagree with the ledger.
+ * Three questions worth asking every month: what is overtime costing each
+ * project, how much leave is still owed, and who is leaving. All are read
+ * straight off the records, so they cannot disagree with the ledger or the
+ * employee file.
+ *
+ * The tab lives in `?tab=` so a dashboard tile can open the turnover report
+ * directly.
  */
+
+const TABS = ['overtime', 'leave', 'turnover'] as const;
+type Tab = (typeof TABS)[number];
 
 interface OvertimeByProject {
   from: string;
@@ -38,7 +46,16 @@ const startOfYear = () => `${new Date().getFullYear()}-01-01`;
 const today = todayLocal;
 
 export function HrReports() {
-  const [tab, setTab] = useState<'overtime' | 'leave'>('overtime');
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('tab');
+  const tab: Tab = TABS.includes(raw as Tab) ? (raw as Tab) : 'overtime';
+
+  const pick = (next: Tab) => {
+    const p = new URLSearchParams(params);
+    if (next === 'overtime') p.delete('tab');
+    else p.set('tab', next);
+    setParams(p, { replace: true });
+  };
 
   return (
     <div>
@@ -47,21 +64,40 @@ export function HrReports() {
           <h1>HR Reports</h1>
           <p>
             Overtime is a project cost as much as a payroll one — the first report shows it the way
-            a project manager needs to see it.
+            a project manager needs to see it. Turnover counts who joined and who left, from the
+            dates on the employee record.
           </p>
         </div>
       </div>
 
-      <div className="scope-switch" style={{ marginBottom: 'var(--s-4)' }}>
-        <button className={tab === 'overtime' ? 'active' : ''} onClick={() => setTab('overtime')}>
+      <div className="scope-switch" role="tablist" style={{ marginBottom: 'var(--s-4)' }}>
+        <button
+          role="tab"
+          aria-selected={tab === 'overtime'}
+          className={tab === 'overtime' ? 'active' : ''}
+          onClick={() => pick('overtime')}
+        >
           Overtime by project
         </button>
-        <button className={tab === 'leave' ? 'active' : ''} onClick={() => setTab('leave')}>
+        <button
+          role="tab"
+          aria-selected={tab === 'leave'}
+          className={tab === 'leave' ? 'active' : ''}
+          onClick={() => pick('leave')}
+        >
           Leave balances
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === 'turnover'}
+          className={tab === 'turnover' ? 'active' : ''}
+          onClick={() => pick('turnover')}
+        >
+          Turnover
         </button>
       </div>
 
-      {tab === 'overtime' ? <OvertimeReport /> : <LeaveReport />}
+      {tab === 'overtime' ? <OvertimeReport /> : tab === 'leave' ? <LeaveReport /> : <TurnoverReport />}
     </div>
   );
 }

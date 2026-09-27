@@ -1,12 +1,80 @@
 /*
-  Pipeline board states (pages/sales/Pipeline.tsx, package P3).
+  The sales board (pages/sales/Pipeline.tsx) and the sales record pages that
+  hand work to it (Leads.tsx, Quotations.tsx) — package P3.
 
-  The column, card and head rules live in styles.css; this file adds what the
-  board DOES — drag, drop, refuse, collapse, forecast, lanes, the Move menu.
-  The KPI row reuses .kpi-grid from styles.css. Tokens only.
+  The base column, card and head rules live in styles.css; this file adds what
+  the board DOES — drag, drop, refuse, collapse, forecast, lanes, the Move
+  menu — and the few layout classes the lead and quotation pages needed to
+  stop writing pixels inline. The KPI row reuses .kpi-grid from styles.css.
+  Tokens only; every colour is a token, so nothing is needed in the light
+  theme block and both themes follow.
 */
 
+/* ── The board ────────────────────────────────────────────────────────────── */
+
+/*
+  Flex rather than the base grid's equal columns, so a collapsed column can be
+  a narrow strip while the others share the room. Columns still scroll
+  sideways when there are more than fit.
+*/
+.pipeline {
+  display: flex;
+  align-items: stretch;
+  gap: var(--s-3);
+  overflow-x: auto;
+  padding-bottom: var(--s-2);
+}
+
+.pipeline > .pipe-col {
+  flex: 1 0 13rem;
+  min-width: 13rem;
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-3);
+}
+
+.pipe-head {
+  font-size: var(--fs-sm);
+  gap: var(--s-2);
+}
+
+.pipe-total {
+  font-size: var(--fs-sm);
+  margin-top: var(--s-1);
+}
+
+.pipe-body {
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
+.pipe-note {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  margin-top: var(--s-2);
+}
+
+.pipe-list-link {
+  display: inline-block;
+  margin-top: auto;
+  padding-top: var(--s-3);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.pipe-list-link:hover {
+  color: var(--neon);
+}
+
 /* ── Cards ────────────────────────────────────────────────────────────────── */
+
+/* A focusable card is not a link any more: the title inside it is. */
+.pipe-card {
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
 
 .pipe-card[draggable='true'] {
   cursor: grab;
@@ -21,14 +89,27 @@
   border-style: dashed;
 }
 
+.pipe-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
 .pipe-card .pipe-card-title {
   font-size: var(--fs-md);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.pipe-card .pipe-card-title:hover {
+  color: var(--neon);
 }
 
 .pipe-card .pipe-card-sub {
   font-size: var(--fs-xs);
   color: var(--faint);
-  margin: var(--s-1) 0;
+  overflow-wrap: anywhere;
 }
 
 .pipe-card .pipe-card-amount {
@@ -38,17 +119,28 @@
 .pipe-card .pipe-card-owner {
   font-size: var(--fs-xs);
   color: var(--faint);
+}
+
+.pipe-card-person {
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.pipe-card-actions {
+  align-self: flex-start;
   margin-top: var(--s-1);
 }
 
-/* Days in stage. Past the expected dwell it turns amber, with the number
-   always printed so the colour is never the only signal. */
+/* Days in the pipeline. Overdue turns amber AND says "overdue" in words, so
+   the colour is never the only signal. */
 .pipe-age {
   font-size: var(--fs-xs);
   color: var(--faint);
+  white-space: nowrap;
 }
 
-.pipe-age.stale {
+.pipe-age.stale,
+.pipe-card .pipe-overdue {
   color: var(--warn);
 }
 
@@ -57,14 +149,19 @@
 /* A drop target under a dragged card. */
 .pipe-col.over {
   border-color: var(--neon);
+  outline: 2px dashed var(--neon);
+  outline-offset: -2px;
   background: rgb(var(--neon-rgb) / 0.06);
 }
 
 /* A drop the rules refuse — WON without an approved revision, a lead into a
-   quotation-only stage. The reason prints in .pipe-refusal. */
+   quotation-only stage. The reason prints in .pipe-refusal, in words. */
 .pipe-col.refused {
   border-color: var(--danger);
+  outline: 2px dashed var(--danger);
+  outline-offset: -2px;
   background: rgb(var(--danger-rgb) / 0.06);
+  cursor: not-allowed;
 }
 
 .pipe-refusal {
@@ -76,12 +173,15 @@
   font-size: var(--fs-xs);
 }
 
-.pipe-col.collapsed {
+/* Collapsed: a strip with the label, count and sum. Still a drop target. */
+.pipeline > .pipe-col.collapsed {
+  flex: 0 0 8rem;
+  min-width: 8rem;
   min-height: 0;
 }
 
 .pipe-col.collapsed .pipe-body,
-.pipe-col.collapsed .pipe-total {
+.pipe-col.collapsed .pipe-total.weighted {
   display: none;
 }
 
@@ -101,7 +201,7 @@
   gap: var(--s-1);
 }
 
-.pipe-head .pipe-collapse {
+.pipe-collapse {
   border: 0;
   background: none;
   color: var(--muted);
@@ -109,6 +209,16 @@
   padding: 0 var(--s-1);
   cursor: pointer;
   border-radius: var(--radius-sm);
+}
+
+.pipe-collapse:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.pipe-collapse:disabled {
+  color: var(--faint);
+  cursor: default;
 }
 
 .pipe-total.weighted {
@@ -134,10 +244,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--s-2);
   margin-bottom: var(--s-3);
   font-size: var(--fs-sm);
   color: var(--muted);
+}
+
+.pipe-lane-head .row {
+  gap: var(--s-2);
 }
 
 .pipe-lane-head strong {
@@ -153,7 +268,11 @@
   padding-bottom: 0;
 }
 
-/* ── Move menu ────────────────────────────────────────────────────────────── */
+.pipe-lane .pipe-col {
+  background: var(--surface-2);
+}
+
+/* ── Menus ────────────────────────────────────────────────────────────────── */
 
 .pipe-menu-wrap {
   position: relative;
@@ -163,14 +282,20 @@
   position: absolute;
   z-index: 20;
   top: 100%;
-  right: 0;
-  min-width: 200px;
+  left: 0;
+  min-width: 14rem;
   margin-top: var(--s-1);
   padding: var(--s-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   box-shadow: var(--shadow-md);
+}
+
+/* The page's "+ New" sits at the right edge; its menu opens leftwards. */
+.page-head .pipe-menu {
+  left: auto;
+  right: 0;
 }
 
 .pipe-menu [role='menuitem'] {
@@ -185,6 +310,7 @@
   padding: var(--s-2) var(--s-3);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  text-decoration: none;
 }
 
 .pipe-menu [role='menuitem']:hover,
@@ -203,29 +329,95 @@
   color: var(--faint);
 }
 
-/* ── Toolbar and views ────────────────────────────────────────────────────── */
+/* ── Toolbar, views, customise ────────────────────────────────────────────── */
 
 .pipe-toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--s-2);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.pipe-toolbar .pipe-select {
+  width: auto;
+  max-width: 100%;
+}
+
+.pipe-toolbar .pipe-search {
+  flex: 1 1 14rem;
+  min-width: 0;
 }
 
 .pipe-popover {
   position: absolute;
   z-index: 20;
+  top: 100%;
+  right: 0;
   margin-top: var(--s-1);
-  min-width: 260px;
-  padding: var(--s-3);
+  width: min(44rem, calc(100vw - var(--s-7)));
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: var(--s-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-2);
   box-shadow: var(--shadow-md);
 }
 
-/* Screen-reader announcements for moves. */
+.pipe-popover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--s-4);
+}
+
+.pipe-popover fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+.pipe-popover legend {
+  padding: 0;
+  margin-bottom: var(--s-2);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.pipe-order {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.pipe-order li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.pipe-order-buttons {
+  display: inline-flex;
+  gap: var(--s-1);
+}
+
+.pipe-popover-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--s-4);
+}
+
+/* Screen-reader announcements for moves and refusals. */
 .pipe-live {
   position: absolute;
   width: 1px;
@@ -233,4 +425,170 @@
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .pipeline > .pipe-col {
+    flex-basis: 78vw;
+    min-width: 78vw;
+  }
+
+  .pipe-popover {
+    position: fixed;
+    left: var(--s-4);
+    right: var(--s-4);
+    top: auto;
+    bottom: var(--s-4);
+    width: auto;
+  }
+}
+
+/* ── Lead and quotation pages ─────────────────────────────────────────────── */
+
+/* A label / value line on a record card. */
+.sales-row {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.sales-row-label {
+  flex: 0 0 9rem;
+  font-size: var(--fs-sm);
+  color: var(--faint);
+}
+
+/* Room between a status pill and the words beside it. */
+.sales-after-badge {
+  margin-left: var(--s-2);
+}
+
+.sales-after-text {
+  margin-left: var(--s-2);
+}
+
+/* The costings and quotations a lead turned into, one line each. */
+.sales-linked {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sales-linked li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: var(--fs-md);
+}
+
+.sales-linked-title {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.sales-revisions {
+  gap: var(--s-2);
+  margin-bottom: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.sales-card-gap {
+  margin-top: var(--s-4);
+  margin-bottom: var(--s-4);
+}
+
+.sales-card-head {
+  justify-content: space-between;
+  margin-bottom: var(--s-3);
+}
+
+.sales-card-head .card-title {
+  margin: 0;
+}
+
+.sales-card-foot {
+  margin-top: var(--s-4);
+}
+
+.sales-col-num {
+  width: 2.5rem;
+}
+
+.sales-col-action {
+  width: 4rem;
+}
+
+.sales-blurb {
+  margin-top: 0;
+  font-size: var(--fs-md);
+}
+
+.sales-hint {
+  font-size: var(--fs-xs);
+  margin-bottom: 0;
+}
+
+.sales-won {
+  margin-top: var(--s-3);
+  margin-bottom: 0;
+}
+
+.sales-won-actions {
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.sales-spacer {
+  flex: 1;
+}
+
+.sales-flush {
+  margin-bottom: 0;
+}
+
+/* A stage a lead reaches only through its quotation. */
+.lead-stage button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.lead-stage button:disabled:hover {
+  background: none;
+  border-color: transparent;
+  color: var(--faint);
+}
+
+/* The lead form's "add as a new customer": industry first, then the button. */
+.lookup-new-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 0 var(--s-1);
+}
+
+.lookup-new-row select {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 45%;
+}
+
+.lookup-new-row button {
+  flex: 1 1 auto;
+}
+
+.lookup-new-row button:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.lookup-note {
+  display: block;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--muted);
 }

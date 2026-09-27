@@ -15,10 +15,20 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { nextNumber } from '../shared/numbering';
+import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
-import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatMoney, formatDate, formatDateTime, type PdfSection } from '../shared/pdf';
+import { activityWhere, type ActivityQuery } from '../shared/activities';
+import { manilaDayKey } from '../shared/day';
+import { toCsv } from '../shared/insights';
+import {
+  assertLeadStatusChange,
+  assertOutcomeChange,
+  buildBoard,
+  columnByKey,
+  type BoardResponse,
+} from '../shared/pipeline';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -120,6 +130,13 @@ leadRoutes.get(
             revisions: { select: { revision: true, status: true, total: true }, orderBy: { revision: 'desc' }, take: 1 },
           },
         },
+        // What has been priced for this enquiry — the lead page's next action
+        // is "start a costing" or "create the quotation", and it can only
+        // offer the right one if it knows what already exists.
+        costings: {
+          select: { id: true, number: true, title: true, status: true, contractValue: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        },
         activities: { orderBy: { startsAt: 'asc' } },
       },
     });
@@ -134,6 +151,7 @@ leadRoutes.get(
         ...qt,
         latest: qt.revisions[0] ? { ...qt.revisions[0], total: num(qt.revisions[0].total) } : null,
       })),
+      costings: lead.costings.map((c) => ({ ...c, contractValue: num(c.contractValue) })),
       canEdit: canEditRecord(me, 'gops', 'leads', lead.assignedToId),
     });
   }),
@@ -232,10 +250,22 @@ leadRoutes.patch(
     const me = currentUser(req);
     const body = parseBody(leadSchema.partial(), req.body);
 
-    const before = await prisma.lead.findUnique({ where: { id: req.params.id } });
+    const before = await prisma.lead.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { quotations: true } } },
+    });
     if (!before) throw notFound('Lead not found');
     if (!canEditRecord(me, 'gops', 'leads', before.assignedToId)) {
       throw forbidden('This lead is assigned to someone else');
+    }
+
+    // The move rules live in shared/pipeline.ts so the board and this page
+    // refuse the same things for the same reasons.
+    if (body.status !== undefined && body.status !== before.status) {
+      assertLeadStatusChange(before.status, body.status, {
+        lostReason: body.lostReason !== undefined ? body.lostReason : before.lostReason,
+        hasQuotations: before._count.quotations > 0,
+      });
     }
 
     const data: Prisma.LeadUpdateInput = {};
@@ -282,6 +312,20 @@ leadRoutes.patch(
       });
     }
 
+    // A manager dragging a salesperson's card on the board tells them, the
+    // same way reassignment does.
+    if (body.status && body.status !== before.status && lead.assignedToId !== me.id) {
+      await notify({
+        userId: lead.assignedToId,
+        type: 'system',
+        title: `${lead.number} moved to ${columnByKey(body.status)?.label ?? body.status.toLowerCase().replace(/_/g, ' ')} by ${me.name}`,
+        body: lead.companyName,
+        link: `/g-ops/leads/${lead.id}`,
+      });
+    }
+
+    const { _count: beforeCount, ...beforeRow } = before;
+    void beforeCount;
     await audit(
       {
         entityType: 'lead',
@@ -291,7 +335,7 @@ leadRoutes.patch(
           body.status && body.status !== before.status
             ? `Lead ${lead.number}: ${before.status} → ${body.status}`
             : `Updated lead ${lead.number}`,
-        before,
+        before: beforeRow,
         after: lead,
       },
       req,
@@ -387,6 +431,9 @@ async function loadQuotation(id: string) {
           items: { orderBy: { sortOrder: 'asc' } },
           costing: { select: { id: true, number: true, title: true, contractValue: true, totalCost: true } },
           approvedBy: { select: { id: true, name: true } },
+          // The project a revision became. Without it a WON quotation still
+          // waiting to be a project looks the same as one already delivered.
+          jobs: { select: { id: true, number: true, name: true, status: true } },
         },
       },
     },
@@ -456,6 +503,35 @@ quotationRoutes.get(
   }),
 );
 
+/**
+ * The number the next quotation WOULD get, so the form can show it before
+ * saving. Declared above `/:id` or that route swallows it. Read-only —
+ * nothing is consumed; the same contract as `/customers/next-code`.
+ *
+ * The author's own digits: the seeded pattern is `{EMP}{YY}{MM}{SEQ}` counted
+ * per employee per month, so two salespeople previewing at once see different
+ * numbers, and an account with no employee record sees 000 and is told so.
+ */
+quotationRoutes.get(
+  '/next-number',
+  require_('gops.quotations.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const [preview, template] = await Promise.all([
+      previewNext('quotation', { ownerId: me.id }),
+      prisma.numberSequence.findFirst({ where: { documentType: 'quotation', periodKey: '' }, select: { pattern: true } }),
+    ]);
+    res.json({
+      number: preview.number,
+      employeeNo: preview.employeeNo,
+      linked: preview.linked,
+      // Whether the pattern prints the author's digits at all — an unlinked
+      // account only matters when it does.
+      usesEmployeeDigits: (template?.pattern ?? '').includes('{EMP}'),
+    });
+  }),
+);
+
 quotationRoutes.get(
   '/:id',
   requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
@@ -491,7 +567,10 @@ quotationRoutes.get(
 );
 
 const quotationSchema = z.object({
-  customerId: z.string().min(1, 'Choose a customer'),
+  // Optional because a quotation raised FROM a lead takes the lead's customer.
+  // A quotation with neither is refused below, with a message that says what
+  // to do about it.
+  customerId: z.string().optional().nullable(),
   contactId: z.string().optional().nullable(),
   siteId: z.string().optional().nullable(),
   leadId: z.string().optional().nullable(),
@@ -500,6 +579,7 @@ const quotationSchema = z.object({
   costingId: z.string().optional().nullable(),
   terms: z.string().optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
+  expectedClosing: z.string().optional().nullable(),
 });
 
 quotationRoutes.post(
@@ -510,18 +590,46 @@ quotationRoutes.post(
     const body = parseBody(quotationSchema, req.body);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
 
+    const lead = body.leadId
+      ? await prisma.lead.findUnique({
+          where: { id: body.leadId },
+          select: { id: true, customerId: true, siteId: true, expectedClosing: true },
+        })
+      : null;
+    if (body.leadId && !lead) throw notFound('Lead not found');
+
+    // "Nothing is retyped": the customer, site and expected close come off the
+    // lead unless the form said otherwise.
+    const customerId = body.customerId || lead?.customerId || null;
+    if (!customerId) {
+      throw badRequest(
+        lead
+          ? 'Link the lead to a customer first — open the lead, Modify, and pick or add the company'
+          : 'Choose a customer',
+      );
+    }
+    // The lead's site only makes sense for the lead's customer.
+    const siteId = body.siteId || (lead && customerId === lead.customerId ? lead.siteId : null) || null;
+    const expectedClosing =
+      body.expectedClosing !== undefined && body.expectedClosing !== null
+        ? asDate(body.expectedClosing)
+        : (lead?.expectedClosing ?? null);
+
     const quotation = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('quotation', tx);
+      // The author's employee digits go into the number (seeded pattern
+      // {EMP}{YY}{MM}{SEQ}); an unlinked account numbers under 000.
+      const number = await nextNumber('quotation', tx, { ownerId: me.id });
       const created = await tx.quotation.create({
         data: {
           number,
-          customerId: body.customerId,
+          customerId,
           contactId: body.contactId || null,
-          siteId: body.siteId || null,
+          siteId,
           leadId: body.leadId || null,
           ownerId: me.id,
           subject: body.subject,
           probability: body.probability ?? 50,
+          expectedClosing,
           revisions: {
             create: [
               {
@@ -597,16 +705,35 @@ quotationRoutes.patch(
       lostReason: z.string().optional().nullable(),
     }), req.body);
 
-    const before = await prisma.quotation.findUnique({ where: { id: req.params.id } });
+    const before = await prisma.quotation.findUnique({
+      where: { id: req.params.id },
+      include: {
+        revisions: {
+          select: { status: true, jobs: { select: { id: true, number: true }, take: 1 } },
+        },
+      },
+    });
     if (!before) throw notFound('Quotation not found');
     if (!canEditRecord(me, 'gops', 'quotations', before.ownerId)) {
       throw forbidden('Only the author can edit this quotation');
+    }
+
+    // One set of move rules for the detail page and the board (shared/pipeline).
+    if (body.outcome !== undefined && body.outcome !== before.outcome) {
+      const job = before.revisions.flatMap((r) => r.jobs)[0] ?? null;
+      assertOutcomeChange(before.outcome, body.outcome, {
+        lostReason: body.lostReason !== undefined ? body.lostReason : before.lostReason,
+        hasApprovedRevision: before.revisions.some((r) => r.status === 'APPROVED'),
+        hasJob: job !== null,
+        jobNumber: job?.number ?? null,
+      });
     }
 
     const data: Prisma.QuotationUpdateInput = {};
     if (body.subject !== undefined) data.subject = body.subject;
     if (body.probability !== undefined) data.probability = body.probability;
     if (body.lostReason !== undefined) data.lostReason = body.lostReason || null;
+    if (body.expectedClosing !== undefined) data.expectedClosing = asDate(body.expectedClosing);
     if (body.contactId !== undefined) {
       data.contact = body.contactId ? { connect: { id: body.contactId } } : { disconnect: true };
     }
@@ -633,10 +760,30 @@ quotationRoutes.patch(
               ? 'QUOTATION_SUBMITTED'
               : body.outcome === 'NEGOTIATION'
                 ? 'NEGOTIATION'
-                : null;
+                : body.outcome === 'OPEN'
+                  ? 'QUOTATION_CREATED' // pulled back to a draft
+                  : null;
       if (leadStatus) {
-        await prisma.lead.update({ where: { id: before.leadId }, data: { status: leadStatus } });
+        await prisma.lead.update({
+          where: { id: before.leadId },
+          data: {
+            status: leadStatus,
+            ...(body.outcome === 'LOST' && body.lostReason ? { lostReason: body.lostReason } : {}),
+          },
+        });
       }
+    }
+
+    // A manager moving somebody else's quotation on the board tells them.
+    if (body.outcome && body.outcome !== before.outcome && quotation.ownerId !== me.id) {
+      const column = body.outcome === 'OPEN' ? 'QUOTED' : body.outcome;
+      await notify({
+        userId: quotation.ownerId,
+        type: 'system',
+        title: `${quotation.number} moved to ${columnByKey(column)?.label ?? body.outcome.toLowerCase()} by ${me.name}`,
+        body: quotation.subject,
+        link: `/g-ops/quotations/${quotation.id}`,
+      });
     }
 
     await audit(
@@ -1103,44 +1250,39 @@ activityRoutes.get(
   '/',
   require_('gops.calendar.view_all'),
   handler(async (req, res) => {
-    const assignedToId = req.query.assignedToId ? String(req.query.assignedToId) : undefined;
-
-    /*
-      Two questions, one table.
-
-      The calendar asks "what is happening between these dates" and wants a
-      window. A record asks "what has anyone ever done about this", and a
-      window is exactly wrong for it — the call that mattered was in March.
-      Naming a record drops the window and returns its whole history, newest
-      first, because a log is read from the top.
-    */
-    const leadId = req.query.leadId ? String(req.query.leadId) : undefined;
-    const quotationId = req.query.quotationId ? String(req.query.quotationId) : undefined;
-    const customerId = req.query.customerId ? String(req.query.customerId) : undefined;
-    const forRecord = leadId || quotationId || customerId;
-
-    const from = req.query.from ? new Date(String(req.query.from)) : new Date();
-    const to = req.query.to
-      ? new Date(String(req.query.to))
-      : new Date(from.getTime() + 14 * 86400000);
-
+    // Window or record — the one rule lives in shared/activities.ts so the
+    // calendar's verification reads exactly what this route reads.
+    const q = req.query as Record<string, unknown>;
+    const query: ActivityQuery = {};
+    for (const key of ['from', 'to', 'leadId', 'quotationId', 'customerId', 'assignedToId'] as const) {
+      if (q[key] !== undefined && q[key] !== '') query[key] = String(q[key]);
+    }
     const rows = await prisma.salesActivity.findMany({
-      where: {
-        ...(forRecord ? {} : { startsAt: { gte: from, lte: to } }),
-        ...(leadId ? { leadId } : {}),
-        ...(quotationId ? { quotationId } : {}),
-        ...(customerId ? { customerId } : {}),
-        ...(assignedToId ? { assignedToId } : {}),
-      },
-      include: {
-        assignedTo: { select: { id: true, name: true } },
-        lead: { select: { id: true, number: true, companyName: true } },
-        quotation: { select: { id: true, number: true } },
-        customer: { select: { id: true, name: true } },
-      },
-      orderBy: { startsAt: forRecord ? 'desc' : 'asc' },
+      ...activityWhere(query),
+      include: ACTIVITY_INCLUDE,
     });
     res.json(rows);
+  }),
+);
+
+const ACTIVITY_INCLUDE = {
+  assignedTo: { select: { id: true, name: true } },
+  lead: { select: { id: true, number: true, companyName: true } },
+  quotation: { select: { id: true, number: true } },
+  customer: { select: { id: true, name: true } },
+} as const;
+
+/** One activity, for a deep link (`/g-ops/calendar?activity=<id>`). */
+activityRoutes.get(
+  '/:id',
+  require_('gops.calendar.view_all'),
+  handler(async (req, res) => {
+    const row = await prisma.salesActivity.findUnique({
+      where: { id: req.params.id },
+      include: ACTIVITY_INCLUDE,
+    });
+    if (!row) throw notFound('Activity not found');
+    res.json(row);
   }),
 );
 
@@ -1196,10 +1338,22 @@ activityRoutes.post(
         userId: assignedToId,
         type: 'system',
         title: `Scheduled for you: ${activity.subject}`,
-        body: formatDate(activity.startsAt),
-        link: '/g-ops/calendar',
+        // Manila-pinned, like every timestamp a document prints; the link
+        // lands on the activity itself, on the day it falls in Manila.
+        body: formatDateTime(activity.startsAt),
+        link: `/g-ops/calendar?activity=${activity.id}&date=${manilaDayKey(activity.startsAt)}`,
       });
     }
+    await audit(
+      {
+        entityType: 'sales_activity',
+        entityId: activity.id,
+        action: 'CREATED',
+        summary: `${activity.status === 'DONE' ? 'Logged' : 'Scheduled'} ${activity.type.toLowerCase().replace(/_/g, ' ')}: ${activity.subject}`,
+        after: activity,
+      },
+      req,
+    );
     res.status(201).json(activity);
   }),
 );
@@ -1212,8 +1366,7 @@ activityRoutes.patch(
     const existing = await prisma.salesActivity.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Activity not found');
 
-    res.json(
-      await prisma.salesActivity.update({
+    const updated = await prisma.salesActivity.update({
         where: { id: req.params.id },
         data: {
           ...(body.type !== undefined ? { type: body.type } : {}),
@@ -1227,8 +1380,22 @@ activityRoutes.patch(
             ? { status: body.status, completedAt: body.status === 'DONE' ? new Date() : null }
             : {}),
         },
-      }),
+    });
+    await audit(
+      {
+        entityType: 'sales_activity',
+        entityId: updated.id,
+        action: 'UPDATED',
+        summary:
+          body.status && body.status !== existing.status
+            ? `${updated.subject}: ${existing.status} → ${body.status}`
+            : `Updated activity: ${updated.subject}`,
+        before: existing,
+        after: updated,
+      },
+      req,
     );
+    res.json(updated);
   }),
 );
 
@@ -1239,6 +1406,16 @@ activityRoutes.delete(
     const existing = await prisma.salesActivity.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Activity not found');
     await prisma.salesActivity.delete({ where: { id: req.params.id } });
+    await audit(
+      {
+        entityType: 'sales_activity',
+        entityId: existing.id,
+        action: 'DELETED',
+        summary: `Deleted activity: ${existing.subject}`,
+        before: existing,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );
@@ -1253,108 +1430,166 @@ pipelineRoutes.use(authenticate);
 /**
  * The pipeline is a VIEW over leads and quotations, not a third record.
  *
- * Weighted value is amount × probability — the number that answers "what can we
- * actually expect to land", as opposed to the sum of every hopeful quotation.
+ * The route only fetches; `buildBoard()` in shared/pipeline.ts decides what
+ * is a card, which column it stands in, what it is worth and where it may be
+ * dropped. Moves write through PATCH /leads and PATCH /quotations — there is
+ * no board-only write path.
+ *
+ * Won and Lost are bounded to `decidedWithinDays` (default 90) so the two
+ * terminal columns stop growing without limit.
  */
+async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardResponse> {
+  const me = currentUser(req);
+  const ownerId = req.query.ownerId ? String(req.query.ownerId) : undefined;
+  const search = req.query.search ? String(req.query.search).trim().toLowerCase() : '';
+  const requestedDays = Number(req.query.decidedWithinDays);
+  const decidedWithinDays = Number.isFinite(requestedDays)
+    ? Math.min(730, Math.max(30, Math.round(requestedDays)))
+    : 90;
+  const now = new Date();
+  const decidedFrom = new Date(now.getTime() - decidedWithinDays * 86_400_000);
+
+  const nextPlanned = {
+    where: { status: 'PLANNED' as const, startsAt: { gte: now } },
+    orderBy: { startsAt: 'asc' as const },
+    take: 1,
+    select: { subject: true, startsAt: true },
+  };
+
+  const [leads, quotations] = await Promise.all([
+    prisma.lead.findMany({
+      where: {
+        // A lead with a quotation is never a card; its quotation is.
+        quotations: { none: {} },
+        OR: [
+          { status: { in: ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD'] } },
+          { status: 'LOST', updatedAt: { gte: decidedFrom } },
+        ],
+        ...(ownerId ? { assignedToId: ownerId } : {}),
+      },
+      include: {
+        assignedTo: { select: { id: true, name: true, photoPath: true } },
+        customer: { select: { id: true, name: true } },
+        activities: nextPlanned,
+        _count: { select: { quotations: true } },
+      },
+    }),
+    prisma.quotation.findMany({
+      where: {
+        OR: [
+          { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } },
+          { outcome: { in: ['WON', 'LOST'] }, decidedAt: { gte: decidedFrom } },
+        ],
+        ...(ownerId ? { ownerId } : {}),
+      },
+      include: {
+        owner: { select: { id: true, name: true, photoPath: true } },
+        customer: { select: { id: true, name: true } },
+        lead: { select: { expectedClosing: true, nextAction: true, nextActionDate: true } },
+        revisions: {
+          orderBy: { revision: 'desc' },
+          select: {
+            id: true,
+            revision: true,
+            status: true,
+            total: true,
+            validityDays: true,
+            createdAt: true,
+            costing: { select: { contractValue: true, totalCost: true, markupPct: true, discountAmount: true } },
+            jobs: { select: { id: true, number: true }, take: 1 },
+          },
+        },
+        activities: nextPlanned,
+      },
+    }),
+  ]);
+
+  const matches = (...fields: (string | null | undefined)[]) =>
+    !search || fields.some((f) => (f ?? '').toLowerCase().includes(search));
+
+  return buildBoard({
+    leads: leads
+      .filter((l) => matches(l.number, l.companyName, l.customer?.name, l.description))
+      .map((l) => ({ ...l, quotationCount: l._count.quotations })),
+    quotations: quotations.filter((q) => matches(q.number, q.subject, q.customer.name)),
+    now,
+    decidedWithinDays,
+    me,
+  });
+}
+
 pipelineRoutes.get(
   '/',
   require_('gops.pipeline.view_all'),
   handler(async (req, res) => {
-    const ownerId = req.query.ownerId ? String(req.query.ownerId) : undefined;
+    res.json(await loadBoard(req));
+  }),
+);
 
-    const [leads, quotations] = await Promise.all([
-      prisma.lead.findMany({
-        where: {
-          status: { notIn: ['WON', 'LOST', 'QUOTATION_CREATED', 'QUOTATION_SUBMITTED'] },
-          ...(ownerId ? { assignedToId: ownerId } : {}),
-        },
-        include: { assignedTo: { select: { id: true, name: true } } },
-      }),
-      prisma.quotation.findMany({
-        where: { ...(ownerId ? { ownerId } : {}) },
-        include: {
-          owner: { select: { id: true, name: true } },
-          customer: { select: { id: true, name: true } },
-          revisions: { orderBy: { revision: 'desc' }, take: 1, select: { total: true, status: true } },
-        },
-      }),
+/**
+ * The board's CSV twin: one row per card. Audited BEFORE the bytes go out.
+ *
+ * Served at /api/pipeline/board.csv: the router is mounted at /api/pipeline,
+ * and Express only hands it paths that continue with a slash, so a
+ * /api/pipeline.csv could never reach it.
+ */
+pipelineRoutes.get(
+  '/board.csv',
+  require_('gops.pipeline.export'),
+  handler(async (req, res) => {
+    const board = await loadBoard(req);
+    const cards = [...board.columns.flatMap((c) => c.cards), ...board.forecast.cards.map((c) => ({ ...c, column: 'FORECAST' }))];
+    const label = (key: string) => (key === 'FORECAST' ? board.forecast.label : (columnByKey(key)?.label ?? key));
+    const rows = cards.map((c) => [
+      label(c.column),
+      c.kind,
+      c.number,
+      c.title,
+      c.customer?.name ?? '',
+      c.owner.name,
+      c.value.toFixed(2),
+      c.probability,
+      c.weighted.toFixed(2),
+      c.ageDays,
+      c.expectedClosing ?? '',
+      c.overdue ? 'yes' : 'no',
+      c.nextStep ? `${c.nextStep.label}${c.nextStep.at ? ` · ${c.nextStep.at.slice(0, 10)}` : ''}` : '',
+      c.revision ? `R${c.revision.n} ${c.revision.status}` : '',
+      c.job?.number ?? '',
     ]);
 
-    const stages = [
-      { key: 'NEW', label: 'New' },
-      { key: 'CONTACTED', label: 'Contacted' },
-      { key: 'QUALIFIED', label: 'Qualified' },
-      { key: 'SITE_VISIT', label: 'Site visit' },
-      { key: 'COSTING', label: 'Costing' },
-      { key: 'QUOTED', label: 'Quoted' },
-      { key: 'NEGOTIATION', label: 'Negotiation' },
-      { key: 'WON', label: 'Won' },
-      { key: 'LOST', label: 'Lost' },
-    ];
-
-    interface Card {
-      id: string;
-      kind: 'lead' | 'quotation';
-      title: string;
-      subtitle: string;
-      amount: number;
-      probability: number;
-      weighted: number;
-      owner: { id: string; name: string } | null;
-      link: string;
-    }
-
-    const byStage = new Map<string, Card[]>(stages.map((s) => [s.key, []]));
-
-    for (const lead of leads) {
-      const amount = num(lead.estimatedValue);
-      byStage.get(lead.status === 'ON_HOLD' ? 'QUALIFIED' : lead.status)?.push({
-        id: lead.id,
-        kind: 'lead',
-        title: lead.companyName,
-        subtitle: lead.number,
-        amount,
-        probability: lead.probability,
-        weighted: (amount * lead.probability) / 100,
-        owner: lead.assignedTo,
-        link: `/g-ops/leads/${lead.id}`,
-      });
-    }
-
-    for (const q of quotations) {
-      const amount = num(q.revisions[0]?.total);
-      const stage =
-        q.outcome === 'WON'
-          ? 'WON'
-          : q.outcome === 'LOST'
-            ? 'LOST'
-            : q.outcome === 'NEGOTIATION'
-              ? 'NEGOTIATION'
-              : 'QUOTED';
-      byStage.get(stage)?.push({
-        id: q.id,
-        kind: 'quotation',
-        title: q.customer.name,
-        subtitle: `${q.number} — ${q.subject}`,
-        amount,
-        probability: q.outcome === 'WON' ? 100 : q.outcome === 'LOST' ? 0 : q.probability,
-        weighted: q.outcome === 'WON' ? amount : q.outcome === 'LOST' ? 0 : (amount * q.probability) / 100,
-        owner: q.owner,
-        link: `/g-ops/quotations/${q.id}`,
-      });
-    }
-
-    res.json({
-      stages: stages.map((s) => {
-        const cards = byStage.get(s.key) ?? [];
-        return {
-          ...s,
-          cards,
-          count: cards.length,
-          value: cards.reduce((sum, c) => sum + c.amount, 0),
-          weighted: cards.reduce((sum, c) => sum + c.weighted, 0),
-        };
-      }),
-    });
+    await audit(
+      {
+        entityType: 'pipeline',
+        entityId: 'sales-pipeline-board',
+        action: 'EXPORTED',
+        summary: `Sales pipeline board exported (${rows.length} rows)`,
+      },
+      req,
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sales-pipeline.csv"');
+    res.send(
+      toCsv(
+        [
+          'Column',
+          'Kind',
+          'Number',
+          'Title',
+          'Customer',
+          'Salesperson',
+          'Value',
+          'Probability %',
+          'Weighted',
+          'Age days',
+          'Expected closing',
+          'Overdue',
+          'Next step',
+          'Revision',
+          'Job',
+        ],
+        rows,
+      ),
+    );
   }),
 );

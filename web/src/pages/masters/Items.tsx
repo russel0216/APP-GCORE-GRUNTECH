@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Modal, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 
 const ITEM_TYPES = [
   { value: 'MATERIAL', label: 'Material' },
@@ -29,6 +30,10 @@ interface ItemRow {
   unit: string;
   standardCost: number | null;
   lastCost: number | null;
+  /** The partner's published list price — a PRICE, which Sales may see; not a cost. */
+  listPrice: number | null;
+  listPriceCurrency: string | null;
+  listPriceAsOf: string | null;
   isStocked: boolean;
   minStock: number | null;
   reorderLevel: number | null;
@@ -41,6 +46,10 @@ interface ItemRow {
 
 export function Items() {
   const { can } = useAuth();
+  const navigate = useNavigate();
+  // /g-chain/items/:id is the item itself — a link to an item (a partner's
+  // price list, a search hit) must open it, not the bare list.
+  const { id: routeId } = useParams<{ id: string }>();
   const [editing, setEditing] = useState<ItemRow | 'new' | null>(null);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
@@ -52,8 +61,26 @@ export function Items() {
     api.get<Ref[]>('/reference/cost-categories').then(setCostCategories).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (!routeId) return;
+    let live = true;
+    api
+      .get<ItemRow>(`/items/${routeId}`)
+      .then((item) => live && setEditing(item))
+      .catch(() => live && navigate('/g-chain/items', { replace: true }));
+    return () => {
+      live = false;
+    };
+  }, [routeId, navigate]);
+
+  /** Closing an item opened by its own URL goes back to the list's URL. */
+  function close() {
+    setEditing(null);
+    if (routeId) navigate('/g-chain/items');
+  }
+
   const columns: Column<ItemRow>[] = [
-    { key: 'code', label: 'Code', sortKey: 'code', width: '150px', render: (i) => <span className="mono">{i.code}</span> },
+    { key: 'code', label: 'Code', sortKey: 'code', render: (i) => <span className="mono">{i.code}</span> },
     {
       key: 'name',
       label: 'Item',
@@ -93,6 +120,21 @@ export function Items() {
       render: (i) => (i.standardCost == null ? '—' : formatMoney(i.standardCost)),
     },
     {
+      key: 'listPrice',
+      label: 'List price',
+      align: 'right',
+      optional: true,
+      render: (i) =>
+        i.listPrice == null ? (
+          <span className="faint">—</span>
+        ) : (
+          <>
+            {formatMoney(i.listPrice, i.listPriceCurrency ?? 'PHP')}
+            {i.listPriceAsOf && <span className="m-subname">as of {formatDate(i.listPriceAsOf)}</span>}
+          </>
+        ),
+    },
+    {
       key: 'stocked',
       label: 'Stocked',
       render: (i) => (i.isStocked ? <span className="badge ok">yes</span> : <span className="faint">no</span>),
@@ -109,9 +151,7 @@ export function Items() {
     {
       key: 'isActive',
       label: 'Status',
-      render: (i) => (
-        <span className={`badge ${i.isActive ? 'ok' : ''}`}>{i.isActive ? 'Active' : 'Inactive'}</span>
-      ),
+      render: (i) => <StatusBadge status={i.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
     },
   ];
 
@@ -135,7 +175,7 @@ export function Items() {
         rowKey={(i) => i.id}
         searchPlaceholder="Search name, code, part number…"
         reloadToken={reload}
-        onRowClick={(i) => setEditing(i)}
+        onRowClick={(i) => navigate(`/g-chain/items/${i.id}`)}
         emptyTitle="No items yet"
         emptyHint="Add what you buy and install regularly — you do not need every screw."
         filters={[
@@ -186,9 +226,9 @@ export function Items() {
           item={editing === 'new' ? null : editing}
           categories={categories}
           costCategories={costCategories}
-          onClose={() => setEditing(null)}
+          onClose={close}
           onSaved={() => {
-            setEditing(null);
+            close();
             setReload((r) => r + 1);
           }}
         />
@@ -236,6 +276,9 @@ function ItemForm({
     costCategoryId: item?.costCategory?.id ?? '',
     unit: item?.unit ?? 'pcs',
     standardCost: item?.standardCost?.toString() ?? '',
+    listPrice: item?.listPrice?.toString() ?? '',
+    listPriceCurrency: item?.listPriceCurrency ?? '',
+    listPriceAsOf: item?.listPriceAsOf ? item.listPriceAsOf.slice(0, 10) : '',
     isStocked: item?.isStocked ?? true,
     minStock: item?.minStock?.toString() ?? '',
     reorderLevel: item?.reorderLevel?.toString() ?? '',
@@ -265,6 +308,9 @@ function ItemForm({
         costCategoryId: form.costCategoryId || null,
         unit: form.unit,
         standardCost: form.standardCost === '' ? null : Number(form.standardCost),
+        listPrice: form.listPrice === '' ? null : Number(form.listPrice),
+        listPriceCurrency: form.listPriceCurrency.trim() ? form.listPriceCurrency.trim().toUpperCase() : null,
+        listPriceAsOf: form.listPriceAsOf || null,
         isStocked: form.isStocked,
         minStock: form.minStock === '' ? null : Number(form.minStock),
         reorderLevel: form.reorderLevel === '' ? null : Number(form.reorderLevel),
@@ -383,7 +429,36 @@ function ItemForm({
             onChange={(e) => setForm({ ...form, standardCost: e.target.value })}
           />
         </Field>
-        <Field label="Preferred supplier">
+        <Field
+          label="List price"
+          hint="The partner's published price — shown to Sales on the partner's price list. A price, not a cost."
+        >
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            value={form.listPrice}
+            onChange={(e) => setForm({ ...form, listPrice: e.target.value })}
+          />
+        </Field>
+        <Field label="List price currency" hint="Three letters, e.g. USD — blank means pesos">
+          <input
+            className="mono"
+            maxLength={3}
+            value={form.listPriceCurrency}
+            onChange={(e) =>
+              setForm({ ...form, listPriceCurrency: e.target.value.toUpperCase().replace(/[^A-Z]/g, '') })
+            }
+          />
+        </Field>
+        <Field label="List price as of" hint="The date on the price list it came from">
+          <input
+            type="date"
+            value={form.listPriceAsOf}
+            onChange={(e) => setForm({ ...form, listPriceAsOf: e.target.value })}
+          />
+        </Field>
+        <Field label="Preferred supplier" hint="A partner's items appear on its price list in G-OPS › Partners">
           <select
             value={form.preferredSupplierId}
             onChange={(e) => setForm({ ...form, preferredSupplierId: e.target.value })}
@@ -414,7 +489,7 @@ function ItemForm({
       />
 
       {form.isStocked && (
-        <div className="grid grid-2" style={{ marginTop: 12 }}>
+        <div className="grid grid-2 m-stock-grid">
           <Field label="Minimum stock">
             <input
               type="number"

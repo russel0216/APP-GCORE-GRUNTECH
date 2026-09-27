@@ -277,7 +277,7 @@ export function OpsDashboard() {
                     icon="check"
                     value={aftermarket.pmAccomplished}
                     tone="neon"
-                    to="/g-ops/visits"
+                    to="/g-ops/visits?mode=list&status=COMPLETED&kind=PREVENTIVE_MAINTENANCE"
                     hint="Preventive maintenance completed in the selected range"
                   />
                 </div>

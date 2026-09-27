@@ -140,6 +140,13 @@ export function planSchedule(startsAt: Date, endsAt: Date, frequencyMonths: numb
  * Completed and missed visits are left alone: they are a record of what
  * happened, and regenerating a schedule must not be able to erase a visit that
  * was made.
+ *
+ * Only GENERATED visits are ever touched — the ones carrying a `sequence`. A
+ * visit with no sequence under the same contract is a call-out somebody
+ * booked by hand, or the visit a job order scheduled on approval; it is not
+ * part of the plan, so re-planning must not delete it. This `where` clause is
+ * the one place such a visit could be destroyed silently — do not "simplify"
+ * the sequence guard away.
  */
 export async function regenerateSchedule(
   tx: Tx,
@@ -153,14 +160,14 @@ export async function regenerateSchedule(
   if (!contract) throw badRequest('Service contract not found');
 
   const kept = await tx.serviceVisit.count({
-    where: { contractId, status: { in: ['COMPLETED', 'MISSED'] } },
+    where: { contractId, sequence: { not: null }, status: { in: ['COMPLETED', 'MISSED'] } },
   });
   await tx.serviceVisit.deleteMany({
-    where: { contractId, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+    where: { contractId, sequence: { not: null }, status: { in: ['SCHEDULED', 'CANCELLED'] } },
   });
 
   const keptVisits = await tx.serviceVisit.findMany({
-    where: { contractId },
+    where: { contractId, sequence: { not: null } },
     select: { sequence: true },
   });
   const taken = new Set(keptVisits.map((v) => v.sequence));
@@ -413,4 +420,62 @@ export async function sweepOverdue(): Promise<{ expired: number; missed: number 
   ]);
 
   return { expired: expired.count, missed: missed.count };
+}
+
+// ── Cover for a piece of service work ───────────────────────────────────────
+
+export type ChargeBasisValue = 'WARRANTY' | 'CONTRACT' | 'CHARGEABLE' | 'GOODWILL';
+
+export interface Coverage {
+  /** The FACT: the machine's warranty runs to or past the date. */
+  underWarranty: boolean;
+  warrantyEndsAt: Date | null;
+  /** An ACTIVE contract whose term includes the date and which covers the machine. */
+  contract: { id: string; number: string; jobId: string; endsAt: Date } | null;
+  /** The project that installed the machine — where warranty work is charged. */
+  installingJob: { id: string; number: string; name: string } | null;
+  /** The DECISION the facts suggest; a job order may override it. */
+  suggested: ChargeBasisValue;
+}
+
+/**
+ * What covers work on a machine on a given day, decided from the records.
+ *
+ * In order: an ACTIVE service contract that lists the machine and whose term
+ * includes the date → CONTRACT (the contract's job carries the cost); else a
+ * warranty that runs to or past the date → WARRANTY (the project that sold
+ * the machine carries it); else CHARGEABLE. No machine → CHARGEABLE: there is
+ * nothing to be covered.
+ *
+ * `underWarranty` is reported whatever basis is suggested — the fact is kept
+ * even when somebody overrides the decision.
+ */
+export async function coverageFor(assetId: string | null | undefined, date: Date, tx: Tx = prisma): Promise<Coverage> {
+  if (!assetId) {
+    return { underWarranty: false, warrantyEndsAt: null, contract: null, installingJob: null, suggested: 'CHARGEABLE' };
+  }
+  const on = dayKey(date);
+  const asset = await tx.installedAsset.findUnique({
+    where: { id: assetId },
+    select: {
+      warrantyEndsAt: true,
+      job: { select: { id: true, number: true, name: true } },
+      contracts: {
+        where: { contract: { status: 'ACTIVE', startsAt: { lte: on }, endsAt: { gte: on } } },
+        select: { contract: { select: { id: true, number: true, jobId: true, endsAt: true } } },
+        take: 1,
+      },
+    },
+  });
+  if (!asset) throw badRequest('That machine is not in the installed base');
+
+  const underWarranty = !!asset.warrantyEndsAt && asset.warrantyEndsAt >= on;
+  const contract = asset.contracts[0]?.contract ?? null;
+  return {
+    underWarranty,
+    warrantyEndsAt: asset.warrantyEndsAt,
+    contract,
+    installingJob: asset.job,
+    suggested: contract ? 'CONTRACT' : underWarranty ? 'WARRANTY' : 'CHARGEABLE',
+  };
 }

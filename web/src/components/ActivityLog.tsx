@@ -44,6 +44,22 @@ interface Activity {
 
 const typeOf = (v: string) => TYPES.find((t) => t.value === v) ?? TYPES[5];
 
+/** The time now, to the quarter hour, as an `<input type="time">` value. */
+function nowTime(): string {
+  const d = new Date();
+  const minutes = Math.floor(d.getMinutes() / 15) * 15;
+  return `${String(d.getHours()).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+const blankForm = () => ({
+  type: 'CALL',
+  subject: '',
+  notes: '',
+  when: todayLocal(),
+  time: nowTime(),
+  done: true,
+});
+
 export function ActivityLog({
   leadId,
   quotationId,
@@ -60,13 +76,7 @@ export function ActivityLog({
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({
-    type: 'CALL',
-    subject: '',
-    notes: '',
-    when: todayLocal(),
-    done: true,
-  });
+  const [form, setForm] = useState(blankForm);
 
   const load = useCallback(() => {
     api
@@ -89,13 +99,14 @@ export function ActivityLog({
         leadId: leadId ?? null,
         quotationId: quotationId ?? null,
         customerId: customerId ?? null,
-        // Midday, so a date with no time cannot land on the wrong side of a
-        // timezone boundary and read as the day before.
-        startsAt: `${form.when}T12:00:00`,
+        // The instant the person meant, in THEIR clock, sent as UTC. A bare
+        // `T12:00:00` put every planned site visit at noon, and a local string
+        // with no offset is read in whatever zone the server happens to run.
+        startsAt: new Date(`${form.when}T${form.time || '09:00'}`).toISOString(),
         status: form.done ? 'DONE' : 'PLANNED',
       });
       toast('ok', form.done ? 'Logged' : 'Next action set');
-      setForm({ type: 'CALL', subject: '', notes: '', when: todayLocal(), done: true });
+      setForm(blankForm());
       setOpen(false);
       load();
     } catch (err) {
@@ -136,7 +147,7 @@ export function ActivityLog({
       </div>
       <p className="panel-blurb">
         What has been done about this, and what happens next. Write it as you go — this is what
-        somebody else needs when the lead changes hands.
+        somebody else needs when the work changes hands.
       </p>
 
       <ErrorBox error={error} />
@@ -153,13 +164,23 @@ export function ActivityLog({
                 ))}
               </select>
             </Field>
-            <Field label="When">
-              <input
-                type="date"
-                value={form.when}
-                onChange={(e) => setForm({ ...form, when: e.target.value })}
-              />
-            </Field>
+            <div className="grid grid-2">
+              <Field label="When">
+                <input
+                  type="date"
+                  value={form.when}
+                  onChange={(e) => setForm({ ...form, when: e.target.value })}
+                />
+              </Field>
+              <Field label="At">
+                <input
+                  type="time"
+                  step={900}
+                  value={form.time}
+                  onChange={(e) => setForm({ ...form, time: e.target.value })}
+                />
+              </Field>
+            </div>
           </div>
 
           <Field label="In a line" hint="Spoke to whom, about what, what came of it">
@@ -199,7 +220,7 @@ export function ActivityLog({
       ) : rows.length === 0 ? (
         <Empty
           title="Nothing logged yet"
-          hint={canEdit ? 'Record the first call or visit and it stays with the lead.' : undefined}
+          hint={canEdit ? 'Record the first call or visit and it stays with the record.' : undefined}
         />
       ) : (
         <>

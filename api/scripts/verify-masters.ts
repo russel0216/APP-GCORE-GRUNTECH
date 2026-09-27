@@ -11,8 +11,12 @@
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { resolveUser, can } from '../src/permissions/resolve';
-import { nextNumber } from '../src/shared/numbering';
+import { nextNumber, previewNext } from '../src/shared/numbering';
 import { parseCsv, runImport, templateFor, type ImportSpec } from '../src/shared/csv';
+// The real spec and writer the import route runs — importing the routes module
+// pulls in Express, which is harmless here and keeps this script from testing
+// a copy that has drifted from what users actually get.
+import { customerSpec, customerWrite } from '../src/routes/imports';
 import { globalSearch } from '../src/shared/search';
 import bcrypt from 'bcryptjs';
 
@@ -143,41 +147,68 @@ async function main() {
     missingCol instanceof Error ? missingCol.message : 'no error',
   );
 
-  // ── 3. Real customer import, end to end ────────────────────────────────────
+  // ── 3. Industries — the fixed list customers are filed under ───────────────
+  console.log('\nIndustries');
+
+  const industries = await prisma.industry.findMany({
+    where: { code: { in: ['HI', 'BI', 'UI', 'GI', 'SI'] } },
+  });
+  check('the five standard industries are seeded', industries.length === 5, `${industries.length} found`);
+  check('all five are system rows', industries.every((i) => i.isSystem));
+  const hi = industries.find((i) => i.code === 'HI');
+  const gi = industries.find((i) => i.code === 'GI');
+
+  // ── 4. Real customer import, end to end ────────────────────────────────────
   console.log('\nCustomer import');
 
+  const industryColumn = customerSpec.columns.find((c) => c.header === 'Industry');
+  check('the Industry column is required', industryColumn?.required === true);
+  check('the template example is a code', industryColumn?.example === 'HI', industryColumn?.example);
+
+  // A — a code, and a full name in the wrong case: both resolve, both commit.
   const csv = [
     'Name,Code,Industry,Contact Name,Contact Position,Site Name,Site City,Active',
-    `${TAG} Hospital,,Healthcare,Maria Santos,Purchasing,Main Plant,Cagayan de Oro,Yes`,
-    `${TAG} Foods,,Food processing,Juan Cruz,Engineering,Plant 2,Davao,Yes`,
+    `${TAG} Hospital,,HI,Maria Santos,Purchasing,Main Plant,Cagayan de Oro,Yes`,
+    `${TAG} Foods,,general industry,Juan Cruz,Engineering,Plant 2,Davao,Yes`,
   ].join('\n');
 
-  const { parseCsv: _p } = await import('../src/shared/csv');
-  void _p;
-  const customerImport = await import('../src/routes/imports');
-  void customerImport;
-
-  // Drive the same spec the route uses by importing through the HTTP-free path.
-  const specs = await buildCustomerSpec();
-  const importWritten: string[] = [];
-  const report = await runImport(csv, specs.spec, true, async (records) => {
-    for (const { record } of records as { record: Record<string, unknown> }[]) {
-      const created = await prisma.customer.create({
-        data: {
-          ...(record as never),
-          code: (record.code as string) || (await nextNumber('customer')),
-        },
-      });
-      importWritten.push(created.id);
-    }
-  });
-
+  const report = await runImport(csv, customerSpec, true, customerWrite);
   check('two customers imported', report.committed && report.created === 2, JSON.stringify(report.rows));
+
+  const foods = await prisma.customer.findFirst({ where: { name: `${TAG} Foods` } });
+  check(
+    'a full industry name, any case, files the customer under its code',
+    foods?.industryId === gi?.id,
+    `industryId ${foods?.industryId}`,
+  );
+
+  // B — free text and a blank: neither is an industry, and the file does not land.
+  const bad = [
+    'Name,Code,Industry,Active',
+    `${TAG} Cannery,,Food processing,Yes`,
+    `${TAG} Nameless Industry,,,Yes`,
+  ].join('\n');
+  const refused = await runImport(bad, customerSpec, true, customerWrite);
+  check('an unknown and a blank industry are both refused', refused.errors === 2, `${refused.errors} errors`);
+  check('and nothing from that file was written', !refused.committed);
+  check(
+    'the refusal lists the codes to use',
+    (refused.rows[0].message ?? '').includes('HI') && (refused.rows[0].message ?? '').includes('SI'),
+    refused.rows[0].message,
+  );
+  check(
+    'a blank industry is reported as required',
+    (refused.rows[1].message ?? '').toLowerCase().includes('required'),
+    refused.rows[1].message,
+  );
+  const cannery = await prisma.customer.count({ where: { name: `${TAG} Cannery` } });
+  check('the refused customer does not exist', cannery === 0);
 
   const imported = await prisma.customer.findFirst({
     where: { name: `${TAG} Hospital` },
     include: { contacts: true, sites: true },
   });
+  check('it is filed under HI', imported?.industryId === hi?.id);
   check('the customer landed', imported !== null);
   check('its contact came with it', imported?.contacts.length === 1, `${imported?.contacts.length ?? 0} contacts`);
   check('the contact is marked primary', imported?.contacts[0]?.isPrimary === true);
@@ -190,20 +221,7 @@ async function main() {
   );
 
   // Re-importing the same file must update, not duplicate.
-  const second = await runImport(csv, specs.spec, true, async (records) => {
-    for (const { record, existingId } of records as {
-      record: Record<string, unknown>;
-      existingId: string | null;
-    }[]) {
-      if (existingId) {
-        const { contacts, sites, code, ...fields } = record;
-        void contacts;
-        void sites;
-        void code;
-        await prisma.customer.update({ where: { id: existingId }, data: fields as never });
-      }
-    }
-  });
+  const second = await runImport(csv, customerSpec, true, customerWrite);
   check('re-importing recognises the existing rows', second.updated === 2, `${second.updated} updates`);
 
   const afterSecond = await prisma.customer.findMany({ where: { name: `${TAG} Hospital` } });
@@ -214,7 +232,7 @@ async function main() {
   });
   check('the contact was not duplicated on re-import', contactsAfter === 1, `${contactsAfter} contacts`);
 
-  // ── 4. Employee pay is gated ───────────────────────────────────────────────
+  // ── 5. Employee pay is gated ───────────────────────────────────────────────
   console.log('\nEmployee pay visibility');
 
   const hrRole = await prisma.role.findUnique({ where: { key: 'hr' } });
@@ -244,7 +262,7 @@ async function main() {
   check('HR may see pay rates', can(hr, 'ghr.employee_rates.view_all'));
   check('a project manager may NOT see pay rates', !can(pm, 'ghr.employee_rates.view_all'));
 
-  // ── 5. Numbering for masters ───────────────────────────────────────────────
+  // ── 6. Numbering for masters ───────────────────────────────────────────────
   console.log('\nMaster numbering');
 
   const supplierCode = await nextNumber('supplier');
@@ -263,7 +281,9 @@ async function main() {
     Array.from({ length: 20 }, (_, i) =>
       prisma.$transaction(async (tx) => {
         const code = await nextNumber('customer', tx);
-        return tx.customer.create({ data: { code, name: `${TAG} Concurrent ${i}` } });
+        return tx.customer.create({
+          data: { code, name: `${TAG} Concurrent ${i}`, industry: { connect: { id: gi!.id } } },
+        });
       }),
     ),
   );
@@ -274,7 +294,19 @@ async function main() {
   );
   await prisma.customer.deleteMany({ where: { name: { startsWith: `${TAG} Concurrent` } } });
 
-  // ── 6. Cost categories ─────────────────────────────────────────────────────
+  /*
+    The customer form's code preview (GET /customers/next-code) is
+    previewNext() — the same template and counter lookup nextNumber() uses,
+    minus the reservation. It once hand-rolled a year key of its own; the proof
+    that it no longer can disagree is that the preview IS the next number.
+  */
+  const previewed = await previewNext('customer');
+  const issued = await nextNumber('customer');
+  check('the previewed customer code is the one issued next', previewed.number === issued, `${previewed.number} vs ${issued}`);
+  const previewedAgain = await previewNext('customer');
+  check('a preview reserves nothing', previewedAgain.number !== issued && (await previewNext('customer')).number === previewedAgain.number);
+
+  // ── 7. Cost categories ─────────────────────────────────────────────────────
   console.log('\nCost categories');
 
   const costCategories = await prisma.costCategory.findMany({ orderBy: { sortOrder: 'asc' } });
@@ -287,7 +319,7 @@ async function main() {
   );
   check('they are all marked as system categories', costCategories.slice(0, 5).every((c) => c.isSystem));
 
-  // ── 7. Global search reaches the masters ───────────────────────────────────
+  // ── 8. Global search reaches the masters ───────────────────────────────────
   console.log('\nGlobal search');
 
   const admin = await prisma.user.findFirst({ where: { isSuperAdmin: true } });
@@ -306,6 +338,7 @@ async function main() {
 
   const hit = byName.find((h) => h.kind === 'customer');
   check('the hit deep-links to the record', /^\/g-ops\/customers\/.+/.test(hit?.link ?? ''), hit?.link);
+  check('the hit names its industry code', (hit?.subtitle ?? '').includes('HI'), hit?.subtitle ?? '');
 
   // A project manager has no supplier permission, so suppliers must not leak.
   const pmSearch = await globalSearch(TAG, pm);
@@ -318,52 +351,6 @@ async function main() {
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;
-}
-
-/**
- * The customer import spec lives inside the routes module, which pulls in
- * Express. Rebuilt here against the same shared helpers so this script stays
- * free of HTTP.
- */
-async function buildCustomerSpec() {
-  const { required, optional, decimal, bool } = await import('../src/shared/csv');
-  const spec: ImportSpec<Record<string, unknown>> = {
-    entity: 'customers',
-    label: 'Customers',
-    columns: [
-      { header: 'Name', required: true },
-      { header: 'Code' },
-      { header: 'Industry' },
-      { header: 'Contact Name' },
-      { header: 'Contact Position' },
-      { header: 'Site Name' },
-      { header: 'Site City' },
-      { header: 'Active' },
-    ],
-    existing: async (row) => {
-      if (row['Code']) {
-        const byCode = await prisma.customer.findUnique({ where: { code: row['Code'] } });
-        if (byCode) return byCode.id;
-      }
-      const byName = await prisma.customer.findFirst({
-        where: { name: { equals: row['Name'], mode: 'insensitive' } },
-      });
-      return byName?.id ?? null;
-    },
-    build: async (row) => ({
-      code: row['Code'] || '',
-      name: required(row, 'Name'),
-      creditLimit: decimal(row, 'Credit Limit'),
-      isActive: bool(row, 'Active'),
-      contacts: row['Contact Name']
-        ? { create: [{ name: row['Contact Name'], position: optional(row, 'Contact Position'), isPrimary: true }] }
-        : undefined,
-      sites: row['Site Name']
-        ? { create: [{ name: row['Site Name'], city: optional(row, 'Site City') }] }
-        : undefined,
-    }),
-  };
-  return { spec };
 }
 
 main()

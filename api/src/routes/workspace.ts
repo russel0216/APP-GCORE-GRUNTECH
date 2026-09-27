@@ -8,7 +8,8 @@ import { globalSearch, searchProviders, canSearch } from '../shared/search';
 import { act, historyFor, pendingFor } from '../shared/approvals';
 import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { renderDocument, formatDate } from '../shared/pdf';
-import type { ResolvedUser } from '../permissions/resolve';
+import { can, type ResolvedUser } from '../permissions/resolve';
+import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/aftermarket';
 
 // ════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -208,6 +209,320 @@ export async function scheduleFor(
   return results.flat().sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
 }
 
+/**
+ * A planned sales activity is a schedule row like any meeting: it has a start,
+ * a duration and a person expected at it. Registered here rather than in
+ * sales.ts because the activity is the one "today" source that predates the
+ * seam — the module never had a provider to move.
+ */
+registerSchedule(async (user, { from, to }) => {
+  const rows = await prisma.salesActivity.findMany({
+    where: { assignedToId: user.id, status: 'PLANNED', startsAt: { gte: from, lt: to } },
+    orderBy: { startsAt: 'asc' },
+    select: {
+      id: true,
+      type: true,
+      subject: true,
+      location: true,
+      startsAt: true,
+      durationMinutes: true,
+      lead: { select: { companyName: true } },
+      customer: { select: { name: true } },
+      quotation: { select: { number: true } },
+    },
+  });
+  return rows.map((r) => ({
+    kind: 'activity',
+    id: r.id,
+    title: r.subject,
+    startsAt: r.startsAt,
+    endsAt: new Date(r.startsAt.getTime() + r.durationMinutes * 60_000),
+    link: `/g-ops/calendar?activity=${r.id}`,
+    meetLink: null,
+    sub: [
+      humanise(r.type),
+      r.lead?.companyName ?? r.customer?.name ?? r.quotation?.number ?? null,
+      r.location,
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  }));
+});
+
+/**
+ * One row of "assigned to me" or "my drafts" — the contract every module's
+ * rows share (audits plan §3 item 7). `link` always starts with `/`, which is
+ * what verify-workspace.ts checks for every row the route returns.
+ */
+export interface WorkRow {
+  id: string;
+  kind: string;
+  title: string;
+  subtitle?: string;
+  /** The date that matters — next action, due date, target end — if any. */
+  when?: Date | null;
+  overdue?: boolean;
+  link: string;
+}
+
+function humanise(value: string): string {
+  const s = value.replace(/_/g, ' ').toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+const TAKE = 10;
+
+/** Past its date and still open. A missing date is never overdue. */
+function isOverdue(when: Date | null | undefined, today: Date): boolean {
+  return when != null && when.getTime() < today.getTime();
+}
+
+/** Overdue first, then by date with undated rows last. */
+function byUrgency(a: WorkRow, b: WorkRow): number {
+  if (!!a.overdue !== !!b.overdue) return a.overdue ? -1 : 1;
+  const at = a.when ? a.when.getTime() : Number.POSITIVE_INFINITY;
+  const bt = b.when ? b.when.getTime() : Number.POSITIVE_INFINITY;
+  return at - bt;
+}
+
+/**
+ * What is on my plate that nobody has to approve: the leads I am working,
+ * the jobs I manage, the visits I am booked on, the tasks on my name, the
+ * job orders I am to attend, and any planned activity I let slip past its day.
+ * Ten of each, oldest date first.
+ */
+async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> {
+  const [leads, jobs, visits, tasks, jobOrders, slipped] = await Promise.all([
+    prisma.lead.findMany({
+      where: { assignedToId: me.id, status: { notIn: ['WON', 'LOST'] } },
+      orderBy: [{ nextActionDate: { sort: 'asc', nulls: 'last' } }, { updatedAt: 'desc' }],
+      take: TAKE,
+      select: { id: true, number: true, companyName: true, status: true, nextAction: true, nextActionDate: true },
+    }),
+    prisma.job.findMany({
+      where: { projectManagerId: me.id, status: { in: ['PLANNING', 'IN_PROGRESS', 'ON_HOLD'] } },
+      orderBy: [{ targetEndDate: { sort: 'asc', nulls: 'last' } }, { updatedAt: 'desc' }],
+      take: TAKE,
+      select: { id: true, number: true, name: true, status: true, targetEndDate: true, customer: { select: { name: true } } },
+    }),
+    prisma.serviceVisit.findMany({
+      where: { assignedToId: me.id, status: 'SCHEDULED' },
+      orderBy: { dueDate: 'asc' },
+      take: TAKE,
+      select: {
+        id: true,
+        number: true,
+        kind: true,
+        dueDate: true,
+        customer: { select: { name: true } },
+        site: { select: { name: true } },
+      },
+    }),
+    prisma.jobTask.findMany({
+      where: { assignedToId: me.id, status: { not: 'DONE' } },
+      orderBy: [{ dueDate: { sort: 'asc', nulls: 'last' } }, { updatedAt: 'desc' }],
+      take: TAKE,
+      select: { id: true, name: true, status: true, dueDate: true, jobId: true, job: { select: { number: true, name: true } } },
+    }),
+    prisma.jobOrder.findMany({
+      where: { assignedToId: me.id, status: 'APPROVED' },
+      orderBy: { requestedFor: 'asc' },
+      take: TAKE,
+      select: { id: true, number: true, title: true, urgent: true, requestedFor: true, customer: { select: { name: true } } },
+    }),
+    // Planned before today and never marked done — the follow-up that slipped.
+    prisma.salesActivity.findMany({
+      where: { assignedToId: me.id, status: 'PLANNED', startsAt: { lt: dayStart } },
+      orderBy: { startsAt: 'desc' },
+      take: TAKE,
+      select: {
+        id: true,
+        type: true,
+        subject: true,
+        startsAt: true,
+        lead: { select: { companyName: true } },
+        customer: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const rows: WorkRow[] = [
+    ...leads.map((r) => ({
+      id: r.id,
+      kind: 'lead',
+      title: r.companyName,
+      subtitle: `${r.number} · ${r.nextAction ?? humanise(r.status)}`,
+      when: r.nextActionDate,
+      overdue: isOverdue(r.nextActionDate, dayStart),
+      link: `/g-ops/leads/${r.id}`,
+    })),
+    ...jobs.map((r) => ({
+      id: r.id,
+      kind: 'job',
+      title: r.name,
+      subtitle: `${r.number} · ${r.customer.name} · ${humanise(r.status)}`,
+      when: r.targetEndDate,
+      overdue: r.status !== 'ON_HOLD' && isOverdue(r.targetEndDate, dayStart),
+      link: `/g-ops/projects/${r.id}`,
+    })),
+    ...visits.map((r) => ({
+      id: r.id,
+      kind: 'visit',
+      title: r.customer.name,
+      subtitle: `${r.number} · ${humanise(r.kind)}${r.site ? ` · ${r.site.name}` : ''}`,
+      when: r.dueDate,
+      overdue: isOverdue(r.dueDate, dayStart),
+      link: `/g-ops/visits?visit=${r.id}`,
+    })),
+    ...tasks.map((r) => ({
+      id: r.id,
+      kind: 'task',
+      title: r.name,
+      subtitle: `${r.job.number} · ${r.job.name} · ${humanise(r.status)}`,
+      when: r.dueDate,
+      overdue: isOverdue(r.dueDate, dayStart),
+      link: `/g-ops/projects/${r.jobId}`,
+    })),
+    ...jobOrders.map((r) => ({
+      id: r.id,
+      kind: 'job_order',
+      title: r.title,
+      subtitle: `${r.number} · ${r.customer.name}${r.urgent ? ' · URGENT' : ''}`,
+      when: r.requestedFor,
+      overdue: isOverdue(r.requestedFor, dayStart),
+      link: `/g-ops/job-orders/${r.id}`,
+    })),
+    ...slipped.map((r) => ({
+      id: r.id,
+      kind: 'activity',
+      title: r.subject,
+      subtitle: [humanise(r.type), r.lead?.companyName ?? r.customer?.name ?? null].filter(Boolean).join(' · '),
+      when: r.startsAt,
+      overdue: true,
+      link: `/g-ops/calendar?activity=${r.id}`,
+    })),
+  ];
+  return rows.sort(byUrgency);
+}
+
+/**
+ * Documents I started and never submitted. A draft is invisible to everyone
+ * else by design, which is exactly why it needs a place on my own screen —
+ * nobody will chase it. Overtime has no draft: filing it submits it.
+ */
+async function draftsOf(me: ResolvedUser): Promise<WorkRow[]> {
+  const [revisions, prs, claims, advances, leave, jobOrders] = await Promise.all([
+    prisma.quotationRevision.findMany({
+      where: { status: 'DRAFT', quotation: { ownerId: me.id } },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: {
+        id: true,
+        revision: true,
+        updatedAt: true,
+        quotation: { select: { id: true, number: true, subject: true } },
+      },
+    }),
+    prisma.purchaseRequest.findMany({
+      where: { requestedById: me.id, status: 'DRAFT' },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: { id: true, number: true, purpose: true, updatedAt: true },
+    }),
+    prisma.expenseClaim.findMany({
+      where: { claimedById: me.id, status: 'DRAFT' },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: { id: true, number: true, purpose: true, updatedAt: true },
+    }),
+    prisma.cashAdvance.findMany({
+      where: { requestedById: me.id, status: 'DRAFT' },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: { id: true, number: true, purpose: true, updatedAt: true },
+    }),
+    prisma.leaveRequest.findMany({
+      where: { status: 'DRAFT', employee: { userId: me.id } },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: { id: true, number: true, reason: true, startDate: true, updatedAt: true, leaveType: { select: { name: true } } },
+    }),
+    prisma.jobOrder.findMany({
+      where: { requestedById: me.id, status: 'DRAFT' },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: { id: true, number: true, title: true, updatedAt: true, customer: { select: { name: true } } },
+    }),
+  ]);
+
+  const rows: WorkRow[] = [
+    ...revisions.map((r) => ({
+      id: r.quotation.id,
+      kind: 'quotation',
+      title: r.quotation.subject,
+      subtitle: `${r.quotation.number} · revision ${r.revision}`,
+      when: r.updatedAt,
+      link: `/g-ops/quotations/${r.quotation.id}`,
+    })),
+    ...prs.map((r) => ({
+      id: r.id,
+      kind: 'purchase_request',
+      title: r.purpose,
+      subtitle: r.number,
+      when: r.updatedAt,
+      link: `/g-chain/purchase-requests/${r.id}`,
+    })),
+    ...claims.map((r) => ({
+      id: r.id,
+      kind: 'expense_claim',
+      title: r.purpose,
+      subtitle: r.number,
+      when: r.updatedAt,
+      link: `/g-fin/expenses/${r.id}`,
+    })),
+    ...advances.map((r) => ({
+      id: r.id,
+      kind: 'cash_advance',
+      title: r.purpose,
+      subtitle: r.number,
+      when: r.updatedAt,
+      link: `/g-fin/cash-advances/${r.id}`,
+    })),
+    ...leave.map((r) => ({
+      id: r.id,
+      kind: 'leave_request',
+      title: `${r.leaveType.name} from ${formatDate(r.startDate)}`,
+      subtitle: `${r.number} · ${r.reason}`,
+      when: r.updatedAt,
+      link: `/g-hr/leave/${r.id}`,
+    })),
+    ...jobOrders.map((r) => ({
+      id: r.id,
+      kind: 'job_order',
+      title: r.title,
+      subtitle: `${r.number} · ${r.customer.name}`,
+      when: r.updatedAt,
+      link: `/g-ops/job-orders/${r.id}`,
+    })),
+  ];
+  // Most recently touched first — the one you were in the middle of.
+  return rows.sort((a, b) => (b.when?.getTime() ?? 0) - (a.when?.getTime() ?? 0));
+}
+
+/**
+ * What is about to run out, for the people who sell renewals. Read off the
+ * aftermarket module's own pipeline so this list and Service Contracts agree.
+ */
+async function renewalsFor(me: ResolvedUser) {
+  if (!can(me, 'gops.service_contracts.view_all')) return [];
+  const settings = await aftermarketSettings();
+  const rows = await renewalPipeline(settings.expiryWarningDays);
+  return rows.slice(0, TAKE).map((r) => ({
+    ...r,
+    link: r.kind === 'CONTRACT' ? `/g-ops/service-contracts/${r.id}` : `/g-ops/installed-base/${r.id}`,
+  }));
+}
+
 export const myWorkRoutes = Router();
 myWorkRoutes.use(authenticate);
 
@@ -223,21 +538,29 @@ myWorkRoutes.get(
     const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const dayEnd = new Date(dayStart.getTime() + 86400000);
 
-    const [approvals, submitted, unread, recentActivity, todaysSchedule] = await Promise.all([
-      pendingFor(me.id),
-      prisma.approvalRequest.findMany({
-        where: { requesterId: me.id, status: 'PENDING' },
-        orderBy: { createdAt: 'desc' },
-        take: 10,
-      }),
-      prisma.notification.count({ where: { userId: me.id, isRead: false } }),
-      prisma.auditLog.findMany({
-        where: { actorId: me.id },
-        orderBy: { at: 'desc' },
-        take: 8,
-      }),
-      scheduleFor(me, { from: dayStart, to: dayEnd }),
-    ]);
+    // Expiry and missed visits are derived on read (Phase 8). Once per
+    // request, before the queries that depend on the result run.
+    await sweepOverdue();
+
+    const [approvals, submitted, unread, recentActivity, todaysSchedule, assignedToMe, myDrafts, renewals] =
+      await Promise.all([
+        pendingFor(me.id),
+        prisma.approvalRequest.findMany({
+          where: { requesterId: me.id, status: 'PENDING' },
+          orderBy: { createdAt: 'desc' },
+          take: TAKE,
+        }),
+        prisma.notification.count({ where: { userId: me.id, isRead: false } }),
+        prisma.auditLog.findMany({
+          where: { actorId: me.id },
+          orderBy: { at: 'desc' },
+          take: 8,
+        }),
+        scheduleFor(me, { from: dayStart, to: dayEnd }),
+        assignedTo(me, dayStart),
+        draftsOf(me),
+        renewalsFor(me),
+      ]);
 
     res.json({
       awaitingMyApproval: approvals.map((a) => ({
@@ -248,6 +571,7 @@ myWorkRoutes.get(
         amount: a.amount ? Number(a.amount) : null,
         link: a.link,
         createdAt: a.createdAt,
+        requester: { name: a.requester.name },
       })),
       myPendingSubmissions: submitted.map((s) => ({
         id: s.id,
@@ -259,9 +583,10 @@ myWorkRoutes.get(
       })),
       unreadNotifications: unread,
       recentActivity,
-      // Assigned work fills in as the modules' own queries land here.
-      assignedToMe: [],
+      assignedToMe,
       todaysSchedule,
+      myDrafts,
+      renewals,
     });
   }),
 );

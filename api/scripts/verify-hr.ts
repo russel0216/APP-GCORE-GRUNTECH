@@ -956,6 +956,201 @@ async function main() {
       csv.ok && csvText.includes('Employee No') && csvText.includes(employee.employeeNo),
       `${csv.status}, ${csvText.length} bytes`,
     );
+
+    // ══ One record, one URL (audit fix 21) ════════════════════════════════
+    console.log('\nLeave and overtime by id (over HTTP)');
+
+    // A colleague holding exactly what the worker holds: view_own, not view_all.
+    const colleague = await makeUser('ZZ Colleague', 'colleague@verifyhr.local', [workerRole.id]);
+    await prisma.employee.create({
+      data: { employeeNo: `${TAG}-003`, firstName: 'Cora', lastName: 'Colleague', userId: colleague.id },
+    });
+    const colleagueToken = signToken(colleague.id, colleague.email);
+
+    const ownRead = await api(workerToken, 'GET', `/leave/${first.request.id}`);
+    check(
+      'GET /leave/:id — the owner reads their own request',
+      ownRead.status === 200 && ownRead.body.id === first.request.id && ownRead.body.number === first.request.number,
+      `${ownRead.status} ${JSON.stringify(ownRead.body).slice(0, 140)}`,
+    );
+    check(
+      'it is a list row plus proofNote, with the days as a number',
+      'proofNote' in ownRead.body &&
+        ownRead.body.days === 2 &&
+        (ownRead.body.leaveType as { name?: string } | undefined)?.name === leaveType.name &&
+        (ownRead.body.employee as { employeeNo?: string } | undefined)?.employeeNo === employee.employeeNo,
+      JSON.stringify(ownRead.body).slice(0, 200),
+    );
+    check(
+      'and it does not carry the login id behind the employee',
+      !('userId' in ((ownRead.body.employee as Record<string, unknown>) ?? {})),
+    );
+
+    const peekLeave = await api(colleagueToken, 'GET', `/leave/${first.request.id}`);
+    check("a colleague with view_own cannot read someone else's leave by id", peekLeave.status === 403, String(peekLeave.status));
+
+    const hrLeave = await api(hrToken, 'GET', `/leave/${first.request.id}`);
+    check('HR (view_all) reads it', hrLeave.status === 200 && hrLeave.body.id === first.request.id, String(hrLeave.status));
+
+    const missing = await api(hrToken, 'GET', '/leave/does-not-exist');
+    check('an unknown id is a 404, not an empty 200', missing.status === 404, String(missing.status));
+
+    const typesStill = await api(workerToken, 'GET', '/leave/types');
+    const balancesStill = await api(workerToken, 'GET', '/leave/balances');
+    check(
+      '/leave/types and /leave/balances still answer — /:id does not swallow them',
+      typesStill.status === 200 &&
+        Array.isArray(typesStill.body) &&
+        balancesStill.status === 200 &&
+        Array.isArray(balancesStill.body.balances),
+      `${typesStill.status} / ${balancesStill.status}`,
+    );
+
+    // Filing over HTTP: the approval the engine raises links to the request.
+    const filed = await api(workerToken, 'POST', '/leave', {
+      leaveTypeId: leaveType.id,
+      startDate: '2026-10-05',
+      endDate: '2026-10-06',
+      reason: `${TAG} by url`,
+      proofNote: `${TAG} note for the approver`,
+    });
+    const filedId = String(filed.body.id ?? '');
+    const submitted = await api(workerToken, 'POST', `/leave/${filedId}/submit`);
+    check('a leave request files and submits over HTTP', filed.status === 201 && submitted.status === 200, `${filed.status} / ${submitted.status}`);
+
+    const approvalRow = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'leave_request', documentId: filedId },
+    });
+    check(
+      'the approval links to /g-hr/leave/<id>',
+      approvalRow?.link === `/g-hr/leave/${filedId}`,
+      `got ${approvalRow?.link}`,
+    );
+    const supervisorNote = await prisma.notification.findFirst({
+      where: { userId: supervisor.id, link: `/g-hr/leave/${filedId}` },
+    });
+    check('and so does the notification the supervisor receives', !!supervisorNote);
+
+    const submitAudit = await prisma.auditLog.findFirst({
+      where: { entityType: 'leave_request', entityId: filedId, action: 'SUBMITTED' },
+    });
+    check('submitting a leave request is audited', !!submitAudit);
+
+    // The approver's door: a supervisor holding only view_own can open the
+    // request they are asked to decide — and nothing else of the worker's.
+    const ownOnly = await makeRole('zzhr_own_only', `${TAG} Own only`, ['ghr.leave.view_own', 'ghr.overtime.view_own']);
+    await prisma.userRole.create({ data: { userId: supervisor.id, roleId: ownOnly.id } });
+    const supervisorToken = signToken(supervisor.id, supervisor.email);
+
+    const approverRead = await api(supervisorToken, 'GET', `/leave/${filedId}`);
+    check(
+      'the approver the engine routed it to reads it with only view_own',
+      approverRead.status === 200 && approverRead.body.proofNote === `${TAG} note for the approver`,
+      `${approverRead.status} ${JSON.stringify(approverRead.body).slice(0, 120)}`,
+    );
+    check('but is not offered the cancel button', approverRead.body.canCancel === false);
+    const ownerRead = await api(workerToken, 'GET', `/leave/${filedId}`);
+    check('the owner is', ownerRead.body.canCancel === true);
+
+    const colleagueOnPending = await api(colleagueToken, 'GET', `/leave/${filedId}`);
+    check('a colleague still cannot', colleagueOnPending.status === 403, String(colleagueOnPending.status));
+
+    // Overtime had the same hole: the list was scoped, the record was not.
+    const otOwn = await api(workerToken, 'GET', `/overtime/${ot.id}`);
+    const otPeek = await api(colleagueToken, 'GET', `/overtime/${ot.id}`);
+    const otHr = await api(hrToken, 'GET', `/overtime/${ot.id}`);
+    const otApprover = await api(supervisorToken, 'GET', `/overtime/${ot.id}`);
+    check('GET /overtime/:id — the owner reads it', otOwn.status === 200, String(otOwn.status));
+    check(
+      "a colleague with view_own cannot read someone else's overtime, or its rate",
+      otPeek.status === 403,
+      String(otPeek.status),
+    );
+    check('HR reads it', otHr.status === 200, String(otHr.status));
+    check(
+      'the supervisor who approved it reads it with only view_own',
+      otApprover.status === 200 && otApprover.body.canFileActual === false,
+      `${otApprover.status}`,
+    );
+
+    // Ctrl+K: own scope finds your own filings and nobody else's.
+    type Hit = { kind: string; id: string; link: string };
+    const hits = async (token: string, kind: string) =>
+      (((await api(token, 'GET', `/search?q=${TAG}`)).body.hits as Hit[] | undefined) ?? []).filter(
+        (h) => h.kind === kind,
+      );
+    const workerLeaveHits = await hits(workerToken, 'leave_request');
+    check(
+      'search finds the owner their own leave, linked to /g-hr/leave/:id',
+      workerLeaveHits.some((h) => h.id === filedId && h.link === `/g-hr/leave/${filedId}`),
+      JSON.stringify(workerLeaveHits).slice(0, 160),
+    );
+    check("a colleague's search finds none of it", (await hits(colleagueToken, 'leave_request')).length === 0);
+    check(
+      'HR finds it',
+      (await hits(hrToken, 'leave_request')).some((h) => h.id === filedId),
+    );
+    const workerOtHits = await hits(workerToken, 'overtime_request');
+    check(
+      'search finds the owner their own overtime, linked to /g-hr/overtime/:id',
+      workerOtHits.some((h) => h.id === ot.id && h.link === `/g-hr/overtime/${ot.id}`),
+    );
+    check("and a colleague's finds none of it", (await hits(colleagueToken, 'overtime_request')).length === 0);
+
+    // The filing form starts on the job this person last filed against.
+    const chargeable = await api(workerToken, 'GET', '/overtime/chargeable');
+    const defaults = chargeable.body.defaults as { jobId: string | null; costCategoryId: string | null } | undefined;
+    check(
+      '/overtime/chargeable defaults to the last job and budget line filed against',
+      chargeable.status === 200 && defaults?.jobId === job.id && defaults?.costCategoryId === labour.id,
+      JSON.stringify(defaults),
+    );
+    const colleagueDefaults = (await api(colleagueToken, 'GET', '/overtime/chargeable')).body.defaults as
+      | { jobId: string | null }
+      | undefined;
+    check('somebody who never filed starts on no job', colleagueDefaults?.jobId === null);
+
+    // Every write audits — the two overtime writes that did not.
+    const cancelOt = await api(workerToken, 'POST', `/overtime/${unauthorised.id}/cancel`);
+    const cancelAudit = await prisma.auditLog.findFirst({
+      where: { entityType: 'overtime_request', entityId: unauthorised.id, action: 'CANCELLED' },
+    });
+    const actualAudit = await prisma.auditLog.findFirst({
+      where: { entityType: 'overtime_request', entityId: unauthorised.id, action: 'SUBMITTED' },
+    });
+    check('cancelling overtime is audited', cancelOt.status === 200 && !!cancelAudit, String(cancelOt.status));
+    check('filing the actual hours is audited', !!actualAudit);
+    const again2 = await api(workerToken, 'POST', `/overtime/${unauthorised.id}/cancel`);
+    check('cancelling twice is refused', again2.status === 400, String(again2.status));
+
+    // The clock's "Ask HR to link it" becomes a link — for HR only.
+    const unlinkedHr = await prisma.user.create({
+      data: {
+        name: 'ZZ Unlinked HR',
+        email: 'unlinked@verifyhr.local',
+        employeeNo: `${TAG}-004`,
+        passwordHash: await bcrypt.hash('x', 10),
+        roles: { create: [{ roleId: hrRole.id }] },
+      },
+    });
+    const orphan = await prisma.employee.create({
+      data: { employeeNo: `${TAG}-004`, firstName: 'Una', lastName: 'Linked' },
+    });
+    const unlinkedMe = await api(signToken(unlinkedHr.id, unlinkedHr.email), 'GET', '/clock/me');
+    check(
+      "clock/me offers HR the unlinked record carrying the login's employee number",
+      unlinkedMe.body.employee === null && (unlinkedMe.body.candidate as { id?: string } | null)?.id === orphan.id,
+      JSON.stringify(unlinkedMe.body.candidate),
+    );
+    // The same login, stripped of HR: the record is no longer named.
+    await prisma.userRole.deleteMany({ where: { userId: unlinkedHr.id } });
+    await prisma.userRole.create({ data: { userId: unlinkedHr.id, roleId: workerRole.id } });
+    const plainMe = await api(signToken(unlinkedHr.id, unlinkedHr.email), 'GET', '/clock/me');
+    check(
+      'and names no employee record to somebody who cannot open the register',
+      plainMe.status === 200 && plainMe.body.candidate === null,
+      JSON.stringify(plainMe.body.candidate),
+    );
   }
 
   await cleanup();

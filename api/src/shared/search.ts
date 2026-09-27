@@ -233,6 +233,80 @@ registerSearch({
   },
 });
 
+// Partners are suppliers seen from Sales — the same rows, behind the Sales key,
+// so a salesperson who holds no gchain.suppliers permission still finds the
+// principal whose catalogue they need. Two kinds: the partner, and a document
+// it publishes (a resource), both landing on the partner page.
+
+registerSearch({
+  kind: 'partner',
+  label: 'Partners',
+  permission: 'gops.partners.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.supplier.findMany({
+      where: {
+        isPartner: true,
+        OR: [
+          { name: { contains: term, mode: 'insensitive' } },
+          { brand: { contains: term, mode: 'insensitive' } },
+          { code: { contains: term, mode: 'insensitive' } },
+          { category: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      select: { id: true, code: true, name: true, brand: true, category: true, isActive: true },
+    });
+    return rows.map((r) => ({
+      kind: 'partner',
+      id: r.id,
+      title: r.brand ?? r.name,
+      subtitle: [r.code, r.brand && r.brand !== r.name ? r.name : null, r.category, r.isActive ? null : 'inactive']
+        .filter(Boolean)
+        .join(' · '),
+      link: `/g-ops/partners/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'partner_resource',
+  label: 'Partner documents',
+  permission: 'gops.partners.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.partnerResource.findMany({
+      where: {
+        isActive: true,
+        supplier: { isPartner: true },
+        OR: [
+          { title: { contains: term, mode: 'insensitive' } },
+          { description: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      select: {
+        id: true,
+        title: true,
+        kind: true,
+        supplierId: true,
+        supplier: { select: { name: true, brand: true } },
+      },
+    });
+    const kindLabel: Record<string, string> = {
+      CATALOGUE: 'Catalogue',
+      PRICE_LIST: 'Price list',
+      SIZING_APP: 'Sizing app',
+      OTHER: 'Document',
+    };
+    return rows.map((r) => ({
+      kind: 'partner_resource',
+      id: r.id,
+      title: r.title,
+      subtitle: `${kindLabel[r.kind] ?? r.kind} · ${r.supplier.brand ?? r.supplier.name}`,
+      link: `/g-ops/partners/${r.supplierId}`,
+    }));
+  },
+});
+
 // ── Phase 3: sales ───────────────────────────────────────────────────────────
 // Own scope mirrors each list route: a lead belongs to its assignee, a
 // quotation and a costing to their owner, a project to its manager.

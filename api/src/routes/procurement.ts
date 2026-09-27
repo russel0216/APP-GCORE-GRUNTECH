@@ -13,7 +13,9 @@ import {
   forbidden,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { registerSearch } from '../shared/search';
 import { nextNumber } from '../shared/numbering';
 import { submitForApproval, onApprovalSettled, approvalSignoffs } from '../shared/approvals';
 import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
@@ -270,6 +272,10 @@ purchaseRequestRoutes.patch(
         ...(body.warehouseId !== undefined ? { warehouseId: body.warehouseId || null } : {}),
       },
     });
+    await audit(
+      { entityType: 'purchase_request', entityId: pr.id, action: 'UPDATED', summary: `Modified ${pr.number}` },
+      req,
+    );
     res.json(pr);
   }),
 );
@@ -308,6 +314,15 @@ purchaseRequestRoutes.post(
         sortOrder: count,
       },
     });
+    await audit(
+      {
+        entityType: 'purchase_request',
+        entityId: pr.id,
+        action: 'UPDATED',
+        summary: `Added a line to ${pr.number}: ${body.description}`,
+      },
+      req,
+    );
 
     const full = await loadPr(pr.id);
     res.status(201).json(presentPr(full as unknown as Record<string, unknown>));
@@ -318,8 +333,11 @@ purchaseRequestRoutes.patch(
   '/:id/items/:itemId',
   require_('gchain.purchase_requests.edit_own'),
   handler(async (req, res) => {
-    await prForEdit(req, req.params.id);
+    const pr = await prForEdit(req, req.params.id);
     const body = parseBody(prItemSchema.partial(), req.body);
+    if (pr.kind === 'DIRECT_TO_JOB' && body.costCategoryId !== undefined && !body.costCategoryId) {
+      throw badRequest('A direct-to-job line needs a cost category — it is how the cost finds its budget line');
+    }
 
     const existing = await prisma.purchaseRequestItem.findFirst({
       where: { id: req.params.itemId, requestId: req.params.id },
@@ -341,6 +359,15 @@ purchaseRequestRoutes.patch(
         estimatedAmount: D(cents(quantity * estimatedCost)),
       },
     });
+    await audit(
+      {
+        entityType: 'purchase_request',
+        entityId: pr.id,
+        action: 'UPDATED',
+        summary: `Modified a line on ${pr.number}: ${body.description ?? existing.description}`,
+      },
+      req,
+    );
 
     const full = await loadPr(req.params.id);
     res.json(presentPr(full as unknown as Record<string, unknown>));
@@ -351,12 +378,21 @@ purchaseRequestRoutes.delete(
   '/:id/items/:itemId',
   require_('gchain.purchase_requests.edit_own'),
   handler(async (req, res) => {
-    await prForEdit(req, req.params.id);
+    const pr = await prForEdit(req, req.params.id);
     const existing = await prisma.purchaseRequestItem.findFirst({
       where: { id: req.params.itemId, requestId: req.params.id },
     });
     if (!existing) throw notFound('Line not found');
     await prisma.purchaseRequestItem.delete({ where: { id: req.params.itemId } });
+    await audit(
+      {
+        entityType: 'purchase_request',
+        entityId: pr.id,
+        action: 'UPDATED',
+        summary: `Removed a line from ${pr.number}: ${existing.description}`,
+      },
+      req,
+    );
     const full = await loadPr(req.params.id);
     res.json(presentPr(full as unknown as Record<string, unknown>));
   }),
@@ -827,6 +863,9 @@ purchaseOrderRoutes.get(
     const q = listQuery(req);
     const where: Prisma.PurchaseOrderWhereInput = {};
     if (q.filters.status) where.status = q.filters.status as Prisma.EnumPoStatusFilter['equals'];
+    // "Awaiting delivery" is two statuses — the same pair chainOverview() counts,
+    // so the dashboard tile opens exactly the orders it counted.
+    else if (q.filters.awaiting === 'true') where.status = { in: ['ISSUED', 'PARTIALLY_RECEIVED'] };
     if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
     if (q.filters.jobId) where.jobId = q.filters.jobId;
     if (q.search) {
@@ -886,7 +925,24 @@ async function loadPo(id: string) {
       supplier: true,
       job: { select: { id: true, number: true, name: true } },
       warehouse: { select: { id: true, name: true } },
-      request: { select: { id: true, number: true, purpose: true } },
+      request: {
+        select: {
+          id: true,
+          number: true,
+          purpose: true,
+          // The awarded canvass, if any: its winner is the order's supplier
+          // and must not be swapped on the draft afterwards.
+          canvasses: {
+            where: { status: 'AWARDED' },
+            orderBy: { awardedAt: 'desc' },
+            select: {
+              id: true,
+              number: true,
+              suppliers: { where: { isSelected: true }, select: { supplierId: true } },
+            },
+          },
+        },
+      },
       createdBy: { select: { id: true, name: true, position: true } },
       items: {
         orderBy: { sortOrder: 'asc' },
@@ -894,6 +950,10 @@ async function loadPo(id: string) {
           item: { select: { id: true, code: true, name: true } },
           costCategory: { select: { id: true, name: true } },
         },
+      },
+      bills: {
+        orderBy: { billDate: 'desc' },
+        select: { id: true, number: true, status: true, total: true, dueDate: true },
       },
       receivings: {
         orderBy: { receivedDate: 'desc' },
@@ -908,9 +968,64 @@ async function loadPo(id: string) {
   });
 }
 
-function presentPo(po: NonNullable<Awaited<ReturnType<typeof loadPo>>>) {
+type LoadedPo = NonNullable<Awaited<ReturnType<typeof loadPo>>>;
+
+/** The awarded canvass this order was placed from — its supplier is decided. */
+function awardedCanvass(po: LoadedPo): { id: string; number: string } | null {
+  const hit = po.request?.canvasses.find((c) => c.suppliers.some((s) => s.supplierId === po.supplierId));
+  return hit ? { id: hit.id, number: hit.number } : null;
+}
+
+/**
+ * Who may change a draft order: edit_all, or its author holding edit_own
+ * (rule 7). The route guard only proves the caller holds one of the two.
+ */
+function mayEditPo(me: ResolvedUser, po: { createdById: string }): boolean {
+  return canEditRecord(me, 'gchain', 'purchase_orders', po.createdById);
+}
+
+/**
+ * The approver's reason when the latest submission came back.
+ *
+ * A rejected order reverts to DRAFT silently (onApprovalSettled below), so
+ * without this the person who raised it saw an editable draft and no idea
+ * why — the comment lived only in a notification they may have dismissed.
+ */
+async function lastReturn(documentId: string) {
+  const latest = await prisma.approvalRequest.findFirst({
+    where: { documentType: 'purchase_order', documentId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      status: true,
+      actions: {
+        where: { action: { in: ['REJECTED', 'RETURNED'] } },
+        orderBy: { actedAt: 'desc' },
+        take: 1,
+        select: { comment: true, actedAt: true, approver: { select: { name: true } } },
+      },
+    },
+  });
+  if (!latest || latest.status !== 'REJECTED') return null;
+  const last = latest.actions[0];
   return {
-    ...po,
+    by: last?.approver.name ?? null,
+    comment: last?.comment ?? null,
+    at: last?.actedAt ?? null,
+  };
+}
+
+function presentPo(po: LoadedPo, me?: ResolvedUser) {
+  const { bills, request, ...rest } = po;
+  // Supplier bills are finance's register: listed only to those who can open
+  // them, so a link here never lands on a 403.
+  const seesBills = !!me && can(me, 'gfin.ap.view_all');
+  return {
+    ...rest,
+    request: request ? { id: request.id, number: request.number, purpose: request.purpose } : null,
+    fromCanvass: awardedCanvass(po),
+    bills: seesBills ? bills.map((b) => ({ ...b, total: num(b.total) })) : [],
+    billsVisible: seesBills,
+    canEdit: !!me && po.status === 'DRAFT' && mayEditPo(me, po),
     vatRate: num(po.vatRate),
     subtotal: num(po.subtotal),
     vatAmount: num(po.vatAmount),
@@ -930,9 +1045,13 @@ purchaseOrderRoutes.get(
   '/:id',
   requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const po = await loadPo(req.params.id);
     if (!po) throw notFound('Purchase order not found');
-    res.json(presentPo(po));
+    res.json({
+      ...presentPo(po, me),
+      returned: po.status === 'DRAFT' ? await lastReturn(po.id) : null,
+    });
   }),
 );
 
@@ -1088,21 +1207,33 @@ const poItemSchema = z.object({
   unitPrice: z.number().min(0),
 });
 
-async function poForEdit(id: string) {
+async function poForEdit(req: Parameters<typeof currentUser>[0], id: string) {
+  const me = currentUser(req);
   const po = await prisma.purchaseOrder.findUnique({ where: { id } });
   if (!po) throw notFound('Purchase order not found');
   if (po.status !== 'DRAFT') {
     throw badRequest(`${po.number} is ${po.status.toLowerCase().replace(/_/g, ' ')} and cannot be changed`);
   }
-  return po;
+  if (!mayEditPo(me, po)) throw forbidden('This order belongs to someone else');
+  return { po, me };
 }
+
+/** The request's rule, held on the order too: a direct-to-job line must find its budget line. */
+function requireCategory(kind: string, costCategoryId: string | null | undefined) {
+  if (kind === 'DIRECT_TO_JOB' && !costCategoryId) {
+    throw badRequest('A direct-to-job line needs a cost category — it is how the cost finds its budget line');
+  }
+}
+
+const PO_EDIT = ['gchain.purchase_orders.edit_all', 'gchain.purchase_orders.edit_own'] as const;
 
 purchaseOrderRoutes.post(
   '/:id/items',
-  require_('gchain.purchase_orders.edit_all'),
+  requireAny(...PO_EDIT),
   handler(async (req, res) => {
-    await poForEdit(req.params.id);
+    const { po, me } = await poForEdit(req, req.params.id);
     const body = parseBody(poItemSchema, req.body);
+    requireCategory(po.kind, body.costCategoryId);
     const count = await prisma.purchaseOrderItem.count({ where: { orderId: req.params.id } });
 
     await prisma.purchaseOrderItem.create({
@@ -1119,16 +1250,26 @@ purchaseOrderRoutes.post(
       },
     });
     await recalcPo(req.params.id);
-    res.status(201).json(presentPo((await loadPo(req.params.id))!));
+    await audit(
+      {
+        entityType: 'purchase_order',
+        entityId: po.id,
+        action: 'UPDATED',
+        summary: `Added a line to ${po.number}: ${body.description}`,
+      },
+      req,
+    );
+    res.status(201).json(presentPo((await loadPo(req.params.id))!, me));
   }),
 );
 
 purchaseOrderRoutes.patch(
   '/:id/items/:itemId',
-  require_('gchain.purchase_orders.edit_all'),
+  requireAny(...PO_EDIT),
   handler(async (req, res) => {
-    await poForEdit(req.params.id);
+    const { po, me } = await poForEdit(req, req.params.id);
     const body = parseBody(poItemSchema.partial(), req.body);
+    if (body.costCategoryId !== undefined) requireCategory(po.kind, body.costCategoryId);
     const existing = await prisma.purchaseOrderItem.findFirst({
       where: { id: req.params.itemId, orderId: req.params.id },
     });
@@ -1140,6 +1281,7 @@ purchaseOrderRoutes.patch(
     await prisma.purchaseOrderItem.update({
       where: { id: existing.id },
       data: {
+        ...(body.itemId !== undefined ? { itemId: body.itemId || null } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
         ...(body.unit !== undefined ? { unit: body.unit } : {}),
         ...(body.costCategoryId !== undefined ? { costCategoryId: body.costCategoryId || null } : {}),
@@ -1149,31 +1291,59 @@ purchaseOrderRoutes.patch(
       },
     });
     await recalcPo(req.params.id);
-    res.json(presentPo((await loadPo(req.params.id))!));
+    await audit(
+      {
+        entityType: 'purchase_order',
+        entityId: po.id,
+        action: 'UPDATED',
+        summary: `Modified a line on ${po.number}: ${body.description ?? existing.description}`,
+      },
+      req,
+    );
+    res.json(presentPo((await loadPo(req.params.id))!, me));
   }),
 );
 
 purchaseOrderRoutes.delete(
   '/:id/items/:itemId',
-  require_('gchain.purchase_orders.edit_all'),
+  requireAny(...PO_EDIT),
   handler(async (req, res) => {
-    await poForEdit(req.params.id);
+    const { po, me } = await poForEdit(req, req.params.id);
     const existing = await prisma.purchaseOrderItem.findFirst({
       where: { id: req.params.itemId, orderId: req.params.id },
     });
     if (!existing) throw notFound('Line not found');
     await prisma.purchaseOrderItem.delete({ where: { id: existing.id } });
     await recalcPo(req.params.id);
-    res.json(presentPo((await loadPo(req.params.id))!));
+    await audit(
+      {
+        entityType: 'purchase_order',
+        entityId: po.id,
+        action: 'UPDATED',
+        summary: `Removed a line from ${po.number}: ${existing.description}`,
+      },
+      req,
+    );
+    res.json(presentPo((await loadPo(req.params.id))!, me));
   }),
 );
 
 purchaseOrderRoutes.patch(
   '/:id',
-  require_('gchain.purchase_orders.edit_all'),
+  requireAny(...PO_EDIT),
   handler(async (req, res) => {
-    await poForEdit(req.params.id);
+    const { po, me } = await poForEdit(req, req.params.id);
     const body = parseBody(poSchema.partial().omit({ requestId: true, canvassId: true }), req.body);
+
+    // The canvass decided the supplier; swapping it on the draft would issue an
+    // order at one supplier's quoted prices to another.
+    if (body.supplierId !== undefined && body.supplierId !== po.supplierId) {
+      const loaded = await loadPo(po.id);
+      const canvass = loaded ? awardedCanvass(loaded) : null;
+      if (canvass) {
+        throw badRequest(`The supplier was awarded on ${canvass.number} and cannot be changed on the order`);
+      }
+    }
 
     await prisma.purchaseOrder.update({
       where: { id: req.params.id },
@@ -1187,7 +1357,16 @@ purchaseOrderRoutes.patch(
       },
     });
     await recalcPo(req.params.id);
-    res.json(presentPo((await loadPo(req.params.id))!));
+    await audit(
+      {
+        entityType: 'purchase_order',
+        entityId: po.id,
+        action: 'UPDATED',
+        summary: `Modified ${po.number}`,
+      },
+      req,
+    );
+    res.json(presentPo((await loadPo(req.params.id))!, me));
   }),
 );
 
@@ -1490,3 +1669,102 @@ purchaseRequestRoutes.get(
     res.send(pdf);
   }),
 );
+
+// ── Global search ────────────────────────────────────────────────────────────
+// Ctrl+K finds a procurement document by its number — "PO-2026-0142" is the
+// example the palette itself promises. Numbers and names only; each hit links
+// to the record, never to the list.
+
+registerSearch({
+  kind: 'purchase_request',
+  label: 'Purchase requests',
+  permission: ['gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own'],
+  // The list's own rule (procurement.ts, GET /): own-scope sees what it raised.
+  ownWhere: (user) => ({ requestedById: user.id }),
+  async search(term, _user, limit, own) {
+    const rows = await prisma.purchaseRequest.findMany({
+      where: {
+        ...(own ?? {}),
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { purpose: { contains: term, mode: 'insensitive' } },
+          { job: { number: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { id: true, number: true, purpose: true, status: true, job: { select: { number: true } } },
+    });
+    return rows.map((r) => ({
+      kind: 'purchase_request',
+      id: r.id,
+      title: `${r.number} — ${r.purpose}`,
+      subtitle: [r.job?.number, r.status.toLowerCase().replace(/_/g, ' ')].filter(Boolean).join(' · '),
+      link: `/g-chain/purchase-requests/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'canvass',
+  label: 'Canvass',
+  permission: ['gchain.canvass.view_all', 'gchain.canvass.view_own'],
+  ownWhere: (user) => ({ createdById: user.id }),
+  async search(term, _user, limit, own) {
+    const rows = await prisma.canvass.findMany({
+      where: {
+        ...(own ?? {}),
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { request: { number: { contains: term, mode: 'insensitive' } } },
+          { request: { purpose: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { id: true, number: true, status: true, request: { select: { number: true, purpose: true } } },
+    });
+    return rows.map((r) => ({
+      kind: 'canvass',
+      id: r.id,
+      title: `${r.number} — ${r.request.purpose}`,
+      subtitle: `${r.request.number} · ${r.status.toLowerCase()}`,
+      link: `/g-chain/canvass/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'purchase_order',
+  label: 'Purchase orders',
+  permission: ['gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'],
+  ownWhere: (user) => ({ createdById: user.id }),
+  async search(term, _user, limit, own) {
+    const rows = await prisma.purchaseOrder.findMany({
+      where: {
+        ...(own ?? {}),
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { supplier: { name: { contains: term, mode: 'insensitive' } } },
+          { job: { number: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        supplier: { select: { name: true } },
+        job: { select: { number: true } },
+      },
+    });
+    return rows.map((r) => ({
+      kind: 'purchase_order',
+      id: r.id,
+      title: `${r.number} — ${r.supplier.name}`,
+      subtitle: [r.job?.number ?? 'Stock', r.status.toLowerCase().replace(/_/g, ' ')].join(' · '),
+      link: `/g-chain/purchase-orders/${r.id}`,
+    }));
+  },
+});

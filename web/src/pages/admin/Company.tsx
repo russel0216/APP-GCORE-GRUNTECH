@@ -135,7 +135,7 @@ export function Company() {
                 ref={fileRef}
                 type="file"
                 accept="image/*"
-                style={{ display: 'none' }}
+                className="company-file-input"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (f) void uploadLogo(f);
@@ -144,7 +144,7 @@ export function Company() {
               <button className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy}>
                 {data.logoPath ? 'Replace logo' : 'Upload logo'}
               </button>
-              <span className="faint mono" style={{ fontSize: 11 }}>
+              <span className="faint mono company-logo-name">
                 {data.logoPath ? data.logoPath.split(/[\\/]/).pop() : 'none set'}
               </span>
             </div>
@@ -197,7 +197,10 @@ export function Company() {
                 onChange={(e) => setData({ ...data, currency: e.target.value.toUpperCase() })}
               />
             </Field>
-            <Field label="Document prefix" hint="Leads every number, e.g. GT-QT-2026-0001">
+            <Field
+              label="Document prefix"
+              hint="Leads every prefixed number, e.g. GT-PRJ-2026-0001. A pattern without {PREFIX}, such as the quotation's, ignores it."
+            >
               <input
                 value={data.numberPrefix}
                 maxLength={6}
@@ -225,14 +228,14 @@ export function Company() {
               />
             </Field>
           </div>
-          <div className="alert info" style={{ marginBottom: 0 }}>
+          <div className="alert info company-note">
             EWT is withheld at source and returns as a tax certificate, not as cash. A/R tracks
             invoiced, collected and withheld separately so withholding never reads as a late payment.
           </div>
         </div>
       </div>
 
-      <div className="row" style={{ marginTop: 18 }}>
+      <div className="row company-actions">
         <button className="btn btn-primary" onClick={save} disabled={busy}>
           {busy ? 'Saving…' : 'Save company settings'}
         </button>

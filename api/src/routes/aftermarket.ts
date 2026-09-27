@@ -20,7 +20,10 @@ import {
   forbidden,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import type { ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { registerSearch } from '../shared/search';
+import { registerSchedule } from './workspace';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
@@ -54,14 +57,14 @@ function asDate(value: string, label: string): Date {
 }
 
 /** The document type a report of each kind is numbered and approved under. */
-const REPORT_DOC_TYPE: Record<string, string> = {
+export const REPORT_DOC_TYPE: Record<string, string> = {
   COMMISSIONING: 'commissioning_report',
   PREVENTIVE_MAINTENANCE: 'pm_report',
   INSPECTION: 'inspection_report',
   CORRECTIVE: 'inspection_report',
 };
 
-const KIND_LABEL: Record<string, string> = {
+export const KIND_LABEL: Record<string, string> = {
   COMMISSIONING: 'Commissioning',
   PREVENTIVE_MAINTENANCE: 'Preventive maintenance',
   INSPECTION: 'Inspection',
@@ -69,7 +72,7 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 /** Which permission covers a report of each kind. */
-function reportPermission(kind: string, action: string): string {
+export function reportPermission(kind: string, action: string): string {
   if (kind === 'COMMISSIONING') return `gops.commissioning_reports.${action}`;
   if (kind === 'PREVENTIVE_MAINTENANCE') return `gops.pm_reports.${action}`;
   return `gops.inspection_reports.${action}`;
@@ -196,10 +199,23 @@ assetRoutes.get(
           take: 50,
         },
         visits: {
-          where: { status: 'SCHEDULED' },
-          select: { id: true, number: true, dueDate: true, kind: true },
+          where: { status: { in: ['SCHEDULED', 'MISSED'] } },
+          select: { id: true, number: true, dueDate: true, kind: true, status: true },
           orderBy: { dueDate: 'asc' },
           take: 10,
+        },
+        jobOrders: {
+          select: {
+            id: true,
+            number: true,
+            kind: true,
+            status: true,
+            title: true,
+            requestedFor: true,
+            chargeBasis: true,
+          },
+          orderBy: { requestedFor: 'desc' },
+          take: 20,
         },
       },
     });
@@ -210,6 +226,7 @@ assetRoutes.get(
       contracts: row.contracts.map((c) => c.contract),
       reports: row.reports,
       upcomingVisits: row.visits,
+      jobOrders: row.jobOrders,
     });
   }),
 );
@@ -471,6 +488,8 @@ const contractInclude = {
       customer: { select: { id: true, code: true, name: true } },
       site: { select: { id: true, name: true } },
       projectManager: { select: { id: true, name: true } },
+      // Renewal starts from a copy of this costing (POST /costings/:id/duplicate).
+      costing: { select: { id: true } },
     },
   },
   assets: { include: { asset: { select: { id: true, code: true, name: true, serialNo: true } } } },
@@ -551,6 +570,7 @@ contractRoutes.get(
           include: {
             assignedTo: { select: { id: true, name: true } },
             report: { select: { id: true, number: true, status: true } },
+            jobOrder: { select: { id: true, number: true, status: true } },
           },
           orderBy: { dueDate: 'asc' },
         },
@@ -785,35 +805,245 @@ visitRoutes.use(authenticate);
 
 const visitInclude = {
   contract: {
-    select: { id: true, number: true, job: { select: { id: true, number: true, name: true } } },
+    select: {
+      id: true,
+      number: true,
+      plannedVisits: true,
+      job: { select: { id: true, number: true, name: true } },
+    },
   },
   customer: { select: { id: true, name: true } },
   site: { select: { id: true, name: true, city: true } },
   asset: { select: { id: true, code: true, name: true, serialNo: true } },
   assignedTo: { select: { id: true, name: true } },
-  report: { select: { id: true, number: true, status: true } },
+  report: { select: { id: true, number: true, status: true, performedAt: true } },
+  // Why a visit with no contract sequence exists: the job order that asked for it.
+  jobOrder: { select: { id: true, number: true, status: true } },
 } satisfies Prisma.ServiceVisitInclude;
+
+/**
+ * Who may open the schedule. The report permissions are the historical guard;
+ * `gops.visits.view_all` is the one the menu entry itself asks for, so holding
+ * it and being refused the data behind the screen would be a lie.
+ */
+const VISIT_VIEW = [
+  'gops.pm_reports.view_all',
+  'gops.pm_reports.view_own',
+  'gops.service_contracts.view_all',
+  'gops.visits.view_all',
+] as const;
+
+/**
+ * Somebody who can see visits only through `pm_reports.view_own` sees the
+ * visits booked on them — the same "own" the reports list applies. Everyone
+ * else on the schedule sees the whole schedule.
+ */
+function visitsOnlyOwn(me: ResolvedUser): boolean {
+  return !(
+    me.isSuperAdmin ||
+    me.permissions.has('gops.pm_reports.view_all') ||
+    me.permissions.has('gops.service_contracts.view_all') ||
+    me.permissions.has('gops.visits.view_all')
+  );
+}
+
+/** The filters the list, the calendar feed and the sales calendar share. */
+function visitWhere(
+  filters: Record<string, string | undefined>,
+  me: ResolvedUser,
+  mine: boolean,
+): Prisma.ServiceVisitWhereInput {
+  const where: Prisma.ServiceVisitWhereInput = {};
+  if (filters.assignedToId === 'none') where.assignedToId = null;
+  else if (filters.assignedToId) where.assignedToId = filters.assignedToId;
+  if (mine || visitsOnlyOwn(me)) where.assignedToId = me.id;
+
+  if (filters.contractId) where.contractId = filters.contractId;
+  if (filters.customerId) where.customerId = filters.customerId;
+  if (filters.siteId) where.siteId = filters.siteId;
+  if (filters.assetId) where.assetId = filters.assetId;
+  const kind = asEnum(ServiceKind, filters.kind);
+  if (kind) where.kind = kind;
+
+  // `statuses=SCHEDULED,MISSED` — how the report picker asks for every visit
+  // that can still be reported against, late ones included.
+  const many = (filters.statuses ?? '')
+    .split(',')
+    .map((s) => asEnum(VisitStatus, s.trim()))
+    .filter((s): s is VisitStatus => !!s);
+  const one = asEnum(VisitStatus, filters.status);
+  if (many.length) where.status = { in: many };
+  else if (one) where.status = one;
+  return where;
+}
+
+/** Derived on read, never stored: a stored flag is wrong the moment midnight passes. */
+function presentVisit<T extends { status: string; dueDate: Date }>(row: T, today: Date) {
+  return {
+    ...row,
+    daysUntilDue: daysBetween(today, row.dueDate),
+    overdue: row.status === 'SCHEDULED' && row.dueDate < today,
+  };
+}
+
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+/*
+  Route order matters here. `/calendar` has to be registered before `/:id`,
+  or Express hands "calendar" to the `:id` route and the feed answers 404 —
+  the same trap as `/overtime/chargeable`.
+*/
+
+/**
+ * The range feed behind the month grid (and the sales calendar's service
+ * series). A paginated list caps at 200 rows and is shaped for a table; a
+ * calendar needs every visit in a window in one call, the reports written
+ * with no visit behind them, and the people to filter by.
+ *
+ * It sweeps first: a calendar that shows a three-week-late visit as merely
+ * scheduled is lying about the one thing it exists to show.
+ */
+visitRoutes.get(
+  '/calendar',
+  requireAny(...VISIT_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = req.query as Record<string, string | undefined>;
+    if (!q.from || !q.to) throw badRequest('A calendar window needs a from and a to date');
+    const from = asDate(q.from, 'From');
+    const to = asDate(q.to, 'To');
+    if (to < from) throw badRequest('The window ends before it starts');
+    // A six-row month grid is 42 days; 62 allows a month and its padding and
+    // refuses an accidental year-long pull.
+    if (daysBetween(from, to) > 62) throw badRequest('A calendar window is at most 62 days');
+
+    await sweepOverdue();
+    const settings = await aftermarketSettings();
+    const today = dayKey(new Date());
+    const mine = q.scope === 'mine';
+
+    const where: Prisma.ServiceVisitWhereInput = {
+      ...visitWhere(q, me, mine),
+      dueDate: { gte: from, lte: to },
+    };
+
+    // Reports with no visit — commissioning, a walk-in inspection — are
+    // history, not schedule. They sit on the day the work was done as a
+    // second series, and never turn into visits. A visit status filter asks
+    // about visits, so it leaves them out; so does "unassigned".
+    const canReports =
+      me.isSuperAdmin ||
+      [
+        'gops.pm_reports',
+        'gops.commissioning_reports',
+        'gops.inspection_reports',
+      ].some((m) => me.permissions.has(`${m}.view_all`) || me.permissions.has(`${m}.view_own`));
+    const allReports =
+      me.isSuperAdmin ||
+      me.permissions.has('gops.pm_reports.view_all') ||
+      me.permissions.has('gops.commissioning_reports.view_all') ||
+      me.permissions.has('gops.inspection_reports.view_all');
+    const wantReports =
+      q.includeReports !== 'false' &&
+      canReports &&
+      !q.status &&
+      !q.statuses &&
+      q.assignedToId !== 'none';
+
+    const reportWhere: Prisma.ServiceReportWhereInput = {
+      visitId: null,
+      performedAt: { gte: from, lte: to },
+    };
+    if (q.customerId) reportWhere.customerId = q.customerId;
+    if (q.contractId) reportWhere.contractId = q.contractId;
+    if (q.siteId) reportWhere.siteId = q.siteId;
+    if (q.assetId) reportWhere.assetId = q.assetId;
+    const kind = asEnum(ServiceKind, q.kind);
+    if (kind) reportWhere.kind = kind;
+    if (q.assignedToId && q.assignedToId !== 'none') reportWhere.performedById = q.assignedToId;
+    if (mine || !allReports) reportWhere.performedById = me.id;
+
+    const [visits, reports, engineers] = await Promise.all([
+      prisma.serviceVisit.findMany({
+        where,
+        include: visitInclude,
+        orderBy: [{ dueDate: 'asc' }, { number: 'asc' }],
+        take: 1000,
+      }),
+      wantReports
+        ? prisma.serviceReport.findMany({
+            where: reportWhere,
+            select: {
+              id: true,
+              number: true,
+              kind: true,
+              status: true,
+              performedAt: true,
+              billable: true,
+              underWarranty: true,
+              customer: { select: { id: true, name: true } },
+              site: { select: { id: true, name: true } },
+              asset: { select: { id: true, code: true, name: true } },
+              contract: { select: { id: true, number: true } },
+              performedBy: { select: { id: true, name: true } },
+            },
+            orderBy: { performedAt: 'asc' },
+            take: 1000,
+          })
+        : Promise.resolve([]),
+      // The permission-safe people list for the filter: names already on the
+      // schedule, nothing more. Handing every login to anyone who can see a
+      // visit would be a directory nobody decided to publish.
+      prisma.serviceVisit.findMany({
+        where: { assignedToId: { not: null } },
+        distinct: ['assignedToId'],
+        select: { assignedTo: { select: { id: true, name: true } } },
+      }),
+    ]);
+
+    res.json({
+      from: isoDay(from),
+      to: isoDay(to),
+      asOf: isoDay(today),
+      visits: visits.map((v) => presentVisit(v, today)),
+      reports,
+      engineers: engineers
+        .map((e) => e.assignedTo)
+        .filter((u): u is { id: string; name: string } => !!u)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      missedAfterDays: settings.missedAfterDays,
+    });
+  }),
+);
+
+/** One visit — what every `?visit=` link (notification, contract, asset, report) opens. */
+visitRoutes.get(
+  '/:id',
+  requireAny(...VISIT_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await prisma.serviceVisit.findUnique({ where: { id: req.params.id }, include: visitInclude });
+    if (!row) throw notFound('Visit not found');
+    if (visitsOnlyOwn(me) && row.assignedToId !== me.id) {
+      throw forbidden('That is someone else’s visit');
+    }
+    res.json(presentVisit(row, dayKey(new Date())));
+  }),
+);
 
 visitRoutes.get(
   '/',
-  requireAny('gops.pm_reports.view_all', 'gops.pm_reports.view_own', 'gops.service_contracts.view_all'),
+  requireAny(...VISIT_VIEW),
   handler(async (req, res) => {
     await sweepOverdue();
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.ServiceVisitWhereInput = {};
+    const where: Prisma.ServiceVisitWhereInput = visitWhere(q.filters, me, q.scope === 'mine');
 
-    if (q.scope === 'mine') where.assignedToId = me.id;
-    const status = asEnum(VisitStatus, q.filters.status);
-    if (status) where.status = status;
-    const kind = asEnum(ServiceKind, q.filters.kind);
-    if (kind) where.kind = kind;
-    if (q.filters.contractId) where.contractId = q.filters.contractId;
-    if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
     if (q.filters.from || q.filters.to) {
       where.dueDate = {};
-      if (q.filters.from) where.dueDate.gte = new Date(q.filters.from);
-      if (q.filters.to) where.dueDate.lte = new Date(q.filters.to);
+      if (q.filters.from) where.dueDate.gte = asDate(q.filters.from, 'From');
+      if (q.filters.to) where.dueDate.lte = asDate(q.filters.to, 'To');
     }
     if (q.filters.due === 'true') {
       where.status = 'SCHEDULED';
@@ -839,13 +1069,7 @@ visitRoutes.get(
     ]);
 
     const today = dayKey(new Date());
-    res.json(
-      listResult(
-        rows.map((r) => ({ ...r, daysUntilDue: daysBetween(today, r.dueDate) })),
-        total,
-        q,
-      ),
-    );
+    res.json(listResult(rows.map((r) => presentVisit(r, today)), total, q));
   }),
 );
 
@@ -859,6 +1083,8 @@ const visitSchema = z.object({
   assignedToId: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
+
+const visitLink = (id: string) => `/g-ops/visits?visit=${id}`;
 
 /** An unscheduled call — a breakdown does not appear on a PM schedule. */
 visitRoutes.post(
@@ -888,8 +1114,8 @@ visitRoutes.post(
         userId: visit.assignedToId,
         type: 'pm.due',
         title: `${KIND_LABEL[visit.kind]} visit assigned`,
-        body: `${visit.customer.name} — due ${visit.dueDate.toISOString().slice(0, 10)}`,
-        link: `/g-ops/visits`,
+        body: `${visit.customer.name} — due ${isoDay(visit.dueDate)}`,
+        link: visitLink(visit.id),
       });
     }
 
@@ -902,10 +1128,15 @@ visitRoutes.post(
       },
       req,
     );
-    res.status(201).json(visit);
+    res.status(201).json(presentVisit(visit, dayKey(new Date())));
   }),
 );
 
+/**
+ * Rescheduling, assigning, cancelling. A visit is never marked COMPLETED here
+ * — it completes only when its report is approved (Phase 8 rule) — and a
+ * cancellation carries a written reason, appended to the visit's notes.
+ */
 visitRoutes.patch(
   '/:id',
   require_('gops.pm_reports.create'),
@@ -916,6 +1147,8 @@ visitRoutes.patch(
         assignedToId: z.string().optional().nullable(),
         status: z.enum(['SCHEDULED', 'CANCELLED']).optional(),
         notes: z.string().optional().nullable(),
+        /** Required when cancelling. */
+        reason: z.string().trim().optional(),
       }),
       req.body,
     );
@@ -925,13 +1158,22 @@ visitRoutes.patch(
       throw badRequest('This visit has been made and reported. Its record is what happened.');
     }
 
+    const cancelling = body.status === 'CANCELLED' && visit.status !== 'CANCELLED';
+    if (cancelling && (!body.reason || body.reason.length < 3)) {
+      throw badRequest('Say why the visit is cancelled — a cancelled visit with no reason is all an audit would have to go on.');
+    }
+    const baseNotes = body.notes !== undefined ? body.notes || null : visit.notes;
+    const notes = cancelling
+      ? [baseNotes, `Cancelled ${isoDay(new Date())}: ${body.reason}`].filter(Boolean).join('\n')
+      : baseNotes;
+
     const updated = await prisma.serviceVisit.update({
       where: { id: visit.id },
       data: {
         ...(body.dueDate ? { dueDate: asDate(body.dueDate, 'Due date') } : {}),
         ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
         ...(body.status ? { status: body.status } : {}),
-        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+        notes,
       },
       include: visitInclude,
     });
@@ -941,11 +1183,32 @@ visitRoutes.patch(
         userId: body.assignedToId,
         type: 'pm.due',
         title: `${KIND_LABEL[updated.kind]} visit assigned`,
-        body: `${updated.customer.name} — due ${updated.dueDate.toISOString().slice(0, 10)}`,
-        link: `/g-ops/visits`,
+        body: `${updated.customer.name} — due ${isoDay(updated.dueDate)}`,
+        link: visitLink(updated.id),
       });
     }
-    res.json(updated);
+
+    const changes = [
+      body.dueDate && isoDay(visit.dueDate) !== isoDay(updated.dueDate)
+        ? `due ${isoDay(visit.dueDate)} → ${isoDay(updated.dueDate)}`
+        : null,
+      body.assignedToId !== undefined && body.assignedToId !== visit.assignedToId
+        ? `engineer ${updated.assignedTo?.name ?? 'unassigned'}`
+        : null,
+      body.status && body.status !== visit.status ? `status ${visit.status} → ${body.status}` : null,
+    ].filter(Boolean);
+    await audit(
+      {
+        entityType: 'service_visit',
+        entityId: updated.id,
+        action: cancelling ? 'CANCELLED' : 'UPDATED',
+        summary: `${updated.number}${changes.length ? ` — ${changes.join(', ')}` : ' updated'}${cancelling ? ` (${body.reason})` : ''}`,
+        before: visit,
+        after: { ...updated, customer: undefined, contract: undefined, site: undefined, asset: undefined },
+      },
+      req,
+    );
+    res.json(presentVisit(updated, dayKey(new Date())));
   }),
 );
 
@@ -1143,7 +1406,15 @@ const reportInclude = {
   },
   contract: { select: { id: true, number: true, endsAt: true } },
   job: { select: { id: true, number: true, name: true } },
-  visit: { select: { id: true, number: true, dueDate: true, sequence: true } },
+  visit: {
+    select: {
+      id: true,
+      number: true,
+      dueDate: true,
+      sequence: true,
+      jobOrder: { select: { id: true, number: true, status: true } },
+    },
+  },
   template: { select: { id: true, key: true, name: true, version: true, sections: true } },
   performedBy: { select: { id: true, name: true } },
 } satisfies Prisma.ServiceReportInclude;
@@ -1230,8 +1501,10 @@ serviceReportRoutes.get(
       throw forbidden('That is someone else’s report');
     }
 
+    // Section photos are filed as `<report id>~<section key>`, the rest under
+    // the report id itself — one prefix finds all of them.
     const photos = await prisma.attachment.findMany({
-      where: { entityType: 'service_report', entityId: row.id },
+      where: { entityType: 'service_report', entityId: { startsWith: row.id } },
       select: { id: true, fileName: true, caption: true, capturedAt: true, mimeType: true },
       orderBy: { uploadedAt: 'asc' },
     });
@@ -1241,12 +1514,14 @@ serviceReportRoutes.get(
 );
 
 const reportSchema = z.object({
-  kind: z.enum(['COMMISSIONING', 'PREVENTIVE_MAINTENANCE', 'INSPECTION', 'CORRECTIVE']),
+  /** Defaults to the visit's kind when written against a visit. */
+  kind: z.enum(['COMMISSIONING', 'PREVENTIVE_MAINTENANCE', 'INSPECTION', 'CORRECTIVE']).optional(),
   templateId: z.string().optional(),
   visitId: z.string().optional().nullable(),
   contractId: z.string().optional().nullable(),
   jobId: z.string().optional().nullable(),
-  customerId: z.string().min(1, 'Which customer?'),
+  /** Taken from the visit when written against one. */
+  customerId: z.string().optional(),
   siteId: z.string().optional().nullable(),
   assetId: z.string().optional().nullable(),
   performedAt: z.string().optional(),
@@ -1261,16 +1536,64 @@ serviceReportRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(reportSchema, req.body);
-    if (!me.isSuperAdmin && !me.permissions.has(reportPermission(body.kind, 'create'))) {
-      throw forbidden(`You need "${reportPermission(body.kind, 'create')}" to write this report`);
+
+    /*
+      Written against a visit, the report takes the visit's facts: customer,
+      site, machine, contract and the job that carries the cost. The form used
+      to send only the visit id, so a contract PM was saved with no contract —
+      and therefore defaulted to billable. The server fills them now, whatever
+      the client sends; a body that names a different customer is refused
+      rather than silently overridden.
+    */
+    const visit = body.visitId
+      ? await prisma.serviceVisit.findUnique({
+          where: { id: body.visitId },
+          select: {
+            id: true,
+            kind: true,
+            status: true,
+            customerId: true,
+            siteId: true,
+            assetId: true,
+            contractId: true,
+            contract: { select: { jobId: true } },
+            jobOrder: { select: { jobId: true, chargeBasis: true } },
+            report: { select: { number: true } },
+          },
+        })
+      : null;
+    if (body.visitId) {
+      if (!visit) throw notFound('Visit not found');
+      if (visit.report) throw badRequest(`This visit already has report ${visit.report.number}`);
+      if (visit.status === 'CANCELLED') {
+        throw badRequest('This visit was cancelled. Reinstate it on the schedule before reporting against it.');
+      }
+      if (body.customerId && body.customerId !== visit.customerId) {
+        throw badRequest(
+          'That visit is booked at a different customer — a report is written for the customer the visit is at.',
+        );
+      }
+    }
+
+    const kind = body.kind ?? visit?.kind;
+    if (!kind) throw badRequest('What kind of report is this?');
+    const customerId = body.customerId || visit?.customerId;
+    if (!customerId) throw badRequest('Which customer?');
+    const siteId = body.siteId || visit?.siteId || null;
+    const assetId = body.assetId || visit?.assetId || null;
+    const contractId = body.contractId || visit?.contractId || null;
+    const jobId = body.jobId || visit?.contract?.jobId || visit?.jobOrder?.jobId || null;
+
+    if (!me.isSuperAdmin && !me.permissions.has(reportPermission(kind, 'create'))) {
+      throw forbidden(`You need "${reportPermission(kind, 'create')}" to write this report`);
     }
 
     const template = body.templateId
       ? await prisma.reportTemplate.findUnique({ where: { id: body.templateId } })
-      : await currentTemplate(body.kind);
+      : await currentTemplate(kind);
     if (!template) {
       throw badRequest(
-        `No ${KIND_LABEL[body.kind].toLowerCase()} template exists yet. Set one up in Report Templates first — the form is data, not code.`,
+        `No ${KIND_LABEL[kind].toLowerCase()} template exists yet. Set one up in Report Templates first — the form is data, not code.`,
       );
     }
 
@@ -1278,34 +1601,40 @@ serviceReportRoutes.post(
     // from whoever ticks the box: "was it covered" is a fact, not an opinion.
     let underWarranty = false;
     const performedAt = body.performedAt ? asDate(body.performedAt, 'Performed on') : dayKey(new Date());
-    if (body.assetId) {
-      const asset = await prisma.installedAsset.findUnique({ where: { id: body.assetId } });
+    if (assetId) {
+      const asset = await prisma.installedAsset.findUnique({ where: { id: assetId } });
       if (!asset) throw notFound('Asset not found');
       underWarranty = !!asset.warrantyEndsAt && asset.warrantyEndsAt >= performedAt;
     }
 
+    // A visit a job order scheduled was already decided on: the service
+    // manager approved its charge basis. Anything else follows the facts — a
+    // visit inside a contract or a warranty is covered work, and the rest
+    // defaults to billable, because forgetting to charge is the expensive
+    // mistake.
+    const billable =
+      body.billable ??
+      (visit?.jobOrder ? visit.jobOrder.chargeBasis === 'CHARGEABLE' : !(underWarranty || !!contractId));
+
     const report = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber(REPORT_DOC_TYPE[body.kind], tx);
+      const number = await nextNumber(REPORT_DOC_TYPE[kind], tx);
       return tx.serviceReport.create({
         data: {
           number,
-          kind: body.kind,
-          visitId: body.visitId || null,
-          contractId: body.contractId || null,
-          jobId: body.jobId || null,
-          customerId: body.customerId,
-          siteId: body.siteId || null,
-          assetId: body.assetId || null,
+          kind,
+          visitId: visit?.id ?? null,
+          contractId,
+          jobId,
+          customerId,
+          siteId,
+          assetId,
           templateId: template.id,
           performedAt,
           performedById: me.id,
           data: body.data as Prisma.InputJsonValue,
           findings: body.findings || null,
           recommendations: body.recommendations || null,
-          // A visit inside a contract or a warranty is covered work. Anything
-          // else defaults to billable, because forgetting to charge is the
-          // expensive mistake.
-          billable: body.billable ?? !(underWarranty || !!body.contractId),
+          billable,
           underWarranty,
         },
         include: reportInclude,
@@ -1337,7 +1666,11 @@ serviceReportRoutes.patch(
     );
     const report = await prisma.serviceReport.findUnique({ where: { id: req.params.id } });
     if (!report) throw notFound('Report not found');
-    if (report.status !== 'DRAFT') {
+    // A RETURNED report is corrected and sent again, like every other
+    // document. It used to be frozen, which left its visit holding a dead
+    // report forever: a visit takes exactly one report, so nothing else could
+    // ever be written against it and the visit could never complete.
+    if (report.status !== 'DRAFT' && report.status !== 'REJECTED') {
       throw badRequest('This report has been submitted. Its content is what was signed.');
     }
     if (report.performedById !== me.id && !me.isSuperAdmin && !me.permissions.has(reportPermission(report.kind, 'edit_all'))) {
@@ -1375,7 +1708,9 @@ serviceReportRoutes.post(
       include: { template: true, customer: true, asset: true },
     });
     if (!report) throw notFound('Report not found');
-    if (report.status !== 'DRAFT') throw badRequest('This report has already been submitted');
+    if (report.status !== 'DRAFT' && report.status !== 'REJECTED') {
+      throw badRequest('This report has already been submitted');
+    }
     if (report.performedById !== me.id && !me.isSuperAdmin) {
       throw forbidden('That is someone else’s report');
     }
@@ -1454,6 +1789,15 @@ function onReportSettled(documentType: string) {
           data: { status: 'COMPLETED', performedAt: report.performedAt },
         });
       }
+      // The job order that scheduled this visit is complete on the same
+      // evidence — the approved report — and on the date the work was done.
+      // Only an APPROVED order moves: a cancelled one stays cancelled.
+      if (report.visit?.jobOrderId) {
+        await tx.jobOrder.updateMany({
+          where: { id: report.visit.jobOrderId, status: 'APPROVED' },
+          data: { status: 'COMPLETED', completedAt: report.performedAt },
+        });
+      }
       // A commissioning report is the moment a warranty starts running.
       if (report.kind === 'COMMISSIONING' && report.assetId && report.asset && !report.asset.commissionedAt) {
         const settings = await aftermarketSettings();
@@ -1477,6 +1821,14 @@ function onReportSettled(documentType: string) {
         ? `${report.number} approved — visit closed`
         : `${report.number} approved`,
     });
+    if (report.visit?.jobOrderId) {
+      await audit({
+        entityType: 'job_order',
+        entityId: report.visit.jobOrderId,
+        action: 'COMPLETED',
+        summary: `Completed by ${report.number}, performed ${isoDay(report.performedAt)}`,
+      });
+    }
   });
 }
 
@@ -1609,3 +1961,181 @@ aftermarketRoutes.put(
     res.json(saved);
   }),
 );
+
+// ════════════════════════════════════════════════════════════════════
+//  CTRL+K AND MY WORK
+// ════════════════════════════════════════════════════════════════════
+//
+// Registered from this module, as every other module does, so search never
+// has to know what a visit is. Numbers and names only in every select.
+
+registerSearch({
+  kind: 'installed_asset',
+  label: 'Installed base',
+  permission: 'gops.installed_base.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.installedAsset.findMany({
+      where: {
+        OR: [
+          { code: { contains: term, mode: 'insensitive' } },
+          { name: { contains: term, mode: 'insensitive' } },
+          { serialNo: { contains: term, mode: 'insensitive' } },
+          { model: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, code: true, name: true, serialNo: true, customer: { select: { name: true } } },
+    });
+    return rows.map((r) => ({
+      kind: 'installed_asset',
+      id: r.id,
+      title: r.name,
+      subtitle: [r.code, r.serialNo ? `S/N ${r.serialNo}` : null, r.customer.name].filter(Boolean).join(' · '),
+      link: `/g-ops/installed-base/${r.id}`,
+    }));
+  },
+});
+
+registerSearch({
+  kind: 'service_contract',
+  label: 'Service contracts',
+  permission: ['gops.service_contracts.view_all', 'gops.service_contracts.view_own'],
+  // The contract's owner is its job's project manager — the list's own rule.
+  ownWhere: (user) => ({ job: { projectManagerId: user.id } }),
+  search: async (term, _user, limit, own) => {
+    const rows = await prisma.serviceContract.findMany({
+      where: {
+        ...(own ?? {}),
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { job: { name: { contains: term, mode: 'insensitive' } } },
+          { job: { customer: { name: { contains: term, mode: 'insensitive' } } } },
+        ],
+      },
+      take: limit,
+      orderBy: { endsAt: 'desc' },
+      select: { id: true, number: true, status: true, job: { select: { name: true, customer: { select: { name: true } } } } },
+    });
+    return rows.map((r) => ({
+      kind: 'service_contract',
+      id: r.id,
+      title: `${r.number} — ${r.job.name}`,
+      subtitle: `${r.job.customer.name} · ${r.status.toLowerCase()}`,
+      link: `/g-ops/service-contracts/${r.id}`,
+    }));
+  },
+});
+
+/** One provider per report permission: a PM report is not an inspection. */
+function registerReportSearch(module: string, label: string, kinds: ServiceKind[]) {
+  // One kind for all three, so Ctrl+K shows a single "Service reports" group;
+  // what differs is only the permission that admits each provider.
+  registerSearch({
+    kind: 'service_report',
+    label,
+    permission: [`gops.${module}.view_all`, `gops.${module}.view_own`],
+    ownWhere: (user) => ({ performedById: user.id }),
+    search: async (term, _user, limit, own) => {
+      const rows = await prisma.serviceReport.findMany({
+        where: {
+          ...(own ?? {}),
+          kind: { in: kinds },
+          OR: [
+            { number: { contains: term, mode: 'insensitive' } },
+            { customer: { name: { contains: term, mode: 'insensitive' } } },
+            { asset: { serialNo: { contains: term, mode: 'insensitive' } } },
+          ],
+        },
+        take: limit,
+        orderBy: { performedAt: 'desc' },
+        select: {
+          id: true,
+          number: true,
+          kind: true,
+          status: true,
+          customer: { select: { name: true } },
+          asset: { select: { name: true } },
+        },
+      });
+      return rows.map((r) => ({
+        kind: 'service_report',
+        id: r.id,
+        title: `${r.number} — ${r.customer.name}`,
+        subtitle: [KIND_LABEL[r.kind], r.asset?.name, r.status.toLowerCase().replace(/_/g, ' ')].filter(Boolean).join(' · '),
+        link: `/g-ops/service-reports/${r.id}`,
+      }));
+    },
+  });
+}
+
+registerReportSearch('commissioning_reports', 'Commissioning reports', ['COMMISSIONING']);
+registerReportSearch('pm_reports', 'PM reports', ['PREVENTIVE_MAINTENANCE']);
+registerReportSearch('inspection_reports', 'Inspection reports', ['INSPECTION', 'CORRECTIVE']);
+
+registerSearch({
+  kind: 'service_visit',
+  label: 'Service visits',
+  permission: 'gops.visits.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.serviceVisit.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { customer: { name: { contains: term, mode: 'insensitive' } } },
+          { asset: { name: { contains: term, mode: 'insensitive' } } },
+        ],
+      },
+      take: limit,
+      orderBy: { dueDate: 'desc' },
+      select: { id: true, number: true, kind: true, status: true, dueDate: true, customer: { select: { name: true } } },
+    });
+    return rows.map((r) => ({
+      kind: 'service_visit',
+      id: r.id,
+      title: `${r.number} — ${r.customer.name}`,
+      subtitle: `${KIND_LABEL[r.kind]} · due ${isoDay(r.dueDate)} · ${r.status.toLowerCase()}`,
+      link: visitLink(r.id),
+    }));
+  },
+});
+
+/**
+ * Today's schedule: the visits booked on me that fall inside the window My
+ * Work asks for. A visit's due date is a calendar day stored as UTC midnight,
+ * so the database is asked for a padded range and the window is applied here
+ * on the timestamp — comparing a DATE column against a timestamp would
+ * truncate the window's edges and shift the day for anyone east of UTC.
+ */
+registerSchedule(async (user, window) => {
+  const pad = 86_400_000;
+  const rows = await prisma.serviceVisit.findMany({
+    where: {
+      assignedToId: user.id,
+      status: 'SCHEDULED',
+      dueDate: { gte: new Date(window.from.getTime() - pad), lte: new Date(window.to.getTime() + pad) },
+    },
+    orderBy: { dueDate: 'asc' },
+    select: {
+      id: true,
+      number: true,
+      kind: true,
+      dueDate: true,
+      customer: { select: { name: true } },
+      site: { select: { name: true } },
+      asset: { select: { name: true } },
+    },
+  });
+  return rows
+    .filter((v) => v.dueDate >= window.from && v.dueDate < window.to)
+    .map((v) => ({
+      kind: 'visit',
+      id: v.id,
+      title: `${KIND_LABEL[v.kind]} — ${v.customer.name}`,
+      startsAt: v.dueDate,
+      endsAt: new Date(v.dueDate.getTime() + pad),
+      link: visitLink(v.id),
+      meetLink: null,
+      sub: [v.number, v.asset?.name ?? v.site?.name].filter(Boolean).join(' · '),
+    }));
+});

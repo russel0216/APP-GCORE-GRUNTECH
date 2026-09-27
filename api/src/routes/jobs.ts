@@ -17,6 +17,7 @@ import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
+import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -344,14 +345,36 @@ jobRoutes.get(
   }),
 );
 
+/**
+ * The job picker every other module uses.
+ *
+ * Open work only by default: a purchase request, a stock issue or a supplier
+ * bill for a project that is finished is almost always a mis-pick, and a list
+ * that offers two years of closed jobs makes the mis-pick likely. A screen that
+ * legitimately needs closed ones — registering equipment at turnover, a late
+ * supplier bill — passes `?includeClosed=true`. CANCELLED is never offered.
+ * `?q=` narrows by number, name or customer.
+ */
 jobRoutes.get(
   '/lookup',
   requireAny('gops.projects.view_all', 'gops.projects.view_own'),
-  handler(async (_req, res) => {
+  handler(async (req, res) => {
+    const includeClosed = req.query.includeClosed === 'true';
+    const term = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const where: Prisma.JobWhereInput = {
+      status: { notIn: includeClosed ? ['CANCELLED'] : ['CANCELLED', 'COMPLETED', 'TURNED_OVER'] },
+    };
+    if (term) {
+      where.OR = [
+        { number: { contains: term, mode: 'insensitive' } },
+        { name: { contains: term, mode: 'insensitive' } },
+        { customer: { name: { contains: term, mode: 'insensitive' } } },
+      ];
+    }
     res.json(
       await prisma.job.findMany({
-        where: { status: { notIn: ['CANCELLED'] } },
-        select: { id: true, number: true, name: true },
+        where,
+        select: { id: true, number: true, name: true, status: true },
         orderBy: { createdAt: 'desc' },
         take: 100,
       }),
@@ -379,7 +402,37 @@ const createJobSchema = z.object({
   contractDate: z.string().optional().nullable(),
   startDate: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
+  /**
+   * Renewing an expiring service contract. The new job is forced to
+   * SERVICE_CONTRACT and its DRAFT coverage terms are written in the same
+   * transaction, so a renewal can never exist as a job with no contract.
+   */
+  renewedFromContractId: z.string().optional().nullable(),
 });
+
+const DAY_MS = 86_400_000;
+
+/**
+ * The renewal's term, the same length as the one it replaces.
+ *
+ * Contracts are written in whole months far more often than in days, so a term
+ * that runs exactly N months (1 Oct – 30 Sep) renews as N months — otherwise a
+ * leap year would shift every later renewal by a day. Anything else keeps its
+ * length in days.
+ */
+export function renewalTerm(old: { startsAt: Date; endsAt: Date }): { startsAt: Date; endsAt: Date } {
+  const oldStart = dayKey(old.startsAt);
+  const oldEnd = dayKey(old.endsAt);
+  const startsAt = new Date(oldEnd.getTime() + DAY_MS);
+
+  const months =
+    (startsAt.getUTCFullYear() - oldStart.getUTCFullYear()) * 12 +
+    (startsAt.getUTCMonth() - oldStart.getUTCMonth());
+  if (months > 0 && addMonths(oldStart, months).getTime() === startsAt.getTime()) {
+    return { startsAt, endsAt: new Date(addMonths(startsAt, months).getTime() - DAY_MS) };
+  }
+  return { startsAt, endsAt: new Date(startsAt.getTime() + (oldEnd.getTime() - oldStart.getTime())) };
+}
 
 function asDate(v: string | null | undefined): Date | null {
   if (!v) return null;
@@ -409,6 +462,13 @@ jobRoutes.post(
       },
     });
     if (!costing) throw notFound('Costing not found');
+    // The job's customer is the costing's customer. The screen locks it; this
+    // is the half that makes it true for any caller.
+    if (costing.customerId && costing.customerId !== body.customerId) {
+      throw badRequest(
+        `${costing.number} was costed for a different customer. A project takes its customer from its costing.`,
+      );
+    }
     if (!costing.scopeSections.length) {
       throw badRequest(
         'That costing has no scope of work. The scope sections become the schedule of values, which progress and billing are measured against.',
@@ -432,6 +492,39 @@ jobRoutes.post(
         throw badRequest('Only an approved quotation revision can become a job');
       }
     }
+
+    // A renewal: load the contract it replaces and refuse anything that would
+    // leave the renewal chain ambiguous.
+    const renewing = body.renewedFromContractId
+      ? await prisma.serviceContract.findUnique({
+          where: { id: body.renewedFromContractId },
+          include: {
+            job: { select: { customerId: true } },
+            renewedTo: { select: { number: true } },
+            assets: { select: { assetId: true } },
+          },
+        })
+      : null;
+    if (body.renewedFromContractId) {
+      if (!renewing) throw notFound('The contract being renewed was not found');
+      if (!me.isSuperAdmin && !me.permissions.has('gops.service_contracts.create')) {
+        throw forbidden(
+          'Renewing a contract writes new coverage terms — that needs "gops.service_contracts.create"',
+        );
+      }
+      if (renewing.renewedTo) {
+        throw badRequest(`${renewing.number} has already been renewed as ${renewing.renewedTo.number}`);
+      }
+      if (renewing.status === 'DRAFT' || renewing.status === 'CANCELLED') {
+        throw badRequest(
+          `${renewing.number} is ${renewing.status.toLowerCase()} — only a contract that ran can be renewed`,
+        );
+      }
+      if (renewing.job.customerId !== body.customerId) {
+        throw badRequest(`${renewing.number} covers a different customer's equipment`);
+      }
+    }
+    const type = renewing ? ('SERVICE_CONTRACT' as const) : body.type;
 
     const start = asDate(body.startDate) ?? new Date();
 
@@ -461,7 +554,7 @@ jobRoutes.post(
       const created = await tx.job.create({
         data: {
           number,
-          type: body.type,
+          type,
           name: body.name,
           customerId: body.customerId,
           siteId: body.siteId || null,
@@ -507,7 +600,34 @@ jobRoutes.post(
 
       // A costing that has produced a job is a commercial record.
       await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL' } });
-      return created;
+
+      // The renewal's coverage terms: a DRAFT, so nothing is scheduled until
+      // somebody activates it — the same rule as any new contract. Same term
+      // length, same frequency and wording, the same equipment; it starts the
+      // day after the old one ends.
+      let serviceContract: { id: string; number: string } | null = null;
+      if (renewing) {
+        const term = renewalTerm(renewing);
+        const planned = planSchedule(term.startsAt, term.endsAt, renewing.frequencyMonths);
+        serviceContract = await tx.serviceContract.create({
+          data: {
+            number: await nextNumber('service_contract', tx),
+            jobId: created.id,
+            startsAt: term.startsAt,
+            endsAt: term.endsAt,
+            frequencyMonths: renewing.frequencyMonths,
+            plannedVisits: planned.length,
+            responseTime: renewing.responseTime,
+            exclusions: renewing.exclusions,
+            coverageNotes: renewing.coverageNotes,
+            renewedFromId: renewing.id,
+            createdById: me.id,
+            assets: { create: renewing.assets.map((a) => ({ assetId: a.assetId })) },
+          },
+          select: { id: true, number: true },
+        });
+      }
+      return { ...created, serviceContract };
     });
 
     if (body.projectManagerId && body.projectManagerId !== me.id) {
@@ -529,8 +649,24 @@ jobRoutes.post(
       },
       req,
     );
+    if (job.serviceContract && renewing) {
+      await audit(
+        {
+          entityType: 'service_contract',
+          entityId: job.serviceContract.id,
+          action: 'CREATED',
+          summary: `${job.serviceContract.number} drafted as the renewal of ${renewing.number}, under ${job.number}`,
+        },
+        req,
+      );
+    }
 
-    res.status(201).json({ ...job, contractValue: num(job.contractValue) });
+    const { serviceContract, ...created } = job;
+    res.status(201).json({
+      ...created,
+      contractValue: num(job.contractValue),
+      serviceContractId: serviceContract?.id ?? null,
+    });
   }),
 );
 
@@ -580,7 +716,8 @@ async function loadJob(id: string) {
         orderBy: { sortOrder: 'asc' },
         include: { assignedTo: { select: { id: true, name: true } } },
       },
-      _count: { select: { budgetRequests: true } },
+      serviceContract: { select: { id: true, number: true, status: true } },
+      _count: { select: { budgetRequests: true, installedAssets: true } },
     },
   });
 }
@@ -641,6 +778,7 @@ jobRoutes.get(
         netCollectible: num(b.netCollectible),
       })),
       budgetRequestCount: job._count.budgetRequests,
+      installedAssetCount: job._count.installedAssets,
       position,
       curve,
       summary: {
@@ -821,6 +959,123 @@ jobRoutes.get(
   }),
 );
 
+// ── Aftermarket, seen from the job ───────────────────────────────────────────
+
+const REPORT_KEY: Record<string, string> = {
+  COMMISSIONING: 'gops.commissioning_reports.view_all',
+  PREVENTIVE_MAINTENANCE: 'gops.pm_reports.view_all',
+  INSPECTION: 'gops.inspection_reports.view_all',
+  CORRECTIVE: 'gops.inspection_reports.view_all',
+};
+
+/**
+ * What this job left behind in the field: the equipment it installed, the
+ * contract that covers it (a service job's own terms), the reports written
+ * against either, and job orders charged to it.
+ *
+ * One read for the workspace's Service tab. Each section is `null` when the
+ * caller does not hold that register's `view_all` — the tab then hides the card
+ * rather than showing an empty one, which would read as "nothing installed".
+ * Numbers, names, dates and statuses only; no money.
+ */
+jobRoutes.get(
+  '/:id/service',
+  requireAny('gops.projects.view_all', 'gops.projects.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const can = (key: string) => me.isSuperAdmin || me.permissions.has(key);
+    const job = await prisma.job.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, serviceContract: { select: { id: true } } },
+    });
+    if (!job) throw notFound('Job not found');
+
+    const [assets, contract, jobOrders] = await Promise.all([
+      can('gops.installed_base.view_all')
+        ? prisma.installedAsset.findMany({
+            where: { jobId: job.id },
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              manufacturer: true,
+              model: true,
+              serialNo: true,
+              location: true,
+              status: true,
+              installedAt: true,
+              warrantyEndsAt: true,
+            },
+            orderBy: { code: 'asc' },
+          })
+        : null,
+      can('gops.service_contracts.view_all') && job.serviceContract
+        ? prisma.serviceContract.findUnique({
+            where: { id: job.serviceContract.id },
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              startsAt: true,
+              endsAt: true,
+              frequencyMonths: true,
+              plannedVisits: true,
+              renewedFrom: { select: { id: true, number: true } },
+              renewedTo: { select: { id: true, number: true } },
+              _count: { select: { assets: true } },
+            },
+          })
+        : null,
+      can('gops.job_orders.view_all')
+        ? prisma.jobOrder.findMany({
+            where: { jobId: job.id },
+            select: { id: true, number: true, title: true, status: true, kind: true, requestedFor: true },
+            orderBy: { requestedFor: 'desc' },
+            take: 50,
+          })
+        : null,
+    ]);
+
+    // Reports: written against the job, its contract, or anything it installed.
+    const kinds = Object.keys(REPORT_KEY).filter((k) => can(REPORT_KEY[k]));
+    let reports = null;
+    if (kinds.length) {
+      const assetIds = assets
+        ? assets.map((a) => a.id)
+        : (await prisma.installedAsset.findMany({ where: { jobId: job.id }, select: { id: true } })).map(
+            (a) => a.id,
+          );
+      const or: Prisma.ServiceReportWhereInput[] = [{ jobId: job.id }];
+      if (job.serviceContract) or.push({ contractId: job.serviceContract.id });
+      if (assetIds.length) or.push({ assetId: { in: assetIds } });
+      reports = await prisma.serviceReport.findMany({
+        where: { OR: or, kind: { in: kinds as Prisma.EnumServiceKindFilter['in'] } },
+        select: {
+          id: true,
+          number: true,
+          kind: true,
+          status: true,
+          performedAt: true,
+          billable: true,
+          asset: { select: { id: true, code: true, name: true } },
+          performedBy: { select: { id: true, name: true } },
+        },
+        orderBy: { performedAt: 'desc' },
+        take: 50,
+      });
+    }
+
+    res.json({
+      assets,
+      // `contractVisible` separates "no contract" from "not yours to see".
+      contract: contract ? { ...contract, assetCount: contract._count.assets, _count: undefined } : null,
+      contractVisible: can('gops.service_contracts.view_all'),
+      reports,
+      jobOrders,
+    });
+  }),
+);
+
 // ════════════════════════════════════════════════════════════════════
 //  BUDGET REQUESTS — change the budget (model §5.2)
 // ════════════════════════════════════════════════════════════════════
@@ -937,7 +1192,9 @@ budgetRequestRoutes.post(
       documentNumber: request.number,
       subject: `${request.job.number} — ${request.costCategory.name}: ${request.reason}`,
       amount: num(request.amount),
-      link: `/g-ops/projects/${request.jobId}`,
+      // The Budget tab lists the request with its approval chain — the approver
+      // lands where the request can actually be found.
+      link: `/g-ops/projects/${request.jobId}?tab=budget`,
       requesterId: me.id,
     });
 

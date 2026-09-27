@@ -10,36 +10,39 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
+import { LostReasonModal } from './LostReasonModal';
+import { QUOTATION_OUTCOME_TONES } from './Quotations';
 
 /** Somebody a lead can be handed to, and whether selling is their job. */
-interface Person {
+export interface Person {
   id: string;
   name: string;
   isSales: boolean;
 }
 
 /**
- * The roles that mean "this person sells".
+ * Everybody a lead can go to, with the people who can actually work one
+ * marked.
  *
- * Read off the user's roles rather than guessed from a department, because
- * the roles are what the permission registry already uses to decide who may
- * touch a lead at all.
+ * "Sells" is read off the permission that lets somebody work their own lead
+ * (`gops.leads.edit_own`) rather than guessed from a department or a role
+ * name — the permission is what the registry already uses to decide who may
+ * touch a lead at all. Both lists come from `/users/lookup`, which any
+ * signed-in user may read; the old `/users?pageSize=200` is admin-gated and
+ * left a salesperson with an empty picker.
  */
-const SALES_ROLES = ['sales', 'sales_manager'];
-
-async function loadPeople(): Promise<Person[]> {
-  const res = await api.get<{ rows: { id: string; name: string; roles?: { key: string }[] }[] }>(
-    '/users?pageSize=200',
-  );
-  return res.rows.map((u) => ({
-    id: u.id,
-    name: u.name,
-    isSales: (u.roles ?? []).some((r) => SALES_ROLES.includes(r.key)),
-  }));
+export async function loadPeople(): Promise<Person[]> {
+  const [everyone, sellers] = await Promise.all([
+    api.get<{ id: string; name: string }[]>('/users/lookup'),
+    api.get<{ id: string }[]>(`/users/lookup${qs({ holding: 'gops.leads.edit_own' })}`).catch(() => []),
+  ]);
+  const selling = new Set(sellers.map((u) => u.id));
+  return everyone.map((u) => ({ id: u.id, name: u.name, isSales: selling.has(u.id) }));
 }
 
 export const LEAD_STATUSES = [
@@ -55,8 +58,6 @@ export const LEAD_STATUSES = [
   { value: 'LOST', label: 'Lost' },
   { value: 'ON_HOLD', label: 'On hold' },
 ];
-
-import { statusTone } from '../../components/ui';
 
 /**
  * The pipeline the lead is standing in.
@@ -74,16 +75,28 @@ import { statusTone } from '../../components/ui';
  */
 const PIPELINE = LEAD_STATUSES.filter((s) => !['LOST', 'ON_HOLD'].includes(s.value));
 
+/**
+ * Stages a lead reaches only through its quotation. The server refuses them
+ * on a lead with no quotation (`assertLeadStatusChange`), so the buttons say
+ * so before anybody clicks.
+ */
+const QUOTATION_STAGES = ['QUOTATION_CREATED', 'QUOTATION_SUBMITTED', 'NEGOTIATION', 'WON'];
+
 function LeadProgress({
   status,
   lostReason,
   canEdit,
+  hasQuotation,
   onMove,
+  onLose,
 }: {
   status: string;
   lostReason: string | null;
   canEdit: boolean;
+  hasQuotation: boolean;
   onMove: (status: string) => void;
+  /** Losing a lead asks why first — see LostReasonModal. */
+  onLose: () => void;
 }) {
   const index = PIPELINE.findIndex((s) => s.value === status);
   const lost = status === 'LOST';
@@ -126,8 +139,8 @@ function LeadProgress({
               </button>
             )}
             {!lost && (
-              <button className="btn btn-sm btn-danger-ghost" onClick={() => onMove('LOST')}>
-                Mark lost
+              <button className="btn btn-sm btn-danger-ghost" onClick={onLose}>
+                Mark lost…
               </button>
             )}
           </div>
@@ -143,10 +156,19 @@ function LeadProgress({
           const done = !off && i < index;
           const here = stage.value === status;
           const cls = `lead-stage${done ? ' done' : ''}${here ? ' here' : ''}${off ? ' dimmed' : ''}`;
+          const needsQuotation = !hasQuotation && QUOTATION_STAGES.includes(stage.value);
           return (
             <li key={stage.value} className={cls}>
               {canEdit && !here ? (
-                <button onClick={() => onMove(stage.value)} title={`Move to ${stage.label}`}>
+                <button
+                  onClick={() => onMove(stage.value)}
+                  disabled={needsQuotation}
+                  title={
+                    needsQuotation
+                      ? 'Raise a quotation first — a lead reaches this stage through its quotation'
+                      : `Move to ${stage.label}`
+                  }
+                >
                   {stage.label}
                 </button>
               ) : (
@@ -168,15 +190,6 @@ function progressLabel(status: string, index: number): string {
   return `Stage ${index + 1} of ${PIPELINE.length}`;
 }
 
-
-
-export function StatusBadge({ status }: { status: string }) {
-  return (
-    <span className={`badge ${statusTone(status)}`}>
-      {LEAD_STATUSES.find((s) => s.value === status)?.label ?? status}
-    </span>
-  );
-}
 
 interface LeadRow {
   id: string;
@@ -329,11 +342,12 @@ export function LeadDetail() {
   const { can } = useAuth();
   const toast = useToast();
 
-  const [lead, setLead] = useState<(LeadRow & { canEdit: boolean; quotations: { id: string; number: string; subject: string; outcome: string; latest: { revision: number; status: string; total: number } | null }[] }) | null>(null);
+  const [lead, setLead] = useState<LeadDetailRow | null>(null);
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
+  const [losing, setLosing] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -366,6 +380,29 @@ export function LeadDetail() {
     }
   }
 
+  /** Throws on refusal so LostReasonModal keeps the reason and shows why. */
+  async function markLost(reason: string) {
+    if (!lead) return;
+    await api.patch(`/leads/${lead.id}`, { status: 'LOST', lostReason: reason });
+    setLosing(false);
+    toast('ok', `${lead.companyName} marked lost`);
+    await load();
+  }
+
+  const hasQuotation = lead.quotations.length > 0;
+  const closed = lead.status === 'WON' || lead.status === 'LOST';
+  const latestCosting = lead.costings[0] ?? null;
+  /*
+    The two hand-offs out of a lead. Each carries the lead in the URL, and the
+    screen it opens prefills from it: the customer, the site, the subject and
+    the costing already priced, so nothing is typed twice (model 4.1).
+    A quotation needs a customer on file; a costing does not, because a
+    costing is often the first thing done for a company nobody has filed yet.
+  */
+  const quotationBlocked = !lead.customer
+    ? 'Link the lead to a customer first: Modify, and pick or add the company'
+    : null;
+
   async function remove() {
     if (!lead) return;
     try {
@@ -390,13 +427,35 @@ export function LeadDetail() {
           <h1>{lead.companyName}</h1>
           <p>
             <StatusBadge status={lead.status} />
-            <span style={{ marginLeft: 10 }}>
-              {lead.assignedTo.name}
+            <span className="sales-after-badge">
+              {lead.number} · {lead.assignedTo.name}
               {lead.source ? ` · via ${lead.source}` : ''}
             </span>
           </p>
         </div>
         <div className="row">
+          {!closed && can('gops.costing.create') && (
+            <Link
+              className="btn"
+              to={`/g-ops/costing${qs({ new: 1, leadId: lead.id, customerId: lead.customer?.id })}`}
+            >
+              Start costing
+            </Link>
+          )}
+          {!closed &&
+            can('gops.quotations.create') &&
+            (quotationBlocked ? (
+              <button className="btn btn-primary" disabled title={quotationBlocked}>
+                Create quotation
+              </button>
+            ) : (
+              <Link
+                className="btn btn-primary"
+                to={`/g-ops/quotations${qs({ new: 1, leadId: lead.id, costingId: latestCosting?.id })}`}
+              >
+                Create quotation
+              </Link>
+            ))}
           {lead.canEdit && (
             <button className="btn" onClick={() => setEditing(true)}>
               Modify
@@ -411,12 +470,17 @@ export function LeadDetail() {
       </div>
 
       <ErrorBox error={error} />
+      {!closed && quotationBlocked && can('gops.quotations.create') && (
+        <div className="alert info">A quotation is raised for a customer on file. {quotationBlocked}.</div>
+      )}
 
       <LeadProgress
         status={lead.status}
         lostReason={lead.lostReason}
         canEdit={lead.canEdit}
+        hasQuotation={hasQuotation}
         onMove={setStatus}
+        onLose={() => setLosing(true)}
       />
 
       {/*
@@ -489,6 +553,68 @@ export function LeadDetail() {
         </div>
 
         {/*
+          What has been priced and quoted for this enquiry. The API always
+          returned the quotations and nothing drew them; a lead page that
+          cannot say which quotation it became is a dead end.
+        */}
+        <div className="card">
+          <h3 className="card-title">
+            Costings
+            {lead.costings.length > 0 && <span className="badge">{lead.costings.length}</span>}
+          </h3>
+          {lead.costings.length === 0 ? (
+            <p className="faint">Nothing priced yet. Start a costing to work out what this will take.</p>
+          ) : (
+            <ul className="sales-linked">
+              {lead.costings.map((c) => (
+                <li key={c.id}>
+                  <Link to={`/g-ops/costing/${c.id}`} className="mono">
+                    {c.number}
+                  </Link>
+                  <span className="sales-linked-title">{c.title}</span>
+                  <span className="mono">{formatMoney(c.contractValue)}</span>
+                  <StatusBadge status={c.status} extra={{ FINAL: 'ok' }} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="card">
+          <h3 className="card-title">
+            Quotations
+            {lead.quotations.length > 0 && <span className="badge">{lead.quotations.length}</span>}
+          </h3>
+          {lead.quotations.length === 0 ? (
+            <p className="faint">
+              None yet. Once a quotation exists it is what moves on the pipeline, and this lead follows
+              it.
+            </p>
+          ) : (
+            <ul className="sales-linked">
+              {lead.quotations.map((q) => (
+                <li key={q.id}>
+                  <Link to={`/g-ops/quotations/${q.id}`} className="mono">
+                    {q.number}
+                  </Link>
+                  <span className="sales-linked-title">
+                    {q.subject}
+                    {q.latest && (
+                      <span className="faint">
+                        {' '}
+                        · R{q.latest.revision} {q.latest.status.toLowerCase().replace(/_/g, ' ')}
+                      </span>
+                    )}
+                  </span>
+                  <span className="mono">{q.latest ? formatMoney(q.latest.total) : '—'}</span>
+                  <StatusBadge status={q.outcome} extra={QUOTATION_OUTCOME_TONES} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/*
           What the customer actually sent. The scope of work is the document
           every later argument refers back to — the quotation is priced from
           it, the job is delivered against it — so it belongs on the lead
@@ -526,16 +652,35 @@ export function LeadDetail() {
         />
       )}
 
+      {losing && (
+        <LostReasonModal
+          what={lead.companyName}
+          initial={lead.lostReason ?? ''}
+          onClose={() => setLosing(false)}
+          onSave={markLost}
+        />
+      )}
     </div>
   );
 }
 
+interface LeadDetailRow extends LeadRow {
+  canEdit: boolean;
+  site: { id: string; name: string } | null;
+  quotations: {
+    id: string;
+    number: string;
+    subject: string;
+    outcome: string;
+    latest: { revision: number; status: string; total: number } | null;
+  }[];
+  costings: { id: string; number: string; title: string; status: string; contractValue: number }[];
+}
+
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--line-soft)' }}>
-      <span className="faint" style={{ width: 150, flexShrink: 0, fontSize: 12 }}>
-        {label}
-      </span>
+    <div className="sales-row">
+      <span className="sales-row-label">{label}</span>
       <span>{value || <span className="faint">—</span>}</span>
     </div>
   );
@@ -543,7 +688,8 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 
 // ── Form ─────────────────────────────────────────────────────────────────────
 
-function LeadForm({
+/** Exported so the pipeline board's "+ New" menu opens this same form. */
+export function LeadForm({
   lead,
   people,
   onClose,
@@ -569,6 +715,21 @@ function LeadForm({
 
   const [matches, setMatches] = useState<{ id: string; name: string }[]>([]);
   const [picking, setPicking] = useState(false);
+  /*
+    A customer is filed under an industry (HI, BI, UI, GI, SI) and the server
+    refuses one without it, so the quick-add asks for it right beside the
+    button. null = not loaded yet; [] = none set up, which is said plainly
+    rather than offering a button that can only fail.
+  */
+  const [industries, setIndustries] = useState<{ id: string; code: string; name: string }[] | null>(null);
+  const [industryId, setIndustryId] = useState('');
+
+  useEffect(() => {
+    api
+      .get<{ id: string; code: string; name: string }[]>('/reference/industries?active=true')
+      .then(setIndustries)
+      .catch(() => setIndustries([]));
+  }, []);
   const [form, setForm] = useState({
     companyName: lead?.companyName ?? '',
     customerId: lead?.customer?.id ?? '',
@@ -645,10 +806,10 @@ function LeadForm({
   /** No match: the enquiry is from somebody not on file yet. */
   async function createCustomer() {
     const name = form.companyName.trim();
-    if (name.length < 2) return;
+    if (name.length < 2 || !industryId) return;
     setBusy(true);
     try {
-      const created = await api.post<{ id: string; name: string }>('/customers', { name });
+      const created = await api.post<{ id: string; name: string }>('/customers', { name, industryId });
       toast('ok', `${name} added as a customer`);
       setForm((f) => ({ ...f, customerId: created.id, companyName: created.name }));
       setPicking(false);
@@ -756,10 +917,36 @@ function LeadForm({
               ))}
               {!matches.some((m) => m.name === form.companyName.trim()) && (
                 <li className="lookup-new">
-                  <button type="button" onClick={createCustomer} disabled={busy}>
-                    {matches.length ? 'Not one of these — ' : ''}add “{form.companyName.trim()}” as a
-                    new customer
-                  </button>
+                  {industries !== null && industries.length === 0 ? (
+                    <span className="lookup-note">
+                      A new customer needs an industry, and none are set up yet. Ask an administrator
+                      to add them under Admin › Categories.
+                    </span>
+                  ) : (
+                    <div className="lookup-new-row">
+                      <select
+                        aria-label="Industry of the new customer"
+                        value={industryId}
+                        onChange={(e) => setIndustryId(e.target.value)}
+                      >
+                        <option value="">Industry…</option>
+                        {(industries ?? []).map((i) => (
+                          <option key={i.id} value={i.id}>
+                            {i.code} — {i.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={createCustomer}
+                        disabled={busy || !industryId}
+                        title={industryId ? undefined : 'Pick the industry first'}
+                      >
+                        {matches.length ? 'Not one of these — ' : ''}add “{form.companyName.trim()}” as a
+                        new customer
+                      </button>
+                    </div>
+                  )}
                 </li>
               )}
             </ul>

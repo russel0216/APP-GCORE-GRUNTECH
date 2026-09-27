@@ -96,6 +96,14 @@ rm -f node_modules/.prisma/client/*.tmp* 2>/dev/null || true
 npx prisma generate \
   || echo "    NOTE: prisma generate hit EPERM on the engine binary — continuing; the api build verifies the client is current."
 
+# Seeding is idempotent by design: permissions are refreshed from the registry,
+# a role/permission pair is granted only if the seed has never offered it, and
+# everything else is create-only — so an administrator's revocations and edits
+# survive. Without this step a new screen's permission, workflow or setting
+# never reaches the server.
+step "seed (idempotent)"
+npm run seed
+
 # ── 6. Build ─────────────────────────────────────────────────────────────────
 step "build api"
 npm run build

@@ -2,7 +2,17 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { Empty, ErrorBox, Field, Loading, formatDate, formatMoney, useToast } from '../../components/ui';
+import {
+  Empty,
+  ErrorBox,
+  Field,
+  Loading,
+  StatusBadge,
+  formatDate,
+  formatMoney,
+  humanise,
+  useToast,
+} from '../../components/ui';
 import { BarList, Donut, Meter, Panel, Stat, type Slice } from '../../components/charts';
 import { IconBadge } from '../../components/Icon';
 
@@ -59,6 +69,17 @@ interface ApAging {
   totalOverdue: number;
   unreimbursedClaims: { id: string; number: string; person: string; claimDate: string; outstanding: number }[];
   unreimbursedTotal: number;
+  /** Cash out with people and not yet accounted for — the company is the creditor. */
+  unliquidatedAdvances?: {
+    id: string;
+    number: string;
+    person: string;
+    releasedAt: string | null;
+    liquidationDueDate: string | null;
+    daysOverdue: number;
+    amount: number;
+  }[];
+  unliquidatedTotal?: number;
 }
 
 // ── Executive dashboard ──────────────────────────────────────────────────────
@@ -70,12 +91,22 @@ interface Dashboard {
   payable: number;
   payableOverdue: number;
   reimbursable: number;
+  /** Approved and not yet handed over — counted against the position already. */
+  advancesToRelease: number;
+  /** Released and not yet accounted for by a liquidation. */
+  advancesInHand: number;
   workingPosition: number;
   collectedThisMonth: number;
   collectedThisYear: number;
   invoicedThisYear: number;
   withheldAwaitingCertificate: number;
-  queue: { billingsAwaitingInvoice: number; receivingsAwaitingBill: number };
+  queue: {
+    billingsAwaitingInvoice: number;
+    receivingsAwaitingBill: number;
+    advancesAwaitingRelease: number;
+    liquidationsOverdue: number;
+    refundsAwaitingReceipt: number;
+  };
   activeJobs: number;
 }
 
@@ -123,7 +154,7 @@ export function FinanceDashboard() {
       icon: 'balance' as const,
       more: 'Open cash flow',
       value: data.workingPosition,
-      sub: 'receivable less everything owed',
+      sub: 'receivable less everything owed, advances included',
       accent: data.workingPosition < 0 ? ('danger' as const) : ('ok' as const),
       to: '/g-fin/cash-flow',
     },
@@ -153,6 +184,15 @@ export function FinanceDashboard() {
       display: formatMoney(data.reimbursable),
       tone: 'info',
       to: '/g-fin/expenses?status=APPROVED',
+    },
+    // An approved advance is cash promised; the working position counts it
+    // before the voucher exists, so the chart shows it too.
+    {
+      label: 'Advances approved, not yet released',
+      value: data.advancesToRelease,
+      display: formatMoney(data.advancesToRelease),
+      tone: 'warn',
+      to: '/g-fin/cash-advances?status=APPROVED',
     },
   ];
 
@@ -227,6 +267,24 @@ export function FinanceDashboard() {
               ? 'we owe more than we are owed.'
               : 'what customers owe us, less everything we owe.'}
           </p>
+          <div className="grid grid-2">
+            <Stat
+              label="Advances to release"
+              value={formatMoney(data.advancesToRelease)}
+              sub={`${data.queue.advancesAwaitingRelease} approved, waiting on finance`}
+              figure
+              accent={data.advancesToRelease > 0 ? 'warn' : 'quiet'}
+              to="/g-fin/cash-advances?status=APPROVED"
+            />
+            <Stat
+              label="Cash out with staff"
+              value={formatMoney(data.advancesInHand)}
+              sub="released, not yet accounted for"
+              figure
+              accent={data.queue.liquidationsOverdue > 0 ? 'danger' : 'info'}
+              to="/g-fin/cash-advances?status=RELEASED"
+            />
+          </div>
         </Panel>
 
         <Panel
@@ -315,6 +373,36 @@ export function FinanceDashboard() {
               </Link>
             </li>
             <li>
+              <Link to="/g-fin/cash-advances?status=APPROVED" className="icon-row">
+                <IconBadge name="money-out" accent={data.queue.advancesAwaitingRelease > 0 ? 'warn' : 'quiet'} size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Cash advances approved, not yet released</span>
+                  <span className="icon-row-sub">Somebody is waiting on finance for the cash</span>
+                </span>
+                <span className="icon-row-value">{data.queue.advancesAwaitingRelease}</span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/g-fin/cash-advances?overdue=true" className="icon-row">
+                <IconBadge name="people" accent={data.queue.liquidationsOverdue > 0 ? 'danger' : 'quiet'} size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Liquidations overdue</span>
+                  <span className="icon-row-sub">Cash released and past its deadline with no receipts</span>
+                </span>
+                <span className="icon-row-value">{data.queue.liquidationsOverdue}</span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/g-fin/cash-advances?status=REFUND_DUE" className="icon-row">
+                <IconBadge name="money-in" accent={data.queue.refundsAwaitingReceipt > 0 ? 'warn' : 'quiet'} size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Unspent advance money not yet returned</span>
+                  <span className="icon-row-sub">Liquidated, and the change is still with the person</span>
+                </span>
+                <span className="icon-row-value">{data.queue.refundsAwaitingReceipt}</span>
+              </Link>
+            </li>
+            <li>
               <span className="icon-row">
                 <IconBadge
                   name="document"
@@ -358,7 +446,7 @@ export function FinanceReports() {
         </div>
       </div>
 
-      <div className="scope-switch" style={{ marginBottom: 16 }}>
+      <div className="scope-switch fin-gap-bottom">
         {can('gfin.ar.view_all') && (
           <button className={tab === 'ar' ? 'active' : ''} onClick={() => setTab('ar')}>
             Receivables aging
@@ -378,23 +466,16 @@ export function FinanceReports() {
 
 function BucketStrip({ buckets, total }: { buckets: AgingBucket[]; total: number }) {
   return (
-    <div className="grid grid-4" style={{ marginBottom: 18 }}>
+    <div className="grid grid-4 fin-gap-bottom">
       {buckets.map((b) => (
         <div key={b.label} className="card">
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            {b.label === 'Current' ? 'NOT YET DUE' : `${b.label} DAYS LATE`}
+          <div className="faint fin-bucket-label">
+            {b.label === 'Current' ? 'Not yet due' : `${b.label} days late`}
           </div>
-          <div
-            style={{
-              fontSize: 20,
-              marginTop: 6,
-              fontWeight: 600,
-              color: b.label === 'Current' ? undefined : b.amount > 0 ? 'var(--warn)' : undefined,
-            }}
-          >
+          <div className={`stat-value${b.label !== 'Current' && b.amount > 0 ? ' warn' : ''}`}>
             {formatMoney(b.amount)}
           </div>
-          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          <div className="faint fin-bucket-count">
             {b.count} document{b.count === 1 ? '' : 's'}
             {total > 0 && ` · ${((b.amount / total) * 100).toFixed(0)}%`}
           </div>
@@ -491,7 +572,7 @@ function ArAgingReport() {
                   <td className="right mono faint">{formatMoney(r.paid)}</td>
                   <td className="right mono">{formatMoney(r.outstanding)}</td>
                   <td>
-                    <span className={`badge ${r.bucket === 'Current' ? '' : 'warn'}`}>{r.bucket}</span>
+                    <StatusBadge status={r.bucket} extra={{ CURRENT: '' }} label={r.bucket} />
                   </td>
                 </tr>
               ))}
@@ -523,9 +604,7 @@ function ApAgingReport() {
           {formatMoney(data.totalOutstanding)} payable · {formatMoney(data.totalOverdue)} overdue
         </h3>
         {data.suppliers.length === 0 ? (
-          <p className="muted" style={{ marginBottom: 0 }}>
-            Nothing outstanding to suppliers.
-          </p>
+          <p className="muted fin-flush">Nothing outstanding to suppliers.</p>
         ) : (
           <div className="table-wrap">
             <table className="data">
@@ -593,6 +672,49 @@ function ApAgingReport() {
         </div>
       )}
 
+      {/* Not a payable — the company is the creditor — but the aging screen is
+          where finance looks for money that has stopped moving. Shown only
+          when there is any, so an empty table does not read as a failed load. */}
+      {!!data.unliquidatedAdvances?.length && (
+        <div className="card">
+          <h3 className="card-title">
+            {formatMoney(data.unliquidatedTotal ?? 0)} in advances awaiting liquidation
+          </h3>
+          <p className="muted">Cash handed over and not yet accounted for with receipts.</p>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Advance</th>
+                  <th>Who</th>
+                  <th>Released</th>
+                  <th>Liquidate by</th>
+                  <th className="right">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.unliquidatedAdvances.map((a) => (
+                  <tr key={a.id}>
+                    <td>
+                      <Link to={`/g-fin/cash-advances/${a.id}`} className="mono">
+                        {a.number}
+                      </Link>
+                    </td>
+                    <td>{a.person}</td>
+                    <td className="faint">{formatDate(a.releasedAt)}</td>
+                    <td>
+                      {formatDate(a.liquidationDueDate)}
+                      {a.daysOverdue > 0 && <div className="faint warn">{a.daysOverdue} days overdue</div>}
+                    </td>
+                    <td className="right mono">{formatMoney(a.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {data.rows.length > 0 && (
         <div className="card">
           <h3 className="card-title">Every open bill</h3>
@@ -624,7 +746,7 @@ function ApAgingReport() {
                     <td className="right mono faint">{formatMoney(r.paid)}</td>
                     <td className="right mono">{formatMoney(r.outstanding)}</td>
                     <td>
-                      <span className={`badge ${r.bucket === 'Current' ? '' : 'warn'}`}>{r.bucket}</span>
+                      <StatusBadge status={r.bucket} extra={{ CURRENT: '' }} label={r.bucket} />
                     </td>
                   </tr>
                 ))}
@@ -642,8 +764,11 @@ function ApAgingReport() {
 interface CashFlow {
   months: { month: string; in: number; out: number; net: number }[];
   forecast: { label: string; in: number; out: number; net: number }[];
-  uncleared: { number: string; kind: string; method: string; amount: number; paymentDate: string }[];
+  uncleared: { id: string; number: string; kind: string; method: string; amount: number; paymentDate: string }[];
   unclearedIn: number;
+  /** Approved advances in the forecast's "out", and unspent cash due back in its "in". */
+  advancesToRelease?: number;
+  refundsDue?: number;
   unclearedOut: number;
   netMovement: number;
 }
@@ -703,7 +828,7 @@ export function CashFlow() {
                 <th className="right">In</th>
                 <th className="right">Out</th>
                 <th className="right">Net</th>
-                <th style={{ width: '34%' }} />
+                <th className="fin-flow-col" />
               </tr>
             </thead>
             <tbody>
@@ -761,14 +886,18 @@ export function CashFlow() {
               </tbody>
             </table>
           </div>
+          {((data.advancesToRelease ?? 0) > 0 || (data.refundsDue ?? 0) > 0) && (
+            <p className="fin-note">
+              Includes {formatMoney(data.advancesToRelease ?? 0)} of approved cash advances going out
+              and {formatMoney(data.refundsDue ?? 0)} of unspent advance money due back.
+            </p>
+          )}
         </div>
 
         <div className="card">
           <h3 className="card-title">Uncleared</h3>
           {data.uncleared.length === 0 ? (
-            <p className="muted" style={{ marginBottom: 0 }}>
-              Nothing is waiting to clear.
-            </p>
+            <p className="muted fin-flush">Nothing is waiting to clear.</p>
           ) : (
             <>
               <p className="muted">
@@ -779,11 +908,13 @@ export function CashFlow() {
                 <table className="data">
                   <tbody>
                     {data.uncleared.map((p) => (
-                      <tr key={p.number}>
+                      <tr key={p.id}>
                         <td>
-                          <span className="mono">{p.number}</span>
+                          <Link to={`/g-fin/payments?payment=${p.id}`} className="mono">
+                            {p.number}
+                          </Link>
                           <div className="faint">
-                            {formatDate(p.paymentDate)} · {p.method.toLowerCase().replace(/_/g, ' ')}
+                            {formatDate(p.paymentDate)} · {humanise(p.method)}
                           </div>
                         </td>
                         <td className="right mono">
@@ -917,7 +1048,7 @@ export function BudgetVsActual() {
             )}
           </table>
         </div>
-        <p className="faint" style={{ marginTop: 12, marginBottom: 0 }}>
+        <p className="faint fin-gap-top fin-flush">
           Available is budgeted less committed less incurred. Consumed — stock issued to the job —
           is reported on the project screen but never subtracted here, because it was already
           counted as incurred when the goods were received.
@@ -934,6 +1065,8 @@ interface FinSettings {
   supplierEwtGoods: number;
   supplierEwtServices: number;
   agingBuckets: number[];
+  advanceLiquidationDays: number;
+  blockAdvanceWhileUnliquidated: boolean;
   vatRate: number;
   ewtRate: number;
 }
@@ -963,6 +1096,8 @@ export function FinanceSettings() {
         supplierEwtGoods: settings.supplierEwtGoods,
         supplierEwtServices: settings.supplierEwtServices,
         agingBuckets: settings.agingBuckets,
+        advanceLiquidationDays: settings.advanceLiquidationDays,
+        blockAdvanceWhileUnliquidated: settings.blockAdvanceWhileUnliquidated,
       });
       setSettings({ ...settings, ...saved });
       toast('ok', 'Finance rules saved');
@@ -982,8 +1117,8 @@ export function FinanceSettings() {
         <div>
           <h1>Finance Settings</h1>
           <p>
-            Payment terms, what Gruntech withholds from its own suppliers, and how the aging
-            report is bucketed.
+            Payment terms, what Gruntech withholds from its own suppliers, how the aging report is
+            bucketed, and the rules for cash advances.
           </p>
         </div>
         {editable && (
@@ -993,7 +1128,7 @@ export function FinanceSettings() {
         )}
       </div>
 
-      <fieldset disabled={!editable} style={{ border: 0, padding: 0, margin: 0 }}>
+      <fieldset disabled={!editable} className="fin-fieldset">
         <div className="grid grid-2">
           <div className="card">
             <h3 className="card-title">Terms</h3>
@@ -1061,11 +1196,39 @@ export function FinanceSettings() {
               <dt>EWT withheld</dt>
               <dd className="mono">{(settings.ewtRate * 100).toFixed(0)}%</dd>
             </dl>
-            <div className="alert info" style={{ marginTop: 12, marginBottom: 0 }}>
+            <div className="alert info fin-gap-top fin-flush">
               These live on the company record, because they are printed on every quotation,
               billing and invoice. Change them in Admin › Company. Each document snapshots the
               rate it was issued under, so changing them never rewrites history.
             </div>
+          </div>
+
+          <div className="card">
+            <h3 className="card-title">Cash advances</h3>
+            <Field
+              label="Days to liquidate"
+              hint="Counted from the day the cash is handed over. Set on each advance when it is released, so changing this never moves a deadline already given."
+            >
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={settings.advanceLiquidationDays}
+                onChange={(e) => set('advanceLiquidationDays', Number(e.target.value))}
+              />
+            </Field>
+            <Field
+              label="One advance at a time"
+              hint="Refuse a new advance to somebody who has not liquidated the last one. Turn off if staff often run two trips at once."
+            >
+              <select
+                value={settings.blockAdvanceWhileUnliquidated ? 'yes' : 'no'}
+                onChange={(e) => set('blockAdvanceWhileUnliquidated', e.target.value === 'yes')}
+              >
+                <option value="yes">Yes — liquidate first</option>
+                <option value="no">No — allow several</option>
+              </select>
+            </Field>
           </div>
         </div>
       </fieldset>

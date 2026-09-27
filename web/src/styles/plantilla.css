@@ -1,1 +1,133 @@
-/* Plantilla, clearances, turnover report — package A. Tokens only. */
+/*
+  Plantilla, Turnover & Clearance, and the Turnover tab of HR Reports —
+  package A (pages/hr/Plantilla.tsx, Clearances.tsx, reports/TurnoverReport.tsx).
+
+  Loaded after styles.css. Tokens only: spacing from --s-*, type from --fs-*,
+  colour from the theme variables, so the day theme is covered by the same
+  rules and nothing here is a literal colour or a pixel value. Stat, BarList,
+  Donut, Meter and Panel bring their own rules from charts; nothing here
+  restyles them.
+*/
+
+/* ── Plantilla ────────────────────────────────────────────────────────────── */
+
+/* The Meter in a list cell: wide enough to read its label, never the row. */
+.plantilla-meter {
+  min-width: calc(var(--s-8) * 2.5);
+}
+
+/* Holder names as links, separated by a middle dot rather than a comma run. */
+.plantilla-holders {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-2);
+  font-size: var(--fs-md);
+}
+
+.plantilla-holders > a + a::before,
+.plantilla-holders > a + span::before {
+  content: '·';
+  margin-right: var(--s-2);
+  color: var(--faint);
+}
+
+.plantilla-spacer {
+  flex: 1;
+}
+
+.plantilla-holder-list {
+  margin-top: var(--s-4);
+}
+
+.plantilla-holder-list ul {
+  margin: var(--s-2) 0 var(--s-3);
+  padding-left: var(--s-5);
+  display: grid;
+  gap: var(--s-1);
+}
+
+/* ── Clearance register ───────────────────────────────────────────────────── */
+
+.clearance-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: calc(var(--s-8) * 3);
+}
+
+.clearance-progress .meter {
+  flex: 1;
+}
+
+/* ── Clearance detail ─────────────────────────────────────────────────────── */
+
+/* The person on the left, the five area cards beside it; one column on a phone. */
+.clearance-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--s-4);
+  align-items: start;
+  margin-bottom: var(--s-4);
+}
+
+.clearance-areas {
+  display: grid;
+  gap: var(--s-4);
+  min-width: 0;
+}
+
+.clearance-areas .card,
+.clearance-layout > .card {
+  margin-bottom: 0;
+}
+
+.clearance-notes {
+  margin: var(--s-1) 0 0;
+  white-space: pre-wrap;
+  font-size: var(--fs-md);
+}
+
+/* Clear · Waive… · Reopen · Remove — wraps rather than widening the table. */
+.clearance-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s-1);
+}
+
+@media (max-width: 60em) {
+  .clearance-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── Turnover report ──────────────────────────────────────────────────────── */
+
+/* From · To · Download on one line, the button sitting on the inputs' baseline. */
+.turnover-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-3) var(--s-4);
+}
+
+.turnover-range .field {
+  flex: 1 1 calc(var(--s-8) * 4);
+  margin-bottom: 0;
+}
+
+.turnover-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--s-8) * 8)), 1fr));
+  gap: var(--s-4);
+  margin-bottom: var(--s-4);
+}
+
+.turnover-charts .card {
+  margin-bottom: 0;
+}
+
+.turnover-footnote {
+  margin: var(--s-3) 0 0;
+  font-size: var(--fs-sm);
+}

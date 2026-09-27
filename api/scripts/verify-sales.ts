@@ -17,7 +17,19 @@ import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
-import { resolveUser, canEditRecord } from '../src/permissions/resolve';
+import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
+import {
+  quotationValue,
+  columnFor,
+  allowedTargets,
+  assertLeadStatusChange,
+  assertOutcomeChange,
+  inForecastMonth,
+  isOverdue,
+  buildBoard,
+  type BoardLead,
+  type BoardQuotation,
+} from '../src/shared/pipeline';
 // Imported for its side effect: this is what registers the quotation's
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
 // test has to exercise the same wiring or it proves nothing about production.
@@ -51,6 +63,10 @@ const d = (v: number) => new Prisma.Decimal(v);
 const TAG = 'ZZSALES';
 
 async function cleanup() {
+  // Activities point at leads and quotations; they go first.
+  await prisma.salesActivity.deleteMany({
+    where: { OR: [{ subject: { startsWith: TAG } }, { lead: { companyName: { startsWith: TAG } } }] },
+  });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
@@ -221,7 +237,9 @@ async function main() {
 
   const quotation = await prisma.quotation.create({
     data: {
-      number: await nextNumber('quotation'),
+      // The author's employee digits go into the number (item 6). The fixture
+      // asserts nothing about the format — the template is the owner's.
+      number: await nextNumber('quotation', prisma, { ownerId: sales.id }),
       customerId: customer.id,
       leadId: lead.id,
       ownerId: sales.id,
@@ -388,6 +406,290 @@ async function main() {
   await prisma.quotation.update({ where: { id: quotation.id }, data: { outcome: 'WON' } });
   const wonQuote = await prisma.quotation.findUnique({ where: { id: quotation.id } });
   check('a won quotation is recorded as won', wonQuote!.outcome === 'WON');
+
+  // ── 7b. The pipeline board ─────────────────────────────────────────────────
+  // Pure functions from shared/pipeline.ts, on in-memory fixtures: the route
+  // only fetches, so the arithmetic and the move rules can be proved without
+  // an HTTP server (the HTTP half is verify-pipeline.ts).
+  console.log('\nPipeline board');
+
+  const D = (v: number) => new Prisma.Decimal(v);
+  const now = new Date();
+  const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000);
+  const managerUser = (await resolveUser(manager.id))!;
+  const person = { id: sales.id, name: sales.name, photoPath: null };
+
+  check(
+    'quotationValue prefers the APPROVED revision over a later draft',
+    money(
+      quotationValue([
+        { revision: 0, status: 'APPROVED', total: D(1_344_000) },
+        { revision: 1, status: 'DRAFT', total: D(1_500_000) },
+      ]),
+      1_344_000,
+    ),
+  );
+  check(
+    'a draft-only quotation is valued at its latest revision',
+    money(
+      quotationValue([
+        { revision: 1, status: 'DRAFT', total: D(900_000) },
+        { revision: 0, status: 'SUPERSEDED', total: D(800_000) },
+      ]),
+      900_000,
+    ),
+  );
+  check('no revisions is worth nothing', quotationValue([]) === 0);
+
+  check(
+    'an ON_HOLD lead stands in its own column, not Qualified',
+    columnFor({ kind: 'lead', status: 'ON_HOLD', quotationCount: 0 }) === 'ON_HOLD',
+  );
+  check('an OPEN quotation is "Quotation drafted"', columnFor({ kind: 'quotation', outcome: 'OPEN' }) === 'QUOTED');
+  check('a SUBMITTED quotation is Submitted', columnFor({ kind: 'quotation', outcome: 'SUBMITTED' }) === 'SUBMITTED');
+  check(
+    'a lead with a quotation is never a card',
+    columnFor({ kind: 'lead', status: 'NEGOTIATION', quotationCount: 1 }) === null &&
+      columnFor({ kind: 'lead', status: 'QUALIFIED', quotationCount: 1 }) === null,
+  );
+
+  function fixtureLead(over: Partial<BoardLead> = {}): BoardLead {
+    return {
+      id: `L-${Math.random()}`,
+      number: 'GT-LD-2026-0001',
+      companyName: `${TAG} Lead Co`,
+      description: null,
+      status: 'QUALIFIED',
+      estimatedValue: D(500_000),
+      probability: 40,
+      expectedClosing: null,
+      nextAction: null,
+      nextActionDate: null,
+      lostReason: null,
+      createdAt: daysAgo(3),
+      updatedAt: daysAgo(1),
+      assignedToId: sales.id,
+      assignedTo: person,
+      customer: null,
+      activities: [],
+      quotationCount: 0,
+      ...over,
+    };
+  }
+  function fixtureQuotation(over: Partial<BoardQuotation> = {}): BoardQuotation {
+    return {
+      id: `Q-${Math.random()}`,
+      number: '0012609001',
+      subject: `${TAG} Plant`,
+      outcome: 'NEGOTIATION',
+      probability: 60,
+      submittedAt: daysAgo(5),
+      decidedAt: null,
+      lostReason: null,
+      expectedClosing: null,
+      createdAt: daysAgo(10),
+      ownerId: sales.id,
+      owner: person,
+      customer: { id: customer.id, name: customer.name },
+      lead: null,
+      revisions: [
+        {
+          id: 'R0',
+          revision: 0,
+          status: 'APPROVED',
+          total: D(1_344_000),
+          validityDays: 30,
+          createdAt: daysAgo(10),
+          costing: null,
+          jobs: [],
+        },
+      ],
+      activities: [],
+      ...over,
+    };
+  }
+  const board = (leads: BoardLead[], quotations: BoardQuotation[], me: ResolvedUser = managerUser, days = 90) =>
+    buildBoard({ leads, quotations, now, decidedWithinDays: days, me });
+
+  // Gap 4: a lead at NEGOTIATION whose quotation is at NEGOTIATION is ONE card.
+  const b1 = board(
+    [fixtureLead({ status: 'NEGOTIATION', quotationCount: 1, estimatedValue: D(999_999) })],
+    [fixtureQuotation({ outcome: 'NEGOTIATION' })],
+  );
+  const negotiation = b1.columns.find((c) => c.key === 'NEGOTIATION')!;
+  check('a lead and its quotation at NEGOTIATION make one card, not two', negotiation.count === 1, `${negotiation.count}`);
+  check(
+    "and the column's value is the quotation's, not the sum of both",
+    money(negotiation.value, 1_344_000),
+    String(negotiation.value),
+  );
+
+  const refuses = (fn: () => void, needle: string) => {
+    try {
+      fn();
+      return false;
+    } catch (err) {
+      return String((err as Error).message).toLowerCase().includes(needle.toLowerCase());
+    }
+  };
+  check(
+    'WON is refused with no approved revision',
+    refuses(() => assertOutcomeChange('NEGOTIATION', 'WON', { hasApprovedRevision: false, hasJob: false }), 'approved revision'),
+  );
+  check(
+    'and accepted with one',
+    !refuses(() => assertOutcomeChange('NEGOTIATION', 'WON', { hasApprovedRevision: true, hasJob: false }), ''),
+  );
+  check(
+    'leaving WON is refused once a job references the quotation',
+    refuses(
+      () =>
+        assertOutcomeChange('WON', 'NEGOTIATION', {
+          hasApprovedRevision: true,
+          hasJob: true,
+          jobNumber: 'GT-PRJ-2026-0001',
+        }),
+      'GT-PRJ-2026-0001',
+    ),
+  );
+  check(
+    'LOST without a reason is refused for a lead',
+    refuses(() => assertLeadStatusChange('QUALIFIED', 'LOST', { hasQuotations: false }), 'why'),
+  );
+  check(
+    'and for a quotation',
+    refuses(
+      () => assertOutcomeChange('SUBMITTED', 'LOST', { hasApprovedRevision: false, hasJob: false, lostReason: '  ' }),
+      'why',
+    ),
+  );
+  check(
+    'LOST with a reason is accepted',
+    !refuses(
+      () => assertOutcomeChange('SUBMITTED', 'LOST', { hasApprovedRevision: false, hasJob: false, lostReason: 'Price' }),
+      '',
+    ) && !refuses(() => assertLeadStatusChange('QUALIFIED', 'LOST', { hasQuotations: false, lostReason: 'Went elsewhere' }), ''),
+  );
+  check(
+    'a lead with no quotation cannot be won',
+    refuses(() => assertLeadStatusChange('QUALIFIED', 'WON', { hasQuotations: false }), 'won by its quotation'),
+  );
+  check(
+    'nor negotiated',
+    refuses(() => assertLeadStatusChange('COSTING', 'NEGOTIATION', { hasQuotations: false }), 'won by its quotation'),
+  );
+  check(
+    'a lead card can be dropped on its own stages and Lost, never on a quotation stage',
+    (() => {
+      const t = allowedTargets({ kind: 'lead', column: 'QUALIFIED' });
+      return (
+        t.includes('COSTING') &&
+        t.includes('ON_HOLD') &&
+        t.includes('LOST') &&
+        !t.includes('QUALIFIED') &&
+        !t.includes('WON') &&
+        !t.includes('QUOTED')
+      );
+    })(),
+  );
+  check(
+    'a quotation card reaches WON only with an approved revision',
+    !allowedTargets({ kind: 'quotation', column: 'SUBMITTED', hasApprovedRevision: false }).includes('WON') &&
+      allowedTargets({ kind: 'quotation', column: 'SUBMITTED', hasApprovedRevision: true }).includes('WON'),
+  );
+  check(
+    'a WON quotation with a job cannot be moved at all',
+    allowedTargets({ kind: 'quotation', column: 'WON', hasApprovedRevision: true, hasJob: true }).length === 0,
+  );
+
+  // Forecast month, in Manila.
+  const manilaParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit' })
+    .format(now)
+    .split('-')
+    .map(Number);
+  const [mYear, mMonth] = [manilaParts[0], manilaParts[1] - 1];
+  const midMonth = new Date(Date.UTC(mYear, mMonth, 15));
+  const lastOfPrev = new Date(Date.UTC(mYear, mMonth, 0));
+  const firstOfNext = new Date(Date.UTC(mYear, mMonth + 1, 1));
+  check('the 15th of this month is in the forecast', inForecastMonth(midMonth, now));
+  check('the last day of last month is not', !inForecastMonth(lastOfPrev, now));
+  check('the first day of next month is not', !inForecastMonth(firstOfNext, now));
+  check('no date is not', !inForecastMonth(null, now));
+
+  const b2 = board(
+    [
+      fixtureLead({ status: 'QUALIFIED', estimatedValue: D(200_000), probability: 50, expectedClosing: midMonth }),
+      fixtureLead({ status: 'ON_HOLD', estimatedValue: D(300_000), probability: 50, expectedClosing: midMonth }),
+    ],
+    [fixtureQuotation({ outcome: 'SUBMITTED', probability: 25, expectedClosing: midMonth })],
+  );
+  check(
+    'an ON_HOLD lead is left out of the forecast even when dated this month',
+    b2.forecast.count === 2,
+    `${b2.forecast.count}`,
+  );
+  check(
+    'forecastWeighted = Σ value × probability',
+    money(b2.kpis.forecastWeighted, 200_000 * 0.5 + 1_344_000 * 0.25),
+    String(b2.kpis.forecastWeighted),
+  );
+
+  // Won/Lost window.
+  const approvedRev = (id: string, total: number, created: Date) => ({
+    id,
+    revision: 0,
+    status: 'APPROVED',
+    total: D(total),
+    validityDays: 30,
+    createdAt: created,
+    costing: null,
+    jobs: [],
+  });
+  const b3 = board(
+    [],
+    [
+      fixtureQuotation({ outcome: 'WON', decidedAt: daysAgo(91), revisions: [approvedRev('a', 100, daysAgo(100))] }),
+      fixtureQuotation({ outcome: 'WON', decidedAt: now, revisions: [approvedRev('b', 7, daysAgo(3))] }),
+    ],
+  );
+  check('a quotation decided 91 days ago is outside a 90-day board', b3.kpis.wonCount === 1, `${b3.kpis.wonCount}`);
+  check('and wonValue counts only the one inside', money(b3.kpis.wonValue, 7), String(b3.kpis.wonValue));
+
+  // Overdue.
+  check('expected closing yesterday is overdue', isOverdue({ kind: 'lead', expectedClosing: daysAgo(1) }, now));
+  check(
+    'validity lapsed (submitted 31 days ago, 30 days valid) is overdue',
+    isOverdue({ kind: 'quotation', submittedAt: daysAgo(31), validityDays: 30 }, now),
+  );
+  check(
+    'expected closing tomorrow is not',
+    !isOverdue(
+      { kind: 'quotation', expectedClosing: new Date(now.getTime() + 86_400_000), submittedAt: daysAgo(2), validityDays: 30 },
+      now,
+    ),
+  );
+
+  // Quoted figures and lead estimates never add up together.
+  const b4 = board(
+    [fixtureLead({ status: 'NEW', estimatedValue: D(50_000), probability: 10 })],
+    [fixtureQuotation({ outcome: 'SUBMITTED' })],
+  );
+  check('kpis.quotedValue counts quotations only', money(b4.kpis.quotedValue, 1_344_000), String(b4.kpis.quotedValue));
+  check('kpis.leadEstimate counts leads only', money(b4.kpis.leadEstimate, 50_000), String(b4.kpis.leadEstimate));
+  check('openQuotes counts quotation cards only', b4.kpis.openQuotes === 1 && b4.kpis.leadCount === 1);
+
+  // canMove comes from canEditRecord, not from the client. The seeded sales
+  // role may edit any lead but only its OWN quotations, so the quotation card
+  // is the one that tells the two apart.
+  const b5 = board([fixtureLead()], [fixtureQuotation()], (await resolveUser(other.id))!);
+  check(
+    "another salesperson's board offers no moves on somebody else's quotation",
+    b5.columns.every((c) =>
+      c.cards.filter((card) => card.kind === 'quotation').every((card) => !card.canMove && card.allowedTargets.length === 0),
+    ),
+  );
+  const b6 = board([fixtureLead()], [fixtureQuotation()], salesUser);
+  check('the owner may move their own', b6.columns.every((c) => c.cards.every((card) => card.canMove)));
 
   // ── 8. PDFs ────────────────────────────────────────────────────────────────
   console.log('\nDocuments');

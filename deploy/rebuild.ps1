@@ -123,6 +123,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 $ErrorActionPreference = 'Stop'
 
+# Seeding is idempotent by design: permissions are refreshed from the registry,
+# a role/permission pair is granted only if the seed has never offered it, and
+# everything else is create-only - so an administrator's revocations and edits
+# survive. Without this step a new screen's permission, workflow or setting
+# never reaches the server.
+Step 'seed (idempotent)'
+npm run seed
+if ($LASTEXITCODE -ne 0) { throw 'npm run seed failed' }
+
 # -- 6. Build -----------------------------------------------------------------
 Step 'build api'
 npm run build

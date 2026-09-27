@@ -1,9 +1,21 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import { ErrorBox, Field, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import {
+  ErrorBox,
+  Field,
+  Modal,
+  StatusBadge,
+  formatDate,
+  formatMoney,
+  useToast,
+  type Tone,
+} from '../../components/ui';
+
+/** A costing has two states and neither is in the shared lifecycle table. */
+export const COSTING_TONES: Record<string, Tone> = { DRAFT: 'warn', FINAL: 'ok' };
 
 export interface CostingRow {
   id: string;
@@ -25,8 +37,28 @@ export interface CostingRow {
 export function Costings() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const [creating, setCreating] = useState(false);
   const [reload, setReload] = useState(0);
+
+  // "Start costing" on a lead lands here as ?new=1&leadId=… and opens the form
+  // prefilled from that lead. The two params are cleared when the form closes
+  // so a refresh, or the browser's back button, does not reopen it.
+  const presetLeadId = params.get('leadId') ?? undefined;
+  const openFromUrl = params.get('new') === '1' && can('gops.costing.create');
+  useEffect(() => {
+    if (openFromUrl) setCreating(true);
+  }, [openFromUrl]);
+
+  function closeForm() {
+    setCreating(false);
+    if (params.has('new') || params.has('leadId')) {
+      const next = new URLSearchParams(params);
+      next.delete('new');
+      next.delete('leadId');
+      setParams(next, { replace: true });
+    }
+  }
 
   const columns: Column<CostingRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (c) => <span className="mono">{c.number}</span> },
@@ -60,11 +92,7 @@ export function Costings() {
     {
       key: 'status',
       label: 'Status',
-      render: (c) => (
-        <span className={`badge ${c.status === 'FINAL' ? 'ok' : 'warn'}`}>
-          {c.status === 'FINAL' ? 'Final' : 'Draft'}
-        </span>
-      ),
+      render: (c) => <StatusBadge status={c.status} extra={COSTING_TONES} />,
     },
   ];
 
@@ -113,9 +141,10 @@ export function Costings() {
 
       {creating && (
         <CostingForm
-          onClose={() => setCreating(false)}
+          leadId={presetLeadId}
+          onClose={closeForm}
           onSaved={(id) => {
-            setCreating(false);
+            closeForm();
             setReload((r) => r + 1);
             navigate(`/g-ops/costing/${id}`);
           }}
@@ -132,12 +161,35 @@ export function MarginBadge({ pct }: { pct: number }) {
   return <span className={`badge ${tone}`}>{value}</span>;
 }
 
+/** The slice of a lead the costing form takes its starting values from. */
+interface LeadPreset {
+  id: string;
+  number: string;
+  companyName: string;
+  description: string | null;
+  customer: { id: string; name: string } | null;
+  site: { id: string; name: string } | null;
+}
+
+/**
+ * The lead's description becomes the title, cut to its first line — a costing
+ * is named for the job, and the first line of a lead is what the job is.
+ */
+function titleFromLead(lead: LeadPreset): string {
+  const firstLine = (lead.description ?? '').split('\n')[0].trim();
+  const base = firstLine || `${lead.companyName} — requirement`;
+  return base.length > 120 ? `${base.slice(0, 117)}…` : base;
+}
+
 export function CostingForm({
   costing,
+  leadId,
   onClose,
   onSaved,
 }: {
   costing?: CostingRow;
+  /** Start from this lead: customer, site and title are prefilled and the link is kept. */
+  leadId?: string;
   onClose: () => void;
   onSaved: (id: string) => void;
 }) {
@@ -146,6 +198,7 @@ export function CostingForm({
   const [error, setError] = useState<unknown>(null);
   const [customers, setCustomers] = useState<{ id: string; name: string; code: string }[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
+  const [lead, setLead] = useState<LeadPreset | null>(null);
   const [form, setForm] = useState({
     title: costing?.title ?? '',
     customerId: costing?.customer?.id ?? '',
@@ -157,6 +210,31 @@ export function CostingForm({
   useEffect(() => {
     api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
   }, []);
+
+  // Prefill from the lead, once, and only into fields still empty — nothing
+  // is retyped, and nothing typed is overwritten.
+  useEffect(() => {
+    if (!leadId || costing) return;
+    let cancelled = false;
+    api
+      .get<LeadPreset>(`/leads/${leadId}`)
+      .then((l) => {
+        if (cancelled) return;
+        setLead(l);
+        setForm((f) => ({
+          ...f,
+          title: f.title || titleFromLead(l),
+          customerId: f.customerId || l.customer?.id || '',
+          siteId: f.siteId || (f.customerId && f.customerId !== l.customer?.id ? '' : l.site?.id ?? ''),
+        }));
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [leadId, costing]);
 
   useEffect(() => {
     if (!form.customerId) {
@@ -179,6 +257,9 @@ export function CostingForm({
         siteId: form.siteId || null,
         markupPct: Number(form.markupPct) / 100,
         durationDays: form.durationDays === '' ? null : Number(form.durationDays),
+        // Only on creation: the API moves the lead to COSTING when a costing is
+        // started from it, and a Modify must never re-run that handoff.
+        ...(!costing && leadId ? { leadId } : {}),
       };
       const saved = costing
         ? await api.patch<{ id: string }>(`/costings/${costing.id}`, payload)
@@ -207,6 +288,18 @@ export function CostingForm({
       }
     >
       <ErrorBox error={error} />
+      {lead && (
+        <div className="alert info">
+          Started from lead{' '}
+          <Link to={`/g-ops/leads/${lead.id}`} className="mono">
+            {lead.number}
+          </Link>{' '}
+          — {lead.companyName}.{' '}
+          {lead.customer
+            ? 'The customer and site are taken from it; the lead moves to Costing when you save.'
+            : 'The lead is not linked to a customer yet — pick one here, or leave it for later.'}
+        </div>
+      )}
       <Field label="Title" hint="What the job is — e.g. Oxygen plant expansion, Phase 1">
         <input value={form.title} autoFocus onChange={(e) => setForm({ ...form, title: e.target.value })} />
       </Field>

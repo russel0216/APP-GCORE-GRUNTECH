@@ -451,12 +451,36 @@ export function initials(name: string): string {
 }
 
 /**
+ * Object URLs for account photos, one per attachment id, for the life of the
+ * page.
+ *
+ * The pipeline board draws an avatar on every card, and sixty cards owned by
+ * one salesperson used to fetch the same photo sixty times on every load. The
+ * promise is cached rather than the URL so that sixty avatars mounting in the
+ * same tick share ONE request. A failed fetch is forgotten, so the next mount
+ * tries again. The URLs are never revoked: they are shared by every avatar of
+ * that person, and a replaced photo gets a new attachment id — a new key.
+ */
+const avatarUrls = new Map<string, Promise<string>>();
+
+function avatarUrl(photoId: string): Promise<string> {
+  let pending = avatarUrls.get(photoId);
+  if (!pending) {
+    pending = api.getBlob(`/attachments/file/${photoId}`).then((blob) => URL.createObjectURL(blob));
+    pending.catch(() => avatarUrls.delete(photoId));
+    avatarUrls.set(photoId, pending);
+  }
+  return pending;
+}
+
+/**
  * The one avatar, everywhere someone's picture appears — the topbar, the
- * Account page, and anywhere else that follows. `photoId` is an Attachment
- * id, never a URL: the file is behind `/attachments/file/:id`, which needs
- * the bearer token, so a bare `<img src>` can't reach it. This fetches the
- * bytes once per id and renders them as an object URL, falling back to the
- * initials disc — unchanged — when there is no photo or the fetch fails.
+ * Account page, the pipeline cards, and anywhere else that follows. `photoId`
+ * is an Attachment id, never a URL: the file is behind
+ * `/attachments/file/:id`, which needs the bearer token, so a bare
+ * `<img src>` can't reach it. The bytes are fetched once per id (see
+ * `avatarUrls`) and rendered as an object URL, falling back to the initials
+ * disc — unchanged — when there is no photo or the fetch fails.
  */
 export function Avatar({
   name,
@@ -474,19 +498,12 @@ export function Avatar({
       setUrl(null);
       return;
     }
-    let current: string | null = null;
     let cancelled = false;
-    api
-      .getBlob(`/attachments/file/${photoId}`)
-      .then((blob) => {
-        if (cancelled) return;
-        current = URL.createObjectURL(blob);
-        setUrl(current);
-      })
-      .catch(() => setUrl(null));
+    avatarUrl(photoId)
+      .then((u) => !cancelled && setUrl(u))
+      .catch(() => !cancelled && setUrl(null));
     return () => {
       cancelled = true;
-      if (current) URL.revokeObjectURL(current);
     };
   }, [photoId]);
 

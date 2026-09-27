@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -14,6 +15,17 @@ const EMPLOYMENT_TYPES = [
   { value: 'PART_TIME', label: 'Part-time' },
 ];
 
+/** GET /positions/lookup — the plantilla, for the picker and the filter. */
+interface PositionOption {
+  id: string;
+  code: string;
+  title: string;
+  departmentId: string | null;
+  departmentName: string | null;
+  authorisedHeadcount: number;
+  filled: number;
+}
+
 interface EmployeeRow {
   id: string;
   employeeNo: string;
@@ -21,7 +33,14 @@ interface EmployeeRow {
   lastName: string;
   middleName: string | null;
   suffix: string | null;
+  /**
+   * The title. For an employee on a plantilla position this is a MIRROR of
+   * positionRef.title written by the server; it is free text only when
+   * positionId is null (unclassified).
+   */
   position: string | null;
+  positionId: string | null;
+  positionRef: { id: string; code: string; title: string } | null;
   employmentType: string;
   dateHired: string | null;
   dateRegularized: string | null;
@@ -37,7 +56,12 @@ interface EmployeeRow {
   isActive: boolean;
   notes: string | null;
   department: { id: string; name: string } | null;
-  user: { id: string; email: string; isActive: boolean } | null;
+  user: {
+    id: string;
+    email: string;
+    isActive: boolean;
+    supervisor?: { id: string; name: string } | null;
+  } | null;
   // Only present when the caller holds ghr.employee_rates.view_all
   dailyRate?: number | null;
   burdenMultiplier?: number | null;
@@ -49,23 +73,58 @@ interface EmployeeRow {
 
 export function Employees() {
   const { can } = useAuth();
-  const [editing, setEditing] = useState<EmployeeRow | 'new' | null>(null);
+  // The open record is the URL: /g-hr/employees/:id. A plantilla holder link,
+  // a leaver on the turnover report or a clearance lands on the person, not on
+  // the list with nothing selected.
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [creating, setCreating] = useState(false);
+  const [record, setRecord] = useState<EmployeeRow | null>(null);
+  const [recordError, setRecordError] = useState<unknown>(null);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
   const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [positions, setPositions] = useState<PositionOption[]>([]);
 
   const seeRates = can('ghr.employee_rates.view_all');
+  const seeUsers = can('admin.users.view_all');
 
   useEffect(() => {
     api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    api.get<PositionOption[]>('/positions/lookup').then(setPositions).catch(() => {});
+  }, [reload]);
+
+  useEffect(() => {
+    if (!id) {
+      setRecord(null);
+      setRecordError(null);
+      return;
+    }
+    let live = true;
+    setRecordError(null);
+    api
+      .get<EmployeeRow>(`/employees/${id}`)
+      .then((r) => live && setRecord(r))
+      .catch((err) => live && setRecordError(err));
+    return () => {
+      live = false;
+    };
+  }, [id]);
+
+  // Keep the list's own URL state (search, filters, page) across open/close.
+  const openRecord = (e: EmployeeRow) => navigate(`/g-hr/employees/${e.id}${location.search}`);
+  const closeRecord = () => navigate(`/g-hr/employees${location.search}`);
 
   const columns: Column<EmployeeRow>[] = [
     {
       key: 'employeeNo',
       label: 'Employee No.',
       sortKey: 'employeeNo',
-      width: '170px',
+      width: '12rem',
       render: (e) => <span className="mono">{e.employeeNo}</span>,
     },
     {
@@ -77,7 +136,10 @@ export function Employees() {
           <div>
             {e.lastName}, {e.firstName} {e.middleName?.[0] ? `${e.middleName[0]}.` : ''}
           </div>
-          <div className="faint">{e.position ?? '—'}</div>
+          <div className="faint">
+            {e.positionRef?.title ?? e.position ?? '—'}
+            {!e.positionId && e.position ? ' · unclassified' : ''}
+          </div>
         </div>
       ),
     },
@@ -98,9 +160,18 @@ export function Employees() {
       label: 'Login',
       render: (e) =>
         e.user ? (
-          <span className="mono" title={e.user.email}>
-            {e.user.email}
-          </span>
+          seeUsers ? (
+            // The login opens the user account; the row around it opens the person.
+            <span onClick={(ev) => ev.stopPropagation()} onKeyDown={(ev) => ev.stopPropagation()}>
+              <Link to={`/admin/users/${e.user.id}`} className="mono" title={e.user.email}>
+                {e.user.email}
+              </Link>
+            </span>
+          ) : (
+            <span className="mono" title={e.user.email}>
+              {e.user.email}
+            </span>
+          )
         ) : (
           <span className="faint">none</span>
         ),
@@ -156,7 +227,7 @@ export function Employees() {
         rowKey={(e) => e.id}
         searchPlaceholder="Search name, employee number, position…"
         reloadToken={reload}
-        onRowClick={(e) => setEditing(e)}
+        onRowClick={openRecord}
         emptyTitle="No employees yet"
         emptyHint="Add them one at a time, or import your existing list."
         filters={[
@@ -174,11 +245,22 @@ export function Employees() {
             options: departments.map((d) => ({ value: d.id, label: d.name })),
           },
           { key: 'employmentType', label: 'Type', options: EMPLOYMENT_TYPES },
+          {
+            key: 'positionId',
+            label: 'Position',
+            options: [
+              { value: 'none', label: 'No plantilla position' },
+              ...positions.map((p) => ({
+                value: p.id,
+                label: p.departmentName ? `${p.title} · ${p.departmentName}` : p.title,
+              })),
+            ],
+          },
         ]}
         actions={
           <>
             {can('ghr.employees.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
+              <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
                 + Add employee
               </button>
             )}
@@ -197,13 +279,39 @@ export function Employees() {
         }
       />
 
-      {editing && (
+      {id && recordError !== null && (
+        <Modal title="Employee" onClose={closeRecord}>
+          <ErrorBox error={recordError} />
+        </Modal>
+      )}
+      {id && recordError === null && (!record || record.id !== id) && (
+        <Modal title="Employee" onClose={closeRecord}>
+          <Loading />
+        </Modal>
+      )}
+
+      {id && record && record.id === id && (
         <EmployeeForm
-          employee={editing === 'new' ? null : editing}
+          key={record.id}
+          employee={record}
           departments={departments}
-          onClose={() => setEditing(null)}
+          positions={positions}
+          onClose={closeRecord}
           onSaved={() => {
-            setEditing(null);
+            closeRecord();
+            setReload((r) => r + 1);
+          }}
+        />
+      )}
+
+      {creating && (
+        <EmployeeForm
+          employee={null}
+          departments={departments}
+          positions={positions}
+          onClose={() => setCreating(false)}
+          onSaved={() => {
+            setCreating(false);
             setReload((r) => r + 1);
           }}
         />
@@ -225,11 +333,13 @@ export function Employees() {
 function EmployeeForm({
   employee,
   departments,
+  positions,
   onClose,
   onSaved,
 }: {
   employee: EmployeeRow | null;
   departments: { id: string; name: string }[];
+  positions: PositionOption[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -242,6 +352,7 @@ function EmployeeForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [users, setUsers] = useState<{ id: string; name: string; email: string }[]>([]);
+  const seeUsers = can('admin.users.view_all');
   const [detail, setDetail] = useState<EmployeeRow | null>(null);
 
   const [form, setForm] = useState({
@@ -253,6 +364,7 @@ function EmployeeForm({
     userId: employee?.user?.id ?? '',
     departmentId: employee?.department?.id ?? '',
     position: employee?.position ?? '',
+    positionId: employee?.positionId ?? '',
     employmentType: employee?.employmentType ?? 'REGULAR',
     dateHired: employee?.dateHired?.slice(0, 10) ?? '',
     dateRegularized: employee?.dateRegularized?.slice(0, 10) ?? '',
@@ -274,12 +386,37 @@ function EmployeeForm({
     notes: employee?.notes ?? '',
   });
 
+  // Naming a login is not the admin right — the lookup, not /users.
   useEffect(() => {
     api
-      .get<{ rows: { id: string; name: string; email: string }[] }>('/users?pageSize=200')
-      .then((r) => setUsers(r.rows))
+      .get<{ id: string; name: string; email: string }[]>('/users/lookup')
+      .then(setUsers)
       .catch(() => {});
   }, []);
+
+  // The lookup lists ACTIVE logins and ACTIVE positions. The record's own may
+  // be neither (a leaver), and a select that cannot show its value lies.
+  const linked = employee?.user ?? null;
+  const userOptions =
+    linked && !users.some((u) => u.id === linked.id)
+      ? [...users, { id: linked.id, name: `${linked.email} (inactive)`, email: linked.email }]
+      : users;
+  const held = employee?.positionRef ?? null;
+  const positionOptions: PositionOption[] =
+    held && !positions.some((p) => p.id === held.id)
+      ? [
+          ...positions,
+          {
+            id: held.id,
+            code: held.code,
+            title: `${held.title} (inactive)`,
+            departmentId: null,
+            departmentName: null,
+            authorisedHeadcount: 0,
+            filled: 0,
+          },
+        ]
+      : positions;
 
   // The list never carries pay data — fetch the full record when editing so the
   // rate fields are populated for someone allowed to see them.
@@ -314,7 +451,6 @@ function EmployeeForm({
         suffix: form.suffix || null,
         userId: form.userId || null,
         departmentId: form.departmentId || null,
-        position: form.position || null,
         employmentType: form.employmentType,
         dateHired: form.dateHired || null,
         dateRegularized: form.dateRegularized || null,
@@ -334,6 +470,14 @@ function EmployeeForm({
         isActive: form.isActive,
         notes: form.notes || null,
       };
+
+      // The position goes through the server's one writer of the mirror. Sent
+      // only when it changed, so an employee on a since-deactivated position
+      // can still be saved for something else.
+      if (!employee || form.positionId !== (employee.positionId ?? '')) {
+        payload.positionId = form.positionId || null;
+      }
+      if (!form.positionId) payload.position = form.position.trim() || null;
 
       if (setRates) {
         payload.dailyRate = form.dailyRate === '' ? null : Number(form.dailyRate);
@@ -402,7 +546,7 @@ function EmployeeForm({
     >
       <ErrorBox error={error} />
 
-      <div className="row" style={{ marginBottom: 16 }}>
+      <div className="row" style={{ marginBottom: 'var(--s-4)' }}>
         <div className="scope-switch">
           <button className={tab === 'person' ? 'active' : ''} onClick={() => setTab('person')}>
             Person
@@ -479,9 +623,49 @@ function EmployeeForm({
                 onChange={(e) => setForm({ ...form, employeeNo: e.target.value })}
               />
             </Field>
-            <Field label="Position">
-              <input value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} />
+            <Field
+              label="Position"
+              hint="From the plantilla. Pick none to type a title that has no authorised slot yet."
+            >
+              <select
+                value={form.positionId}
+                onChange={(e) => {
+                  const next = positions.find((p) => p.id === e.target.value);
+                  setForm({
+                    ...form,
+                    positionId: e.target.value,
+                    // A position that sits in a department suggests it.
+                    departmentId:
+                      next?.departmentId && !form.departmentId ? next.departmentId : form.departmentId,
+                  });
+                }}
+              >
+                <option value="">— none (unclassified) —</option>
+                {positionOptions.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.title}
+                    {p.departmentName ? ` · ${p.departmentName}` : ''} ({p.filled}/{p.authorisedHeadcount})
+                  </option>
+                ))}
+              </select>
             </Field>
+            {form.positionId ? (
+              <Field label="Title" hint="Set by the plantilla — rename it there">
+                <input
+                  readOnly
+                  value={
+                    positionOptions.find((p) => p.id === form.positionId)?.title ?? held?.title ?? ''
+                  }
+                />
+              </Field>
+            ) : (
+              <Field label="Title (unclassified)" hint="Free text, until HR adds it to the plantilla">
+                <input
+                  value={form.position}
+                  onChange={(e) => setForm({ ...form, position: e.target.value })}
+                />
+              </Field>
+            )}
             <Field label="Department">
               <select
                 value={form.departmentId}
@@ -546,7 +730,7 @@ function EmployeeForm({
             >
               <select value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })}>
                 <option value="">— no login —</option>
-                {users.map((u) => (
+                {userOptions.map((u) => (
                   <option key={u.id} value={u.id}>
                     {u.name} ({u.email})
                   </option>
@@ -558,6 +742,13 @@ function EmployeeForm({
           <Field label="Notes">
             <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
           </Field>
+
+          {linked && seeUsers && (
+            <p className="faint">
+              Login: <Link to={`/admin/users/${linked.id}`}>{linked.email}</Link>
+              {linked.supervisor ? ` · reports to ${linked.supervisor.name}` : ''}
+            </p>
+          )}
 
           <Checkbox
             checked={form.isActive}
@@ -649,7 +840,7 @@ function EmployeeForm({
           </div>
 
           {employee && !detail && (
-            <p className="faint" style={{ fontSize: 12 }}>
+            <p className="faint">
               Loading pay data…
             </p>
           )}

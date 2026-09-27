@@ -70,6 +70,40 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 }
 
 const money = (a: number, b: number) => Math.abs(a - b) < 0.005;
+
+/** Splits an RFC 4180 export back into cells — quoted commas and all. */
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  const body = text.replace(/^﻿/, '');
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (quoted) {
+      if (ch === '"' && body[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\r' && body[i + 1] === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+      i++;
+    } else cell += ch;
+  }
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
 const D = (v: number) => new Prisma.Decimal(v);
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
@@ -113,6 +147,13 @@ async function cleanup() {
   });
   const ids = users.map((u) => u.id);
   if (ids.length) {
+    // Advance refunds and customer receipts recorded by the fixture users,
+    // then the claims (a liquidation holds its advance), then the advances.
+    await prisma.payment.deleteMany({
+      where: { OR: [{ recordedById: { in: ids } }, { payeeUserId: { in: ids } }] },
+    });
+    await prisma.expenseClaim.deleteMany({ where: { claimedById: { in: ids } } });
+    await prisma.cashAdvance.deleteMany({ where: { requestedById: { in: ids } } });
     await prisma.approvalAction.deleteMany({ where: { approverId: { in: ids } } });
     await prisma.approvalRequest.deleteMany({ where: { requesterId: { in: ids } } });
     await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
@@ -658,6 +699,104 @@ async function main() {
     },
   });
 
+  // ══ Advances, claims and refunds ═════════════════════════════════════════
+  // The cash forecast gained two columns with cash advances, and the
+  // "collected" figures learned to leave refunds out. Fixtures that make each
+  // of those rules bite.
+  const todayKey = dayKey(new Date());
+  const inTen = new Date(todayKey.getTime() + 10 * 86_400_000);
+  const advToRelease = await prisma.cashAdvance.create({
+    data: {
+      number: await nextNumber('cash_advance'),
+      status: 'APPROVED',
+      requestedById: seller.id,
+      requestDate: todayKey,
+      neededBy: inTen,
+      purpose: `${TAG} site cash`,
+      amount: D(50_000),
+    },
+  });
+  const advRefund = await prisma.cashAdvance.create({
+    data: {
+      number: await nextNumber('cash_advance'),
+      status: 'REFUND_DUE',
+      requestedById: seller.id,
+      requestDate: todayKey,
+      purpose: `${TAG} spent less than drawn`,
+      amount: D(20_000),
+      amountReleased: D(20_000),
+      amountSpent: D(15_000),
+      amountRefunded: D(2_000),
+      releasedAt: todayKey,
+      liquidationDueDate: inTen,
+    },
+  });
+  const plainClaim = await prisma.expenseClaim.create({
+    data: {
+      number: await nextNumber('expense'),
+      status: 'APPROVED',
+      claimedById: seller.id,
+      claimDate: todayKey,
+      purpose: `${TAG} tolls`,
+      total: D(3_000),
+      approvedAt: new Date(),
+    },
+  });
+  // A liquidation the advance fully covered: nothing is owed to anybody, so
+  // it must not reach "reimbursable".
+  await prisma.expenseClaim.create({
+    data: {
+      number: await nextNumber('expense'),
+      status: 'SETTLED',
+      claimedById: seller.id,
+      advanceId: advRefund.id,
+      claimDate: todayKey,
+      purpose: `${TAG} liquidation`,
+      total: D(15_000),
+      approvedAt: new Date(),
+    },
+  });
+  // Unspent advance money handed back this month: cash in, never a collection.
+  await prisma.payment.create({
+    data: {
+      number: await nextNumber('payment'),
+      kind: 'RECEIPT',
+      paymentDate: todayKey,
+      clearedAt: todayKey,
+      payeeUserId: seller.id,
+      amount: D(2_000),
+      recordedById: director.id,
+      allocations: { create: [{ advanceId: advRefund.id, amount: D(2_000) }] },
+    },
+  });
+  // A customer receipt this month, so "collected this month" is not trivially 0.
+  const healthyInvoice = await prisma.invoice.findFirstOrThrow({ where: { jobId: healthy.id } });
+  await prisma.payment.create({
+    data: {
+      number: await nextNumber('payment'),
+      kind: 'RECEIPT',
+      paymentDate: todayKey,
+      clearedAt: todayKey,
+      customerId: customer.id,
+      amount: D(1_000),
+      recordedById: director.id,
+      allocations: { create: [{ invoiceId: healthyInvoice.id, amount: D(1_000) }] },
+    },
+  });
+  await prisma.invoice.update({ where: { id: healthyInvoice.id }, data: { amountCollected: D(401_000) } });
+  // A document stuck on an approval, carrying the link to itself.
+  const stuck = await prisma.approvalRequest.create({
+    data: {
+      documentType: 'expense',
+      documentId: plainClaim.id,
+      documentNumber: plainClaim.number,
+      subject: `${TAG} stuck claim`,
+      link: `/g-fin/expenses/${plainClaim.id}`,
+      requesterId: seller.id,
+      status: 'PENDING',
+    },
+  });
+
   // ══ Route guards and reconciliation, over HTTP ═══════════════════════════
   console.log('\nOver HTTP');
 
@@ -699,7 +838,14 @@ async function main() {
     const d = dash.body as unknown as {
       sales: { openPipeline: number; weightedPipeline: number; won: number; lost: number; winRatePct: number };
       delivery: { budgeted: number; committed: number; incurred: number; available: number };
-      finance: { receivable: number; payable: number; workingPosition: number };
+      finance: {
+        receivable: number;
+        payable: number;
+        reimbursable: number;
+        advancesToRelease: number;
+        collectedThisMonth: number;
+        workingPosition: number;
+      };
     };
     check(
       'the weighted pipeline is less than the raw pipeline, because nothing is certain',
@@ -716,9 +862,43 @@ async function main() {
       money(d.delivery.available, cents(d.delivery.budgeted - d.delivery.committed - d.delivery.incurred)),
       `${d.delivery.available}`,
     );
+    // The overview used to print receivable − payable while G-FIN printed
+    // receivable − payable − claims − advances. Now there is one definition,
+    // decided in financePosition(), and the two screens agree to the centavo.
+    const finDash = await api('GET', '/finance-reports/dashboard');
+    const fd = finDash.body as unknown as {
+      receivable: number;
+      payable: number;
+      reimbursable: number;
+      advancesToRelease: number;
+      workingPosition: number;
+    };
     check(
-      'the working position is receivable less payable',
-      money(d.finance.workingPosition, cents(d.finance.receivable - d.finance.payable)),
+      'the working position is receivable less everything owed — suppliers, staff and approved advances',
+      money(
+        d.finance.workingPosition,
+        cents(d.finance.receivable - d.finance.payable - d.finance.reimbursable - d.finance.advancesToRelease),
+      ),
+      `${d.finance.workingPosition}`,
+    );
+    check(
+      'and the company overview prints the same working position as the finance dashboard',
+      finDash.status === 200 && money(d.finance.workingPosition, fd.workingPosition),
+      `overview ${d.finance.workingPosition} vs G-FIN ${fd.workingPosition}`,
+    );
+    const monthStartKey = new Date(Date.UTC(todayKey.getUTCFullYear(), todayKey.getUTCMonth(), 1));
+    const invoiceAllocations = await prisma.paymentAllocation.aggregate({
+      where: {
+        invoiceId: { not: null },
+        payment: { kind: 'RECEIPT', clearedAt: { gte: monthStartKey } },
+      },
+      _sum: { amount: true },
+    });
+    check(
+      'collected this month is customer receipts only — the advance refund is not a collection',
+      money(d.finance.collectedThisMonth, num(invoiceAllocations._sum.amount)) &&
+        d.finance.collectedThisMonth >= 1_000,
+      `overview ${d.finance.collectedThisMonth} vs invoice allocations ${num(invoiceAllocations._sum.amount)}`,
     );
 
     const trend = await api('GET', '/insights/trend?months=12');
@@ -801,7 +981,16 @@ async function main() {
     const cf = cash.body as unknown as {
       buckets: { label: string; invoiced: number; unbilled: number; net: number }[];
       cumulative: { cumulative: number }[];
-      totals: { invoiced: number; unbilled: number; net: number };
+      totals: {
+        invoiced: number;
+        unbilled: number;
+        refunds: number;
+        payable: number;
+        reimbursable: number;
+        committed: number;
+        advances: number;
+        net: number;
+      };
       ourMove: { billingsAwaitingInvoice: number; billingsAwaitingInvoiceValue: number };
     };
     check('the cash forecast runs', cash.status === 200, String(cash.status));
@@ -819,6 +1008,107 @@ async function main() {
       'and it is separated from what a customer owes, not mixed in',
       cf.totals.invoiced !== cf.totals.unbilled,
       'one is waiting on them, the other on us',
+    );
+
+    // Advances and refunds.
+    const approvedAdvances = await prisma.cashAdvance.findMany({
+      where: { status: 'APPROVED' },
+      select: { amount: true, amountReleased: true },
+    });
+    const advancesDirect = cents(
+      approvedAdvances.reduce((s, a) => s + Math.max(0, num(a.amount) - num(a.amountReleased)), 0),
+    );
+    check(
+      'an approved advance nobody has released is cash promised — read directly, to the centavo',
+      money(cf.totals.advances, advancesDirect) && cf.totals.advances >= 50_000,
+      `forecast ${cf.totals.advances} vs direct ${advancesDirect}`,
+    );
+    check(
+      'and it is the figure G-FIN calls advances to release',
+      money(cf.totals.advances, fd.advancesToRelease),
+      `forecast ${cf.totals.advances} vs G-FIN ${fd.advancesToRelease}`,
+    );
+    const refundDue = await prisma.cashAdvance.findMany({
+      where: { status: 'REFUND_DUE' },
+      select: { amountReleased: true, amountSpent: true, amountRefunded: true },
+    });
+    const refundsDirect = cents(
+      refundDue.reduce(
+        (s, a) => s + Math.max(0, num(a.amountReleased) - num(a.amountSpent)) - num(a.amountRefunded),
+        0,
+      ),
+    );
+    check(
+      'unspent advance money still to come back is counted in, at what is still owed',
+      money(cf.totals.refunds, refundsDirect) && cf.totals.refunds >= 3_000,
+      `forecast ${cf.totals.refunds} vs direct ${refundsDirect}`,
+    );
+    const approvedClaims = await prisma.expenseClaim.findMany({
+      where: { status: 'APPROVED' },
+      select: { total: true, amountPaid: true, advance: { select: { amountReleased: true } } },
+    });
+    const claimsDirect = cents(
+      approvedClaims.reduce(
+        (s, c) =>
+          s + Math.max(0, Math.max(0, num(c.total) - num(c.advance?.amountReleased)) - num(c.amountPaid)),
+        0,
+      ),
+    );
+    check(
+      'claims owed to staff leave out a liquidation the advance already settled',
+      money(cf.totals.reimbursable, claimsDirect) && cf.totals.reimbursable >= 3_000,
+      `forecast ${cf.totals.reimbursable} vs APPROVED claims read directly ${claimsDirect}`,
+    );
+    check(
+      'the forecast agrees with the finance position — receivable, payable, staff and advances',
+      money(cf.totals.invoiced, fd.receivable) &&
+        money(cf.totals.payable, fd.payable) &&
+        money(cf.totals.reimbursable, fd.reimbursable) &&
+        money(cf.totals.advances, fd.advancesToRelease),
+      `${cf.totals.invoiced}/${cf.totals.payable}/${cf.totals.reimbursable}/${cf.totals.advances} vs ` +
+        `${fd.receivable}/${fd.payable}/${fd.reimbursable}/${fd.advancesToRelease}`,
+    );
+    check(
+      'net is everything in less everything out, advances and refunds included',
+      money(
+        cf.totals.net,
+        cents(
+          cf.totals.invoiced +
+            cf.totals.unbilled +
+            cf.totals.refunds -
+            cf.totals.payable -
+            cf.totals.reimbursable -
+            cf.totals.committed -
+            cf.totals.advances,
+        ),
+      ),
+      `net ${cf.totals.net}`,
+    );
+
+    // The CSV twin lists the same documents the screen counts.
+    const cashCsv = await fetch(`${BASE}/insights/cash-forecast.csv`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const cashText = await cashCsv.text();
+    const cashRows = parseCsvRows(cashText).slice(1);
+    const sumDir = (dir: string) =>
+      cents(cashRows.filter((r) => r[0] === dir).reduce((s, r) => s + Number(r[4]), 0));
+    check(
+      'the cash-forecast CSV carries advances, claims and refunds as well as invoices and bills',
+      cashCsv.ok &&
+        cashText.includes(advToRelease.number) &&
+        cashText.includes(advRefund.number) &&
+        cashText.includes(plainClaim.number),
+      `${cashCsv.status}, ${cashRows.length} rows`,
+    );
+    check(
+      "and its money in and money out equal the screen's totals",
+      money(sumDir('In'), cents(cf.totals.invoiced + cf.totals.unbilled + cf.totals.refunds)) &&
+        money(
+          sumDir('Out'),
+          cents(cf.totals.payable + cf.totals.reimbursable + cf.totals.committed + cf.totals.advances),
+        ),
+      `CSV in ${sumDir('In')} / out ${sumDir('Out')}`,
     );
 
     const inv = await api('GET', '/insights/inventory?sinceDays=90');
@@ -857,6 +1147,23 @@ async function main() {
     check(
       'the bottleneck view exists and groups by who is holding things up',
       Array.isArray(pf.bottleneck.byApprover),
+    );
+    const bottleneckRows = (pf.bottleneck as unknown as { rows: { id: string; link: string | null }[] }).rows;
+    check(
+      'a stuck document carries its own link, so the row opens the document',
+      bottleneckRows.find((r) => r.id === stuck.id)?.link === `/g-fin/expenses/${plainClaim.id}`,
+      JSON.stringify(bottleneckRows.find((r) => r.id === stuck.id)),
+    );
+    const perfCsv = await fetch(`${BASE}/insights/performance.csv`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const perfRows = parseCsvRows(await perfCsv.text());
+    check(
+      'and the approvals CSV appends the link as its last column',
+      perfCsv.ok &&
+        perfRows[0][perfRows[0].length - 1] === 'Link' &&
+        perfRows.some((r) => r[r.length - 1] === `/g-fin/expenses/${plainClaim.id}`),
+      perfRows[0].join(','),
     );
 
     // CSV twins.

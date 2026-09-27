@@ -1,1 +1,88 @@
 /* Insights brief (components/charts.tsx Brief, pages/insights/Overview.tsx) — package P1. Tokens only. */
+
+/*
+  "The company at a glance": one sentence per division, the division's tag on
+  the left, the sentence on the right. Every colour is a token, so the day
+  theme is covered by the same rules and nothing here is a literal colour.
+  A figure is bold and tabular so a column of sentences still scans as
+  numbers; its colour only ever ADDS to what the words already say.
+*/
+
+.brief {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.brief-row {
+  display: grid;
+  grid-template-columns: calc(var(--s-8) * 2) 1fr;
+  gap: var(--s-3);
+  align-items: baseline;
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.brief-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.brief-tag {
+  font-family: var(--display);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.brief-tag:hover {
+  color: var(--neon);
+}
+
+.brief-text {
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.brief-figure {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+a.brief-figure {
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 0.2em;
+}
+
+a.brief-figure:hover {
+  color: var(--neon);
+  text-decoration-color: currentColor;
+}
+
+.brief-hint {
+  display: block;
+  margin-top: var(--s-1);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+/* A phone has no room for a tag column: the tag stacks above its sentence. */
+@media (max-width: 640px) {
+  .brief-row {
+    grid-template-columns: 1fr;
+    gap: var(--s-1);
+  }
+  .brief-figure {
+    white-space: normal;
+  }
+}

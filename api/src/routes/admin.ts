@@ -13,7 +13,13 @@ import {
 } from '../http/kit';
 import { authenticate, require_ } from '../auth/middleware';
 import { audit } from '../shared/audit';
-import { DOCUMENT_TYPES, previewNumber } from '../shared/numbering';
+import {
+  DOCUMENT_TYPES,
+  previewNext,
+  employeeNoFor,
+  periodKeyFor,
+  type Period,
+} from '../shared/numbering';
 import { upload, saveAttachment, attachmentPath } from '../shared/attachments';
 import { currentUser } from '../auth/middleware';
 
@@ -120,57 +126,136 @@ companyRoutes.post(
 export const numberingRoutes = Router();
 numberingRoutes.use(authenticate);
 
+interface CounterRow {
+  documentType: string;
+  periodKey: string;
+  lastNumber: number;
+}
+
+/**
+ * "Issued this period" for one document type: the sum of every counter row
+ * that belongs to the current period — the bare key for a company-wide
+ * counter (`2026`, `2026-09`), plus every `@employee` row hanging off it for a
+ * per-employee one. A NONE counter's current key is '', which is the template
+ * row itself, so a flat company-wide counter reports the template's number as
+ * it always did, and a flat per-employee one sums its `@007`, `@008` rows.
+ */
+export function issuedThisPeriod(rows: CounterRow[], documentType: string, current: string): number {
+  return rows
+    .filter(
+      (r) =>
+        r.documentType === documentType &&
+        (r.periodKey === current || r.periodKey.startsWith(`${current}@`)),
+    )
+    .reduce((sum, r) => sum + r.lastNumber, 0);
+}
+
 numberingRoutes.get(
   '/',
   require_('admin.numbering.view_all'),
-  handler(async (_req, res) => {
+  handler(async (req, res) => {
+    const me = currentUser(req);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     const prefix = company?.numberPrefix ?? 'GT';
-    const currentYear = String(new Date().getFullYear());
+    const now = new Date();
 
     const sequences = await prisma.numberSequence.findMany({
       orderBy: [{ documentType: 'asc' }, { periodKey: 'desc' }],
     });
 
-    // One row per document type — the template row plus this period's counter.
-    const rows = DOCUMENT_TYPES.map((dt) => {
+    // The sample numbers carry the administrator's own {EMP} digits, so a
+    // per-employee pattern previews as it would print for them. Resolved once
+    // here rather than once per document type.
+    const employeeNo = await employeeNoFor(me.id);
+    const ctx = employeeNo ? { employeeNo } : { ownerId: me.id };
+
+    // One row per document type — the template row plus this period's count.
+    const rows = [];
+    for (const dt of DOCUMENT_TYPES) {
       const template =
         sequences.find((s) => s.documentType === dt.type && s.periodKey === '') ??
         sequences.find((s) => s.documentType === dt.type);
-      const active =
-        sequences.find((s) => s.documentType === dt.type && s.periodKey === currentYear) ?? template;
-      if (!template) return null;
-      return {
+      if (!template) continue;
+      const current = periodKeyFor(template.period as Period, now);
+
+      // A template that cannot issue — a per-employee counter whose pattern
+      // has no {EMP} — is shown with the reason rather than hidden or crashed;
+      // the administrator is the one person who can fix it.
+      let preview = '';
+      let problem: string | null = null;
+      try {
+        preview = (await previewNext(dt.type, ctx)).number;
+      } catch (err) {
+        problem = err instanceof Error ? err.message : String(err);
+      }
+
+      rows.push({
         id: template.id,
         documentType: dt.type,
         label: template.label,
         pattern: template.pattern,
         typeCode: template.typeCode,
         period: template.period,
+        scope: template.scope,
         padding: template.padding,
-        lastNumber: active?.lastNumber ?? 0,
-        preview: previewNumber(
-          {
-            pattern: template.pattern,
-            typeCode: template.typeCode,
-            padding: template.padding,
-            lastNumber: active?.lastNumber ?? 0,
-          },
-          prefix,
-        ),
-      };
-    }).filter(Boolean);
+        lastNumber: issuedThisPeriod(sequences, dt.type, current),
+        preview,
+        problem,
+      });
+    }
 
-    res.json({ prefix, rows });
+    res.json({
+      prefix,
+      previewFor: { employeeNo, linked: employeeNo !== null },
+      rows,
+    });
   }),
 );
 
-const numberingSchema = z.object({
-  pattern: z.string().min(3).includes('{SEQ}', { message: 'The pattern must contain {SEQ}' }),
-  typeCode: z.string().min(1).max(8),
-  padding: z.number().int().min(1).max(10),
-  period: z.enum(['YEAR', 'NONE']),
-});
+const hasYear = (pattern: string) => pattern.includes('{YYYY}') || pattern.includes('{YY}');
+
+/**
+ * Each rule guards a real collision: without the owner in a per-employee
+ * pattern two people get the same number; without the month in a monthly
+ * pattern January repeats December; without the year in a yearly pattern next
+ * year repeats this one. `nextNumber` refuses the first case again at issue
+ * time as a backstop; the other two it cannot tell apart from a deliberate
+ * choice, so they are enforced only here.
+ */
+const numberingSchema = z
+  .object({
+    pattern: z.string().min(3).includes('{SEQ}', { message: 'The pattern must contain {SEQ}' }),
+    typeCode: z.string().min(1).max(8),
+    padding: z.number().int().min(1).max(10),
+    period: z.enum(['YEAR', 'MONTH', 'NONE']),
+    scope: z.enum(['GLOBAL', 'OWNER']).default('GLOBAL'),
+  })
+  .superRefine((v, ctx) => {
+    if (v.scope === 'OWNER' && !v.pattern.includes('{EMP}')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pattern'],
+        message:
+          'A per-employee counter needs {EMP} in the pattern, or two people will be issued the same number',
+      });
+    }
+    if (v.period === 'MONTH' && !(v.pattern.includes('{MM}') && hasYear(v.pattern))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pattern'],
+        message:
+          'A monthly counter needs {MM} and {YY} or {YYYY} in the pattern, or January’s numbers repeat December’s',
+      });
+    }
+    if (v.period === 'YEAR' && !hasYear(v.pattern)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pattern'],
+        message:
+          'A yearly counter needs {YYYY} or {YY} in the pattern, or next year’s numbers repeat this year’s',
+      });
+    }
+  });
 
 numberingRoutes.put(
   '/:documentType',
@@ -182,8 +267,10 @@ numberingRoutes.put(
     });
     if (!existing.length) throw notFound('Unknown document type');
 
-    // Update every period row so the change applies to this year's counter too,
-    // without resetting anyone's sequence.
+    // Update every period row so the change applies to this period's counter
+    // too, without resetting anyone's sequence. A counter keyed for a period
+    // or scope the type no longer uses simply stops being matched; it is kept
+    // as the record of what was issued under it.
     await prisma.numberSequence.updateMany({
       where: { documentType: req.params.documentType },
       data: body,
@@ -194,7 +281,7 @@ numberingRoutes.put(
         entityType: 'number_sequence',
         entityId: req.params.documentType,
         action: 'UPDATED',
-        summary: `Numbering for ${req.params.documentType} set to ${body.pattern}`,
+        summary: `Numbering for ${req.params.documentType} set to ${body.pattern} (${body.period}, ${body.scope})`,
       },
       req,
     );

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, formatDateTime, useToast } from '../../components/ui';
@@ -19,6 +20,12 @@ import { ErrorBox, Field, Loading, formatDateTime, useToast } from '../../compon
 interface ClockState {
   employee: { id: string; firstName: string; lastName: string; employeeNo: string } | null;
   message?: string;
+  /**
+   * Only for somebody who can open the employee register, and only while this
+   * login is unlinked: the unlinked record carrying the login's employee
+   * number, if there is one.
+   */
+  candidate?: { id: string; employeeNo: string; name: string } | null;
   enrolled?: boolean;
   faceSamples?: number;
   faceEngineReady?: boolean;
@@ -97,7 +104,7 @@ function useCamera() {
 
 export function Clock() {
   const toast = useToast();
-  const { refresh: refreshAuth } = useAuth();
+  const { refresh: refreshAuth, can, me } = useAuth();
   const camera = useCamera();
   const [state, setState] = useState<ClockState | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -195,9 +202,32 @@ export function Clock() {
           </div>
         </div>
         <div className="card">
-          <div className="alert warn" style={{ marginBottom: 0 }}>
-            {state.message}
-          </div>
+          <div className="alert warn hraud-flush">{state.message}</div>
+          {/*
+            "Ask HR to link it" is a dead end when the person reading it IS
+            HR — or an administrator setting the system up. For them it is a
+            link: the record the login matches, else the register searched by
+            name. The link is made on the employee record (its Login account field).
+          */}
+          {can('ghr.employees.edit_all') && (
+            <p className="hraud-after hraud-flush">
+              {state.candidate ? (
+                <Link to={`/g-hr/employees/${state.candidate.id}`}>
+                  Open {state.candidate.name} ({state.candidate.employeeNo}) and link this login →
+                </Link>
+              ) : (
+                <Link to={`/g-hr/employees?q=${encodeURIComponent(me?.user.name.split(' ').pop() ?? '')}`}>
+                  Find the employee record and link this login →
+                </Link>
+              )}
+            </p>
+          )}
+          {!can('ghr.employees.edit_all') && can('admin.users.edit_all') && me && (
+            <p className="hraud-after hraud-flush">
+              <Link to={`/admin/users/${me.user.id}`}>Check this login’s employee number →</Link>{' '}
+              <span className="faint">HR links it from the employee record.</span>
+            </p>
+          )}
         </div>
       </div>
     );
@@ -248,10 +278,10 @@ export function Clock() {
                 {camera.mode === 'starting' ? (
                   <Loading label="Starting the camera…" />
                 ) : (
-                  <div className="faint" style={{ textAlign: 'center', padding: '0 16px' }}>
+                  <div className="faint hraud-camera-note">
                     {camera.detail || 'Camera off'}
                     {camera.mode === 'idle' && (
-                      <div style={{ marginTop: 10 }}>
+                      <div className="hraud-gap-above">
                         <button className="btn btn-sm" onClick={camera.start}>
                           Start camera
                         </button>
@@ -279,7 +309,7 @@ export function Clock() {
               </button>
             </>
           ) : done ? (
-            <div className="alert ok" style={{ marginBottom: 0 }}>
+            <div className="alert ok hraud-flush">
               You are done for today — in at {formatDateTime(today!.timeIn)}, out at{' '}
               {formatDateTime(today!.timeOut)}.
             </div>
@@ -366,9 +396,7 @@ export function Clock() {
                 )}
               </dl>
             ) : (
-              <p className="muted" style={{ marginBottom: 0 }}>
-                Nothing recorded yet today.
-              </p>
+              <p className="muted hraud-flush">Nothing recorded yet today.</p>
             )}
           </div>
 
@@ -390,7 +418,7 @@ export function Clock() {
               </button>
             )}
             {state.faceEngineReady === false && (
-              <div className="alert warn" style={{ marginTop: 12, marginBottom: 0 }}>
+              <div className="alert warn hraud-after hraud-flush">
                 The recognition models are still loading on the server. Give it a few seconds, or
                 use the fallback.
               </div>

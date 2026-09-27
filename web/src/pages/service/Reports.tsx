@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { DocumentApproval } from '../../components/ApprovalStepper';
+import { Attachments } from '../../components/Attachments';
+import { Stat } from '../../components/charts';
 import {
   Checkbox,
   Empty,
@@ -10,9 +13,11 @@ import {
   Field,
   Loading,
   Modal,
+  StatusBadge,
   formatDate,
   formatMoney,
   useToast,
+  type Tone,
 } from '../../components/ui';
 
 /**
@@ -32,7 +37,25 @@ export const KINDS = [
   { value: 'CORRECTIVE', label: 'Corrective' },
 ];
 
-const KIND_LABEL = Object.fromEntries(KINDS.map((k) => [k.value, k.label]));
+export const KIND_LABEL: Record<string, string> = Object.fromEntries(KINDS.map((k) => [k.value, k.label]));
+
+/** The document type a report of each kind is approved under — mirrors the API. */
+export const REPORT_DOC_TYPE: Record<string, string> = {
+  COMMISSIONING: 'commissioning_report',
+  PREVENTIVE_MAINTENANCE: 'pm_report',
+  INSPECTION: 'inspection_report',
+  CORRECTIVE: 'inspection_report',
+};
+
+/** Which permission covers a report of each kind — mirrors the API. */
+export function reportPermission(kind: string, action: string): string {
+  if (kind === 'COMMISSIONING') return `gops.commissioning_reports.${action}`;
+  if (kind === 'PREVENTIVE_MAINTENANCE') return `gops.pm_reports.${action}`;
+  return `gops.inspection_reports.${action}`;
+}
+
+/** REJECTED reads "Returned" on this screen — the report goes back to its author. */
+const REPORT_TONES: Record<string, Tone> = { REJECTED: 'warn' };
 
 const STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -41,7 +64,6 @@ const STATUSES = [
   { value: 'REJECTED', label: 'Returned' },
 ];
 
-import { statusTone as tone } from '../../components/ui';
 import { todayLocal } from '../../lib/day';
 
 export interface TemplateField {
@@ -100,7 +122,13 @@ interface Report {
   } | null;
   contract: { id: string; number: string; endsAt: string } | null;
   job: { id: string; number: string; name: string } | null;
-  visit: { id: string; number: string; dueDate: string; sequence: number | null } | null;
+  visit: {
+    id: string;
+    number: string;
+    dueDate: string;
+    sequence: number | null;
+    jobOrder: { id: string; number: string; status: string } | null;
+  } | null;
   template: Template;
   performedBy: { id: string; name: string };
   photos?: { id: string; fileName: string; caption: string | null }[];
@@ -141,8 +169,24 @@ export function ServiceReports() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const preset = PRESET_BY_PATH[pathname];
-  const [writing, setWriting] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // `?new=1&visitId=` is how the schedule and a job order hand a visit over
+  // ("Write report"); `?visit=` is the older spelling of the same thing.
+  const handedVisit = params.get('visitId') ?? params.get('visit');
+  const [writing, setWriting] = useState(params.get('new') === '1' || !!handedVisit);
+  const [reportPreset] = useState(() => (handedVisit ? { visitId: handedVisit } : undefined));
   const [reload, setReload] = useState(0);
+
+  function closeWriting() {
+    setWriting(false);
+    if (params.has('new') || params.has('visitId') || params.has('visit')) {
+      const next = new URLSearchParams(params);
+      next.delete('new');
+      next.delete('visitId');
+      next.delete('visit');
+      setParams(next, { replace: true });
+    }
+  }
 
   const columns: Column<Report>[] = [
     {
@@ -206,9 +250,7 @@ export function ServiceReports() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => (
-        <span className={`badge ${tone(r.status)}`}>{r.status.toLowerCase().replace(/_/g, ' ')}</span>
-      ),
+      render: (r) => <StatusBadge status={r.status} extra={REPORT_TONES} />,
     },
   ];
 
@@ -265,11 +307,12 @@ export function ServiceReports() {
 
       {writing && (
         <NewReportModal
-          onClose={() => setWriting(false)}
+          preset={reportPreset}
+          onClose={closeWriting}
           onCreated={(id) => {
             setWriting(false);
             setReload((r) => r + 1);
-            navigate(`/g-ops/service-reports/${id}`);
+            navigate(`/g-ops/service-reports/${id}`, { replace: true });
           }}
         />
       )}
@@ -277,12 +320,41 @@ export function ServiceReports() {
   );
 }
 
-function NewReportModal({
+export interface ReportPreset {
+  visitId?: string;
+  customerId?: string;
+  assetId?: string;
+  kind?: string;
+  contractId?: string;
+  siteId?: string;
+}
+
+interface PickerVisit {
+  id: string;
+  number: string;
+  kind: string;
+  status: string;
+  dueDate: string;
+  customer: { id: string; name: string };
+  site: { id: string } | null;
+  asset: { id: string } | null;
+  contract: { id: string } | null;
+  report: { id: string } | null;
+}
+
+/**
+ * Starting a report. Opened from the list, and — with a `preset` — from a
+ * visit on the schedule or a job order, so the report is written against
+ * that visit without re-finding it in a dropdown.
+ */
+export function NewReportModal({
   onClose,
   onCreated,
+  preset,
 }: {
   onClose: () => void;
   onCreated: (id: string) => void;
+  preset?: ReportPreset;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -290,26 +362,51 @@ function NewReportModal({
   const [templates, setTemplates] = useState<Template[]>([]);
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [assets, setAssets] = useState<{ id: string; code: string; name: string; serialNo: string | null }[]>([]);
-  const [visits, setVisits] = useState<
-    { id: string; number: string; dueDate: string; customer: { id: string; name: string }; asset: { id: string } | null; contract: { id: string } | null }[]
-  >([]);
+  const [visits, setVisits] = useState<PickerVisit[]>([]);
 
   const [form, setForm] = useState({
-    kind: 'PREVENTIVE_MAINTENANCE',
+    kind: preset?.kind ?? 'PREVENTIVE_MAINTENANCE',
     templateId: '',
-    visitId: '',
-    customerId: '',
-    assetId: '',
+    visitId: preset?.visitId ?? '',
+    customerId: preset?.customerId ?? '',
+    assetId: preset?.assetId ?? '',
+    contractId: preset?.contractId ?? '',
+    siteId: preset?.siteId ?? '',
     performedAt: todayLocal(),
   });
+  const locked = !!preset?.visitId;
+
+  /** A chosen visit decides the kind, the customer, the machine and the contract. */
+  const takeVisit = useCallback((v: PickerVisit | undefined, visitId: string) => {
+    setForm((f) => ({
+      ...f,
+      visitId,
+      kind: v?.kind ?? f.kind,
+      customerId: v?.customer.id ?? f.customerId,
+      assetId: v ? (v.asset?.id ?? '') : f.assetId,
+      contractId: v ? (v.contract?.id ?? '') : '',
+      siteId: v ? (v.site?.id ?? '') : f.siteId,
+    }));
+  }, []);
 
   useEffect(() => {
     api.get<Template[]>('/report-templates').then(setTemplates).catch(() => {});
     api.get<{ rows: { id: string; name: string }[] }>('/customers?pageSize=200').then((d) => setCustomers(d.rows)).catch(() => {});
+    // MISSED as well as SCHEDULED: a late visit still has to be reported, or
+    // it can never complete.
     api
-      .get<{ rows: typeof visits }>('/service-visits?pageSize=100&status=SCHEDULED')
-      .then((d) => setVisits(d.rows))
+      .get<{ rows: PickerVisit[] }>('/service-visits?pageSize=200&statuses=SCHEDULED,MISSED&sort=dueDate&dir=asc')
+      .then(async (d) => {
+        let rows = d.rows.filter((v) => !v.report);
+        if (preset?.visitId && !rows.some((v) => v.id === preset.visitId)) {
+          const one = await api.get<PickerVisit>(`/service-visits/${preset.visitId}`).catch(() => null);
+          if (one) rows = [one, ...rows];
+        }
+        setVisits(rows);
+        if (preset?.visitId) takeVisit(rows.find((v) => v.id === preset.visitId), preset.visitId);
+      })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -335,12 +432,17 @@ function NewReportModal({
     setBusy(true);
     setError(null);
     try {
+      // The server fills customer, site, machine, contract and job from the
+      // visit whatever is sent; sending them keeps this form's own preview
+      // honest about what covers the work.
       const created = await api.post<{ id: string }>('/service-reports', {
         kind: form.kind,
         templateId: form.templateId || undefined,
         visitId: form.visitId || null,
         customerId: form.customerId,
+        siteId: form.siteId || null,
         assetId: form.assetId || null,
+        contractId: form.contractId || null,
         performedAt: form.performedAt,
         data: {},
       });
@@ -352,9 +454,11 @@ function NewReportModal({
     }
   }
 
+  const chosen = visits.find((v) => v.id === form.visitId);
+
   return (
     <Modal
-      title="New service report"
+      title={chosen ? `Report for ${chosen.number}` : 'New service report'}
       onClose={onClose}
       footer={
         <>
@@ -374,7 +478,11 @@ function NewReportModal({
       <ErrorBox error={error} />
 
       <Field label="What kind of visit?">
-        <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+        <select
+          value={form.kind}
+          disabled={!!form.visitId}
+          onChange={(e) => setForm({ ...form, kind: e.target.value })}
+        >
           {KINDS.map((k) => (
             <option key={k.value} value={k.value}>
               {k.label}
@@ -403,24 +511,21 @@ function NewReportModal({
         </Field>
       )}
 
-      {visits.length > 0 && (
-        <Field label="Against a scheduled visit" hint="Leave empty for a call-out nobody scheduled">
+      {(visits.length > 0 || locked) && (
+        <Field
+          label="Against a visit on the schedule"
+          hint={locked ? 'Opened from the visit' : 'Leave empty for a call-out nobody scheduled'}
+        >
           <select
             value={form.visitId}
-            onChange={(e) => {
-              const v = visits.find((x) => x.id === e.target.value);
-              setForm({
-                ...form,
-                visitId: e.target.value,
-                customerId: v?.customer.id ?? form.customerId,
-                assetId: v?.asset?.id ?? '',
-              });
-            }}
+            disabled={locked}
+            onChange={(e) => takeVisit(visits.find((x) => x.id === e.target.value), e.target.value)}
           >
             <option value="">— unscheduled —</option>
             {visits.map((v) => (
               <option key={v.id} value={v.id}>
                 {v.number} — {v.customer.name} — due {v.dueDate.slice(0, 10)}
+                {v.status === 'MISSED' ? ' (missed)' : ''}
               </option>
             ))}
           </select>
@@ -431,9 +536,13 @@ function NewReportModal({
         <Field label="Customer">
           <select
             value={form.customerId}
+            disabled={!!form.visitId}
             onChange={(e) => setForm({ ...form, customerId: e.target.value, assetId: '' })}
           >
             <option value="">— choose —</option>
+            {chosen && !customers.some((c) => c.id === chosen.customer.id) && (
+              <option value={chosen.customer.id}>{chosen.customer.name}</option>
+            )}
             {customers.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
@@ -463,6 +572,10 @@ function NewReportModal({
           ))}
         </select>
       </Field>
+
+      {form.contractId && (
+        <div className="alert info">Covered by the service contract this visit belongs to — not billed by default.</div>
+      )}
     </Modal>
   );
 }
@@ -472,8 +585,9 @@ function NewReportModal({
 export function ServiceReportDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
-  const { me } = useAuth();
+  const { me, can } = useAuth();
   const [row, setRow] = useState<Report | null>(null);
+  const [reload, setReload] = useState(0);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState<Record<string, Record<string, unknown>>>({});
@@ -492,6 +606,7 @@ export function ServiceReportDetail() {
         billable: report.billable,
       });
       setDirty(false);
+      setReload((n) => n + 1);
     } catch (err) {
       setError(err);
     }
@@ -518,7 +633,13 @@ export function ServiceReportDetail() {
   if (error) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
-  const editable = row.status === 'DRAFT' && row.performedBy.id === me?.user.id;
+  const isAuthor = row.performedBy.id === me?.user.id;
+  // A returned report is corrected and sent again; whoever holds edit_all for
+  // this kind can correct it too, but only its author sends it for approval.
+  const editable =
+    (row.status === 'DRAFT' || row.status === 'REJECTED') &&
+    (isAuthor || !!me?.user.isSuperAdmin || can(reportPermission(row.kind, 'edit_all')));
+  const canSubmit = editable && (isAuthor || !!me?.user.isSuperAdmin);
 
   function set(sectionKey: string, fieldKey: string, value: unknown) {
     setDraft((d) => ({ ...d, [sectionKey]: { ...(d[sectionKey] ?? {}), [fieldKey]: value } }));
@@ -573,12 +694,15 @@ export function ServiceReportDetail() {
         <div>
           <h1>
             <span className="mono">{row.number}</span>{' '}
-            <span className={`badge ${tone(row.status)}`}>
-              {row.status.toLowerCase().replace(/_/g, ' ')}
-            </span>
+            <StatusBadge status={row.status} extra={REPORT_TONES} label={row.status === 'REJECTED' ? 'Returned' : undefined} />
           </h1>
           <p>
-            {KIND_LABEL[row.kind]} · {row.customer.name}
+            {KIND_LABEL[row.kind]} ·{' '}
+            {can('gops.customers.view_all') ? (
+              <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+            ) : (
+              row.customer.name
+            )}
             {row.asset && (
               <>
                 {' · '}
@@ -594,16 +718,27 @@ export function ServiceReportDetail() {
             <button className="btn btn-sm" onClick={save} disabled={busy || !dirty}>
               {busy ? 'Saving…' : 'Save draft'}
             </button>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={submit}
-              disabled={busy || missing.length > 0 || !meta.customerSignedBy.trim()}
-            >
-              Send for approval
-            </button>
+            {canSubmit && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={submit}
+                disabled={busy || missing.length > 0 || !meta.customerSignedBy.trim()}
+              >
+                {row.status === 'REJECTED' ? 'Send again' : 'Send for approval'}
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      <DocumentApproval documentType={REPORT_DOC_TYPE[row.kind]} documentId={row.id} reloadToken={reload} />
+
+      {row.status === 'REJECTED' && (
+        <div className="alert warn">
+          Returned by the approver. Correct it and send it again — the visit closes when the report
+          is approved.
+        </div>
+      )}
 
       {editable && (missing.length > 0 || !meta.customerSignedBy.trim()) && (
         <div className="alert warn">
@@ -630,6 +765,57 @@ export function ServiceReportDetail() {
               ? ' Out of warranty and outside any contract — this visit is billable.'
               : ''}
       </div>
+
+      {(row.visit || row.contract || row.job) && (
+        <div className="card">
+          <h3 className="card-title">Where this work came from</h3>
+          <dl className="kv">
+            {row.visit && (
+              <>
+                <dt>Against visit</dt>
+                <dd>
+                  <Link to={`/g-ops/visits?visit=${row.visit.id}`} className="mono">
+                    {row.visit.number}
+                  </Link>{' '}
+                  <span className="faint">due {formatDate(row.visit.dueDate)}</span>
+                </dd>
+              </>
+            )}
+            {row.visit?.jobOrder && (
+              <>
+                <dt>Job order</dt>
+                <dd>
+                  <Link to={`/g-ops/job-orders/${row.visit.jobOrder.id}`} className="mono">
+                    {row.visit.jobOrder.number}
+                  </Link>{' '}
+                  <StatusBadge status={row.visit.jobOrder.status} />
+                </dd>
+              </>
+            )}
+            {row.contract && (
+              <>
+                <dt>Contract</dt>
+                <dd>
+                  <Link to={`/g-ops/service-contracts/${row.contract.id}`} className="mono">
+                    {row.contract.number}
+                  </Link>
+                </dd>
+              </>
+            )}
+            {row.job && (
+              <>
+                <dt>Charged to</dt>
+                <dd>
+                  <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+                    {row.job.number}
+                  </Link>{' '}
+                  <span className="faint">{row.job.name}</span>
+                </dd>
+              </>
+            )}
+          </dl>
+        </div>
+      )}
 
       {row.template.sections.map((section) => (
         <div key={section.key} className="card">
@@ -658,7 +844,7 @@ export function ServiceReportDetail() {
 
               if (field.type === 'boolean') {
                 return (
-                  <div key={field.key} style={{ alignSelf: 'end', paddingBottom: 12 }}>
+                  <div key={field.key} className="svc-check-cell">
                     <Checkbox
                       checked={value === true}
                       onChange={(v) => set(section.key, field.key, v)}
@@ -687,7 +873,7 @@ export function ServiceReportDetail() {
               }
               if (field.type === 'note') {
                 return (
-                  <div key={field.key} style={{ gridColumn: '1 / -1' }}>
+                  <div key={field.key} className="svc-span-all">
                     <Field label={label}>
                       <textarea
                         rows={2}
@@ -716,6 +902,14 @@ export function ServiceReportDetail() {
               );
             })}
           </div>
+          {section.allowPhotos && (
+            <Attachments
+              entityType="service_report"
+              entityId={`${row.id}~${section.key}`}
+              title={`Photos — ${section.title}`}
+              canEdit={editable}
+            />
+          )}
         </div>
       ))}
 
@@ -776,308 +970,18 @@ export function ServiceReportDetail() {
                 <span className="faint"> on {formatDate(row.customerSignedAt)}</span>
               )}
             </dd>
-            {row.visit && (
-              <>
-                <dt>Against visit</dt>
-                <dd className="mono">{row.visit.number}</dd>
-              </>
-            )}
           </dl>
         )}
       </div>
-    </div>
-  );
-}
 
-// ── The PM schedule across every contract ────────────────────────────────────
-
-interface Visit {
-  id: string;
-  number: string;
-  kind: string;
-  status: string;
-  sequence: number | null;
-  dueDate: string;
-  performedAt: string | null;
-  daysUntilDue: number;
-  notes: string | null;
-  contract: { id: string; number: string; job: { id: string; number: string; name: string } } | null;
-  customer: { id: string; name: string };
-  site: { id: string; name: string; city: string | null } | null;
-  asset: { id: string; code: string; name: string; serialNo: string | null } | null;
-  assignedTo: { id: string; name: string } | null;
-  report: { id: string; number: string; status: string } | null;
-}
-
-export function PmSchedule() {
-  const { can } = useAuth();
-  const navigate = useNavigate();
-  const [assigning, setAssigning] = useState<Visit | null>(null);
-  const [reload, setReload] = useState(0);
-
-  const columns: Column<Visit>[] = [
-    {
-      key: 'number',
-      label: 'Visit',
-      sortKey: 'number',
-      width: '140px',
-      render: (r) => (
-        <div>
-          <span className="mono">{r.number}</span>
-          {r.sequence && <div className="faint">visit {r.sequence}</div>}
-        </div>
-      ),
-    },
-    {
-      key: 'dueDate',
-      label: 'Due',
-      sortKey: 'dueDate',
-      render: (r) => (
-        <div>
-          <div>{formatDate(r.dueDate)}</div>
-          {r.status === 'SCHEDULED' && (
-            <div className={`faint ${r.daysUntilDue < 0 ? 'warn' : ''}`}>
-              {r.daysUntilDue < 0 ? `${-r.daysUntilDue} days overdue` : `in ${r.daysUntilDue} days`}
-            </div>
-          )}
-        </div>
-      ),
-    },
-    {
-      key: 'customer',
-      label: 'Where',
-      render: (r) => (
-        <div>
-          <div>{r.customer.name}</div>
-          <div className="faint">{r.asset?.name ?? r.site?.name ?? '—'}</div>
-        </div>
-      ),
-    },
-    {
-      key: 'kind',
-      label: 'Kind',
-      render: (r) => <span className="badge">{KIND_LABEL[r.kind] ?? r.kind}</span>,
-      optional: true,
-    },
-    {
-      key: 'contract',
-      label: 'Contract',
-      render: (r) =>
-        r.contract ? (
-          <Link to={`/g-ops/service-contracts/${r.contract.id}`} className="mono">
-            {r.contract.number}
-          </Link>
-        ) : (
-          <span className="faint">unscheduled call</span>
-        ),
-    },
-    {
-      key: 'assignedTo',
-      label: 'Engineer',
-      render: (r) =>
-        r.assignedTo ? (
-          r.assignedTo.name
-        ) : (
-          <span className="badge warn">unassigned</span>
-        ),
-    },
-    {
-      key: 'report',
-      label: 'Report',
-      render: (r) =>
-        r.report ? (
-          <Link to={`/g-ops/service-reports/${r.report.id}`} className="mono">
-            {r.report.number}
-          </Link>
-        ) : (
-          <span className="faint">—</span>
-        ),
-    },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (r) => (
-        <span
-          className={`badge ${r.status === 'COMPLETED' ? 'ok' : r.status === 'MISSED' ? 'danger' : 'warn'}`}
-        >
-          {r.status.toLowerCase()}
-        </span>
-      ),
-    },
-  ];
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h1>PM Schedule</h1>
-          <p>
-            Every visit a contract implies, plus the call-outs nobody scheduled. A visit is only
-            complete once its report has been approved — marking it done when the engineer left
-            site would count a visit nobody has checked.
-          </p>
-        </div>
-      </div>
-
-      <DataList<Visit>
-        listKey="service-visits"
-        endpoint="/service-visits"
-        columns={columns}
-        rowKey={(r) => r.id}
-        scoped
-        reloadToken={reload}
-        searchPlaceholder="Search visit number, customer, machine…"
-        emptyTitle="Nothing scheduled"
-        emptyHint="Activating a service contract writes its schedule."
-        onRowClick={can('gops.pm_reports.create') ? (r) => setAssigning(r) : undefined}
-        filters={[
-          {
-            key: 'status',
-            label: 'Status',
-            options: [
-              { value: 'SCHEDULED', label: 'Scheduled' },
-              { value: 'COMPLETED', label: 'Completed' },
-              { value: 'MISSED', label: 'Missed' },
-              { value: 'CANCELLED', label: 'Cancelled' },
-            ],
-          },
-          { key: 'due', label: 'Due', options: [{ value: 'true', label: 'Due or overdue' }] },
-          { key: 'kind', label: 'Kind', options: KINDS },
-        ]}
+      <Attachments
+        entityType="service_report"
+        entityId={row.id}
+        title="Photos and documents"
+        hint="The signed service slip, readings off the panel, anything the report refers to"
+        canEdit={editable}
       />
-
-      {assigning && (
-        <AssignVisitModal
-          visit={assigning}
-          onClose={() => setAssigning(null)}
-          onSaved={() => {
-            setAssigning(null);
-            setReload((r) => r + 1);
-          }}
-          onReport={(visitId) => navigate(`/g-ops/service-reports?visit=${visitId}`)}
-        />
-      )}
     </div>
-  );
-}
-
-function AssignVisitModal({
-  visit,
-  onClose,
-  onSaved,
-}: {
-  visit: Visit;
-  onClose: () => void;
-  onSaved: () => void;
-  onReport: (visitId: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [users, setUsers] = useState<{ id: string; name: string }[]>([]);
-  const [form, setForm] = useState({
-    assignedToId: visit.assignedTo?.id ?? '',
-    dueDate: visit.dueDate.slice(0, 10),
-    notes: visit.notes ?? '',
-  });
-
-  useEffect(() => {
-    api
-      .get<{ rows: { id: string; name: string }[] }>(`/users${qs({ pageSize: 200 })}`)
-      .then((d) => setUsers(d.rows))
-      .catch(() => {});
-  }, []);
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.patch(`/service-visits/${visit.id}`, {
-        assignedToId: form.assignedToId || null,
-        dueDate: form.dueDate,
-        notes: form.notes || null,
-      });
-      toast('ok', 'Visit updated');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const done = visit.status === 'COMPLETED';
-
-  return (
-    <Modal
-      title={`${visit.number} — ${visit.customer.name}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Close
-          </button>
-          {!done && (
-            <button className="btn btn-primary" onClick={save} disabled={busy}>
-              {busy ? 'Saving…' : 'Save'}
-            </button>
-          )}
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-
-      {done ? (
-        <div className="alert ok">
-          Attended on {formatDate(visit.performedAt)}
-          {visit.report && (
-            <>
-              {' '}
-              and reported as{' '}
-              <Link to={`/g-ops/service-reports/${visit.report.id}`} className="mono">
-                {visit.report.number}
-              </Link>
-            </>
-          )}
-          . This visit is a record of what happened and does not change.
-        </div>
-      ) : (
-        <>
-          <div className="grid grid-2">
-            <Field label="Due">
-              <input
-                type="date"
-                value={form.dueDate}
-                onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
-              />
-            </Field>
-            <Field label="Engineer">
-              <select
-                value={form.assignedToId}
-                onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}
-              >
-                <option value="">— unassigned —</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-          <Field label="Notes for the engineer">
-            <textarea
-              rows={2}
-              value={form.notes}
-              onChange={(e) => setForm({ ...form, notes: e.target.value })}
-            />
-          </Field>
-          <p className="faint" style={{ marginBottom: 0 }}>
-            Write the report from Service Reports, choosing this visit — the visit closes when the
-            report is approved.
-          </p>
-        </>
-      )}
-    </Modal>
   );
 }
 
@@ -1138,45 +1042,25 @@ export function Renewals() {
         </Field>
       </div>
 
-      <div className="grid grid-3" style={{ marginBottom: 18 }}>
-        <div className="card">
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            CONTRACTS TO RENEW
-          </div>
-          <div style={{ fontSize: 24, marginTop: 6, fontWeight: 600 }}>{data.counts.contracts}</div>
-          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-            {formatMoney(data.contractValue)} of cover
-          </div>
-        </div>
-        <div className="card">
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            WARRANTIES LAPSING
-          </div>
-          <div style={{ fontSize: 24, marginTop: 6, fontWeight: 600, color: 'var(--warn)' }}>
-            {data.counts.warranties}
-          </div>
-          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-            machines with no contract behind them
-          </div>
-        </div>
-        <div className="card">
-          <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-            ALREADY LAPSED
-          </div>
-          <div
-            style={{
-              fontSize: 24,
-              marginTop: 6,
-              fontWeight: 600,
-              color: data.counts.alreadyLapsed > 0 ? 'var(--danger)' : undefined,
-            }}
-          >
-            {data.counts.alreadyLapsed}
-          </div>
-          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-            the calls that are late
-          </div>
-        </div>
+      <div className="kpi-grid svc-kpis">
+        <Stat
+          label="Contracts to renew"
+          value={data.counts.contracts}
+          hint={`${formatMoney(data.contractValue)} of cover`}
+          figure
+        />
+        <Stat
+          label="Warranties lapsing"
+          value={data.counts.warranties}
+          hint="machines with no contract behind them"
+          accent={data.counts.warranties > 0 ? 'warn' : undefined}
+        />
+        <Stat
+          label="Already lapsed"
+          value={data.counts.alreadyLapsed}
+          hint="the calls that are late"
+          accent={data.counts.alreadyLapsed > 0 ? 'danger' : undefined}
+        />
       </div>
 
       {data.rows.length === 0 ? (
@@ -1221,15 +1105,11 @@ export function Renewals() {
                       {r.value !== null ? formatMoney(r.value) : <span className="faint">—</span>}
                     </td>
                     <td>
-                      <span
-                        className={`badge ${
-                          r.daysRemaining < 0 ? 'danger' : r.daysRemaining <= 30 ? 'warn' : ''
-                        }`}
-                      >
-                        {r.daysRemaining < 0
-                          ? `${-r.daysRemaining} days ago`
-                          : `${r.daysRemaining} days`}
-                      </span>
+                      <StatusBadge
+                        status={r.daysRemaining < 0 ? 'LAPSED' : r.daysRemaining <= 30 ? 'SOON' : 'LATER'}
+                        extra={{ LAPSED: 'danger', SOON: 'warn', LATER: '' }}
+                        label={r.daysRemaining < 0 ? `${-r.daysRemaining} days ago` : `${r.daysRemaining} days`}
+                      />
                       <div className="section-label">
                         {r.kind === 'CONTRACT' ? 'contract' : 'warranty'}
                       </div>

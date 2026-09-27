@@ -16,6 +16,8 @@ import {
 } from '../../components/ui';
 import { ProgressBar } from './Projects';
 import { openPdf } from '../../lib/api';
+import { Stat } from '../../components/charts';
+import { Attachments } from '../../components/Attachments';
 
 // ════════════════════════════════════════════════════════════════════
 //  LIST
@@ -62,7 +64,7 @@ export function ProgressReports() {
   const [tab, setTab] = useState<'reports' | 'billings'>('reports');
 
   const billingColumns: Column<BillingRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (b) => <span className="mono">{b.number}</span> },
+    { key: 'number', label: 'Number', sortKey: 'number', render: (b) => <span className="mono">{b.number}</span> },
     {
       key: 'job',
       label: 'Project',
@@ -107,7 +109,7 @@ export function ProgressReports() {
   ];
 
   const columns: Column<ReportRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'number', label: 'Number', sortKey: 'number', render: (r) => <span className="mono">{r.number}</span> },
     {
       key: 'job',
       label: 'Project',
@@ -125,7 +127,7 @@ export function ProgressReports() {
       sortKey: 'periodTo',
       render: (r) => `${formatDate(r.periodFrom)} — ${formatDate(r.periodTo)}`,
     },
-    { key: 'progress', label: 'To date', width: '130px', render: (r) => <ProgressBar pct={r.toDatePct} /> },
+    { key: 'progress', label: 'To date', render: (r) => <ProgressBar pct={r.toDatePct} /> },
     {
       key: 'earned',
       label: 'Earned value',
@@ -146,9 +148,7 @@ export function ProgressReports() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => (
-        <span className={`badge ${r.status === 'APPROVED' ? 'ok' : 'warn'}`}>{r.status.toLowerCase()}</span>
-      ),
+      render: (r) => <StatusBadge status={r.status} />,
     },
   ];
 
@@ -378,10 +378,7 @@ export function ProgressReportDetail() {
           </h1>
           <p>
             {report.job.name} · {report.job.customer.name} · {formatDate(report.periodFrom)} —{' '}
-            {formatDate(report.periodTo)}
-            <span className={`badge ${report.status === 'APPROVED' ? 'ok' : 'warn'}`} style={{ marginLeft: 8 }}>
-              {report.status.toLowerCase()}
-            </span>
+            {formatDate(report.periodTo)} <StatusBadge status={report.status} />
           </p>
         </div>
         <div className="row">
@@ -425,16 +422,22 @@ export function ProgressReportDetail() {
         </div>
       )}
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
-        <Stat label="Contract value" value={formatMoney(report.totals.contractValue)} />
-        <Stat label="This period" value={formatMoney(report.totals.thisPeriodValue)} accent />
-        <Stat label="Earned to date" value={formatMoney(report.totals.earnedValue)} />
+      <div className="kpi-grid">
+        <Stat label="Contract value" value={formatMoney(report.totals.contractValue)} figure />
+        <Stat
+          label="This period"
+          value={formatMoney(report.totals.thisPeriodValue)}
+          figure
+          accent="neon"
+          hint="value reported this period"
+        />
+        <Stat label="Earned to date" value={formatMoney(report.totals.earnedValue)} figure />
         <Stat label="Complete" value={<ProgressBar pct={report.totals.toDatePct} />} />
       </div>
 
       <div className="card">
         <h3 className="card-title">Accomplishment against the schedule of values</h3>
-        <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+        <p className="muted del-lede">
           {report.canEdit
             ? 'Enter either the percentage done this period or the cumulative to-date figure — the other follows.'
             : 'Percentages as reported for this period.'}
@@ -447,12 +450,8 @@ export function ProgressReportDetail() {
                 <th>Scope</th>
                 <th className="right">Value</th>
                 <th className="right">Previous</th>
-                <th className="right" style={{ width: 110 }}>
-                  This period
-                </th>
-                <th className="right" style={{ width: 110 }}>
-                  To date
-                </th>
+                <th className="right del-col-pct">This period</th>
+                <th className="right del-col-pct">To date</th>
                 <th className="right">Earned to date</th>
               </tr>
             </thead>
@@ -504,35 +503,65 @@ export function ProgressReportDetail() {
       </div>
 
       {(report.accomplishment || report.manpower || report.issues || report.nextPeriodPlan) && (
-        <div className="grid grid-2" style={{ marginTop: 16 }}>
+        <div className="grid grid-2 del-gap-top">
           {report.accomplishment && (
             <div className="card">
               <h3 className="card-title">Work accomplished</h3>
-              <div style={{ whiteSpace: 'pre-wrap' }}>{report.accomplishment}</div>
+              <div className="del-prose">{report.accomplishment}</div>
             </div>
           )}
           {(report.manpower || report.equipment) && (
             <div className="card">
               <h3 className="card-title">Resources</h3>
-              {report.manpower && <Row label="Manpower" value={report.manpower} />}
-              {report.equipment && <Row label="Equipment" value={report.equipment} />}
-              {report.weather && <Row label="Weather / delays" value={report.weather} />}
+              <dl className="kv">
+                {report.manpower && (
+                  <>
+                    <dt>Manpower</dt>
+                    <dd>{report.manpower}</dd>
+                  </>
+                )}
+                {report.equipment && (
+                  <>
+                    <dt>Equipment</dt>
+                    <dd>{report.equipment}</dd>
+                  </>
+                )}
+                {report.weather && (
+                  <>
+                    <dt>Weather / delays</dt>
+                    <dd>{report.weather}</dd>
+                  </>
+                )}
+              </dl>
             </div>
           )}
           {report.issues && (
             <div className="card">
               <h3 className="card-title">Issues</h3>
-              <div style={{ whiteSpace: 'pre-wrap' }}>{report.issues}</div>
+              <div className="del-prose">{report.issues}</div>
             </div>
           )}
           {report.nextPeriodPlan && (
             <div className="card">
               <h3 className="card-title">Next period</h3>
-              <div style={{ whiteSpace: 'pre-wrap' }}>{report.nextPeriodPlan}</div>
+              <div className="del-prose">{report.nextPeriodPlan}</div>
             </div>
           )}
         </div>
       )}
+
+      {/* The site photos are the evidence the percentages rest on (model §2.10).
+          The PDF already prints them; an approved report's evidence is frozen
+          with it. */}
+      <div className="del-gap-top">
+        <Attachments
+          entityType="progress_report"
+          entityId={report.id}
+          title="Photos"
+          hint="Site photos for this period — they print on the report."
+          canEdit={report.canEdit && report.status !== 'APPROVED'}
+        />
+      </div>
 
       {narrative && (
         <NarrativeModal
@@ -561,37 +590,13 @@ function PctInput({ value, onCommit }: { value: number; onCommit: (v: number) =>
 
   return (
     <input
-      className="mono"
-      style={{ textAlign: 'right', padding: '5px 7px' }}
+      className="mono del-pct-input"
+      aria-label="Percentage"
       value={text}
       onChange={(e) => setText(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
     />
-  );
-}
-
-function Stat({ label, value, accent }: { label: string; value: React.ReactNode; accent?: boolean }) {
-  return (
-    <div className="card">
-      <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-        {label.toUpperCase()}
-      </div>
-      <div style={{ fontSize: 18, marginTop: 6, fontWeight: 600, color: accent ? 'var(--neon)' : 'var(--text)' }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--line-soft)' }}>
-      <span className="faint" style={{ width: 140, flexShrink: 0, fontSize: 12 }}>
-        {label}
-      </span>
-      <span>{value || <span className="faint">—</span>}</span>
-    </div>
   );
 }
 
@@ -719,6 +724,8 @@ interface BillingDetail {
     thisPeriodAmount: number;
     scopeItem: { id: string; name: string };
   }[];
+  /** The invoice raised from this billing — at most one, by a unique key. */
+  invoice: { id: string; number: string; status: string } | null;
 }
 
 export function BillingDetailPage() {
@@ -774,13 +781,8 @@ export function BillingDetailPage() {
         <div>
           <h1>Progress billing #{billing.billingNo}</h1>
           <p>
-            {billing.job.name} · {billing.job.customer.name} · {formatDate(billing.billingDate)}
-            <span
-              className={`badge ${billing.status === 'APPROVED' || billing.status === 'INVOICED' ? 'ok' : 'warn'}`}
-              style={{ marginLeft: 8 }}
-            >
-              {billing.status.toLowerCase()}
-            </span>
+            {billing.job.name} · {billing.job.customer.name} · {formatDate(billing.billingDate)}{' '}
+            <StatusBadge status={billing.status} />
           </p>
         </div>
         <div className="row">
@@ -795,16 +797,39 @@ export function BillingDetailPage() {
               Approve
             </button>
           )}
+          {/* The hand-off to Finance. The invoice copies this billing's figures,
+              so it is raised from here rather than keyed again in A/R. */}
+          {!billing.invoice && billing.status === 'APPROVED' && can('gfin.ar.create') && (
+            <Link className="btn btn-primary" to={`/g-fin/ar?raise=${billing.id}`}>
+              Raise invoice
+            </Link>
+          )}
         </div>
       </div>
 
       <ErrorBox error={error} />
 
-      <div className="grid grid-4" style={{ marginBottom: 18 }}>
-        <Stat label="Gross this billing" value={formatMoney(billing.grossAmount)} />
-        <Stat label={`VAT ${(billing.vatRate * 100).toFixed(0)}%`} value={formatMoney(billing.vatAmount)} />
-        <Stat label="Invoice total" value={formatMoney(billing.invoiceTotal)} accent />
-        <Stat label="Net collectible" value={formatMoney(billing.netCollectible)} />
+      {billing.invoice && (
+        <div className="alert ok">
+          Invoiced as{' '}
+          <Link className="mono" to={`/g-fin/ar/${billing.invoice.id}`}>
+            {billing.invoice.number}
+          </Link>{' '}
+          <StatusBadge status={billing.invoice.status} />
+        </div>
+      )}
+      {!billing.invoice && billing.status === 'APPROVED' && (
+        <div className="alert info">
+          Approved and not yet invoiced — this is work you are owed and have not asked for.
+          {!can('gfin.ar.create') && ' Finance raises the invoice from this billing.'}
+        </div>
+      )}
+
+      <div className="kpi-grid">
+        <Stat label="Gross this billing" value={formatMoney(billing.grossAmount)} figure />
+        <Stat label={`VAT ${(billing.vatRate * 100).toFixed(0)}%`} value={formatMoney(billing.vatAmount)} figure />
+        <Stat label="Invoice total" value={formatMoney(billing.invoiceTotal)} figure accent="neon" hint="what the invoice says" />
+        <Stat label="Net collectible" value={formatMoney(billing.netCollectible)} figure hint="what arrives as cash" />
       </div>
 
       {/* The thing people get wrong about EWT, said plainly. */}
@@ -853,7 +878,7 @@ export function BillingDetailPage() {
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 16, maxWidth: 520 }}>
+      <div className="card del-gap-top del-summary">
         <h3 className="card-title">Summary</h3>
         <table className="data">
           <tbody>
@@ -874,7 +899,7 @@ export function BillingDetailPage() {
           </tbody>
         </table>
         {billing.downpaymentRecouped === null && billing.retentionWithheld === null && (
-          <p className="faint" style={{ fontSize: 12, marginBottom: 0 }}>
+          <p className="faint del-note">
             Downpayment recoupment and retention are switched off. The lines appear here
             automatically if either is turned on for a project.
           </p>
@@ -913,7 +938,7 @@ export function BudgetRequests() {
   const navigate = useNavigate();
 
   const columns: Column<BudgetRequestRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (r) => <span className="mono">{r.number}</span> },
+    { key: 'number', label: 'Number', sortKey: 'number', render: (r) => <span className="mono">{r.number}</span> },
     {
       key: 'job',
       label: 'Project',
@@ -938,15 +963,7 @@ export function BudgetRequests() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => (
-        <span
-          className={`badge ${
-            r.status === 'APPROVED' ? 'ok' : r.status === 'REJECTED' ? 'danger' : 'warn'
-          }`}
-        >
-          {r.status.toLowerCase().replace(/_/g, ' ')}
-        </span>
-      ),
+      render: (r) => <StatusBadge status={r.status} />,
     },
   ];
 
@@ -970,7 +987,8 @@ export function BudgetRequests() {
         rowKey={(r) => r.id}
         scoped
         searchPlaceholder="Search number, reason, project…"
-        onRowClick={(r) => navigate(`/g-ops/projects/${r.job.id}`)}
+        // A request lives on its project's Budget tab, with its approval chain.
+        onRowClick={(r) => navigate(`/g-ops/projects/${r.job.id}?tab=budget`)}
         emptyTitle="No budget requests"
         emptyHint="Raise one from a project's Budget tab when the budget needs to change."
         filters={[
@@ -1019,7 +1037,7 @@ export function BudgetMonitoring() {
       </div>
     ) },
     { key: 'customer', label: 'Customer', render: (j) => j.customer.name },
-    { key: 'progress', label: 'Progress', width: '120px', render: (j) => <ProgressBar pct={j.progressPct} /> },
+    { key: 'progress', label: 'Progress', render: (j) => <ProgressBar pct={j.progressPct} /> },
     {
       key: 'contractValue',
       label: 'Contract',
@@ -1036,9 +1054,7 @@ export function BudgetMonitoring() {
       render: (j) => {
         const unbilled = (j.contractValue * j.progressPct) / 100 - j.billed;
         return (
-          <span className="mono" style={{ color: unbilled > 0 ? 'var(--warn)' : undefined }}>
-            {formatMoney(unbilled)}
-          </span>
+          <span className={`mono${unbilled > 0 ? ' del-warn' : ''}`}>{formatMoney(unbilled)}</span>
         );
       },
     },
@@ -1098,11 +1114,11 @@ export function BudgetMonitoring() {
 
 /** Register of approved plans across every project. */
 export function PlansRegister() {
-  const navigate = useNavigate();
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
 
   useEffect(() => {
-    api.get<typeof jobs>('/jobs/lookup').then(setJobs).catch(() => {});
+    // Closed jobs too: an as-built drawing is looked up long after turnover.
+    api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
   }, []);
 
   return (
@@ -1124,17 +1140,10 @@ export function PlansRegister() {
       ) : (
         <div className="grid grid-3">
           {jobs.map((j) => (
-            <div
-              key={j.id}
-              className="card"
-              style={{ cursor: 'pointer' }}
-              onClick={() => navigate(`/g-ops/projects/${j.id}`)}
-            >
-              <div className="mono faint" style={{ fontSize: 12 }}>
-                {j.number}
-              </div>
+            <Link key={j.id} className="card card-button" to={`/g-ops/projects/${j.id}?tab=plans`}>
+              <div className="mono faint del-small">{j.number}</div>
               <strong>{j.name}</strong>
-            </div>
+            </Link>
           ))}
         </div>
       )}

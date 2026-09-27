@@ -54,7 +54,7 @@ previous implementation traces back to its absence.
 | Quotations with preserved revisions | `/g-ops/quotations` |
 | Quotation approval through the shared engine | Submit for approval |
 | Quotation and costing PDFs | Print on either screen |
-| Sales calendar, a week per screen | `/g-ops/calendar` |
+| Sales calendar — a week per screen, or the month, with the view and position in the URL | `/g-ops/calendar` |
 | Pipeline with weighted value | `/g-ops/pipeline` |
 
 **Phase 4 — Delivery.** Job → budget → progress → billing.

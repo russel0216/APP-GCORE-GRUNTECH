@@ -1,1 +1,213 @@
 /* Masters: customers, industries, partners, suppliers, items — package P2. Tokens only. */
+
+/* ── Record pages: head actions, card heads, detail lists ───────────────── */
+
+/* The header of a card that carries its own action — "+ Add contact". */
+.m-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-3);
+}
+
+.m-card-head .card-title {
+  margin: 0;
+}
+
+/* A label/value list. Replaces the inline-styled Detail/Row helpers: one
+   hairline per row so a long record still reads as a form, not a paragraph. */
+.m-details {
+  margin: 0;
+}
+
+.m-details > div {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-1) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.m-details > div:last-child {
+  border-bottom: 0;
+}
+
+.m-details dt {
+  flex: 0 0 9.5rem;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.m-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A pill that sits after a name in a cell or a heading. */
+.m-inline {
+  margin-left: var(--s-2);
+}
+
+.m-span-all {
+  grid-column: 1 / -1;
+}
+
+.m-prewrap {
+  white-space: pre-wrap;
+}
+
+/* The small print under a reference card — "the five standard …". */
+.m-footnote {
+  margin: var(--s-3) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--faint);
+}
+
+/* Action column in a reference table: wide enough for "Modify", no wider. */
+.m-col-action {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.m-col-code {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* ── Industry select: a native <select> with its hint under it ───────────── */
+
+.m-industry-code {
+  font-family: var(--mono);
+  margin-right: var(--s-1);
+}
+
+/* ── Tabs on a record page (partner detail) — the scope-switch buttons ──── */
+
+.m-tabs {
+  margin: var(--s-4) 0 var(--s-3);
+  flex-wrap: wrap;
+}
+
+.m-tabs button {
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+
+.m-tab-count {
+  margin-left: var(--s-1);
+  color: var(--faint);
+}
+
+.m-tabs button.active .m-tab-count {
+  color: inherit;
+}
+
+/* ── Partner resource cards ─────────────────────────────────────────────── */
+
+.m-resources {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: var(--s-3);
+}
+
+.m-resource {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+}
+
+.m-resource.inactive {
+  opacity: 0.7;
+}
+
+.m-resource-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.m-resource-title {
+  margin: 0;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.m-resource-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-md);
+}
+
+.m-resource-meta {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.m-resource-actions {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: var(--s-2);
+}
+
+.m-section-head {
+  margin: var(--s-5) 0 var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ── Partner list and detail head ───────────────────────────────────────── */
+
+.m-subname {
+  display: block;
+  color: var(--faint);
+  font-size: var(--fs-sm);
+}
+
+.m-kpis {
+  margin-bottom: var(--s-2);
+}
+
+/* ── Customer 360 header shortcuts ──────────────────────────────────────── */
+
+.m-shortcuts {
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .m-details > div {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .m-details dt {
+    flex-basis: auto;
+  }
+
+  .m-shortcuts {
+    justify-content: flex-start;
+  }
+}
+
+.m-industries {
+  margin-top: var(--s-3);
+}
+
+.m-supplier-history {
+  margin-top: var(--s-3);
+}
+
+.m-stock-grid {
+  margin-top: var(--s-3);
+}

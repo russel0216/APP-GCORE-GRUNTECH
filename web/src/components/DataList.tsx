@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, qs, type ListResult } from '../lib/api';
 import { Empty, ErrorBox, Loading } from './ui';
 
@@ -11,7 +12,18 @@ import { Empty, ErrorBox, Loading } from './ui';
  * Columns · Export · Refresh, plus sorting, pagination, saved filters and the
  * Mine/All scope switch. Build it once, and the twentieth list screen costs a
  * column definition rather than a week.
+ *
+ * The list's state lives in the URL (rule 15). `?q=`, `?scope=`, `?page=` and
+ * `?<filterKey>=` for every key the screen DECLARES in `filters` are read on
+ * mount and written back on every change, with `replace` so the back button
+ * still leaves the screen, and every key the list does not own (`new`,
+ * `jobId`, `visit`, `payment`…) is preserved untouched. That is what makes a
+ * dashboard tile's `/g-fin/ar?overdue=true` true rather than a link to an
+ * unfiltered list — twenty of those were dead before this. URL wins over
+ * `initialFilters` when both name a key; `pageSize` stays out of the URL.
  */
+
+const OWN_KEYS = ['q', 'scope', 'page'] as const;
 
 export interface Column<T> {
   key: string;
@@ -53,7 +65,33 @@ interface Props<T> {
   initialFilters?: Record<string, string>;
   /** Bump to force a reload from outside (after a create, say). */
   reloadToken?: number;
+  /**
+   * Whether search, scope, page and filters are mirrored to the URL. On by
+   * default; a screen that mounts two lists at once turns it off on one of
+   * them so they do not fight over `?page=`.
+   */
+  urlState?: boolean;
   rowKey: (row: T) => string;
+}
+
+/** The URL's view of this list: only the keys it owns, only when present. */
+function readUrl(
+  params: URLSearchParams,
+  filterKeys: string[],
+): { q: string | null; scope: 'mine' | 'all' | null; page: number | null; filters: Record<string, string> } {
+  const filters: Record<string, string> = {};
+  for (const key of filterKeys) {
+    const v = params.get(key);
+    if (v) filters[key] = v;
+  }
+  const scopeRaw = params.get('scope');
+  const pageRaw = Number(params.get('page'));
+  return {
+    q: params.get('q'),
+    scope: scopeRaw === 'mine' || scopeRaw === 'all' ? scopeRaw : null,
+    page: Number.isInteger(pageRaw) && pageRaw > 0 ? pageRaw : null,
+    filters,
+  };
 }
 
 export function DataList<T>({
@@ -70,20 +108,32 @@ export function DataList<T>({
   emptyAction,
   initialFilters,
   reloadToken = 0,
+  urlState = true,
   rowKey,
 }: Props<T>) {
   const [data, setData] = useState<ListResult<T> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
 
-  const [search, setSearch] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [page, setPage] = useState(1);
+  const [params, setParams] = useSearchParams();
+  const filterKeys = filters.map((f) => f.key);
+  const filterKeysKey = filterKeys.join('|');
+  // Read once for the initial state — the URL is the linked window, so the
+  // first fetch is already the filtered one rather than a flash of everything.
+  const initial = useRef(readUrl(params, filterKeys)).current;
+  const fromUrl = urlState ? initial : { q: null, scope: null, page: null, filters: {} };
+
+  const [search, setSearch] = useState(fromUrl.q ?? '');
+  const [debounced, setDebounced] = useState(fromUrl.q ?? '');
+  const [page, setPage] = useState(fromUrl.page ?? 1);
   const [pageSize, setPageSize] = useState(25);
   const [sort, setSort] = useState<string | null>(null);
   const [dir, setDir] = useState<'asc' | 'desc'>('desc');
-  const [scope, setScope] = useState<'mine' | 'all'>('all');
-  const [active, setActive] = useState<Record<string, string>>(initialFilters ?? {});
+  const [scope, setScope] = useState<'mine' | 'all'>(fromUrl.scope ?? 'all');
+  const [active, setActive] = useState<Record<string, string>>({
+    ...(initialFilters ?? {}),
+    ...fromUrl.filters,
+  });
 
   // A preset that changes because the route changed — Preventive Maintenance to
   // Service Inspections, say — is a different screen, not a filter the user set.
@@ -92,10 +142,60 @@ export function DataList<T>({
   useEffect(() => {
     if (presetKey === firstPreset.current) return;
     firstPreset.current = presetKey;
-    setActive(initialFilters ?? {});
+    setActive({ ...(initialFilters ?? {}), ...(urlState ? readUrl(params, filterKeys).filters : {}) });
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetKey]);
+
+  /*
+    Two-way with the URL. `lastWritten` is the query string this list last put
+    there: when the URL changes to something else, the change came from
+    outside — a tile on the same page linking to `?status=LATE` — and the list
+    follows it. When it matches, it is our own write echoing back, and nothing
+    happens. That one ref is what keeps the two directions from chasing each
+    other.
+  */
+  const lastWritten = useRef<string | null>(null);
+  useEffect(() => {
+    if (!urlState) return;
+    const current = params.toString();
+    if (lastWritten.current === null) {
+      // First render: the state was built from these params already.
+      lastWritten.current = current;
+      return;
+    }
+    if (current === lastWritten.current) return;
+    lastWritten.current = current;
+    const next = readUrl(params, filterKeys);
+    setSearch(next.q ?? '');
+    setDebounced(next.q ?? '');
+    setPage(next.page ?? 1);
+    setScope(next.scope ?? 'all');
+    setActive({ ...(initialFilters ?? {}), ...next.filters });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, urlState, filterKeysKey]);
+
+  useEffect(() => {
+    if (!urlState) return;
+    const next = new URLSearchParams(params);
+    for (const key of OWN_KEYS) next.delete(key);
+    for (const key of filterKeys) next.delete(key);
+    if (debounced) next.set('q', debounced);
+    if (scope !== 'all') next.set('scope', scope);
+    if (page > 1) next.set('page', String(page));
+    // A route preset (`initialFilters`) is the screen's own default, not a
+    // choice the user made — it stays out of the URL so the menu path reads
+    // the way the registry declares it. Only a departure from it is written.
+    for (const key of filterKeys) {
+      if (active[key] && active[key] !== initialFilters?.[key]) next.set(key, active[key]);
+    }
+    const encoded = next.toString();
+    if (encoded === params.toString()) return;
+    lastWritten.current = encoded;
+    setParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debounced, scope, page, active, urlState, filterKeysKey]);
+
   const [showColumns, setShowColumns] = useState(false);
 
   const [hidden, setHidden] = useState<Set<string>>(() => {
@@ -119,11 +219,15 @@ export function DataList<T>({
   }, [hidden, listKey]);
 
   useEffect(() => {
+    // Nothing typed since the last settle — on mount, say, when both came
+    // from the URL — so the page the link named must not be reset to 1.
+    if (search === debounced) return;
     const t = setTimeout(() => {
       setDebounced(search);
       setPage(1);
     }, 280);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
   const query = useMemo(
@@ -284,6 +388,7 @@ export function DataList<T>({
             onClick={() => {
               setActive({});
               setSearch('');
+              setDebounced('');
               setPage(1);
             }}
           >

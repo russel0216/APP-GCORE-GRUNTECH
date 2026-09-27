@@ -21,7 +21,7 @@ const PAD = { top: 16, right: 16, bottom: 34, left: 44 };
 export function SCurve({ points }: { points: CurvePoint[] }) {
   if (points.length < 2) {
     return (
-      <div className="muted" style={{ padding: 30, textAlign: 'center' }}>
+      <div className="chart-empty del-curve-empty">
         The curve appears once the schedule of values has planned dates and the first progress
         report is approved.
       </div>
@@ -56,7 +56,7 @@ export function SCurve({ points }: { points: CurvePoint[] }) {
 
   return (
     <div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img" aria-label="S-curve">
+      <svg viewBox={`0 0 ${W} ${H}`} className="del-curve" role="img" aria-label="S-curve">
         {/* Horizontal gridlines at 25% intervals */}
         {[0, 25, 50, 75, 100].map((pct) => (
           <g key={pct}>
@@ -99,7 +99,7 @@ export function SCurve({ points }: { points: CurvePoint[] }) {
         )}
       </svg>
 
-      <div className="row" style={{ gap: 18, justifyContent: 'center', marginTop: 4 }}>
+      <div className="row del-curve-legend">
         <Legend color="var(--muted)" dashed label={`Planned ${last.planned.toFixed(1)}%`} />
         <Legend color="var(--neon)" label={`Actual ${lastActual?.actual?.toFixed(1) ?? '0.0'}%`} />
         <Legend color="var(--magenta)" label={`Billed ${lastBilled?.billed?.toFixed(1) ?? '0.0'}%`} />
@@ -110,8 +110,8 @@ export function SCurve({ points }: { points: CurvePoint[] }) {
 
 function Legend({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
   return (
-    <span className="row" style={{ gap: 6, fontSize: 12 }}>
-      <svg width="22" height="8">
+    <span className="row del-curve-key">
+      <svg width="22" height="8" aria-hidden="true">
         <line
           x1="0"
           y1="4"

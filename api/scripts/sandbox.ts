@@ -189,16 +189,27 @@ async function create() {
 
   // ── Customers and sites ────────────────────────────────────────────────
   const customers = [
-    { code: 'SBX-C001', name: 'St. Luke’s Medical Center — Quezon City', terms: '30 days', site: 'Main Hospital', city: 'Quezon City' },
-    { code: 'SBX-C002', name: 'Davao Doctors Hospital', terms: '45 days', site: 'Annex Building', city: 'Davao City' },
-    { code: 'SBX-C003', name: 'Cebu Industrial Gases Inc.', terms: '15 days', site: 'Mandaue Plant', city: 'Mandaue' },
+    { code: 'SBX-C001', name: 'St. Luke’s Medical Center — Quezon City', terms: '30 days', site: 'Main Hospital', city: 'Quezon City', industry: 'HI' },
+    { code: 'SBX-C002', name: 'Davao Doctors Hospital', terms: '45 days', site: 'Annex Building', city: 'Davao City', industry: 'HI' },
+    { code: 'SBX-C003', name: 'Cebu Industrial Gases Inc.', terms: '15 days', site: 'Mandaue Plant', city: 'Mandaue', industry: 'GI' },
   ];
+  // Every customer is filed under an industry (the seed creates the five);
+  // a sandbox customer without one would only ever show as "Unclassified".
+  const industryIds = new Map(
+    (await prisma.industry.findMany({ select: { id: true, code: true } })).map((i) => [i.code, i.id]),
+  );
   for (const c of customers) {
+    const industryId = industryIds.get(c.industry) ?? null;
     const customer = await prisma.customer.upsert({
       where: { code: c.code },
-      create: { code: c.code, name: c.name, paymentTerms: c.terms, creditLimit: D(2_000_000) },
+      create: { code: c.code, name: c.name, paymentTerms: c.terms, creditLimit: D(2_000_000), industryId },
+      // Fills an unclassified sandbox customer from before industries existed;
+      // leaves one somebody has reclassified by hand alone.
       update: {},
     });
+    if (!customer.industryId && industryId) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { industryId } });
+    }
     const site = await prisma.customerSite.findFirst({
       where: { customerId: customer.id, name: c.site },
     });

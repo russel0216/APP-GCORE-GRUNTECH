@@ -1,1 +1,156 @@
 /* My Work, Home, ComingSoon, Audit — package SHELL. Tokens only. */
+
+/* ── My Work ─────────────────────────────────────────────────────────────── */
+
+.mywork-card {
+  margin-bottom: var(--s-4);
+}
+
+.card-title-count {
+  margin-left: var(--s-2);
+}
+
+/* Three buttons on one line; a narrower column wraps them into a stack. */
+.mywork-decision-col {
+  min-width: 16em;
+}
+
+/* The record a row is about. Underlined on hover only: a table of links
+   that are all underlined is a table that is hard to read. */
+.work-title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.work-title:hover {
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--neon-rgb) / 0.6);
+}
+
+.work-overdue-tag {
+  margin-left: var(--s-2);
+}
+
+/* An overdue row says so in words (the tag) and, secondarily, in a tint the
+   date column carries — never colour alone. */
+table.data tr.work-overdue td {
+  background: rgb(var(--danger-rgb) / 0.05);
+}
+
+.today-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.today-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  padding: var(--s-2) 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.today-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.today-time {
+  flex: 0 0 auto;
+  min-width: 9em;
+  font-size: var(--fs-sm);
+}
+
+.today-what {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.today-sub {
+  font-size: var(--fs-xs);
+}
+
+.decision-subject {
+  margin-top: 0;
+}
+
+.decision-open {
+  margin: 0 0 var(--s-3);
+}
+
+.decision-note {
+  font-size: var(--fs-sm);
+}
+
+/* ── Home — the My Work summary ───────────────────────────────────────────── */
+
+.home-work-spacer {
+  flex: 1;
+}
+
+/* Five cards. auto-fit keeps them on one line where they fit and wraps the
+   rest, rather than a fixed count that leaves the fifth alone on its row. */
+.home-work-grid {
+  grid-template-columns: repeat(auto-fit, minmax(13em, 1fr));
+}
+
+/* A row on a launcher card is a link to the record: the whole row is the
+   target, and it looks like one on hover and on keyboard focus alike. */
+.home-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: inherit;
+  border-radius: var(--radius-sm);
+}
+
+.home-row.row {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.home-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.home-row-title {
+  color: var(--text);
+}
+
+a.home-row:hover .home-row-title {
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--neon-rgb) / 0.6);
+}
+
+.home-work .today-time {
+  min-width: 4.5em;
+}
+
+/* Day theme: the overdue tint reads against a white card at the same alpha,
+   but the underline colour needs the theme's own neon. Both come from the
+   tokens the theme redefines, so nothing here changes per theme except the
+   tint, which is slightly stronger on a light surface to stay visible. */
+[data-theme='day'] table.data tr.work-overdue td {
+  background: rgb(var(--danger-rgb) / 0.07);
+}
+
+@media (max-width: 40em) {
+  .today-row {
+    flex-wrap: wrap;
+    gap: var(--s-2);
+  }
+  .today-time {
+    min-width: 0;
+  }
+}
