@@ -1,0 +1,126 @@
+/*
+  G-OPS › Sales › SCORO Archive — package A. Tokens only: no raw colour, no
+  raw pixel, so the day theme and the density settings restyle it for free.
+*/
+
+/* The notice above the list ("one customer's history", "N not linked"). */
+.archive-scope {
+  margin-bottom: var(--s-3);
+}
+
+/* "not linked" after a client name in a cell. */
+.archive-inline {
+  margin-left: var(--s-2);
+  font-size: var(--fs-xs);
+}
+
+/* A product line: the title in bold, then SCORO's description as written. */
+.archive-line-title {
+  font-weight: 600;
+}
+
+.archive-pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+table.data.archive-lines td {
+  vertical-align: top;
+}
+
+table.data.archive-lines td .archive-pre {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  margin-top: var(--s-1);
+}
+
+.archive-card {
+  margin-top: var(--s-4);
+}
+
+/* Sum without tax / VAT / Total, under the lines, right-hand side. */
+.archive-totals {
+  margin-top: var(--s-3);
+  margin-left: auto;
+  max-width: 32rem;
+}
+
+.archive-totals dd {
+  margin-left: auto;
+  text-align: right;
+}
+
+.archive-foot {
+  margin-top: var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+/* The warning with a button beside it. */
+.archive-link-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+/* ── Import dialog ───────────────────────────────────────────────────────── */
+
+.archive-lead {
+  margin-top: 0;
+}
+
+.archive-report {
+  margin-top: var(--s-4);
+}
+
+.archive-report h4 {
+  margin: var(--s-4) 0 var(--s-2);
+  font-size: var(--fs-md);
+}
+
+.archive-report details {
+  margin-bottom: var(--s-2);
+}
+
+.archive-report summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.archive-list {
+  margin: var(--s-2) 0;
+  padding-left: var(--s-5);
+  line-height: 1.6;
+}
+
+/* A code mismatch is the one line an importer must act on. */
+.archive-problem {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+/* ── Customer picker ─────────────────────────────────────────────────────── */
+
+.archive-picker {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+}
+
+.archive-picker button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  text-align: left;
+}
+
+/* ── Customer 360: "View all" beside the SCORO history title ─────────────── */
+
+.archive-collection-action {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: var(--fs-sm);
+}

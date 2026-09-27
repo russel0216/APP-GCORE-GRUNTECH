@@ -183,6 +183,7 @@ customerRoutes.get(
       serviceReports,
       payments,
       jobOrders,
+      legacyQuotes,
     ] = await Promise.all([
       can(me, 'gops.quotations.view_all')
         ? prisma.quotation.findMany({
@@ -336,6 +337,24 @@ customerRoutes.get(
             },
           })
         : [],
+      // The SCORO history — read-only, behind the archive's own key.
+      can(me, 'gops.quote_archive.view_all')
+        ? prisma.legacyQuote.findMany({
+            where: { customerId },
+            orderBy: [{ date: 'desc' }, { number: 'desc' }],
+            take: 50,
+            select: {
+              id: true,
+              number: true,
+              date: true,
+              name: true,
+              status: true,
+              currency: true,
+              total: true,
+              continuedQuotation: { select: { id: true, number: true } },
+            },
+          })
+        : [],
     ]);
 
     res.json({
@@ -373,6 +392,7 @@ customerRoutes.get(
       serviceReports,
       payments: payments.map((p) => ({ ...p, amount: Number(p.amount) })),
       jobOrders: jobOrders.map((j) => ({ ...j, amount: j.amount == null ? null : Number(j.amount) })),
+      legacyQuotes: legacyQuotes.map((l) => ({ ...l, total: Number(l.total) })),
     });
   }),
 );

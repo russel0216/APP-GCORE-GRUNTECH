@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, getToken, qs } from '../../lib/api';
+import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { DocumentApproval } from '../../components/ApprovalStepper';
@@ -64,7 +64,15 @@ interface QuotationRow {
   customer: { id: string; name: string };
   owner: { id: string; name: string };
   createdAt: string;
+  legacyQuote: LegacyRef | null;
   latest: { revision: number; status: string; total: number; updatedAt: string } | null;
+}
+
+/** The SCORO quote a live quotation carries on, under the same number. */
+interface LegacyRef {
+  id: string;
+  number: string;
+  status: string;
 }
 
 /** What `?new=1&…` asks the create modal to start from. */
@@ -111,7 +119,18 @@ export function Quotations() {
   }
 
   const columns: Column<QuotationRow>[] = [
-    { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (q) => <span className="mono">{q.number}</span> },
+    {
+      key: 'number',
+      label: 'Number',
+      sortKey: 'number',
+      width: '160px',
+      render: (q) => (
+        <div>
+          <span className="mono">{q.number}</span>
+          {q.legacyQuote && <div className="faint">from SCORO</div>}
+        </div>
+      ),
+    },
     {
       key: 'subject',
       label: 'Quotation',
@@ -200,14 +219,62 @@ export function Quotations() {
 
 // ── Detail ───────────────────────────────────────────────────────────────────
 
+interface Person {
+  id: string;
+  name: string;
+  position?: string | null;
+}
+
+interface SupplierRef {
+  id: string;
+  code?: string;
+  name: string;
+}
+
+/**
+ * A SCORO-style line. The cost half (unitCost … marginPct) is present only
+ * when the server decided this viewer may see cost — the keys are stripped
+ * server-side otherwise, so the screen never has them to hide.
+ */
 interface Item {
   id: string;
+  group: string | null;
+  title: string | null;
   description: string;
   quantity: number;
   unit: string;
   unitPrice: number;
   amount: number;
   sortOrder: number;
+  unitCost?: number | null;
+  costAmount?: number | null;
+  margin?: number | null;
+  marginPct?: number | null;
+  providerSupplierId?: string | null;
+  providerSupplier?: SupplierRef | null;
+  providerUserId?: string | null;
+  providerUser?: Person | null;
+  costNote?: string | null;
+}
+
+/** SCORO's right-hand panel. Percentages are of the sum without tax. */
+interface CostPanel {
+  totalCost: number;
+  inHouseCost: number;
+  outsourcedCost: number;
+  unassignedCost: number;
+  totalMargin: number;
+  inHouseMargin: number;
+  outsourcedMargin: number;
+  unassignedMargin: number;
+  totalCostPct: number | null;
+  inHouseCostPct: number | null;
+  outsourcedCostPct: number | null;
+  totalMarginPct: number | null;
+  inHouseMarginPct: number | null;
+  outsourcedMarginPct: number | null;
+  costedLines: number;
+  lineCount: number;
 }
 
 interface Revision {
@@ -217,15 +284,27 @@ interface Revision {
   validityDays: number;
   terms: string | null;
   notes: string | null;
+  /** Σ line amount, BEFORE the discount. */
   subtotal: number;
+  discountPct: number;
+  discountAmount: number;
+  /** subtotal − discount. */
+  net: number;
+  /** SCORO's "Sum without tax" — net, less the tax when prices include it. */
+  netOfTax?: number;
   vatAmount: number;
   total: number;
   vatRate: number;
   vatInclusive: boolean;
+  prNumber: string | null;
+  delivery: string | null;
+  paymentTerms: string | null;
   approvedAt: string | null;
   createdAt: string;
   items: Item[];
-  costing: { id: string; number: string; title: string; contractValue: number; totalCost: number } | null;
+  costPanel?: CostPanel;
+  /** totalCost is absent when this viewer may not see cost. */
+  costing: { id: string; number: string; title: string; contractValue: number; totalCost?: number } | null;
   approvedBy: { id: string; name: string } | null;
   /** The project this revision became, if any (Job.quotationRevisionId). */
   jobs: { id: string; number: string; name: string; status: string }[];
@@ -241,13 +320,18 @@ interface QuotationDetail {
   submittedAt: string | null;
   expectedClosing: string | null;
   canEdit: boolean;
-  customer: { id: string; name: string; code: string };
+  /** Whether the server sent the cost half of each line. */
+  canSeeCost: boolean;
+  customer: { id: string; name: string; code: string; paymentTerms: string | null };
   contact: { id: string; name: string } | null;
   site: { id: string; name: string } | null;
   lead: { id: string; number: string; companyName: string } | null;
   owner: { id: string; name: string };
+  legacyQuote: LegacyRef | null;
   revisions: Revision[];
 }
+
+const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
 
 export function QuotationDetail() {
   const { id } = useParams<{ id: string }>();
@@ -286,9 +370,13 @@ export function QuotationDetail() {
   if (!quotation) return <ErrorBox error={error ?? new Error('Quotation not found')} />;
 
   const revision = quotation.revisions.find((r) => r.id === selected) ?? quotation.revisions[0];
+  // SCORO's panel beside the totals, once there is a line to cost.
+  const showPanel = quotation.canSeeCost && !!revision?.costPanel && revision.items.length > 0;
   const editable = quotation.canEdit && revision?.status === 'DRAFT';
   const approved = quotation.revisions.find((r) => r.status === 'APPROVED') ?? null;
   const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
+  const showCost = quotation.canSeeCost;
+  const groups = [...new Set(quotation.revisions.flatMap((r) => r.items.map((i) => i.group).filter(Boolean) as string[]))];
 
   async function act(fn: () => Promise<unknown>, message: string) {
     try {
@@ -310,12 +398,9 @@ export function QuotationDetail() {
 
   function printPdf() {
     if (!revision) return;
-    fetch(`/api/quotations/${quotation!.id}/revisions/${revision.id}/pdf`, {
-      headers: { Authorization: `Bearer ${getToken()}` },
-    })
-      .then((r) => r.blob())
-      .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-      .catch(() => toast('error', 'Could not render the quotation'));
+    openPdf(`/api/quotations/${quotation!.id}/revisions/${revision.id}/pdf`, () =>
+      toast('error', 'Could not render the quotation'),
+    );
   }
 
   // A quotation that became a project stays won — no moves at all.
@@ -383,6 +468,17 @@ export function QuotationDetail() {
         </div>
       </div>
 
+      {quotation.legacyQuote && (
+        <div className="alert info">
+          Continued from SCORO{' '}
+          <Link to={`/g-ops/quote-archive/${quotation.legacyQuote.id}`} className="mono">
+            {quotation.legacyQuote.number}
+          </Link>{' '}
+          ({quotation.legacyQuote.status}). The SCORO record stays in the archive, read-only; this is
+          the live quotation from here on.
+        </div>
+      )}
+
       <ErrorBox error={error} />
 
       {/* Every revision, newest first. Clicking one shows what was sent then. */}
@@ -424,7 +520,12 @@ export function QuotationDetail() {
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
           <div className="kpi-grid">
-            <Stat label="Subtotal" value={formatMoney(revision.subtotal)} figure />
+            <Stat
+              label="Subtotal"
+              value={formatMoney(revision.subtotal)}
+              figure
+              sub={revision.discountAmount > 0 ? `less ${formatMoney(revision.discountAmount)} discount` : 'no discount'}
+            />
             <Stat
               label={`VAT ${(revision.vatRate * 100).toFixed(0)}%`}
               value={formatMoney(revision.vatAmount)}
@@ -432,7 +533,7 @@ export function QuotationDetail() {
               sub={revision.vatInclusive ? 'backed out of the prices' : 'added on'}
             />
             <Stat label="Total" value={formatMoney(revision.total)} figure accent="neon" />
-            <MarginStat costing={revision.costing} />
+            {showCost && <MarginStat panel={revision.costPanel} costing={revision.costing} />}
           </div>
 
           <div className="card sales-card-gap">
@@ -468,21 +569,23 @@ export function QuotationDetail() {
                 title="No lines yet"
                 hint={
                   revision.costing
-                    ? 'Use “Fill from costing” to bring in the scope sections you already priced.'
-                    : 'Link a costing under Modify, then fill the lines from its scope of work.'
+                    ? 'Use “Fill from costing” to bring in the scope sections you already priced, or add lines one by one.'
+                    : 'Add lines one by one, or link a costing under Modify and fill them from its scope of work.'
                 }
               />
             ) : (
               <div className="table-wrap">
-                <table className="data">
+                <table className="data quote-lines">
                   <thead>
                     <tr>
                       <th className="sales-col-num">#</th>
-                      <th>Description</th>
-                      <th className="right">Qty</th>
-                      <th>Unit</th>
+                      <th>Group</th>
+                      <th>Product | Description</th>
+                      <th className="right">Qty | Unit</th>
                       <th className="right">Unit price</th>
                       <th className="right">Amount</th>
+                      {showCost && <th>Cost &amp; provider</th>}
+                      {showCost && <th className="right">Margin</th>}
                       {editable && <th className="sales-col-action" />}
                     </tr>
                   </thead>
@@ -490,14 +593,40 @@ export function QuotationDetail() {
                     {revision.items.map((item, i) => (
                       <tr key={item.id}>
                         <td className="mono">{i + 1}</td>
-                        <td>{item.description}</td>
-                        <td className="right mono">{item.quantity}</td>
-                        <td>{item.unit}</td>
+                        <td>{item.group || <span className="faint">—</span>}</td>
+                        <td>
+                          {item.title && <div className="quote-line-title">{item.title}</div>}
+                          {item.description && <div className="quote-line-desc">{item.description}</div>}
+                        </td>
+                        <td className="right mono">
+                          {item.quantity} <span className="faint">{item.unit}</span>
+                        </td>
                         <td className="right mono">{formatMoney(item.unitPrice)}</td>
                         <td className="right mono">{formatMoney(item.amount)}</td>
+                        {showCost && (
+                          <td>
+                            <LineCost item={item} />
+                          </td>
+                        )}
+                        {showCost && (
+                          <td className="right mono">
+                            {item.margin == null ? (
+                              <span className="faint">—</span>
+                            ) : (
+                              <>
+                                <div className={item.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(item.margin)}</div>
+                                <div className="faint">{pct(item.marginPct)}</div>
+                              </>
+                            )}
+                          </td>
+                        )}
                         {editable && (
                           <td>
-                            <button className="btn btn-sm" onClick={() => setItemModal(item)}>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => setItemModal(item)}
+                              aria-label={`Modify line ${i + 1}`}
+                            >
                               Modify
                             </button>
                           </td>
@@ -508,6 +637,17 @@ export function QuotationDetail() {
                 </table>
               </div>
             )}
+
+            <div className={`quote-summary${showPanel ? '' : ' quote-summary-single'}`}>
+              <TotalsBlock
+                quotationId={quotation.id}
+                revision={revision}
+                editable={editable}
+                onSaved={() => void load()}
+                onError={setError}
+              />
+              {showPanel && revision.costPanel && <CostPanelBlock panel={revision.costPanel} />}
+            </div>
 
             {editable && revision.items.length > 0 && (
               <div className="row sales-card-foot">
@@ -533,6 +673,9 @@ export function QuotationDetail() {
               <Row label="Customer" value={quotation.customer.name} />
               <Row label="Attention" value={quotation.contact?.name} />
               <Row label="Site" value={quotation.site?.name} />
+              <Row label="Payment terms" value={revision.paymentTerms} />
+              <Row label="PR number" value={revision.prNumber} />
+              <Row label="Delivery" value={revision.delivery} />
               <Row label="Valid for" value={`${revision.validityDays} days`} />
               <Row label="VAT" value={revision.vatInclusive ? 'Inclusive of VAT' : 'Exclusive — added on'} />
               <Row label="Raised" value={formatDate(revision.createdAt)} />
@@ -606,6 +749,8 @@ export function QuotationDetail() {
           quotationId={quotation.id}
           revisionId={revision.id}
           item={itemModal === 'new' ? null : itemModal}
+          showCost={showCost}
+          groups={groups}
           onClose={() => setItemModal(null)}
           onSaved={() => {
             setItemModal(null);
@@ -634,6 +779,167 @@ export function QuotationDetail() {
           onSave={markLost}
         />
       )}
+    </div>
+  );
+}
+
+/** Who carries a line's cost, and what it is — the cost column's cell. */
+function LineCost({ item }: { item: Item }) {
+  const who = item.providerUser
+    ? { kind: 'In-house', name: item.providerUser.name }
+    : item.providerSupplier
+      ? { kind: 'Supplier', name: item.providerSupplier.name }
+      : null;
+  if (item.costAmount == null && !who) return <span className="faint">not costed</span>;
+  return (
+    <div className="quote-line-cost">
+      <div className="mono">{item.costAmount == null ? '—' : formatMoney(item.costAmount)}</div>
+      {who ? (
+        <div className="faint">
+          {who.kind} · {who.name}
+        </div>
+      ) : (
+        <div className="faint">no provider named</div>
+      )}
+      {item.costNote && <div className="faint quote-line-desc">{item.costNote}</div>}
+    </div>
+  );
+}
+
+/**
+ * SCORO's totals: subtotal, the discount (edited in place on a draft), the sum
+ * without tax, the tax and the total. The figures are the server's — it
+ * recomputes them on every save with the one `quotationTotals`.
+ */
+function TotalsBlock({
+  quotationId,
+  revision,
+  editable,
+  onSaved,
+  onError,
+}: {
+  quotationId: string;
+  revision: Revision;
+  editable: boolean;
+  onSaved: () => void;
+  onError: (err: unknown) => void;
+}) {
+  const [discount, setDiscount] = useState(String(revision.discountPct ?? 0));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setDiscount(String(revision.discountPct ?? 0)), [revision.id, revision.discountPct]);
+
+  async function commit() {
+    if (busy) return;
+    const value = Number(discount);
+    if (!Number.isFinite(value) || value === revision.discountPct) {
+      setDiscount(String(revision.discountPct ?? 0));
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.patch(`/quotations/${quotationId}/revisions/${revision.id}`, { discountPct: value });
+      onSaved();
+    } catch (err) {
+      onError(err);
+      setDiscount(String(revision.discountPct ?? 0));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rate = `${(revision.vatRate * 100).toFixed(0)}%`;
+  return (
+    <div>
+    <dl className="quote-totals" aria-label="Totals">
+      <div>
+        <dt>Subtotal</dt>
+        <dd className="mono">{formatMoney(revision.subtotal)}</dd>
+      </div>
+      <div>
+        <dt>
+          {editable ? (
+            <label className="quote-discount">
+              Discount
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step="0.01"
+                inputMode="decimal"
+                value={discount}
+                disabled={busy}
+                aria-label="Discount percent"
+                aria-describedby="quote-discount-hint"
+                onChange={(e) => setDiscount(e.target.value)}
+                onBlur={() => void commit()}
+                onKeyDown={(e) => {
+                  // Enter leaves the field, and leaving it is what saves — one
+                  // PATCH, not one for the key and another for the blur.
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  }
+                  if (e.key === 'Escape') setDiscount(String(revision.discountPct ?? 0));
+                }}
+              />
+              %
+            </label>
+          ) : (
+            `Discount ${revision.discountPct ? `${revision.discountPct}%` : ''}`
+          )}
+        </dt>
+        <dd className="mono">{revision.discountAmount > 0 ? `−${formatMoney(revision.discountAmount)}` : formatMoney(0)}</dd>
+      </div>
+      <div>
+        <dt>Sum without tax</dt>
+        <dd className="mono">{formatMoney(revision.netOfTax ?? revision.net)}</dd>
+      </div>
+      <div>
+        <dt>{revision.vatInclusive ? `Tax included (${rate})` : `Tax (${rate})`}</dt>
+        <dd className="mono">{formatMoney(revision.vatAmount)}</dd>
+      </div>
+      <div className="quote-totals-grand">
+        <dt>Total</dt>
+        <dd className="mono">{formatMoney(revision.total)}</dd>
+      </div>
+    </dl>
+      {editable && (
+        <p id="quote-discount-hint" className="faint sales-hint">
+          The discount comes off the whole quotation before tax. Enter to save.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** SCORO's right-hand panel: cost and margin, in-house against outsourced. */
+function CostPanelBlock({ panel }: { panel: CostPanel }) {
+  const row = (label: string, value: number, share: number | null, strong = false) => (
+    <div className={strong ? 'quote-totals-grand' : undefined}>
+      <dt>{label}</dt>
+      <dd className="mono">
+        <span className={value < 0 ? 'quote-negative' : undefined}>{formatMoney(value)}</span>{' '}
+        <span className="faint">{pct(share)}</span>
+      </dd>
+    </div>
+  );
+  return (
+    <div className="quote-cost-panel">
+      <h4 className="quote-panel-title">Cost and margin</h4>
+      <dl className="quote-totals">
+        {row('Total cost', panel.totalCost, panel.totalCostPct)}
+        {row('In-house cost', panel.inHouseCost, panel.inHouseCostPct)}
+        {row('Outsourced cost', panel.outsourcedCost, panel.outsourcedCostPct)}
+        {panel.unassignedCost > 0 && row('No provider named', panel.unassignedCost, null)}
+        {row('Total margin', panel.totalMargin, panel.totalMarginPct, true)}
+        {row('In-house margin', panel.inHouseMargin, panel.inHouseMarginPct)}
+        {row('Outsourced margin', panel.outsourcedMargin, panel.outsourcedMarginPct)}
+      </dl>
+      <p className="faint sales-hint">
+        {panel.costedLines} of {panel.lineCount} line{panel.lineCount === 1 ? '' : 's'} costed. Percentages
+        are of the sum without tax. Internal — never printed.
+      </p>
     </div>
   );
 }
@@ -715,18 +1021,40 @@ function WonBlock({
   );
 }
 
-function MarginStat({ costing }: { costing: { contractValue: number; totalCost: number } | null }) {
-  if (!costing) return <Stat label="Margin" value="—" sub="no costing linked" />;
-  const profit = costing.contractValue - costing.totalCost;
-  const pct = costing.contractValue > 0 ? profit / costing.contractValue : 0;
-  const accent = pct < 0 ? 'danger' : pct < 0.1 ? 'warn' : 'ok';
+/**
+ * The margin tile. The quotation's own cost panel when its lines are costed
+ * (SCORO's way), else the linked costing's figures. Only rendered for a viewer
+ * the server sent cost to.
+ */
+function MarginStat({
+  panel,
+  costing,
+}: {
+  panel?: CostPanel;
+  costing: { contractValue: number; totalCost?: number } | null;
+}) {
+  let profit: number;
+  let pctValue: number;
+  let source: string;
+  if (panel && panel.costedLines > 0) {
+    profit = panel.totalMargin;
+    pctValue = (panel.totalMarginPct ?? 0) / 100;
+    source = `on the lines (${panel.costedLines} of ${panel.lineCount} costed)`;
+  } else if (costing && costing.totalCost != null) {
+    profit = costing.contractValue - costing.totalCost;
+    pctValue = costing.contractValue > 0 ? profit / costing.contractValue : 0;
+    source = 'on the costing';
+  } else {
+    return <Stat label="Margin" value="—" sub="no line costs or costing yet" />;
+  }
+  const accent = pctValue < 0 ? 'danger' : pctValue < 0.1 ? 'warn' : 'ok';
   return (
     <Stat
       label="Margin"
-      value={`${(pct * 100).toFixed(1)}%`}
+      value={`${(pctValue * 100).toFixed(1)}%`}
       figure
       accent={accent}
-      sub={`${formatMoney(profit)} on the costing${pct < 0 ? ' — below cost' : pct < 0.1 ? ' — under 10%' : ''}`}
+      sub={`${formatMoney(profit)} ${source}${pctValue < 0 ? ' — below cost' : pctValue < 0.1 ? ' — under 10%' : ''}`}
     />
   );
 }
@@ -1092,40 +1420,123 @@ export function NewQuotationModal({
   );
 }
 
+type ProviderKind = 'none' | 'user' | 'supplier';
+
+/**
+ * Picks who carries a line's cost: one of our people, or a supplier. Names
+ * come from `/quotations/providers`, which the sales role may read without the
+ * supplier-master permission. The chosen one stays in the list whatever the
+ * search says, so filtering never silently drops the current choice.
+ */
+function ProviderPicker({
+  kind,
+  value,
+  current,
+  onChange,
+}: {
+  kind: 'user' | 'supplier';
+  value: string;
+  current: { id: string; name: string } | null;
+  onChange: (id: string) => void;
+}) {
+  const [term, setTerm] = useState('');
+  const [options, setOptions] = useState<{ id: string; name: string; code?: string; position?: string | null }[]>([]);
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      api
+        .get<typeof options>(`/quotations/providers${qs({ kind, q: term || undefined })}`)
+        .then(setOptions)
+        .catch(() => setOptions([]));
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [kind, term]);
+
+  const list = current && !options.some((o) => o.id === current.id) ? [current, ...options] : options;
+  const label = kind === 'user' ? 'In-house person' : 'Supplier';
+  return (
+    <div className="grid grid-2">
+      <Field label={`Find a ${kind === 'user' ? 'person' : 'supplier'}`}>
+        <input value={term} placeholder="Type to narrow the list" onChange={(e) => setTerm(e.target.value)} />
+      </Field>
+      <Field label={label}>
+        <select value={value} onChange={(e) => onChange(e.target.value)}>
+          <option value="">— choose —</option>
+          {list.map((o) => (
+            <option key={o.id} value={o.id}>
+              {'code' in o && o.code ? `${o.code} — ` : ''}
+              {o.name}
+              {'position' in o && o.position ? ` (${o.position})` : ''}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </div>
+  );
+}
+
+/**
+ * One SCORO line: group, product title and description, quantity and unit,
+ * price — and, for those allowed to see it, what it costs and who carries that
+ * cost. Amount, cost amount and margin shown here are previews; the server
+ * computes the stored figures.
+ */
 function ItemModal({
   quotationId,
   revisionId,
   item,
+  showCost,
+  groups,
   onClose,
   onSaved,
 }: {
   quotationId: string;
   revisionId: string;
   item: Item | null;
+  showCost: boolean;
+  groups: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
+    group: item?.group ?? '',
+    title: item?.title ?? '',
     description: item?.description ?? '',
     quantity: item?.quantity?.toString() ?? '1',
     unit: item?.unit ?? 'lot',
     unitPrice: item?.unitPrice?.toString() ?? '',
+    unitCost: item?.unitCost == null ? '' : String(item.unitCost),
+    providerKind: (item?.providerUserId ? 'user' : item?.providerSupplierId ? 'supplier' : 'none') as ProviderKind,
+    providerUserId: item?.providerUserId ?? '',
+    providerSupplierId: item?.providerSupplierId ?? '',
+    costNote: item?.costNote ?? '',
   });
 
-  const amount = (Number(form.quantity) || 0) * (Number(form.unitPrice) || 0);
+  const qty = Number(form.quantity) || 0;
+  const amount = qty * (Number(form.unitPrice) || 0);
+  const cost = form.unitCost.trim() === '' ? null : qty * (Number(form.unitCost) || 0);
+  const margin = cost == null ? null : amount - cost;
 
   async function save() {
     setBusy(true);
     setError(null);
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
+        group: form.group.trim() || null,
+        title: form.title.trim() || null,
         description: form.description,
         quantity: Number(form.quantity),
         unit: form.unit,
         unitPrice: Number(form.unitPrice),
       };
+      if (showCost) {
+        payload.unitCost = form.unitCost.trim() === '' ? null : Number(form.unitCost);
+        payload.providerUserId = form.providerKind === 'user' ? form.providerUserId || null : null;
+        payload.providerSupplierId = form.providerKind === 'supplier' ? form.providerSupplierId || null : null;
+        payload.costNote = form.costNote.trim() || null;
+      }
       if (item) await api.patch(`/quotations/${quotationId}/revisions/${revisionId}/items/${item.id}`, payload);
       else await api.post(`/quotations/${quotationId}/revisions/${revisionId}/items`, payload);
       onSaved();
@@ -1147,8 +1558,10 @@ function ItemModal({
     }
   }
 
+  const described = !!(form.title.trim() || form.description.trim());
   return (
     <Modal
+      wide
       title={item ? 'Modify line' : 'Add line'}
       onClose={onClose}
       footer={
@@ -1162,17 +1575,35 @@ function ItemModal({
           <button className="btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button className="btn btn-primary" onClick={save} disabled={busy || !form.description}>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !described}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </>
       }
     >
       <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Group" hint="e.g. Gruntech Installation, Gruntech Services — printed as a heading">
+          <input
+            value={form.group}
+            list="quote-line-groups"
+            autoFocus
+            onChange={(e) => setForm({ ...form, group: e.target.value })}
+          />
+        </Field>
+        <Field label="Product" hint="Printed in bold above the description">
+          <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+        </Field>
+      </div>
+      <datalist id="quote-line-groups">
+        {groups.map((g) => (
+          <option key={g} value={g} />
+        ))}
+      </datalist>
       <Field label="Description">
         <textarea
           value={form.description}
-          autoFocus
+          rows={4}
           onChange={(e) => setForm({ ...form, description: e.target.value })}
         />
       </Field>
@@ -1181,6 +1612,7 @@ function ItemModal({
           <input
             type="number"
             step="0.001"
+            min={0}
             value={form.quantity}
             onChange={(e) => setForm({ ...form, quantity: e.target.value })}
           />
@@ -1192,13 +1624,80 @@ function ItemModal({
           <input
             type="number"
             step="0.01"
+            min={0}
             value={form.unitPrice}
             onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
           />
         </Field>
       </div>
+
+      {showCost && (
+        <fieldset className="quote-cost-fields">
+          <legend>Cost &amp; provider — internal, never printed</legend>
+          <div className="quote-provider-toggle" role="radiogroup" aria-label="Who carries the cost">
+            {(
+              [
+                ['none', 'Not named'],
+                ['user', 'In-house person'],
+                ['supplier', 'Supplier'],
+              ] as [ProviderKind, string][]
+            ).map(([value, label]) => (
+              <label key={value} className="checkbox">
+                <input
+                  type="radio"
+                  name="quote-provider-kind"
+                  value={value}
+                  checked={form.providerKind === value}
+                  onChange={() => setForm({ ...form, providerKind: value })}
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+          {form.providerKind === 'user' && (
+            <ProviderPicker
+              kind="user"
+              value={form.providerUserId}
+              current={item?.providerUser ?? null}
+              onChange={(id) => setForm({ ...form, providerUserId: id })}
+            />
+          )}
+          {form.providerKind === 'supplier' && (
+            <ProviderPicker
+              kind="supplier"
+              value={form.providerSupplierId}
+              current={item?.providerSupplier ?? null}
+              onChange={(id) => setForm({ ...form, providerSupplierId: id })}
+            />
+          )}
+          <div className="grid grid-2">
+            <Field label="Unit cost" hint="Leave empty if not costed yet">
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                value={form.unitCost}
+                onChange={(e) => setForm({ ...form, unitCost: e.target.value })}
+              />
+            </Field>
+            <Field label="Cost notes">
+              <input value={form.costNote} onChange={(e) => setForm({ ...form, costNote: e.target.value })} />
+            </Field>
+          </div>
+        </fieldset>
+      )}
+
       <div className="alert info sales-flush">
         Line amount: <strong>{formatMoney(amount)}</strong>
+        {showCost && cost != null && (
+          <>
+            {' '}· cost {formatMoney(cost)} · margin{' '}
+            <strong className={margin != null && margin < 0 ? 'quote-negative' : undefined}>
+              {formatMoney(margin)}
+            </strong>
+            {amount > 0 && margin != null ? ` (${((margin / amount) * 100).toFixed(1)}%)` : ''}
+          </>
+        )}
       </div>
     </Modal>
   );
@@ -1228,6 +1727,10 @@ function QuotationSettings({
     terms: revision.terms ?? '',
     notes: revision.notes ?? '',
     vatInclusive: revision.vatInclusive,
+    prNumber: revision.prNumber ?? '',
+    delivery: revision.delivery ?? '',
+    // The customer's own terms, unless this revision already says otherwise.
+    paymentTerms: revision.paymentTerms ?? quotation.customer.paymentTerms ?? '',
   });
 
   useEffect(() => {
@@ -1252,6 +1755,9 @@ function QuotationSettings({
           terms: form.terms || null,
           notes: form.notes || null,
           vatInclusive: form.vatInclusive,
+          prNumber: form.prNumber || null,
+          delivery: form.delivery || null,
+          paymentTerms: form.paymentTerms || null,
         });
       }
       toast('ok', 'Saved');
@@ -1320,6 +1826,30 @@ function QuotationSettings({
               </option>
             ))}
           </select>
+        </Field>
+        <Field label="PR number" hint="The customer's purchase request reference — printed on the quotation">
+          <input
+            value={form.prNumber}
+            disabled={!editableRevision}
+            onChange={(e) => setForm({ ...form, prNumber: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="Payment terms"
+          hint={quotation.customer.paymentTerms ? `The customer's usual: ${quotation.customer.paymentTerms}` : undefined}
+        >
+          <input
+            value={form.paymentTerms}
+            disabled={!editableRevision}
+            onChange={(e) => setForm({ ...form, paymentTerms: e.target.value })}
+          />
+        </Field>
+        <Field label="Delivery" hint="e.g. 4 to 6 weeks upon receipt of PO">
+          <input
+            value={form.delivery}
+            disabled={!editableRevision}
+            onChange={(e) => setForm({ ...form, delivery: e.target.value })}
+          />
         </Field>
         <Field label="Validity (days)">
           <input

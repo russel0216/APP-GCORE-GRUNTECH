@@ -28,6 +28,7 @@ interface UserRow {
   email: string;
   employeeNo: string | null;
   position: string | null;
+  phone: string | null;
   isActive: boolean;
   isSuperAdmin: boolean;
   lastLoginAt: string | null;
@@ -222,6 +223,7 @@ function UserEditor({
     password: '',
     employeeNo: '',
     position: '',
+    phone: '',
     supervisorId: '',
     departmentId: '',
     roleIds: [] as string[],
@@ -250,6 +252,7 @@ function UserEditor({
           password: '',
           employeeNo: u.employeeNo ?? '',
           position: u.position ?? '',
+          phone: u.phone ?? '',
           supervisorId: u.supervisor?.id ?? '',
           departmentId: u.department?.id ?? '',
           roleIds: u.roles.map((r) => r.id),
@@ -268,6 +271,7 @@ function UserEditor({
         name: form.name,
         employeeNo: form.employeeNo || null,
         position: form.position || null,
+        phone: form.phone || null,
         supervisorId: form.supervisorId || null,
         departmentId: form.departmentId || null,
         roleIds: form.roleIds,
@@ -366,6 +370,14 @@ function UserEditor({
               <input
                 value={form.position}
                 onChange={(e) => setForm({ ...form, position: e.target.value })}
+              />
+            </Field>
+            <Field label="Mobile" hint="Printed under the author's name on the quotations they raise">
+              <input
+                type="tel"
+                autoComplete="off"
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
               />
             </Field>
             <Field

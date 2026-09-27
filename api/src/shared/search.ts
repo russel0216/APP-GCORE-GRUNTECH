@@ -514,3 +514,37 @@ registerSearch({
     }));
   },
 });
+
+// ── The SCORO archive ────────────────────────────────────────────────────────
+// Read-only history. Found by its SCORO number, the customer SCORO named, or
+// the quote's own name — the three things somebody remembers about an old quote.
+
+registerSearch({
+  kind: 'legacy_quote',
+  label: 'SCORO quotes',
+  permission: 'gops.quote_archive.view_all',
+  search: async (term, _user, limit) => {
+    const rows = await prisma.legacyQuote.findMany({
+      where: {
+        OR: [
+          { number: { contains: term, mode: 'insensitive' } },
+          { customerName: { contains: term, mode: 'insensitive' } },
+          { customer: { name: { contains: term, mode: 'insensitive' } } },
+          { name: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      take: limit,
+      orderBy: { date: 'desc' },
+      select: { id: true, number: true, name: true, customerName: true, status: true, date: true },
+    });
+    return rows.map((r) => ({
+      kind: 'legacy_quote',
+      id: r.id,
+      title: `${r.number} — ${r.name || r.customerName}`,
+      subtitle: [r.name ? r.customerName : null, r.status, r.date ? r.date.toISOString().slice(0, 10) : null, 'SCORO']
+        .filter(Boolean)
+        .join(' · '),
+      link: `/g-ops/quote-archive/${r.id}`,
+    }));
+  },
+});

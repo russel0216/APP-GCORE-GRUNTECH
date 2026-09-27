@@ -333,16 +333,17 @@ async function checkBelongs(customerId: string, body: {
  * The agreed price when a quotation is named and nobody typed one: its latest
  * APPROVED revision, else its latest — the same rule Insights and Customer 360
  * use. The SUBTOTAL, because the invoice adds VAT itself; the total would tax
- * the work twice.
+ * the work twice. Less the quote-level discount: the stored subtotal is the
+ * sum of the lines BEFORE discount, and the customer agreed to the price after.
  */
 async function quotedAmount(quotationId: string): Promise<number | null> {
   const revisions = await prisma.quotationRevision.findMany({
     where: { quotationId },
-    select: { status: true, subtotal: true, revision: true },
+    select: { status: true, subtotal: true, discountAmount: true, revision: true },
     orderBy: { revision: 'desc' },
   });
   const chosen = revisions.find((r) => r.status === 'APPROVED') ?? revisions[0];
-  return chosen ? Number(chosen.subtotal) : null;
+  return chosen ? Number(chosen.subtotal.sub(chosen.discountAmount)) : null;
 }
 
 jobOrderRoutes.post(

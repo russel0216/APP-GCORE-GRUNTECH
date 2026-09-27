@@ -11,6 +11,7 @@
  */
 
 import bcrypt from 'bcryptjs';
+import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -18,6 +19,8 @@ import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
+import { signToken } from '../src/auth/middleware';
+import { quotationTotals, lineAmount, recalcQuotationRevision } from '../src/shared/quotation';
 import {
   quotationValue,
   columnFor,
@@ -68,6 +71,7 @@ async function cleanup() {
     where: { OR: [{ subject: { startsWith: TAG } }, { lead: { companyName: { startsWith: TAG } } }] },
   });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
+  await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -97,6 +101,75 @@ async function makeUser(name: string, email: string, roleKeys: string[]) {
   });
 }
 
+// ── HTTP and PDF helpers (the cost-stripping half needs the API running) ─────
+
+const BASE = `http://localhost:${env.port}/api`;
+
+interface HttpResult {
+  status: number;
+  body: Record<string, unknown>;
+  text: string;
+}
+
+async function http(token: string, method: string, path: string, body?: unknown): Promise<HttpResult> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await res.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    parsed = { raw: text };
+  }
+  return { status: res.status, body: parsed, text };
+}
+
+async function apiReachable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** The text a PDF shows, one string per text run (verify-foundation.ts's reader). */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue; // not every stream is text, and a font program is not a failure
+    }
+
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1]
+          ? Buffer.from(part[1], 'hex').toString('latin1')
+          : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
 
 async function main() {
   console.log('\nG-CORE sales verification\n');
@@ -730,6 +803,250 @@ async function main() {
     ],
   });
   check('a costing sheet prints', costingPdf.subarray(0, 5).toString() === '%PDF-');
+
+  // ── 9. SCORO-style quotation money ─────────────────────────────────────────
+  // quotationTotals in shared/quotation.ts is the ONE arithmetic: the routes
+  // store what it returns and the screen shows what it returns.
+  console.log('\nQuotation money (SCORO-style discount, cost and margin)');
+
+  const lines = [
+    // In-house: one of our people carries the cost.
+    { amount: 10_000, costAmount: 6_000, providerUserId: 'u1' },
+    // Outsourced: a supplier carries it.
+    { amount: 20_000, costAmount: 15_000, providerSupplierId: 's1' },
+    // Priced but not costed yet.
+    { amount: 5_000 },
+  ];
+  const t0 = quotationTotals({ lines, discountPct: 0, vatRate: 0.12 });
+  check('no discount: subtotal is Σ line amount', money(t0.subtotal, 35_000), String(t0.subtotal));
+  check('no discount: discount is nothing and net = subtotal', t0.discountAmount === 0 && money(t0.net, 35_000));
+  check('VAT exclusive: 12% of net is added on', money(t0.vatAmount, 4_200) && money(t0.total, 39_200), `${t0.vatAmount} / ${t0.total}`);
+  check('total cost is in-house + outsourced + unassigned', money(t0.cost.totalCost, 21_000) && money(t0.cost.inHouseCost, 6_000) && money(t0.cost.outsourcedCost, 15_000) && t0.cost.unassignedCost === 0);
+  check('total margin = net − total cost', money(t0.cost.totalMargin, 14_000), String(t0.cost.totalMargin));
+  check('in-house margin comes only from in-house lines', money(t0.cost.inHouseMargin, 4_000), String(t0.cost.inHouseMargin));
+  check('outsourced margin comes only from supplier lines', money(t0.cost.outsourcedMargin, 5_000), String(t0.cost.outsourcedMargin));
+  check('margin % is of net', t0.cost.totalMarginPct === 40 && t0.cost.inHouseMarginPct === 11.4 && t0.cost.totalCostPct === 60, JSON.stringify(t0.cost));
+  check(
+    'a line reports its own margin and margin %',
+    t0.lines[0].margin === 4_000 && t0.lines[0].marginPct === 40 && t0.lines[1].marginPct === 25 && t0.lines[2].margin === null,
+    JSON.stringify(t0.lines),
+  );
+  check('the panel counts which lines carry a cost', t0.cost.costedLines === 2 && t0.cost.lineCount === 3);
+
+  const t10 = quotationTotals({ lines, discountPct: 10, vatRate: 0.12 });
+  check('10% discount comes off the subtotal', money(t10.discountAmount, 3_500) && money(t10.net, 31_500), `${t10.discountAmount} / ${t10.net}`);
+  check('VAT is charged on the DISCOUNTED figure', money(t10.vatAmount, 3_780) && money(t10.total, 35_280), `${t10.vatAmount} / ${t10.total}`);
+  check('the discount comes out of margin, not cost', money(t10.cost.totalCost, 21_000) && money(t10.cost.totalMargin, 10_500));
+  check(
+    'and is applied pro rata to in-house and outsourced revenue',
+    money(t10.cost.inHouseMargin, 3_000) && money(t10.cost.outsourcedMargin, 3_000) && money(t10.cost.unassignedMargin, 4_500),
+    JSON.stringify(t10.cost),
+  );
+  check(
+    'the three margins add up to the total to the centavo',
+    money(t10.cost.inHouseMargin + t10.cost.outsourcedMargin + t10.cost.unassignedMargin, t10.cost.totalMargin),
+  );
+  check('margin % is of the discounted net', t10.cost.totalMarginPct === 33.3, String(t10.cost.totalMarginPct));
+
+  const inc = quotationTotals({ lines: [{ amount: 112_000, costAmount: 70_000, providerSupplierId: 's1' }], vatRate: 0.12, vatInclusive: true });
+  check('VAT inclusive backs the tax out and the total stays the price', money(inc.vatAmount, 12_000) && money(inc.total, 112_000), `${inc.vatAmount} / ${inc.total}`);
+  check('an inclusive quote measures margin without the tax in it', money(inc.netOfTax, 100_000) && money(inc.cost.totalMargin, 30_000), `${inc.netOfTax} / ${inc.cost.totalMargin}`);
+  const inc10 = quotationTotals({ lines: [{ amount: 112_000 }], discountPct: 10, vatRate: 0.12, vatInclusive: true });
+  check('inclusive with a discount: tax backed out of the discounted figure', money(inc10.net, 100_800) && money(inc10.vatAmount, 10_800) && money(inc10.total, 100_800), `${inc10.vatAmount}`);
+
+  const oddQ = quotationTotals({ lines: [{ amount: 333.33 }], discountPct: 7.5, vatRate: 0.12 });
+  check(
+    'rounding: 7.5% of 333.33 is 25.00, VAT 37.00, total 345.33',
+    oddQ.discountAmount === 25 && oddQ.net === 308.33 && oddQ.vatAmount === 37 && oddQ.total === 345.33,
+    JSON.stringify({ d: oddQ.discountAmount, n: oddQ.net, v: oddQ.vatAmount, t: oddQ.total }),
+  );
+  check('a line amount rounds half up to the centavo (3 × 33.335 = 100.01)', Number(lineAmount(3, 33.335)) === 100.01, String(lineAmount(3, 33.335)));
+  check('an empty quotation is worth nothing and has no percentages', (() => {
+    const e = quotationTotals({ lines: [], vatRate: 0.12 });
+    return e.total === 0 && e.cost.totalMarginPct === null;
+  })());
+
+  // The stored figures are the same function's.
+  const stored = await prisma.quotation.create({
+    data: {
+      number: `${TAG}-${Date.now()}`,
+      customerId: customer.id,
+      ownerId: sales.id,
+      subject: `${TAG} Stored totals`,
+      revisions: {
+        create: [
+          {
+            revision: 0,
+            status: 'DRAFT',
+            vatRate: d(0.12),
+            discountPct: d(10),
+            items: {
+              create: [
+                { description: 'a', quantity: d(1), unitPrice: d(10_000), amount: d(10_000), unitCost: d(6_000), costAmount: d(6_000) },
+                { description: 'b', quantity: d(2), unitPrice: d(10_000), amount: d(20_000) },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    include: { revisions: true },
+  });
+  const recalced = await recalcQuotationRevision(stored.revisions[0].id);
+  check(
+    'a recalculated revision stores subtotal (pre-discount), discount, VAT on net and total',
+    money(Number(recalced!.subtotal), 30_000) &&
+      money(Number(recalced!.discountAmount), 3_000) &&
+      money(Number(recalced!.vatAmount), 3_240) &&
+      money(Number(recalced!.total), 30_240),
+    `${recalced!.subtotal} ${recalced!.discountAmount} ${recalced!.vatAmount} ${recalced!.total}`,
+  );
+  check(
+    'quotationValue still reads the stored total, discount included',
+    money(quotationValue([{ revision: 0, status: 'DRAFT', total: recalced!.total }]), 30_240),
+  );
+
+  // ── 10. Cost is stripped server-side, and never printed ────────────────────
+  console.log('\nCost visibility over HTTP, and the SCORO-style PDF');
+
+  if (!(await apiReachable())) {
+    failed += 1;
+    console.log(
+      `  ✗ the API is not reachable at ${BASE} — cost stripping and the PDF were NOT verified.\n` +
+        '      Start it with "npm run dev" in api/ and run this script again.',
+    );
+  } else {
+    const salesToken = signToken(sales.id, sales.email);
+    const otherToken = signToken(other.id, other.email);
+    const managerToken = signToken(manager.id, manager.email);
+
+    const clinic = await prisma.customer.create({
+      data: {
+        code: `${TAG}-C2`,
+        name: `${TAG} Clinic`,
+        paymentTerms: '30 days PDC',
+        phone: '(02) 8123 4567',
+        createdById: sales.id,
+        contacts: { create: [{ name: `${TAG} Engr. Cruz`, position: 'Facilities Head', mobile: '0917 555 0101', email: 'cruz@zz.local', isPrimary: true }] },
+        sites: { create: [{ name: `${TAG} Main`, address: '12 Sample St', city: 'Pasig City' }] },
+      },
+      include: { contacts: true },
+    });
+    const supplier = await prisma.supplier.create({ data: { code: `${TAG}-S1`, name: `${TAG} Compressor Supply` } });
+
+    const created = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      contactId: clinic.contacts[0].id,
+      subject: `${TAG} SCORO-style quote`,
+    });
+    check('the author raises a quotation over HTTP', created.status === 201, created.text.slice(0, 200));
+    const qid = String(created.body.id);
+    const rev0 = (created.body.revisions as { id: string; paymentTerms: string | null }[])[0];
+    check("payment terms default to the customer's own", rev0?.paymentTerms === '30 days PDC', String(rev0?.paymentTerms));
+
+    const providers = await http(salesToken, 'GET', `/quotations/providers?kind=supplier&q=${TAG}`);
+    check(
+      'a salesperson can pick a supplier without the supplier master permission',
+      providers.status === 200 && (providers.body as unknown as { id: string }[]).some((p) => p.id === supplier.id),
+      providers.text.slice(0, 200),
+    );
+
+    // Distinctive cost figures, so their absence from the other views means something.
+    const UNIT_COST = 7_777.77;
+    const COST_AMOUNT = 15_555.54;
+    const base = `/quotations/${qid}/revisions/${rev0.id}`;
+    const l1 = await http(salesToken, 'POST', `${base}/items`, {
+      group: 'Gruntech Installation',
+      title: 'Air compressor installation',
+      description: 'Mechanical and electrical tie-in',
+      quantity: 2,
+      unit: 'lot',
+      unitPrice: 12_500,
+      unitCost: UNIT_COST,
+      providerSupplierId: supplier.id,
+      costNote: `${TAG} supplier quote 88`,
+    });
+    const l2 = await http(salesToken, 'POST', `${base}/items`, {
+      group: 'Gruntech Services',
+      title: 'Commissioning',
+      description: 'Start-up and hand-over',
+      quantity: 1,
+      unit: 'lot',
+      unitPrice: 5_000,
+      unitCost: 1_000,
+      providerUserId: sales.id,
+    });
+    check('lines with cost and a provider are accepted', l1.status === 201 && l2.status === 201, `${l1.text.slice(0, 160)} ${l2.text.slice(0, 160)}`);
+    const both = await http(salesToken, 'POST', `${base}/items`, {
+      title: 'Bad line',
+      quantity: 1,
+      unitPrice: 1,
+      providerSupplierId: supplier.id,
+      providerUserId: sales.id,
+    });
+    check('a line cannot name a supplier AND a person', both.status === 400, both.text.slice(0, 160));
+
+    const patched = await http(salesToken, 'PATCH', base, { discountPct: 10, prNumber: 'PR-ZZ-4471', delivery: '4 to 6 weeks' });
+    check('the revision takes a discount, PR number and delivery', patched.status === 200, patched.text.slice(0, 200));
+
+    const mine = await http(salesToken, 'GET', `/quotations/${qid}`);
+    const myRev = (mine.body.revisions as Record<string, unknown>[])[0];
+    const myItems = myRev.items as Record<string, unknown>[];
+    check(
+      'the server computes amount and cost amount',
+      myItems[0].amount === 25_000 && myItems[0].costAmount === COST_AMOUNT,
+      JSON.stringify(myItems[0]).slice(0, 300),
+    );
+    check(
+      'the stored total is subtotal − 10% + VAT on the rest',
+      money(Number(myRev.total), (30_000 - 3_000) * 1.12),
+      String(myRev.total),
+    );
+    const panel = myRev.costPanel as { inHouseCost: number; outsourcedCost: number; totalMargin: number } | undefined;
+    check(
+      'the author sees the cost panel, split in-house / outsourced',
+      !!panel && money(panel.outsourcedCost, COST_AMOUNT) && money(panel.inHouseCost, 1_000) && money(panel.totalMargin, 27_000 - COST_AMOUNT - 1_000),
+      JSON.stringify(panel),
+    );
+    check('the author sees who carries each line', (myItems[0].providerSupplier as { name?: string } | null)?.name === supplier.name);
+
+    const theirs = await http(otherToken, 'GET', `/quotations/${qid}`);
+    check("another salesperson may read the quotation (sales holds view_all)", theirs.status === 200, String(theirs.status));
+    const theirRev = ((theirs.body.revisions ?? []) as Record<string, unknown>[])[0] ?? {};
+    const theirItems = (theirRev.items ?? []) as Record<string, unknown>[];
+    const costKeys = ['unitCost', 'costAmount', 'providerSupplierId', 'providerSupplier', 'providerUserId', 'providerUser', 'costNote', 'margin', 'marginPct'];
+    check(
+      'but without edit rights or costing.view_all, no line carries a cost key',
+      theirItems.length === 2 && theirItems.every((i) => costKeys.every((k) => !(k in i))),
+      JSON.stringify(theirItems[0] ?? {}).slice(0, 300),
+    );
+    check('nor the cost panel', !('costPanel' in theirRev) && theirs.body.canSeeCost === false);
+    check(
+      'and the cost figures appear nowhere in the response',
+      !theirs.text.includes('7777.77') && !theirs.text.includes('15555.54') && !theirs.text.includes(`${TAG} supplier quote 88`),
+    );
+    const managerView = await http(managerToken, 'GET', `/quotations/${qid}`);
+    check(
+      'a sales manager (edit_all, costing.view_all) does see cost',
+      managerView.body.canSeeCost === true && managerView.text.includes('15555.54'),
+    );
+
+    const pdfRes = await fetch(`${BASE}/quotations/${qid}/revisions/${rev0.id}/pdf`, {
+      headers: { Authorization: `Bearer ${salesToken}` },
+    });
+    const pdfBytes = Buffer.from(await pdfRes.arrayBuffer());
+    const text = pdfText(pdfBytes);
+    check('the quotation PDF renders', pdfRes.status === 200 && pdfBytes.subarray(0, 5).toString() === '%PDF-', String(pdfRes.status));
+    check('it prints the PR Number field and its value', /PR NUMBER/i.test(text) && text.includes('PR-ZZ-4471'));
+    check("it carries SCORO's opening and closing sentences", text.includes('Thank you very much for the opportunity') && text.includes('looking forward to your positive response'));
+    check('it prints the discount, then VAT on the discounted figure', text.includes('Less discount (10%)') && text.includes('PHP 3,240.00'));
+    check('it prints the group as a sub-heading and the line title', text.includes('GRUNTECH INSTALLATION') && text.includes('Air compressor installation'));
+    check('it prints the payment terms and the contact', text.includes('30 days PDC') && text.includes('0917 555 0101'));
+    check(
+      'and never a cost figure, a margin or a cost note',
+      !text.includes('7,777.77') && !text.includes('15,555.54') && !text.includes('supplier quote 88') && !text.includes(supplier.name),
+    );
+  }
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

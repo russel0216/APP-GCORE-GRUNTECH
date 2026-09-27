@@ -9,9 +9,15 @@ interface CompanyData {
   city: string | null;
   country: string;
   tin: string | null;
+  regNo: string | null;
   phone: string | null;
+  fax: string | null;
   email: string | null;
   website: string | null;
+  bankName: string | null;
+  bankBranch: string | null;
+  bankAccount: string | null;
+  documentTagline: string | null;
   logoPath: string | null;
   currency: string;
   vatRate: number;
@@ -52,9 +58,15 @@ export function Company() {
         city: data.city,
         country: data.country,
         tin: data.tin,
+        regNo: data.regNo,
         phone: data.phone,
+        fax: data.fax,
         email: data.email,
         website: data.website,
+        bankName: data.bankName,
+        bankBranch: data.bankBranch,
+        bankAccount: data.bankAccount,
+        documentTagline: data.documentTagline,
         currency: data.currency,
         vatRate: data.vatRate,
         ewtRate: data.ewtRate,
@@ -126,10 +138,15 @@ export function Company() {
               onChange={(e) => setData({ ...data, legalName: e.target.value })}
             />
           </Field>
-          <Field label="TIN">
-            <input value={data.tin ?? ''} onChange={(e) => setData({ ...data, tin: e.target.value })} />
-          </Field>
-          <Field label="Logo" hint="PNG with a transparent background works best. Appears top-left on every PDF.">
+          <div className="grid grid-2">
+            <Field label="TIN">
+              <input value={data.tin ?? ''} onChange={(e) => setData({ ...data, tin: e.target.value })} />
+            </Field>
+            <Field label="Reg. No." hint="SEC registration, printed as REG. NO.">
+              <input value={data.regNo ?? ''} onChange={(e) => setData({ ...data, regNo: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Logo" hint="PNG with a transparent background works best. Appears top-right on every PDF.">
             <div className="row">
               <input
                 ref={fileRef}
@@ -168,9 +185,22 @@ export function Company() {
             </Field>
           </div>
           <div className="grid grid-2">
-            <Field label="Phone">
-              <input value={data.phone ?? ''} onChange={(e) => setData({ ...data, phone: e.target.value })} />
+            <Field label="Tel">
+              <input
+                type="tel"
+                value={data.phone ?? ''}
+                onChange={(e) => setData({ ...data, phone: e.target.value })}
+              />
             </Field>
+            <Field label="Fax">
+              <input
+                type="tel"
+                value={data.fax ?? ''}
+                onChange={(e) => setData({ ...data, fax: e.target.value })}
+              />
+            </Field>
+          </div>
+          <div className="grid grid-2">
             <Field label="Email">
               <input
                 type="email"
@@ -178,11 +208,50 @@ export function Company() {
                 onChange={(e) => setData({ ...data, email: e.target.value })}
               />
             </Field>
+            <Field label="Website">
+              <input
+                value={data.website ?? ''}
+                onChange={(e) => setData({ ...data, website: e.target.value })}
+              />
+            </Field>
           </div>
-          <Field label="Website">
+          <Field
+            label="Document tagline"
+            hint="Printed in every document's footer, e.g. INDUSTRIAL UTILITY SOLUTIONS. The website is added after it unless you type it in yourself."
+          >
             <input
-              value={data.website ?? ''}
-              onChange={(e) => setData({ ...data, website: e.target.value })}
+              value={data.documentTagline ?? ''}
+              maxLength={140}
+              onChange={(e) => setData({ ...data, documentTagline: e.target.value })}
+            />
+          </Field>
+        </div>
+
+        <div className="card">
+          <h3 className="card-title">Bank details</h3>
+          <p className="muted">
+            Where customers pay. Kept here with the rest of the letterhead so every document that asks
+            for payment prints the same account.
+          </p>
+          <div className="grid grid-2">
+            <Field label="Bank name">
+              <input
+                value={data.bankName ?? ''}
+                onChange={(e) => setData({ ...data, bankName: e.target.value })}
+              />
+            </Field>
+            <Field label="Bank branch">
+              <input
+                value={data.bankBranch ?? ''}
+                onChange={(e) => setData({ ...data, bankBranch: e.target.value })}
+              />
+            </Field>
+          </div>
+          <Field label="Bank account">
+            <input
+              className="mono"
+              value={data.bankAccount ?? ''}
+              onChange={(e) => setData({ ...data, bankAccount: e.target.value })}
             />
           </Field>
         </div>

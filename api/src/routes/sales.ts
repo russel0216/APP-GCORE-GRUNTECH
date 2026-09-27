@@ -18,7 +18,7 @@ import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
-import { renderDocument, formatMoney, formatDate, formatDateTime, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatMoney, formatDate, formatDateTime, type PdfCell, type PdfSection } from '../shared/pdf';
 import { activityWhere, type ActivityQuery } from '../shared/activities';
 import { manilaDayKey } from '../shared/day';
 import { toCsv } from '../shared/insights';
@@ -29,6 +29,13 @@ import {
   columnByKey,
   type BoardResponse,
 } from '../shared/pipeline';
+import {
+  quotationTotals,
+  lineAmount,
+  recalcQuotationRevision,
+  canSeeQuotationCost,
+  stripLineCost,
+} from '../shared/quotation';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -377,58 +384,121 @@ leadRoutes.delete(
 export const quotationRoutes = Router();
 quotationRoutes.use(authenticate);
 
-function presentRevision(rev: Record<string, unknown>) {
-  const items = (rev.items ?? []) as Record<string, unknown>[];
-  return {
+/**
+ * A revision as the API returns it: Decimals as numbers, and — for a caller
+ * allowed to see cost — the SCORO cost panel beside the lines. For everybody
+ * else the line cost keys are removed HERE, on the server (see
+ * `canSeeQuotationCost`), and the costing's cost goes with them.
+ */
+function presentRevision(rev: Record<string, unknown>, showCost: boolean) {
+  const items = (rev.items ?? null) as Record<string, unknown>[] | null;
+  const costing = rev.costing as Record<string, unknown> | null | undefined;
+  const totals = items
+    ? quotationTotals({
+        lines: items as { amount: Prisma.Decimal }[],
+        discountPct: rev.discountPct as Prisma.Decimal,
+        vatRate: rev.vatRate as Prisma.Decimal,
+        vatInclusive: rev.vatInclusive as boolean,
+      })
+    : null;
+
+  const presented: Record<string, unknown> = {
     ...rev,
     subtotal: num(rev.subtotal as Prisma.Decimal),
+    discountPct: num(rev.discountPct as Prisma.Decimal),
+    discountAmount: num(rev.discountAmount as Prisma.Decimal),
     vatAmount: num(rev.vatAmount as Prisma.Decimal),
     total: num(rev.total as Prisma.Decimal),
     vatRate: num(rev.vatRate as Prisma.Decimal),
-    items: items.map((i) => ({
-      ...i,
-      quantity: num(i.quantity as Prisma.Decimal),
-      unitPrice: num(i.unitPrice as Prisma.Decimal),
-      amount: num(i.amount as Prisma.Decimal),
-    })),
+    // Derived, never stored: subtotal − discount, and the sum without tax.
+    net: totals ? totals.net : num(rev.subtotal as Prisma.Decimal) - num(rev.discountAmount as Prisma.Decimal),
+    netOfTax: totals?.netOfTax,
   };
+
+  if (items) {
+    presented.items = items.map((i, n) => {
+      const line: Record<string, unknown> = {
+        ...i,
+        quantity: num(i.quantity as Prisma.Decimal),
+        unitPrice: num(i.unitPrice as Prisma.Decimal),
+        amount: num(i.amount as Prisma.Decimal),
+      };
+      if (!showCost) return stripLineCost(line);
+      const m = totals!.lines[n];
+      return {
+        ...line,
+        unitCost: i.unitCost == null ? null : num(i.unitCost as Prisma.Decimal),
+        costAmount: m.costAmount,
+        margin: m.margin,
+        marginPct: m.marginPct,
+      };
+    });
+  }
+  if (showCost && totals) presented.costPanel = totals.cost;
+
+  if (costing !== undefined) {
+    presented.costing = costing
+      ? showCost
+        ? { ...costing, contractValue: num(costing.contractValue as Prisma.Decimal), totalCost: num(costing.totalCost as Prisma.Decimal) }
+        : { id: costing.id, number: costing.number, title: costing.title, contractValue: num(costing.contractValue as Prisma.Decimal) }
+      : null;
+  }
+  return presented;
 }
 
-/** Recomputes a revision's money from its items and its own VAT snapshot. */
-async function recalcRevision(revisionId: string, tx: Prisma.TransactionClient = prisma) {
-  const rev = await tx.quotationRevision.findUnique({
-    where: { id: revisionId },
-    include: { items: true },
-  });
-  if (!rev) return null;
+/** The one arithmetic lives in shared/quotation.ts; this is only its name here. */
+const recalcRevision = recalcQuotationRevision;
 
-  const subtotal = rev.items.reduce((s, i) => s + Number(i.amount), 0);
-  const rate = Number(rev.vatRate);
-  // VAT-inclusive pricing means the entered figures already contain the tax,
-  // so it is backed out rather than added on.
-  const vatAmount = rev.vatInclusive ? subtotal - subtotal / (1 + rate) : subtotal * rate;
-  const total = rev.vatInclusive ? subtotal : subtotal + vatAmount;
-
-  return tx.quotationRevision.update({
+/** A revision re-read with its lines, for the line routes to answer with. */
+async function revisionWithItems(revisionId: string) {
+  return prisma.quotationRevision.findUnique({
     where: { id: revisionId },
-    data: { subtotal: d(subtotal), vatAmount: d(vatAmount), total: d(total) },
+    include: { items: { orderBy: { sortOrder: 'asc' }, include: LINE_PROVIDERS } },
   });
 }
+
+/** Who carries a line's cost, by name — only ever sent to a caller who may see cost. */
+const LINE_PROVIDERS = {
+  providerSupplier: { select: { id: true, code: true, name: true } },
+  providerUser: { select: { id: true, name: true, position: true } },
+} as const;
 
 async function loadQuotation(id: string) {
   return prisma.quotation.findUnique({
     where: { id },
     include: {
       // A customer has no address of its own — addresses belong to its sites.
-      customer: { select: { id: true, code: true, name: true, legalName: true } },
-      contact: { select: { id: true, name: true, position: true, email: true } },
+      customer: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          legalName: true,
+          phone: true,
+          email: true,
+          website: true,
+          paymentTerms: true,
+          // The client block on the PDF prints an address; a customer keeps
+          // its addresses on its sites, so the first active one stands in
+          // when the quotation names none.
+          sites: {
+            where: { isActive: true },
+            select: { address: true, city: true },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+          },
+        },
+      },
+      contact: { select: { id: true, name: true, position: true, email: true, phone: true, mobile: true } },
       site: { select: { id: true, name: true, address: true, city: true } },
       lead: { select: { id: true, number: true, companyName: true } },
-      owner: { select: { id: true, name: true, position: true } },
+      owner: { select: { id: true, name: true, position: true, email: true, phone: true } },
+      // Set when this quotation carries on a SCORO quote under the same number.
+      legacyQuote: { select: { id: true, number: true, status: true } },
       revisions: {
         orderBy: { revision: 'desc' },
         include: {
-          items: { orderBy: { sortOrder: 'asc' } },
+          items: { orderBy: { sortOrder: 'asc' }, include: LINE_PROVIDERS },
           costing: { select: { id: true, number: true, title: true, contractValue: true, totalCost: true } },
           approvedBy: { select: { id: true, name: true } },
           // The project a revision became. Without it a WON quotation still
@@ -468,6 +538,7 @@ quotationRoutes.get(
         include: {
           customer: { select: { id: true, name: true } },
           owner: { select: { id: true, name: true } },
+          legacyQuote: { select: { id: true, number: true, status: true } },
           revisions: {
             orderBy: { revision: 'desc' },
             take: 1,
@@ -492,6 +563,7 @@ quotationRoutes.get(
           customer: r.customer,
           owner: r.owner,
           createdAt: r.createdAt,
+          legacyQuote: r.legacyQuote,
           latest: r.revisions[0]
             ? { ...r.revisions[0], total: num(r.revisions[0].total) }
             : null,
@@ -532,6 +604,64 @@ quotationRoutes.get(
   }),
 );
 
+/**
+ * Who can carry a line's cost: suppliers (outsourced) or our own people
+ * (in-house). Names only.
+ *
+ * Its own route rather than `/suppliers/lookup`, because that one is gated by
+ * `gchain.suppliers.view_all`, which the sales role does not hold — naming who
+ * supplies a line is not the same right as browsing the supplier master. The
+ * same reasoning as overtime's `/overtime/chargeable`. Declared above `/:id`
+ * or that route swallows it.
+ */
+quotationRoutes.get(
+  '/providers',
+  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  handler(async (req, res) => {
+    const kind = String(req.query.kind ?? 'supplier');
+    const term = String(req.query.q ?? '').trim();
+    if (kind === 'user') {
+      res.json(
+        await prisma.user.findMany({
+          where: {
+            isActive: true,
+            ...(term
+              ? {
+                  OR: [
+                    { name: { contains: term, mode: 'insensitive' } },
+                    { position: { contains: term, mode: 'insensitive' } },
+                  ],
+                }
+              : {}),
+          },
+          select: { id: true, name: true, position: true },
+          orderBy: { name: 'asc' },
+          take: 50,
+        }),
+      );
+      return;
+    }
+    res.json(
+      await prisma.supplier.findMany({
+        where: {
+          isActive: true,
+          ...(term
+            ? {
+                OR: [
+                  { name: { contains: term, mode: 'insensitive' } },
+                  { code: { contains: term, mode: 'insensitive' } },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, code: true, name: true },
+        orderBy: { name: 'asc' },
+        take: 50,
+      }),
+    );
+  }),
+);
+
 quotationRoutes.get(
   '/:id',
   requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
@@ -547,21 +677,19 @@ quotationRoutes.get(
       throw forbidden('This quotation belongs to someone else');
     }
 
+    const showCost = canSeeQuotationCost(me, quotation.ownerId);
+    const { customer, ...rest } = quotation;
+    const { sites, ...customerRest } = customer;
     res.json({
-      ...quotation,
+      ...rest,
+      customer: { ...customerRest, address: sites[0] ? [sites[0].address, sites[0].city].filter(Boolean).join(', ') : null },
       revisions: quotation.revisions.map((r) =>
-        presentRevision({
-          ...r,
-          costing: r.costing
-            ? {
-                ...r.costing,
-                contractValue: num(r.costing.contractValue),
-                totalCost: num(r.costing.totalCost),
-              }
-            : null,
-        } as unknown as Record<string, unknown>),
+        presentRevision(r as unknown as Record<string, unknown>, showCost),
       ),
       canEdit: canEditRecord(me, 'gops', 'quotations', quotation.ownerId),
+      // Tells the screen whether to draw the cost columns — the keys are
+      // already absent when it is false; this only saves it guessing.
+      canSeeCost: showCost,
     });
   }),
 );
@@ -580,6 +708,10 @@ const quotationSchema = z.object({
   terms: z.string().optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
   expectedClosing: z.string().optional().nullable(),
+  // SCORO's header fields. Payment terms default to the customer's own.
+  prNumber: z.string().trim().max(120).optional().nullable(),
+  delivery: z.string().trim().max(500).optional().nullable(),
+  paymentTerms: z.string().trim().max(500).optional().nullable(),
 });
 
 quotationRoutes.post(
@@ -614,6 +746,10 @@ quotationRoutes.post(
       body.expectedClosing !== undefined && body.expectedClosing !== null
         ? asDate(body.expectedClosing)
         : (lead?.expectedClosing ?? null);
+    const customerTerms = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { paymentTerms: true },
+    });
 
     const quotation = await prisma.$transaction(async (tx) => {
       // The author's employee digits go into the number (seeded pattern
@@ -639,6 +775,9 @@ quotationRoutes.post(
                 validityDays: body.validityDays ?? 30,
                 terms: body.terms || null,
                 vatRate: company?.vatRate ?? d(0.12),
+                prNumber: body.prNumber || null,
+                delivery: body.delivery || null,
+                paymentTerms: body.paymentTerms || customerTerms?.paymentTerms || null,
               },
             ],
           },
@@ -849,24 +988,35 @@ quotationRoutes.post(
           notes: latest?.notes ?? null,
           vatRate: latest?.vatRate ?? d(0.12),
           vatInclusive: latest?.vatInclusive ?? false,
+          discountPct: latest?.discountPct ?? d(0),
+          prNumber: latest?.prNumber ?? null,
+          delivery: latest?.delivery ?? null,
+          paymentTerms: latest?.paymentTerms ?? null,
           items: latest
             ? {
                 create: latest.items.map((i) => ({
+                  group: i.group,
+                  title: i.title,
                   description: i.description,
                   quantity: i.quantity,
                   unit: i.unit,
                   unitPrice: i.unitPrice,
                   amount: i.amount,
                   sortOrder: i.sortOrder,
+                  unitCost: i.unitCost,
+                  costAmount: i.costAmount,
+                  providerSupplierId: i.providerSupplierId,
+                  providerUserId: i.providerUserId,
+                  costNote: i.costNote,
                 })),
               }
             : undefined,
         },
-        include: { items: true },
       });
     });
 
     await recalcRevision(created.id);
+    const fresh = await revisionWithItems(created.id);
     await audit(
       {
         entityType: 'quotation',
@@ -876,7 +1026,7 @@ quotationRoutes.post(
       },
       req,
     );
-    res.status(201).json(presentRevision(created as unknown as Record<string, unknown>));
+    res.status(201).json(presentRevision(fresh as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -886,13 +1036,17 @@ const revisionSchema = z.object({
   terms: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   vatInclusive: z.boolean().optional(),
+  discountPct: z.number().min(0, 'A discount cannot be negative').max(100, 'A discount cannot exceed 100%').optional(),
+  prNumber: z.string().trim().max(120).optional().nullable(),
+  delivery: z.string().trim().max(500).optional().nullable(),
+  paymentTerms: z.string().trim().max(500).optional().nullable(),
 });
 
 quotationRoutes.patch(
   '/:id/revisions/:revisionId',
   require_('gops.quotations.edit_own'),
   handler(async (req, res) => {
-    await revisionForEdit(req, req.params.id, req.params.revisionId);
+    const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const body = parseBody(revisionSchema, req.body);
 
     await prisma.quotationRevision.update({
@@ -903,10 +1057,26 @@ quotationRoutes.patch(
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+        ...(body.discountPct !== undefined ? { discountPct: d(body.discountPct) } : {}),
+        ...(body.prNumber !== undefined ? { prNumber: body.prNumber || null } : {}),
+        ...(body.delivery !== undefined ? { delivery: body.delivery || null } : {}),
+        ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
       },
     });
-    const updated = await recalcRevision(req.params.revisionId);
-    res.json(presentRevision(updated as unknown as Record<string, unknown>));
+    await recalcRevision(req.params.revisionId);
+    const discountChanged = body.discountPct !== undefined && !d(body.discountPct).equals(revision.discountPct);
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: req.params.id,
+        action: 'UPDATED',
+        summary: discountChanged
+          ? `Revision ${revision.revision}: discount ${Number(revision.discountPct)}% -> ${body.discountPct}%`
+          : `Updated the terms of revision ${revision.revision}`,
+      },
+      req,
+    );
+    res.json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -936,9 +1106,12 @@ quotationRoutes.post(
     await prisma.$transaction(async (tx) => {
       await tx.quotationItem.deleteMany({ where: { revisionId: req.params.revisionId } });
       await tx.quotationItem.createMany({
+        // The section's name is the line's title (bold on the PDF) and its
+        // description the text under it — SCORO's two-part line.
         data: sections.map((s, i) => ({
           revisionId: req.params.revisionId,
-          description: s.description ? `${s.name} — ${s.description}` : s.name,
+          title: s.name,
+          description: s.description ?? '',
           quantity: d(1),
           unit: 'lot',
           unitPrice: s.value,
@@ -946,19 +1119,8 @@ quotationRoutes.post(
           sortOrder: i,
         })),
       });
+      await recalcRevision(req.params.revisionId, tx);
     });
-
-    const updated = await prisma.quotationRevision.findUnique({
-      where: { id: req.params.revisionId },
-      include: { items: { orderBy: { sortOrder: 'asc' } } },
-    });
-    await recalcRevision(req.params.revisionId);
-
-    const final = await prisma.quotationRevision.findUnique({
-      where: { id: req.params.revisionId },
-      include: { items: { orderBy: { sortOrder: 'asc' } } },
-    });
-    void updated;
 
     await audit(
       {
@@ -969,38 +1131,108 @@ quotationRoutes.post(
       },
       req,
     );
-    res.json(presentRevision(final as unknown as Record<string, unknown>));
+    res.json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
   }),
 );
 
-const itemSchema = z.object({
-  description: z.string().trim().min(1, 'Describe the line'),
+/**
+ * A SCORO line: group, title and description; quantity, unit and price; and,
+ * internally, what it costs and who carries that cost. Amount and cost amount
+ * are computed here and never accepted from the client.
+ */
+const itemFields = {
+  group: z.string().trim().max(120).optional().nullable(),
+  title: z.string().trim().max(300).optional().nullable(),
+  description: z.string().optional().nullable(),
   quantity: z.number().min(0),
   unit: z.string().trim().min(1).default('lot'),
   unitPrice: z.number().min(0),
+  unitCost: z.number().min(0).optional().nullable(),
+  providerSupplierId: z.string().optional().nullable(),
+  providerUserId: z.string().optional().nullable(),
+  costNote: z.string().optional().nullable(),
   sortOrder: z.number().int().optional(),
-});
+};
+const itemSchema = z.object(itemFields);
+const itemPatchSchema = z.object(itemFields).partial();
+
+/**
+ * Checks the parts of a line that span fields: it says what it is, and one
+ * provider at most. A provider named must exist — a bad id would otherwise
+ * surface as a foreign-key 500.
+ */
+async function checkLine(line: {
+  title?: string | null;
+  description?: string | null;
+  providerSupplierId?: string | null;
+  providerUserId?: string | null;
+}) {
+  if (!(line.title ?? '').trim() && !(line.description ?? '').trim()) {
+    throw badRequest('Give the line a product title or a description');
+  }
+  if (line.providerSupplierId && line.providerUserId) {
+    throw badRequest('A line’s cost is carried by a supplier OR by one of our people, not both');
+  }
+  if (line.providerSupplierId) {
+    const found = await prisma.supplier.findUnique({ where: { id: line.providerSupplierId }, select: { id: true } });
+    if (!found) throw badRequest('That supplier does not exist');
+  }
+  if (line.providerUserId) {
+    const found = await prisma.user.findUnique({ where: { id: line.providerUserId }, select: { id: true } });
+    if (!found) throw badRequest('That person does not exist');
+  }
+}
 
 quotationRoutes.post(
   '/:id/revisions/:revisionId/items',
   require_('gops.quotations.edit_own'),
   handler(async (req, res) => {
-    await revisionForEdit(req, req.params.id, req.params.revisionId);
+    const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const body = parseBody(itemSchema, req.body);
+    await checkLine(body);
 
-    await prisma.quotationItem.create({
-      data: {
-        revisionId: req.params.revisionId,
-        description: body.description,
-        quantity: d(body.quantity),
-        unit: body.unit,
-        unitPrice: d(body.unitPrice),
-        amount: d(body.quantity * body.unitPrice),
-        sortOrder: body.sortOrder ?? 0,
-      },
+    const hasCost = body.unitCost !== undefined && body.unitCost !== null;
+    const item = await prisma.$transaction(async (tx) => {
+      const last = body.sortOrder === undefined
+        ? await tx.quotationItem.findFirst({
+            where: { revisionId: req.params.revisionId },
+            orderBy: { sortOrder: 'desc' },
+            select: { sortOrder: true },
+          })
+        : null;
+      const created = await tx.quotationItem.create({
+        data: {
+          revisionId: req.params.revisionId,
+          group: body.group || null,
+          title: body.title || null,
+          description: body.description ?? '',
+          quantity: d(body.quantity),
+          unit: body.unit,
+          unitPrice: d(body.unitPrice),
+          amount: lineAmount(body.quantity, body.unitPrice),
+          // A new line goes to the bottom, as it does in SCORO.
+          sortOrder: body.sortOrder ?? (last ? last.sortOrder + 1 : 0),
+          unitCost: hasCost ? d(body.unitCost!) : null,
+          costAmount: hasCost ? lineAmount(body.quantity, body.unitCost!) : null,
+          providerSupplierId: body.providerSupplierId || null,
+          providerUserId: body.providerUserId || null,
+          costNote: body.costNote || null,
+        },
+      });
+      await recalcRevision(req.params.revisionId, tx);
+      return created;
     });
-    const updated = await recalcRevision(req.params.revisionId);
-    res.status(201).json(presentRevision(updated as unknown as Record<string, unknown>));
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'UPDATED',
+        summary: `Added a line to ${quotation.number} R${revision.revision}: ${item.title || item.description.slice(0, 60)}`,
+      },
+      req,
+    );
+    res.status(201).json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -1008,8 +1240,8 @@ quotationRoutes.patch(
   '/:id/revisions/:revisionId/items/:itemId',
   require_('gops.quotations.edit_own'),
   handler(async (req, res) => {
-    await revisionForEdit(req, req.params.id, req.params.revisionId);
-    const body = parseBody(itemSchema.partial(), req.body);
+    const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
+    const body = parseBody(itemPatchSchema, req.body);
 
     const existing = await prisma.quotationItem.findFirst({
       where: { id: req.params.itemId, revisionId: req.params.revisionId },
@@ -1018,20 +1250,53 @@ quotationRoutes.patch(
 
     const quantity = body.quantity ?? Number(existing.quantity);
     const unitPrice = body.unitPrice ?? Number(existing.unitPrice);
+    // undefined keeps the stored cost; null clears it.
+    const unitCost =
+      body.unitCost === undefined ? (existing.unitCost == null ? null : Number(existing.unitCost)) : body.unitCost;
+    const merged = {
+      title: body.title !== undefined ? body.title : existing.title,
+      description: body.description !== undefined ? body.description : existing.description,
+      providerSupplierId: body.providerSupplierId !== undefined ? body.providerSupplierId || null : existing.providerSupplierId,
+      providerUserId: body.providerUserId !== undefined ? body.providerUserId || null : existing.providerUserId,
+    };
+    // Choosing one kind of provider clears the other, so switching a line
+    // from outsourced to in-house is one edit rather than two.
+    if (body.providerUserId && body.providerSupplierId === undefined) merged.providerSupplierId = null;
+    if (body.providerSupplierId && body.providerUserId === undefined) merged.providerUserId = null;
+    await checkLine(merged);
 
-    await prisma.quotationItem.update({
-      where: { id: req.params.itemId },
-      data: {
-        ...(body.description !== undefined ? { description: body.description } : {}),
-        ...(body.unit !== undefined ? { unit: body.unit } : {}),
-        ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
-        quantity: d(quantity),
-        unitPrice: d(unitPrice),
-        amount: d(quantity * unitPrice),
-      },
+    await prisma.$transaction(async (tx) => {
+      await tx.quotationItem.update({
+        where: { id: req.params.itemId },
+        data: {
+          ...(body.group !== undefined ? { group: body.group || null } : {}),
+          ...(body.title !== undefined ? { title: body.title || null } : {}),
+          ...(body.description !== undefined ? { description: body.description ?? '' } : {}),
+          ...(body.unit !== undefined ? { unit: body.unit } : {}),
+          ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
+          ...(body.costNote !== undefined ? { costNote: body.costNote || null } : {}),
+          providerSupplierId: merged.providerSupplierId,
+          providerUserId: merged.providerUserId,
+          quantity: d(quantity),
+          unitPrice: d(unitPrice),
+          amount: lineAmount(quantity, unitPrice),
+          unitCost: unitCost == null ? null : d(unitCost),
+          costAmount: unitCost == null ? null : lineAmount(quantity, unitCost),
+        },
+      });
+      await recalcRevision(req.params.revisionId, tx);
     });
-    const updated = await recalcRevision(req.params.revisionId);
-    res.json(presentRevision(updated as unknown as Record<string, unknown>));
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'UPDATED',
+        summary: `Changed a line on ${quotation.number} R${revision.revision}: ${merged.title || (merged.description ?? '').slice(0, 60)}`,
+      },
+      req,
+    );
+    res.json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -1039,15 +1304,26 @@ quotationRoutes.delete(
   '/:id/revisions/:revisionId/items/:itemId',
   require_('gops.quotations.edit_own'),
   handler(async (req, res) => {
-    await revisionForEdit(req, req.params.id, req.params.revisionId);
+    const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const existing = await prisma.quotationItem.findFirst({
       where: { id: req.params.itemId, revisionId: req.params.revisionId },
     });
     if (!existing) throw notFound('Line not found');
 
-    await prisma.quotationItem.delete({ where: { id: req.params.itemId } });
-    const updated = await recalcRevision(req.params.revisionId);
-    res.json(presentRevision(updated as unknown as Record<string, unknown>));
+    await prisma.$transaction(async (tx) => {
+      await tx.quotationItem.delete({ where: { id: req.params.itemId } });
+      await recalcRevision(req.params.revisionId, tx);
+    });
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'UPDATED',
+        summary: `Removed a line from ${quotation.number} R${revision.revision}: ${existing.title || existing.description.slice(0, 60)}`,
+      },
+      req,
+    );
+    res.json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -1153,74 +1429,139 @@ quotationRoutes.get(
 
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     const currency = company?.currency ?? 'PHP';
+    const money = (v: Prisma.Decimal | number) => formatMoney(Number(v), currency);
     const rate = Number(revision.vatRate);
+    const ratePct = `${(rate * 100).toFixed(0)}%`;
+    const discountPct = Number(revision.discountPct);
+    const discountAmount = Number(revision.discountAmount);
+    const net = Number(revision.subtotal) - discountAmount;
 
+    // SCORO's client block: name, address, phone — and the person it is for.
+    const place = quotation.site?.address
+      ? [quotation.site.address, quotation.site.city]
+      : quotation.customer.sites[0]
+        ? [quotation.customer.sites[0].address, quotation.customer.sites[0].city]
+        : [];
+    const client = [
+      quotation.customer.legalName || quotation.customer.name,
+      place.filter(Boolean).join(', '),
+      quotation.customer.phone ? `Tel: ${quotation.customer.phone}` : '',
+      quotation.customer.website ?? '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const contact = quotation.contact;
+    const attention = contact
+      ? [
+          contact.name,
+          contact.position ?? '',
+          contact.mobile || contact.phone ? `Mobile: ${contact.mobile || contact.phone}` : '',
+          contact.email ?? '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : '—';
+
+    // The lines, with SCORO's group as a sub-heading row wherever it changes.
+    // Title in bold, description under it. Cost is never read here.
+    const rows: PdfCell[][] = [];
+    let group: string | null = null;
+    let n = 0;
+    for (const i of revision.items) {
+      if (i.group && i.group !== group) rows.push(['', { title: i.group.toUpperCase() }, '', '', '']);
+      group = i.group ?? group;
+      n++;
+      const qty = Number(i.quantity);
+      const title = (i.title ?? '').trim();
+      const description = (i.description ?? '').trim();
+      rows.push([
+        String(n),
+        title ? { title, ...(description ? { body: description } : {}) } : description,
+        `${Number.isInteger(qty) ? qty : qty.toString()} ${i.unit}`,
+        money(i.unitPrice),
+        money(i.amount),
+      ]);
+    }
+
+    const totals: string[][] = [['Sub Total Price', money(revision.subtotal)]];
+    if (discountAmount > 0) {
+      totals.push([`Less discount (${discountPct.toFixed(discountPct % 1 ? 2 : 0)}%)`, `-${money(discountAmount)}`]);
+      totals.push(['Sub Total after discount', money(net)]);
+    }
+    if (revision.vatInclusive) {
+      totals.push([`Total Price (${currency}), VAT inclusive`, money(revision.total)]);
+      totals.push([`VAT included (${ratePct})`, money(revision.vatAmount)]);
+    } else {
+      totals.push([`VAT (${ratePct})`, money(revision.vatAmount)]);
+      totals.push([`Total Price (${currency})`, money(revision.total)]);
+    }
+
+    const validity = `${revision.validityDays} days from ${formatDate(revision.createdAt)}`;
     const sections: PdfSection[] = [
       {
         kind: 'fields',
         columns: 2,
         fields: [
-          { label: 'Customer', value: quotation.customer.name },
-          { label: 'Attention', value: quotation.contact?.name ?? '—' },
-          { label: 'Site', value: quotation.site?.name ?? '—' },
-          { label: 'Position', value: quotation.contact?.position ?? '—' },
-          {
-            label: 'Valid for',
-            value: `${revision.validityDays} days from ${formatDate(revision.createdAt)}`,
-          },
-          { label: 'Prepared by', value: quotation.owner.name },
+          { label: 'Date', value: formatDate(revision.createdAt) },
+          { label: 'Quote No.', value: `${quotation.number}${revision.revision > 0 ? ` R${revision.revision}` : ''}` },
+          { label: 'Client', value: client },
+          { label: 'Attention', value: attention },
+          { label: 'Payment Terms', value: revision.paymentTerms || '—' },
+          { label: 'PR Number', value: revision.prNumber || '—' },
+          { label: 'Delivery', value: revision.delivery || '—' },
+          { label: 'Validity', value: validity },
         ],
       },
       { kind: 'text', title: 'Subject', body: quotation.subject },
+      { kind: 'text', body: 'Thank you very much for the opportunity to provide the following quotation.' },
       {
         kind: 'table',
         title: 'Scope and pricing',
-        head: ['#', 'Description', 'Qty', 'Unit', 'Unit price', 'Amount'],
-        widths: [5, 45, 9, 9, 16, 16],
-        align: ['right', 'left', 'right', 'left', 'right', 'right'],
-        rows: revision.items.map((i, n) => [
-          String(n + 1),
-          i.description,
-          String(Number(i.quantity)),
-          i.unit,
-          formatMoney(Number(i.unitPrice), currency),
-          formatMoney(Number(i.amount), currency),
-        ]),
+        head: ['#', 'Product description', 'Qty', 'Unit price', 'Total'],
+        widths: [5, 51, 12, 16, 16],
+        align: ['right', 'left', 'right', 'right', 'right'],
+        rows,
       },
       {
         kind: 'table',
         head: ['', 'Amount'],
         widths: [72, 28],
         align: ['right', 'right'],
-        rows: revision.vatInclusive
-          ? [
-              ['Total (VAT inclusive)', formatMoney(Number(revision.total), currency)],
-              [`VAT included (${(rate * 100).toFixed(0)}%)`, formatMoney(Number(revision.vatAmount), currency)],
-            ]
-          : [
-              ['Subtotal', formatMoney(Number(revision.subtotal), currency)],
-              [`VAT (${(rate * 100).toFixed(0)}%)`, formatMoney(Number(revision.vatAmount), currency)],
-              ['TOTAL', formatMoney(Number(revision.total), currency)],
-            ],
+        rows: totals,
       },
     ];
 
     if (revision.terms) sections.push({ kind: 'text', title: 'Terms and conditions', body: revision.terms });
     if (revision.notes) sections.push({ kind: 'text', title: 'Notes', body: revision.notes });
 
+    sections.push({
+      kind: 'text',
+      body: 'I trust that the above offer meets your requirements, and I am looking forward to your positive response.',
+    });
+    sections.push({
+      kind: 'text',
+      body: ['Sincerely yours,', '', quotation.owner.name, quotation.owner.phone ?? '', quotation.owner.email]
+        .filter((line, i) => i < 2 || line)
+        .join('\n'),
+    });
+    sections.push({ kind: 'text', body: 'This document is system generated and does not require signature.' });
+
     const pdf = await renderDocument({
       title: 'Quotation',
       documentNumber: quotation.number,
       revision: String(revision.revision),
       date: revision.createdAt,
-      reference: `${quotation.customer.name}${quotation.site ? ` — ${quotation.site.name}` : ''}`,
+      // No header reference: the Client field below names the customer, and a
+      // long name wrapped in the header ran into the first field row.
       sections,
       signatories: [
         { role: 'Prepared by', name: quotation.owner.name, position: quotation.owner.position ?? undefined, at: revision.createdAt },
         { role: 'Approved by', name: revision.approvedBy?.name, at: revision.approvedAt },
         { role: 'Conforme', name: quotation.contact?.name },
       ],
-      footerNote: `${company?.name ?? ''} · ${quotation.number} R${revision.revision}`,
+      // The company block and strapline are the engine's (rule 6); this only
+      // says which revision the paper is.
+      footerNote: `${quotation.number} R${revision.revision}`,
     });
 
     await audit(

@@ -113,14 +113,14 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,583 assertions across twenty scripts** (counted 2026-09-27): foundation 104,
-masters 54, sales 64, costing 40, pipeline 44, calendar 38, numbering 46,
-partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
-evaluations 119, academy 97, finance 133, aftermarket 166, insights 92,
-insights-brief 43, workspace 39. They cover permission resolution, numbering
+**1,745 assertions across twenty-one scripts** (counted 2026-09-27): foundation 115,
+masters 54, sales 110, costing 40, pipeline 44, calendar 38, numbering 46,
+partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 85,
+evaluations 119, academy 97, finance 133, aftermarket 166, archive 106,
+insights 92, insights-brief 43, workspace 39. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -131,7 +131,7 @@ versioning, Phase 9's reconciliation between the reports and the records, and
 Phase 10's rules listed below.
 
 **Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
-API.** The other seventeen check route guards and responses over HTTP against
+API.** The other eighteen check route guards and responses over HTTP against
 `http://localhost:5100`, and say so loudly — a failed "API is not reachable"
 line — rather than skipping them if the API is down or restarting (under
 `tsx watch` an edit elsewhere restarts it mid-run; rerun that script). All create
@@ -880,3 +880,43 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   keeps working.
 - **Industry reporting puts UNCLASSIFIED last**, and the industry table sums to
   the report's own totals — asserted.
+
+## SCORO migration notes
+
+Gruntech moved from SCORO. Customers came across through the ordinary CSV
+import; quotations come across as a **read-only archive**, and new work starts
+in G-CORE. `tools/scoro/` holds the workstation-side converters (Python +
+PyMuPDF — never installed on the server); `docs/notes/{S,C,Q,A,R}-*.md` carry
+the detail.
+
+- **`LegacyQuote` is history, not a quotation.** Nothing live points at it; the
+  only link is one-way, `continuedQuotationId`, set by "Continue in G-CORE",
+  which creates a real quotation with the SAME number from an OPEN SCORO status.
+  Never report archive values as pipeline — Insights and the board read
+  `Quotation` only.
+- **Import is `importBundle()` in `shared/legacyQuotes.ts`**, from the CLI
+  (`scripts/import-scoro-quotes.ts <bundle> [--commit]`) or the archive's Import
+  button — one function, dry run by default. Re-import upserts on
+  `(source, sourceId)` and never clears `continuedQuotationId`. A quote with
+  `pdf: null` is archived without an attachment.
+- **Counters continue SCORO's numbering, and are only ever raised.** A SCORO
+  number seeds `<YYYY-MM>@<code>` only when it is a house number — 3-digit code,
+  YYMM, 3-digit sequence — whose YYMM equals the quote's own date, for the
+  current month onward. Keyed per CODE, not per owner: salespeople issued
+  numbers under colleagues' codes, and every such number must stay unissuable.
+  SCORO dropped leading zeros on some (`12609060` is `0012609060`), so 8/9-digit
+  numbers are padded before the date test. Numbers that fail (Camille's
+  `83`+YYMM+run, Erica's frozen `2601` month) are archived as-is and seed nothing.
+- **One quotation arithmetic: `shared/quotation.ts`.** `subtotal` is PRE-discount;
+  net = subtotal − discountAmount; VAT on net (honouring `vatInclusive` and the
+  snapshotted rate); margin is measured against net of tax, never a VAT-inclusive
+  figure. `recalcQuotationRevision(revisionId, tx)` is the only writer of
+  revision totals.
+- **Cost never leaves unless the caller may see it** — `canSeeQuotationCost`
+  (the author, `edit_all`, or `gops.costing.view_all`) strips `unitCost`,
+  `costAmount`, the provider and `costNote` server-side, and the quotation PDF
+  never reads cost at all.
+- **The letterhead lives in `renderDocument`**: Tel/Fax, TIN, REG. NO. and the
+  company's `documentTagline` print on every document when set; unset lines are
+  left out. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
+  bold title over its description. Bank details are stored, printed nowhere yet.

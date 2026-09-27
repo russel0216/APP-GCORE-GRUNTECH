@@ -27,6 +27,7 @@ import { Quotations, QuotationDetail } from './pages/sales/Quotations';
 import { SalesCalendar } from './pages/sales/Calendar';
 import { Pipeline } from './pages/sales/Pipeline';
 import { Partners, PartnerDetail } from './pages/sales/Partners';
+import { QuoteArchive, QuoteArchiveDetail } from './pages/sales/QuoteArchive';
 import { Projects } from './pages/delivery/Projects';
 import { ProjectWorkspace } from './pages/delivery/ProjectWorkspace';
 import {
@@ -372,6 +373,23 @@ function Routed() {
             <GuardAny permissions={['gops.quotations.view_all', 'gops.quotations.view_own']}>
               <QuotationDetail />
             </GuardAny>
+          }
+        />
+        {/* The read-only SCORO quotation history. */}
+        <Route
+          path="/g-ops/quote-archive"
+          element={
+            <Guard permission="gops.quote_archive.view_all">
+              <QuoteArchive />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/quote-archive/:id"
+          element={
+            <Guard permission="gops.quote_archive.view_all">
+              <QuoteArchiveDetail />
+            </Guard>
           }
         />
         <Route

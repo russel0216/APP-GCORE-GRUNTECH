@@ -45,7 +45,7 @@ authRoutes.get(
     const user = currentUser(req);
     const [company, row, appearance] = await Promise.all([
       prisma.company.findUnique({ where: { id: 'company' } }),
-      prisma.user.findUnique({ where: { id: user.id }, select: { photoPath: true } }),
+      prisma.user.findUnique({ where: { id: user.id }, select: { photoPath: true, phone: true } }),
       // Rides along rather than taking a request of its own: every browser
       // needs it to draw the page, and this is already the call that says
       // what to draw.
@@ -60,6 +60,7 @@ authRoutes.get(
         isSuperAdmin: user.isSuperAdmin,
         roles: user.roleKeys,
         photoPath: row?.photoPath ?? null,
+        phone: row?.phone ?? null,
       },
       permissions: [...user.permissions],
       menu: menuFor(user),
@@ -128,6 +129,60 @@ authRoutes.delete(
       req,
     );
     res.json({ ok: true });
+  }),
+);
+
+/**
+ * Your own contact details.
+ *
+ * Only the phone, deliberately. It is the one detail a person knows better
+ * than an administrator does, and it prints under "Sincerely Yours," on every
+ * quotation they author — so a salesperson whose number changed should not
+ * have to raise a ticket to stop customers ringing the old one. Name,
+ * position, email and reporting line stay with Admin > Users: position prints
+ * beside a sign-off, and the reporting line routes approvals.
+ */
+const profileSchema = z.object({
+  phone: z.string().trim().max(40).optional().nullable(),
+});
+
+authRoutes.get(
+  '/profile',
+  authenticate,
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await prisma.user.findUnique({
+      where: { id: me.id },
+      select: { name: true, email: true, position: true, phone: true },
+    });
+    res.json(row);
+  }),
+);
+
+authRoutes.patch(
+  '/profile',
+  authenticate,
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(profileSchema, req.body);
+    const before = await prisma.user.findUnique({ where: { id: me.id }, select: { phone: true } });
+    const row = await prisma.user.update({
+      where: { id: me.id },
+      data: body.phone !== undefined ? { phone: body.phone || null } : {},
+      select: { name: true, email: true, position: true, phone: true },
+    });
+    await audit(
+      {
+        entityType: 'user',
+        entityId: me.id,
+        action: 'UPDATED',
+        summary: 'Updated own contact details',
+        before,
+        after: { phone: row.phone },
+      },
+      req,
+    );
+    res.json(row);
   }),
 );
 

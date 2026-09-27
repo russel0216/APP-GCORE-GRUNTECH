@@ -18,6 +18,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { CustomerForm, IndustryLabel, type CustomerRow } from './Customers';
+import { ScoroStatus } from '../sales/QuoteArchive';
 
 /**
  * Customer 360 (model §3).
@@ -159,6 +160,18 @@ interface JobOrderLine {
   assignedTo: { id: string; name: string } | null;
 }
 
+/** A quote from the read-only SCORO archive. */
+interface LegacyQuoteLine {
+  id: string;
+  number: string;
+  date: string | null;
+  name: string | null;
+  status: string;
+  currency: string;
+  total: number;
+  continuedQuotation: { id: string; number: string } | null;
+}
+
 interface Customer360 extends CustomerRow {
   createdAt: string;
   updatedAt: string;
@@ -174,6 +187,7 @@ interface Customer360 extends CustomerRow {
   serviceReports?: ReportLine[];
   payments?: PaymentLine[];
   jobOrders?: JobOrderLine[];
+  legacyQuotes?: LegacyQuoteLine[];
 }
 
 interface HistoryRow {
@@ -250,6 +264,7 @@ export function Customer360Page() {
   }
 
   const leads = customer.leads ?? [];
+  const legacyQuotes = customer.legacyQuotes ?? [];
   const installedAssets = customer.installedAssets ?? [];
   const serviceReports = customer.serviceReports ?? [];
   const payments = customer.payments ?? [];
@@ -506,6 +521,47 @@ export function Customer360Page() {
             </tr>
           ))}
         </Collection>
+
+        {/* What was quoted before G-CORE: SCORO's read-only history. */}
+        {can('gops.quote_archive.view_all') && (
+          <Collection
+            title="SCORO history"
+            count={legacyQuotes.length}
+            empty="No SCORO quotes are linked to this customer."
+            head={['Quote No.', 'Date', 'Quote', 'Total', 'Status']}
+            action={
+              legacyQuotes.length > 0 ? (
+                <Link to={`/g-ops/quote-archive?customerId=${customer.id}`}>View all</Link>
+              ) : undefined
+            }
+          >
+            {legacyQuotes.map((l) => (
+              <tr key={l.id}>
+                <td>
+                  <Link className="mono" to={`/g-ops/quote-archive/${l.id}`}>
+                    {l.number}
+                  </Link>
+                </td>
+                <td>{formatDate(l.date)}</td>
+                <td>
+                  {l.name ?? <span className="faint">—</span>}
+                  {l.continuedQuotation && (
+                    <div className="faint">
+                      continued as{' '}
+                      <Link className="mono" to={`/g-ops/quotations/${l.continuedQuotation.id}`}>
+                        {l.continuedQuotation.number}
+                      </Link>
+                    </div>
+                  )}
+                </td>
+                <td className="num">{formatMoney(l.total, l.currency || 'PHP')}</td>
+                <td>
+                  <ScoroStatus status={l.status} />
+                </td>
+              </tr>
+            ))}
+          </Collection>
+        )}
 
         <Collection
           title="Projects"
@@ -784,12 +840,15 @@ export function Collection({
   count,
   empty,
   head,
+  action,
   children,
 }: {
   title: string;
   count: number;
   empty: string;
   head: string[];
+  /** A link beside the title — "View all" when the collection is capped. */
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -797,6 +856,7 @@ export function Collection({
       <h3 className="card-title">
         {title}
         {count > 0 && <span className="badge">{count}</span>}
+        {action && <span className="archive-collection-action">{action}</span>}
       </h3>
       {count === 0 ? (
         /* One faint line, not a full empty state: nine of those stacked turned

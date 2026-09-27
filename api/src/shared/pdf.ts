@@ -16,9 +16,15 @@ export interface PdfField {
   value: string;
 }
 
+/**
+ * A table cell: plain text, or a bold title with regular text under it — the
+ * way a quotation line prints its product title above its description.
+ */
+export type PdfCell = string | { title: string; body?: string };
+
 export type PdfSection =
   | { kind: 'fields'; title?: string; columns?: 1 | 2 | 3; fields: PdfField[] }
-  | { kind: 'table'; title?: string; head: string[]; rows: string[][]; widths?: number[]; align?: ('left' | 'right' | 'center')[] }
+  | { kind: 'table'; title?: string; head: string[]; rows: PdfCell[][]; widths?: number[]; align?: ('left' | 'right' | 'center')[] }
   | { kind: 'text'; title?: string; body: string }
   | { kind: 'spacer'; height?: number };
 
@@ -73,8 +79,13 @@ const RULE = '#cccccc';
 const HEAD_BG = '#70798a';
 const HEAD_INK = '#ffffff';
 
-export async function renderDocument(spec: PdfDocumentSpec): Promise<Buffer> {
-  const company = await prisma.company.findUnique({ where: { id: 'company' } });
+export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
+  // Everything that reaches the page goes through pdfSafe first: the module's
+  // content AND the company's own details, which an administrator types freely
+  // into Settings and which print on every page of every document.
+  const spec = safeSpec(input);
+  const row = await prisma.company.findUnique({ where: { id: 'company' } });
+  const company = row && safeCompany(row);
 
   const doc = new PDFDocument({
     size: 'A4',
@@ -102,6 +113,155 @@ export async function renderDocument(spec: PdfDocumentSpec): Promise<Buffer> {
 }
 
 type Company = Awaited<ReturnType<typeof prisma.company.findUnique>>;
+
+/**
+ * The characters a standard PDF font can actually draw.
+ *
+ * PDFKit's built-in Helvetica speaks WinAnsiEncoding: Latin-1, plus the
+ * handful of typographic marks WinAnsi parks in 0x80-0x9F (curly quotes,
+ * dashes, the bullet, the euro, the ellipsis). Anything else is written out as
+ * its UTF-16 code split into two bytes, so the peso sign (U+20B1) lands on the
+ * page as a space followed by a plus-or-minus, in front of a price on a
+ * customer's quotation. `formatMoney` avoids the peso sign for amounts; this
+ * catches it, and its relatives, wherever else they come from: a line
+ * description pasted from a spreadsheet, a company address typed on a phone,
+ * a SCORO import.
+ */
+const WINANSI_EXTRA = new Set([
+  0x0152, 0x0153, 0x0160, 0x0161, 0x0178, 0x017d, 0x017e, 0x0192, 0x02c6, 0x02dc, 0x2013, 0x2014,
+  0x2018, 0x2019, 0x201a, 0x201c, 0x201d, 0x201e, 0x2020, 0x2021, 0x2022, 0x2026, 0x2030, 0x2039,
+  0x203a, 0x20ac, 0x2122,
+]);
+
+/** Readable stand-ins for the characters people actually type that WinAnsi lacks. */
+const STAND_INS: Record<string, string> = {
+  '\u00a0': ' ', // no-break space
+  '\u2007': ' ', // figure space
+  '\u2009': ' ', // thin space
+  '\u202f': ' ', // narrow no-break space (Intl puts these in dates and money)
+  '\u200b': '', // zero-width space
+  '\ufeff': '', // byte-order mark, pasted in from exported CSV
+  '\u2010': '-', // hyphen
+  '\u2011': '-', // non-breaking hyphen
+  '\u2212': '-', // minus sign
+  '\u2264': '<=',
+  '\u2265': '>=',
+  '\u2192': '->',
+  '\u2190': '<-',
+  '\u2713': 'x',
+  '\u2714': 'x',
+  '\u2715': 'x',
+  '\u2716': 'x',
+};
+
+/**
+ * Text as a standard PDF font can print it. Every string renderDocument puts
+ * on a page passes through here, so a module never has to remember to.
+ */
+export function pdfSafe(text: string): string {
+  if (!text) return text;
+  let out = text.replace(/\u20b1\s*/g, 'PHP ');
+  // Fast path: most text is plain ASCII and needs nothing more.
+  if (!/[^\x00-\x7f]/.test(out)) return out;
+  out = out.normalize('NFC');
+  let result = '';
+  for (const ch of out) {
+    const code = ch.codePointAt(0)!;
+    if (STAND_INS[ch] !== undefined) result += STAND_INS[ch];
+    else if ((code <= 0xff && (code < 0x80 || code > 0x9f)) || WINANSI_EXTRA.has(code)) result += ch;
+    else {
+      // An accented letter outside Latin-1 keeps its base letter (s-cedilla
+      // prints as "s"); anything else becomes "?", which at least reads as
+      // "something was here" rather than as a different, wrong character.
+      const base = ch.normalize('NFD')[0];
+      result += base && base.codePointAt(0)! < 0x80 ? base : '?';
+    }
+  }
+  return result;
+}
+
+function safeSection(section: PdfSection): PdfSection {
+  const t = (v?: string) => (v === undefined ? v : pdfSafe(v));
+  switch (section.kind) {
+    case 'spacer':
+      return section;
+    case 'text':
+      return { ...section, title: t(section.title), body: pdfSafe(section.body) };
+    case 'fields':
+      return {
+        ...section,
+        title: t(section.title),
+        fields: section.fields.map((f) => ({ label: pdfSafe(f.label), value: pdfSafe(f.value ?? '') })),
+      };
+    case 'table':
+      return {
+        ...section,
+        title: t(section.title),
+        head: section.head.map(pdfSafe),
+        rows: section.rows.map((r) =>
+          r.map((c) =>
+            typeof c === 'object' && c !== null
+              ? { title: pdfSafe(c.title ?? ''), ...(c.body !== undefined ? { body: pdfSafe(c.body) } : {}) }
+              : pdfSafe(c ?? ''),
+          ),
+        ),
+      };
+  }
+}
+
+function safeSpec(spec: PdfDocumentSpec): PdfDocumentSpec {
+  const t = (v?: string) => (v === undefined ? v : pdfSafe(v));
+  return {
+    ...spec,
+    title: pdfSafe(spec.title),
+    documentNumber: t(spec.documentNumber),
+    revision: t(spec.revision),
+    reference: t(spec.reference),
+    footerNote: t(spec.footerNote),
+    sections: spec.sections.map(safeSection),
+    signatories: spec.signatories?.map((p) => ({
+      ...p,
+      role: pdfSafe(p.role),
+      name: t(p.name),
+      position: t(p.position),
+    })),
+  };
+}
+
+function safeCompany<C extends NonNullable<Company>>(c: C): C {
+  const out = { ...c };
+  for (const key of Object.keys(out) as (keyof C)[]) {
+    const v = out[key];
+    if (typeof v === 'string' && key !== 'logoPath') out[key] = pdfSafe(v) as C[keyof C];
+  }
+  return out;
+}
+
+/** "http://www.gruntechnology.com/" -> "WWW.GRUNTECHNOLOGY.COM", as the footer prints it. */
+function websiteForPrint(website?: string | null): string {
+  if (!website) return '';
+  return website
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '')
+    .toUpperCase();
+}
+
+/**
+ * The strapline along the foot of every page, e.g.
+ * "INDUSTRIAL UTILITY SOLUTIONS  WWW.GRUNTECHNOLOGY.COM" (carried over from
+ * SCORO's quote layout). The website is added unless the tagline already
+ * carries it, so an administrator can type either form into Settings.
+ */
+export function footerTagline(
+  company: { documentTagline?: string | null; website?: string | null } | null,
+): string {
+  const tagline = company?.documentTagline?.trim() ?? '';
+  if (!tagline) return '';
+  const site = websiteForPrint(company?.website);
+  if (!site || tagline.toUpperCase().includes(site)) return tagline;
+  return `${tagline}  ${site}`;
+}
 
 /**
  * The document identifies itself top-left; the logo sits top-right.
@@ -142,9 +302,12 @@ function drawHeader(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Com
   for (const [label, value] of meta) {
     const y = doc.y + 3;
     doc.font('Helvetica-Bold').fontSize(10).fillColor(INK);
-    doc.text(label, MARGIN, y, { width: 200, lineBreak: false, continued: true });
-    doc.font('Helvetica').text(` ${value}`, { lineBreak: false });
-    doc.y = y + 13;
+    // Wraps inside the space left of the logo, and the next line starts below
+    // however many lines it took — a long reference used to overprint what
+    // followed it.
+    doc.text(label, MARGIN, y, { width: right - MARGIN - 170, continued: true });
+    doc.font('Helvetica').text(` ${value}`);
+    doc.y = Math.max(doc.y, y + 13);
   }
 
   // Clear of the logo whatever the header ran to.
@@ -259,18 +422,28 @@ function drawTableHead(
   doc.y = top + height;
 }
 
-function rowHeight(doc: PDFKit.PDFDocument, row: string[], widths: number[]): number {
+function cellHeight(doc: PDFKit.PDFDocument, cell: PdfCell, width: number): number {
+  if (typeof cell === 'object' && cell !== null) {
+    doc.font('Helvetica-Bold').fontSize(9);
+    const title = doc.heightOfString(cell.title || ' ', { width });
+    doc.font('Helvetica').fontSize(9);
+    return title + (cell.body ? 2 + doc.heightOfString(cell.body, { width }) : 0);
+  }
   doc.font('Helvetica').fontSize(9);
+  return doc.heightOfString(cell ?? '', { width });
+}
+
+function rowHeight(doc: PDFKit.PDFDocument, row: PdfCell[], widths: number[]): number {
   let tallest = 0;
   row.forEach((cell, i) => {
-    tallest = Math.max(tallest, doc.heightOfString(cell ?? '', { width: widths[i] - 16 }));
+    tallest = Math.max(tallest, cellHeight(doc, cell, widths[i] - 16));
   });
   return tallest + 14;
 }
 
 function drawTableRow(
   doc: PDFKit.PDFDocument,
-  row: string[],
+  row: PdfCell[],
   widths: number[],
   align: ('left' | 'right' | 'center')[],
   height: number,
@@ -279,7 +452,14 @@ function drawTableRow(
   doc.font('Helvetica').fontSize(9).fillColor(INK);
   let x = MARGIN;
   row.forEach((cell, i) => {
-    doc.text(cell ?? '', x + 8, top + 7, { width: widths[i] - 16, align: align[i] });
+    const opts = { width: widths[i] - 16, align: align[i] };
+    if (typeof cell === 'object' && cell !== null) {
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text(cell.title, x + 8, top + 7, opts);
+      if (cell.body) doc.font('Helvetica').fontSize(9).text(cell.body, x + 8, doc.y + 2, opts);
+      doc.font('Helvetica').fontSize(9);
+    } else {
+      doc.text(cell ?? '', x + 8, top + 7, opts);
+    }
     x += widths[i];
   });
   const bottom = top + height;
@@ -344,24 +524,41 @@ function drawSignoffs(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
 /**
  * Footer and "Page n of m" on every page. Done at the end because the total
  * page count is only known once the content is laid out.
+ *
+ * This is the company block for EVERY document (rule 6): no module prints its
+ * own letterhead, so Tel, Fax, TIN, REG. NO. and the strapline appear on a
+ * purchase order exactly as they do on a quotation.
  */
 function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
   const range = doc.bufferedPageRange();
 
   // Three columns, as on the reference: who we are, how to reach us, and the
-  // TIN — which is the one a Philippine counterparty actually looks for.
+  // registration numbers (the TIN is the one a Philippine counterparty
+  // actually looks for, the SEC number the one a tender asks for). A line
+  // whose value is not set is dropped, never printed as a bare label.
+  // The strapline row carries the tagline with the website on it, or the
+  // website alone when no tagline is set; printing it twice in a strip this
+  // small is clutter.
+  const strapline = footerTagline(company) || websiteForPrint(company?.website);
   const who = [
     company?.name ?? '',
     company?.address ?? '',
     [company?.city, company?.country].filter(Boolean).join(', '),
-  ];
-  const reach = [company?.phone ?? '', company?.email ?? '', company?.website ?? ''];
+  ].filter((t) => t.trim());
+  const reach = [
+    company?.phone ? `Tel: ${company.phone}` : '',
+    company?.fax ? `Fax: ${company.fax}` : '',
+    company?.email ?? '',
+  ].filter((t) => t.trim());
+  const ids: [string, string][] = [];
+  if (company?.tin) ids.push(['TIN:', company.tin]);
+  if (company?.regNo) ids.push(['REG. NO.:', company.regNo]);
 
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
 
     // The footer deliberately sits BELOW the bottom margin. PDFKit treats any
-    // text past that margin as overflow and helpfully starts a new page — which
+    // text past that margin as overflow and helpfully starts a new page, which
     // would then need its own footer, and so on. Dropping the margin for the
     // duration of the write is the documented way to stop that; without it a
     // two-page document silently becomes six.
@@ -373,39 +570,64 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
 
     doc.moveTo(MARGIN, top - 8).lineTo(right, top - 8).strokeColor(RULE).lineWidth(0.7).stroke();
 
-    const colTwo = MARGIN + 236;
-    const colThree = MARGIN + 410;
-    const line = 11;
+    const colTwo = MARGIN + 226;
+    const colThree = MARGIN + 390;
+    // Three rows of 7.5pt on 9.5pt leading, then the strapline row. The
+    // strapline's baseline sits about 16pt off the paper's edge: clear of the
+    // 14pt margin, and of the ~12pt below which consumer printers clip.
+    const line = 9.5;
+    const baseRow = top + line * 3 + 1.5;
+    // PDFKit wraps at `width` even with lineBreak off, so every line is given
+    // a width it fits, and a long one is cut with an ellipsis rather than
+    // spilling onto the row below.
+    const oneLine = (width: number) => ({ width, height: line, ellipsis: true, lineGap: 0 });
 
     who.forEach((text, n) => {
-      if (!text.trim()) return;
       doc.font(n === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5).fillColor(n === 0 ? INK : MUTED);
-      doc.text(text, MARGIN, top + n * line, { width: 230, lineBreak: false });
+      doc.text(text, MARGIN, top + n * line, oneLine(colTwo - MARGIN - 8));
     });
 
     doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
     reach.forEach((text, n) => {
-      if (!text.trim()) return;
-      doc.text(text, colTwo, top + n * line, { width: 170, lineBreak: false });
+      doc.text(text, colTwo, top + n * line, oneLine(colThree - colTwo - 8));
     });
 
-    if (company?.tin) {
+    ids.forEach(([label, value], n) => {
       doc.font('Helvetica-Bold').fontSize(7.5).fillColor(INK);
-      doc.text('TIN:', colThree, top, { lineBreak: false, continued: true });
-      doc.font('Helvetica').fillColor(MUTED).text(` ${company.tin}`, { lineBreak: false });
-    }
-    if (spec.footerNote) {
-      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
-      doc.text(spec.footerNote, colThree, top + line, { width: right - colThree, lineBreak: false });
-    }
+      doc.text(label, colThree, top + n * line, { lineBreak: false, continued: true });
+      doc.font('Helvetica').fillColor(MUTED).text(` ${value}`, { lineBreak: false });
+    });
 
-    // Only when there is more than one page — "Page 1 of 1" is noise.
+    // Only when there is more than one page: "Page 1 of 1" is noise. Top
+    // right of the block, on the TIN's row, so the rows below stay free for a
+    // module's note to wrap into.
     if (range.count > 1) {
       doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
-      doc.text(`Page ${i + 1} of ${range.count}`, colThree, top + line * 2, {
-        width: right - colThree,
+      doc.text(`Page ${i + 1} of ${range.count}`, right - 60, top, {
+        width: 60,
         align: 'right',
         lineBreak: false,
+      });
+    }
+
+    if (spec.footerNote) {
+      // Wraps down the third column as far as the strapline row, then stops.
+      const noteTop = top + ids.length * line;
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+      doc.text(spec.footerNote, colThree, noteTop, {
+        width: right - colThree,
+        // A point of slack, or float rounding cuts the last line it has room for.
+        height: baseRow + line - noteTop + 1,
+        ellipsis: true,
+        lineGap: line - doc.currentLineHeight(),
+      });
+    }
+
+    if (strapline) {
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(HEAD_BG);
+      doc.text(strapline, MARGIN, baseRow, {
+        ...oneLine(colThree - MARGIN - 8),
+        characterSpacing: 0.8,
       });
     }
 

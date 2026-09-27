@@ -56,6 +56,8 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('gops', 'quotations'),
       'gops.quotations.view_all',
       'gops.quotations.export',
+      // The SCORO history they are continuing from. Read-only.
+      'gops.quote_archive.view_all',
       ...VIEW_OWN_SELF('gops', 'costing'),
       'gops.costing.export',
       'gops.dashboard.view_all',
@@ -89,6 +91,10 @@ const ROLES: RoleSeed[] = [
       'gops.dashboard.view_all',
       'gops.projects.view_all',
       'gops.projects.export',
+      // The SCORO archive, seen and exported whole. Not create: the import is
+      // an administrator's job, done once.
+      'gops.quote_archive.view_all',
+      'gops.quote_archive.export',
       // The pipeline analytics are their own numbers, seen whole.
       'insights.pipeline.view_all',
       'insights.pipeline.export',
@@ -123,6 +129,7 @@ const ROLES: RoleSeed[] = [
       'gops.installed_base.view_all',
       'gops.visits.view_all',
       'gops.quotations.view_all',
+      'gops.quote_archive.view_all',
       'gops.job_orders.view_all',
       'gchain.purchase_requests.view_all',
       // A PM raises stock-replenishment requests too, not only direct-to-job
@@ -642,11 +649,27 @@ async function main() {
   // ── Company ────────────────────────────────────────────────────────────────
   await prisma.company.upsert({
     where: { id: 'company' },
+    // The company record as it stood in SCORO (Settings > Company data and
+    // logo), so a fresh database prints the letterhead Gruntech already issues.
+    // Create only: `update` stays empty, so an existing database keeps
+    // whatever an administrator typed in Settings.
     create: {
       id: 'company',
-      name: 'Gruntechnology Corp',
-      legalName: 'Gruntechnology Corporation',
+      name: 'GRUNTECHNOLOGY CORPORATION',
+      legalName: 'GRUNTECHNOLOGY CORPORATION',
+      address: '2 Rajah Soliman Street, Parang',
+      city: 'Marikina City 1809',
       country: 'Philippines',
+      tin: '008-847-780-000',
+      regNo: 'CS201416452',
+      phone: '(02) 8 655 4063',
+      fax: '(02) 9 794 6560',
+      email: 'customercare@gruntechnology.com',
+      website: 'http://www.gruntechnology.com/',
+      bankName: 'Bank of Philippine Islands',
+      bankBranch: 'Marikina',
+      bankAccount: '9731 0004 22',
+      documentTagline: 'INDUSTRIAL UTILITY SOLUTIONS  WWW.GRUNTECHNOLOGY.COM',
       currency: 'PHP',
       numberPrefix: 'GT',
     },

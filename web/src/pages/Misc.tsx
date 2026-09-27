@@ -101,6 +101,70 @@ function ProfilePhoto() {
   );
 }
 
+/**
+ * Your own mobile number.
+ *
+ * It prints under "Sincerely Yours," on every quotation you author, so it is
+ * yours to keep current; everything else about the account (name, position,
+ * reporting line) stays with Admin > Users. Read from /auth/profile rather
+ * than /auth/me so the number is always the saved one, not a session copy.
+ */
+function ContactDetails() {
+  const toast = useToast();
+  const [phone, setPhone] = useState('');
+  const [saved, setSaved] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    api
+      .get<{ phone: string | null }>('/auth/profile')
+      .then((r) => {
+        setPhone(r.phone ?? '');
+        setSaved(r.phone ?? '');
+      })
+      .catch(setError)
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.patch<{ phone: string | null }>('/auth/profile', { phone: phone.trim() || null });
+      setPhone(r.phone ?? '');
+      setSaved(r.phone ?? '');
+      toast('ok', 'Contact details saved');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) return <Loading />;
+  return (
+    <form className="card" onSubmit={submit}>
+      <h3 className="card-title">Contact</h3>
+      <ErrorBox error={error} />
+      <Field label="Mobile" hint="Printed under your name on the quotations you author">
+        <input
+          type="tel"
+          autoComplete="tel"
+          value={phone}
+          maxLength={40}
+          onChange={(e) => setPhone(e.target.value)}
+        />
+      </Field>
+      <button className="btn btn-primary" type="submit" disabled={busy || phone.trim() === saved}>
+        {busy ? 'Saving…' : 'Save contact details'}
+      </button>
+    </form>
+  );
+}
+
 export function Account() {
   const { me, signOut } = useAuth();
   const toast = useToast();
@@ -188,6 +252,8 @@ export function Account() {
             </div>
           </div>
         </div>
+
+        <ContactDetails />
 
         <form className="card" onSubmit={submit}>
           <h3 className="card-title">Change password</h3>

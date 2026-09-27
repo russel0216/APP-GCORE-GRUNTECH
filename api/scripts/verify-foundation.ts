@@ -16,6 +16,7 @@
 import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import type { Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { allPermissions } from '../src/permissions/registry';
@@ -745,6 +746,69 @@ async function main() {
   const edges = pdfEdges(signed);
   check('content starts 14pt from the edge', edges.left === 14, `${edges.left}pt`);
   check('and nothing runs off the bottom', edges.bottom > 12, `${edges.bottom}pt clear`);
+
+  // ── 10. The letterhead every document carries ──────────────────────────────
+  console.log('\nLetterhead');
+
+  /*
+    The company block and the strapline are drawn by the engine, never by a
+    module, so one document proves them for all of them. The fields are only
+    borrowed when the database has none: a value an administrator already set
+    is asserted as it stands and never overwritten, and whatever this sets is
+    put back to null afterwards.
+  */
+  const companyBefore = await prisma.company.findUnique({ where: { id: 'company' } });
+  const borrowed: Prisma.CompanyUpdateInput = {};
+  if (!companyBefore?.regNo) borrowed.regNo = `${TAG}-REG`;
+  if (!companyBefore?.documentTagline) borrowed.documentTagline = `${TAG} UTILITY SOLUTIONS`;
+  if (!companyBefore?.fax) borrowed.fax = `${TAG}-FAX`;
+  if (companyBefore && Object.keys(borrowed).length) {
+    await prisma.company.update({ where: { id: 'company' }, data: borrowed });
+  }
+  try {
+    const co = await prisma.company.findUniqueOrThrow({ where: { id: 'company' } });
+    const lettered = await renderDocument({
+      title: 'Quotation',
+      documentNumber: `${TAG}-LH`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Product description', 'Total'],
+          align: ['left', 'right'],
+          // A peso sign pasted into a description, as SCORO's exports carry
+          // them. The engine has to catch it; formatMoney only covers amounts.
+          rows: [['Compressor overhaul ₱1,000 allowance', formatMoney(1562.2)]],
+        },
+      ],
+      footerNote: 'Pesos ₱ only — net of discount',
+    });
+    const letteredText = pdfText(lettered);
+    check('the footer prints REG. NO.', letteredText.includes('REG. NO.'));
+    check('with the registration number itself', letteredText.includes(co.regNo ?? '\u0000'));
+    check('and the tagline', letteredText.includes(co.documentTagline ?? '\u0000'));
+    check('and Tel / Fax when set', !co.fax || letteredText.includes(`Fax: ${co.fax}`));
+    check(
+      'the website rides on the tagline line',
+      !co.website ||
+        letteredText.includes(
+          co.website.replace(/^https?:\/\//i, '').replace(/\/+$/, '').toUpperCase(),
+        ),
+    );
+    check('no peso sign ever reaches the page as ±', !letteredText.includes('±'));
+    check('it prints as the currency code instead', letteredText.includes('PHP 1,000 allowance'));
+    check('and the footer note is cleaned the same way', letteredText.includes('Pesos PHP only'));
+    const letteredEdges = pdfEdges(lettered);
+    check('the strapline stays clear of the bottom edge', letteredEdges.bottom > 12, `${letteredEdges.bottom}pt clear`);
+    check('and still starts 14pt from the edge', letteredEdges.left === 14, `${letteredEdges.left}pt`);
+    check('a letterhead does not cost a page', pages(lettered) === 1, `${pages(lettered)} pages`);
+  } finally {
+    if (companyBefore && Object.keys(borrowed).length) {
+      await prisma.company.update({
+        where: { id: 'company' },
+        data: Object.fromEntries(Object.keys(borrowed).map((k) => [k, null])),
+      });
+    }
+  }
 
 
   // ══ Appearance ═══════════════════════════════════════════════════════════

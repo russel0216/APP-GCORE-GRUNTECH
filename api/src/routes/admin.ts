@@ -47,9 +47,17 @@ const companySchema = z.object({
   city: z.string().optional().nullable(),
   country: z.string().optional(),
   tin: z.string().optional().nullable(),
+  // Letterhead and footer. Every one of these prints on EVERY document through
+  // renderDocument, so they live here rather than on any one module's settings.
+  regNo: z.string().trim().max(60).optional().nullable(),
   phone: z.string().optional().nullable(),
+  fax: z.string().trim().max(60).optional().nullable(),
   email: z.string().email().optional().nullable().or(z.literal('')),
   website: z.string().optional().nullable(),
+  bankName: z.string().trim().max(120).optional().nullable(),
+  bankBranch: z.string().trim().max(120).optional().nullable(),
+  bankAccount: z.string().trim().max(60).optional().nullable(),
+  documentTagline: z.string().trim().max(140).optional().nullable(),
   currency: z.string().min(3).max(3).optional(),
   vatRate: z.number().min(0).max(1).optional(),
   ewtRate: z.number().min(0).max(1).optional(),
@@ -68,8 +76,18 @@ companyRoutes.put(
     const body = parseBody(companySchema, req.body);
     const before = await prisma.company.findUnique({ where: { id: 'company' } });
 
+    // A blank box means "not set", never an empty string: the PDF engine
+    // prints a line only when its value is there, and "" would print a label
+    // with nothing after it.
+    const blankToNull = (v: string | null | undefined) => (v === undefined ? undefined : v?.trim() || null);
     const data: Prisma.CompanyUpdateInput = {
       ...body,
+      regNo: blankToNull(body.regNo),
+      fax: blankToNull(body.fax),
+      bankName: blankToNull(body.bankName),
+      bankBranch: blankToNull(body.bankBranch),
+      bankAccount: blankToNull(body.bankAccount),
+      documentTagline: blankToNull(body.documentTagline),
       email: body.email || null,
       vatRate: body.vatRate !== undefined ? new Prisma.Decimal(body.vatRate) : undefined,
       ewtRate: body.ewtRate !== undefined ? new Prisma.Decimal(body.ewtRate) : undefined,

@@ -23,6 +23,10 @@ model User {
   employeeNo   String? @unique
   passwordHash String
   position     String?
+  /// The author's mobile, printed under "Sincerely Yours," on a quotation
+  /// (carried over from SCORO's quote layout). The login's own number, because
+  /// an account need not have an Employee record behind it.
+  phone        String?
   isActive     Boolean @default(true)
   isSuperAdmin Boolean @default(false)
 
@@ -113,6 +117,10 @@ model User {
   reportsPerformed   ServiceReport[]   @relation("ReportAuthor")
   jobOrdersRequested JobOrder[]        @relation("JobOrderRequester")
   jobOrdersAssigned  JobOrder[]        @relation("JobOrderEngineer")
+
+  quoteLinesProvided   QuotationItem[] @relation("QuoteLineProvider")
+  legacyQuotesOwned    LegacyQuote[]   @relation("LegacyQuoteOwner")
+  legacyQuotesImported LegacyQuote[]   @relation("LegacyQuoteImporter")
 
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
@@ -216,11 +224,21 @@ model Company {
   city      String?
   country   String  @default("Philippines")
   tin       String?
+  /// SEC registration number, printed on the letterhead as "REG. NO.".
+  regNo     String?
   phone     String?
+  fax       String?
   email     String?
   website   String?
   logoPath  String?
   currency  String  @default("PHP")
+
+  /// Where customers pay. Printed on documents that ask for payment.
+  bankName        String?
+  bankBranch      String?
+  bankAccount     String?
+  /// Footer strapline, e.g. "INDUSTRIAL UTILITY SOLUTIONS  WWW.GRUNTECHNOLOGY.COM".
+  documentTagline String?
 
   /// Tax rates are configuration, not constants — rates change, and some
   /// customers withhold differently (model §5.4).
@@ -482,6 +500,7 @@ model Customer {
   visits         ServiceVisit[]
   serviceReports ServiceReport[]
   jobOrders      JobOrder[]
+  legacyQuotes   LegacyQuote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -590,6 +609,7 @@ model Supplier {
   purchaseOrders PurchaseOrder[]
   bills          SupplierBill[]
   payments       Payment[]
+  quoteLines     QuotationItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1129,6 +1149,10 @@ model Quotation {
   activities SalesActivity[]
   jobOrders  JobOrder[]
 
+  /// Set when this quotation was continued from a SCORO quote. The archive
+  /// row points here, never the other way round.
+  legacyQuote LegacyQuote?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1151,9 +1175,24 @@ model QuotationRevision {
   terms        String?
   notes        String?
 
-  subtotal     Decimal @default(0) @db.Decimal(18, 2)
-  vatAmount    Decimal @default(0) @db.Decimal(18, 2)
-  total        Decimal @default(0) @db.Decimal(18, 2)
+  /// Sum of line amounts BEFORE discount. The arithmetic, in order:
+  ///   net       = subtotal - discountAmount
+  ///   vatAmount = net x vatRate        (on the discounted figure)
+  ///   total     = net + vatAmount
+  subtotal       Decimal @default(0) @db.Decimal(18, 2)
+  /// Quote-level discount, as SCORO carried it. discountAmount is stored, not
+  /// re-derived on read, so a printed revision cannot drift by a centavo.
+  discountPct    Decimal @default(0) @db.Decimal(7, 4)
+  discountAmount Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount      Decimal @default(0) @db.Decimal(18, 2)
+  total          Decimal @default(0) @db.Decimal(18, 2)
+
+  /// The customer's purchase-request reference, printed as "PR Number :".
+  prNumber     String?
+  /// Delivery lead time / terms, printed as "Delivery:".
+  delivery     String?
+  /// Printed as "Payment Terms :".
+  paymentTerms String?
   /// Snapshot of the rate used, so an old revision still prints the tax it was
   /// issued with after Settings change.
   vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
@@ -1178,6 +1217,10 @@ model QuotationItem {
   revisionId String
   revision   QuotationRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
 
+  /// SCORO's line group, e.g. "Gruntech Installation", "Gruntech Services".
+  group       String?
+  /// Product name, printed in bold above the description.
+  title       String?
   description String
   quantity    Decimal @default(1) @db.Decimal(18, 3)
   unit        String  @default("lot")
@@ -1185,7 +1228,96 @@ model QuotationItem {
   amount      Decimal @default(0) @db.Decimal(18, 2)
   sortOrder   Int     @default(0)
 
+  /// INTERNAL. Cost and margin never print on the customer PDF and are stripped
+  /// server-side from responses for callers who may not see them.
+  /// costAmount = quantity x unitCost, stored.
+  unitCost           Decimal?  @db.Decimal(18, 2)
+  costAmount         Decimal?  @db.Decimal(18, 2)
+  /// Who carries the cost: a supplier (outsourced) OR an in-house person.
+  /// Margin splits in-house vs outsourced by which of the two is set.
+  providerSupplierId String?
+  providerSupplier   Supplier? @relation(fields: [providerSupplierId], references: [id], onDelete: SetNull)
+  providerUserId     String?
+  providerUser       User?     @relation("QuoteLineProvider", fields: [providerUserId], references: [id], onDelete: SetNull)
+  costNote           String?
+
   @@index([revisionId])
+  @@index([providerSupplierId])
+  @@index([providerUserId])
+}
+
+// ── SCORO archive ────────────────────────────────────────────────────────────
+
+/// The read-only SCORO quotation archive. This is NOT a quotation: it is
+/// history carried over when Gruntech moved from SCORO to G-CORE, kept so an
+/// old quote can still be looked up and its PDF reopened. Nothing in live work
+/// links from it: no job, costing, billing or ledger row may reference a
+/// LegacyQuote. The one link is outbound and one-way: an open SCORO quote may
+/// be "continued in G-CORE", which raises a real Quotation under the SAME
+/// number and records it in continuedQuotationId. Figures are stored exactly as
+/// SCORO held them; nothing recomputes them.
+model LegacyQuote {
+  id       String @id @default(cuid())
+  source   String @default("SCORO")
+  /// SCORO's own quote id.
+  sourceId String
+  number   String @unique
+
+  date             DateTime? @db.Date
+  dueDate          DateTime? @db.Date
+  estimatedClosing DateTime? @db.Date
+  confirmedAt      DateTime?
+
+  /// As SCORO spelled it; ownerUserId is the matched G-CORE login, if any.
+  ownerName   String
+  ownerUserId String?
+  ownerUser   User?   @relation("LegacyQuoteOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  customerName String
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  contactName  String?
+  name         String?
+  projectName  String?
+
+  /// SCORO's status label verbatim (Opportunity, Negotiation, Confirmed...).
+  status          String
+  previousStatus  String?
+  statusChangedAt DateTime?
+  statusChangedBy String?
+
+  currency    String  @default("PHP")
+  discountPct Decimal @default(0) @db.Decimal(7, 4)
+  /// After discount, as SCORO reported it.
+  subtotal    Decimal @default(0) @db.Decimal(18, 2)
+  vat         Decimal @default(0) @db.Decimal(18, 2)
+  total       Decimal @default(0) @db.Decimal(18, 2)
+  cost        Decimal @default(0) @db.Decimal(18, 2)
+
+  prNumber     String?
+  delivery     String?
+  paymentTerms String?
+  comment      String?
+  invoiceNos   String?
+  isSent       Boolean @default(false)
+
+  /// [{ title, description, quantity, unit, unitPrice, amount }] as parsed
+  /// from SCORO's PDF. linesReconcile is false when they do not sum to subtotal.
+  lines          Json
+  linesReconcile Boolean @default(true)
+
+  continuedQuotationId String?    @unique
+  continuedQuotation   Quotation? @relation(fields: [continuedQuotationId], references: [id], onDelete: SetNull)
+
+  importedAt   DateTime @default(now())
+  importedById String?
+  importedBy   User?    @relation("LegacyQuoteImporter", fields: [importedById], references: [id], onDelete: SetNull)
+
+  @@unique([source, sourceId])
+  @@index([customerId])
+  @@index([ownerName])
+  @@index([status])
+  @@index([date])
 }
 
 // ── Sales calendar ───────────────────────────────────────────────────────────

@@ -592,3 +592,128 @@
   font-size: var(--fs-sm);
   color: var(--muted);
 }
+
+/* ── Quotation lines, totals and the cost panel (SCORO-style) ────────────── */
+
+/* Product title over its description, as the PDF prints it. */
+.quote-line-title {
+  font-weight: 600;
+}
+
+.quote-line-desc {
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.quote-lines td {
+  vertical-align: top;
+}
+
+.quote-line-cost {
+  min-width: 9rem;
+}
+
+/* A negative margin reads as a problem whatever the colour scheme: it also
+   carries its minus sign, so colour is never the only signal. */
+.quote-negative {
+  color: var(--danger);
+}
+
+/* Totals on the left, the cost panel on the right; stacked on a phone. */
+.quote-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s-4);
+  margin-top: var(--s-4);
+}
+
+.quote-summary-single {
+  grid-template-columns: minmax(0, 28rem);
+  justify-content: end;
+}
+
+@media (max-width: 720px) {
+  .quote-summary,
+  .quote-summary-single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.quote-totals {
+  margin: 0;
+}
+
+.quote-totals > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.quote-totals dt {
+  color: var(--muted);
+  font-size: var(--fs-md);
+}
+
+.quote-totals dd {
+  margin: 0;
+  text-align: right;
+}
+
+.quote-totals-grand dt,
+.quote-totals-grand dd {
+  color: var(--text);
+  font-weight: 600;
+  font-size: var(--fs-base);
+}
+
+/* The discount is edited where it is read. */
+.quote-discount {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.quote-discount input {
+  width: 6rem;
+  text-align: right;
+}
+
+.quote-cost-panel {
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.quote-panel-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-md);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* The internal half of the line form. */
+.quote-cost-fields {
+  margin: var(--s-3) 0;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.quote-cost-fields legend {
+  padding: 0 var(--s-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.quote-provider-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+  margin-bottom: var(--s-3);
+}

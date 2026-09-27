@@ -28,6 +28,7 @@ const publicUser = {
   name: true,
   employeeNo: true,
   position: true,
+  phone: true,
   isActive: true,
   isSuperAdmin: true,
   supervisorId: true,
@@ -183,6 +184,8 @@ const createSchema = z.object({
   password: z.string().min(8, 'Use at least 8 characters'),
   employeeNo: z.string().trim().optional().nullable(),
   position: z.string().trim().optional().nullable(),
+  /** The author's mobile under "Sincerely Yours," on a quotation. */
+  phone: z.string().trim().max(40).optional().nullable(),
   supervisorId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   roleIds: z.array(z.string()).default([]),
@@ -207,6 +210,7 @@ userRoutes.post(
         passwordHash: await bcrypt.hash(body.password, 10),
         employeeNo: body.employeeNo || null,
         position: body.position || null,
+        phone: body.phone || null,
         supervisorId: body.supervisorId || null,
         departmentId: body.departmentId || null,
         isActive: body.isActive,
@@ -264,6 +268,7 @@ userRoutes.patch(
     if (body.name !== undefined) data.name = body.name;
     if (body.employeeNo !== undefined) data.employeeNo = body.employeeNo || null;
     if (body.position !== undefined) data.position = body.position || null;
+    if (body.phone !== undefined) data.phone = body.phone || null;
     if (body.isActive !== undefined) data.isActive = body.isActive;
     if (body.password) data.passwordHash = await bcrypt.hash(body.password, 10);
     if (body.supervisorId !== undefined) {

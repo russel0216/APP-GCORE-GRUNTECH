@@ -178,6 +178,8 @@ export interface Me {
     name: string;
     email: string;
     position: string | null;
+    /** Printed under "Sincerely Yours," on the quotations this user authors. */
+    phone: string | null;
     isSuperAdmin: boolean;
     roles: string[];
     /** Attachment id — see components/ui.tsx's Avatar. */
