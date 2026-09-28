@@ -162,12 +162,25 @@ const bundleSchema = z.object({
 export type BundleQuote = z.infer<typeof quoteSchema>;
 export type BundleLine = z.infer<typeof lineSchema>;
 
+/**
+ * Text read out of a PDF can carry control characters — SCORO's PDFs leave a
+ * NUL (U+0000) inside some line descriptions — and PostgreSQL refuses a NUL in
+ * text and in jsonb alike, so one of them rolled back a whole import. Every
+ * string is cleaned on the way in; line breaks and tabs are kept.
+ */
+export function cleanText(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+}
+
 export function readBundle(dir: string): { source: string; quotes: BundleQuote[] } {
   const file = path.join(dir, 'quotes.json');
   if (!fs.existsSync(file)) throw badRequest(`No quotes.json in ${dir}`);
   let raw: unknown;
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''), (_key, value: unknown) =>
+      typeof value === 'string' ? cleanText(value) : value,
+    );
   } catch {
     throw badRequest('quotes.json is not valid JSON');
   }
@@ -646,7 +659,7 @@ export async function importBundle(dir: string, opts: ImportOptions): Promise<Im
     warnings.push(`There is no "${counterType}" numbering configured; no counters can be continued`);
   } else if (counterTemplate && !counterTemplate.houseScheme && targets.size) {
     warnings.push(
-      `Quotation numbering is set to ${counterTemplate.pattern} (${counterTemplate.period.toLowerCase()}, ${counterTemplate.scope.toLowerCase()}), not SCORO's {EMP}{YY}{MM}{SEQ} monthly per employee. ` +
+      `Quotation numbering is set to ${counterTemplate.pattern} (${counterTemplate.period.toLowerCase()}, ${counterTemplate.scope.toLowerCase()}), not the house scheme {EMP}{YY}{MM}{SEQ} per employee. ` +
         'The counters below are seeded anyway, but G-CORE only uses them once Admin > Numbering sets Quotation to that scheme.',
     );
   }

@@ -116,10 +116,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,745 assertions across twenty-one scripts** (counted 2026-09-27): foundation 115,
-masters 54, sales 110, costing 40, pipeline 44, calendar 38, numbering 46,
-partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 85,
-evaluations 119, academy 97, finance 133, aftermarket 166, archive 106,
+**1,790 assertions across twenty-one scripts** (counted 2026-09-28): foundation 115,
+masters 54, sales 147, costing 40, pipeline 44, calendar 38, numbering 46,
+partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
+evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -898,7 +898,10 @@ the detail.
   (`scripts/import-scoro-quotes.ts <bundle> [--commit]`) or the archive's Import
   button — one function, dry run by default. Re-import upserts on
   `(source, sourceId)` and never clears `continuedQuotationId`. A quote with
-  `pdf: null` is archived without an attachment.
+  `pdf: null` is archived without an attachment. `readBundle()` strips control
+  characters from every string (`cleanText`): SCORO's PDFs leave NULs in some
+  descriptions, PostgreSQL refuses a NUL in text and jsonb, and one rolled back a
+  whole import on the server. The converter strips them too.
 - **The quotation count runs through the YEAR and restarts each January**, as
   SCORO's did (`0012609059` is employee 001's 59th quotation of 2026); the month
   is printed, never counted. The seed's default is `{EMP}{YY}{MM}{SEQ}`, YEAR,

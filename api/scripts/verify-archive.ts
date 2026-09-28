@@ -31,6 +31,8 @@ import {
   MSG_LINK_CUSTOMER,
   counterTargets,
   parseYearNumber,
+  cleanText,
+  readBundle,
   importBundle,
   isOpenStatus,
   outcomeFor,
@@ -310,6 +312,21 @@ async function main() {
     check('a lagging month part still counts in a yearly run', parseYearNumber('0012604011', '2026-03-04')?.seq === 11);
     check('the year must still be the quote\'s own', parseYearNumber('0012609059', '2025-09-24') === null && parseYearNumber('8326090163', '2026-09-25') === null);
     check('a new year starts a new counter', counterTargets([{ number: '0012701004', date: '2027-01-08' }], '2026-09', 'YEAR').get('2027@001')?.seq === 4);
+  }
+  // SCORO's PDFs leave NULs in some descriptions, and PostgreSQL refuses a NUL
+  // in text and jsonb: one rolled back a whole 191-quote import on the server.
+  {
+    check('cleanText drops control characters and keeps line breaks and tabs',
+      cleanText('A\u0000B\u0007C\nD\tE\u007F') === 'ABC\nD\tE');
+    const dir = path.join(os.tmpdir(), `${TAG}-nul`);
+    const dirty = quote({ scoroId: '991', number: '0019909001', comment: 'bad\u0000comment',
+      lines: [line('Pump\u0000 set', '1', '300.00', '300.00')] });
+    writeBundle(dir, [dirty], () => false);
+    const read = readBundle(dir).quotes[0];
+    check('a bundle with a NUL in its text reads back without it',
+      !JSON.stringify(read).includes('\\u0000') && read.comment === 'badcomment' && read.lines[0].title === 'Pump set',
+      JSON.stringify({ comment: read.comment, title: read.lines[0].title }));
+    fs.rmSync(dir, { recursive: true, force: true });
   }
   check('a month 13 is not a month', parseHouseNumber('0012613001', '2026-13-01') === null);
   check('a house number needs its own date', parseHouseNumber('0012609059', '') === null && parseHouseNumber('0012609059', '2026-08-31') === null);

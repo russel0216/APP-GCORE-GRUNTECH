@@ -43,6 +43,22 @@ found = {}
 for n, d, s, e in spans:
     found.setdefault(n, (d, s, e))   # the first copy wins if two PDFs repeat a quote
 
+# PDF text can carry control characters (SCORO's PDFs leave NULs in some
+# descriptions); PostgreSQL refuses a NUL, so every string is cleaned before it
+# is written. Line breaks and tabs stay.
+CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+
+def clean(o):
+    if isinstance(o, str):
+        return CONTROL.sub('', o)
+    if isinstance(o, list):
+        return [clean(v) for v in o]
+    if isinstance(o, dict):
+        return {k: clean(v) for k, v in o.items()}
+    return o
+
+
 MONEY = re.compile(r'^-?[\d,]+\.\d{2}$')
 # "2 set", "1 lot", "0.5 lot" — or a bare "1": some salespeople left the unit
 # blank, and a line is still only a line item when two amounts follow it.
@@ -145,7 +161,7 @@ for number, r in by_no.items():
     })
 
 with io.open(os.path.join(OUT, 'quotes.json'), 'w', encoding='utf-8') as f:
-    json.dump({'source': 'SCORO', 'quotes': bundle}, f, ensure_ascii=False, indent=1)
+    json.dump(clean({'source': 'SCORO', 'quotes': bundle}), f, ensure_ascii=False, indent=1)
 
 with_pdf = sum(1 for q in bundle if q['pdf'])
 print(f'quotes in CSV {len(rows)} | documents in PDFs {len(spans)} | bundled {len(bundle)} ({with_pdf} with a PDF)')
