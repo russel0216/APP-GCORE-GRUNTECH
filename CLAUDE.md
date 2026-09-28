@@ -126,8 +126,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,807 assertions across twenty-one scripts** (counted 2026-09-28): foundation 128,
-masters 54, sales 151, costing 40, pipeline 44, calendar 38, numbering 46,
+**1,824 assertions across twenty-one scripts** (counted 2026-09-28): foundation 128,
+masters 54, sales 168, costing 40, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39. They cover permission resolution, numbering
@@ -956,3 +956,16 @@ the detail.
   that `from-costing` writes. **The old `?new=1&leadId=&costingId=&customerId=`
   links redirect** to `/new` with the same preset; new links point at `/new`.
   `docs/notes/quotation-editor.md` has the detail.
+- **The quotation page is SCORO's "Quote details"** (`QuotationDetail` in
+  `pages/sales/Quotations.tsx`): SCORO's labels in two columns, Duplicate and
+  Modify top right, and SCORO's action bar (PDF, Submit for approval, Mark as
+  sent) across the card's foot — in flow, because `.content` scrolls and a
+  fixed bar would sit on the toasts. Its status block (Previous status, who
+  moved it and when, Date confirmed, Sent, days per status) is
+  `outcomeChanges()` / `outcomeStages()` in `shared/pipeline.ts`, read off the
+  quotation's audit rows — there is no history table. The PATCH writes each
+  move as `before/after: { outcome }`; older rows are read from the summary
+  `…: FROM → TO`, so never reword that summary. **Duplicate** is the editor's
+  `?duplicate=&revision=` preset: client, contact, site, name, terms and lines
+  (cost only where the viewer was sent it), never the PR number, enquiry or
+  costing; nothing is written and no number used until Save.

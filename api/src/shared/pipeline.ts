@@ -176,6 +176,109 @@ export function assertOutcomeChange(
   if (next === 'LOST' && !(ctx.lostReason ?? '').trim()) throw badRequest(MSG_LOST_REASON);
 }
 
+// ── Outcome history (SCORO's "Previous status" and "Opportunity 46 days") ────
+
+/** One move of a quotation's outcome: from what, to what, when, and by whom. */
+export interface OutcomeChange {
+  from: string;
+  to: string;
+  at: Date;
+  by: { id: string | null; name: string } | null;
+}
+
+const OUTCOME_KEYS = new Set(['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST']);
+/** "Quotation 0012609061: OPEN → SUBMITTED", as PATCH /quotations/:id has always summarised a move. */
+const SUMMARY_MOVE = /: ([A-Z_]+) → ([A-Z_]+)$/;
+
+/**
+ * A quotation's outcome moves, oldest first, read off its audit rows — the
+ * record every move already writes. There is no history table: the audit trail
+ * IS the history, and a second copy could disagree with it. A move carries its
+ * two outcomes in `before`/`after`; rows written before it did carry them only
+ * in the summary, which is read when `before`/`after` say nothing.
+ */
+export function outcomeChanges(
+  rows: {
+    summary: string | null;
+    before: unknown;
+    after: unknown;
+    at: Date;
+    actorId: string | null;
+    actorName: string | null;
+  }[],
+): OutcomeChange[] {
+  const out: OutcomeChange[] = [];
+  for (const row of [...rows].sort((a, b) => a.at.getTime() - b.at.getTime())) {
+    const was = (row.before ?? null) as { outcome?: unknown } | null;
+    const now = (row.after ?? null) as { outcome?: unknown } | null;
+    let from = typeof was?.outcome === 'string' ? was.outcome : null;
+    let to = typeof now?.outcome === 'string' ? now.outcome : null;
+    if (!from || !to) {
+      const m = SUMMARY_MOVE.exec(row.summary ?? '');
+      if (m) [from, to] = [m[1], m[2]];
+    }
+    if (!from || !to || from === to || !OUTCOME_KEYS.has(from) || !OUTCOME_KEYS.has(to)) continue;
+    out.push({ from, to, at: row.at, by: row.actorName ? { id: row.actorId, name: row.actorName } : null });
+  }
+  return out;
+}
+
+/** Whole Manila calendar days from one instant's day to another's: 3 Jan to 18 Feb is 46. */
+export function manilaDaysBetween(from: Date, to: Date): number {
+  const a = Date.parse(`${manilaDayKey(from)}T00:00:00Z`);
+  const b = Date.parse(`${manilaDayKey(to)}T00:00:00Z`);
+  return Math.round((b - a) / 86_400_000);
+}
+
+export interface OutcomeStage {
+  outcome: string;
+  days: number;
+  /** The stretch still running — the quotation is in this outcome now. */
+  current: boolean;
+}
+
+/**
+ * How long a quotation spent in each outcome, as SCORO's strip shows it —
+ * "Opportunity 46 days | Closed in 65 days" — in Manila calendar days, in the
+ * order the outcomes were first reached. An outcome returned to (NEGOTIATION,
+ * reopened) adds to its own total rather than appearing twice.
+ *
+ * A decided quotation (WON or LOST) lists the stretches that led there and
+ * `closedInDays`, issue to decision; "Won for 12 days" would say nothing. The
+ * decision's date is `decidedAt` where the quotation has one, else the move
+ * that decided it.
+ */
+export function outcomeStages(
+  createdAt: Date,
+  current: string,
+  changes: OutcomeChange[],
+  decidedAt: Date | null,
+  now: Date,
+): { stages: OutcomeStage[]; closedInDays: number | null } {
+  const order: string[] = [];
+  const total = new Map<string, number>();
+  const add = (outcome: string, days: number) => {
+    if (!total.has(outcome)) order.push(outcome);
+    total.set(outcome, (total.get(outcome) ?? 0) + Math.max(0, days));
+  };
+
+  let outcome = changes[0]?.from ?? current;
+  let since = createdAt;
+  for (const c of changes) {
+    add(outcome, manilaDaysBetween(since, c.at));
+    outcome = c.to;
+    since = c.at;
+  }
+  const decided = current === 'WON' || current === 'LOST';
+  if (!decided) add(current, manilaDaysBetween(since, now));
+
+  const decision = decidedAt ?? (decided && changes.length ? since : null);
+  return {
+    stages: order.map((o) => ({ outcome: o, days: total.get(o)!, current: !decided && o === current })),
+    closedInDays: decided && decision ? Math.max(0, manilaDaysBetween(createdAt, decision)) : null,
+  };
+}
+
 // ── Dates ────────────────────────────────────────────────────────────────────
 
 /**

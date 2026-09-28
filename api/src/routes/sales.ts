@@ -36,6 +36,8 @@ import {
   assertOutcomeChange,
   buildBoard,
   columnByKey,
+  outcomeChanges,
+  outcomeStages,
   type BoardResponse,
 } from '../shared/pipeline';
 import {
@@ -738,8 +740,28 @@ quotationRoutes.get(
     const showCost = canSeeQuotationCost(me, quotation.ownerId);
     const { customer, ...rest } = quotation;
     const { sites, ...customerRest } = customer;
+
+    // SCORO's status block: the previous status, who moved it and when, and
+    // how long it sat in each — read off the audit rows every move writes.
+    const statusHistory = outcomeChanges(
+      await prisma.auditLog.findMany({
+        where: { entityType: 'quotation', entityId: quotation.id },
+        select: { summary: true, before: true, after: true, at: true, actorId: true, actorName: true },
+      }),
+    );
+    const { stages, closedInDays } = outcomeStages(
+      quotation.createdAt,
+      quotation.outcome,
+      statusHistory,
+      quotation.decidedAt,
+      new Date(),
+    );
+
     res.json({
       ...rest,
+      statusHistory,
+      stages,
+      closedInDays,
       customer: { ...customerRest, address: sites[0] ? [sites[0].address, sites[0].city].filter(Boolean).join(', ') : null },
       revisions: quotation.revisions.map((r) =>
         presentRevision(r as unknown as Record<string, unknown>, showCost),
@@ -1132,15 +1154,18 @@ quotationRoutes.patch(
       });
     }
 
+    const moved = !!body.outcome && body.outcome !== before.outcome;
     await audit(
       {
         entityType: 'quotation',
         entityId: quotation.id,
         action: body.outcome === 'WON' ? 'COMPLETED' : 'UPDATED',
-        summary:
-          body.outcome && body.outcome !== before.outcome
-            ? `Quotation ${quotation.number}: ${before.outcome} → ${body.outcome}`
-            : `Updated quotation ${quotation.number}`,
+        summary: moved
+          ? `Quotation ${quotation.number}: ${before.outcome} → ${body.outcome}`
+          : `Updated quotation ${quotation.number}`,
+        // The move itself, which is what the quotation page's status history
+        // reads (outcomeChanges in shared/pipeline.ts).
+        ...(moved ? { before: { outcome: before.outcome }, after: { outcome: body.outcome } } : {}),
       },
       req,
     );

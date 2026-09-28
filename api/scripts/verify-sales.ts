@@ -36,6 +36,9 @@ import {
   inForecastMonth,
   isOverdue,
   buildBoard,
+  outcomeChanges,
+  outcomeStages,
+  manilaDaysBetween,
   type BoardLead,
   type BoardQuotation,
 } from '../src/shared/pipeline';
@@ -833,6 +836,68 @@ async function main() {
   });
   check('a costing sheet prints', costingPdf.subarray(0, 5).toString() === '%PDF-');
 
+  // ── 8b. SCORO's status block: history off the audit trail, days per stage ──
+  console.log('\nOutcome history (Previous status, who moved it, days in each status)');
+
+  const at = (iso: string) => new Date(iso);
+  const auditRow = (iso: string, summary: string | null, before: unknown = null, after: unknown = null) => ({
+    summary,
+    before,
+    after,
+    at: at(iso),
+    actorId: 'u1',
+    actorName: 'Rodolfo Almonte',
+  });
+  const moves = outcomeChanges([
+    // Out of order on purpose: the history is sorted by time, not by row order.
+    auditRow('2026-02-18T07:51:00Z', 'Quotation Q1: SUBMITTED → WON', { outcome: 'SUBMITTED' }, { outcome: 'WON' }),
+    auditRow('2026-01-10T02:00:00Z', 'Quotation Q1: OPEN → SUBMITTED'),
+    auditRow('2026-01-05T02:00:00Z', 'Updated quotation Q1'),
+    auditRow('2026-01-06T02:00:00Z', 'Created quotation Q1'),
+  ]);
+  check(
+    'moves are read off the audit rows, oldest first, and other edits are ignored',
+    moves.map((m) => `${m.from}>${m.to}`).join(',') === 'OPEN>SUBMITTED,SUBMITTED>WON',
+    JSON.stringify(moves.map((m) => [m.from, m.to])),
+  );
+  check('a move written before before/after carried it is read from its summary', moves[0]?.from === 'OPEN');
+  check('each move says who made it', moves.every((m) => m.by?.name === 'Rodolfo Almonte'));
+  check(
+    'SCORO counts calendar days in Manila: 3 Jan to 18 Feb is 46',
+    manilaDaysBetween(at('2026-01-03T01:00:00Z'), at('2026-02-18T07:51:00Z')) === 46,
+  );
+  check(
+    'a Manila day boundary counts, not 24 hours: 23:30 to 00:30 the next day is 1',
+    manilaDaysBetween(at('2026-01-03T15:30:00Z'), at('2026-01-03T16:30:00Z')) === 1,
+  );
+  const decided = outcomeStages(at('2026-01-03T01:00:00Z'), 'WON', moves, at('2026-03-09T06:28:00Z'), at('2026-09-28T00:00:00Z'));
+  check(
+    'a won quotation lists the stages that led there, not "won for N days"',
+    decided.stages.map((s) => `${s.outcome}:${s.days}`).join(',') === 'OPEN:7,SUBMITTED:39',
+    JSON.stringify(decided.stages),
+  );
+  check('and "Closed in" runs from issue to the decision date (65 days)', decided.closedInDays === 65, String(decided.closedInDays));
+  check('no stage of a decided quotation is current', decided.stages.every((s) => !s.current));
+  const running = outcomeStages(
+    at('2026-09-01T01:00:00Z'),
+    'NEGOTIATION',
+    outcomeChanges([
+      auditRow('2026-09-03T01:00:00Z', null, { outcome: 'OPEN' }, { outcome: 'NEGOTIATION' }),
+      auditRow('2026-09-10T01:00:00Z', null, { outcome: 'NEGOTIATION' }, { outcome: 'WON' }),
+      auditRow('2026-09-12T01:00:00Z', null, { outcome: 'WON' }, { outcome: 'NEGOTIATION' }),
+    ]),
+    null,
+    at('2026-09-20T01:00:00Z'),
+  );
+  check(
+    'an outcome returned to adds to its own total rather than appearing twice',
+    running.stages.map((s) => `${s.outcome}:${s.days}`).join(',') === 'OPEN:2,NEGOTIATION:15,WON:2',
+    JSON.stringify(running.stages),
+  );
+  check('the stage it is in now is marked current, and it is not closed', running.stages.find((s) => s.current)?.outcome === 'NEGOTIATION' && running.closedInDays === null);
+  const untouched = outcomeStages(at('2026-09-01T01:00:00Z'), 'OPEN', [], null, at('2026-09-05T01:00:00Z'));
+  check('a quotation nobody has moved is open since it was raised', untouched.stages.length === 1 && untouched.stages[0].days === 4 && untouched.stages[0].current);
+
   // ── 9. SCORO-style quotation money ─────────────────────────────────────────
   // quotationTotals in shared/quotation.ts is the ONE arithmetic: the routes
   // store what it returns and the screen shows what it returns.
@@ -1152,6 +1217,41 @@ async function main() {
     check(
       'and never a cost figure, a margin or a cost note',
       !text.includes('7,777.77') && !text.includes('15,555.54') && !text.includes('supplier quote 88') && !text.includes(supplier.name),
+    );
+
+    // SCORO's status block, end to end: a move is recorded, and the quotation
+    // comes back with its previous status, who moved it, and days per stage.
+    const beforeSend = await http(salesToken, 'GET', `/quotations/${qid}`);
+    check(
+      'an unmoved quotation has no history and is open since it was raised',
+      Array.isArray(beforeSend.body.statusHistory) &&
+        (beforeSend.body.statusHistory as unknown[]).length === 0 &&
+        (beforeSend.body.stages as { outcome: string; current: boolean }[])?.[0]?.outcome === 'OPEN',
+      JSON.stringify(beforeSend.body.stages),
+    );
+    const sendIt = await http(salesToken, 'PATCH', `/quotations/${qid}`, { outcome: 'SUBMITTED' });
+    check('"Mark as sent" moves it to Submitted', sendIt.status === 200, sendIt.text.slice(0, 200));
+    const afterSend = await http(otherToken, 'GET', `/quotations/${qid}`);
+    const moved = (afterSend.body.statusHistory ?? []) as { from: string; to: string; at: string; by: { name: string } | null }[];
+    check(
+      'the move comes back as history — from Open, to Submitted, by the salesperson — for any reader of the quotation',
+      moved.length === 1 && moved[0].from === 'OPEN' && moved[0].to === 'SUBMITTED' && moved[0].by?.name === sales.name,
+      JSON.stringify(moved),
+    );
+    check('with the time it happened, and submittedAt set', !!moved[0]?.at && !!afterSend.body.submittedAt);
+    const stagesNow = (afterSend.body.stages ?? []) as { outcome: string; current: boolean }[];
+    check(
+      'and the strip shows Open, then Submitted as the current stage',
+      stagesNow.map((s) => s.outcome).join(',') === 'OPEN,SUBMITTED' && stagesNow[1]?.current === true && afterSend.body.closedInDays === null,
+      JSON.stringify(stagesNow),
+    );
+    const moveRow = await prisma.auditLog.findFirst({
+      where: { entityType: 'quotation', entityId: qid, summary: { contains: 'SUBMITTED' } },
+      orderBy: { at: 'desc' },
+    });
+    check(
+      'the audit row carries the move itself, not only a sentence about it',
+      (moveRow?.before as { outcome?: string } | null)?.outcome === 'OPEN' && (moveRow?.after as { outcome?: string } | null)?.outcome === 'SUBMITTED',
     );
 
     // ── 11. The full-page editor: one save, one transaction ──────────────────

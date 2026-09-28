@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type Column } from '../../components/DataList';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
@@ -278,6 +279,21 @@ export interface Revision {
   jobs: { id: string; number: string; name: string; status: string }[];
 }
 
+/** One move of the outcome, off the audit trail (outcomeChanges in api/src/shared/pipeline.ts). */
+export interface StatusChange {
+  from: string;
+  to: string;
+  at: string;
+  by: { id: string | null; name: string } | null;
+}
+
+/** Days spent in one outcome — SCORO's "Opportunity 46 days". */
+export interface OutcomeStage {
+  outcome: string;
+  days: number;
+  current: boolean;
+}
+
 export interface QuotationDetail {
   id: string;
   number: string;
@@ -286,17 +302,40 @@ export interface QuotationDetail {
   probability: number;
   lostReason: string | null;
   submittedAt: string | null;
+  decidedAt?: string | null;
   expectedClosing: string | null;
+  createdAt?: string;
   canEdit: boolean;
   /** Whether the server sent the cost half of each line. */
   canSeeCost: boolean;
-  customer: { id: string; name: string; code: string; paymentTerms: string | null };
-  contact: { id: string; name: string } | null;
-  site: { id: string; name: string } | null;
+  customer: {
+    id: string;
+    name: string;
+    code: string;
+    paymentTerms: string | null;
+    legalName?: string | null;
+    /** The first active site's address — a customer keeps its addresses on its sites. */
+    address?: string | null;
+    phone?: string | null;
+  };
+  contact: {
+    id: string;
+    name: string;
+    position?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    mobile?: string | null;
+  } | null;
+  site: { id: string; name: string; address?: string | null; city?: string | null } | null;
   lead: { id: string; number: string; companyName: string } | null;
   owner: { id: string; name: string };
   legacyQuote: LegacyRef | null;
   revisions: Revision[];
+  /** Oldest first. */
+  statusHistory?: StatusChange[];
+  stages?: OutcomeStage[];
+  /** Issue to decision, once the quotation is won or lost. */
+  closedInDays?: number | null;
 }
 
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
@@ -375,8 +414,41 @@ export function QuotationDetail() {
 
   // A quotation that became a project stays won — no moves at all.
   const moves = (quotation.outcome === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[quotation.outcome] ?? [])).map(
-    (o) => ({ value: o, label: OUTCOMES.find((x) => x.value === o)?.label ?? o }),
+    (o) => ({ value: o, label: outcomeLabel(o) }),
   );
+  const reopening = quotation.outcome === 'WON' || quotation.outcome === 'LOST';
+
+  // SCORO's status block, off the audit trail: the last move says what the
+  // status was before, and who moved it when.
+  const history = quotation.statusHistory ?? [];
+  const lastMove = history.length ? history[history.length - 1] : null;
+  const lastTo = (outcome: string) => [...history].reverse().find((c) => c.to === outcome) ?? null;
+  const won = quotation.outcome === 'WON' ? lastTo('WON') : null;
+  const lost = quotation.outcome === 'LOST' ? lastTo('LOST') : null;
+  const sent = lastTo('SUBMITTED');
+
+  const issued = revision ? dayKeyOf(new Date(revision.createdAt)) : null;
+  const due = revision && issued ? addDays(issued, revision.validityDays) : null;
+  const canSubmit = editable && !!revision && revision.items.length > 0;
+  const canSend = quotation.canEdit && moves.some((m) => m.value === 'SUBMITTED');
+  const address = quotation.site?.address
+    ? [quotation.site.address, quotation.site.city].filter(Boolean).join(', ')
+    : quotation.customer.address;
+  const contactLine = quotation.contact
+    ? [quotation.contact.mobile || quotation.contact.phone, quotation.contact.email].filter(Boolean).join(' · ')
+    : '';
+
+  function changeOutcome(next: string) {
+    if (!next) return;
+    if (next === 'LOST') {
+      setLosing(true);
+      return;
+    }
+    void act(
+      () => api.patch(`/quotations/${quotation!.id}`, { outcome: next }),
+      reopening ? 'Reopened' : `Marked ${outcomeLabel(next).toLowerCase()}`,
+    );
+  }
 
   return (
     <div>
@@ -407,42 +479,6 @@ export function QuotationDetail() {
         ))}
       </div>
 
-      <div className="page-head">
-        <div>
-          <h1>{quotation.subject}</h1>
-          <p>
-            <Link to={`/g-ops/customers/${quotation.customer.id}`}>{quotation.customer.name}</Link>
-            {quotation.site ? ` · ${quotation.site.name}` : ''} · {quotation.owner.name}
-            <span className="sales-after-text">
-              <StatusBadge status={quotation.outcome} extra={QUOTATION_OUTCOME_TONES} />
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          <button className="btn" onClick={printPdf} disabled={!revision}>
-            Print
-          </button>
-          {quotation.canEdit &&
-            (draft ? (
-              <Link className="btn" to={editHref}>
-                Modify
-              </Link>
-            ) : (
-              <button className="btn" onClick={() => setSettingsOpen(true)}>
-                Modify
-              </button>
-            ))}
-          {quotation.canEdit && revision?.status !== 'DRAFT' && (
-            <button
-              className="btn"
-              onClick={() => act(() => api.post(`/quotations/${quotation.id}/revisions`), 'New revision raised')}
-            >
-              New revision
-            </button>
-          )}
-        </div>
-      </div>
-
       {quotation.legacyQuote && (
         <div className="alert info">
           Continued from SCORO{' '}
@@ -456,19 +492,274 @@ export function QuotationDetail() {
 
       <ErrorBox error={error} />
 
-      {/* Every revision, newest first. Clicking one shows what was sent then. */}
-      <div className="row sales-revisions">
-        {quotation.revisions.map((r) => (
-          <button
-            key={r.id}
-            className={`btn btn-sm${r.id === revision?.id ? ' btn-primary' : ''}`}
-            onClick={() => setSelected(r.id)}
-            aria-pressed={r.id === revision?.id}
-          >
-            R{r.revision} <StatusBadge status={r.status} extra={REVISION_TONES} />
-          </button>
-        ))}
-      </div>
+      {/*
+        SCORO's "Quote details": the same labels in the same two columns, so a
+        salesperson coming from SCORO finds each thing where they left it.
+      */}
+      <section className="card qd-card" aria-labelledby="qd-title">
+        <div className="qd-head">
+          <h1 id="qd-title" className="qd-title">
+            Quote details
+          </h1>
+          <div className="row qd-actions">
+            {can('gops.quotations.create') && revision && (
+              <Link
+                className="btn"
+                to={`/g-ops/quotations/new${qs({ duplicate: quotation.id, revision: revision.id })}`}
+                title="A new quotation with this one's client, terms and lines — numbered when you save it"
+              >
+                Duplicate
+              </Link>
+            )}
+            {quotation.canEdit && revision?.status !== 'DRAFT' && (
+              <button
+                className="btn"
+                onClick={() => act(() => api.post(`/quotations/${quotation.id}/revisions`), 'New revision raised')}
+              >
+                New revision
+              </button>
+            )}
+            {quotation.canEdit &&
+              (draft ? (
+                <Link className="btn btn-primary" to={editHref}>
+                  Modify
+                </Link>
+              ) : (
+                <button className="btn btn-primary" onClick={() => setSettingsOpen(true)}>
+                  Modify
+                </button>
+              ))}
+          </div>
+        </div>
+
+        <div className="qd-grid">
+          <div className="qd-col">
+            <dl className="qd-group">
+              <Detail label="Quote No.">
+                <span className="mono">{quotation.number}</span>
+              </Detail>
+              {quotation.revisions.length > 0 && (
+                <Detail label="Revision">
+                  {/* Every revision, newest first. Choosing one shows what was sent then. */}
+                  <div className="row qd-revisions">
+                    {quotation.revisions.map((r) => (
+                      <button
+                        key={r.id}
+                        className={`btn btn-sm${r.id === revision?.id ? ' btn-primary' : ''}`}
+                        onClick={() => setSelected(r.id)}
+                        aria-pressed={r.id === revision?.id}
+                      >
+                        R{r.revision} <StatusBadge status={r.status} extra={REVISION_TONES} />
+                      </button>
+                    ))}
+                  </div>
+                </Detail>
+              )}
+              <Detail label="Date of issue">{revision ? formatDate(revision.createdAt) : null}</Detail>
+              <Detail label="Quote name">{quotation.subject}</Detail>
+            </dl>
+
+            <dl className="qd-group">
+              <Detail label="Client">
+                <Link className="qd-strong" to={`/g-ops/customers/${quotation.customer.id}`}>
+                  {quotation.customer.legalName || quotation.customer.name}
+                </Link>
+                {address && <div className="qd-sub">{address}</div>}
+                {quotation.customer.phone && <div className="qd-sub">{quotation.customer.phone}</div>}
+              </Detail>
+              <Detail label="Contact person">
+                {quotation.contact && (
+                  <>
+                    <span className="qd-strong">{quotation.contact.name}</span>
+                    {quotation.contact.position && <span className="qd-sub"> · {quotation.contact.position}</span>}
+                    {contactLine && <div className="qd-sub">{contactLine}</div>}
+                  </>
+                )}
+              </Detail>
+              {quotation.site && <Detail label="Site">{quotation.site.name}</Detail>}
+            </dl>
+
+            <dl className="qd-group">
+              <Detail label="Project">
+                <ProjectCell approved={approved} jobs={jobs} outcome={quotation.outcome} can={can} />
+              </Detail>
+              {quotation.lead && (
+                <Detail label="Enquiry">
+                  <Link to={`/g-ops/leads/${quotation.lead.id}`}>
+                    {quotation.lead.number} — {quotation.lead.companyName}
+                  </Link>
+                </Detail>
+              )}
+              {revision?.costing && (
+                <Detail label="Costing">
+                  <Link to={`/g-ops/costing/${revision.costing.id}`}>
+                    {revision.costing.number} — {revision.costing.title}
+                  </Link>
+                </Detail>
+              )}
+            </dl>
+
+            <dl className="qd-group">
+              <Detail label="Comment">{revision?.notes ? <span className="qd-pre">{revision.notes}</span> : null}</Detail>
+              {revision?.terms && (
+                <Detail label="Terms">
+                  <span className="qd-pre">{revision.terms}</span>
+                </Detail>
+              )}
+            </dl>
+          </div>
+
+          <div className="qd-col">
+            <dl className="qd-group">
+              <Detail label="Author">{quotation.owner.name}</Detail>
+              <Detail label="Due date">
+                {due && revision ? (
+                  <>
+                    {formatDate(parseDay(due))}{' '}
+                    <span className="qd-sub">
+                      ({revision.validityDays} day{revision.validityDays === 1 ? '' : 's'})
+                    </span>
+                  </>
+                ) : null}
+              </Detail>
+              <Detail label="Estimated closing date">{quotation.expectedClosing ? formatDate(quotation.expectedClosing) : null}</Detail>
+              <Detail label="Probability">{`${quotation.probability}%`}</Detail>
+            </dl>
+
+            <dl className="qd-group">
+              <Detail label="Previous status">
+                {lastMove ? <StatusBadge status={lastMove.from} extra={QUOTATION_OUTCOME_TONES} /> : null}
+              </Detail>
+              <Detail label="Status">
+                <span className="qd-status">
+                  <StatusBadge status={quotation.outcome} extra={QUOTATION_OUTCOME_TONES} />
+                  <Stamp at={lastMove?.at ?? quotation.createdAt} by={lastMove?.by} />
+                </span>
+                {quotation.canEdit && moves.length > 0 && (
+                  <div className="qd-status-change">
+                    <select
+                      aria-label="Change status"
+                      aria-describedby="qd-status-hint"
+                      value=""
+                      onChange={(e) => changeOutcome(e.target.value)}
+                    >
+                      <option value="">Change status…</option>
+                      {moves.map((o) => {
+                        const needsApproval = o.value === 'WON' && !approved;
+                        return (
+                          <option key={o.value} value={o.value} disabled={needsApproval}>
+                            {reopening ? `Reopen — ${o.label}` : o.label}
+                            {o.value === 'LOST' ? '…' : ''}
+                            {needsApproval ? ' (needs an approved revision)' : ''}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <p id="qd-status-hint" className="faint sales-hint">
+                      Moving it here also moves its lead, so the pipeline stays honest.
+                      {quotation.outcome !== 'WON' && !approved
+                        ? ' Won is available once a revision is approved — only the approved revision becomes a project.'
+                        : ''}
+                    </p>
+                  </div>
+                )}
+              </Detail>
+              {quotation.outcome === 'WON' && (
+                <Detail label="Date confirmed">
+                  <Stamp at={won?.at ?? quotation.decidedAt} by={won?.by} />
+                </Detail>
+              )}
+              {quotation.outcome === 'LOST' && (
+                <>
+                  <Detail label="Date lost">
+                    <Stamp at={lost?.at ?? quotation.decidedAt} by={lost?.by} />
+                  </Detail>
+                  <Detail label="Lost because">{quotation.lostReason}</Detail>
+                </>
+              )}
+              <Detail label="Sent">
+                {quotation.submittedAt || sent ? (
+                  <span className="qd-status">
+                    Yes <Stamp at={sent?.at ?? quotation.submittedAt} by={sent?.by} />
+                  </span>
+                ) : (
+                  'No'
+                )}
+              </Detail>
+            </dl>
+
+            {revision && (
+              <dl className="qd-group">
+                <Detail label="PR Number">{revision.prNumber}</Detail>
+                <Detail label="Payment Terms">{revision.paymentTerms}</Detail>
+                <Detail label="Delivery">{revision.delivery}</Detail>
+                <Detail label="VAT">{revision.vatInclusive ? 'Prices include VAT' : 'Added on top of the prices'}</Detail>
+              </dl>
+            )}
+          </div>
+        </div>
+
+        {/* SCORO's strip: how long it sat in each status, and how long it took to close. */}
+        {((quotation.stages?.length ?? 0) > 0 || quotation.closedInDays != null) && (
+          <div className="kpi-grid qd-stages" aria-label="Days in each status">
+            {(quotation.stages ?? []).map((s) => (
+              <Stat
+                key={s.outcome}
+                label={outcomeLabel(s.outcome)}
+                value={dayCount(s.days)}
+                figure
+                accent={STAGE_ACCENT[s.outcome] ?? 'quiet'}
+                sub={s.current ? 'so far' : undefined}
+              />
+            ))}
+            {quotation.closedInDays != null && (
+              <Stat
+                label="Closed in"
+                value={dayCount(quotation.closedInDays)}
+                figure
+                accent={quotation.outcome === 'WON' ? 'ok' : 'danger'}
+                sub={quotation.outcome === 'WON' ? 'won' : 'lost'}
+              />
+            )}
+          </div>
+        )}
+
+        {/* SCORO's action bar, at the foot of the details it acts on. */}
+        <div className="qd-bar">
+          <div className="row">
+            <ProjectActions quotation={quotation} jobs={jobs} can={can} />
+          </div>
+          <div className="row">
+            <button className="btn" onClick={printPdf} disabled={!revision}>
+              PDF
+            </button>
+            {canSubmit && (
+              <button
+                className="btn btn-ok"
+                onClick={() =>
+                  act(
+                    () => api.post(`/quotations/${quotation.id}/revisions/${revision!.id}/submit`),
+                    'Submitted for approval',
+                  )
+                }
+              >
+                Submit for approval
+              </button>
+            )}
+            {canSend && (
+              <button
+                className="btn btn-primary"
+                title="Records that the customer has it. Email the PDF as you always have."
+                onClick={() =>
+                  act(() => api.patch(`/quotations/${quotation.id}`, { outcome: 'SUBMITTED' }), 'Marked as sent')
+                }
+              >
+                Mark as sent
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
 
       {revision && (
         <>
@@ -513,7 +804,7 @@ export function QuotationDetail() {
 
           <div className="card sales-card-gap">
             <div className="row sales-card-head">
-              <h3 className="card-title">Lines</h3>
+              <h2 className="card-title">Lines</h2>
               {editable && (
                 <div className="row">
                   {revision.costing && (
@@ -622,94 +913,6 @@ export function QuotationDetail() {
                 onError={setError}
               />
               {showPanel && revision.costPanel && <CostPanelBlock panel={revision.costPanel} />}
-            </div>
-
-            {editable && revision.items.length > 0 && (
-              <div className="row sales-card-foot">
-                <button
-                  className="btn btn-ok"
-                  onClick={() =>
-                    act(
-                      () =>
-                        api.post(`/quotations/${quotation.id}/revisions/${revision.id}/submit`),
-                      'Submitted for approval',
-                    )
-                  }
-                >
-                  Submit for approval
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-2">
-            <div className="card">
-              <h3 className="card-title">Commercial</h3>
-              <Row label="Customer" value={quotation.customer.name} />
-              <Row label="Attention" value={quotation.contact?.name} />
-              <Row label="Site" value={quotation.site?.name} />
-              <Row label="Payment terms" value={revision.paymentTerms} />
-              <Row label="PR number" value={revision.prNumber} />
-              <Row label="Delivery" value={revision.delivery} />
-              <Row label="Valid for" value={`${revision.validityDays} days`} />
-              <Row label="VAT" value={revision.vatInclusive ? 'Inclusive of VAT' : 'Exclusive — added on'} />
-              <Row label="Raised" value={formatDate(revision.createdAt)} />
-              <Row label="Expected closing" value={formatDate(quotation.expectedClosing)} />
-            </div>
-
-            <div className="card">
-              <h3 className="card-title">Outcome</h3>
-              <p className="muted sales-blurb">
-                Recording the outcome here also moves the lead, so the pipeline stays honest without
-                keeping two statuses in step.
-              </p>
-              {quotation.outcome === 'LOST' && (
-                <Row label="Lost because" value={quotation.lostReason} />
-              )}
-              {quotation.canEdit && moves.length > 0 && (
-                <div className="row">
-                  {moves.map((o) => {
-                    if (o.value === 'LOST') {
-                      return (
-                        <button key={o.value} className="btn btn-sm btn-danger-ghost" onClick={() => setLosing(true)}>
-                          Lost…
-                        </button>
-                      );
-                    }
-                    const needsApproval = o.value === 'WON' && !approved;
-                    const reopening = quotation.outcome === 'WON' || quotation.outcome === 'LOST';
-                    return (
-                      <button
-                        key={o.value}
-                        className={`btn btn-sm${o.value === 'WON' ? ' btn-ok' : ''}`}
-                        disabled={needsApproval}
-                        title={
-                          needsApproval
-                            ? 'Only an approved revision can be won — submit it for approval first'
-                            : undefined
-                        }
-                        onClick={() =>
-                          act(
-                            () => api.patch(`/quotations/${quotation.id}`, { outcome: o.value }),
-                            reopening ? 'Reopened' : `Marked ${o.label.toLowerCase()}`,
-                          )
-                        }
-                      >
-                        {reopening ? 'Reopen' : o.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {quotation.canEdit && quotation.outcome !== 'WON' && !approved && (
-                <p className="faint sales-hint">
-                  Won is available once a revision is approved — only the approved revision becomes
-                  a project.
-                </p>
-              )}
-              {quotation.outcome === 'WON' && (
-                <WonBlock quotation={quotation} approved={approved} jobs={jobs} can={can} />
-              )}
             </div>
           </div>
 
@@ -904,27 +1107,28 @@ export function CostPanelBlock({ panel }: { panel: CostPanel }) {
   );
 }
 
+type JobRef = { id: string; number: string; name: string; status: string };
+
 /**
- * What happens after a win. A quotation that became a project says so and
- * links to it; one that has not offers the next step — a project from the
- * approved revision's costing, or a job order for service work — so a won
- * quotation waiting on somebody is distinguishable from one already delivered.
+ * SCORO's Project row. A quotation that became a project links to it; a won
+ * one not yet delivered offers "Create project" from the approved revision's
+ * costing; before that the row says when a project becomes possible — so a won
+ * quotation waiting on somebody reads differently from one already delivered.
  */
-function WonBlock({
-  quotation,
+function ProjectCell({
   approved,
   jobs,
+  outcome,
   can,
 }: {
-  quotation: QuotationDetail;
   approved: Revision | null;
-  jobs: { id: string; number: string; name: string; status: string }[];
+  jobs: JobRef[];
+  outcome: string;
   can: (permission: string) => boolean;
 }) {
   if (jobs.length > 0) {
     return (
-      <div className="alert ok sales-won">
-        Delivered as{' '}
+      <>
         {jobs.map((j, i) => (
           <span key={j.id}>
             {i > 0 && ', '}
@@ -934,50 +1138,52 @@ function WonBlock({
             {j.name} <StatusBadge status={j.status} />
           </span>
         ))}
-        . It stays won while the project exists.
-      </div>
+        <div className="qd-sub">It stays won while the project exists.</div>
+      </>
     );
   }
-  const canProject = !!approved && can('gops.projects.create');
-  const canJobOrder = can('gops.job_orders.create');
+  if (outcome !== 'WON') return <span className="faint">Created once the quotation is won</span>;
+  if (!approved) return <span className="faint">No revision is approved, so there is nothing to build a project from yet</span>;
+  if (!can('gops.projects.create')) return <span className="faint">Won — waiting for a project to be created</span>;
   return (
-    <div className="alert ok sales-won">
-      <div>
-        Won.{' '}
-        {approved
-          ? `R${approved.revision} is the approved revision — its costing carries the budget and the schedule of values into the project.`
-          : 'No revision is approved, so there is nothing to build a project from yet.'}
+    <>
+      <Link
+        className="btn btn-sm btn-primary"
+        to={`/g-ops/projects${qs({ new: 1, costingId: approved.costing?.id, quotationRevisionId: approved.id })}`}
+      >
+        Create project ›
+      </Link>
+      <div className="qd-sub">
+        R{approved.revision} is the approved revision — its costing carries the budget and the schedule of values
+        into the project.
       </div>
-      {(canProject || canJobOrder) && (
-        <div className="row sales-won-actions">
-          {canProject && (
-            <Link
-              className="btn btn-sm btn-primary"
-              to={`/g-ops/projects${qs({
-                new: 1,
-                costingId: approved?.costing?.id,
-                quotationRevisionId: approved?.id,
-              })}`}
-            >
-              Create project ›
-            </Link>
-          )}
-          {canJobOrder && (
-            <Link
-              className="btn btn-sm"
-              to={`/g-ops/job-orders${qs({
-                new: 1,
-                customerId: quotation.customer.id,
-                siteId: quotation.site?.id,
-                quotationId: quotation.id,
-              })}`}
-            >
-              Request job order
-            </Link>
-          )}
-        </div>
-      )}
-    </div>
+    </>
+  );
+}
+
+/** The action bar's left end: a won quotation not yet delivered can also become a job order. */
+function ProjectActions({
+  quotation,
+  jobs,
+  can,
+}: {
+  quotation: QuotationDetail;
+  jobs: JobRef[];
+  can: (permission: string) => boolean;
+}) {
+  if (quotation.outcome !== 'WON' || jobs.length > 0 || !can('gops.job_orders.create')) return null;
+  return (
+    <Link
+      className="btn"
+      to={`/g-ops/job-orders${qs({
+        new: 1,
+        customerId: quotation.customer.id,
+        siteId: quotation.site?.id,
+        quotationId: quotation.id,
+      })}`}
+    >
+      Request job order
+    </Link>
   );
 }
 
@@ -1019,14 +1225,54 @@ function MarginStat({
   );
 }
 
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+/** A SCORO label / value line: "Quote No.:  0012609061". An empty value reads as a dash. */
+function Detail({ label, children }: { label: string; children?: ReactNode }) {
+  const empty = children === null || children === undefined || children === '' || children === false;
   return (
-    <div className="sales-row">
-      <span className="sales-row-label">{label}</span>
-      <span>{value || <span className="faint">—</span>}</span>
+    <div className="qd-row">
+      <dt>{label}:</dt>
+      <dd>{empty ? <span className="faint">—</span> : children}</dd>
     </div>
   );
 }
+
+/** "Sep 28, 2026, 02:28 PM | RA" — when a status was set, and by whom, as SCORO shows it. */
+function Stamp({ at, by }: { at: string | null | undefined; by?: { name: string } | null }) {
+  if (!at) return null;
+  return (
+    <span className="qd-stamp">
+      {formatDateTime(at)}
+      {by && (
+        <>
+          {' '}
+          <span aria-hidden="true">|</span>{' '}
+          <span title={by.name} aria-hidden="true">
+            {initials(by.name)}
+          </span>
+          <span className="visually-hidden">by {by.name}</span>
+        </>
+      )}
+    </span>
+  );
+}
+
+const outcomeLabel = (o: string) => OUTCOMES.find((x) => x.value === o)?.label ?? o;
+const dayCount = (n: number) => `${n} day${n === 1 ? '' : 's'}`;
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w[0])
+    .slice(0, 3)
+    .join('')
+    .toUpperCase();
+
+/** The strip's colours follow the status pill's: open waits on us, the rest are the lifecycle. */
+const STAGE_ACCENT: Record<string, 'ok' | 'warn' | 'danger' | 'info' | 'neon' | 'quiet'> = {
+  OPEN: 'warn',
+  SUBMITTED: 'info',
+  NEGOTIATION: 'neon',
+};
 
 // ── Modals ───────────────────────────────────────────────────────────────────
 

@@ -205,6 +205,9 @@ export function QuotationEditor() {
       leadId: params.get('leadId') ?? '',
       costingId: params.get('costingId') ?? '',
       customerId: params.get('customerId') ?? '',
+      // SCORO's "Duplicate": the quotation, and which of its revisions, to copy.
+      duplicate: params.get('duplicate') ?? '',
+      revision: params.get('revision') ?? '',
     }),
     // The preset is read once, when the page opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -427,6 +430,49 @@ export function QuotationEditor() {
       setHeader((h) => (h.customer ? h : { ...h, customer: { id: preset.customerId, name: '' } }));
     }
   }, [editing, preset, adoptLead]);
+
+  /*
+    ── Duplicate (?duplicate=&revision=, create only) ─────────────────────────
+    SCORO's most-used button: a new quotation starting from an old one. It
+    copies the client, contact, site, name, terms and lines — cost included
+    only where the server sent it to this viewer — and leaves the PR number,
+    the enquiry and the costing to be set, because those belong to the new
+    request. Nothing is written, and no number used, until Save.
+  */
+  const [duplicateOf, setDuplicateOf] = useState<string | null>(null);
+  useEffect(() => {
+    if (editing || !preset.duplicate) return;
+    let live = true;
+    api
+      .get<QuotationDetail>(`/quotations/${preset.duplicate}`)
+      .then((q) => {
+        if (!live) return;
+        const src = q.revisions.find((r) => r.id === preset.revision) ?? q.revisions[0];
+        if (!src) return;
+        termsTouched.current = true;
+        linesTouched.current = src.items.length > 0;
+        setHeader((h) => ({
+          ...h,
+          customer: { id: q.customer.id, name: q.customer.name },
+          contactId: q.contact?.id ?? '',
+          siteId: q.site?.id ?? '',
+          subject: q.subject,
+          notes: src.notes ?? '',
+          dueDate: addDays(today, src.validityDays),
+          delivery: src.delivery ?? '',
+          paymentTerms: src.paymentTerms ?? '',
+          terms: src.terms ?? '',
+          vatInclusive: src.vatInclusive,
+          discountPct: String(src.discountPct ?? 0),
+        }));
+        if (src.items.length) setLines(src.items.map(fromItem));
+        setDuplicateOf(src.revision > 0 ? `${q.number} R${src.revision}` : q.number);
+      })
+      .catch((err) => live && setError(err));
+    return () => {
+      live = false;
+    };
+  }, [editing, preset, today]);
 
   // ── The chosen customer's contacts, sites and payment terms ───────────────
   const customerId = header.customer?.id ?? '';
@@ -802,6 +848,12 @@ export function QuotationEditor() {
       </div>
 
       <ErrorBox error={error} />
+      {duplicateOf && (
+        <div className="alert info">
+          Copied from <span className="mono">{duplicateOf}</span> — client, terms and lines. Set the PR
+          Number, the enquiry and the costing for this request, then Save; the new number is issued then.
+        </div>
+      )}
       {leadWithoutCustomer && (
         <div className="alert warn">
           This lead is not linked to a customer yet. Choose the client below, or open the lead, Modify,
@@ -846,7 +898,7 @@ export function QuotationEditor() {
                   value={header.customer}
                   invalid={!!errors.customer}
                   describedBy={errors.customer ? 'qe-customer-error' : undefined}
-                  autoFocus={!preset.leadId && !preset.costingId && !preset.customerId}
+                  autoFocus={!preset.leadId && !preset.costingId && !preset.customerId && !preset.duplicate}
                   onError={setError}
                   onChange={(c) => {
                     setHeader((h) => ({ ...h, customer: c, contactId: '', siteId: '' }));
@@ -889,7 +941,7 @@ export function QuotationEditor() {
               <input
                 id="qe-subject"
                 value={header.subject}
-                autoFocus={!!(preset.leadId || preset.costingId || preset.customerId) && !editing}
+                autoFocus={!!(preset.leadId || preset.costingId || preset.customerId || preset.duplicate) && !editing}
                 onChange={(e) => set('subject', e.target.value)}
               />
             </Field>

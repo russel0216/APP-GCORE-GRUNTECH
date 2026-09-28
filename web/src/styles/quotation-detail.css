@@ -1,0 +1,170 @@
+/*
+  The quotation page (pages/sales/Quotations.tsx › QuotationDetail) — SCORO's
+  "Quote details": a titled card with Duplicate / Modify at the top right, the
+  same labels in the same two columns (label bold on the left, value beside
+  it), groups split by a hairline, the days-in-status strip, and the action bar
+  across the foot. The lines, totals and cost panel below keep the quote-*
+  rules in styles.css and pipeline.css. Tokens only.
+*/
+
+.qd-card {
+  margin-bottom: var(--s-5);
+}
+
+.qd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  padding-bottom: var(--s-4);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.qd-title {
+  margin: 0;
+  font-size: var(--fs-xl);
+}
+
+.qd-actions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+/* Two columns, one under 860px. */
+.qd-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--s-6);
+}
+
+@media (max-width: 860px) {
+  .qd-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.qd-col {
+  min-width: 0;
+}
+
+/* A group of rows; the hairline between groups is SCORO's. */
+.qd-group {
+  margin: 0;
+  padding: var(--s-2) 0;
+}
+
+.qd-group + .qd-group {
+  border-top: 1px solid var(--line-soft);
+}
+
+/* On a phone the right column's first group follows the left's last: keep the hairline. */
+@media (max-width: 860px) {
+  .qd-col + .qd-col > .qd-group:first-child {
+    border-top: 1px solid var(--line-soft);
+  }
+}
+
+.qd-row {
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  align-items: baseline;
+}
+
+.qd-row dt {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.qd-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .qd-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-1);
+  }
+}
+
+.qd-strong {
+  font-weight: 600;
+}
+
+.qd-sub {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+/* A comment or terms typed over several lines keeps its lines. */
+.qd-pre {
+  white-space: pre-line;
+}
+
+.qd-revisions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.qd-status {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.qd-stamp {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.qd-status-change {
+  margin-top: var(--s-2);
+  max-width: 22rem;
+}
+
+.qd-status-change .sales-hint {
+  margin-top: var(--s-1);
+}
+
+/* Compact tiles, centred as SCORO sets them — one stage must not stretch across the card. */
+.qd-stages {
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 13rem));
+  justify-content: center;
+  margin-top: var(--s-3);
+  margin-bottom: 0;
+}
+
+/* SCORO's bar: what makes the next thing on the left, the paper and the sending on the right. */
+.qd-bar {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+.qd-bar > .row {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.qd-bar > .row:last-child {
+  margin-left: auto;
+}
+
+@media (max-width: 520px) {
+  .qd-bar > .row,
+  .qd-bar .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+}
