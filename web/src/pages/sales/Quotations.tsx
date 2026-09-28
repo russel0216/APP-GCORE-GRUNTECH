@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -75,47 +75,28 @@ interface LegacyRef {
   status: string;
 }
 
-/** What `?new=1&…` asks the create modal to start from. */
-export interface QuotationPreset {
-  leadId?: string;
-  costingId?: string;
-  customerId?: string;
-}
-
 export function Quotations() {
   const { can } = useAuth();
   const navigate = useNavigate();
-  const [params, setParams] = useSearchParams();
-  const [reload, setReload] = useState(0);
+  const [params] = useSearchParams();
 
   /*
-    `?new=1&leadId=&costingId=&customerId=` opens the create modal already
-    filled in. The lead page's "Create quotation", the costing's "Create
-    quotation" and Customer 360's "New quotation" all land here; the URL is
-    the hand-off, so there is no second create form anywhere.
+    `?new=1&leadId=&costingId=&customerId=` is the old hand-off to the create
+    dialog. The dialog is gone — a quotation is written on its own page — but
+    a bookmark or an old link still lands somewhere sensible: the editor, with
+    the same preset. Replace, so Back does not bounce through this redirect.
   */
-  const [creating, setCreating] = useState<QuotationPreset | null>(() =>
-    params.get('new') && can('gops.quotations.create')
-      ? {
-          leadId: params.get('leadId') ?? undefined,
-          costingId: params.get('costingId') ?? undefined,
-          customerId: params.get('customerId') ?? undefined,
-        }
-      : null,
-  );
-
-  function closeCreate() {
-    setCreating(null);
-    if (params.has('new')) {
-      setParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          for (const k of ['new', 'leadId', 'costingId', 'customerId']) next.delete(k);
-          return next;
-        },
-        { replace: true },
-      );
-    }
+  if (params.get('new') && can('gops.quotations.create')) {
+    return (
+      <Navigate
+        replace
+        to={`/g-ops/quotations/new${qs({
+          leadId: params.get('leadId'),
+          costingId: params.get('costingId'),
+          customerId: params.get('customerId'),
+        })}`}
+      />
+    );
   }
 
   const columns: Column<QuotationRow>[] = [
@@ -189,43 +170,30 @@ export function Quotations() {
         rowKey={(q) => q.id}
         scoped
         searchPlaceholder="Search number, subject, customer…"
-        reloadToken={reload}
         onRowClick={(q) => navigate(`/g-ops/quotations/${q.id}`)}
         emptyTitle="No quotations yet"
         filters={[{ key: 'outcome', label: 'Outcome', options: OUTCOMES }]}
         actions={
           can('gops.quotations.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating({})}>
+            <Link className="btn btn-primary btn-sm" to="/g-ops/quotations/new">
               + New quotation
-            </button>
+            </Link>
           ) : null
         }
       />
-
-      {creating && (
-        <NewQuotationModal
-          preset={creating}
-          onClose={closeCreate}
-          onCreated={(id) => {
-            setCreating(null);
-            setReload((r) => r + 1);
-            navigate(`/g-ops/quotations/${id}`, { replace: params.has('new') });
-          }}
-        />
-      )}
     </div>
   );
 }
 
 // ── Detail ───────────────────────────────────────────────────────────────────
 
-interface Person {
+export interface Person {
   id: string;
   name: string;
   position?: string | null;
 }
 
-interface SupplierRef {
+export interface SupplierRef {
   id: string;
   code?: string;
   name: string;
@@ -236,7 +204,7 @@ interface SupplierRef {
  * when the server decided this viewer may see cost — the keys are stripped
  * server-side otherwise, so the screen never has them to hide.
  */
-interface Item {
+export interface Item {
   id: string;
   group: string | null;
   title: string | null;
@@ -258,7 +226,7 @@ interface Item {
 }
 
 /** SCORO's right-hand panel. Percentages are of the sum without tax. */
-interface CostPanel {
+export interface CostPanel {
   totalCost: number;
   inHouseCost: number;
   outsourcedCost: number;
@@ -277,7 +245,7 @@ interface CostPanel {
   lineCount: number;
 }
 
-interface Revision {
+export interface Revision {
   id: string;
   revision: number;
   status: string;
@@ -310,7 +278,7 @@ interface Revision {
   jobs: { id: string; number: string; name: string; status: string }[];
 }
 
-interface QuotationDetail {
+export interface QuotationDetail {
   id: string;
   number: string;
   subject: string;
@@ -342,7 +310,6 @@ export function QuotationDetail() {
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  const [itemModal, setItemModal] = useState<Item | 'new' | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [losing, setLosing] = useState(false);
   const [reload, setReload] = useState(0);
@@ -376,7 +343,10 @@ export function QuotationDetail() {
   const approved = quotation.revisions.find((r) => r.status === 'APPROVED') ?? null;
   const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
   const showCost = quotation.canSeeCost;
-  const groups = [...new Set(quotation.revisions.flatMap((r) => r.items.map((i) => i.group).filter(Boolean) as string[]))];
+  // A draft is written on the full-page editor; the dialog only ever holds
+  // what may still change once a revision has left draft.
+  const draft = quotation.revisions.find((r) => r.status === 'DRAFT') ?? null;
+  const editHref = `/g-ops/quotations/${quotation.id}/edit`;
 
   async function act(fn: () => Promise<unknown>, message: string) {
     try {
@@ -452,11 +422,16 @@ export function QuotationDetail() {
           <button className="btn" onClick={printPdf} disabled={!revision}>
             Print
           </button>
-          {quotation.canEdit && (
-            <button className="btn" onClick={() => setSettingsOpen(true)}>
-              Modify
-            </button>
-          )}
+          {quotation.canEdit &&
+            (draft ? (
+              <Link className="btn" to={editHref}>
+                Modify
+              </Link>
+            ) : (
+              <button className="btn" onClick={() => setSettingsOpen(true)}>
+                Modify
+              </button>
+            ))}
           {quotation.canEdit && revision?.status !== 'DRAFT' && (
             <button
               className="btn"
@@ -557,9 +532,9 @@ export function QuotationDetail() {
                       Fill from costing
                     </button>
                   )}
-                  <button className="btn btn-primary btn-sm" onClick={() => setItemModal('new')}>
-                    + Add line
-                  </button>
+                  <Link className="btn btn-primary btn-sm" to={editHref}>
+                    Edit lines
+                  </Link>
                 </div>
               )}
             </div>
@@ -569,8 +544,8 @@ export function QuotationDetail() {
                 title="No lines yet"
                 hint={
                   revision.costing
-                    ? 'Use “Fill from costing” to bring in the scope sections you already priced, or add lines one by one.'
-                    : 'Add lines one by one, or link a costing under Modify and fill them from its scope of work.'
+                    ? 'Use “Fill from costing” to bring in the scope sections you already priced, or type the lines in under Edit lines.'
+                    : 'Type the lines in under Edit lines, or link a costing there and fill them from its scope of work.'
                 }
               />
             ) : (
@@ -622,13 +597,13 @@ export function QuotationDetail() {
                         )}
                         {editable && (
                           <td>
-                            <button
+                            <Link
                               className="btn btn-sm"
-                              onClick={() => setItemModal(item)}
+                              to={`${editHref}#line-${i + 1}`}
                               aria-label={`Modify line ${i + 1}`}
                             >
                               Modify
-                            </button>
+                            </Link>
                           </td>
                         )}
                       </tr>
@@ -742,21 +717,6 @@ export function QuotationDetail() {
             <ActivityLog quotationId={quotation.id} canEdit={quotation.canEdit} />
           </div>
         </>
-      )}
-
-      {itemModal && revision && (
-        <ItemModal
-          quotationId={quotation.id}
-          revisionId={revision.id}
-          item={itemModal === 'new' ? null : itemModal}
-          showCost={showCost}
-          groups={groups}
-          onClose={() => setItemModal(null)}
-          onSaved={() => {
-            setItemModal(null);
-            void load();
-          }}
-        />
       )}
 
       {settingsOpen && revision && (
@@ -914,7 +874,7 @@ function TotalsBlock({
 }
 
 /** SCORO's right-hand panel: cost and margin, in-house against outsourced. */
-function CostPanelBlock({ panel }: { panel: CostPanel }) {
+export function CostPanelBlock({ panel }: { panel: CostPanel }) {
   const row = (label: string, value: number, share: number | null, strong = false) => (
     <div className={strong ? 'quote-totals-grand' : undefined}>
       <dt>{label}</dt>
@@ -1069,639 +1029,6 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 // ── Modals ───────────────────────────────────────────────────────────────────
-
-interface LeadForQuote {
-  id: string;
-  companyName: string;
-  description: string | null;
-  contactPerson: string | null;
-  expectedClosing: string | null;
-  customer: { id: string; name: string } | null;
-  site: { id: string; name: string } | null;
-  costings: { id: string; number: string; title: string; status: string }[];
-}
-
-/**
- * The one "new quotation" form — the list's button, the lead page, the
- * costing page, Customer 360 and the pipeline board's "+ New" all open this.
- *
- * `preset` is what the caller already knows. Naming a lead fills in the
- * customer, the site, the attention line (the lead's contact by name, else
- * the customer's primary), the subject (the enquiry's first line), the
- * expected close and the lead's latest costing. Every one stays editable —
- * "nothing is retyped" is not the same as "nothing can be changed".
- */
-export function NewQuotationModal({
-  preset = {},
-  onClose,
-  onCreated,
-}: {
-  preset?: QuotationPreset;
-  onClose: () => void;
-  onCreated: (id: string) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
-  const [contacts, setContacts] = useState<{ id: string; name: string }[]>([]);
-  const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
-  const [costings, setCostings] = useState<{ id: string; number: string; title: string }[]>([]);
-  const [leads, setLeads] = useState<{ id: string; companyName: string; status: string }[]>([]);
-  const [lead, setLead] = useState<LeadForQuote | null>(null);
-  /*
-    Records the preset names that the lookups (recent 50, open leads) may not
-    include. Kept apart and merged at render, so a lookup that answers after
-    the preset cannot wipe them out.
-  */
-  const [pinnedCustomers, setPinnedCustomers] = useState<{ id: string; name: string }[]>([]);
-  const [pinnedCostings, setPinnedCostings] = useState<{ id: string; number: string; title: string }[]>([]);
-  const [preview, setPreview] = useState<{
-    number: string;
-    employeeNo: string | null;
-    linked: boolean;
-    usesEmployeeDigits: boolean;
-  } | null>(null);
-  const [form, setForm] = useState({
-    customerId: preset.customerId ?? '',
-    contactId: '',
-    siteId: '',
-    subject: '',
-    costingId: preset.costingId ?? '',
-    leadId: preset.leadId ?? '',
-    expectedClosing: '',
-  });
-  /** The contact to pick once the customer's contacts arrive, by name. */
-  const [wantContact, setWantContact] = useState<string | null>(null);
-
-  useEffect(() => {
-    api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
-    api.get<typeof costings>('/costings/lookup').then(setCostings).catch(() => {});
-    /*
-      Leads still open, so a quotation can say which enquiry it answers.
-
-      The link is not decoration: a quotation's outcome writes the lead's
-      status back, so a quotation raised without one leaves its lead sitting
-      at whatever stage somebody last set by hand.
-    */
-    api
-      .get<{ rows: { id: string; companyName: string; status: string }[] }>(
-        '/leads?pageSize=200&status=NEW,CONTACTED,QUALIFIED,SITE_VISIT,COSTING,QUOTATION_CREATED,NEGOTIATION',
-      )
-      .then((r) => setLeads(r.rows))
-      .catch(() => {});
-    /*
-      The number this quotation will get, before it is saved. It carries the
-      author's own employee digits, so it is worth seeing — and an account not
-      linked to an employee record numbers under 000, which is better said
-      here than discovered on the printout.
-    */
-    api
-      .get<NonNullable<typeof preview>>('/quotations/next-number')
-      .then(setPreview)
-      .catch(() => setPreview(null));
-  }, []);
-
-  /** Take what the lead already knows. Only fills; the form stays editable. */
-  const adoptLead = useCallback(async (leadId: string) => {
-    if (!leadId) {
-      setLead(null);
-      return;
-    }
-    try {
-      const l = await api.get<LeadForQuote>(`/leads/${leadId}`);
-      setLead(l);
-      const firstLine = (l.description ?? '').split('\n')[0].trim();
-      setForm((f) => ({
-        ...f,
-        leadId,
-        customerId: l.customer?.id ?? f.customerId,
-        siteId: l.customer ? (l.site?.id ?? '') : f.siteId,
-        subject: f.subject || firstLine.slice(0, 120),
-        expectedClosing: l.expectedClosing ? l.expectedClosing.slice(0, 10) : f.expectedClosing,
-        costingId: f.costingId || l.costings[0]?.id || '',
-      }));
-      setWantContact(l.contactPerson);
-      // A lead's costing or customer may not be in the lookups; make sure they show.
-      setPinnedCostings((list) => [...l.costings, ...list]);
-      if (l.customer) setPinnedCustomers((list) => [l.customer!, ...list]);
-    } catch (err) {
-      setError(err);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (preset.leadId) void adoptLead(preset.leadId);
-  }, [preset.leadId, adoptLead]);
-
-  /*
-    Raised from a costing ("Create quotation" on the costing page): the
-    costing names the customer, the site, the subject and — when it was
-    started from a lead — the lead, which then fills in the rest.
-  */
-  useEffect(() => {
-    if (!preset.costingId || preset.leadId) return;
-    api
-      .get<{
-        id: string;
-        number: string;
-        title: string;
-        customer: { id: string; name: string } | null;
-        site: { id: string; name: string } | null;
-        lead: { id: string } | null;
-      }>(`/costings/${preset.costingId}`)
-      .then((c) => {
-        setPinnedCostings((list) => [{ id: c.id, number: c.number, title: c.title }, ...list]);
-        if (c.customer) setPinnedCustomers((list) => [c.customer!, ...list]);
-        setForm((f) => ({
-          ...f,
-          costingId: c.id,
-          customerId: f.customerId || c.customer?.id || '',
-          siteId: f.siteId || c.site?.id || '',
-          subject: f.subject || c.title,
-        }));
-        if (c.lead) {
-          setForm((f) => ({ ...f, leadId: c.lead!.id }));
-          void adoptLead(c.lead.id);
-        }
-      })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset.costingId, preset.leadId, adoptLead]);
-
-  useEffect(() => {
-    if (!form.customerId) {
-      setContacts([]);
-      setSites([]);
-      return;
-    }
-    api
-      .get<{ contacts: { id: string; name: string }[]; sites: { id: string; name: string }[] }>(
-        `/customers/${form.customerId}`,
-      )
-      .then((c) => {
-        setContacts(c.contacts);
-        setSites(c.sites);
-        // Contacts arrive primary first, so the fallback is the primary one.
-        setForm((f) => {
-          if (f.contactId) return f;
-          const byName = wantContact
-            ? c.contacts.find((x) => x.name.trim().toLowerCase() === wantContact.trim().toLowerCase())
-            : undefined;
-          return { ...f, contactId: (byName ?? c.contacts[0])?.id ?? '' };
-        });
-      })
-      .catch(() => {});
-  }, [form.customerId, wantContact]);
-
-  async function create() {
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await api.post<{ id: string; number: string }>('/quotations', {
-        // Left empty, the server takes the lead's customer.
-        customerId: form.customerId || null,
-        contactId: form.contactId || null,
-        siteId: form.siteId || null,
-        subject: form.subject,
-        costingId: form.costingId || null,
-        leadId: form.leadId || null,
-        expectedClosing: form.expectedClosing || null,
-      });
-      toast('ok', `Quotation ${created.number ?? ''} created`.replace('  ', ' '));
-      onCreated(created.id);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const leadWithoutCustomer = !!lead && !lead.customer;
-  const merge = <T extends { id: string }>(pinned: T[], list: T[]) => {
-    const seen = new Set<string>();
-    return [...pinned, ...list].filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
-  };
-  const customerOptions = merge(pinnedCustomers, customers);
-  const costingOptions = merge(pinnedCostings, costings);
-  const leadOptions =
-    lead && !leads.some((l) => l.id === lead.id)
-      ? [{ id: lead.id, companyName: lead.companyName, status: '' }, ...leads]
-      : leads;
-
-  return (
-    <Modal
-      title="New quotation"
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={create}
-            disabled={busy || !form.customerId || form.subject.trim().length < 2}
-          >
-            {busy ? 'Creating…' : 'Create'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-
-      <div className="sales-row">
-        <span className="sales-row-label">Number</span>
-        <span>
-          {preview ? (
-            <>
-              <span className="mono">{preview.number}</span>{' '}
-              <span className="faint">— the next one; issued when you save</span>
-            </>
-          ) : (
-            <span className="faint">issued when you save</span>
-          )}
-        </span>
-      </div>
-      {preview && preview.usesEmployeeDigits && !preview.linked && (
-        <div className="alert info">
-          Your account is not linked to an employee record, so this number carries 000 where your
-          employee digits would be. HR can link it under G-HR › Employees.
-        </div>
-      )}
-
-      {leadOptions.length > 0 && (
-        <Field
-          label="Answering which enquiry"
-          hint="Optional, but it is what keeps the lead's status in step with this quotation — and it fills in the rest"
-        >
-          <select
-            value={form.leadId}
-            onChange={(e) => {
-              const leadId = e.target.value;
-              setForm((f) => ({ ...f, leadId }));
-              void adoptLead(leadId);
-            }}
-          >
-            <option value="">— none —</option>
-            {leadOptions.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.companyName}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-      {leadWithoutCustomer && (
-        <div className="alert warn">
-          This lead is not linked to a customer yet. Pick the customer below, or open the lead,
-          Modify, and pick or add the company first.
-        </div>
-      )}
-      <Field label="Customer" required>
-        <select
-          value={form.customerId}
-          onChange={(e) => setForm({ ...form, customerId: e.target.value, contactId: '', siteId: '' })}
-        >
-          <option value="">— choose —</option>
-          {customerOptions.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {contacts.length > 0 && (
-        <Field label="Attention">
-          <select value={form.contactId} onChange={(e) => setForm({ ...form, contactId: e.target.value })}>
-            <option value="">— none —</option>
-            {contacts.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-      {sites.length > 0 && (
-        <Field label="Site">
-          <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
-            <option value="">— none —</option>
-            {sites.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-      <Field label="Subject" required>
-        <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
-      </Field>
-      <div className="grid grid-2">
-        <Field label="Costing" hint="Links the pricing to what you actually estimated">
-          <select value={form.costingId} onChange={(e) => setForm({ ...form, costingId: e.target.value })}>
-            <option value="">— none yet —</option>
-            {costingOptions.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.number} — {c.title}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Expected closing" hint="When you expect the decision — the pipeline forecast reads it">
-          <input
-            type="date"
-            value={form.expectedClosing}
-            onChange={(e) => setForm({ ...form, expectedClosing: e.target.value })}
-          />
-        </Field>
-      </div>
-    </Modal>
-  );
-}
-
-type ProviderKind = 'none' | 'user' | 'supplier';
-
-/**
- * Picks who carries a line's cost: one of our people, or a supplier. Names
- * come from `/quotations/providers`, which the sales role may read without the
- * supplier-master permission. The chosen one stays in the list whatever the
- * search says, so filtering never silently drops the current choice.
- */
-function ProviderPicker({
-  kind,
-  value,
-  current,
-  onChange,
-}: {
-  kind: 'user' | 'supplier';
-  value: string;
-  current: { id: string; name: string } | null;
-  onChange: (id: string) => void;
-}) {
-  const [term, setTerm] = useState('');
-  const [options, setOptions] = useState<{ id: string; name: string; code?: string; position?: string | null }[]>([]);
-
-  useEffect(() => {
-    const handle = setTimeout(() => {
-      api
-        .get<typeof options>(`/quotations/providers${qs({ kind, q: term || undefined })}`)
-        .then(setOptions)
-        .catch(() => setOptions([]));
-    }, 200);
-    return () => clearTimeout(handle);
-  }, [kind, term]);
-
-  const list = current && !options.some((o) => o.id === current.id) ? [current, ...options] : options;
-  const label = kind === 'user' ? 'In-house person' : 'Supplier';
-  return (
-    <div className="grid grid-2">
-      <Field label={`Find a ${kind === 'user' ? 'person' : 'supplier'}`}>
-        <input value={term} placeholder="Type to narrow the list" onChange={(e) => setTerm(e.target.value)} />
-      </Field>
-      <Field label={label}>
-        <select value={value} onChange={(e) => onChange(e.target.value)}>
-          <option value="">— choose —</option>
-          {list.map((o) => (
-            <option key={o.id} value={o.id}>
-              {'code' in o && o.code ? `${o.code} — ` : ''}
-              {o.name}
-              {'position' in o && o.position ? ` (${o.position})` : ''}
-            </option>
-          ))}
-        </select>
-      </Field>
-    </div>
-  );
-}
-
-/**
- * One SCORO line: group, product title and description, quantity and unit,
- * price — and, for those allowed to see it, what it costs and who carries that
- * cost. Amount, cost amount and margin shown here are previews; the server
- * computes the stored figures.
- */
-function ItemModal({
-  quotationId,
-  revisionId,
-  item,
-  showCost,
-  groups,
-  onClose,
-  onSaved,
-}: {
-  quotationId: string;
-  revisionId: string;
-  item: Item | null;
-  showCost: boolean;
-  groups: string[];
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [form, setForm] = useState({
-    group: item?.group ?? '',
-    title: item?.title ?? '',
-    description: item?.description ?? '',
-    quantity: item?.quantity?.toString() ?? '1',
-    unit: item?.unit ?? 'lot',
-    unitPrice: item?.unitPrice?.toString() ?? '',
-    unitCost: item?.unitCost == null ? '' : String(item.unitCost),
-    providerKind: (item?.providerUserId ? 'user' : item?.providerSupplierId ? 'supplier' : 'none') as ProviderKind,
-    providerUserId: item?.providerUserId ?? '',
-    providerSupplierId: item?.providerSupplierId ?? '',
-    costNote: item?.costNote ?? '',
-  });
-
-  const qty = Number(form.quantity) || 0;
-  const amount = qty * (Number(form.unitPrice) || 0);
-  const cost = form.unitCost.trim() === '' ? null : qty * (Number(form.unitCost) || 0);
-  const margin = cost == null ? null : amount - cost;
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      const payload: Record<string, unknown> = {
-        group: form.group.trim() || null,
-        title: form.title.trim() || null,
-        description: form.description,
-        quantity: Number(form.quantity),
-        unit: form.unit,
-        unitPrice: Number(form.unitPrice),
-      };
-      if (showCost) {
-        payload.unitCost = form.unitCost.trim() === '' ? null : Number(form.unitCost);
-        payload.providerUserId = form.providerKind === 'user' ? form.providerUserId || null : null;
-        payload.providerSupplierId = form.providerKind === 'supplier' ? form.providerSupplierId || null : null;
-        payload.costNote = form.costNote.trim() || null;
-      }
-      if (item) await api.patch(`/quotations/${quotationId}/revisions/${revisionId}/items/${item.id}`, payload);
-      else await api.post(`/quotations/${quotationId}/revisions/${revisionId}/items`, payload);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  async function remove() {
-    if (!item) return;
-    setBusy(true);
-    try {
-      await api.del(`/quotations/${quotationId}/revisions/${revisionId}/items/${item.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const described = !!(form.title.trim() || form.description.trim());
-  return (
-    <Modal
-      wide
-      title={item ? 'Modify line' : 'Add line'}
-      onClose={onClose}
-      footer={
-        <>
-          {item && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Remove
-            </button>
-          )}
-          <div className="sales-spacer" />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" onClick={save} disabled={busy || !described}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <div className="grid grid-2">
-        <Field label="Group" hint="e.g. Gruntech Installation, Gruntech Services — printed as a heading">
-          <input
-            value={form.group}
-            list="quote-line-groups"
-            autoFocus
-            onChange={(e) => setForm({ ...form, group: e.target.value })}
-          />
-        </Field>
-        <Field label="Product" hint="Printed in bold above the description">
-          <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
-        </Field>
-      </div>
-      <datalist id="quote-line-groups">
-        {groups.map((g) => (
-          <option key={g} value={g} />
-        ))}
-      </datalist>
-      <Field label="Description">
-        <textarea
-          value={form.description}
-          rows={4}
-          onChange={(e) => setForm({ ...form, description: e.target.value })}
-        />
-      </Field>
-      <div className="grid grid-3">
-        <Field label="Quantity">
-          <input
-            type="number"
-            step="0.001"
-            min={0}
-            value={form.quantity}
-            onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-          />
-        </Field>
-        <Field label="Unit">
-          <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
-        </Field>
-        <Field label="Unit price">
-          <input
-            type="number"
-            step="0.01"
-            min={0}
-            value={form.unitPrice}
-            onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
-          />
-        </Field>
-      </div>
-
-      {showCost && (
-        <fieldset className="quote-cost-fields">
-          <legend>Cost &amp; provider — internal, never printed</legend>
-          <div className="quote-provider-toggle" role="radiogroup" aria-label="Who carries the cost">
-            {(
-              [
-                ['none', 'Not named'],
-                ['user', 'In-house person'],
-                ['supplier', 'Supplier'],
-              ] as [ProviderKind, string][]
-            ).map(([value, label]) => (
-              <label key={value} className="checkbox">
-                <input
-                  type="radio"
-                  name="quote-provider-kind"
-                  value={value}
-                  checked={form.providerKind === value}
-                  onChange={() => setForm({ ...form, providerKind: value })}
-                />
-                <span>{label}</span>
-              </label>
-            ))}
-          </div>
-          {form.providerKind === 'user' && (
-            <ProviderPicker
-              kind="user"
-              value={form.providerUserId}
-              current={item?.providerUser ?? null}
-              onChange={(id) => setForm({ ...form, providerUserId: id })}
-            />
-          )}
-          {form.providerKind === 'supplier' && (
-            <ProviderPicker
-              kind="supplier"
-              value={form.providerSupplierId}
-              current={item?.providerSupplier ?? null}
-              onChange={(id) => setForm({ ...form, providerSupplierId: id })}
-            />
-          )}
-          <div className="grid grid-2">
-            <Field label="Unit cost" hint="Leave empty if not costed yet">
-              <input
-                type="number"
-                step="0.01"
-                min={0}
-                value={form.unitCost}
-                onChange={(e) => setForm({ ...form, unitCost: e.target.value })}
-              />
-            </Field>
-            <Field label="Cost notes">
-              <input value={form.costNote} onChange={(e) => setForm({ ...form, costNote: e.target.value })} />
-            </Field>
-          </div>
-        </fieldset>
-      )}
-
-      <div className="alert info sales-flush">
-        Line amount: <strong>{formatMoney(amount)}</strong>
-        {showCost && cost != null && (
-          <>
-            {' '}· cost {formatMoney(cost)} · margin{' '}
-            <strong className={margin != null && margin < 0 ? 'quote-negative' : undefined}>
-              {formatMoney(margin)}
-            </strong>
-            {amount > 0 && margin != null ? ` (${((margin / amount) * 100).toFixed(1)}%)` : ''}
-          </>
-        )}
-      </div>
-    </Modal>
-  );
-}
 
 function QuotationSettings({
   quotation,

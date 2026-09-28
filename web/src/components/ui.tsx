@@ -262,9 +262,12 @@ export function Field({
   // does not claim to point at it.
   const described = [hint ? hintId : null, error ? errorId : null].filter(Boolean).join(' ');
   const wired = isValidElement(children) && typeof children.type === 'string';
+  // A child that brings its own id keeps it, and the label points at THAT id —
+  // otherwise the label would name an element that does not exist.
+  const controlId = wired ? ((children as ReactElement<{ id?: string }>).props.id ?? id) : id;
   const control = wired
     ? cloneElement(children as ReactElement<Record<string, unknown>>, {
-        id: ((children as ReactElement<{ id?: string }>).props.id ?? id) as string,
+        id: controlId,
         'aria-describedby': described || undefined,
         'aria-invalid': error ? true : undefined,
         required:
@@ -274,7 +277,7 @@ export function Field({
 
   return (
     <div className={`field${error ? ' invalid' : ''}`}>
-      <label htmlFor={wired ? id : undefined}>
+      <label htmlFor={wired ? controlId : undefined}>
         {label}
         {required && (
           <span className="req" aria-hidden="true">

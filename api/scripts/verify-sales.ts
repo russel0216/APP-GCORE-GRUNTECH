@@ -15,12 +15,18 @@ import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
-import { nextNumber } from '../src/shared/numbering';
+import { nextNumber, previewNext, employeeToken } from '../src/shared/numbering';
 import { submitForApproval, act } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
 import { signToken } from '../src/auth/middleware';
 import { quotationTotals, lineAmount, recalcQuotationRevision } from '../src/shared/quotation';
+// The quotation editor's live figures. DOM-free, so it runs here as it does in
+// the page; the checks below pin it to the server's arithmetic.
+import {
+  quotationTotals as editorTotals,
+  lineAmount as editorLineAmount,
+} from '../../web/src/lib/quotationMath';
 import {
   quotationValue,
   columnFor,
@@ -65,7 +71,30 @@ const d = (v: number) => new Prisma.Decimal(v);
 
 const TAG = 'ZZSALES';
 
+/**
+ * Employee digits for the "author's number" checks: a token no real person
+ * carries, so the counters it creates under an OWNER-scoped pattern belong to
+ * this script alone and can be removed. Null when somebody real holds it —
+ * then those checks fall back to the author's id and no counter is touched.
+ */
+const EDITOR_TOKEN = '9871';
+async function editorTokenIsSpare(): Promise<boolean> {
+  const [users, employees] = await Promise.all([
+    prisma.user.findMany({
+      where: { employeeNo: { not: null }, NOT: { email: { endsWith: '@verifys.local' } } },
+      select: { employeeNo: true },
+    }),
+    prisma.employee.findMany({ select: { employeeNo: true } }),
+  ]);
+  return ![...users, ...employees].some((r) => employeeToken(r.employeeNo) === EDITOR_TOKEN);
+}
+
 async function cleanup() {
+  if (await editorTokenIsSpare()) {
+    await prisma.numberSequence.deleteMany({
+      where: { documentType: 'quotation', periodKey: { endsWith: `@${EDITOR_TOKEN}` } },
+    });
+  }
   // Activities point at leads and quotations; they go first.
   await prisma.salesActivity.deleteMany({
     where: { OR: [{ subject: { startsWith: TAG } }, { lead: { companyName: { startsWith: TAG } } }] },
@@ -906,6 +935,74 @@ async function main() {
     money(quotationValue([{ revision: 0, status: 'DRAFT', total: recalced!.total }]), 30_240),
   );
 
+  // ── 9b. The editor's live figures are the server's arithmetic ─────────────
+  console.log("\nThe quotation editor's live figures (web/src/lib/quotationMath.ts)");
+
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const mirrorLines = [
+    { amount: 10_000, costAmount: 6_000, providerUserId: 'u1' },
+    { amount: 20_000, costAmount: 15_000, providerSupplierId: 's1' },
+    { amount: 5_000 },
+    // A zero cost is still a cost entered, and a half-centavo rounds up.
+    { amount: 0.03, costAmount: 0, providerUserId: 'u2' },
+    { amount: 1_234.565, costAmount: 1_000.005, providerSupplierId: 's2' },
+  ];
+  const lineSets = {
+    'in-house and outsourced': mirrorLines,
+    'in-house only': mirrorLines.filter((l) => l.providerUserId),
+    'outsourced only': mirrorLines.filter((l) => l.providerSupplierId),
+    'no lines': [],
+  };
+  for (const [discountPct, vatInclusive] of [
+    [0, false],
+    [10, false],
+    [0, true],
+    [10, true],
+    // A non-terminating factor — where a float version drifts by a centavo.
+    [33.3333, true],
+  ] as [number, boolean][]) {
+    const differs = Object.entries(lineSets).filter(
+      ([, set]) =>
+        !same(
+          editorTotals({ lines: set, discountPct, vatRate: 0.12, vatInclusive }),
+          quotationTotals({ lines: set, discountPct, vatRate: 0.12, vatInclusive }),
+        ),
+    );
+    check(
+      `discount ${discountPct}%, VAT ${vatInclusive ? 'inclusive' : 'exclusive'}: the page's totals equal quotationTotals (in-house, outsourced, both, none)`,
+      differs.length === 0,
+      differs.map(([k]) => k).join(', '),
+    );
+  }
+  const amountPairs: [number, number][] = [[2, 12_500], [1.333, 0.75], [0.005, 1], [3, 33.335], [7.5, 1_999.99], [0.001, 0.01]];
+  check(
+    "the page's line amount is the server's lineAmount, to the centavo",
+    amountPairs.every(([q, p]) => editorLineAmount(q, p) === Number(lineAmount(q, p).toFixed(2))),
+    amountPairs.map(([q, p]) => `${editorLineAmount(q, p)}/${lineAmount(q, p)}`).join(' '),
+  );
+  {
+    // A reproducible spread of quotations rather than a handful of hand-picked ones.
+    let seed = 20260928;
+    const rand = () => ((seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648);
+    const pick = (max: number, dp: number) => Number((rand() * max).toFixed(dp));
+    let mismatches = 0;
+    for (let n = 0; n < 500; n++) {
+      const set = Array.from({ length: 1 + Math.floor(rand() * 6) }, () => {
+        const q = pick(40, 3);
+        const k = rand();
+        return {
+          amount: Number(lineAmount(q, pick(250_000, 2)).toFixed(2)),
+          costAmount: rand() < 0.7 ? Number(lineAmount(q, pick(200_000, 2)).toFixed(2)) : null,
+          providerUserId: k < 0.35 ? 'u' : null,
+          providerSupplierId: k >= 0.35 && k < 0.7 ? 's' : null,
+        };
+      });
+      const input = { lines: set, discountPct: rand() < 0.4 ? 0 : pick(35, 2), vatRate: 0.12, vatInclusive: rand() < 0.5 };
+      if (!same(editorTotals(input), quotationTotals(input))) mismatches++;
+    }
+    check('and on 500 generated quotations, not one figure differs', mismatches === 0, `${mismatches} differ`);
+  }
+
   // ── 10. Cost is stripped server-side, and never printed ────────────────────
   console.log('\nCost visibility over HTTP, and the SCORO-style PDF');
 
@@ -1045,6 +1142,261 @@ async function main() {
     check(
       'and never a cost figure, a margin or a cost note',
       !text.includes('7,777.77') && !text.includes('15,555.54') && !text.includes('supplier quote 88') && !text.includes(supplier.name),
+    );
+
+    // ── 11. The full-page editor: one save, one transaction ──────────────────
+    console.log('\nThe quotation editor over HTTP (create with lines, rollback, author, replace lines, costing lines)');
+
+    // The author's digits, where a spare token exists (see EDITOR_TOKEN).
+    const tokenSpare = await editorTokenIsSpare();
+    if (tokenSpare) await prisma.user.update({ where: { id: sales.id }, data: { employeeNo: `${TAG}-${EDITOR_TOKEN}` } });
+    const counter = async (periodKey: string) =>
+      (await prisma.numberSequence.findUnique({ where: { documentType_periodKey: { documentType: 'quotation', periodKey } } }))
+        ?.lastNumber ?? 0;
+
+    const editorLead = await prisma.lead.create({
+      data: {
+        number: await nextNumber('lead'),
+        companyName: `${TAG} Editor enquiry`,
+        customerId: clinic.id,
+        assignedToId: sales.id,
+        createdById: sales.id,
+        probability: 40,
+      },
+    });
+    const editorLines = [
+      {
+        group: 'Gruntech Installation',
+        title: 'First',
+        description: 'one',
+        quantity: 2,
+        unit: 'lot',
+        unitPrice: 12_500,
+        unitCost: 7_777.77,
+        providerSupplierId: supplier.id,
+        costNote: `${TAG} editor note`,
+      },
+      { title: 'Second', description: '', quantity: 1.5, unit: 'set', unitPrice: 3_333.33, unitCost: 1_000, providerUserId: sales.id },
+      { title: '', description: 'Third, description only', quantity: 3, unit: 'pc', unitPrice: 99.99 },
+    ];
+
+    const promised = await previewNext('quotation', { ownerId: sales.id });
+    const issuedBefore = await counter(promised.periodKey);
+    const made = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      leadId: editorLead.id,
+      subject: `${TAG} Editor quote`,
+      discountPct: 10,
+      lines: editorLines,
+    });
+    check('the editor creates a quotation and its lines in one request', made.status === 201, made.text.slice(0, 200));
+    check('it takes the number the preview promised', made.body.number === promised.number, `${made.body.number} vs ${promised.number}`);
+    check('and the number is issued once — the counter moved by exactly one', (await counter(promised.periodKey)) === issuedBefore + 1);
+    const madeId = String(made.body.id);
+    const madeRev = await prisma.quotationRevision.findFirstOrThrow({
+      where: { quotationId: madeId },
+      include: { items: { orderBy: { sortOrder: 'asc' } } },
+    });
+    check(
+      'the lines are stored in the order given, numbered from 0',
+      madeRev.items.map((i) => i.title || i.description).join('|') === 'First|Second|Third, description only' &&
+        madeRev.items.every((i, n) => i.sortOrder === n),
+      madeRev.items.map((i) => `${i.sortOrder}:${i.title || i.description}`).join(' '),
+    );
+    check(
+      'amount and cost amount are computed on the server',
+      Number(madeRev.items[1].amount) === 5_000 && Number(madeRev.items[0].costAmount) === 15_555.54 && madeRev.items[2].costAmount === null,
+      `${madeRev.items[1].amount} ${madeRev.items[0].costAmount}`,
+    );
+    const madeTotals = quotationTotals({
+      lines: madeRev.items,
+      discountPct: madeRev.discountPct,
+      vatRate: madeRev.vatRate,
+      vatInclusive: madeRev.vatInclusive,
+    });
+    check(
+      'the stored totals are quotationTotals of those lines, 10% discount included',
+      Number(madeRev.discountPct) === 10 &&
+        money(Number(madeRev.subtotal), madeTotals.subtotal) &&
+        money(Number(madeRev.discountAmount), madeTotals.discountAmount) &&
+        money(Number(madeRev.vatAmount), madeTotals.vatAmount) &&
+        money(Number(madeRev.total), madeTotals.total) &&
+        madeTotals.discountAmount > 0,
+      `${madeRev.subtotal} ${madeRev.discountAmount} ${madeRev.vatAmount} ${madeRev.total}`,
+    );
+    const shownBeforeSaving = editorTotals({
+      lines: editorLines.map((l) => ({
+        amount: editorLineAmount(l.quantity, l.unitPrice),
+        costAmount: l.unitCost === undefined ? null : editorLineAmount(l.quantity, l.unitCost),
+        providerUserId: l.providerUserId ?? null,
+        providerSupplierId: l.providerSupplierId ?? null,
+      })),
+      discountPct: 10,
+      vatRate: Number(madeRev.vatRate),
+      vatInclusive: false,
+    });
+    check('what the editor showed before saving is exactly what was stored', same(shownBeforeSaving, madeTotals));
+    check(
+      'raising it from the lead moved the lead on, in the same save',
+      (await prisma.lead.findUniqueOrThrow({ where: { id: editorLead.id } })).status === 'QUOTATION_CREATED',
+    );
+    check(
+      'the create is audited once, with the line count',
+      (await prisma.auditLog.count({
+        where: { entityType: 'quotation', entityId: madeId, action: 'CREATED', summary: { contains: '(3 lines)' } },
+      })) === 1,
+    );
+
+    // A refused line refuses the whole save — quotation, lines and number.
+    const beforeRefusal = await counter(promised.periodKey);
+    const noWords = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor refused`,
+      lines: [editorLines[0], { title: ' ', description: '  ', quantity: 1, unitPrice: 5 }],
+    });
+    check(
+      'a line with neither product nor description refuses the save, and says which line',
+      noWords.status === 400 && noWords.text.includes('Line 2'),
+      noWords.text.slice(0, 160),
+    );
+    const ghostSupplier = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor refused`,
+      lines: [{ ...editorLines[0], providerSupplierId: 'no-such-supplier' }],
+    });
+    check('so does a provider that does not exist', ghostSupplier.status === 400 && ghostSupplier.text.includes('Line 1'), ghostSupplier.text.slice(0, 160));
+    const negative = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor refused`,
+      lines: [{ ...editorLines[2], quantity: -1 }],
+    });
+    check('and a negative quantity', negative.status === 400, negative.text.slice(0, 160));
+    check('none of them left a quotation behind', (await prisma.quotation.count({ where: { subject: `${TAG} Editor refused` } })) === 0);
+    const afterRefusal = await counter(promised.periodKey);
+    check('and none of them burnt a number — the transaction took it back', afterRefusal === beforeRefusal, `${beforeRefusal} -> ${afterRefusal}`);
+
+    // The author: only edit_all may name somebody else, and only somebody who authors.
+    const inOthersName = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor for other`,
+      ownerId: other.id,
+    });
+    check('a salesperson cannot raise a quotation in somebody else’s name (403)', inOthersName.status === 403, inOthersName.text.slice(0, 160));
+    check('and nothing was created by trying', (await prisma.quotation.count({ where: { subject: `${TAG} Editor for other` } })) === 0);
+    const salesPreview = await previewNext('quotation', { ownerId: sales.id });
+    const managerSees = await http(managerToken, 'GET', `/quotations/next-number?ownerId=${sales.id}`);
+    check(
+      "a manager's number preview follows the author chosen",
+      managerSees.body.number === salesPreview.number && managerSees.body.employeeNo === salesPreview.employeeNo,
+      JSON.stringify(managerSees.body),
+    );
+    const salesAsks = await http(salesToken, 'GET', `/quotations/next-number?ownerId=${manager.id}`);
+    check(
+      "a salesperson's ?ownerId= is ignored — the preview stays their own",
+      salesAsks.body.employeeNo === salesPreview.employeeNo && typeof salesAsks.body.vatRate === 'number',
+      JSON.stringify(salesAsks.body),
+    );
+    const nobody = await makeUser('Verify Nobody', 'nobody@verifys.local', []);
+    const toNobody = await http(managerToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor for nobody`,
+      ownerId: nobody.id,
+    });
+    check('a manager cannot make somebody who cannot author quotations the author (400)', toNobody.status === 400, toNobody.text.slice(0, 160));
+    const forSales = await http(managerToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor by manager`,
+      ownerId: sales.id,
+      lines: [editorLines[2]],
+    });
+    check(
+      'a manager (edit_all) raises one for a salesperson, who owns it',
+      forSales.status === 201 && forSales.body.ownerId === sales.id,
+      forSales.text.slice(0, 200),
+    );
+    const template = await prisma.numberSequence.findFirst({ where: { documentType: 'quotation', periodKey: '' } });
+    const printsDigits = tokenSpare && !!template?.pattern.includes('{EMP}');
+    check(
+      `and it carries that salesperson's number${printsDigits ? ` — their digits, ${EDITOR_TOKEN}` : ''}`,
+      forSales.body.number === salesPreview.number && (!printsDigits || String(forSales.body.number).includes(EDITOR_TOKEN)),
+      `${forSales.body.number} vs ${salesPreview.number}`,
+    );
+
+    // Replacing every line of a draft, atomically.
+    const linesPath = `/quotations/${madeId}/revisions/${madeRev.id}/lines`;
+    const replaced = await http(salesToken, 'PUT', linesPath, { lines: [editorLines[2], editorLines[0]] });
+    const afterPut = await prisma.quotationRevision.findUniqueOrThrow({
+      where: { id: madeRev.id },
+      include: { items: { orderBy: { sortOrder: 'asc' } } },
+    });
+    check(
+      'PUT …/lines replaces every line of a draft, in the order given',
+      replaced.status === 200 && afterPut.items.map((i) => i.title || i.description).join('|') === 'Third, description only|First',
+      replaced.text.slice(0, 200),
+    );
+    const putTotals = quotationTotals({
+      lines: afterPut.items,
+      discountPct: afterPut.discountPct,
+      vatRate: afterPut.vatRate,
+      vatInclusive: afterPut.vatInclusive,
+    });
+    check(
+      'and recomputes the stored totals from them',
+      money(Number(afterPut.total), putTotals.total) && money(Number(afterPut.subtotal), 25_299.97),
+      `${afterPut.subtotal} ${afterPut.total}`,
+    );
+    check('it answers with the revision, cost panel included for the author', !!(replaced.body as { costPanel?: unknown }).costPanel);
+    const badPut = await http(salesToken, 'PUT', linesPath, {
+      lines: [editorLines[1], { title: '', description: '', quantity: 1, unitPrice: 1 }],
+    });
+    const afterBadPut = await prisma.quotationItem.findMany({ where: { revisionId: madeRev.id }, orderBy: { sortOrder: 'asc' } });
+    check(
+      'a refused line leaves the revision exactly as it was',
+      badPut.status === 400 && afterBadPut.map((i) => i.title || i.description).join('|') === 'Third, description only|First',
+      badPut.text.slice(0, 160),
+    );
+    const notMine = await http(otherToken, 'PUT', linesPath, { lines: [editorLines[2]] });
+    check('another salesperson (no edit_all) cannot replace the lines (403)', notMine.status === 403, notMine.text.slice(0, 160));
+    await prisma.quotationRevision.update({ where: { id: madeRev.id }, data: { status: 'APPROVED' } });
+    const onApproved = await http(salesToken, 'PUT', linesPath, { lines: [editorLines[2]] });
+    check('an approved revision refuses new lines (400)', onApproved.status === 400, onApproved.text.slice(0, 160));
+    check('and keeps the ones it was approved with', (await prisma.quotationItem.count({ where: { revisionId: madeRev.id } })) === 2);
+
+    // The editor's costing preview is what "Fill from costing" writes.
+    const fromCosting = await http(salesToken, 'POST', '/quotations', {
+      customerId: customer.id,
+      subject: `${TAG} Editor costing`,
+      costingId: costing.id,
+    });
+    const fcRev = (fromCosting.body.revisions as { id: string }[])[0];
+    const costingPreview = await http(salesToken, 'GET', `/quotations/costing-lines?costingId=${costing.id}`);
+    const filled = await http(salesToken, 'POST', `/quotations/${fromCosting.body.id}/revisions/${fcRev.id}/from-costing`);
+    const written = await prisma.quotationItem.findMany({ where: { revisionId: fcRev.id }, orderBy: { sortOrder: 'asc' } });
+    check(
+      'GET /quotations/costing-lines is exactly what from-costing writes',
+      costingPreview.status === 200 &&
+        filled.status === 200 &&
+        written.length > 0 &&
+        same(
+          costingPreview.body,
+          written.map((i) => ({
+            title: i.title,
+            description: i.description,
+            quantity: Number(i.quantity),
+            unit: i.unit,
+            unitPrice: Number(i.unitPrice),
+            amount: Number(i.amount),
+            sortOrder: i.sortOrder,
+          })),
+        ),
+      `${costingPreview.text.slice(0, 160)} / ${written.length} written`,
+    );
+    const noCosting = await http(salesToken, 'GET', '/quotations/costing-lines');
+    const unknownCosting = await http(salesToken, 'GET', '/quotations/costing-lines?costingId=nope');
+    check(
+      'costing-lines asks for a costing (400) and knows an unknown one (404)',
+      noCosting.status === 400 && unknownCosting.status === 404,
+      `${noCosting.status} ${unknownCosting.status}`,
     );
   }
 

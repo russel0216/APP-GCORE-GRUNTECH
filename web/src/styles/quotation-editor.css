@@ -1,0 +1,221 @@
+/*
+  The full-page quotation editor (pages/sales/QuotationEditor.tsx) — SCORO's
+  "Modify quote details": a two-column header, the lines table typed into
+  directly, then the totals and the cost panel. The totals, the cost panel and
+  the lookup menus reuse the quote-* and lookup-* rules in styles.css and
+  pipeline.css; this file only adds what the editor itself needs. Tokens only.
+*/
+
+.qe-card {
+  margin-bottom: var(--s-5);
+}
+
+/* Two columns of header fields, one under 860px. */
+.qe-header {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--s-6);
+}
+
+/* PR Number, Delivery, Payment Terms — three across, stacked on a phone. */
+.qe-terms {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 var(--s-4);
+  border-top: 1px solid var(--line-soft);
+  padding-top: var(--s-4);
+}
+
+@media (max-width: 860px) {
+  .qe-header,
+  .qe-terms {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A read-only header value (Quote No., Date of issue, Currency, Status),
+   labelled like the fields around it so the two columns line up. */
+.qe-static-label {
+  display: block;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--neon-dim);
+  margin-bottom: var(--s-2);
+}
+
+.qe-static > div {
+  min-height: 2.4rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-2);
+}
+
+.qe-lines-head {
+  justify-content: space-between;
+  margin-bottom: var(--s-3);
+}
+
+.qe-lines-head .card-title {
+  margin: 0;
+}
+
+/*
+  The lines table scrolls sideways inside its card on a narrow screen — never
+  the page. The min-width keeps every column usable rather than squeezing a
+  price into three characters.
+*/
+.qe-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+table.data.qe-lines {
+  min-width: 68rem;
+}
+
+table.data.qe-lines.qe-lines-nocost {
+  min-width: 48rem;
+}
+
+/* The zebra and hover tints are for reading rows, not for typing in them. */
+table.data.qe-lines tbody tr:nth-child(even),
+table.data.qe-lines tbody tr:hover {
+  background: none;
+}
+
+table.data.qe-lines td {
+  padding: var(--s-2);
+  vertical-align: top;
+}
+
+.qe-lines input,
+.qe-lines textarea,
+.qe-lines select {
+  padding: var(--s-2);
+  font-size: var(--fs-md);
+}
+
+.qe-lines td > input + input,
+.qe-lines td > input + textarea,
+.qe-lines .qe-cost > * + * {
+  margin-top: var(--s-1);
+}
+
+.qe-lines textarea {
+  min-height: 3.5rem;
+}
+
+.qe-title {
+  font-weight: 600;
+}
+
+.qe-num {
+  text-align: right;
+}
+
+.qe-col-move {
+  width: 3rem;
+}
+
+.qe-col-group {
+  width: 9rem;
+}
+
+.qe-col-product {
+  min-width: 16rem;
+}
+
+.qe-col-qty {
+  width: 7rem;
+}
+
+.qe-col-price {
+  width: 9rem;
+}
+
+.qe-col-amount {
+  width: 9rem;
+  white-space: nowrap;
+}
+
+.qe-col-cost {
+  width: 15rem;
+}
+
+.qe-col-margin {
+  width: 8rem;
+  white-space: nowrap;
+}
+
+.qe-col-remove {
+  width: 2.5rem;
+}
+
+/* Line number over its move buttons — the keyboard's version of a drag handle. */
+.qe-move {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.qe-cost {
+  display: flex;
+  flex-direction: column;
+}
+
+/* In-house / Supplier / Not named — a compact radio row. */
+.qe-kind {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+.qe-kind-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  cursor: pointer;
+}
+
+.qe-kind-option input {
+  accent-color: var(--magenta);
+}
+
+.qe-cost-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+/* An error under the cell it is about, as a Field shows it under its input. */
+.qe-cell-error {
+  margin-top: var(--s-1);
+  font-size: var(--fs-xs);
+  color: var(--danger);
+}
+
+.qe-lines [aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.qe-lines .lookup-menu {
+  min-width: 14rem;
+}
+
+.qe-foot {
+  justify-content: flex-end;
+  margin-bottom: var(--s-6);
+}
+
+@media (max-width: 520px) {
+  .qe-foot .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+}

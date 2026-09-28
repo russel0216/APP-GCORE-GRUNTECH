@@ -209,7 +209,7 @@ export function CostingDetailPage() {
   const projectHref = renewFrom
     ? `/g-ops/projects?new=1&costingId=${costing.id}&type=SERVICE_CONTRACT&renewFrom=${renewFrom}`
     : `/g-ops/projects?new=1&costingId=${costing.id}`;
-  const quotationHref = `/g-ops/quotations?new=1&costingId=${costing.id}`;
+  const quotationHref = `/g-ops/quotations/new?costingId=${costing.id}`;
   const canCreateProject = can('gops.projects.create');
   const canCreateQuotation = can('gops.quotations.create');
 

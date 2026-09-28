@@ -24,6 +24,7 @@ import { Leads, LeadDetail } from './pages/sales/Leads';
 import { Costings } from './pages/sales/Costings';
 import { CostingDetailPage } from './pages/sales/CostingDetail';
 import { Quotations, QuotationDetail } from './pages/sales/Quotations';
+import { QuotationEditor } from './pages/sales/QuotationEditor';
 import { SalesCalendar } from './pages/sales/Calendar';
 import { Pipeline } from './pages/sales/Pipeline';
 import { Partners, PartnerDetail } from './pages/sales/Partners';
@@ -367,11 +368,35 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/*
+          The full-page editor (SCORO's "Modify quote details"). `/new` is a
+          static segment, so React Router ranks it above `/:id` — it is never
+          read as a quotation id. Editing is refused by the API to anyone but
+          the author or an edit_all holder; the page says so rather than guessing.
+        */}
+        <Route
+          path="/g-ops/quotations/new"
+          element={
+            <GuardAny permissions={['gops.quotations.view_all', 'gops.quotations.view_own']}>
+              <Guard permission="gops.quotations.create">
+                <QuotationEditor />
+              </Guard>
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-ops/quotations/:id"
           element={
             <GuardAny permissions={['gops.quotations.view_all', 'gops.quotations.view_own']}>
               <QuotationDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/quotations/:id/edit"
+          element={
+            <GuardAny permissions={['gops.quotations.view_all', 'gops.quotations.view_own']}>
+              <QuotationEditor />
             </GuardAny>
           }
         />

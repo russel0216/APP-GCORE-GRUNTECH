@@ -221,6 +221,44 @@ export async function recalcQuotationRevision(revisionId: string, tx: Prisma.Tra
   });
 }
 
+// ── A costing's scope of work as quotation lines ────────────────────────────
+
+/** What a scope section contributes to a quotation line. */
+export interface ScopeSectionForQuote {
+  name: string;
+  description: string | null;
+  value: Prisma.Decimal;
+}
+
+/**
+ * The one mapping from a costing's scope of work to quotation lines: the
+ * section's name is the line's title (bold on the PDF), its description the
+ * text under it, one lot at the section's value. "Fill from costing" writes
+ * exactly this, and the editor previews exactly this before anything is saved
+ * (`GET /quotations/costing-lines`), so the preview and the stored lines
+ * cannot disagree.
+ */
+export function quotationLinesFromSections(sections: ScopeSectionForQuote[]) {
+  return sections.map((s, i) => ({
+    title: s.name,
+    description: s.description ?? '',
+    quantity: new Prisma.Decimal(1),
+    unit: 'lot',
+    unitPrice: s.value,
+    amount: s.value,
+    sortOrder: i,
+  }));
+}
+
+/** A costing's scope sections, in their order — what the mapping above reads. */
+export function costingScopeSections(costingId: string, tx: Prisma.TransactionClient = prisma) {
+  return tx.scopeSection.findMany({
+    where: { costingId },
+    orderBy: { sortOrder: 'asc' },
+    select: { name: true, description: true, value: true },
+  });
+}
+
 // ── Who may see cost ─────────────────────────────────────────────────────────
 
 /**

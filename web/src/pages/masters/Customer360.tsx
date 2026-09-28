@@ -274,7 +274,7 @@ export function Customer360Page() {
   // Handoffs: start the next document already pointed at this customer.
   const shortcuts: { to: string; label: string }[] = [
     ...(can('gops.leads.create') ? [{ to: `/g-ops/leads?${forCustomer}`, label: 'New lead' }] : []),
-    ...(can('gops.quotations.create') ? [{ to: `/g-ops/quotations?${forCustomer}`, label: 'New quotation' }] : []),
+    ...(can('gops.quotations.create') ? [{ to: `/g-ops/quotations/new?customerId=${encodeURIComponent(customer.id)}`, label: 'New quotation' }] : []),
     ...(can('gops.costing.create') ? [{ to: `/g-ops/costing?${forCustomer}`, label: 'New costing' }] : []),
     ...(can('gops.job_orders.create')
       ? [{ to: `/g-ops/job-orders?${forCustomer}`, label: 'Request job order' }]

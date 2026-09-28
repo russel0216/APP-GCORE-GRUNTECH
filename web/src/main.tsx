@@ -24,6 +24,7 @@ import './styles/delivery.css';
 import './styles/procurement.css';
 import './styles/hr-audit.css';
 import './styles/archive.css';
+import './styles/quotation-editor.css';
 
 /*
   Before React draws anything. The server's copy arrives with /auth/me a

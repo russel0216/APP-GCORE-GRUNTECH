@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, api, downloadBlob, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Stat } from '../../components/charts';
@@ -17,7 +17,6 @@ import {
   useToast,
 } from '../../components/ui';
 import { LeadForm, loadPeople, type Person } from './Leads';
-import { NewQuotationModal } from './Quotations';
 import { LostReasonModal } from './LostReasonModal';
 
 /*
@@ -329,7 +328,8 @@ export function Pipeline() {
   const [savingView, setSavingView] = useState(false);
   const [customising, setCustomising] = useState(false);
   const [newMenu, setNewMenu] = useState(false);
-  const [creating, setCreating] = useState<'lead' | 'quotation' | null>(null);
+  const [creating, setCreating] = useState<'lead' | null>(null);
+  const navigate = useNavigate();
   const [people, setPeople] = useState<Person[]>([]);
 
   const setView = useCallback((next: PipelineView | ((v: PipelineView) => PipelineView)) => {
@@ -568,7 +568,12 @@ export function Pipeline() {
 
   async function openCreate(kind: 'lead' | 'quotation') {
     setNewMenu(false);
-    if (kind === 'lead' && people.length === 0) {
+    // A quotation is written on its own full page (the SCORO editor), not a dialog.
+    if (kind === 'quotation') {
+      navigate('/g-ops/quotations/new');
+      return;
+    }
+    if (people.length === 0) {
       setPeople(await loadPeople().catch(() => []));
     }
     setCreating(kind);
@@ -878,15 +883,6 @@ export function Pipeline() {
           people={people}
           onClose={() => setCreating(null)}
           onSaved={() => {
-            setCreating(null);
-            void load();
-          }}
-        />
-      )}
-      {creating === 'quotation' && (
-        <NewQuotationModal
-          onClose={() => setCreating(null)}
-          onCreated={() => {
             setCreating(null);
             void load();
           }}

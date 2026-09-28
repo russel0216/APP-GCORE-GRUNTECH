@@ -927,3 +927,17 @@ the detail.
   company's `documentTagline` print on every document when set; unset lines are
   left out. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
   bold title over its description. Bank details are stored, printed nowhere yet.
+- **The quotation editor is a page, not a dialog** (SCORO's "Modify quote
+  details"): `/g-ops/quotations/new` and `/g-ops/quotations/:id/edit`
+  (`QuotationEditor.tsx`). **One save = one transaction** on create —
+  `POST /quotations` takes the header AND `lines[]`, issues the number with the
+  caller's `tx`, writes the lines in order and recalculates, so a refused line
+  burns no number. Edit replaces a DRAFT's lines with the idempotent
+  `PUT …/revisions/:revisionId/lines`. `ownerId` is honoured only for
+  `edit_all` (403 otherwise). The page's live figures come from
+  `web/src/lib/quotationMath.ts`, a BigInt mirror of `quotationTotals` pinned
+  equal by `verify-sales.ts` — not a second rule. The editor's costing preview
+  is `GET /quotations/costing-lines`, the same `quotationLinesFromSections()`
+  that `from-costing` writes. **The old `?new=1&leadId=&costingId=&customerId=`
+  links redirect** to `/new` with the same preset; new links point at `/new`.
+  `docs/notes/quotation-editor.md` has the detail.

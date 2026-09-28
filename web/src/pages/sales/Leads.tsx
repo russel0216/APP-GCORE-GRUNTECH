@@ -473,7 +473,7 @@ export function LeadDetail() {
             ) : (
               <Link
                 className="btn btn-primary"
-                to={`/g-ops/quotations${qs({ new: 1, leadId: lead.id, costingId: latestCosting?.id })}`}
+                to={`/g-ops/quotations/new${qs({ leadId: lead.id, costingId: latestCosting?.id })}`}
               >
                 Create quotation
               </Link>
