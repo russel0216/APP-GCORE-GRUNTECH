@@ -1,6 +1,18 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { ErrorBox } from '../components/ui';
+import { PasswordInput } from '../components/PasswordInput';
+
+/** The wordmark over every signed-out page: sign in, forgot, reset, welcome. */
+export function LandingBrand() {
+  return (
+    <div className="login-brand">
+      <h1 className="wordmark">G-CORE</h1>
+      <div className="wordmark-sub">Gruntechnology Corp</div>
+    </div>
+  );
+}
 
 export function Login() {
   const { signIn } = useAuth();
@@ -25,18 +37,16 @@ export function Login() {
   return (
     <div className="landing">
       <div className="login-wrap">
-        <div style={{ textAlign: 'center' }}>
-          <h1 className="wordmark">G-CORE</h1>
-          <div className="wordmark-sub">Gruntechnology Corp</div>
-        </div>
+        <LandingBrand />
 
         <form className="panel" onSubmit={submit}>
           <h2>SIGN IN</h2>
           <ErrorBox error={error} />
 
           <div className="field">
-            <label>Email</label>
+            <label htmlFor="login-email">Email</label>
             <input
+              id="login-email"
               type="email"
               value={email}
               autoComplete="username"
@@ -47,9 +57,9 @@ export function Login() {
           </div>
 
           <div className="field">
-            <label>Password</label>
-            <input
-              type="password"
+            <label htmlFor="login-password">Password</label>
+            <PasswordInput
+              id="login-password"
               value={password}
               autoComplete="current-password"
               onChange={(e) => setPassword(e.target.value)}
@@ -60,11 +70,13 @@ export function Login() {
           <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
             {busy ? 'Signing in…' : 'SIGN IN'}
           </button>
+
+          <p className="login-aside">
+            <Link to="/forgot-password">Forgot password?</Link>
+          </p>
         </form>
 
-        <div className="faint" style={{ fontSize: 11, letterSpacing: 1 }}>
-          gruntech.gcore.tech
-        </div>
+        <div className="faint login-host">gruntech.gcore.tech</div>
       </div>
     </div>
   );

@@ -11,6 +11,7 @@ import {
   notFound,
   conflict,
   badRequest,
+  forbidden,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
@@ -18,6 +19,7 @@ import { nextNumber } from '../shared/numbering';
 import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
+import { createLogin, defaultRoleIds, deliverLink } from '../shared/accounts';
 
 // ════════════════════════════════════════════════════════════════════
 //  EMPLOYEES
@@ -90,7 +92,7 @@ employeeRoutes.get(
         include: {
           department: { select: { id: true, name: true } },
           positionRef: { select: { id: true, code: true, title: true } },
-          user: { select: { id: true, email: true, isActive: true } },
+          user: { select: { id: true, email: true, isActive: true, invitePending: true } },
         },
         orderBy: orderBy(q, ['employeeNo', 'lastName', 'dateHired', 'createdAt'], {
           lastName: 'asc',
@@ -176,6 +178,7 @@ employeeRoutes.get(
             id: true,
             email: true,
             isActive: true,
+            invitePending: true,
             supervisor: { select: { id: true, name: true } },
           },
         },
@@ -236,6 +239,26 @@ const employeeSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
+/**
+ * The G-CORE login made with the employee — "one creation": HR saves the
+ * person and their sign-in together, and the invitation goes out. Making a
+ * login is the administrator's right (admin.users.create), so a form without
+ * it saves the person and leaves the login to an administrator.
+ */
+const loginSchema = z.object({
+  email: z.string().trim().email('Enter the email they will sign in with'),
+  /** Defaults to the self-service Employee role. */
+  roleIds: z.array(z.string()).optional(),
+  supervisorId: z.string().optional().nullable(),
+  /** Set a password now instead of inviting them to choose one. */
+  password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional().nullable(),
+});
+
+const createEmployeeSchema = employeeSchema.extend({ login: loginSchema.optional().nullable() });
+
+const fullName = (e: { firstName: string; lastName: string; suffix?: string | null }) =>
+  [e.firstName, e.lastName, e.suffix].filter(Boolean).join(' ');
+
 function asDate(value: string | null | undefined): Date | null {
   if (!value) return null;
   const d = new Date(value);
@@ -268,10 +291,15 @@ employeeRoutes.post(
   require_('ghr.employees.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(employeeSchema, req.body);
+    const body = parseBody(createEmployeeSchema, req.body);
     const maySetRates = can(me, 'ghr.employee_rates.edit_all');
+    // Refused before anything is written: no half-made person without their login.
+    if (body.login && !can(me, 'admin.users.create')) {
+      throw forbidden('Creating a G-CORE login needs admin.users.create — save the employee, and an administrator can invite them from their record');
+    }
+    if (body.login && body.userId) throw badRequest('Link an existing login or create a new one — not both');
 
-    const employee = await prisma.$transaction(async (tx) => {
+    const { employee, login } = await prisma.$transaction(async (tx) => {
       const employeeNo = body.employeeNo || (await nextNumber('employee', tx));
       if (await tx.employee.findUnique({ where: { employeeNo } })) {
         throw conflict(`Employee number "${employeeNo}" is already in use`);
@@ -281,7 +309,7 @@ employeeRoutes.post(
         if (taken) throw conflict('That user account is already linked to another employee');
       }
 
-      return tx.employee.create({
+      const created = await tx.employee.create({
         data: {
           employeeNo,
           firstName: body.firstName,
@@ -307,6 +335,25 @@ employeeRoutes.post(
           ...rateData(body, maySetRates),
         },
       });
+      if (!body.login) return { employee: created, login: null };
+
+      // The login, in the same transaction: a refused email leaves no person behind.
+      const login = await createLogin(
+        tx,
+        {
+          email: body.login.email,
+          name: fullName(created),
+          password: body.login.password,
+          roleIds: body.login.roleIds?.length ? body.login.roleIds : await defaultRoleIds(tx),
+          supervisorId: body.login.supervisorId,
+          departmentId: created.departmentId,
+          position: created.position,
+          phone: created.mobile,
+        },
+        me.id,
+      );
+      const linked = await tx.employee.update({ where: { id: created.id }, data: { userId: login.user.id } });
+      return { employee: linked, login };
     });
 
     await audit(
@@ -314,11 +361,78 @@ employeeRoutes.post(
         entityType: 'employee',
         entityId: employee.id,
         action: 'CREATED',
-        summary: `Created employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}`,
+        summary: `Created employee ${employee.employeeNo} — ${employee.firstName} ${employee.lastName}${login ? `, with the login ${login.user.email}` : ''}`,
       },
       req,
     );
-    res.status(201).json(stripRates(decimalsToNumbers(employee) as typeof employee, maySetRates));
+    if (login) {
+      await audit(
+        {
+          entityType: 'user',
+          entityId: login.user.id,
+          action: 'CREATED',
+          summary: `Created user ${login.user.email} with employee ${employee.employeeNo}${login.invite ? ' — invited' : ''}`,
+        },
+        req,
+      );
+    }
+    const invite = login?.invite ? await deliverLink('INVITE', login.user, login.invite, me.name) : null;
+    res.status(201).json({
+      ...stripRates(decimalsToNumbers(employee) as typeof employee, maySetRates),
+      login: login ? { user: login.user, invite } : null,
+    });
+  }),
+);
+
+/**
+ * A login for someone already on the register — the employee HR added before
+ * logins could be made here, or one who never had one. Same account, same
+ * invitation as making them together.
+ */
+employeeRoutes.post(
+  '/:id/login',
+  require_('ghr.employees.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!can(me, 'admin.users.create')) {
+      throw forbidden('Creating a G-CORE login needs admin.users.create — ask an administrator');
+    }
+    const body = parseBody(loginSchema, req.body);
+
+    const made = await prisma.$transaction(async (tx) => {
+      const employee = await tx.employee.findUnique({ where: { id: req.params.id } });
+      if (!employee) throw notFound('Employee not found');
+      if (employee.userId) throw conflict(`${employee.firstName} ${employee.lastName} already has a login`);
+      if (!employee.isActive) throw badRequest('This employee is inactive — reactivate them before giving them a login');
+      const login = await createLogin(
+        tx,
+        {
+          email: body.email,
+          name: fullName(employee),
+          password: body.password,
+          roleIds: body.roleIds?.length ? body.roleIds : await defaultRoleIds(tx),
+          supervisorId: body.supervisorId,
+          departmentId: employee.departmentId,
+          position: employee.position,
+          phone: employee.mobile,
+        },
+        me.id,
+      );
+      await tx.employee.update({ where: { id: employee.id }, data: { userId: login.user.id } });
+      return { employee, login };
+    });
+
+    await audit(
+      {
+        entityType: 'user',
+        entityId: made.login.user.id,
+        action: 'CREATED',
+        summary: `Created user ${made.login.user.email} for employee ${made.employee.employeeNo}${made.login.invite ? ' — invited' : ''}`,
+      },
+      req,
+    );
+    const invite = made.login.invite ? await deliverLink('INVITE', made.login.user, made.login.invite, me.name) : null;
+    res.status(201).json({ user: made.login.user, invite });
   }),
 );
 

@@ -5,6 +5,8 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Loading, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import { PasswordInput } from '../../components/PasswordInput';
+import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
 
 const EMPLOYMENT_TYPES = [
@@ -61,6 +63,8 @@ interface EmployeeRow {
     id: string;
     email: string;
     isActive: boolean;
+    /** Invited, and has not chosen a password yet. */
+    invitePending?: boolean;
     supervisor?: { id: string; name: string } | null;
   } | null;
   // Only present when the caller holds ghr.employee_rates.view_all
@@ -167,10 +171,12 @@ export function Employees() {
               <Link to={`/admin/users/${e.user.id}`} className="mono" title={e.user.email}>
                 {e.user.email}
               </Link>
+              {e.user.invitePending && <span className="faint"> · invited</span>}
             </span>
           ) : (
             <span className="mono" title={e.user.email}>
               {e.user.email}
+              {e.user.invitePending && <span className="faint"> · invited</span>}
             </span>
           )
         ) : (
@@ -349,13 +355,32 @@ function EmployeeForm({
   const seeRates = can('ghr.employee_rates.view_all');
   const setRates = can('ghr.employee_rates.edit_all');
 
-  const [tab, setTab] = useState<'person' | 'employment' | 'pay' | 'evaluations'>('person');
+  const [tab, setTab] = useState<'person' | 'employment' | 'login' | 'pay' | 'evaluations'>('person');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [users, setUsers] = useState<{ id: string; name: string; email: string }[]>([]);
   const seeUsers = can('admin.users.view_all');
   const [detail, setDetail] = useState<EmployeeRow | null>(null);
+
+  /*
+    "One creation": the person and their G-CORE login saved together, and the
+    invitation sent. Making a login is the administrator's right; without it
+    the tab says so and the employee saves on their own.
+  */
+  const canMakeLogins = can('admin.users.create');
+  const [makeLogin, setMakeLogin] = useState(!employee && canMakeLogins);
+  const [login, setLogin] = useState<LoginDraft>({
+    email: employee?.personalEmail ?? '',
+    supervisorId: '',
+    roleIds: [],
+    method: 'invite',
+    password: '',
+  });
+  /** Until the login email is typed, it follows the personal email. */
+  const [loginEmailTouched, setLoginEmailTouched] = useState(false);
+  const [roles, setRoles] = useState<RoleOption[] | null>(null);
+  const [issued, setIssued] = useState<{ delivery: Delivery; email: string; created: boolean } | null>(null);
 
   const [form, setForm] = useState({
     employeeNo: employee?.employeeNo ?? '',
@@ -395,6 +420,19 @@ function EmployeeForm({
       .then(setUsers)
       .catch(() => {});
   }, []);
+
+  // The roles a new login can start with; the self-service Employee role is ticked.
+  useEffect(() => {
+    if (!canMakeLogins) return;
+    api
+      .get<RoleOption[]>('/roles')
+      .then((rows) => {
+        setRoles(rows);
+        const starter = rows.find((r) => r.key === 'employee');
+        if (starter) setLogin((l) => (l.roleIds.length ? l : { ...l, roleIds: [starter.id] }));
+      })
+      .catch(() => setRoles(null));
+  }, [canMakeLogins]);
 
   // The lookup lists ACTIVE logins and ACTIVE positions. The record's own may
   // be neither (a leaver), and a select that cannot show its value lies.
@@ -440,6 +478,56 @@ function EmployeeForm({
       })
       .catch(() => {});
   }, [employee, seeRates]);
+
+  /** What a new login is sent as — the tab's choices, checked here first. */
+  function loginPayload(): Record<string, unknown> {
+    if (!login.email.trim()) throw new Error('Enter the email they will sign in with — see the G-CORE login tab');
+    if (login.method === 'password' && login.password.length < 8) {
+      throw new Error('Set a password of at least 8 characters, or invite them to choose their own');
+    }
+    return {
+      email: login.email.trim(),
+      supervisorId: login.supervisorId || null,
+      ...(roles ? { roleIds: login.roleIds } : {}),
+      ...(login.method === 'password' ? { password: login.password } : {}),
+    };
+  }
+
+  /** A login for someone already on the register, from their record. */
+  async function createLoginNow() {
+    if (!employee) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post<{ user: { email: string }; invite: Delivery | null }>(
+        `/employees/${employee.id}/login`,
+        loginPayload(),
+      );
+      if (r.invite) setIssued({ delivery: r.invite, email: r.user.email, created: false });
+      else {
+        toast('ok', `Login created for ${employee.firstName} ${employee.lastName}`);
+        onSaved();
+      }
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendInvite() {
+    if (!employee?.user) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const delivery = await api.post<Delivery>(`/users/${employee.user.id}/invite`);
+      setIssued({ delivery, email: employee.user.email, created: false });
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function save() {
     setBusy(true);
@@ -491,8 +579,26 @@ function EmployeeForm({
         payload.tin = form.tin || null;
       }
 
-      if (employee) await api.patch(`/employees/${employee.id}`, payload);
-      else await api.post('/employees', payload);
+      if (!employee && makeLogin) {
+        payload.login = loginPayload();
+        delete payload.userId;
+      }
+
+      if (employee) {
+        await api.patch(`/employees/${employee.id}`, payload);
+      } else {
+        const created = await api.post<{ login: { user: { email: string }; invite: Delivery | null } | null }>(
+          '/employees',
+          payload,
+        );
+        // The invitation stays on screen so its link can be passed on.
+        if (created.login?.invite) {
+          toast('ok', `${form.firstName} ${form.lastName} saved, with their login`);
+          setIssued({ delivery: created.login.invite, email: created.login.user.email, created: true });
+          setBusy(false);
+          return;
+        }
+      }
 
       toast('ok', `${form.firstName} ${form.lastName} saved`);
       onSaved();
@@ -519,6 +625,27 @@ function EmployeeForm({
     form.dailyRate && form.burdenMultiplier
       ? Number(form.dailyRate) * Number(form.burdenMultiplier)
       : null;
+
+  // An invitation just issued: its link, and a way out.
+  if (issued) {
+    return (
+      <Modal
+        title={issued.created ? `${form.firstName} ${form.lastName} saved` : `Invitation for ${form.firstName} ${form.lastName}`}
+        onClose={onSaved}
+        footer={
+          <button className="btn btn-primary" onClick={onSaved}>
+            Done
+          </button>
+        }
+      >
+        <LinkDelivery delivery={issued.delivery} email={issued.email} kind="invite" />
+        <p className="muted">
+          When they open it they choose their password, add their photo and check their details. Until then their
+          login shows as invited.
+        </p>
+      </Modal>
+    );
+  }
 
   return (
     <Modal
@@ -556,6 +683,9 @@ function EmployeeForm({
           <button className={tab === 'employment' ? 'active' : ''} onClick={() => setTab('employment')}>
             Employment
           </button>
+          <button className={tab === 'login' ? 'active' : ''} onClick={() => setTab('login')}>
+            G-CORE login
+          </button>
           {seeRates && (
             <button className={tab === 'pay' ? 'active' : ''} onClick={() => setTab('pay')}>
               Pay &amp; statutory
@@ -591,7 +721,10 @@ function EmployeeForm({
               <input
                 type="email"
                 value={form.personalEmail}
-                onChange={(e) => setForm({ ...form, personalEmail: e.target.value })}
+                onChange={(e) => {
+                  setForm({ ...form, personalEmail: e.target.value });
+                  if (!loginEmailTouched && !employee?.user) setLogin((l) => ({ ...l, email: e.target.value }));
+                }}
               />
             </Field>
             <Field label="Birth date">
@@ -738,8 +871,82 @@ function EmployeeForm({
                 onChange={(e) => setForm({ ...form, dateSeparated: e.target.value })}
               />
             </Field>
+          </div>
+
+          <Field label="Notes">
+            <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+          </Field>
+
+          <Checkbox
+            checked={form.isActive}
+            onChange={(v) => setForm({ ...form, isActive: v })}
+            label="Active — inactive employees drop out of attendance and assignment"
+          />
+        </>
+      )}
+
+      {tab === 'login' && (
+        <div className="login-tab">
+          {linked ? (
+            <div className="login-status">
+              <p>
+                Signs in as{' '}
+                {seeUsers ? (
+                  <Link to={`/admin/users/${linked.id}`} className="mono">
+                    {linked.email}
+                  </Link>
+                ) : (
+                  <span className="mono">{linked.email}</span>
+                )}
+                {linked.supervisor ? ` · reports to ${linked.supervisor.name}` : ''}
+                {!linked.isActive && ' · switched off'}
+              </p>
+              {linked.invitePending && (
+                <div className="row login-status-row">
+                  <span className="muted">Invited — they have not chosen a password yet.</span>
+                  {canMakeLogins && linked.isActive && (
+                    <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void resendInvite()}>
+                      Send a new invitation
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : canMakeLogins ? (
+            <>
+              {!employee && (
+                <Checkbox
+                  checked={makeLogin}
+                  onChange={setMakeLogin}
+                  label="Create their G-CORE login when I save, and send them an invitation"
+                />
+              )}
+              {(employee || makeLogin) && (
+                <LoginFields
+                  login={login}
+                  roles={roles}
+                  people={users}
+                  onChange={(next) => setLogin(next)}
+                  onEmailTyped={() => setLoginEmailTouched(true)}
+                />
+              )}
+              {employee && (
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void createLoginNow()}>
+                  {login.method === 'invite' ? 'Create login and send invitation' : 'Create login'}
+                </button>
+              )}
+            </>
+          ) : (
+            <div className="alert info">
+              Making a G-CORE login needs an administrator (admin.users.create). Save the employee, and an
+              administrator can invite them from this record — or from Admin › Users.
+            </div>
+          )}
+
+          {/* An existing login can still be linked or unlinked by hand. */}
+          {(!makeLogin || !!employee) && (
             <Field
-              label="Login account"
+              label={linked ? 'Login account' : 'Or link a login that already exists'}
               hint="Who they sign in as. Reporting line is set on the user account, since that is what approvals route by."
             >
               <select value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })}>
@@ -751,25 +958,8 @@ function EmployeeForm({
                 ))}
               </select>
             </Field>
-          </div>
-
-          <Field label="Notes">
-            <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-          </Field>
-
-          {linked && seeUsers && (
-            <p className="faint">
-              Login: <Link to={`/admin/users/${linked.id}`}>{linked.email}</Link>
-              {linked.supervisor ? ` · reports to ${linked.supervisor.name}` : ''}
-            </p>
           )}
-
-          <Checkbox
-            checked={form.isActive}
-            onChange={(v) => setForm({ ...form, isActive: v })}
-            label="Active — inactive employees drop out of attendance and assignment"
-          />
-        </>
+        </div>
       )}
 
       {tab === 'evaluations' && seeEvaluations && employee && (
@@ -869,5 +1059,113 @@ function EmployeeForm({
         </>
       )}
     </Modal>
+  );
+}
+
+interface RoleOption {
+  id: string;
+  key: string;
+  name: string;
+}
+
+interface LoginDraft {
+  email: string;
+  supervisorId: string;
+  roleIds: string[];
+  method: 'invite' | 'password';
+  password: string;
+}
+
+/**
+ * The login's own choices: the email they sign in with, who approves for them
+ * (approvals route by the login, so the reporting line is set here), what they
+ * can open, and how they get in — invited to choose their own password, or
+ * given one now.
+ */
+function LoginFields({
+  login,
+  roles,
+  people,
+  onChange,
+  onEmailTyped,
+}: {
+  login: LoginDraft;
+  roles: RoleOption[] | null;
+  people: { id: string; name: string; email: string }[];
+  onChange: (next: LoginDraft) => void;
+  onEmailTyped: () => void;
+}) {
+  return (
+    <div className="login-fields">
+      <div className="grid grid-2">
+        <Field label="Sign-in email" required hint="Their work email if they have one — the invitation goes here">
+          <input
+            type="email"
+            autoComplete="off"
+            value={login.email}
+            onChange={(e) => {
+              onEmailTyped();
+              onChange({ ...login, email: e.target.value });
+            }}
+          />
+        </Field>
+        <Field label="Reports to" hint="Their leave and overtime go to this person first">
+          <select value={login.supervisorId} onChange={(e) => onChange({ ...login, supervisorId: e.target.value })}>
+            <option value="">— none (HR decides) —</option>
+            {people.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+
+      {roles ? (
+        <Field label="What they can open" hint="Roles — Employee covers clocking in, leave and overtime. Fine-tune later in Admin › Users.">
+          <div className="row login-roles">
+            {roles.map((r) => (
+              <label key={r.id} className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={login.roleIds.includes(r.id)}
+                  onChange={(e) =>
+                    onChange({
+                      ...login,
+                      roleIds: e.target.checked ? [...login.roleIds, r.id] : login.roleIds.filter((x) => x !== r.id),
+                    })
+                  }
+                />
+                <span>{r.name}</span>
+              </label>
+            ))}
+          </div>
+        </Field>
+      ) : (
+        <p className="muted">They start with the Employee role — clocking in, leave and overtime. Add more in Admin › Users.</p>
+      )}
+
+      <fieldset className="signin-choice">
+        <legend>How they get in</legend>
+        <label className="checkbox">
+          <input type="radio" name="employee-signin" checked={login.method === 'invite'} onChange={() => onChange({ ...login, method: 'invite' })} />
+          <span>Invite them — they choose their own password, and add their photo and details</span>
+        </label>
+        <label className="checkbox">
+          <input type="radio" name="employee-signin" checked={login.method === 'password'} onChange={() => onChange({ ...login, method: 'password' })} />
+          <span>Set a password for them now</span>
+        </label>
+        {login.method === 'password' && (
+          <Field label="Password" htmlFor="employee-login-password" hint="At least 8 characters — tell them, and ask them to change it">
+            <PasswordInput
+              id="employee-login-password"
+              value={login.password}
+              autoComplete="new-password"
+              onChange={(e) => onChange({ ...login, password: e.target.value })}
+            />
+          </Field>
+        )}
+      </fieldset>
+    </div>
   );
 }

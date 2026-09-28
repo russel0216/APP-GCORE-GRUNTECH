@@ -16,6 +16,8 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
+import { ADMIN_RESET_HOURS, createLogin, deliverLink, issueToken } from '../shared/accounts';
+import { mailConfig, sendMail } from '../shared/mail';
 
 export const userRoutes = Router();
 userRoutes.use(authenticate);
@@ -31,6 +33,7 @@ const publicUser = {
   phone: true,
   isActive: true,
   isSuperAdmin: true,
+  invitePending: true,
   supervisorId: true,
   departmentId: true,
   lastLoginAt: true,
@@ -150,6 +153,46 @@ userRoutes.get(
   }),
 );
 
+// ── Email: is it set up, and does it work ────────────────────────────────────
+
+/**
+ * Whether invitations and resets go by email. The password is never sent to
+ * the screen; the host and the sender are enough to tell which account is set.
+ */
+userRoutes.get(
+  '/mail-status',
+  require_('admin.users.view_all'),
+  handler(async (_req, res) => {
+    const cfg = mailConfig();
+    res.json({ enabled: !!cfg, host: cfg?.host ?? null, from: cfg?.from ?? null });
+  }),
+);
+
+/** A test email to the administrator asking, so a wrong password shows up now rather than on an invitation. */
+userRoutes.post(
+  '/mail-test',
+  require_('admin.users.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const cfg = mailConfig();
+    if (!cfg) throw badRequest('Email is not set up — add SMTP_HOST and the mailbox details to the server settings first');
+    try {
+      await sendMail(
+        {
+          to: me.email,
+          toName: me.name,
+          subject: 'G-CORE test email',
+          text: `This is a test from G-CORE, sent at your request.\n\nIf you are reading it, invitations and password resets will reach people too.\n\nSent through ${cfg.host} as ${cfg.from}.`,
+        },
+        cfg,
+      );
+    } catch (err) {
+      throw badRequest(`The test email did not go: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    res.json({ ok: true, to: me.email });
+  }),
+);
+
 // ── Read one, with effective permissions ─────────────────────────────────────
 
 userRoutes.get(
@@ -168,10 +211,27 @@ userRoutes.get(
     });
     if (!user) throw notFound('User not found');
 
+    // The invitation in flight, so the screen can say when it went and whether it ran out.
+    const invite = user.invitePending
+      ? await prisma.accountToken.findFirst({
+          where: { userId: user.id, purpose: 'INVITE' },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true, expiresAt: true, usedAt: true },
+        })
+      : null;
+    const employee = await prisma.employee.findUnique({
+      where: { userId: user.id },
+      select: { id: true, employeeNo: true, firstName: true, lastName: true },
+    });
+
     res.json({
       ...user,
       roles: user.roles.map((r) => r.role),
       overrides: user.overrides.map((o) => ({ key: o.permission.key, effect: o.effect })),
+      invite: invite
+        ? { sentAt: invite.createdAt, expiresAt: invite.expiresAt, live: !invite.usedAt && invite.expiresAt > new Date() }
+        : null,
+      employee,
     });
   }),
 );
@@ -181,7 +241,10 @@ userRoutes.get(
 const createSchema = z.object({
   email: z.string().email('Enter a valid email address'),
   name: z.string().min(2, 'Name is required'),
-  password: z.string().min(8, 'Use at least 8 characters'),
+  /** Without one the person is invited, and chooses their own. */
+  password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional().nullable(),
+  /** The employee record this login belongs to — linked in the same save. */
+  employeeId: z.string().optional().nullable(),
   employeeNo: z.string().trim().optional().nullable(),
   position: z.string().trim().optional().nullable(),
   /** The author's mobile under "Sincerely Yours," on a quotation. */
@@ -196,50 +259,117 @@ userRoutes.post(
   '/',
   require_('admin.users.create'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(createSchema, req.body);
-    const email = body.email.toLowerCase();
 
-    if (await prisma.user.findUnique({ where: { email } })) {
-      throw conflict('Someone already uses that email address');
-    }
-
-    const created = await prisma.user.create({
-      data: {
-        email,
-        name: body.name,
-        passwordHash: await bcrypt.hash(body.password, 10),
-        employeeNo: body.employeeNo || null,
-        position: body.position || null,
-        phone: body.phone || null,
-        supervisorId: body.supervisorId || null,
-        departmentId: body.departmentId || null,
-        isActive: body.isActive,
-        roles: { create: body.roleIds.map((roleId) => ({ roleId })) },
-      },
-      select: publicUser,
+    // One save: the login, its link to the employee record, and the invitation.
+    const made = await prisma.$transaction(async (tx) => {
+      const employee = body.employeeId
+        ? await tx.employee.findUnique({ where: { id: body.employeeId }, select: { id: true, userId: true } })
+        : null;
+      if (body.employeeId && !employee) throw notFound('Employee not found');
+      if (employee?.userId) throw conflict('That employee already has a login');
+      const login = await createLogin(
+        tx,
+        {
+          email: body.email,
+          name: body.name,
+          password: body.password,
+          employeeNo: body.employeeNo,
+          position: body.position,
+          phone: body.phone,
+          supervisorId: body.supervisorId,
+          departmentId: body.departmentId,
+          isActive: body.isActive,
+          roleIds: body.roleIds,
+        },
+        me.id,
+      );
+      if (employee) await tx.employee.update({ where: { id: employee.id }, data: { userId: login.user.id } });
+      return login;
     });
 
+    const created = made.user;
     await audit(
       {
         entityType: 'user',
         entityId: created.id,
         action: 'CREATED',
-        summary: `Created user ${created.email}`,
+        summary: `Created user ${created.email}${made.invite ? ' — invited' : ''}${body.employeeId ? ', linked to their employee record' : ''}`,
         after: redact(created as Record<string, unknown>),
       },
       req,
     );
 
-    res.status(201).json(created);
+    const invite = made.invite ? await deliverLink('INVITE', created, made.invite, me.name) : null;
+    res.status(201).json({ ...created, invite });
+  }),
+);
+
+// ── Invitations and reset links, issued by an administrator ──────────────────
+
+/**
+ * A fresh invitation for someone who has not chosen a password yet — the
+ * first may have gone to spam or run out. It kills the previous link.
+ */
+userRoutes.post(
+  '/:id/invite',
+  require_('admin.users.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, name: true, email: true, isActive: true, invitePending: true },
+    });
+    if (!user) throw notFound('User not found');
+    if (!user.isActive) throw badRequest('This account is switched off — switch it on before inviting them');
+    if (!user.invitePending) {
+      throw badRequest('They have already chosen a password — send them a password reset link instead');
+    }
+    const issued = await issueToken(prisma, user.id, 'INVITE', { createdById: me.id });
+    await audit(
+      { entityType: 'user', entityId: user.id, action: 'UPDATED', summary: `Sent a new invitation to ${user.email}` },
+      req,
+    );
+    res.json(await deliverLink('INVITE', user, issued, me.name));
+  }),
+);
+
+/**
+ * A reset link an administrator issues — what "Forgot password?" becomes
+ * while email is not set up, or for someone locked out who calls in. It is
+ * live for a day, because it may be passed on by chat rather than by email.
+ */
+userRoutes.post(
+  '/:id/reset-link',
+  require_('admin.users.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, name: true, email: true, isActive: true, invitePending: true },
+    });
+    if (!user) throw notFound('User not found');
+    if (!user.isActive) throw badRequest('This account is switched off — switch it on first');
+    if (user.invitePending) throw badRequest('They have not used their invitation yet — send a new invitation instead');
+    const issued = await issueToken(prisma, user.id, 'RESET', {
+      createdById: me.id,
+      lifetimeMs: ADMIN_RESET_HOURS * 3_600_000,
+    });
+    await audit(
+      { entityType: 'user', entityId: user.id, action: 'UPDATED', summary: `Issued a password reset link for ${user.email}` },
+      req,
+    );
+    res.json(await deliverLink('RESET', user, issued));
   }),
 );
 
 // ── Update ───────────────────────────────────────────────────────────────────
 
 const updateSchema = createSchema
-  .omit({ password: true, email: true })
+  .omit({ password: true, email: true, employeeId: true })
   .partial()
-  .extend({ password: z.string().min(8).optional() });
+  .extend({ password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional() });
 
 userRoutes.patch(
   '/:id',
@@ -270,7 +400,11 @@ userRoutes.patch(
     if (body.position !== undefined) data.position = body.position || null;
     if (body.phone !== undefined) data.phone = body.phone || null;
     if (body.isActive !== undefined) data.isActive = body.isActive;
-    if (body.password) data.passwordHash = await bcrypt.hash(body.password, 10);
+    if (body.password) {
+      data.passwordHash = await bcrypt.hash(body.password, 10);
+      // A password set here is the invitation answered: the account is ready.
+      data.invitePending = false;
+    }
     if (body.supervisorId !== undefined) {
       data.supervisor = body.supervisorId
         ? { connect: { id: body.supervisorId } }
@@ -283,6 +417,10 @@ userRoutes.patch(
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      // Any link still out stops working once a password is set by hand.
+      if (body.password) {
+        await tx.accountToken.updateMany({ where: { userId: req.params.id, usedAt: null }, data: { usedAt: new Date() } });
+      }
       if (body.roleIds) {
         await tx.userRole.deleteMany({ where: { userId: req.params.id } });
         await tx.userRole.createMany({

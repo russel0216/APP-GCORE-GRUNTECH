@@ -1,0 +1,220 @@
+/*
+  Accounts: the Show / Hide password switch (components/PasswordInput.tsx),
+  the signed-out pages — sign in, forgot, reset, welcome (pages/Login.tsx,
+  pages/AccountLinks.tsx) — the link an administrator passes on
+  (components/LinkDelivery.tsx), and the login parts of Admin › Users and the
+  G-HR employee form. Tokens only.
+*/
+
+/* ── Show / Hide ──────────────────────────────────────────────────────────── */
+
+.password-input {
+  position: relative;
+}
+
+.password-input input {
+  width: 100%;
+  padding-right: 4.5rem;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: var(--s-1);
+  transform: translateY(-50%);
+  padding: var(--s-1) var(--s-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--neon-dim);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.password-toggle:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+/* ── The signed-out pages ─────────────────────────────────────────────────── */
+
+.login-brand {
+  text-align: center;
+}
+
+/* The welcome asks for more, so its panel is wider than the sign-in's. */
+.login-wrap-wide {
+  max-width: 34rem;
+}
+
+.login-text {
+  margin: 0 0 var(--s-4);
+  line-height: 1.5;
+}
+
+.login-aside {
+  margin: var(--s-4) 0 0;
+  text-align: center;
+  font-size: var(--fs-sm);
+}
+
+.login-host {
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+}
+
+/* A label for something that is not one control (the photo picker). */
+.field-label-text {
+  display: block;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--neon-dim);
+  margin-bottom: var(--s-2);
+}
+
+.welcome-photo {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.welcome-photo img,
+.welcome-photo-empty {
+  width: 4rem;
+  height: 4rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.welcome-photo img {
+  object-fit: cover;
+  border: 1px solid var(--line);
+}
+
+.welcome-photo-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+}
+
+.welcome-photo-actions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+/* ── Grouped choices: "How they get in", "Your details" ───────────────────── */
+
+.signin-choice,
+.welcome-personal {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+
+.signin-choice legend,
+.welcome-personal legend {
+  padding: 0 var(--s-1);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--neon-dim);
+}
+
+.signin-choice .checkbox {
+  display: flex;
+  margin-bottom: var(--s-2);
+}
+
+.signin-choice .field {
+  margin-top: var(--s-3);
+  margin-bottom: 0;
+}
+
+.welcome-note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+/* ── A link to pass on ────────────────────────────────────────────────────── */
+
+.link-delivery p {
+  margin: 0;
+}
+
+.link-delivery-row {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+
+.link-delivery-row input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+}
+
+/* ── Admin › Users and the employee form ──────────────────────────────────── */
+
+.mail-line-row {
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.signin-panel {
+  margin-top: var(--s-4);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+.signin-panel h4 {
+  margin: 0 0 var(--s-2);
+}
+
+.signin-panel p {
+  margin: 0 0 var(--s-2);
+}
+
+.signin-panel .link-delivery {
+  margin-top: var(--s-3);
+}
+
+.login-tab .checkbox {
+  margin-bottom: var(--s-3);
+}
+
+.login-status p {
+  margin: 0 0 var(--s-3);
+}
+
+.login-status-row {
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-3);
+}
+
+.login-fields {
+  margin-bottom: var(--s-3);
+}
+
+.login-roles {
+  gap: var(--s-2) var(--s-4);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 520px) {
+  .link-delivery-row {
+    flex-direction: column;
+  }
+}

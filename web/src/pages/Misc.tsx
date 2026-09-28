@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { api, getToken, SHIPPED_PHASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Avatar, ErrorBox, Field, Loading, useToast } from '../components/ui';
+import { PasswordInput } from '../components/PasswordInput';
 
 // ── Account ──────────────────────────────────────────────────────────────────
 
@@ -101,29 +102,51 @@ function ProfilePhoto() {
   );
 }
 
+interface Personal {
+  mobile: string | null;
+  address: string | null;
+  birthDate: string | null;
+  emergencyContactName: string | null;
+  emergencyContactPhone: string | null;
+}
+
+interface Profile {
+  phone: string | null;
+  /** Null for an account with no employee record behind it. */
+  personal: Personal | null;
+}
+
 /**
- * Your own mobile number.
+ * Your own contact and personal details.
  *
- * It prints under "Sincerely Yours," on every quotation you author, so it is
- * yours to keep current; everything else about the account (name, position,
- * reporting line) stays with Admin > Users. Read from /auth/profile rather
- * than /auth/me so the number is always the saved one, not a session copy.
+ * The mobile prints under "Sincerely Yours," on every quotation you author,
+ * so it is yours to keep current. With an employee record behind the account
+ * you also keep your home address, birthday and emergency contact — the
+ * details the invitation asked for, and HR's copy of them. Everything else
+ * (name, position, reporting line, pay) stays with Admin and HR. Read from
+ * /auth/profile rather than /auth/me so it is always the saved copy.
  */
 function ContactDetails() {
   const toast = useToast();
   const [phone, setPhone] = useState('');
+  const [personal, setPersonal] = useState<Personal | null>(null);
   const [saved, setSaved] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
+  const snapshot = (ph: string, p: Personal | null) => JSON.stringify([ph.trim(), p]);
+
+  function adopt(r: Profile) {
+    setPhone(r.phone ?? '');
+    setPersonal(r.personal);
+    setSaved(snapshot(r.phone ?? '', r.personal));
+  }
+
   useEffect(() => {
     api
-      .get<{ phone: string | null }>('/auth/profile')
-      .then((r) => {
-        setPhone(r.phone ?? '');
-        setSaved(r.phone ?? '');
-      })
+      .get<Profile>('/auth/profile')
+      .then(adopt)
       .catch(setError)
       .finally(() => setLoading(false));
   }, []);
@@ -133,10 +156,15 @@ function ContactDetails() {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.patch<{ phone: string | null }>('/auth/profile', { phone: phone.trim() || null });
-      setPhone(r.phone ?? '');
-      setSaved(r.phone ?? '');
-      toast('ok', 'Contact details saved');
+      const r = await api.patch<Profile>('/auth/profile', {
+        phone: phone.trim() || null,
+        // One mobile: the number on your quotations is also HR's number for you.
+        ...(personal
+          ? { personal: { ...personal, mobile: phone.trim() || null, birthDate: personal.birthDate || null } }
+          : {}),
+      });
+      adopt(r);
+      toast('ok', 'Details saved');
     } catch (err) {
       setError(err);
     } finally {
@@ -144,10 +172,12 @@ function ContactDetails() {
     }
   }
 
+  const setP = (key: keyof Personal, value: string) => setPersonal((p) => (p ? { ...p, [key]: value } : p));
+
   if (loading) return <Loading />;
   return (
     <form className="card" onSubmit={submit}>
-      <h3 className="card-title">Contact</h3>
+      <h3 className="card-title">{personal ? 'Contact and personal details' : 'Contact'}</h3>
       <ErrorBox error={error} />
       <Field label="Mobile" hint="Printed under your name on the quotations you author">
         <input
@@ -158,8 +188,40 @@ function ContactDetails() {
           onChange={(e) => setPhone(e.target.value)}
         />
       </Field>
-      <button className="btn btn-primary" type="submit" disabled={busy || phone.trim() === saved}>
-        {busy ? 'Saving…' : 'Save contact details'}
+      {personal && (
+        <>
+          <Field label="Home address">
+            <input
+              autoComplete="street-address"
+              maxLength={300}
+              value={personal.address ?? ''}
+              onChange={(e) => setP('address', e.target.value)}
+            />
+          </Field>
+          <Field label="Birthday">
+            <input type="date" autoComplete="bday" value={personal.birthDate ?? ''} onChange={(e) => setP('birthDate', e.target.value)} />
+          </Field>
+          <div className="grid grid-2">
+            <Field label="Emergency contact">
+              <input
+                maxLength={120}
+                value={personal.emergencyContactName ?? ''}
+                onChange={(e) => setP('emergencyContactName', e.target.value)}
+              />
+            </Field>
+            <Field label="Their number">
+              <input
+                type="tel"
+                maxLength={40}
+                value={personal.emergencyContactPhone ?? ''}
+                onChange={(e) => setP('emergencyContactPhone', e.target.value)}
+              />
+            </Field>
+          </div>
+        </>
+      )}
+      <button className="btn btn-primary" type="submit" disabled={busy || snapshot(phone, personal) === saved}>
+        {busy ? 'Saving…' : 'Save details'}
       </button>
     </form>
   );
@@ -258,27 +320,27 @@ export function Account() {
         <form className="card" onSubmit={submit}>
           <h3 className="card-title">Change password</h3>
           <ErrorBox error={error} />
-          <Field label="Current password">
-            <input
-              type="password"
+          <Field label="Current password" htmlFor="account-current-password">
+            <PasswordInput
+              id="account-current-password"
               value={current}
               autoComplete="current-password"
               onChange={(e) => setCurrent(e.target.value)}
               required
             />
           </Field>
-          <Field label="New password" hint="At least 8 characters">
-            <input
-              type="password"
+          <Field label="New password" htmlFor="account-new-password" hint="At least 8 characters">
+            <PasswordInput
+              id="account-new-password"
               value={next}
               autoComplete="new-password"
               onChange={(e) => setNext(e.target.value)}
               required
             />
           </Field>
-          <Field label="Confirm new password">
-            <input
-              type="password"
+          <Field label="Confirm new password" htmlFor="account-confirm-password">
+            <PasswordInput
+              id="account-confirm-password"
               value={confirm}
               autoComplete="new-password"
               onChange={(e) => setConfirm(e.target.value)}

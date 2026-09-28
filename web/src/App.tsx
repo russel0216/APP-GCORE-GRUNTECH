@@ -1,8 +1,9 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
 import { ToastProvider, Loading } from './components/ui';
 import { Shell } from './components/Shell';
 import { Login } from './pages/Login';
+import { ForgotPassword, ResetPassword, Welcome } from './pages/AccountLinks';
 import { Home } from './pages/Home';
 import { MyWork } from './pages/MyWork';
 import { Account, SystemSettings, ComingSoon } from './pages/Misc';
@@ -149,8 +150,22 @@ function GuardAny({ permissions, children }: { permissions: string[]; children: 
   return <>{children}</>;
 }
 
+/**
+ * The pages that open from a link before anyone can sign in — an invitation,
+ * a reset, "Forgot password?" — whether or not somebody is signed in already.
+ */
+const SIGNED_OUT_PAGES: Record<string, () => JSX.Element> = {
+  '/welcome': Welcome,
+  '/reset-password': ResetPassword,
+  '/forgot-password': ForgotPassword,
+};
+
 function Routed() {
   const { me, loading } = useAuth();
+  const { pathname } = useLocation();
+
+  const SignedOutPage = SIGNED_OUT_PAGES[pathname.replace(/\/+$/, '') || '/'];
+  if (SignedOutPage) return <SignedOutPage />;
 
   if (loading) {
     return (

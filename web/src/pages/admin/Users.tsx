@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -12,6 +12,8 @@ import {
   formatDateTime,
   useToast,
 } from '../../components/ui';
+import { PasswordInput } from '../../components/PasswordInput';
+import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 
 interface Role {
   id: string;
@@ -31,6 +33,8 @@ interface UserRow {
   phone: string | null;
   isActive: boolean;
   isSuperAdmin: boolean;
+  /** Invited, and has not chosen a password yet. */
+  invitePending: boolean;
   lastLoginAt: string | null;
   roles: { key: string; name: string }[];
   department: { id: string; name: string } | null;
@@ -41,7 +45,27 @@ interface UserRow {
 type UserDetail = Omit<UserRow, 'roles'> & {
   roles: { id: string; key: string; name: string }[];
   overrides: { key: string; effect: 'ALLOW' | 'DENY' }[];
+  /** The invitation in flight, while it is pending. */
+  invite: { sentAt: string; expiresAt: string; live: boolean } | null;
+  employee: { id: string; employeeNo: string; firstName: string; lastName: string } | null;
 };
+
+/** An employee a new login can belong to: one on the register who has none yet. */
+interface EmployeeOption {
+  id: string;
+  employeeNo: string;
+  firstName: string;
+  lastName: string;
+  position: string | null;
+  department: { id: string; name: string } | null;
+  hasUser: boolean;
+}
+
+interface MailStatus {
+  enabled: boolean;
+  host: string | null;
+  from: string | null;
+}
 
 interface PermissionCatalog {
   modules: {
@@ -119,9 +143,13 @@ export function Users() {
     {
       key: 'isActive',
       label: 'Status',
-      render: (u) => (
-        <StatusBadge status={u.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: 'danger' }} />
-      ),
+      render: (u) =>
+        // Invited: the account exists, its person has not chosen a password yet.
+        u.isActive && u.invitePending ? (
+          <StatusBadge status="INVITED" extra={{ INVITED: 'warn' }} />
+        ) : (
+          <StatusBadge status={u.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: 'danger' }} />
+        ),
     },
     {
       key: 'lastLoginAt',
@@ -148,6 +176,8 @@ export function Users() {
           </p>
         </div>
       </div>
+
+      <MailLine />
 
       <DataList<UserRow>
         listKey="admin-users"
@@ -229,6 +259,23 @@ function UserEditor({
     roleIds: [] as string[],
     isActive: true,
   });
+  /** A new account: invite them to choose their password, or set one now. */
+  const [signIn, setSignIn] = useState<'invite' | 'password'>('invite');
+  const [employeeId, setEmployeeId] = useState('');
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  const [detail, setDetail] = useState<UserDetail | null>(null);
+  /** The link just issued — shown until the administrator is done with it. */
+  const [issued, setIssued] = useState<{ delivery: Delivery; kind: 'invite' | 'reset' } | null>(null);
+
+  // The register, for linking a new login to its person. Admins who cannot
+  // read HR's register simply do not get the choice.
+  useEffect(() => {
+    if (!isNew) return;
+    api
+      .get<EmployeeOption[]>('/employees/lookup?active=true')
+      .then((rows) => setEmployees(rows.filter((e) => !e.hasUser)))
+      .catch(() => setEmployees([]));
+  }, [isNew]);
 
   useEffect(() => {
     api
@@ -246,6 +293,7 @@ function UserEditor({
     api
       .get<UserDetail>(`/users/${id}`)
       .then((u) => {
+        setDetail(u);
         setForm({
           name: u.name,
           email: u.email,
@@ -279,9 +327,18 @@ function UserEditor({
         ...(form.password ? { password: form.password } : {}),
       };
 
-      const userId = isNew
-        ? (await api.post<{ id: string }>('/users', { ...payload, email: form.email, password: form.password })).id
-        : id;
+      if (isNew && signIn === 'password' && form.password.length < 8) {
+        throw new Error('Set a password of at least 8 characters, or invite them to choose their own');
+      }
+      const created = isNew
+        ? await api.post<{ id: string; invite: Delivery | null }>('/users', {
+            ...payload,
+            email: form.email,
+            employeeId: employeeId || null,
+            ...(signIn === 'password' ? { password: form.password } : { password: null }),
+          })
+        : null;
+      const userId = created ? created.id : id;
 
       await api.put(`/users/${userId}/overrides`, {
         overrides: Object.entries(overrides).map(([key, effect]) => ({ key, effect })),
@@ -290,6 +347,12 @@ function UserEditor({
       if (!isNew) await api.patch(`/users/${id}`, payload);
 
       toast('ok', isNew ? `${form.name} added` : `${form.name} updated`);
+      // An invitation stays on screen so its link can be passed on.
+      if (created?.invite) {
+        setIssued({ delivery: created.invite, kind: 'invite' });
+        setBusy(false);
+        return;
+      }
       onSaved();
     } catch (err) {
       setError(err);
@@ -306,6 +369,53 @@ function UserEditor({
       return next;
     });
   }
+
+  async function issue(kind: 'invite' | 'reset') {
+    setBusy(true);
+    setError(null);
+    try {
+      const delivery = await api.post<Delivery>(`/users/${id}/${kind === 'invite' ? 'invite' : 'reset-link'}`);
+      setIssued({ delivery, kind });
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // After an invitation from "Add user": the link, and a way out.
+  if (isNew && issued) {
+    return (
+      <Modal
+        title={`${form.name} added`}
+        onClose={onSaved}
+        footer={
+          <button className="btn btn-primary" onClick={onSaved}>
+            Done
+          </button>
+        }
+      >
+        <LinkDelivery delivery={issued.delivery} email={form.email} kind={issued.kind} />
+        <p className="muted">
+          Until they use it, their account shows as Invited. From their account you can send a new invitation if this
+          one is lost or runs out.
+        </p>
+      </Modal>
+    );
+  }
+
+  const pickEmployee = (value: string) => {
+    setEmployeeId(value);
+    const e = employees.find((x) => x.id === value);
+    if (!e) return;
+    // The person's own record fills what is still empty; nothing typed is overwritten.
+    setForm((f) => ({
+      ...f,
+      name: f.name || `${e.firstName} ${e.lastName}`,
+      position: f.position || e.position || '',
+      departmentId: f.departmentId || e.department?.id || '',
+    }));
+  };
 
   return (
     <Modal
@@ -411,18 +521,62 @@ function UserEditor({
                 ))}
               </select>
             </Field>
-            <Field
-              label={isNew ? 'Password' : 'New password'}
-              hint={isNew ? 'At least 8 characters' : 'Leave blank to keep the current password'}
-            >
-              <input
-                type="password"
-                value={form.password}
-                autoComplete="new-password"
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-              />
-            </Field>
+            {isNew && employees.length > 0 && (
+              <Field label="Employee record" hint="The person on the G-HR register this login belongs to — linked in the same save">
+                <select value={employeeId} onChange={(e) => pickEmployee(e.target.value)}>
+                  <option value="">— none —</option>
+                  {employees.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.lastName}, {e.firstName} · {e.employeeNo}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {!isNew && (
+              <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
+                <PasswordInput
+                  id="user-password"
+                  value={form.password}
+                  autoComplete="new-password"
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                />
+              </Field>
+            )}
           </div>
+
+          {isNew && (
+            <fieldset className="signin-choice">
+              <legend>How they get in</legend>
+              <label className="checkbox">
+                <input type="radio" name="signin" checked={signIn === 'invite'} onChange={() => setSignIn('invite')} />
+                <span>Invite them — they choose their own password, and add their photo and details</span>
+              </label>
+              <label className="checkbox">
+                <input type="radio" name="signin" checked={signIn === 'password'} onChange={() => setSignIn('password')} />
+                <span>Set a password for them now</span>
+              </label>
+              {signIn === 'password' && (
+                <Field label="Password" htmlFor="user-password" hint="At least 8 characters — tell them, and ask them to change it">
+                  <PasswordInput
+                    id="user-password"
+                    value={form.password}
+                    autoComplete="new-password"
+                    onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  />
+                </Field>
+              )}
+            </fieldset>
+          )}
+
+          {!isNew && detail && (
+            <SignInPanel
+              detail={detail}
+              issued={issued}
+              busy={busy}
+              onIssue={(kind) => void issue(kind)}
+            />
+          )}
 
           <Checkbox
             checked={form.isActive}
@@ -508,5 +662,127 @@ function UserEditor({
         </>
       )}
     </Modal>
+  );
+}
+
+/**
+ * Where an existing account stands on signing in, and the two links an
+ * administrator can send: a new invitation while it is pending, a password
+ * reset once it is in use.
+ */
+function SignInPanel({
+  detail,
+  issued,
+  busy,
+  onIssue,
+}: {
+  detail: UserDetail;
+  issued: { delivery: Delivery; kind: 'invite' | 'reset' } | null;
+  busy: boolean;
+  onIssue: (kind: 'invite' | 'reset') => void;
+}) {
+  const { can } = useAuth();
+  return (
+    <div className="signin-panel">
+      <h4>Signing in</h4>
+      {detail.employee && (
+        <p className="muted">
+          Employee record:{' '}
+          {can('ghr.employees.view_all') ? (
+            <Link to={`/g-hr/employees/${detail.employee.id}`}>
+              {detail.employee.firstName} {detail.employee.lastName} · {detail.employee.employeeNo}
+            </Link>
+          ) : (
+            `${detail.employee.firstName} ${detail.employee.lastName} · ${detail.employee.employeeNo}`
+          )}
+        </p>
+      )}
+      {detail.invitePending ? (
+        <>
+          <p>
+            Invited — they have not chosen a password yet.
+            {detail.invite && (
+              <>
+                {' '}
+                Sent {formatDateTime(detail.invite.sentAt)};{' '}
+                {detail.invite.live ? `works until ${formatDateTime(detail.invite.expiresAt)}.` : 'it has run out.'}
+              </>
+            )}
+          </p>
+          {can('admin.users.create') && detail.isActive && (
+            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onIssue('invite')}>
+              Send a new invitation
+            </button>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="muted">
+            {detail.lastLoginAt ? `Last signed in ${formatDateTime(detail.lastLoginAt)}.` : 'Has not signed in yet.'} If
+            they are locked out, send them a link to choose a new password.
+          </p>
+          {detail.isActive && (
+            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onIssue('reset')}>
+              Send a password reset link
+            </button>
+          )}
+        </>
+      )}
+      {issued && <LinkDelivery delivery={issued.delivery} email={detail.email} kind={issued.kind} />}
+    </div>
+  );
+}
+
+/**
+ * Whether invitations and resets go by email, and a test — so a wrong mailbox
+ * password shows up now, on the administrator's own inbox, rather than on the
+ * first person invited.
+ */
+function MailLine() {
+  const { can } = useAuth();
+  const toast = useToast();
+  const [status, setStatus] = useState<MailStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    api.get<MailStatus>('/users/mail-status').then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  async function test() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post<{ to: string }>('/users/mail-test');
+      toast('ok', `Test email sent to ${r.to} — check the inbox`);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!status) return null;
+  return (
+    <div className={`alert ${status.enabled ? 'ok' : 'info'} mail-line`}>
+      <ErrorBox error={error} />
+      {status.enabled ? (
+        <div className="row mail-line-row">
+          <span>
+            Invitations and password resets are emailed from <span className="mono">{status.from}</span>.
+          </span>
+          {can('admin.users.edit_all') && (
+            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void test()}>
+              {busy ? 'Sending…' : 'Send me a test email'}
+            </button>
+          )}
+        </div>
+      ) : (
+        <span>
+          Email is not set up yet: when you invite someone or reset a password, G-CORE gives you the link to send
+          them yourself. Add the mailbox settings on the server to have it emailed.
+        </span>
+      )}
+    </div>
   );
 }

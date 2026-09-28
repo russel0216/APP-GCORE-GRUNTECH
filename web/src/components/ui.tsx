@@ -245,12 +245,15 @@ export function Field({
   hint,
   error,
   required,
+  htmlFor,
   children,
 }: {
   label: string;
   hint?: string;
   error?: string | null;
   required?: boolean;
+  /** The control's id, when the child is a component (a PasswordInput) the label cannot find by itself. */
+  htmlFor?: string;
   children: ReactNode;
 }) {
   const id = useId();
@@ -277,7 +280,7 @@ export function Field({
 
   return (
     <div className={`field${error ? ' invalid' : ''}`}>
-      <label htmlFor={wired ? controlId : undefined}>
+      <label htmlFor={wired ? controlId : htmlFor}>
         {label}
         {required && (
           <span className="req" aria-hidden="true">

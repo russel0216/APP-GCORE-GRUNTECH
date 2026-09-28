@@ -44,6 +44,26 @@ export const env = {
    * first CORS origin is the Vite dev server.
    */
   appUrl: read('APP_URL') ?? (isProduction ? 'https://gruntech.gcore.tech' : corsOrigin[0]),
+  /**
+   * Outgoing email — invitations and password resets. Any mail provider's
+   * SMTP account works (Google Workspace with an app password, Microsoft 365,
+   * the web host's mailbox). Unset SMTP_HOST means email is off: an
+   * administrator is shown each link to pass on instead, and the sign-in
+   * page says a reset has to come from an administrator.
+   *
+   *   SMTP_HOST=smtp.gmail.com      SMTP_PORT=465 (implicit TLS) or 587 (STARTTLS)
+   *   SMTP_USER=no-reply@gruntechnology.com   SMTP_PASS=<app password>
+   *   MAIL_FROM="G-CORE <no-reply@gruntechnology.com>"   (defaults to SMTP_USER)
+   */
+  smtp: {
+    host: read('SMTP_HOST'),
+    port: Number(read('SMTP_PORT') ?? 587),
+    /** Implicit TLS from the first byte (port 465). Otherwise STARTTLS is required before the password is sent. */
+    secure: (read('SMTP_SECURE') ?? (read('SMTP_PORT') === '465' ? 'true' : 'false')) === 'true',
+    user: read('SMTP_USER'),
+    pass: read('SMTP_PASS'),
+    from: read('MAIL_FROM') ?? read('SMTP_USER'),
+  },
 };
 
 if (env.isProduction && env.jwtSecret === 'dev-only-change-me') {

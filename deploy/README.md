@@ -213,6 +213,21 @@ Get-Service Cloudflared                   # gasiontech's tunnel — should be Ru
 docker ps --filter name=gasion_db         # the other database — should be up
 ```
 
+## Email for invitations and password resets
+
+Off until it is set up, and G-CORE works without it: Admin › Users and the
+G-HR employee form then show each invitation or reset link for you to send by
+Messenger or Viber, and "Forgot password?" tells people to ask an
+administrator.
+
+To have them emailed, add the mailbox to `C:\G-CORE-GRUNTECH\api\.env` — the
+commented block in `deploy\env.production.example` has the lines and the
+settings for Google Workspace, Microsoft 365 and a web host's mailbox. Use an
+app password, never the mailbox's own. Then restart with `rebuild.ps1` (it
+restarts only G-Core's task), open Admin › Users, and press **Send me a test
+email**: a wrong password or a blocked port shows up there, with the mail
+server's reason, rather than on the first person you invite.
+
 ## Locked out of the admin account
 
 ```powershell

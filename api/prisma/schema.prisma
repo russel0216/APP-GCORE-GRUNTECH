@@ -29,6 +29,10 @@ model User {
   phone        String?
   isActive     Boolean @default(true)
   isSuperAdmin Boolean @default(false)
+  /// Invited, and not yet in: the account exists (so it can be assigned work
+  /// and approvals) but nobody has chosen its password. Cleared when the
+  /// invitation — or a password reset — is used. See AccountToken.
+  invitePending Boolean @default(false)
 
   /// Attachment id, not a disk path (same convention as FaceEnrollment.photoPath) —
   /// the most recent verified capture from face enrolment, or a plain upload for
@@ -122,12 +126,40 @@ model User {
   legacyQuotesOwned    LegacyQuote[]   @relation("LegacyQuoteOwner")
   legacyQuotesImported LegacyQuote[]   @relation("LegacyQuoteImporter")
 
+  accountTokens AccountToken[]
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   @@index([isActive])
   @@index([supervisorId])
+}
+
+enum AccountTokenPurpose {
+  INVITE
+  RESET
+}
+
+/// A one-time link that lets a person choose their password: the invitation
+/// to a new account, or a password reset. Only the SHA-256 of the token is
+/// stored, so a copy of this table cannot be used to get into an account —
+/// the link itself is the only copy of the secret. A link is used once, runs
+/// out at `expiresAt`, and is superseded by the next one of its kind.
+model AccountToken {
+  id          String              @id @default(cuid())
+  userId      String
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose     AccountTokenPurpose
+  tokenHash   String              @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  /// Who issued it: the administrator behind an invitation or an admin reset;
+  /// null for a reset the person asked for from the sign-in page.
+  createdById String?
+  createdAt   DateTime            @default(now())
+
+  @@index([userId, purpose])
 }
 
 model Department {

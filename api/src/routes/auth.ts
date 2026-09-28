@@ -1,13 +1,16 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, unauthorized, badRequest } from '../http/kit';
+import { handler, parseBody, unauthorized, badRequest, HttpError } from '../http/kit';
 import { authenticate, currentUser, signToken } from '../auth/middleware';
 import { menuFor } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { unreadCount } from '../shared/notifications';
 import { upload, saveAttachment, deleteAttachment } from '../shared/attachments';
+import { consumeToken, deliverLink, issueToken, liveToken } from '../shared/accounts';
+import { mailEnabled } from '../shared/mail';
 import { currentAppearance } from './appearance';
 
 export const authRoutes = Router();
@@ -142,8 +145,56 @@ authRoutes.delete(
  * position, email and reporting line stay with Admin > Users: position prints
  * beside a sign-off, and the reporting line routes approvals.
  */
+/**
+ * A person's own contact details on their employee record — the ones they
+ * know better than HR does, and that the invitation asks for: mobile,
+ * address, birthday and who to call in an emergency. Never the employment
+ * fields, the position, the pay or the statutory numbers, which stay HR's.
+ */
+const personalSchema = z.object({
+  mobile: z.string().trim().max(40).optional().nullable(),
+  address: z.string().trim().max(300).optional().nullable(),
+  birthDate: z
+    .string()
+    .trim()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter the date as YYYY-MM-DD')
+    .optional()
+    .nullable()
+    .or(z.literal('')),
+  emergencyContactName: z.string().trim().max(120).optional().nullable(),
+  emergencyContactPhone: z.string().trim().max(40).optional().nullable(),
+});
+
+type Personal = z.infer<typeof personalSchema>;
+
+function personalData(p: Personal): Prisma.EmployeeUpdateInput {
+  const data: Prisma.EmployeeUpdateInput = {};
+  if (p.mobile !== undefined) data.mobile = p.mobile || null;
+  if (p.address !== undefined) data.address = p.address || null;
+  if (p.birthDate !== undefined) data.birthDate = p.birthDate ? new Date(p.birthDate) : null;
+  if (p.emergencyContactName !== undefined) data.emergencyContactName = p.emergencyContactName || null;
+  if (p.emergencyContactPhone !== undefined) data.emergencyContactPhone = p.emergencyContactPhone || null;
+  return data;
+}
+
+const PERSONAL_SELECT = {
+  mobile: true,
+  address: true,
+  birthDate: true,
+  emergencyContactName: true,
+  emergencyContactPhone: true,
+} as const;
+
+/** A @db.Date as the 'YYYY-MM-DD' a date input takes. */
+const dayOf = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
+
+function presentPersonal<T extends { birthDate: Date | null }>(e: T) {
+  return { ...e, birthDate: dayOf(e.birthDate) };
+}
+
 const profileSchema = z.object({
   phone: z.string().trim().max(40).optional().nullable(),
+  personal: personalSchema.optional(),
 });
 
 authRoutes.get(
@@ -153,9 +204,11 @@ authRoutes.get(
     const me = currentUser(req);
     const row = await prisma.user.findUnique({
       where: { id: me.id },
-      select: { name: true, email: true, position: true, phone: true },
+      select: { name: true, email: true, position: true, phone: true, employee: { select: PERSONAL_SELECT } },
     });
-    res.json(row);
+    if (!row) throw unauthorized();
+    const { employee, ...rest } = row;
+    res.json({ ...rest, personal: employee ? presentPersonal(employee) : null });
   }),
 );
 
@@ -165,30 +218,57 @@ authRoutes.patch(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(profileSchema, req.body);
-    const before = await prisma.user.findUnique({ where: { id: me.id }, select: { phone: true } });
-    const row = await prisma.user.update({
+    const before = await prisma.user.findUnique({
       where: { id: me.id },
-      data: body.phone !== undefined ? { phone: body.phone || null } : {},
-      select: { name: true, email: true, position: true, phone: true },
+      select: { phone: true, employee: { select: { id: true, ...PERSONAL_SELECT } } },
     });
+    if (!before) throw unauthorized();
+    if (body.personal && !before.employee) {
+      throw badRequest('Your account has no employee record to keep personal details on — HR can link one');
+    }
+    const row = await prisma.$transaction(async (tx) => {
+      if (body.personal && before.employee) {
+        await tx.employee.update({ where: { id: before.employee.id }, data: personalData(body.personal) });
+      }
+      return tx.user.update({
+        where: { id: me.id },
+        data: body.phone !== undefined ? { phone: body.phone || null } : {},
+        select: { name: true, email: true, position: true, phone: true, employee: { select: PERSONAL_SELECT } },
+      });
+    });
+    const { employee, ...rest } = row;
+    const was = before.employee;
     await audit(
       {
         entityType: 'user',
         entityId: me.id,
         action: 'UPDATED',
-        summary: 'Updated own contact details',
-        before,
-        after: { phone: row.phone },
+        summary: body.personal ? 'Updated own contact and personal details' : 'Updated own contact details',
+        before: {
+          phone: before.phone,
+          ...(was
+            ? presentPersonal({
+                mobile: was.mobile,
+                address: was.address,
+                birthDate: was.birthDate,
+                emergencyContactName: was.emergencyContactName,
+                emergencyContactPhone: was.emergencyContactPhone,
+              })
+            : {}),
+        },
+        after: { phone: rest.phone, ...(employee ? presentPersonal(employee) : {}) },
       },
       req,
     );
-    res.json(row);
+    res.json({ ...rest, personal: employee ? presentPersonal(employee) : null });
   }),
 );
 
+const newPassword = z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters');
+
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, 'Enter your current password'),
-  newPassword: z.string().min(8, 'Use at least 8 characters'),
+  newPassword,
 });
 
 authRoutes.post(
@@ -213,5 +293,214 @@ authRoutes.post(
     );
 
     res.json({ ok: true });
+  }),
+);
+
+// ════════════════════════════════════════════════════════════════════
+//  Signing in without a password yet: invitations and resets
+// ════════════════════════════════════════════════════════════════════
+
+/** What the sign-in page needs to know before anyone is signed in. */
+authRoutes.get('/options', (_req, res) => {
+  res.json({ mail: mailEnabled() });
+});
+
+/**
+ * A little memory of recent reset requests, so the sign-in page cannot be
+ * used to flood somebody's inbox: per address, and a ceiling for everyone.
+ * Behind the tunnel every request arrives from the same address, so counting
+ * per caller would count nobody.
+ */
+const recent = new Map<string, number[]>();
+function throttled(key: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  // Addresses nobody has asked about for a window are forgotten, so a flood of
+  // made-up emails cannot grow this without bound.
+  if (recent.size > 1_000) {
+    for (const [k, times] of recent) if (!times.some((t) => now - t < windowMs)) recent.delete(k);
+  }
+  const hits = (recent.get(key) ?? []).filter((t) => now - t < windowMs);
+  const over = hits.length >= limit;
+  if (!over) hits.push(now);
+  recent.set(key, hits);
+  return over;
+}
+
+const linkGone = () =>
+  new HttpError(410, 'This link has expired or has already been used — ask for a new one');
+
+const forgotSchema = z.object({ email: z.string().trim().email('Enter a valid email address') });
+
+/**
+ * "Forgot password?". The answer is the same whether or not the address has
+ * an account — telling them apart would let anyone test which emails work
+ * here — and the email is sent after the answer, so how long sending takes
+ * gives nothing away either.
+ */
+authRoutes.post(
+  '/forgot',
+  handler(async (req, res) => {
+    const { email } = parseBody(forgotSchema, req.body);
+    if (!mailEnabled()) {
+      res.json({ ok: true, mail: false });
+      return;
+    }
+    const address = email.toLowerCase();
+    const allowed =
+      !throttled(`forgot:${address}`, 3, 15 * 60_000) && !throttled('forgot:*', 60, 15 * 60_000);
+    res.json({ ok: true, mail: true });
+    if (!allowed) return;
+    void (async () => {
+      const user = await prisma.user.findUnique({
+        where: { email: address },
+        select: { id: true, name: true, email: true, isActive: true },
+      });
+      if (!user || !user.isActive) return;
+      const issued = await issueToken(prisma, user.id, 'RESET');
+      // The link goes to the mailbox and nowhere else — never back to the caller.
+      const sent = await deliverLink('RESET', user, issued);
+      await audit(
+        {
+          entityType: 'user',
+          entityId: user.id,
+          action: 'UPDATED',
+          actorId: null,
+          actorName: null,
+          summary: sent.emailed
+            ? 'Password reset link emailed on request'
+            : `Password reset email failed: ${sent.error ?? 'unknown reason'}`,
+        },
+        req,
+      );
+    })().catch((err) => console.error('[auth/forgot]', err instanceof Error ? err.message : err));
+  }),
+);
+
+/** What a link is for, and whose it is — before the page asks for a password. */
+authRoutes.post(
+  '/link',
+  handler(async (req, res) => {
+    const { token } = parseBody(z.object({ token: z.string() }), req.body);
+    const row = await liveToken(token);
+    if (!row) throw linkGone();
+    const u = row.user;
+    const e = u.employee;
+    res.json({
+      purpose: row.purpose,
+      name: u.name,
+      email: u.email,
+      expiresAt: row.expiresAt,
+      phone: u.phone,
+      // An invitation also asks for the person's own details, when there is an
+      // employee record to keep them on.
+      personal:
+        row.purpose === 'INVITE' && e
+          ? presentPersonal({
+              mobile: e.mobile,
+              address: e.address,
+              birthDate: e.birthDate,
+              emergencyContactName: e.emergencyContactName,
+              emergencyContactPhone: e.emergencyContactPhone,
+            })
+          : null,
+    });
+  }),
+);
+
+const welcomeSchema = z.object({
+  token: z.string(),
+  password: newPassword,
+  phone: z.string().trim().max(40).optional().nullable(),
+  personal: personalSchema.optional(),
+});
+
+/**
+ * Accepting an invitation: the person chooses their password, adds their
+ * mobile and — when HR keeps a record of them — their own details, and is
+ * signed in. The photo follows through /auth/photo, with the session this
+ * returns.
+ */
+authRoutes.post(
+  '/welcome',
+  handler(async (req, res) => {
+    const body = parseBody(welcomeSchema, req.body);
+    const row = await liveToken(body.token);
+    if (!row || row.purpose !== 'INVITE') throw linkGone();
+    const user = row.user;
+    const passwordHash = await bcrypt.hash(body.password, 10);
+
+    const done = await prisma.$transaction(async (tx) => {
+      if (!(await consumeToken(tx, row.id))) return false;
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash,
+          invitePending: false,
+          lastLoginAt: new Date(),
+          ...(body.phone !== undefined ? { phone: body.phone || null } : {}),
+        },
+      });
+      // Every other link this person holds dies with this one.
+      await tx.accountToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+      if (body.personal && user.employee) {
+        await tx.employee.update({ where: { id: user.employee.id }, data: personalData(body.personal) });
+      }
+      return true;
+    });
+    if (!done) throw linkGone();
+
+    await audit(
+      {
+        entityType: 'user',
+        entityId: user.id,
+        action: 'UPDATED',
+        actorId: user.id,
+        actorName: user.name,
+        summary: 'Accepted the invitation and chose a password',
+      },
+      req,
+    );
+    res.json({ token: signToken(user.id, user.email) });
+  }),
+);
+
+const resetSchema = z.object({ token: z.string(), password: newPassword });
+
+/**
+ * Using a reset link. It also completes an invitation nobody used — the
+ * person has now chosen a password — and signs them in.
+ */
+authRoutes.post(
+  '/reset',
+  handler(async (req, res) => {
+    const body = parseBody(resetSchema, req.body);
+    const row = await liveToken(body.token);
+    if (!row || row.purpose !== 'RESET') throw linkGone();
+    const user = row.user;
+    const passwordHash = await bcrypt.hash(body.password, 10);
+
+    const done = await prisma.$transaction(async (tx) => {
+      if (!(await consumeToken(tx, row.id))) return false;
+      await tx.user.update({
+        where: { id: user.id },
+        data: { passwordHash, invitePending: false, lastLoginAt: new Date() },
+      });
+      await tx.accountToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+      return true;
+    });
+    if (!done) throw linkGone();
+
+    await audit(
+      {
+        entityType: 'user',
+        entityId: user.id,
+        action: 'UPDATED',
+        actorId: user.id,
+        actorName: user.name,
+        summary: 'Chose a new password with a reset link',
+      },
+      req,
+    );
+    res.json({ token: signToken(user.id, user.email) });
   }),
 );

@@ -123,14 +123,14 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,834 assertions across twenty-one scripts** (counted 2026-09-28): foundation 128,
+**1,911 assertions across twenty-two scripts** (counted 2026-09-28): foundation 128,
 masters 54, sales 178, costing 40, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
-insights 92, insights-brief 43, workspace 39. They cover permission resolution, numbering
+insights 92, insights-brief 43, workspace 39, accounts 77. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -141,7 +141,8 @@ versioning, Phase 9's reconciliation between the reports and the records, and
 Phase 10's rules listed below.
 
 **Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
-API.** The other eighteen check route guards and responses over HTTP against
+API** (and the SMTP half of `verify-accounts`, which talks to a fake mail server
+it starts on 127.0.0.1). The other nineteen check route guards and responses over HTTP against
 `http://localhost:5100`, and say so loudly — a failed "API is not reachable"
 line — rather than skipping them if the API is down or restarting (under
 `tsx watch` an edit elsewhere restarts it mid-run; rerun that script). All create
@@ -890,6 +891,43 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   keeps working.
 - **Industry reporting puts UNCLASSIFIED last**, and the industry table sums to
   the report's own totals — asserted.
+
+## Accounts and sign-in
+
+- **Employee and User stay two records** (Phase 2), but a login is made in the
+  same save as its person: `POST /employees { login }`, `POST /employees/:id/login`
+  for someone already on the register, or `POST /users { employeeId }` from
+  Admin — all through `createLogin()` in `shared/accounts.ts`. Making a login
+  needs `admin.users.create`, checked BEFORE anything is written, so HR without
+  it saves the person and no half-made record is left. A login from an
+  employee record copies name, department, position and mobile and starts with
+  the seeded `employee` role.
+- **No password is typed for a new person — they are invited.** `invitePending`
+  marks the account; its password hash is of random bytes nobody sees. The
+  invitation (7 days), a self-service reset (1 hour) and an admin-issued reset
+  (24 hours) are `AccountToken` rows holding only the SHA-256 of the token. The
+  link carries it in the URL **#fragment** (`/welcome#token=…`,
+  `/reset-password#token=…`), which no server log or Referer sees; the pages
+  POST it. A link is claimed by a conditional `updateMany` (used once), the
+  next of its kind supersedes it, and it dies with the account's `isActive`.
+  Accepting or resetting kills every other live link of that person.
+- **"Forgot password?" never tells whether an address has an account**: the
+  answer is identical, the email is sent after it, requests are throttled per
+  address and overall, and the link goes only to the mailbox — never back to
+  the caller. With email off it makes no token at all.
+- **`shared/mail.ts` is the one mail sender**, SMTP over Node's own sockets (no
+  dependency): TLS on 465 or STARTTLS on 587, and it refuses to send the
+  mailbox password over an unencrypted connection. Header values lose CR/LF
+  (no injected Bcc), bodies go base64 UTF-8. `SMTP_*` in api/.env; unset
+  `SMTP_HOST` = email off, and every issued link is returned to the
+  administrator who issued it to pass on (`components/LinkDelivery.tsx`).
+- **A person keeps their own contact details** through `/auth/profile`:
+  mobile, address, birthday and emergency contact on their linked employee —
+  never the employment, pay or statutory fields.
+- **`PasswordInput` is the one password box** (Show / Hide, a real button with
+  `aria-pressed`). The signed-out pages (`/welcome`, `/reset-password`,
+  `/forgot-password`) are `SIGNED_OUT_PAGES` in `App.tsx`, matched before the
+  signed-in check.
 
 ## SCORO migration notes
 
