@@ -1197,6 +1197,10 @@ model QuotationRevision {
   /// issued with after Settings change.
   vatRate      Decimal @default(0.12) @db.Decimal(6, 4)
   vatInclusive Boolean @default(false)
+  /// SCORO's "Hide total": the PDF prints the lines and their prices but no
+  /// totals — a rate sheet, where the customer picks lines rather than buying
+  /// the lot. The stored totals are still computed; only the paper omits them.
+  hideTotal    Boolean @default(false)
 
   approvedById String?
   approvedBy   User?     @relation("RevisionApprover", fields: [approvedById], references: [id], onDelete: SetNull)

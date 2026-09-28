@@ -126,8 +126,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,824 assertions across twenty-one scripts** (counted 2026-09-28): foundation 128,
-masters 54, sales 168, costing 40, pipeline 44, calendar 38, numbering 46,
+**1,834 assertions across twenty-one scripts** (counted 2026-09-28): foundation 128,
+masters 54, sales 178, costing 40, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39. They cover permission resolution, numbering
@@ -969,3 +969,23 @@ the detail.
   `?duplicate=&revision=` preset: client, contact, site, name, terms and lines
   (cost only where the viewer was sent it), never the PR number, enquiry or
   costing; nothing is written and no number used until Save.
+- **The editor is SCORO's "Modify quote details" too**: one card, labels
+  beside their values (`.qe-rows`), the contact beside the client, quantity
+  beside unit, SCORO's grey with-VAT figure under each amount (shown, never
+  stored), the person/building toggles for who carries a line's cost, and Add
+  row / Append quote under the lines. **Append quote** pulls another
+  quotation's newest revision's lines through the ordinary list search and
+  `GET /quotations/:id`, so it finds only what the viewer may read and brings
+  cost only where the server sends it. **Status** on the Modify page is applied
+  on Save through the same `PATCH /quotations/:id` and `assertOutcomeChange`
+  as the quotation page and the board — never a second move path.
+- **SCORO's Tax dropdown is `vatRate` on the revision: the company rate or 0%**
+  (a zero-rated PEZA/BOI customer or an export), checked by `checkVatRate()`
+  before anything is written so a refused rate burns no number; a draft may
+  keep the rate it was snapshotted with. A new revision copies it. **Progress
+  billing still takes the company rate** (`routes/progress.ts`), so a job won
+  from a zero-rated quotation is billed VAT — an open item: billing should
+  read the rate of the revision the job came from.
+- **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
+  lines and prices without the totals block; the stored totals are computed
+  as always, and a new revision copies the flag.

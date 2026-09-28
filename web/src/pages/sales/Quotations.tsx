@@ -23,7 +23,7 @@ import {
 } from '../../components/ui';
 import { LostReasonModal } from './LostReasonModal';
 
-const OUTCOMES = [
+export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
   { value: 'SUBMITTED', label: 'Submitted' },
   { value: 'NEGOTIATION', label: 'Negotiation' },
@@ -47,7 +47,7 @@ const REVISION_TONES: Record<string, Tone> = { SUPERSEDED: '' };
  * (`assertOutcomeChange` in api/src/shared/pipeline.ts); WON additionally
  * needs an approved revision and LOST a reason, both handled below.
  */
-const NEXT_OUTCOMES: Record<string, string[]> = {
+export const NEXT_OUTCOMES: Record<string, string[]> = {
   OPEN: ['SUBMITTED', 'NEGOTIATION', 'LOST'],
   SUBMITTED: ['NEGOTIATION', 'WON', 'LOST'],
   NEGOTIATION: ['WON', 'LOST'],
@@ -265,6 +265,8 @@ export interface Revision {
   total: number;
   vatRate: number;
   vatInclusive: boolean;
+  /** SCORO's "Hide total": the PDF leaves the totals off. */
+  hideTotal?: boolean;
   prNumber: string | null;
   delivery: string | null;
   paymentTerms: string | null;
@@ -336,6 +338,8 @@ export interface QuotationDetail {
   stages?: OutcomeStage[];
   /** Issue to decision, once the quotation is won or lost. */
   closedInDays?: number | null;
+  /** The company's VAT rate — with 0%, what the editor's Tax dropdown offers. */
+  companyVatRate?: number;
 }
 
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
@@ -693,7 +697,12 @@ export function QuotationDetail() {
                 <Detail label="PR Number">{revision.prNumber}</Detail>
                 <Detail label="Payment Terms">{revision.paymentTerms}</Detail>
                 <Detail label="Delivery">{revision.delivery}</Detail>
-                <Detail label="VAT">{revision.vatInclusive ? 'Prices include VAT' : 'Added on top of the prices'}</Detail>
+                <Detail label="VAT">
+                  {revision.vatRate === 0
+                    ? '0% — zero-rated'
+                    : `${Number((revision.vatRate * 100).toFixed(2))}% — ${revision.vatInclusive ? 'included in the prices' : 'added on top of the prices'}`}
+                </Detail>
+                {revision.hideTotal && <Detail label="Hide total">Yes — the PDF prints the lines without the totals</Detail>}
               </dl>
             )}
           </div>

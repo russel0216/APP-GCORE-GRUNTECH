@@ -1254,6 +1254,47 @@ async function main() {
       (moveRow?.before as { outcome?: string } | null)?.outcome === 'OPEN' && (moveRow?.after as { outcome?: string } | null)?.outcome === 'SUBMITTED',
     );
 
+    // SCORO's Modify page: the Tax dropdown (company rate or 0%) and "Hide total".
+    const companyVat = Number((await prisma.company.findUniqueOrThrow({ where: { id: 'company' } })).vatRate);
+    const zeroRated = await http(salesToken, 'PATCH', base, { vatRate: 0 });
+    check(
+      "a draft can be zero-rated — SCORO's Tax at 0% — and its totals follow",
+      zeroRated.status === 200 &&
+        zeroRated.body.vatRate === 0 &&
+        money(Number(zeroRated.body.vatAmount), 0) &&
+        money(Number(zeroRated.body.total), 27_000),
+      zeroRated.text.slice(0, 200),
+    );
+    const oddRate = await http(salesToken, 'PATCH', base, { vatRate: 0.05 });
+    check('but not to a rate typed by hand — the company rate or 0% only', oddRate.status === 400, oddRate.text.slice(0, 160));
+    check(
+      'the change of rate is audited as such',
+      (await prisma.auditLog.count({
+        where: { entityType: 'quotation', entityId: qid, summary: { contains: `VAT ${Number((companyVat * 100).toFixed(2))}% -> 0%` } },
+      })) === 1,
+    );
+    const pdfOf = async () =>
+      pdfText(
+        Buffer.from(
+          await (
+            await fetch(`${BASE}/quotations/${qid}/revisions/${rev0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
+          ).arrayBuffer(),
+        ),
+      );
+    check('a zero-rated quote prints VAT (0%)', (await pdfOf()).includes('VAT (0%):'));
+    const hidden = await http(salesToken, 'PATCH', base, { hideTotal: true });
+    check('Hide total is kept on the revision', hidden.status === 200 && hidden.body.hideTotal === true, hidden.text.slice(0, 160));
+    const hiddenText = await pdfOf();
+    check(
+      'a hidden-total quote prints its lines and prices but no totals',
+      hiddenText.includes('Air compressor installation') &&
+        hiddenText.includes('12,500.00') &&
+        !hiddenText.includes('Sub Total Price:') &&
+        !hiddenText.includes('Total Price (PHP):'),
+    );
+    const restored = await http(salesToken, 'PATCH', base, { hideTotal: false, vatRate: companyVat });
+    check('and the company rate can be put back', restored.status === 200 && restored.body.vatRate === companyVat && restored.body.hideTotal === false);
+
     // ── 11. The full-page editor: one save, one transaction ──────────────────
     console.log('\nThe quotation editor over HTTP (create with lines, rollback, author, replace lines, costing lines)');
 
@@ -1381,6 +1422,13 @@ async function main() {
       lines: [{ ...editorLines[2], quantity: -1 }],
     });
     check('and a negative quantity', negative.status === 400, negative.text.slice(0, 160));
+    const oddVat = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor refused`,
+      vatRate: 0.07,
+      lines: [editorLines[2]],
+    });
+    check('and a VAT rate that is neither the company’s nor 0%', oddVat.status === 400 && oddVat.text.includes('0%'), oddVat.text.slice(0, 160));
     check('none of them left a quotation behind', (await prisma.quotation.count({ where: { subject: `${TAG} Editor refused` } })) === 0);
     const afterRefusal = await counter(promised.periodKey);
     check('and none of them burnt a number — the transaction took it back', afterRefusal === beforeRefusal, `${beforeRefusal} -> ${afterRefusal}`);
@@ -1507,6 +1555,32 @@ async function main() {
       'costing-lines asks for a costing (400) and knows an unknown one (404)',
       noCosting.status === 400 && unknownCosting.status === 404,
       `${noCosting.status} ${unknownCosting.status}`,
+    );
+
+    // A quotation raised zero-rated with its totals hidden, and a revision of
+    // one carries both forward — the VAT snapshot principle, for the choice too.
+    const zeroMade = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Editor zero-rated`,
+      vatRate: 0,
+      hideTotal: true,
+      lines: [editorLines[1]],
+    });
+    const zeroRev = zeroMade.status === 201
+      ? await prisma.quotationRevision.findFirst({ where: { quotationId: String(zeroMade.body.id) } })
+      : null;
+    check(
+      'a new quotation can be raised zero-rated with its totals hidden',
+      zeroMade.status === 201 && Number(zeroRev?.vatRate) === 0 && zeroRev?.hideTotal === true && Number(zeroRev?.vatAmount) === 0,
+      zeroMade.text.slice(0, 160),
+    );
+    await prisma.quotationRevision.update({ where: { id: madeRev.id }, data: { vatRate: 0, hideTotal: true } });
+    const nextRev = await http(salesToken, 'POST', `/quotations/${madeId}/revisions`);
+    const carried = await prisma.quotationRevision.findFirst({ where: { quotationId: madeId, revision: 1 } });
+    check(
+      'a new revision keeps the zero rate and the hidden total it was raised from',
+      nextRev.status < 300 && Number(carried?.vatRate) === 0 && carried?.hideTotal === true,
+      nextRev.text.slice(0, 160),
     );
   }
 

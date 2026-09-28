@@ -1,13 +1,114 @@
 /*
   The full-page quotation editor (pages/sales/QuotationEditor.tsx) — SCORO's
-  "Modify quote details": a two-column header, the lines table typed into
-  directly, then the totals and the cost panel. The totals, the cost panel and
-  the lookup menus reuse the quote-* and lookup-* rules in styles.css and
-  pipeline.css; this file only adds what the editor itself needs. Tokens only.
+  "Modify quote details": one card, titled, with Back / Save top right; the
+  header in two columns with each label BESIDE its value, as SCORO sets it;
+  the custom fields; the lines typed into directly; the totals beside the cost
+  panel. The totals, the cost panel and the lookup menus reuse the quote-* and
+  lookup-* rules in styles.css and pipeline.css; this file only adds what the
+  editor itself needs. Tokens only.
 */
 
 .qe-card {
   margin-bottom: var(--s-5);
+}
+
+.qe-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  padding-bottom: var(--s-4);
+  margin-bottom: var(--s-4);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.qe-heading {
+  margin: 0;
+  font-size: var(--fs-xl);
+}
+
+.qe-lead {
+  margin: var(--s-1) 0 0;
+  font-size: var(--fs-sm);
+}
+
+.qe-actions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+/*
+  SCORO's form: the label on the left, the value beside it. Every Field and
+  read-only value in a .qe-rows block lays out on that grid; the hint and the
+  error sit under the control, in the value's column.
+*/
+.qe-rows .field,
+.qe-rows .qe-static {
+  display: grid;
+  grid-template-columns: 9.5rem minmax(0, 1fr);
+  column-gap: var(--s-3);
+  row-gap: var(--s-1);
+  align-items: center;
+  margin-bottom: var(--s-3);
+}
+
+/* A read-only value is a .field too, so its label needs the same weight as the rule below. */
+.qe-rows .field > label,
+.qe-rows .field > .qe-static-label {
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+}
+
+.qe-rows .field > :not(label):not(.qe-static-label) {
+  grid-column: 2;
+}
+
+/* A label beside a text box sits level with its first line. */
+.qe-rows .field:has(textarea) > label {
+  align-self: start;
+  padding-top: var(--s-2);
+}
+
+.qe-rows .field .hint,
+.qe-rows .field .field-error {
+  margin-top: 0;
+}
+
+/* On a phone the label goes back above its value. */
+@media (max-width: 520px) {
+  .qe-rows .field,
+  .qe-rows .qe-static {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .qe-rows .field > :not(label):not(.qe-static-label) {
+    grid-column: 1;
+  }
+}
+
+/* The client and its contact person, side by side as SCORO has them. */
+.qe-client {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.qe-client > * {
+  flex: 1 1 13rem;
+  min-width: 0;
+}
+
+.qe-client > a {
+  flex: 0 1 auto;
+  font-weight: 600;
 }
 
 /* Two columns of header fields, one under 860px. */
@@ -17,13 +118,14 @@
   gap: 0 var(--s-6);
 }
 
-/* PR Number, Delivery, Payment Terms — three across, stacked on a phone. */
+/* SCORO's custom fields: PR Number beside Delivery, Payment Terms under. */
 .qe-terms {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0 var(--s-4);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--s-6);
   border-top: 1px solid var(--line-soft);
   padding-top: var(--s-4);
+  margin-bottom: var(--s-4);
 }
 
 @media (max-width: 860px) {
@@ -128,7 +230,20 @@ table.data.qe-lines td {
 }
 
 .qe-col-qty {
-  width: 7rem;
+  width: 10rem;
+}
+
+/* Quantity and unit on one line. */
+.qe-qty {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s-1);
+}
+
+/* SCORO's grey figure under Amount: the line with the tax on. */
+.qe-with-vat {
+  margin-top: var(--s-1);
+  font-size: var(--fs-sm);
 }
 
 .qe-col-price {
@@ -141,7 +256,7 @@ table.data.qe-lines td {
 }
 
 .qe-col-cost {
-  width: 15rem;
+  width: 17rem;
 }
 
 .qe-col-margin {
@@ -166,31 +281,96 @@ table.data.qe-lines td {
   flex-direction: column;
 }
 
-/* In-house / Supplier / Not named — a compact radio row. */
-.qe-kind {
+/* SCORO's two toggles — a person for in-house, a building for a supplier — then who. */
+.qe-provider {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-1) var(--s-3);
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.qe-provider .lookup {
+  flex: 1;
+  min-width: 0;
+}
+
+.qe-kind {
+  display: inline-flex;
+  gap: var(--s-1);
+  flex-shrink: 0;
+}
+
+/* The provider kind that is on reads in the state colour, not only by aria-pressed. */
+.qe-kind-btn.is-on {
+  border-color: var(--magenta);
+  color: var(--magenta);
+}
+
+.qe-kind-none {
   font-size: var(--fs-sm);
 }
 
-.qe-kind-option {
-  display: inline-flex;
+/* Notes beside the unit cost, as SCORO's second line. */
+.qe-cost-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 7rem;
   align-items: center;
   gap: var(--s-1);
+}
+
+.qe-cost-sum {
+  font-size: var(--fs-sm);
+  text-align: right;
+}
+
+/* SCORO's buttons under the lines. */
+.qe-line-actions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-top: var(--s-3);
+}
+
+/* The Tax dropdown sits where the discount's box does. */
+.quote-discount select {
+  width: auto;
+  padding: var(--s-1) var(--s-2);
+}
+
+/* Append quote: one row per quotation, the number beside its name. */
+.qe-append-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--line-soft);
+}
+
+.qe-append-item {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  gap: 0 var(--s-3);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 
-.qe-kind-option input {
-  accent-color: var(--magenta);
+.qe-append-item:hover {
+  background: var(--surface-2);
 }
 
-.qe-cost-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--s-2);
+.qe-append-item > .faint {
+  grid-column: 2;
   font-size: var(--fs-sm);
+}
+
+.qe-append-name {
+  font-weight: 600;
 }
 
 /* An error under the cell it is about, as a Field shows it under its input. */
@@ -208,9 +388,13 @@ table.data.qe-lines td {
   min-width: 14rem;
 }
 
+/* Back and Save again at the foot of the card, under a hairline as SCORO has it. */
 .qe-foot {
   justify-content: flex-end;
-  margin-bottom: var(--s-6);
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line-soft);
 }
 
 @media (max-width: 520px) {

@@ -756,12 +756,15 @@ quotationRoutes.get(
       quotation.decidedAt,
       new Date(),
     );
+    // The editor's Tax dropdown offers this or 0% (see checkVatRate).
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
 
     res.json({
       ...rest,
       statusHistory,
       stages,
       closedInDays,
+      companyVatRate: company ? Number(company.vatRate) : 0.12,
       customer: { ...customerRest, address: sites[0] ? [sites[0].address, sites[0].city].filter(Boolean).join(', ') : null },
       revisions: quotation.revisions.map((r) =>
         presentRevision(r as unknown as Record<string, unknown>, showCost),
@@ -893,6 +896,9 @@ const createQuotationSchema = quotationSchema.extend({
   notes: z.string().optional().nullable(),
   discountPct: z.number().min(0, 'A discount cannot be negative').max(100, 'A discount cannot exceed 100%').optional(),
   vatInclusive: z.boolean().optional(),
+  /** SCORO's Tax dropdown — see `checkVatRate`. Defaults to the company's rate. */
+  vatRate: z.number().min(0).max(1).optional(),
+  hideTotal: z.boolean().optional(),
   /** The author. Honoured only for edit_all (see `mayAuthorForOthers`). */
   ownerId: z.string().optional().nullable(),
   lines: z.array(itemSchema).max(MAX_LINES, `A quotation takes at most ${MAX_LINES} lines`).optional(),
@@ -956,6 +962,8 @@ quotationRoutes.post(
       select: { paymentTerms: true },
     });
     const lines = body.lines ?? [];
+    // Before the transaction, so a refused rate burns no number.
+    await checkVatRate(body.vatRate);
 
     /*
       One transaction: the number, the quotation, its lines and their totals,
@@ -986,8 +994,9 @@ quotationRoutes.post(
                 validityDays: body.validityDays ?? 30,
                 terms: body.terms || null,
                 notes: body.notes || null,
-                vatRate: company?.vatRate ?? d(0.12),
+                vatRate: body.vatRate !== undefined ? d(body.vatRate) : (company?.vatRate ?? d(0.12)),
                 vatInclusive: body.vatInclusive ?? false,
+                hideTotal: body.hideTotal ?? false,
                 discountPct: d(body.discountPct ?? 0),
                 prNumber: body.prNumber || null,
                 delivery: body.delivery || null,
@@ -1220,6 +1229,7 @@ quotationRoutes.post(
           notes: latest?.notes ?? null,
           vatRate: latest?.vatRate ?? d(0.12),
           vatInclusive: latest?.vatInclusive ?? false,
+          hideTotal: latest?.hideTotal ?? false,
           discountPct: latest?.discountPct ?? d(0),
           prNumber: latest?.prNumber ?? null,
           delivery: latest?.delivery ?? null,
@@ -1272,7 +1282,29 @@ const revisionSchema = z.object({
   prNumber: z.string().trim().max(120).optional().nullable(),
   delivery: z.string().trim().max(500).optional().nullable(),
   paymentTerms: z.string().trim().max(500).optional().nullable(),
+  vatRate: z.number().min(0).max(1).optional(),
+  hideTotal: z.boolean().optional(),
 });
+
+/**
+ * SCORO's Tax dropdown: a quotation carries the company's VAT rate, or 0% for
+ * a zero-rated sale (a PEZA or BOI-registered customer, an export). Nothing in
+ * between — a rate typed by hand is how a quote goes out at 1.2%. A draft may
+ * also keep the rate it was snapshotted with, so a Settings change never
+ * forces an old draft to move. Checked before anything is written, so a
+ * refused rate burns no number.
+ */
+async function checkVatRate(rate: number | undefined, keep?: Prisma.Decimal | null) {
+  if (rate === undefined) return;
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+  const companyRate = company?.vatRate ?? d(0.12);
+  const allowed = [d(0), companyRate, ...(keep ? [keep] : [])];
+  if (!allowed.some((r) => r.equals(d(rate)))) {
+    throw badRequest(
+      `VAT on a quotation is the company rate (${Number(companyRate.mul(100).toFixed(2))}%) or 0% for a zero-rated sale`,
+    );
+  }
+}
 
 quotationRoutes.patch(
   '/:id/revisions/:revisionId',
@@ -1280,6 +1312,7 @@ quotationRoutes.patch(
   handler(async (req, res) => {
     const { revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
     const body = parseBody(revisionSchema, req.body);
+    await checkVatRate(body.vatRate, revision.vatRate);
 
     await prisma.quotationRevision.update({
       where: { id: req.params.revisionId },
@@ -1289,6 +1322,8 @@ quotationRoutes.patch(
         ...(body.terms !== undefined ? { terms: body.terms || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+        ...(body.vatRate !== undefined ? { vatRate: d(body.vatRate) } : {}),
+        ...(body.hideTotal !== undefined ? { hideTotal: body.hideTotal } : {}),
         ...(body.discountPct !== undefined ? { discountPct: d(body.discountPct) } : {}),
         ...(body.prNumber !== undefined ? { prNumber: body.prNumber || null } : {}),
         ...(body.delivery !== undefined ? { delivery: body.delivery || null } : {}),
@@ -1297,13 +1332,19 @@ quotationRoutes.patch(
     });
     await recalcRevision(req.params.revisionId);
     const discountChanged = body.discountPct !== undefined && !d(body.discountPct).equals(revision.discountPct);
+    const vatChanged = body.vatRate !== undefined && !d(body.vatRate).equals(revision.vatRate);
+    const pctOf = (rate: Prisma.Decimal) => `${Number(rate.mul(100).toFixed(2))}%`;
+    const changes = [
+      discountChanged ? `discount ${Number(revision.discountPct)}% -> ${body.discountPct}%` : '',
+      vatChanged ? `VAT ${pctOf(revision.vatRate)} -> ${pctOf(d(body.vatRate!))}` : '',
+    ].filter(Boolean);
     await audit(
       {
         entityType: 'quotation',
         entityId: req.params.id,
         action: 'UPDATED',
-        summary: discountChanged
-          ? `Revision ${revision.revision}: discount ${Number(revision.discountPct)}% -> ${body.discountPct}%`
+        summary: changes.length
+          ? `Revision ${revision.revision}: ${changes.join(', ')}`
           : `Updated the terms of revision ${revision.revision}`,
       },
       req,
@@ -1730,7 +1771,8 @@ quotationRoutes.get(
         align: ['left', 'right', 'right', 'right'],
         rows,
       },
-      { kind: 'totals', rows: totals },
+      // "Hide total": the lines and their prices, no sum — SCORO's rate-sheet quote.
+      ...(revision.hideTotal ? [] : [{ kind: 'totals' as const, rows: totals }]),
       { kind: 'lines', lines: after },
       { kind: 'spacer', height: 28 },
       {

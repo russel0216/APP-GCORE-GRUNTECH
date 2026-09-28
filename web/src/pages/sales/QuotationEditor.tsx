@@ -5,8 +5,17 @@ import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, isDayKey, parseDay, todayLocal } from '../../lib/day';
 import { lineAmount, quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
-import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
-import { CostPanelBlock, QUOTATION_OUTCOME_TONES, type Item, type QuotationDetail, type Revision } from './Quotations';
+import { Checkbox, ErrorBox, Field, Loading, Modal, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
+import { Icon } from '../../components/Icon';
+import {
+  CostPanelBlock,
+  NEXT_OUTCOMES,
+  OUTCOMES,
+  QUOTATION_OUTCOME_TONES,
+  type Item,
+  type QuotationDetail,
+  type Revision,
+} from './Quotations';
 
 /*
   SCORO's "Modify quote details", as a page rather than a dialog.
@@ -62,7 +71,14 @@ interface Header {
   paymentTerms: string;
   terms: string;
   vatInclusive: boolean;
+  /** SCORO's Tax dropdown: the company's rate, or 0% for a zero-rated sale. */
+  vatRate: number;
+  /** SCORO's "Hide total": the PDF prints the lines without the totals. */
+  hideTotal: boolean;
   discountPct: string;
+  /** SCORO's Status on the Modify page (edit only); applied on Save through the same move rules. */
+  outcome: string;
+  lostReason: string;
 }
 
 interface Preview {
@@ -161,6 +177,8 @@ const figure = (s: string) => {
 const numberOk = (s: string) => s.trim() !== '' && Number.isFinite(Number(s)) && Number(s) >= 0;
 const daysBetween = (from: string, to: string) => Math.round((parseDay(to).getTime() - parseDay(from).getTime()) / 86_400_000);
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
+/** A line's amount with the tax on — SCORO's grey figure under Amount. Shown, never stored. */
+const withTax = (amount: number, rate: number) => Math.round(amount * (1 + rate) * 100) / 100;
 
 /** The mirror's view of a line — the same fields the server's arithmetic reads. */
 function moneyOf(l: Line) {
@@ -256,9 +274,16 @@ export function QuotationEditor() {
     paymentTerms: '',
     terms: '',
     vatInclusive: false,
+    vatRate: 0.12,
+    hideTotal: false,
     discountPct: '0',
+    outcome: 'OPEN',
+    lostReason: '',
   }));
+  /** Once somebody picks a tax rate, the company rate arriving late never replaces it. */
+  const vatTouched = useRef(false);
   const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
+  const [appendOpen, setAppendOpen] = useState(false);
   /** Once somebody has typed in the table, a costing never replaces it unasked. */
   const linesTouched = useRef(false);
   const termsTouched = useRef(false);
@@ -268,7 +293,9 @@ export function QuotationEditor() {
 
   const issueDate = editing && revision ? dayKeyOf(new Date(revision.createdAt)) : today;
   const showCost = editing ? !!quotation?.canSeeCost : true;
-  const vatRate = editing ? (revision?.vatRate ?? 0) : (preview?.vatRate ?? 0.12);
+  const vatRate = header.vatRate;
+  /** What the Tax dropdown offers: the company's rate, and 0% (see checkVatRate on the server). */
+  const companyRate = editing ? (quotation?.companyVatRate ?? revision?.vatRate ?? 0.12) : (preview?.vatRate ?? 0.12);
   const currency = me?.company?.currency ?? preview?.currency ?? 'PHP';
 
   /** A change somebody made — as opposed to a prefill — marks the page dirty. */
@@ -317,8 +344,13 @@ export function QuotationEditor() {
             paymentTerms: draft.paymentTerms ?? '',
             terms: draft.terms ?? '',
             vatInclusive: draft.vatInclusive,
+            vatRate: draft.vatRate,
+            hideTotal: draft.hideTotal ?? false,
             discountPct: String(draft.discountPct ?? 0),
+            outcome: q.outcome,
+            lostReason: q.lostReason ?? '',
           });
+          vatTouched.current = true;
           if (draft.costing) setPinnedCostings([draft.costing]);
           setLines(draft.items.length ? draft.items.map(fromItem) : [blankLine()]);
           linesTouched.current = draft.items.length > 0;
@@ -361,7 +393,10 @@ export function QuotationEditor() {
     if (editing) return;
     api
       .get<Preview>(`/quotations/next-number${qs({ ownerId: header.ownerId && header.ownerId !== myId ? header.ownerId : undefined })}`)
-      .then(setPreview)
+      .then((p) => {
+        setPreview(p);
+        if (!vatTouched.current) setHeader((h) => ({ ...h, vatRate: p.vatRate }));
+      })
       .catch(() => setPreview(null));
   }, [editing, header.ownerId, myId]);
 
@@ -463,8 +498,13 @@ export function QuotationEditor() {
           paymentTerms: src.paymentTerms ?? '',
           terms: src.terms ?? '',
           vatInclusive: src.vatInclusive,
+          // A zero-rated quote stays zero-rated; any other takes today's company
+          // rate, which is what a new quotation may carry.
+          ...(src.vatRate === 0 ? { vatRate: 0 } : {}),
+          hideTotal: src.hideTotal ?? false,
           discountPct: String(src.discountPct ?? 0),
         }));
+        if (src.vatRate === 0) vatTouched.current = true;
         if (src.items.length) setLines(src.items.map(fromItem));
         setDuplicateOf(src.revision > 0 ? `${q.number} R${src.revision}` : q.number);
       })
@@ -590,6 +630,25 @@ export function QuotationEditor() {
     focusAfterRender.current = rest.length ? [lineField(neighbour.key, 'remove')] : [lineField(neighbour.key, 'title')];
   }
 
+  /**
+   * SCORO's "Append quote": another quotation's lines, added under these —
+   * the starter row and any other empty line give way to them. The keyboard
+   * lands on the first line appended.
+   */
+  function appendLines(items: Item[], from: string) {
+    setAppendOpen(false);
+    if (!items.length) {
+      setError(new Error(`${from} has no lines to append`));
+      return;
+    }
+    const added = items.map(fromItem);
+    linesTouched.current = true;
+    setDirty(true);
+    setLines((list) => [...list.filter((l) => !isBlank(l)), ...added]);
+    focusAfterRender.current = [lineField(added[0].key, 'title')];
+    toast('ok', `Appended ${added.length} line${added.length === 1 ? '' : 's'} from ${from}`);
+  }
+
   function moveLine(key: string, by: -1 | 1) {
     linesTouched.current = true;
     setDirty(true);
@@ -697,6 +756,9 @@ export function QuotationEditor() {
     }
     const disc = Number(header.discountPct || 0);
     if (!Number.isFinite(disc) || disc < 0 || disc > 100) flag('discountPct', 'A discount from 0 to 100%', 'qe-discount');
+    if (editing && header.outcome === 'LOST' && header.outcome !== quotation?.outcome && !header.lostReason.trim()) {
+      flag('lostReason', 'Say why it was lost — Sales Analytics reports the reasons', 'qe-lostReason');
+    }
     return { errors: found, first: order[0] ?? null };
   }
 
@@ -730,6 +792,8 @@ export function QuotationEditor() {
           delivery: header.delivery || null,
           paymentTerms: header.paymentTerms || null,
           vatInclusive: header.vatInclusive,
+          vatRate: header.vatRate,
+          hideTotal: header.hideTotal,
           discountPct: Number(header.discountPct || 0),
           ...(canPickAuthor && header.ownerId && header.ownerId !== myId ? { ownerId: header.ownerId } : {}),
           lines: payloadLines,
@@ -754,14 +818,21 @@ export function QuotationEditor() {
         delivery: header.delivery || null,
         paymentTerms: header.paymentTerms || null,
         vatInclusive: header.vatInclusive,
+        vatRate: header.vatRate,
+        hideTotal: header.hideTotal,
         discountPct: Number(header.discountPct || 0),
       });
+      // The status last: the server checks the same move rules as the
+      // quotation page and the board, and a refusal leaves the lines saved.
+      const moved = header.outcome !== quotation!.outcome;
       await api.patch(`/quotations/${quotation!.id}`, {
         subject: header.subject.trim(),
         probability: Number(header.probability),
         expectedClosing: header.expectedClosing || null,
         contactId: header.contactId || null,
         siteId: header.siteId || null,
+        ...(moved ? { outcome: header.outcome } : {}),
+        ...(moved && header.outcome === 'LOST' ? { lostReason: header.lostReason.trim() } : {}),
       });
       setDirty(false);
       toast('ok', `Saved ${quotation!.number}`);
@@ -810,6 +881,27 @@ export function QuotationEditor() {
   const leadWithoutCustomer = !editing && !!lead && !lead.customer;
   const validityDays = isDayKey(header.dueDate) ? daysBetween(issueDate, header.dueDate) : null;
 
+  // SCORO's Status on the Modify page: where the quotation may go from here,
+  // by the same rules as the quotation page and the board. Won needs an
+  // approved revision; one that became a project stays won.
+  const jobs = quotation ? quotation.revisions.flatMap((r) => r.jobs ?? []) : [];
+  const hasApproved = !!quotation?.revisions.some((r) => r.status === 'APPROVED');
+  const current = quotation?.outcome ?? 'OPEN';
+  const statusOptions = [
+    current,
+    ...(current === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[current] ?? [])),
+  ].map((value) => ({
+    value,
+    label: `${OUTCOMES.find((o) => o.value === value)?.label ?? value}${value === 'WON' && value !== current && !hasApproved ? ' (needs an approved revision)' : ''}`,
+    disabled: value === 'WON' && value !== current && !hasApproved,
+  }));
+  const wonMove = quotation?.statusHistory ? [...quotation.statusHistory].reverse().find((c) => c.to === 'WON') : undefined;
+  const confirmedAt = wonMove?.at ?? quotation?.decidedAt ?? null;
+
+  // SCORO's Tax dropdown: the company's rate and 0%, plus a draft's own snapshot.
+  const taxOptions = [...new Set([companyRate, 0, header.vatRate])].sort((a, b) => b - a);
+  const pctLabel = (r: number) => `${Number((r * 100).toFixed(2))}%`;
+
   return (
     <div className="qe">
       <div className="breadcrumb">
@@ -826,25 +918,6 @@ export function QuotationEditor() {
         ) : (
           <span>New</span>
         )}
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{editing ? 'Modify quote details' : 'New quotation'}</h1>
-          <p>
-            {editing
-              ? `Draft revision ${revision!.revision}. Saving replaces its lines and header in one go; nothing changes until you save.`
-              : 'Type the header and the lines straight in. Nothing is saved — and no number is used — until you press Save.'}
-          </p>
-        </div>
-        <div className="row">
-          <button type="button" className="btn" onClick={cancel} disabled={busy}>
-            Cancel
-          </button>
-          <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </div>
       </div>
 
       <ErrorBox error={error} />
@@ -868,9 +941,34 @@ export function QuotationEditor() {
         </div>
       )}
 
-      {/* ── Header: two columns, as SCORO lays it out ── */}
-      <div className="card qe-card">
-        <div className="qe-header">
+      {/*
+        One card, as SCORO lays out "Modify quote details": the header in two
+        columns with the labels beside the values, the custom fields, the
+        lines, the totals beside the cost panel, and Back / Save at both ends.
+      */}
+      <section className="card qe-card" aria-labelledby="qe-title">
+        <div className="qe-head">
+          <div>
+            <h1 id="qe-title" className="qe-heading">
+              {editing ? 'Modify quote details' : 'New quotation'}
+            </h1>
+            <p className="faint qe-lead">
+              {editing
+                ? `Draft revision ${revision!.revision}. Nothing changes until you save.`
+                : 'Nothing is saved — and no number is used — until you press Save.'}
+            </p>
+          </div>
+          <div className="row qe-actions">
+            <button type="button" className="btn" onClick={cancel} disabled={busy}>
+              Back
+            </button>
+            <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+
+        <div className="qe-header qe-rows">
           <div className="qe-col">
             <Static label="Quote No.">
               {editing ? (
@@ -887,43 +985,38 @@ export function QuotationEditor() {
             </Static>
             <Static label="Date of issue">{formatDate(parseDay(issueDate))}</Static>
 
+            {/* SCORO puts the contact beside the client, on the same line. */}
             {editing ? (
               <Static label="Client">
-                <Link to={`/g-ops/customers/${quotation!.customer.id}`}>{quotation!.customer.name}</Link>
+                <div className="qe-client">
+                  <Link to={`/g-ops/customers/${quotation!.customer.id}`}>{quotation!.customer.name}</Link>
+                  <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
+                </div>
               </Static>
             ) : (
               <LooseField label="Client" htmlFor="qe-customer" required error={errors.customer}>
-                <CustomerPicker
-                  inputId="qe-customer"
-                  value={header.customer}
-                  invalid={!!errors.customer}
-                  describedBy={errors.customer ? 'qe-customer-error' : undefined}
-                  autoFocus={!preset.leadId && !preset.costingId && !preset.customerId && !preset.duplicate}
-                  onError={setError}
-                  onChange={(c) => {
-                    setHeader((h) => ({ ...h, customer: c, contactId: '', siteId: '' }));
-                    setWantContact(null);
-                    setDirty(true);
-                    setErrors((e) => {
-                      const next = { ...e };
-                      delete next.customer;
-                      return next;
-                    });
-                  }}
-                />
+                <div className="qe-client">
+                  <CustomerPicker
+                    inputId="qe-customer"
+                    value={header.customer}
+                    invalid={!!errors.customer}
+                    describedBy={errors.customer ? 'qe-customer-error' : undefined}
+                    autoFocus={!preset.leadId && !preset.costingId && !preset.customerId && !preset.duplicate}
+                    onError={setError}
+                    onChange={(c) => {
+                      setHeader((h) => ({ ...h, customer: c, contactId: '', siteId: '' }));
+                      setWantContact(null);
+                      setDirty(true);
+                      setErrors((e) => {
+                        const next = { ...e };
+                        delete next.customer;
+                        return next;
+                      });
+                    }}
+                  />
+                  <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
+                </div>
               </LooseField>
-            )}
-            {contacts.length > 0 && (
-              <Field label="Attention">
-                <select value={header.contactId} onChange={(e) => set('contactId', e.target.value)}>
-                  <option value="">— none —</option>
-                  {contacts.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
             )}
             {sites.length > 0 && (
               <Field label="Site">
@@ -937,7 +1030,7 @@ export function QuotationEditor() {
                 </select>
               </Field>
             )}
-            <Field label="Quote name" required error={errors.subject} hint="Printed as the subject">
+            <Field label="Quote name" required error={errors.subject}>
               <input
                 id="qe-subject"
                 value={header.subject}
@@ -959,7 +1052,7 @@ export function QuotationEditor() {
               <Static label="Author">{ownerName}</Static>
             )}
             <Field label="Comment" hint="Printed under Notes on the quotation">
-              <textarea rows={2} value={header.notes} onChange={(e) => set('notes', e.target.value)} />
+              <textarea rows={3} value={header.notes} onChange={(e) => set('notes', e.target.value)} />
             </Field>
           </div>
 
@@ -986,15 +1079,69 @@ export function QuotationEditor() {
               />
             </Field>
             <Static label="Currency">{currency}</Static>
-            <Static label="Status">
-              {editing ? (
-                <StatusBadge status={quotation!.outcome} extra={QUOTATION_OUTCOME_TONES} />
-              ) : (
-                <>
-                  Opportunity <span className="faint">— moves on the board or the quotation page</span>
-                </>
-              )}
-            </Static>
+            {editing ? (
+              <Field
+                label="Status"
+                hint={
+                  statusOptions.length > 1
+                    ? 'Applied when you save — it moves the lead too, so the pipeline stays honest'
+                    : current === 'WON' && jobs.length > 0
+                      ? 'It became a project, so it stays won'
+                      : undefined
+                }
+              >
+                <select
+                  id="qe-outcome"
+                  value={header.outcome}
+                  disabled={statusOptions.length <= 1}
+                  onChange={(e) => set('outcome', e.target.value)}
+                >
+                  {statusOptions.map((o) => (
+                    <option key={o.value} value={o.value} disabled={o.disabled}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : (
+              <Static label="Status">
+                <StatusBadge status="OPEN" extra={QUOTATION_OUTCOME_TONES} />{' '}
+                <span className="faint">— it moves once the quotation is saved</span>
+              </Static>
+            )}
+            {editing && header.outcome === 'LOST' && current !== 'LOST' && (
+              <Field label="Why it was lost" required error={errors.lostReason} hint="Sales Analytics reports the reasons">
+                <textarea
+                  id="qe-lostReason"
+                  rows={2}
+                  value={header.lostReason}
+                  onChange={(e) => set('lostReason', e.target.value)}
+                />
+              </Field>
+            )}
+            {editing && current === 'WON' && (
+              <Static label="Date confirmed">
+                {confirmedAt ? formatDateTime(confirmedAt) : <span className="faint">—</span>}
+                {wonMove?.by ? <span className="faint"> · {wonMove.by.name}</span> : null}
+              </Static>
+            )}
+            {editing && (
+              <Static label="Project">
+                {jobs.length > 0 ? (
+                  jobs.map((j, i) => (
+                    <span key={j.id}>
+                      {i > 0 && ', '}
+                      <Link to={`/g-ops/projects/${j.id}`} className="mono">
+                        {j.number}
+                      </Link>{' '}
+                      {j.name}
+                    </span>
+                  ))
+                ) : (
+                  <span className="faint">Created from the quotation page once it is won</span>
+                )}
+              </Static>
+            )}
             <Field label="Probability %" error={errors.probability} hint="Your own read — the weighted pipeline multiplies by it">
               <input
                 id="qe-probability"
@@ -1020,7 +1167,7 @@ export function QuotationEditor() {
             ) : (
               leadOptions.length > 0 && (
                 <Field
-                  label="Answering which enquiry"
+                  label="Enquiry"
                   hint="Keeps the lead's status in step with this quotation — and fills in the rest"
                 >
                   <select
@@ -1054,7 +1201,8 @@ export function QuotationEditor() {
           </div>
         </div>
 
-        <div className="qe-terms">
+        {/* SCORO's custom fields: PR Number beside Delivery, Payment Terms under. */}
+        <div className="qe-terms qe-rows">
           <Field label="PR Number" hint="The customer's purchase request reference">
             <input value={header.prNumber} onChange={(e) => set('prNumber', e.target.value)} />
           </Field>
@@ -1073,27 +1221,13 @@ export function QuotationEditor() {
               }}
             />
           </Field>
+          <Field label="Terms and conditions">
+            <textarea rows={3} value={header.terms} onChange={(e) => set('terms', e.target.value)} />
+          </Field>
         </div>
-        <Field label="Terms and conditions">
-          <textarea rows={3} value={header.terms} onChange={(e) => set('terms', e.target.value)} />
-        </Field>
-      </div>
 
-      {/* ── Lines ── */}
-      <div className="card qe-card">
-        <div className="row qe-lines-head">
-          <h3 className="card-title">Lines</h3>
-          <div className="row">
-            {header.costingId && (
-              <button type="button" className="btn btn-sm" onClick={() => void fillFromCosting()}>
-                Fill from costing
-              </button>
-            )}
-            <button type="button" id="qe-add-line" className="btn btn-sm" onClick={() => addLine()}>
-              + Add line
-            </button>
-          </div>
-        </div>
+        {/* ── Lines ── */}
+        <h2 className="visually-hidden">Lines</h2>
         {errors.lines && (
           <div className="alert error" role="alert">
             {errors.lines}
@@ -1125,6 +1259,7 @@ export function QuotationEditor() {
                 const m = marginByKey.get(l.key);
                 const last = i === lines.length - 1;
                 const err = (f: string) => errors[lineField(l.key, f)];
+                const amount = m?.amount ?? 0;
                 return (
                   <tr key={l.key} id={`line-${n}`}>
                     <td className="qe-col-move">
@@ -1181,24 +1316,27 @@ export function QuotationEditor() {
                       <CellError id={`${lineField(l.key, 'title')}-error`} message={err('title')} />
                     </td>
                     <td>
-                      <input
-                        id={lineField(l.key, 'quantity')}
-                        className="qe-num"
-                        type="number"
-                        min={0}
-                        step="any"
-                        inputMode="decimal"
-                        aria-label={`Line ${n} quantity`}
-                        value={l.quantity}
-                        aria-invalid={err('quantity') ? true : undefined}
-                        onChange={(e) => updateLine(l.key, { quantity: e.target.value })}
-                      />
-                      <input
-                        aria-label={`Line ${n} unit`}
-                        placeholder="lot"
-                        value={l.unit}
-                        onChange={(e) => updateLine(l.key, { unit: e.target.value })}
-                      />
+                      {/* Quantity and unit side by side, as SCORO sets them. */}
+                      <div className="qe-qty">
+                        <input
+                          id={lineField(l.key, 'quantity')}
+                          className="qe-num"
+                          type="number"
+                          min={0}
+                          step="any"
+                          inputMode="decimal"
+                          aria-label={`Line ${n} quantity`}
+                          value={l.quantity}
+                          aria-invalid={err('quantity') ? true : undefined}
+                          onChange={(e) => updateLine(l.key, { quantity: e.target.value })}
+                        />
+                        <input
+                          aria-label={`Line ${n} unit`}
+                          placeholder="lot"
+                          value={l.unit}
+                          onChange={(e) => updateLine(l.key, { unit: e.target.value })}
+                        />
+                      </div>
                       <CellError message={err('quantity')} />
                     </td>
                     <td>
@@ -1223,7 +1361,16 @@ export function QuotationEditor() {
                       />
                       <CellError message={err('unitPrice')} />
                     </td>
-                    <td className="right mono">{formatMoney(m?.amount ?? 0, currency)}</td>
+                    <td className="right mono">
+                      {formatMoney(amount, currency)}
+                      {/* SCORO's grey figure under the amount: the same line with the tax on. */}
+                      {!header.vatInclusive && header.vatRate > 0 && amount > 0 && (
+                        <div className="faint qe-with-vat" title={`With ${pctLabel(header.vatRate)} VAT`}>
+                          <span className="visually-hidden">With VAT: </span>
+                          {formatMoney(withTax(amount, header.vatRate), currency)}
+                        </div>
+                      )}
+                    </td>
                     {showCost && (
                       <td>
                         <CostCell
@@ -1270,8 +1417,24 @@ export function QuotationEditor() {
             <option key={g} value={g} />
           ))}
         </datalist>
+
+        {/* SCORO's buttons under the lines. */}
+        <div className="row qe-line-actions">
+          <button type="button" id="qe-add-line" className="btn btn-sm" onClick={() => addLine()}>
+            + Add row
+          </button>
+          <button type="button" className="btn btn-sm" onClick={() => setAppendOpen(true)}>
+            + Append quote
+          </button>
+          {header.costingId && (
+            <button type="button" className="btn btn-sm" onClick={() => void fillFromCosting()}>
+              Fill from costing
+            </button>
+          )}
+        </div>
         <p className="faint sales-hint">
-          Enter on the last line’s price adds a line. Empty lines are left out when you save.
+          Enter on the last line’s price adds a line. Empty lines are left out when you save. A group
+          prints as a heading over its lines.
           {showCost ? ' Cost, provider and margin are internal — never printed.' : ''}
         </p>
 
@@ -1311,7 +1474,24 @@ export function QuotationEditor() {
               </div>
               <div>
                 <dt>
-                  {header.vatInclusive ? 'Tax included' : 'Tax'} ({(vatRate * 100).toFixed(0)}%)
+                  <label className="quote-discount" htmlFor="qe-tax">
+                    {header.vatInclusive ? 'Tax included' : 'Tax'}
+                    <select
+                      id="qe-tax"
+                      value={String(header.vatRate)}
+                      aria-describedby="qe-tax-hint"
+                      onChange={(e) => {
+                        vatTouched.current = true;
+                        set('vatRate', Number(e.target.value));
+                      }}
+                    >
+                      {taxOptions.map((r) => (
+                        <option key={r} value={String(r)}>
+                          {pctLabel(r)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </dt>
                 <dd className="mono">{formatMoney(totals.vatAmount, currency)}</dd>
               </div>
@@ -1320,25 +1500,37 @@ export function QuotationEditor() {
                 <dd className="mono">{formatMoney(totals.total, currency)}</dd>
               </div>
             </dl>
+            <p id="qe-tax-hint" className="faint sales-hint">
+              0% is for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
+            </p>
             {errors.discountPct && <CellError message={errors.discountPct} />}
             <Checkbox
               checked={header.vatInclusive}
               onChange={(v) => set('vatInclusive', v)}
               label="Prices are VAT inclusive — the tax is backed out rather than added on"
             />
+            <Checkbox
+              checked={header.hideTotal}
+              onChange={(v) => set('hideTotal', v)}
+              label="Hide total — the PDF prints the lines and their prices, without the totals"
+            />
           </div>
           {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} />}
         </div>
-      </div>
 
-      <div className="row qe-foot">
-        <button type="button" className="btn" onClick={cancel} disabled={busy}>
-          Cancel
-        </button>
-        <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
-          {busy ? 'Saving…' : editing ? 'Save' : 'Save quotation'}
-        </button>
-      </div>
+        <div className="row qe-foot">
+          <button type="button" className="btn" onClick={cancel} disabled={busy}>
+            Back
+          </button>
+          <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : editing ? 'Save' : 'Save quotation'}
+          </button>
+        </div>
+      </section>
+
+      {appendOpen && (
+        <AppendQuoteModal excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />
+      )}
     </div>
   );
 }
@@ -1403,8 +1595,10 @@ function CellError({ id, message }: { id?: string; message?: string }) {
 }
 
 /**
- * SCORO's "Cost and provider info": who carries the line's cost — one of our
- * people (in-house) or a supplier (outsourced) — the notes, and the unit cost.
+ * SCORO's "Cost and provider info": two toggles for who carries the line's
+ * cost — one of our people (in-house) or a supplier (outsourced); pressing the
+ * one that is on clears it — the person or supplier beside them, then the
+ * notes and the unit cost. The line's cost (quantity × unit cost) sits under.
  */
 function CostCell({
   line,
@@ -1421,43 +1615,50 @@ function CostCell({
   currency: string;
   onChange: (patch: Partial<Line>) => void;
 }) {
-  const kinds: [ProviderKind, string][] = [
-    ['user', 'In-house'],
-    ['supplier', 'Supplier'],
-    ['none', 'Not named'],
+  const kinds: [Exclude<ProviderKind, 'none'>, 'person' | 'building', string][] = [
+    ['user', 'person', 'In-house — one of our people'],
+    ['supplier', 'building', 'Outsourced — a supplier'],
   ];
   return (
     <div className="qe-cost">
-      <div className="qe-kind" role="radiogroup" aria-label={`Line ${n}: who carries the cost`}>
-        {kinds.map(([value, label]) => (
-          <label key={value} className="qe-kind-option">
-            <input
-              type="radio"
-              name={`qe-kind-${line.key}`}
-              value={value}
-              checked={line.providerKind === value}
-              onChange={() => onChange({ providerKind: value, provider: null })}
-            />
-            <span>{label}</span>
-          </label>
-        ))}
+      <div className="qe-provider">
+        <div className="qe-kind" role="group" aria-label={`Line ${n}: who carries the cost`}>
+          {kinds.map(([value, icon, label]) => {
+            const on = line.providerKind === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                className={`btn btn-sm btn-icon qe-kind-btn${on ? ' is-on' : ''}`}
+                aria-pressed={on}
+                aria-label={label}
+                title={label}
+                onClick={() => onChange({ providerKind: on ? 'none' : value, provider: null })}
+              >
+                <Icon name={icon} size={16} />
+              </button>
+            );
+          })}
+        </div>
+        {line.providerKind !== 'none' ? (
+          <ProviderLookup
+            key={line.providerKind}
+            kind={line.providerKind}
+            label={`Line ${n} ${line.providerKind === 'user' ? 'in-house person' : 'supplier'}`}
+            value={line.provider}
+            onChange={(provider) => onChange({ provider })}
+          />
+        ) : (
+          <span className="faint qe-kind-none">No provider named</span>
+        )}
       </div>
-      {line.providerKind !== 'none' && (
-        <ProviderLookup
-          key={line.providerKind}
-          kind={line.providerKind}
-          label={`Line ${n} ${line.providerKind === 'user' ? 'in-house person' : 'supplier'}`}
-          value={line.provider}
-          onChange={(provider) => onChange({ provider })}
-        />
-      )}
-      <input
-        aria-label={`Line ${n} cost notes`}
-        placeholder="Notes"
-        value={line.costNote}
-        onChange={(e) => onChange({ costNote: e.target.value })}
-      />
       <div className="qe-cost-row">
+        <input
+          aria-label={`Line ${n} cost notes`}
+          placeholder="Notes"
+          value={line.costNote}
+          onChange={(e) => onChange({ costNote: e.target.value })}
+        />
         <input
           id={lineField(line.key, 'unitCost')}
           className="qe-num"
@@ -1471,10 +1672,114 @@ function CostCell({
           value={line.unitCost}
           onChange={(e) => onChange({ unitCost: e.target.value })}
         />
-        <span className="mono faint">{amount == null ? 'not costed' : formatMoney(amount, currency)}</span>
       </div>
+      <div className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</div>
       <CellError message={costError} />
     </div>
+  );
+}
+
+/** The contact person, beside the client as SCORO has it. Nothing until the client has contacts. */
+function ContactSelect({ contacts, value, onChange }: { contacts: Option[]; value: string; onChange: (v: string) => void }) {
+  if (contacts.length === 0) return null;
+  return (
+    <select aria-label="Contact person" value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— contact person —</option>
+      {contacts.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+interface QuotationListRow {
+  id: string;
+  number: string;
+  subject: string;
+  customer: { name: string };
+  latest: { revision: number; total: number } | null;
+}
+
+/**
+ * SCORO's "Append quote": pick another quotation and its newest revision's
+ * lines are added under these. The search is the quotation list's own, so it
+ * finds only what this person may read, and a line's cost comes along only
+ * where the server sends it to them.
+ */
+function AppendQuoteModal({
+  excludeId,
+  onClose,
+  onPick,
+}: {
+  excludeId?: string;
+  onClose: () => void;
+  onPick: (items: Item[], from: string) => void;
+}) {
+  const [text, setText] = useState('');
+  const [rows, setRows] = useState<QuotationListRow[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      api
+        .get<{ rows: QuotationListRow[] }>(`/quotations${qs({ search: text.trim() || undefined, pageSize: 12 })}`)
+        .then((r) => setRows(r.rows.filter((q) => q.id !== excludeId)))
+        .catch(setError);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [text, excludeId]);
+
+  async function pick(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const q = await api.get<QuotationDetail>(`/quotations/${id}`);
+      const src = q.revisions[0];
+      onPick(src?.items ?? [], src && src.revision > 0 ? `${q.number} R${src.revision}` : q.number);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title="Append quote"
+      onClose={onClose}
+      footer={
+        <button type="button" className="btn" onClick={onClose}>
+          Cancel
+        </button>
+      }
+    >
+      <ErrorBox error={error} />
+      <Field label="Find a quotation" hint="By number, name or client. Its newest revision’s lines are added under yours.">
+        <input autoFocus value={text} onChange={(e) => setText(e.target.value)} />
+      </Field>
+      {rows === null ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <p className="faint">No quotation matches.</p>
+      ) : (
+        <ul className="qe-append-list">
+          {rows.map((q) => (
+            <li key={q.id}>
+              <button type="button" className="qe-append-item" disabled={busy} onClick={() => void pick(q.id)}>
+                <span className="mono">{q.number}</span>
+                <span className="qe-append-name">{q.subject}</span>
+                <span className="faint">
+                  {q.customer.name}
+                  {q.latest ? ` · ${formatMoney(q.latest.total)}` : ''}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Modal>
   );
 }
 

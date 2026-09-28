@@ -38,7 +38,9 @@ export type IconName =
   | 'truck'
   | 'image'
   | 'book'
-  | 'panel';
+  | 'panel'
+  | 'person'
+  | 'building';
 
 /** Path data only — the wrapper supplies the canvas and the stroke. */
 const PATHS: Record<IconName, string> = {
@@ -68,6 +70,10 @@ const PATHS: Record<IconName, string> = {
   // everybody reads as "image" without a label.
   image: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m0 11 4.5-4.5 3 3L15 11l5 5M9 9.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0',
   panel: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m6 0v14',
+  // One of our people: SCORO's in-house provider.
+  person: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8m-7 9v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1',
+  // A company: SCORO's outsourced provider, a supplier.
+  building: 'M4 21V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v16m0-11h3a2 2 0 0 1 2 2v9M2 21h20M8 7h3m-3 4h3m-3 4h3',
   // An open book: two pages meeting at the spine, for the Academy.
   book: 'M12 7c-1.5-1.5-4-2-9-2v13c5 0 7.5.5 9 2m0-13c1.5-1.5 4-2 9-2v13c-5 0-7.5.5-9 2m0-13v13',
 };
