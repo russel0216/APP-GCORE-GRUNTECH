@@ -1134,9 +1134,19 @@ async function main() {
     const pdfBytes = Buffer.from(await pdfRes.arrayBuffer());
     const text = pdfText(pdfBytes);
     check('the quotation PDF renders', pdfRes.status === 200 && pdfBytes.subarray(0, 5).toString() === '%PDF-', String(pdfRes.status));
-    check('it prints the PR Number field and its value', /PR NUMBER/i.test(text) && text.includes('PR-ZZ-4471'));
+    check('it prints the PR Number field and its value', text.includes('PR Number :') && text.includes('PR-ZZ-4471'));
     check("it carries SCORO's opening and closing sentences", text.includes('Thank you very much for the opportunity') && text.includes('looking forward to your positive response'));
-    check('it prints the discount, then VAT on the discounted figure', text.includes('Less discount (10%)') && text.includes('PHP 3,240.00'));
+    check('it names itself as SCORO did, "Quote No." and the number', text.includes(`Quote No. ${String(created.body.number)}`));
+    check(
+      "it prints SCORO's totals: the discount, the sum without tax, then VAT on the discounted figure",
+      text.includes('Discount (10%):') && text.includes('Sum without tax:') && text.includes('27,000.00') && text.includes('VAT (12%):') && text.includes('3,240.00'),
+    );
+    check(
+      'the currency is named once, in the total, and the figures carry none',
+      text.includes('Total Price (PHP):') && !text.includes('PHP 3,240.00'),
+    );
+    check('it keeps the dated sign-offs under the letter', text.includes('PREPARED BY :') && text.includes('APPROVED BY :') && text.includes('CONFORME :'));
+    check('Delivery prints as a labelled line', text.includes('Delivery:') && text.includes('4 to 6 weeks'));
     check('it prints the group as a sub-heading and the line title', text.includes('GRUNTECH INSTALLATION') && text.includes('Air compressor installation'));
     check('it prints the payment terms and the contact', text.includes('30 days PDC') && text.includes('0917 555 0101'));
     check(

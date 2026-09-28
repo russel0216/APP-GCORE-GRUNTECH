@@ -49,6 +49,16 @@ four databases and four copies of "customer".
    **Money is `formatMoney`, which prints `PHP 1,562.20`** — the currency code,
    not `₱`. U+20B1 is outside WinAnsiEncoding, so a standard PDF font draws it
    as `±`. Never put a non-Latin-1 character in a PDF without embedding a font.
+   **The quotation is the one customer letter**: `style: 'letter'` sets it the
+   way SCORO printed quotes — logo top-left, company block top-right,
+   `Date: 08/17/2026` and a green `Quote No.`, client and contact side by side,
+   each product name a bold row over its description and figures, the magenta
+   band with the strapline on every page, and a running header (customer,
+   number, date) on every page after the first. It keeps the dated sign-offs
+   above the band. Its table figures are `formatAmount` (`13,100,000.00`),
+   because the currency is named once in `Total Price (PHP):`. The engine still
+   draws all of that — a module picks the style and supplies `parties`,
+   `totals` and `lines` sections, never its own header or footer.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
@@ -116,8 +126,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,790 assertions across twenty-one scripts** (counted 2026-09-28): foundation 115,
-masters 54, sales 147, costing 40, pipeline 44, calendar 38, numbering 46,
+**1,807 assertions across twenty-one scripts** (counted 2026-09-28): foundation 128,
+masters 54, sales 151, costing 40, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39. They cover permission resolution, numbering
@@ -928,7 +938,9 @@ the detail.
   never reads cost at all.
 - **The letterhead lives in `renderDocument`**: Tel/Fax, TIN, REG. NO. and the
   company's `documentTagline` print on every document when set; unset lines are
-  left out. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
+  left out — in the footer on the house style, across the top (and the band) on
+  the quotation's `letter` style. The letter prints no subject and no validity,
+  because SCORO's never did. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
   bold title over its description. Bank details are stored, printed nowhere yet.
 - **The quotation editor is a page, not a dialog** (SCORO's "Modify quote
   details"): `/g-ops/quotations/new` and `/g-ops/quotations/:id/edit`

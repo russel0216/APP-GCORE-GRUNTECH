@@ -18,7 +18,16 @@ import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
-import { renderDocument, formatMoney, formatDate, formatDateTime, type PdfCell, type PdfSection } from '../shared/pdf';
+import {
+  renderDocument,
+  formatAmount,
+  formatDateTime,
+  type PdfLine,
+  type PdfParty,
+  type PdfRow,
+  type PdfSection,
+  type PdfTotal,
+} from '../shared/pdf';
 import { activityWhere, type ActivityQuery } from '../shared/activities';
 import { manilaDayKey } from '../shared/day';
 import { toCsv } from '../shared/insights';
@@ -1608,141 +1617,133 @@ quotationRoutes.get(
     const revision = quotation.revisions.find((r) => r.id === req.params.revisionId);
     if (!revision) throw notFound('Revision not found');
 
+    // The quote a customer receives, set the way SCORO printed it for years
+    // (the engine's `letter` style): letterhead across the top, the client and
+    // the person it is for side by side, each product name as a bold row over
+    // its description and figures, the totals under the last two columns.
+    // The one thing SCORO never had is kept: who prepared and who approved it,
+    // with the time, above the band. No subject and no validity line, because
+    // SCORO printed neither and customers know the page without them.
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     const currency = company?.currency ?? 'PHP';
-    const money = (v: Prisma.Decimal | number) => formatMoney(Number(v), currency);
+    // The currency is named once, in "Total Price (PHP):"; the figures carry none, as SCORO's did.
+    const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
     const rate = Number(revision.vatRate);
     const ratePct = `${(rate * 100).toFixed(0)}%`;
     const discountPct = Number(revision.discountPct);
     const discountAmount = Number(revision.discountAmount);
     const net = Number(revision.subtotal) - discountAmount;
 
-    // SCORO's client block: name, address, phone — and the person it is for.
+    // SCORO's client block: name, address, phone, website — and on the right
+    // the person it is for.
     const place = quotation.site?.address
       ? [quotation.site.address, quotation.site.city]
       : quotation.customer.sites[0]
         ? [quotation.customer.sites[0].address, quotation.customer.sites[0].city]
         : [];
-    const client = [
-      quotation.customer.legalName || quotation.customer.name,
-      place.filter(Boolean).join(', '),
-      quotation.customer.phone ? `Tel: ${quotation.customer.phone}` : '',
-      quotation.customer.website ?? '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    const client: PdfParty = {
+      name: quotation.customer.legalName || quotation.customer.name,
+      lines: [place.filter(Boolean).join(', '), quotation.customer.phone ?? '', quotation.customer.website ?? ''],
+      label: 'Payment Terms :',
+      value: revision.paymentTerms ?? '',
+    };
     const contact = quotation.contact;
-    const attention = contact
-      ? [
-          contact.name,
-          contact.position ?? '',
-          contact.mobile || contact.phone ? `Mobile: ${contact.mobile || contact.phone}` : '',
-          contact.email ?? '',
-        ]
-          .filter(Boolean)
-          .join('\n')
-      : '—';
+    const attention: PdfParty = {
+      name: contact?.name ?? '',
+      lines: contact ? [contact.position ?? '', contact.mobile || contact.phone || '', contact.email ?? ''] : [],
+      label: 'PR Number :',
+      value: revision.prNumber ?? '',
+    };
 
-    // The lines, with SCORO's group as a sub-heading row wherever it changes.
-    // Title in bold, description under it. Cost is never read here.
-    const rows: PdfCell[][] = [];
+    // Each product name is a bold row of its own over the row carrying its
+    // description and figures; a group, where it changes, is a shaded row
+    // above them. Cost is never read here.
+    const rows: PdfRow[] = [];
     let group: string | null = null;
-    let n = 0;
     for (const i of revision.items) {
-      if (i.group && i.group !== group) rows.push(['', { title: i.group.toUpperCase() }, '', '', '']);
+      if (i.group && i.group !== group) rows.push({ heading: i.group.toUpperCase(), shade: true });
       group = i.group ?? group;
-      n++;
       const qty = Number(i.quantity);
       const title = (i.title ?? '').trim();
-      const description = (i.description ?? '').trim();
+      if (title) rows.push({ heading: title });
       rows.push([
-        String(n),
-        title ? { title, ...(description ? { body: description } : {}) } : description,
+        (i.description ?? '').trim(),
         `${Number.isInteger(qty) ? qty : qty.toString()} ${i.unit}`,
-        money(i.unitPrice),
-        money(i.amount),
+        amount(i.unitPrice),
+        amount(i.amount),
       ]);
     }
 
-    const totals: string[][] = [['Sub Total Price', money(revision.subtotal)]];
+    const totals: PdfTotal[] = [{ label: 'Sub Total Price:', value: amount(revision.subtotal) }];
     if (discountAmount > 0) {
-      totals.push([`Less discount (${discountPct.toFixed(discountPct % 1 ? 2 : 0)}%)`, `-${money(discountAmount)}`]);
-      totals.push(['Sub Total after discount', money(net)]);
+      totals.push({ label: `Discount (${discountPct.toFixed(discountPct % 1 ? 2 : 0)}%):`, value: `-${amount(discountAmount)}` });
+      // On an inclusive quote the net still carries the VAT, so it is not a sum without tax.
+      if (!revision.vatInclusive) totals.push({ label: 'Sum without tax:', value: amount(net) });
     }
     if (revision.vatInclusive) {
-      totals.push([`Total Price (${currency}), VAT inclusive`, money(revision.total)]);
-      totals.push([`VAT included (${ratePct})`, money(revision.vatAmount)]);
+      totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
+      totals.push({ label: `VAT included (${ratePct}):`, value: amount(revision.vatAmount) });
     } else {
-      totals.push([`VAT (${ratePct})`, money(revision.vatAmount)]);
-      totals.push([`Total Price (${currency})`, money(revision.total)]);
+      totals.push({ label: `VAT (${ratePct}):`, value: amount(revision.vatAmount) });
+      totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
     }
 
-    const validity = `${revision.validityDays} days from ${formatDate(revision.createdAt)}`;
+    const after: PdfLine[] = [{ label: 'Delivery:', text: revision.delivery ?? '' }];
+    if (revision.terms) after.push({ text: '' }, { text: 'Terms and Conditions:', bold: true }, { text: revision.terms });
+    if (revision.notes) after.push({ text: '' }, { text: 'Notes:', bold: true }, { text: revision.notes });
+
+    const owner = quotation.owner;
     const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 2,
-        fields: [
-          { label: 'Date', value: formatDate(revision.createdAt) },
-          { label: 'Quote No.', value: `${quotation.number}${revision.revision > 0 ? ` R${revision.revision}` : ''}` },
-          { label: 'Client', value: client },
-          { label: 'Attention', value: attention },
-          { label: 'Payment Terms', value: revision.paymentTerms || '—' },
-          { label: 'PR Number', value: revision.prNumber || '—' },
-          { label: 'Delivery', value: revision.delivery || '—' },
-          { label: 'Validity', value: validity },
-        ],
-      },
-      { kind: 'text', title: 'Subject', body: quotation.subject },
-      { kind: 'text', body: 'Thank you very much for the opportunity to provide the following quotation.' },
+      { kind: 'parties', left: client, right: attention },
+      { kind: 'spacer', height: 20 },
+      { kind: 'lines', lines: [{ text: 'Thank you very much for the opportunity to provide the following quotation.' }] },
+      { kind: 'spacer', height: 14 },
       {
         kind: 'table',
-        title: 'Scope and pricing',
-        head: ['#', 'Product description', 'Qty', 'Unit price', 'Total'],
-        widths: [5, 51, 12, 16, 16],
-        align: ['right', 'left', 'right', 'right', 'right'],
+        head: ['Product description', 'Qty', 'Unit price', 'Total'],
+        widths: [58.3, 10.8, 15.5, 15.4],
+        align: ['left', 'right', 'right', 'right'],
         rows,
       },
+      { kind: 'totals', rows: totals },
+      { kind: 'lines', lines: after },
+      { kind: 'spacer', height: 28 },
       {
-        kind: 'table',
-        head: ['', 'Amount'],
-        widths: [72, 28],
-        align: ['right', 'right'],
-        rows: totals,
+        kind: 'lines',
+        lines: [{ text: 'I trust that the above offer meets your requirements, and I am looking forward to your positive response.' }],
+      },
+      { kind: 'spacer', height: 12 },
+      {
+        kind: 'lines',
+        lines: [
+          { text: 'Sincerely Yours,' },
+          { text: owner.name, bold: true },
+          ...(owner.phone ? [{ text: owner.phone }] : []),
+          { text: owner.email },
+        ],
+      },
+      { kind: 'spacer', height: 26 },
+      {
+        kind: 'lines',
+        lines: [{ text: 'This document is system generated and does not require signature.', italic: true, small: true }],
       },
     ];
 
-    if (revision.terms) sections.push({ kind: 'text', title: 'Terms and conditions', body: revision.terms });
-    if (revision.notes) sections.push({ kind: 'text', title: 'Notes', body: revision.notes });
-
-    sections.push({
-      kind: 'text',
-      body: 'I trust that the above offer meets your requirements, and I am looking forward to your positive response.',
-    });
-    sections.push({
-      kind: 'text',
-      body: ['Sincerely yours,', '', quotation.owner.name, quotation.owner.phone ?? '', quotation.owner.email]
-        .filter((line, i) => i < 2 || line)
-        .join('\n'),
-    });
-    sections.push({ kind: 'text', body: 'This document is system generated and does not require signature.' });
-
     const pdf = await renderDocument({
-      title: 'Quotation',
+      style: 'letter',
+      // SCORO's word: "Quote No. 0012608040".
+      title: 'Quote',
       documentNumber: quotation.number,
       revision: String(revision.revision),
       date: revision.createdAt,
-      // No header reference: the Client field below names the customer, and a
-      // long name wrapped in the header ran into the first field row.
+      // Leads the running header on every page after the first.
+      reference: quotation.customer.legalName || quotation.customer.name,
       sections,
       signatories: [
-        { role: 'Prepared by', name: quotation.owner.name, position: quotation.owner.position ?? undefined, at: revision.createdAt },
+        { role: 'Prepared by', name: owner.name, position: owner.position ?? undefined, at: revision.createdAt },
         { role: 'Approved by', name: revision.approvedBy?.name, at: revision.approvedAt },
         { role: 'Conforme', name: quotation.contact?.name },
       ],
-      // The company block and strapline are the engine's (rule 6); this only
-      // says which revision the paper is.
-      footerNote: `${quotation.number} R${revision.revision}`,
     });
 
     await audit(

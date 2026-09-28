@@ -36,7 +36,7 @@ import {
   onApprovalSettled,
   approvalSignoffs,
 } from '../src/shared/approvals';
-import { renderDocument, formatDateTime, formatMoney } from '../src/shared/pdf';
+import { renderDocument, formatAmount, formatDateTime, formatMoney, pdfSafe } from '../src/shared/pdf';
 import { readAppearance } from '../src/routes/appearance';
 
 if (env.isProduction) {
@@ -801,6 +801,69 @@ async function main() {
     check('the strapline stays clear of the bottom edge', letteredEdges.bottom > 12, `${letteredEdges.bottom}pt clear`);
     check('and still starts 14pt from the edge', letteredEdges.left === 14, `${letteredEdges.left}pt`);
     check('a letterhead does not cost a page', pages(lettered) === 1, `${pages(lettered)} pages`);
+
+    // ── 11. The customer's letter: SCORO's quote, drawn by the same engine ──
+    console.log('\nLetter style');
+
+    const letter = await renderDocument({
+      style: 'letter',
+      title: 'Quote',
+      documentNumber: `${TAG}-LT`,
+      revision: '2',
+      reference: `${TAG} Customer Inc.`,
+      date: new Date('2026-08-17T02:00:00Z'),
+      sections: [
+        {
+          kind: 'parties',
+          left: { name: `${TAG} Customer Inc.`, lines: ['1 Test Street'], label: 'Payment Terms :', value: '30 days' },
+          right: { name: 'Juan Dela Cruz', lines: ['Procurement'], label: 'PR Number :', value: 'PR-77' },
+        },
+        {
+          kind: 'table',
+          head: ['Product description', 'Qty', 'Unit price', 'Total'],
+          widths: [58.3, 10.8, 15.5, 15.4],
+          align: ['left', 'right', 'right', 'right'],
+          // Forty rows, alternating product name and figures, so it runs over.
+          rows: Array.from({ length: 40 }, (_, i) =>
+            i % 2 ? [`Filter element 0.1 μm, lot ${i}`, '1 lot', formatAmount(1000), formatAmount(1000)] : { heading: `PRODUCT ${i}` },
+          ),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: 'Sub Total Price:', value: formatAmount(20_000) },
+            { label: 'Total Price (PHP):', value: formatAmount(22_400), bold: true },
+          ],
+        },
+        { kind: 'lines', lines: [{ label: 'Delivery:', text: '2 weeks' }] },
+      ],
+      signatories: [
+        { role: 'Prepared by', name: employee.name, at: ot.createdAt },
+        { role: 'Approved by' },
+      ],
+    });
+    const letterText = pdfText(letter);
+    const letterPages = pages(letter);
+    check('the letter names itself as SCORO did, with the revision', letterText.includes(`Quote No. ${TAG}-LT R2`));
+    check('and dates itself the SCORO way', letterText.includes('Date:  08/17/2026'));
+    check('its company block is on the letterhead: REG. NO. and TIN', letterText.includes('REG. NO.:') && (!co.tin || letterText.includes(co.tin)));
+    check('the band carries the tagline', letterText.includes(co.documentTagline ?? '\u0000'));
+    check('both parties print their labelled line', letterText.includes('Payment Terms :') && letterText.includes('PR-77'));
+    check('a long letter runs over', letterPages >= 2, `${letterPages} pages`);
+    const running = letterText
+      .split('\n')
+      .filter((line) => line.includes(`${TAG} Customer Inc.`) && line.includes(`${TAG}-LT R2`) && line.includes('08/17/2026'));
+    check(
+      'every page after the first repeats who it is for, the number and the date',
+      running.length === letterPages - 1,
+      `${running.length} running headers on ${letterPages} pages`,
+    );
+    check('the table head repeats on the next page', letterText.split('\n').filter((l) => l === 'PRODUCT DESCRIPTION').length === letterPages);
+    check('the dated sign-offs are kept', letterText.includes('PREPARED BY :') && letterText.includes(stamp(ot.createdAt)) && letterText.includes('Pending'));
+    check('the figures carry no currency; the total names it once', letterText.includes('1,000.00') && !letterText.includes('PHP 1,000.00'));
+    check('Greek mu prints as the micro sign, not "?"', pdfSafe('0.1 μm') === '0.1 µm' && letterText.includes('0.1 µm'));
+    check("the letter's content starts where SCORO's did, 43.5pt in", pdfEdges(letter).left === 44, `${pdfEdges(letter).left}pt`);
+    check('and its band stays clear of the bottom edge', pdfEdges(letter).bottom > 12, `${pdfEdges(letter).bottom}pt clear`);
   } finally {
     if (companyBefore && Object.keys(borrowed).length) {
       await prisma.company.update({
