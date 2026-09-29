@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -14,6 +14,7 @@ import {
 } from '../../components/ui';
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
+import { OrgChart } from './OrgChart';
 
 interface Role {
   id: string;
@@ -88,6 +89,16 @@ export function Users() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  // ?view=tree shows the organisational chart; it is in the URL so the chart
+  // stays behind a person opened from it, and a link can open it directly.
+  const [params, setParams] = useSearchParams();
+  const view = params.get('view') === 'tree' ? 'tree' : 'list';
+  const showView = (next: 'list' | 'tree') => {
+    const p = new URLSearchParams(params);
+    if (next === 'tree') p.set('view', 'tree');
+    else p.delete('view');
+    setParams(p, { replace: true });
+  };
   // Adding someone is a local modal; an existing person has a URL, so a search
   // hit or a link from an employee record opens their editor directly.
   const [adding, setAdding] = useState(false);
@@ -179,6 +190,20 @@ export function Users() {
 
       <MailLine />
 
+      <div className="row org-switch">
+        <div className="scope-switch">
+          <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => showView('list')}>
+            Users
+          </button>
+          <button type="button" className={view === 'tree' ? 'active' : ''} aria-pressed={view === 'tree'} onClick={() => showView('tree')}>
+            Organizational Chart
+          </button>
+        </div>
+      </div>
+
+      {view === 'tree' ? (
+        <OrgChart key={reload} />
+      ) : (
       <DataList<UserRow>
         listKey="admin-users"
         endpoint="/users"
@@ -207,6 +232,7 @@ export function Users() {
           ) : null
         }
       />
+      )}
 
       {editing && (
         <UserEditor

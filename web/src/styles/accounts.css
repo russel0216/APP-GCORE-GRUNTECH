@@ -218,3 +218,192 @@
     flex-direction: column;
   }
 }
+
+/* ── Organisational chart (pages/admin/OrgChart.tsx) ──────────────────────── */
+
+.org-switch {
+  margin-bottom: var(--s-4);
+}
+
+.org-lead {
+  margin: 0 0 var(--s-4);
+  font-size: var(--fs-sm);
+}
+
+/* A wide company scrolls sideways inside the card, never the page. */
+.org-scroll {
+  overflow-x: auto;
+  padding-bottom: var(--s-3);
+}
+
+.org-tree {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: max-content;
+  min-width: 100%;
+  margin-bottom: var(--s-6);
+}
+
+.org-card {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-4) var(--s-2) var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  text-decoration: none;
+  min-width: 13rem;
+  position: relative;
+  z-index: 1;
+}
+
+.org-card:hover {
+  border-color: var(--neon-dim);
+}
+
+/* The level shows as a ring on the picture, and the colour is never the only clue. */
+.org-card > :first-child {
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px var(--org-ring, var(--line));
+}
+.org-depth-0 { --org-ring: var(--danger); }
+.org-depth-1 { --org-ring: var(--warn); }
+.org-depth-2 { --org-ring: var(--ok); }
+.org-depth-3 { --org-ring: var(--info); }
+
+.org-card-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.org-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.org-you {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--info);
+}
+
+.org-position {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.org-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Level 1: a row under the head, joined by one bar. */
+.org-row {
+  display: flex;
+  gap: var(--s-5);
+  padding-top: var(--s-6) !important;
+  position: relative;
+}
+
+.org-row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  height: var(--s-4);
+  border-left: 1px solid var(--line);
+}
+
+.org-row-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  padding-top: var(--s-4);
+}
+
+/* The bar across, and the drop to each card. */
+.org-row-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--line);
+}
+.org-row-item:first-child::before { left: 50%; }
+.org-row-item:last-child::before { right: 50%; }
+.org-row-item:only-child::before { display: none; }
+.org-row-item::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  height: var(--s-4);
+  border-left: 1px solid var(--line);
+}
+
+/* Level 2 down: a column hanging from the card above. */
+.org-column {
+  align-self: flex-start;
+  margin-left: var(--s-5) !important;
+  padding-top: var(--s-3) !important;
+}
+
+.org-column > li {
+  position: relative;
+  padding: var(--s-2) 0 var(--s-2) var(--s-5);
+}
+
+.org-column > li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: calc(var(--s-2) + 1.6rem);
+  width: var(--s-5);
+  border-top: 1px solid var(--line);
+}
+
+/* Each item carries its own stretch of the vertical line; the last stops at its card. */
+.org-column > li::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: calc(var(--s-3) * -1);
+  bottom: 0;
+  border-left: 1px solid var(--line);
+}
+.org-column > li:not(:first-child)::after {
+  top: 0;
+}
+.org-column > li:last-child::after {
+  bottom: auto;
+  height: calc(var(--s-2) + 1.6rem);
+}
+.org-column > li:first-child:last-child::after {
+  height: calc(var(--s-3) + var(--s-2) + 1.6rem);
+}
+
+.org-loose {
+  border-top: 1px solid var(--line-soft);
+  padding-top: var(--s-4);
+}
+
+.org-loose-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+}

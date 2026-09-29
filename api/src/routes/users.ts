@@ -38,6 +38,8 @@ const publicUser = {
   departmentId: true,
   lastLoginAt: true,
   createdAt: true,
+  /** Attachment id of the account picture — the org chart draws it. */
+  photoPath: true,
 } as const;
 
 // ── List ─────────────────────────────────────────────────────────────────────
