@@ -16,7 +16,9 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
-import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import { approvalSignoffs, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
+import { costingFigures, lineAmount, lineCodes, planTasks } from '../shared/costingMath';
+import { renderDocument, formatMoney, formatAmount, type PdfGanttGroup, type PdfRow, type PdfSection, type Signatory } from '../shared/pdf';
 
 /**
  * Costing (model §5.3).
@@ -25,6 +27,15 @@ import { renderDocument, formatMoney, formatDate, type PdfSection } from '../sha
  * record carries the scope of work whose sections become the Schedule of
  * Values — the backbone that progress reporting, progress billing and the
  * S-curve are all measured against in Phase 4.
+ *
+ * The sheet is written whole: `POST /costings` and `PUT /costings/:id/sheet`
+ * take the header, every cost line and every scope phase with its tasks, and
+ * write them in ONE transaction — so a refused line burns no number and a
+ * half-saved sheet never exists. The per-line and per-section routes below
+ * remain for scripts and for the renewal path.
+ *
+ * The arithmetic is `shared/costingMath.ts`, and nothing else: line amounts,
+ * markup, contingency, discount, VAT and the working-day plan.
  */
 
 export const costingRoutes = Router();
@@ -37,58 +48,152 @@ function num(v: Prisma.Decimal | null | undefined): number {
   return v == null ? 0 : Number(v);
 }
 
+type Tx = Prisma.TransactionClient;
+
+/** The costing's stored rates, as costingMath takes them. */
+function ratesOf(c: {
+  markupPct: Prisma.Decimal;
+  contingencyPct: Prisma.Decimal;
+  discountAmount: Prisma.Decimal;
+  vatRate: Prisma.Decimal;
+}) {
+  return {
+    markupPct: c.markupPct.toString(),
+    contingencyPct: c.contingencyPct.toString(),
+    discountAmount: c.discountAmount.toString(),
+    vatRate: c.vatRate.toString(),
+  };
+}
+
 /** Recomputes totals from the lines and rewrites the stored figures. */
-async function recalc(costingId: string, tx: Prisma.TransactionClient = prisma) {
+async function recalc(costingId: string, tx: Tx = prisma) {
   const costing = await tx.costing.findUnique({
     where: { id: costingId },
     include: { lines: true },
   });
   if (!costing) return null;
 
-  const totalCost = costing.lines.reduce((sum, l) => sum + Number(l.amount), 0);
-  const markup = totalCost * Number(costing.markupPct);
-  const contractValue = totalCost + markup - Number(costing.discountAmount);
-
+  const f = costingFigures(
+    costing.lines.map((l) => ({ quantity: l.quantity.toString(), unitCost: l.unitCost.toString(), isHeading: l.isHeading })),
+    ratesOf(costing),
+  );
   return tx.costing.update({
     where: { id: costingId },
-    data: {
-      totalCost: d(totalCost),
-      contractValue: d(Math.max(0, contractValue)),
-    },
+    data: { totalCost: d(f.totalCost), contractValue: d(f.contractValue) },
   });
 }
 
+/**
+ * Spreads the contract value across the scope sections in proportion to what
+ * is already there, or evenly when nothing has been set. Rounded to centavos,
+ * with the rounding remainder on the last section, so the sum is exact.
+ */
+async function spreadSections(tx: Tx, costingId: string): Promise<number> {
+  const costing = await tx.costing.findUnique({ where: { id: costingId }, select: { contractValue: true } });
+  const sections = await tx.scopeSection.findMany({ where: { costingId }, orderBy: { sortOrder: 'asc' } });
+  if (!costing || !sections.length) return 0;
+
+  const contractValue = num(costing.contractValue);
+  const currentTotal = sections.reduce((s, x) => s + num(x.value), 0);
+  const raw = sections.map((s) =>
+    currentTotal > 0 ? (num(s.value) / currentTotal) * contractValue : contractValue / sections.length,
+  );
+  const rounded = raw.map((v) => Math.round(v * 100) / 100);
+  const drift = Math.round((contractValue - rounded.reduce((a, b) => a + b, 0)) * 100) / 100;
+  rounded[rounded.length - 1] = Math.round((rounded[rounded.length - 1] + drift) * 100) / 100;
+
+  for (const [i, s] of sections.entries()) {
+    await tx.scopeSection.update({ where: { id: s.id }, data: { value: d(rounded[i]) } });
+  }
+  return sections.length;
+}
+
+/** Category id → its place in the five buckets (1 = first), which the line codes print. */
+async function categoryRanks(tx: Tx = prisma): Promise<Map<string, number>> {
+  const cats = await tx.costCategory.findMany({ orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true } });
+  return new Map(cats.map((c, i) => [c.id, i + 1]));
+}
+
+const dayKey = (v: Date | null | undefined) => (v ? v.toISOString().slice(0, 10) : null);
+
 /** Shapes a costing for the API: Decimals to numbers, plus derived figures. */
-function present(costing: Record<string, unknown>) {
+function present(costing: Record<string, unknown>, ranks?: Map<string, number>) {
   const lines = (costing.lines ?? []) as Record<string, unknown>[];
-  const sections = (costing.scopeSections ?? []) as Record<string, unknown>[];
+  const sections = (costing.scopeSections ?? []) as (Record<string, unknown> & {
+    durationDays: number;
+    tasks?: (Record<string, unknown> & { startDay: number | null; durationDays: number })[];
+  })[];
 
   const totalCost = num(costing.totalCost as Prisma.Decimal);
   const contractValue = num(costing.contractValue as Prisma.Decimal);
-  const grossProfit = contractValue - totalCost;
+  const rates = {
+    markupPct: num(costing.markupPct as Prisma.Decimal),
+    contingencyPct: num(costing.contingencyPct as Prisma.Decimal),
+    discountAmount: num(costing.discountAmount as Prisma.Decimal),
+    vatRate: num(costing.vatRate as Prisma.Decimal),
+  };
+  // The summary's middle rows, worked from the stored cost with the same
+  // arithmetic the stored contract value came from (one "line" of the cost).
+  const f = costingFigures([{ quantity: 1, unitCost: totalCost }], rates);
+
+  // Codes run within each category, in the order the sheet shows the lines.
+  const ordered = [...lines].sort(
+    (a, b) =>
+      (ranks?.get(a.costCategoryId as string) ?? 0) - (ranks?.get(b.costCategoryId as string) ?? 0) ||
+      (a.sortOrder as number) - (b.sortOrder as number),
+  );
+  const codes = lineCodes(
+    ordered.map((l) => ({ rank: ranks?.get(l.costCategoryId as string) ?? 0, isHeading: l.isHeading as boolean })),
+  );
+  const codeOf = new Map(ordered.map((l, i) => [l.id as string, codes[i]]));
+
+  const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks ?? [] })));
 
   return {
     ...costing,
-    markupPct: num(costing.markupPct as Prisma.Decimal),
-    discountAmount: num(costing.discountAmount as Prisma.Decimal),
+    ...rates,
     totalCost,
     contractValue,
-    grossProfit,
+    markupAmount: f.markupAmount,
+    contingencyAmount: f.contingencyAmount,
+    vatAmount: f.vatAmount,
+    grandTotal: f.grandTotal,
+    grossProfit: contractValue - totalCost,
     // Margin is profit over the contract value, not over cost — the two differ
     // and only one of them is what the business calls margin (model §5.3).
-    grossMarginPct: contractValue > 0 ? grossProfit / contractValue : 0,
-    lines: lines.map((l) => ({
+    grossMarginPct: contractValue > 0 ? (contractValue - totalCost) / contractValue : 0,
+    validUntil: dayKey(costing.validUntil as Date | null),
+    lines: ordered.map((l) => ({
       ...l,
+      code: ranks ? codeOf.get(l.id as string) ?? null : null,
+      /** The bucket's number on the sheet (1 = Materials), which the codes start with. */
+      rank: ranks?.get(l.costCategoryId as string) ?? null,
       quantity: num(l.quantity as Prisma.Decimal),
       unitCost: num(l.unitCost as Prisma.Decimal),
       amount: num(l.amount as Prisma.Decimal),
     })),
-    scopeSections: sections.map((s) => ({ ...s, value: num(s.value as Prisma.Decimal) })),
+    scopeSections: sections.map((s, i) => ({
+      ...s,
+      value: num(s.value as Prisma.Decimal),
+      startDay: plan.sections[i].start,
+      endDay: plan.sections[i].end,
+      planDays: plan.sections[i].days,
+      tasks: (s.tasks ?? []).map((t, j) => ({ ...t, start: plan.sections[i].tasks[j].start, end: plan.sections[i].tasks[j].end })),
+    })),
+    planDays: plan.totalDays,
     scopeTotal: sections.reduce((sum, s) => sum + num(s.value as Prisma.Decimal), 0),
   };
 }
 
+/** Someone with only view_own never sees another person's costing. */
+function onlyOwn(me: ReturnType<typeof currentUser>) {
+  return !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
+}
+
 // ── List ─────────────────────────────────────────────────────────────────────
+
+const STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'FINAL'] as const;
+type Status = (typeof STATUSES)[number];
 
 costingRoutes.get(
   '/',
@@ -100,17 +205,19 @@ costingRoutes.get(
 
     // Someone with only view_own never sees another person's costing, whatever
     // the scope switch says.
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
-    if (onlyOwn || q.scope === 'mine') where.ownerId = me.id;
+    if (onlyOwn(me) || q.scope === 'mine') where.ownerId = me.id;
 
     if (q.search) {
       where.OR = [
         { title: { contains: q.search, mode: 'insensitive' } },
         { number: { contains: q.search, mode: 'insensitive' } },
         { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+        { systemUnit: { contains: q.search, mode: 'insensitive' } },
       ];
     }
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumCostingStatusFilter['equals'];
+    if (q.filters.status && (STATUSES as readonly string[]).includes(q.filters.status)) {
+      where.status = q.filters.status as Status;
+    }
     if (q.filters.customerId) where.customerId = q.filters.customerId;
     // Service Costing is this same screen, narrowed to the costings that back a
     // service contract. A service costing is not a different kind of record —
@@ -154,8 +261,7 @@ costingRoutes.get(
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
-    const where: Prisma.CostingWhereInput = onlyOwn ? { ownerId: me.id } : {};
+    const where: Prisma.CostingWhereInput = onlyOwn(me) ? { ownerId: me.id } : {};
 
     // `?status=FINAL` (or a comma list) lets a picker leave DRAFT costings out —
     // a project is built on a final costing, and a picker that offers drafts
@@ -165,7 +271,7 @@ costingRoutes.get(
     const statuses = status
       .split(',')
       .map((s) => s.trim().toUpperCase())
-      .filter((s): s is 'DRAFT' | 'FINAL' => s === 'DRAFT' || s === 'FINAL');
+      .filter((s): s is Status => (STATUSES as readonly string[]).includes(s));
     if (statuses.length === 1) where.status = statuses[0];
     else if (statuses.length > 1) where.status = { in: statuses };
 
@@ -195,15 +301,455 @@ costingRoutes.get(
   }),
 );
 
+// ── Predictions: what was typed before ───────────────────────────────────────
+
+/**
+ * Past cost lines matching what is being typed, newest price first, plus
+ * matching items from the item master — so a line is picked rather than
+ * retyped, and costs what it cost last time until somebody says otherwise.
+ *
+ * Only from costings the caller may read: a `view_own` estimator is offered
+ * their own history and the item master, never a colleague's unit costs.
+ */
+costingRoutes.get(
+  '/suggest',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+    const categoryId = typeof req.query.categoryId === 'string' ? req.query.categoryId : '';
+    if (q.length < 2) return res.json([]);
+
+    const past = await prisma.costingLine.findMany({
+      where: {
+        isHeading: false,
+        ...(categoryId ? { costCategoryId: categoryId } : {}),
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { description: { contains: q, mode: 'insensitive' } },
+        ],
+        costing: onlyOwn(me) ? { ownerId: me.id } : {},
+      },
+      select: {
+        name: true,
+        description: true,
+        unit: true,
+        unitCost: true,
+        costCategoryId: true,
+        itemId: true,
+        costing: { select: { number: true, createdAt: true } },
+      },
+      orderBy: { costing: { createdAt: 'desc' } },
+      take: 400,
+    });
+
+    // One row per name: the newest use sets the price, and the count says how
+    // often it has been costed, which is what ranks a habit above a one-off.
+    const byName = new Map<
+      string,
+      {
+        name: string;
+        description: string;
+        unit: string;
+        unitCost: number;
+        costCategoryId: string;
+        itemId: string | null;
+        source: 'history';
+        uses: number;
+        lastNumber: string;
+        lastUsed: Date;
+      }
+    >();
+    for (const l of past) {
+      const name = (l.name || l.description).trim();
+      const key = name.toUpperCase();
+      const seen = byName.get(key);
+      if (seen) {
+        seen.uses++;
+        continue;
+      }
+      byName.set(key, {
+        name,
+        description: l.name && l.description !== l.name ? l.description : '',
+        unit: l.unit,
+        unitCost: num(l.unitCost),
+        costCategoryId: l.costCategoryId,
+        itemId: l.itemId,
+        source: 'history',
+        uses: 1,
+        lastNumber: l.costing.number,
+        lastUsed: l.costing.createdAt,
+      });
+    }
+    const starts = (s: string) => s.toUpperCase().startsWith(q.toUpperCase());
+    const history = [...byName.values()]
+      .sort((a, b) => Number(starts(b.name)) - Number(starts(a.name)) || b.uses - a.uses || +b.lastUsed - +a.lastUsed)
+      .slice(0, 10);
+
+    const items = await prisma.item.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { code: { contains: q, mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true, code: true, name: true, description: true, unit: true, standardCost: true },
+      orderBy: { name: 'asc' },
+      take: 6,
+    });
+    const named = new Set(history.map((h) => h.name.toUpperCase()));
+
+    res.json([
+      ...history,
+      ...items
+        .filter((i) => !named.has(i.name.toUpperCase()))
+        .map((i) => ({
+          name: i.name,
+          description: i.description ?? '',
+          unit: i.unit,
+          unitCost: i.standardCost == null ? null : num(i.standardCost),
+          costCategoryId: null,
+          itemId: i.id,
+          itemCode: i.code,
+          source: 'item' as const,
+          uses: 0,
+        })),
+    ]);
+  }),
+);
+
+/**
+ * The short lists the sheet's inputs offer as you type: units, System / Unit
+ * names, phase and task names — the most used first — and the caller's own
+ * latest Terms & Conditions, which a new costing starts from.
+ */
+costingRoutes.get(
+  '/suggest/lists',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const visible: Prisma.CostingWhereInput = onlyOwn(me) ? { ownerId: me.id } : {};
+    const [units, systems, phases, tasks, lastTerms, company] = await Promise.all([
+      prisma.costingLine.groupBy({
+        by: ['unit'],
+        where: { isHeading: false, costing: visible },
+        _count: { unit: true },
+        orderBy: { _count: { unit: 'desc' } },
+        take: 40,
+      }),
+      prisma.costing.groupBy({
+        by: ['systemUnit'],
+        where: { ...visible, systemUnit: { not: null } },
+        _count: { systemUnit: true },
+        orderBy: { _count: { systemUnit: 'desc' } },
+        take: 60,
+      }),
+      prisma.scopeSection.groupBy({
+        by: ['name'],
+        where: { costing: visible },
+        _count: { name: true },
+        orderBy: { _count: { name: 'desc' } },
+        take: 60,
+      }),
+      prisma.scopeTask.groupBy({
+        by: ['name'],
+        where: { scopeSection: { costing: visible } },
+        _count: { name: true },
+        orderBy: { _count: { name: 'desc' } },
+        take: 150,
+      }),
+      prisma.costing.findFirst({
+        where: { ownerId: me.id, terms: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        select: { terms: true },
+      }),
+      prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } }),
+    ]);
+    res.json({
+      units: units.map((u) => u.unit).filter(Boolean),
+      systemUnits: systems.map((s) => s.systemUnit).filter(Boolean),
+      phases: phases.map((p) => p.name),
+      tasks: tasks.map((t) => t.name),
+      terms: lastTerms?.terms ?? null,
+      // What a new sheet's VAT toggle switches on.
+      companyVatRate: company ? Number(company.vatRate) : 0.12,
+    });
+  }),
+);
+
+// ── Templates ────────────────────────────────────────────────────────────────
+
+/** A template line names its category by CODE, which never changes (isSystem rows). */
+const templateLineSchema = z.object({
+  category: z.string().min(1),
+  isHeading: z.boolean().default(false),
+  name: z.string().max(300).nullable().default(null),
+  description: z.string().max(5000).default(''),
+  quantity: z.number().min(0).default(0),
+  unit: z.string().max(30).default('pcs'),
+  unitCost: z.number().min(0).default(0),
+  itemId: z.string().nullable().default(null),
+});
+const templateSectionSchema = z.object({
+  kind: z.enum(['MAIN_WORK', 'TESTING_COMMISSIONING', 'TURNOVER', 'OTHER']).default('MAIN_WORK'),
+  name: z.string(),
+  description: z.string().nullable().default(null),
+  durationDays: z.number().int().min(0).default(0),
+  tasks: z
+    .array(z.object({ name: z.string(), startDay: z.number().int().nullable().default(null), durationDays: z.number().int().min(0).default(0) }))
+    .default([]),
+});
+const templateBodySchema = z.object({
+  systemUnit: z.string().nullable().default(null),
+  markupPct: z.number().default(0),
+  contingencyPct: z.number().default(0),
+  terms: z.string().nullable().default(null),
+  lines: z.array(templateLineSchema).default([]),
+  sections: z.array(templateSectionSchema).default([]),
+});
+type TemplateBody = z.infer<typeof templateBodySchema>;
+
+function readTemplateBody(json: Prisma.JsonValue): TemplateBody {
+  const parsed = templateBodySchema.safeParse(json);
+  return parsed.success ? parsed.data : templateBodySchema.parse({});
+}
+
+costingRoutes.get(
+  '/templates',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const rows = await prisma.costingTemplate.findMany({
+      include: { createdBy: { select: { id: true, name: true } } },
+      orderBy: { name: 'asc' },
+    });
+    res.json(
+      rows.map((t) => {
+        const body = readTemplateBody(t.body);
+        return {
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          withPrices: t.withPrices,
+          createdBy: t.createdBy,
+          createdAt: t.createdAt,
+          updatedAt: t.updatedAt,
+          systemUnit: body.systemUnit,
+          lineCount: body.lines.filter((l) => !l.isHeading).length,
+          sectionCount: body.sections.length,
+          taskCount: body.sections.reduce((n, s) => n + s.tasks.length, 0),
+          canEdit: canEditRecord(me, 'gops', 'costing', t.createdById),
+        };
+      }),
+    );
+  }),
+);
+
+/** One template, its lines' categories resolved to ids for the sheet to load. */
+costingRoutes.get(
+  '/templates/:templateId',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const t = await prisma.costingTemplate.findUnique({
+      where: { id: req.params.templateId },
+      include: { createdBy: { select: { id: true, name: true } } },
+    });
+    if (!t) throw notFound('Template not found');
+    const body = readTemplateBody(t.body);
+    const cats = await prisma.costCategory.findMany({ select: { id: true, code: true } });
+    const idOf = new Map(cats.map((c) => [c.code, c.id]));
+    res.json({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      withPrices: t.withPrices,
+      createdBy: t.createdBy,
+      ...body,
+      // A line whose category no longer exists lands in the first bucket
+      // rather than vanishing from the template.
+      lines: body.lines.map((l) => ({ ...l, costCategoryId: idOf.get(l.category) ?? cats[0]?.id ?? null })),
+    });
+  }),
+);
+
+const templateSchema = z.object({
+  name: z.string().trim().min(2, 'Name the template').max(120),
+  description: z.string().trim().max(500).optional().nullable(),
+  /** Copy a saved costing… */
+  costingId: z.string().optional(),
+  /** …or the sheet as it stands in the editor, saved or not. */
+  sheet: z
+    .object({
+      systemUnit: z.string().max(200).optional().nullable(),
+      markupPct: z.number().min(0).max(10).optional(),
+      contingencyPct: z.number().min(0).max(5).optional(),
+      terms: z.string().max(20000).optional().nullable(),
+      lines: z.array(z.lazy(() => sheetLineSchema)).max(1000).default([]),
+      sections: z.array(z.lazy(() => sheetSectionSchema)).max(100).default([]),
+    })
+    .optional(),
+  /** Off: quantities and names only, every unit cost zero — for a scope whose prices go stale. */
+  withPrices: z.boolean().default(true),
+});
+
+costingRoutes.post(
+  '/templates',
+  require_('gops.costing.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(templateSchema, req.body);
+    const cats = await prisma.costCategory.findMany({ select: { id: true, code: true } });
+    const codeOf = new Map(cats.map((c) => [c.id, c.code]));
+
+    let content: TemplateBody;
+    if (body.costingId) {
+      const source = await prisma.costing.findUnique({
+        where: { id: body.costingId },
+        include: {
+          lines: { orderBy: { sortOrder: 'asc' } },
+          scopeSections: { orderBy: { sortOrder: 'asc' }, include: { tasks: { orderBy: { sortOrder: 'asc' } } } },
+        },
+      });
+      if (!source) throw notFound('Costing not found');
+      if (onlyOwn(me) && source.ownerId !== me.id) throw forbidden('This costing belongs to someone else');
+      content = {
+        systemUnit: source.systemUnit,
+        markupPct: num(source.markupPct),
+        contingencyPct: num(source.contingencyPct),
+        terms: source.terms,
+        lines: source.lines.map((l) => ({
+          category: codeOf.get(l.costCategoryId) ?? '',
+          isHeading: l.isHeading,
+          name: l.name,
+          description: l.description,
+          quantity: num(l.quantity),
+          unit: l.unit,
+          unitCost: num(l.unitCost),
+          itemId: l.itemId,
+        })),
+        sections: source.scopeSections.map((s) => ({
+          kind: s.kind,
+          name: s.name,
+          description: s.description,
+          durationDays: s.durationDays,
+          tasks: s.tasks.map((t) => ({ name: t.name, startDay: t.startDay, durationDays: t.durationDays })),
+        })),
+      };
+    } else if (body.sheet) {
+      const sheet = body.sheet;
+      content = {
+        systemUnit: sheet.systemUnit ?? null,
+        markupPct: sheet.markupPct ?? 0,
+        contingencyPct: sheet.contingencyPct ?? 0,
+        terms: sheet.terms ?? null,
+        lines: sheet.lines.map((l) => ({
+          category: codeOf.get(l.costCategoryId) ?? '',
+          isHeading: !!l.isHeading,
+          name: l.name?.trim() || null,
+          description: l.description?.trim() || '',
+          quantity: l.quantity ?? 0,
+          unit: l.unit?.trim() || 'pcs',
+          unitCost: l.unitCost ?? 0,
+          itemId: l.itemId ?? null,
+        })),
+        sections: sheet.sections.map((s) => ({
+          kind: s.kind,
+          name: s.name,
+          description: s.description ?? null,
+          durationDays: s.durationDays,
+          tasks: s.tasks.map((t) => ({ name: t.name, startDay: t.startDay ?? null, durationDays: t.durationDays })),
+        })),
+      };
+    } else {
+      throw badRequest('Save a template from a costing or from the sheet being edited');
+    }
+    if (content.lines.some((l) => !l.category)) throw badRequest('A line names a cost category that does not exist');
+    if (!body.withPrices) content.lines = content.lines.map((l) => ({ ...l, unitCost: 0 }));
+
+    const t = await prisma.costingTemplate.create({
+      data: {
+        name: body.name,
+        description: body.description || null,
+        withPrices: body.withPrices,
+        body: content as unknown as Prisma.InputJsonValue,
+        createdById: me.id,
+      },
+    });
+    await audit(
+      {
+        entityType: 'costing_template',
+        entityId: t.id,
+        action: 'CREATED',
+        summary: `Saved costing template "${t.name}" — ${content.lines.length} line(s), ${content.sections.length} phase(s)`,
+      },
+      req,
+    );
+    res.status(201).json({ id: t.id, name: t.name });
+  }),
+);
+
+async function templateForEdit(req: Parameters<typeof currentUser>[0]) {
+  const me = currentUser(req);
+  const t = await prisma.costingTemplate.findUnique({ where: { id: req.params.templateId } });
+  if (!t) throw notFound('Template not found');
+  if (!canEditRecord(me, 'gops', 'costing', t.createdById)) {
+    throw forbidden('Only whoever saved this template can change it');
+  }
+  return t;
+}
+
+costingRoutes.patch(
+  '/templates/:templateId',
+  require_('gops.costing.edit_own'),
+  handler(async (req, res) => {
+    const before = await templateForEdit(req);
+    const body = parseBody(
+      z.object({
+        name: z.string().trim().min(2).max(120).optional(),
+        description: z.string().trim().max(500).optional().nullable(),
+      }),
+      req.body,
+    );
+    const t = await prisma.costingTemplate.update({
+      where: { id: before.id },
+      data: {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.description !== undefined ? { description: body.description || null } : {}),
+      },
+    });
+    await audit(
+      { entityType: 'costing_template', entityId: t.id, action: 'UPDATED', summary: `Renamed costing template "${before.name}" → "${t.name}"` },
+      req,
+    );
+    res.json({ id: t.id, name: t.name, description: t.description });
+  }),
+);
+
+costingRoutes.delete(
+  '/templates/:templateId',
+  require_('gops.costing.edit_own'),
+  handler(async (req, res) => {
+    const t = await templateForEdit(req);
+    // Nothing points at a template: a costing started from one keeps no link.
+    await prisma.costingTemplate.delete({ where: { id: t.id } });
+    await audit(
+      { entityType: 'costing_template', entityId: t.id, action: 'DELETED', summary: `Deleted costing template "${t.name}"` },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
 // ── Read one ─────────────────────────────────────────────────────────────────
 
-async function loadFull(id: string) {
-  return prisma.costing.findUnique({
+async function loadFull(id: string, tx: Tx = prisma) {
+  return tx.costing.findUnique({
     where: { id },
     include: {
       customer: { select: { id: true, name: true, code: true } },
-      site: { select: { id: true, name: true } },
-      owner: { select: { id: true, name: true } },
+      site: { select: { id: true, name: true, address: true, city: true } },
+      owner: { select: { id: true, name: true, position: true } },
       lead: { select: { id: true, number: true, companyName: true, status: true } },
       lines: {
         orderBy: { sortOrder: 'asc' },
@@ -235,6 +781,11 @@ async function loadFull(id: string) {
   });
 }
 
+/** Whether costings go through the approval engine here, i.e. a costing workflow is active. */
+async function approvalConfigured(amount: number): Promise<boolean> {
+  return !!(await pickWorkflow('costing', amount));
+}
+
 costingRoutes.get(
   '/:id',
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
@@ -243,22 +794,28 @@ costingRoutes.get(
     const costing = await loadFull(req.params.id);
     if (!costing) throw notFound('Costing not found');
 
-    if (
-      !me.isSuperAdmin &&
-      !me.permissions.has('gops.costing.view_all') &&
-      costing.ownerId !== me.id
-    ) {
+    if (onlyOwn(me) && costing.ownerId !== me.id) {
       throw forbidden('This costing belongs to someone else');
     }
 
+    const [ranks, company, configured] = await Promise.all([
+      categoryRanks(),
+      prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } }),
+      approvalConfigured(num(costing.contractValue)),
+    ]);
+    const canEdit = canEditRecord(me, 'gops', 'costing', costing.ownerId);
     res.json({
-      ...present(costing as unknown as Record<string, unknown>),
-      canEdit: canEditRecord(me, 'gops', 'costing', costing.ownerId),
+      ...present(costing as unknown as Record<string, unknown>, ranks),
+      canEdit,
+      companyVatRate: company ? Number(company.vatRate) : 0.12,
+      // With a costing workflow active, FINAL is reached by approval and the
+      // page offers "Submit for approval"; without one, "Mark final" as before.
+      approvalConfigured: configured,
     });
   }),
 );
 
-// ── Create / update ──────────────────────────────────────────────────────────
+// ── The sheet: header, lines and scope in one save ───────────────────────────
 
 /**
  * The lead stages a new costing advances from. Anything at or past COSTING is
@@ -267,26 +824,190 @@ costingRoutes.get(
  */
 const LEAD_STAGES_BEFORE_COSTING = new Set(['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT']);
 
-const costingSchema = z.object({
-  title: z.string().trim().min(2, 'Give the costing a title'),
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+const sheetLineSchema = z
+  .object({
+    /** A line already on this costing keeps its id; anything else is created. */
+    id: z.string().optional(),
+    costCategoryId: z.string().min(1, 'Choose a cost category'),
+    itemId: z.string().optional().nullable(),
+    /** A subheading: printed as a heading row inside its category, costs nothing. */
+    isHeading: z.boolean().optional(),
+    name: z.string().trim().max(300).optional().nullable(),
+    description: z.string().trim().max(5000).optional().nullable(),
+    quantity: z.number().min(0).max(1e9).default(0),
+    unit: z.string().trim().max(30).optional().nullable(),
+    unitCost: z.number().min(0).max(1e12).default(0),
+  })
+  .refine((l) => !!(l.name?.trim() || l.description?.trim()), { message: 'Name the line', path: ['name'] });
+
+const sheetTaskSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().trim().min(1, 'Name the task').max(300),
+  /** Working day the task starts (day 1 = the first). Empty: the day after the task before it ends. */
+  startDay: z.number().int().min(1).max(3650).optional().nullable(),
+  durationDays: z.number().int().min(0).max(3650).default(0),
+});
+
+const sheetSectionSchema = z.object({
+  id: z.string().optional(),
+  kind: z.enum(['MAIN_WORK', 'TESTING_COMMISSIONING', 'TURNOVER', 'OTHER']).default('MAIN_WORK'),
+  name: z.string().trim().min(2, 'Name the phase').max(200),
+  description: z.string().trim().max(2000).optional().nullable(),
+  durationDays: z.number().int().min(0).max(3650).default(0),
+  value: z.number().min(0).default(0),
+  tasks: z.array(sheetTaskSchema).max(200).default([]),
+});
+
+const headerSchema = z.object({
+  title: z.string().trim().min(2, 'Give the costing a title').max(300),
   customerId: z.string().optional().nullable(),
   siteId: z.string().optional().nullable(),
   /** The lead this costing answers. Set on creation from "Start costing". */
   leadId: z.string().optional().nullable(),
-  markupPct: z.number().min(0).max(5).optional(),
+  markupPct: z.number().min(0).max(10).optional(),
+  contingencyPct: z.number().min(0).max(5).optional(),
   discountAmount: z.number().min(0).optional(),
+  /** The company's VAT rate, or 0 for a zero-rated job — see `checkVatRate`. */
+  vatRate: z.number().min(0).max(1).optional(),
+  validUntil: z.string().regex(DAY, 'Use a date').optional().nullable(),
+  systemUnit: z.string().trim().max(200).optional().nullable(),
   durationDays: z.number().int().min(0).optional().nullable(),
-  notes: z.string().optional().nullable(),
-  terms: z.string().optional().nullable(),
-  status: z.enum(['DRAFT', 'FINAL']).optional(),
+  notes: z.string().max(20000).optional().nullable(),
+  terms: z.string().max(20000).optional().nullable(),
 });
+
+const sheetSchema = headerSchema.extend({
+  lines: z.array(sheetLineSchema).max(1000, 'A costing takes at most 1,000 lines').optional(),
+  sections: z.array(sheetSectionSchema).max(100).optional(),
+  /** Keep the schedule of values equal to the contract value: spread it on save. */
+  spread: z.boolean().optional(),
+});
+
+type SheetBody = z.infer<typeof sheetSchema>;
+
+/**
+ * The estimate's VAT is the company's rate or zero (a PEZA/BOI or export job),
+ * as on the quotation. A costing may keep the rate it was saved with after
+ * Settings change — that is the snapshot, not a third rate.
+ */
+async function checkVatRate(rate: number | undefined, keep?: number): Promise<number | undefined> {
+  if (rate === undefined) return undefined;
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+  const companyRate = company ? Number(company.vatRate) : 0.12;
+  const same = (a: number, b: number) => Math.abs(a - b) < 0.00005;
+  if (same(rate, 0) || same(rate, companyRate) || (keep !== undefined && same(rate, keep))) return rate;
+  throw badRequest(`VAT is the company rate (${(companyRate * 100).toFixed(0)}%) or 0%`, [
+    { field: 'vatRate', message: 'Choose the company rate or 0%' },
+  ]);
+}
+
+/** Refuses ids that are not what they claim, before anything is written. */
+async function checkReferences(body: SheetBody, tx: Tx) {
+  const catIds = new Set((body.lines ?? []).map((l) => l.costCategoryId));
+  if (catIds.size) {
+    const found = await tx.costCategory.count({ where: { id: { in: [...catIds] } } });
+    if (found !== catIds.size) throw badRequest('A line names a cost category that does not exist');
+  }
+  const itemIds = new Set((body.lines ?? []).map((l) => l.itemId).filter((v): v is string => !!v));
+  if (itemIds.size) {
+    const found = await tx.item.count({ where: { id: { in: [...itemIds] } } });
+    if (found !== itemIds.size) throw badRequest('A line names an item that does not exist');
+  }
+  if (body.siteId && body.customerId) {
+    const site = await tx.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } });
+    if (!site || site.customerId !== body.customerId) throw badRequest('That location is not one of the client\'s sites');
+  }
+}
+
+const asDay = (v: string | null | undefined) => (v ? new Date(`${v}T00:00:00Z`) : null);
+
+/**
+ * Writes the sheet's lines and scope against a costing, inside the caller's
+ * transaction. Rows that exist keep their ids (a line or phase is updated in
+ * place, never deleted and recreated), rows left out are removed, and the
+ * order on the page is the order stored.
+ */
+async function writeSheet(tx: Tx, costingId: string, body: SheetBody) {
+  if (body.lines) {
+    const own = new Set((await tx.costingLine.findMany({ where: { costingId }, select: { id: true } })).map((l) => l.id));
+    const kept = body.lines.map((l) => l.id).filter((id): id is string => !!id && own.has(id));
+    await tx.costingLine.deleteMany({ where: { costingId, id: { notIn: kept } } });
+    for (const [i, l] of body.lines.entries()) {
+      const heading = !!l.isHeading;
+      const name = l.name?.trim() || null;
+      const data = {
+        costCategoryId: l.costCategoryId,
+        itemId: heading ? null : l.itemId || null,
+        isHeading: heading,
+        name,
+        // The description is what every older reader of a cost line prints, so
+        // a line typed as a name alone carries it there too.
+        description: l.description?.trim() || name || '',
+        quantity: d(heading ? 0 : l.quantity),
+        unit: l.unit?.trim() || 'pcs',
+        unitCost: d(heading ? 0 : l.unitCost),
+        amount: d(heading ? 0 : lineAmount(l.quantity, l.unitCost)),
+        sortOrder: i,
+      };
+      if (l.id && own.has(l.id)) await tx.costingLine.update({ where: { id: l.id }, data });
+      else await tx.costingLine.create({ data: { ...data, costingId } });
+    }
+  }
+
+  if (body.sections) {
+    const plan = planTasks(body.sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
+    const own = new Set((await tx.scopeSection.findMany({ where: { costingId }, select: { id: true } })).map((s) => s.id));
+    const kept = body.sections.map((s) => s.id).filter((id): id is string => !!id && own.has(id));
+    await tx.scopeSection.deleteMany({ where: { costingId, id: { notIn: kept } } });
+
+    for (const [i, s] of body.sections.entries()) {
+      const data = {
+        kind: s.kind,
+        name: s.name,
+        description: s.description?.trim() || null,
+        // A phase with tasks lasts as long as they do; one without keeps what was typed.
+        durationDays: s.tasks.length ? plan.sections[i].days : s.durationDays,
+        value: d(s.value),
+        sortOrder: i,
+      };
+      let sectionId: string;
+      if (s.id && own.has(s.id)) {
+        sectionId = s.id;
+        await tx.scopeSection.update({ where: { id: s.id }, data });
+      } else {
+        sectionId = (await tx.scopeSection.create({ data: { ...data, costingId } })).id;
+      }
+
+      const ownTasks = new Set(
+        (await tx.scopeTask.findMany({ where: { scopeSectionId: sectionId }, select: { id: true } })).map((t) => t.id),
+      );
+      const keptTasks = s.tasks.map((t) => t.id).filter((id): id is string => !!id && ownTasks.has(id));
+      await tx.scopeTask.deleteMany({ where: { scopeSectionId: sectionId, id: { notIn: keptTasks } } });
+      for (const [j, t] of s.tasks.entries()) {
+        const taskData = { name: t.name, startDay: t.startDay ?? null, durationDays: t.durationDays, sortOrder: j };
+        if (t.id && ownTasks.has(t.id)) await tx.scopeTask.update({ where: { id: t.id }, data: taskData });
+        else await tx.scopeTask.create({ data: { ...taskData, scopeSectionId: sectionId } });
+      }
+    }
+
+    // The costing's duration is the plan's, once there is a plan.
+    if (plan.totalDays > 0) await tx.costing.update({ where: { id: costingId }, data: { durationDays: plan.totalDays } });
+  }
+
+  await recalc(costingId, tx);
+  if (body.spread) await spreadSections(tx, costingId);
+}
 
 costingRoutes.post(
   '/',
   require_('gops.costing.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(costingSchema, req.body);
+    const body = parseBody(sheetSchema, req.body);
+    const vatRate = await checkVatRate(body.vatRate);
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
 
     const { costing, leadMoved } = await prisma.$transaction(async (tx) => {
       // "Start costing" from a lead. The costing takes the lead's customer and
@@ -302,6 +1023,8 @@ costingRoutes.post(
         });
         if (!lead) throw notFound('Lead not found');
       }
+      // Everything that can be refused is refused before the number is taken.
+      await checkReferences(body, tx);
 
       const number = await nextNumber('costing', tx);
       const created = await tx.costing.create({
@@ -313,19 +1036,26 @@ costingRoutes.post(
           leadId: lead?.id ?? null,
           ownerId: me.id,
           markupPct: d(body.markupPct ?? 0),
+          contingencyPct: d(body.contingencyPct ?? 0),
           discountAmount: d(body.discountAmount ?? 0),
+          // Snapshotted, like a quotation revision's: a Settings change later
+          // does not reprint the tax this estimate was made with.
+          vatRate: d(vatRate ?? (company ? Number(company.vatRate) : 0.12)),
+          validUntil: asDay(body.validUntil),
+          systemUnit: body.systemUnit?.trim() || null,
           durationDays: body.durationDays ?? null,
           notes: body.notes || null,
           terms: body.terms || null,
         },
       });
+      await writeSheet(tx, created.id, body);
 
       let moved = false;
       if (lead && LEAD_STAGES_BEFORE_COSTING.has(lead.status)) {
         await tx.lead.update({ where: { id: lead.id }, data: { status: 'COSTING' } });
         moved = true;
       }
-      return { costing: created, leadMoved: moved ? lead : null };
+      return { costing: (await loadFull(created.id, tx))!, leadMoved: moved ? lead : null };
     });
 
     await audit(
@@ -333,9 +1063,7 @@ costingRoutes.post(
         entityType: 'costing',
         entityId: costing.id,
         action: 'CREATED',
-        summary: `Created costing ${costing.number} — ${costing.title}${
-          costing.leadId ? ` (from lead)` : ''
-        }`,
+        summary: `Created costing ${costing.number} — ${costing.title}${costing.leadId ? ` (from lead)` : ''}`,
       },
       req,
     );
@@ -350,7 +1078,7 @@ costingRoutes.post(
         req,
       );
     }
-    res.status(201).json(present(costing as unknown as Record<string, unknown>));
+    res.status(201).json(present(costing as unknown as Record<string, unknown>, await categoryRanks()));
   }),
 );
 
@@ -367,47 +1095,100 @@ async function forEdit(req: Parameters<typeof currentUser>[0], id: string) {
   if (costing.status === 'FINAL') {
     throw badRequest('This costing is final. Set it back to draft before changing it.');
   }
+  // One under approval is what the approver is looking at; it holds still.
+  if (costing.status === 'PENDING_APPROVAL') {
+    throw badRequest('This costing is with the approver. It can be changed once they decide.');
+  }
   return costing;
 }
+
+/** Every field of the header that was sent, as a Prisma update. */
+function headerData(body: Partial<z.infer<typeof headerSchema>>, vatRate: number | undefined): Prisma.CostingUpdateInput {
+  const data: Prisma.CostingUpdateInput = {};
+  if (body.title !== undefined) data.title = body.title;
+  if (body.notes !== undefined) data.notes = body.notes || null;
+  if (body.terms !== undefined) data.terms = body.terms || null;
+  if (body.durationDays !== undefined) data.durationDays = body.durationDays ?? null;
+  if (body.markupPct !== undefined) data.markupPct = d(body.markupPct);
+  if (body.contingencyPct !== undefined) data.contingencyPct = d(body.contingencyPct);
+  if (body.discountAmount !== undefined) data.discountAmount = d(body.discountAmount);
+  if (vatRate !== undefined) data.vatRate = d(vatRate);
+  if (body.validUntil !== undefined) data.validUntil = asDay(body.validUntil);
+  if (body.systemUnit !== undefined) data.systemUnit = body.systemUnit?.trim() || null;
+  if (body.customerId !== undefined) {
+    data.customer = body.customerId ? { connect: { id: body.customerId } } : { disconnect: true };
+  }
+  if (body.siteId !== undefined) {
+    data.site = body.siteId ? { connect: { id: body.siteId } } : { disconnect: true };
+  }
+  // Re-linking a costing to a lead is a correction, not a handoff: the lead's
+  // stage only moves when a costing is STARTED from it (POST).
+  if (body.leadId !== undefined) {
+    data.lead = body.leadId ? { connect: { id: body.leadId } } : { disconnect: true };
+  }
+  return data;
+}
+
+/** The sheet editor's save: header, lines and scope, all or nothing. */
+costingRoutes.put(
+  '/:id/sheet',
+  require_('gops.costing.edit_own'),
+  handler(async (req, res) => {
+    const before = await forEdit(req, req.params.id);
+    const body = parseBody(sheetSchema, req.body);
+    const vatRate = await checkVatRate(body.vatRate, num(before.vatRate));
+
+    const costing = await prisma.$transaction(async (tx) => {
+      await checkReferences(body, tx);
+      // PUT carries the whole header; a lead link is only ever corrected, never handed off here.
+      const { leadId: _lead, ...header } = body;
+      await tx.costing.update({ where: { id: before.id }, data: headerData(header, vatRate) });
+      await writeSheet(tx, before.id, body);
+      return (await loadFull(before.id, tx))!;
+    });
+
+    await audit(
+      {
+        entityType: 'costing',
+        entityId: before.id,
+        action: 'UPDATED',
+        summary: `Updated costing ${before.number} — ${costing.lines.filter((l) => !l.isHeading).length} line(s), cost ${formatMoney(num(costing.totalCost))}, contract ${formatMoney(num(costing.contractValue))}`,
+      },
+      req,
+    );
+    res.json({ ...present(costing as unknown as Record<string, unknown>, await categoryRanks()), canEdit: true });
+  }),
+);
 
 costingRoutes.patch(
   '/:id',
   require_('gops.costing.edit_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(costingSchema.partial(), req.body);
+    const body = parseBody(headerSchema.partial().extend({ status: z.enum(['DRAFT', 'FINAL']).optional() }), req.body);
 
     const before = await prisma.costing.findUnique({ where: { id: req.params.id } });
     if (!before) throw notFound('Costing not found');
     if (!canEditRecord(me, 'gops', 'costing', before.ownerId)) {
       throw forbidden('Only the author can edit this costing');
     }
+    if (before.status === 'PENDING_APPROVAL') {
+      throw badRequest('This costing is with the approver. It can be changed once they decide.');
+    }
     // Status is the one field that may change on a FINAL costing — that is how
     // it gets reopened.
     if (before.status === 'FINAL' && Object.keys(body).some((k) => k !== 'status')) {
       throw badRequest('This costing is final. Set it back to draft before changing it.');
     }
+    // With a costing workflow active, FINAL means approved: the author does not
+    // get to skip the approver by ticking it themselves.
+    if (body.status === 'FINAL' && before.status !== 'FINAL' && (await approvalConfigured(num(before.contractValue)))) {
+      throw badRequest('Costings are approved here — submit it for approval instead of marking it final.');
+    }
+    const vatRate = await checkVatRate(body.vatRate, num(before.vatRate));
 
-    const data: Prisma.CostingUpdateInput = {};
-    if (body.title !== undefined) data.title = body.title;
-    if (body.notes !== undefined) data.notes = body.notes || null;
-    if (body.terms !== undefined) data.terms = body.terms || null;
-    if (body.durationDays !== undefined) data.durationDays = body.durationDays ?? null;
-    if (body.markupPct !== undefined) data.markupPct = d(body.markupPct);
-    if (body.discountAmount !== undefined) data.discountAmount = d(body.discountAmount);
+    const data = headerData(body, vatRate);
     if (body.status !== undefined) data.status = body.status;
-    if (body.customerId !== undefined) {
-      data.customer = body.customerId ? { connect: { id: body.customerId } } : { disconnect: true };
-    }
-    if (body.siteId !== undefined) {
-      data.site = body.siteId ? { connect: { id: body.siteId } } : { disconnect: true };
-    }
-    // Re-linking a costing to a lead is a correction, not a handoff: the lead's
-    // stage only moves when a costing is STARTED from it (POST).
-    if (body.leadId !== undefined) {
-      data.lead = body.leadId ? { connect: { id: body.leadId } } : { disconnect: true };
-    }
-
     await prisma.costing.update({ where: { id: req.params.id }, data });
     await recalc(req.params.id);
 
@@ -420,12 +1201,14 @@ costingRoutes.patch(
         summary:
           body.status === 'FINAL'
             ? `Marked costing ${before.number} final — contract value ${formatMoney(num(costing!.contractValue))}`
-            : `Updated costing ${before.number}`,
+            : body.status === 'DRAFT' && before.status === 'FINAL'
+              ? `Reopened costing ${before.number}`
+              : `Updated costing ${before.number}`,
       },
       req,
     );
 
-    res.json(present(costing as unknown as Record<string, unknown>));
+    res.json(present(costing as unknown as Record<string, unknown>, await categoryRanks()));
   }),
 );
 
@@ -436,11 +1219,14 @@ costingRoutes.delete(
     const me = currentUser(req);
     const costing = await prisma.costing.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { quotationRevisions: true } } },
+      include: { _count: { select: { quotationRevisions: true, jobs: true } } },
     });
     if (!costing) throw notFound('Costing not found');
     if (!canEditRecord(me, 'gops', 'costing', costing.ownerId)) {
       throw forbidden('Only the author can delete this costing');
+    }
+    if (costing.status === 'PENDING_APPROVAL') {
+      throw badRequest('This costing is with the approver and cannot be deleted while they decide.');
     }
     if (costing._count.quotationRevisions > 0) {
       throw badRequest(
@@ -462,6 +1248,79 @@ costingRoutes.delete(
   }),
 );
 
+// ── Approval ─────────────────────────────────────────────────────────────────
+
+/**
+ * Sends a DRAFT costing to the approval engine. It is claimed with a
+ * conditional update, so two presses submit once, and a submission the engine
+ * refuses (no workflow, nobody to approve) puts it straight back to DRAFT —
+ * never left pending with no approval behind it.
+ */
+costingRoutes.post(
+  '/:id/submit',
+  require_('gops.costing.edit_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const costing = await prisma.costing.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { lines: { where: { isHeading: false } } } } },
+    });
+    if (!costing) throw notFound('Costing not found');
+    if (!canEditRecord(me, 'gops', 'costing', costing.ownerId)) {
+      throw forbidden('Only the author can submit this costing');
+    }
+    if (costing.status !== 'DRAFT') throw badRequest('Only a draft costing is submitted for approval');
+    if (!costing._count.lines) throw badRequest('Add at least one cost line before submitting for approval');
+
+    const claimed = await prisma.costing.updateMany({
+      where: { id: costing.id, status: 'DRAFT' },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+    if (!claimed.count) throw badRequest('This costing was submitted a moment ago');
+
+    try {
+      await submitForApproval({
+        documentType: 'costing',
+        documentId: costing.id,
+        documentNumber: costing.number,
+        subject: costing.title,
+        amount: num(costing.contractValue),
+        link: `/g-ops/costing/${costing.id}`,
+        // The author, not whoever pressed the button: an admin submitting for
+        // somebody must not become able to approve a costing they did not make.
+        requesterId: costing.ownerId,
+      });
+    } catch (err) {
+      await prisma.costing.update({ where: { id: costing.id }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    res.json({ ok: true, status: 'PENDING_APPROVAL' });
+  }),
+);
+
+/** The approver's decision moves the costing: approved → FINAL, rejected → back to DRAFT to rework. */
+export async function settleCosting(documentId: string, outcome: 'APPROVED' | 'REJECTED') {
+  const claimed = await prisma.costing.updateMany({
+    where: { id: documentId, status: 'PENDING_APPROVAL' },
+    data: { status: outcome === 'APPROVED' ? 'FINAL' : 'DRAFT' },
+  });
+  if (!claimed.count) return;
+  const costing = await prisma.costing.findUnique({ where: { id: documentId }, select: { number: true, contractValue: true } });
+  await audit({
+    entityType: 'costing',
+    entityId: documentId,
+    action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+    summary:
+      outcome === 'APPROVED'
+        ? `Costing ${costing?.number} approved — final at ${formatMoney(num(costing?.contractValue))}`
+        : `Costing ${costing?.number} returned to draft`,
+  });
+}
+
+onApprovalSettled('costing', async (request, outcome) => {
+  await settleCosting(request.documentId, outcome);
+});
+
 // ── Duplicate ────────────────────────────────────────────────────────────────
 
 /**
@@ -475,7 +1334,8 @@ costingRoutes.delete(
  *
  * What is NOT copied: the lead link (a copy answers no lead), the quotation
  * revisions and jobs built on the original (they are the original's history),
- * and the status (a copy is always a draft — its numbers are about to change).
+ * the status (a copy is always a draft — its numbers are about to change) and
+ * the validity date (the copy's prices have not been offered to anyone yet).
  */
 costingRoutes.post(
   '/:id/duplicate',
@@ -500,11 +1360,7 @@ costingRoutes.post(
     if (!source) throw notFound('Costing not found');
     // Copying is reading: someone who may only see their own costings may only
     // copy their own.
-    if (
-      !me.isSuperAdmin &&
-      !me.permissions.has('gops.costing.view_all') &&
-      source.ownerId !== me.id
-    ) {
+    if (onlyOwn(me) && source.ownerId !== me.id) {
       throw forbidden('This costing belongs to someone else');
     }
 
@@ -519,7 +1375,10 @@ costingRoutes.post(
           siteId: source.siteId,
           ownerId: me.id,
           markupPct: source.markupPct,
+          contingencyPct: source.contingencyPct,
           discountAmount: source.discountAmount,
+          vatRate: source.vatRate,
+          systemUnit: source.systemUnit,
           durationDays: source.durationDays,
           notes: source.notes,
           terms: source.terms,
@@ -527,7 +1386,9 @@ costingRoutes.post(
             create: source.lines.map((l) => ({
               costCategoryId: l.costCategoryId,
               itemId: l.itemId,
+              name: l.name,
               description: l.description,
+              isHeading: l.isHeading,
               quantity: l.quantity,
               unit: l.unit,
               unitCost: l.unitCost,
@@ -546,6 +1407,7 @@ costingRoutes.post(
               tasks: {
                 create: s.tasks.map((t) => ({
                   name: t.name,
+                  startDay: t.startDay,
                   durationDays: t.durationDays,
                   sortOrder: t.sortOrder,
                 })),
@@ -571,19 +1433,21 @@ costingRoutes.post(
       req,
     );
     res.status(201).json({
-      ...present(copy as unknown as Record<string, unknown>),
+      ...present(copy as unknown as Record<string, unknown>, await categoryRanks()),
       canEdit: true,
       duplicatedFrom: { id: source.id, number: source.number },
     });
   }),
 );
 
-// ── Cost lines ───────────────────────────────────────────────────────────────
+// ── Cost lines, one at a time ────────────────────────────────────────────────
 
 const lineSchema = z.object({
   costCategoryId: z.string().min(1, 'Choose a cost category'),
   itemId: z.string().optional().nullable(),
+  name: z.string().trim().max(300).optional().nullable(),
   description: z.string().trim().min(1, 'Describe the line'),
+  isHeading: z.boolean().optional(),
   quantity: z.number().min(0),
   unit: z.string().trim().min(1).default('pcs'),
   unitCost: z.number().min(0),
@@ -596,17 +1460,20 @@ costingRoutes.post(
   handler(async (req, res) => {
     await forEdit(req, req.params.id);
     const body = parseBody(lineSchema, req.body);
+    const heading = !!body.isHeading;
 
     const line = await prisma.costingLine.create({
       data: {
         costingId: req.params.id,
         costCategoryId: body.costCategoryId,
         itemId: body.itemId || null,
+        name: body.name || null,
         description: body.description,
-        quantity: d(body.quantity),
+        isHeading: heading,
+        quantity: d(heading ? 0 : body.quantity),
         unit: body.unit,
-        unitCost: d(body.unitCost),
-        amount: d(body.quantity * body.unitCost),
+        unitCost: d(heading ? 0 : body.unitCost),
+        amount: d(heading ? 0 : lineAmount(body.quantity, body.unitCost)),
         sortOrder: body.sortOrder ?? 0,
       },
     });
@@ -628,20 +1495,23 @@ costingRoutes.patch(
     });
     if (!existing) throw notFound('Cost line not found');
 
-    const quantity = body.quantity ?? Number(existing.quantity);
-    const unitCost = body.unitCost ?? Number(existing.unitCost);
+    const heading = body.isHeading ?? existing.isHeading;
+    const quantity = heading ? 0 : body.quantity ?? Number(existing.quantity);
+    const unitCost = heading ? 0 : body.unitCost ?? Number(existing.unitCost);
 
     const line = await prisma.costingLine.update({
       where: { id: req.params.lineId },
       data: {
         ...(body.costCategoryId !== undefined ? { costCategoryId: body.costCategoryId } : {}),
         ...(body.itemId !== undefined ? { itemId: body.itemId || null } : {}),
+        ...(body.name !== undefined ? { name: body.name || null } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
         ...(body.unit !== undefined ? { unit: body.unit } : {}),
         ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
+        isHeading: heading,
         quantity: d(quantity),
         unitCost: d(unitCost),
-        amount: d(quantity * unitCost),
+        amount: d(lineAmount(quantity, unitCost)),
       },
     });
     await recalc(req.params.id);
@@ -666,7 +1536,7 @@ costingRoutes.delete(
   }),
 );
 
-// ── Scope of work / Schedule of Values ───────────────────────────────────────
+// ── Scope of work / Schedule of Values, one at a time ────────────────────────
 
 const sectionSchema = z.object({
   kind: z.enum(['MAIN_WORK', 'TESTING_COMMISSIONING', 'TURNOVER', 'OTHER']).default('MAIN_WORK'),
@@ -755,42 +1625,21 @@ costingRoutes.post(
   require_('gops.costing.edit_own'),
   handler(async (req, res) => {
     const costing = await forEdit(req, req.params.id);
-    const sections = await prisma.scopeSection.findMany({
-      where: { costingId: req.params.id },
-      orderBy: { sortOrder: 'asc' },
-    });
-    if (!sections.length) throw badRequest('Add at least one scope section first');
-
-    const contractValue = num(costing.contractValue);
-    const currentTotal = sections.reduce((s, x) => s + num(x.value), 0);
-
-    // Round to centavos and put any rounding remainder on the last section, so
-    // the sum matches the contract value exactly rather than being a centavo out.
-    const raw = sections.map((s) =>
-      currentTotal > 0 ? (num(s.value) / currentTotal) * contractValue : contractValue / sections.length,
-    );
-    const rounded = raw.map((v) => Math.round(v * 100) / 100);
-    const drift = Math.round((contractValue - rounded.reduce((a, b) => a + b, 0)) * 100) / 100;
-    rounded[rounded.length - 1] = Math.round((rounded[rounded.length - 1] + drift) * 100) / 100;
-
-    await prisma.$transaction(
-      sections.map((s, i) =>
-        prisma.scopeSection.update({ where: { id: s.id }, data: { value: d(rounded[i]) } }),
-      ),
-    );
+    const count = await prisma.$transaction((tx) => spreadSections(tx, req.params.id));
+    if (!count) throw badRequest('Add at least one scope section first');
 
     await audit(
       {
         entityType: 'costing',
         entityId: req.params.id,
         action: 'UPDATED',
-        summary: `Distributed ${formatMoney(contractValue)} across ${sections.length} scope section(s)`,
+        summary: `Distributed ${formatMoney(num(costing.contractValue))} across ${count} scope section(s)`,
       },
       req,
     );
 
     const full = await loadFull(req.params.id);
-    res.json(present(full as unknown as Record<string, unknown>));
+    res.json(present(full as unknown as Record<string, unknown>, await categoryRanks()));
   }),
 );
 
@@ -804,6 +1653,7 @@ costingRoutes.post(
     const body = parseBody(
       z.object({
         name: z.string().trim().min(1),
+        startDay: z.number().int().min(1).optional().nullable(),
         durationDays: z.number().int().min(0).default(0),
         sortOrder: z.number().int().optional(),
       }),
@@ -819,6 +1669,7 @@ costingRoutes.post(
         data: {
           scopeSectionId: req.params.sectionId,
           name: body.name,
+          startDay: body.startDay ?? null,
           durationDays: body.durationDays,
           sortOrder: body.sortOrder ?? 0,
         },
@@ -841,14 +1692,10 @@ costingRoutes.delete(
   }),
 );
 
-// ── PDF ──────────────────────────────────────────────────────────────────────
+// ── PDF: the Material Cost Estimate and the Scope of Work ────────────────────
 
-const KIND_LABELS: Record<string, string> = {
-  MAIN_WORK: 'Main work',
-  TESTING_COMMISSIONING: 'Testing & commissioning',
-  TURNOVER: 'Turnover',
-  OTHER: 'Other',
-};
+const pct = (v: number, places = 2) => `${(v * 100).toFixed(places).replace(/\.?0+$/, '')}%`;
+const qty = (v: number) => (Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3))));
 
 costingRoutes.get(
   '/:id/pdf',
@@ -857,120 +1704,162 @@ costingRoutes.get(
     const me = currentUser(req);
     const costing = await loadFull(req.params.id);
     if (!costing) throw notFound('Costing not found');
-    if (
-      !me.isSuperAdmin &&
-      !me.permissions.has('gops.costing.view_all') &&
-      costing.ownerId !== me.id
-    ) {
+    if (onlyOwn(me) && costing.ownerId !== me.id) {
       throw forbidden('This costing belongs to someone else');
     }
 
-    const view = present(costing as unknown as Record<string, unknown>);
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
+    const ranks = await categoryRanks();
+    const view = present(costing as unknown as Record<string, unknown>, ranks);
+    const lines = view.lines as unknown as {
+      code: string | null;
+      name: string | null;
+      description: string;
+      isHeading: boolean;
+      unit: string;
+      quantity: number;
+      unitCost: number;
+      amount: number;
+      costCategory: { id: string; name: string };
+    }[];
 
-    // Cost lines grouped by the five buckets, with a subtotal each.
-    const byCategory = new Map<string, { name: string; sortOrder: number; rows: string[][]; total: number }>();
-    for (const line of costing.lines) {
-      const key = line.costCategory.id;
-      const bucket = byCategory.get(key) ?? {
-        name: line.costCategory.name,
-        sortOrder: line.costCategory.sortOrder,
-        rows: [],
-        total: 0,
-      };
-      bucket.rows.push([
-        line.description,
-        String(Number(line.quantity)),
-        line.unit,
-        formatMoney(Number(line.unitCost), currency),
-        formatMoney(Number(line.amount), currency),
-      ]);
-      bucket.total += Number(line.amount);
-      byCategory.set(key, bucket);
-    }
-
+    // Who the estimate is for, then where and on what.
+    const location = costing.site
+      ? [costing.site.name, costing.site.address, costing.site.city].filter(Boolean).join(', ')
+      : '';
     const sections: PdfSection[] = [
       {
         kind: 'fields',
-        title: 'Costing',
-        columns: 3,
+        columns: 2,
         fields: [
-          { label: 'Customer', value: costing.customer?.name ?? '—' },
-          { label: 'Site', value: costing.site?.name ?? '—' },
+          { label: 'Project', value: costing.title },
+          { label: 'Client', value: costing.customer?.name ?? '' },
+          { label: 'Location', value: location },
+          { label: 'System / Unit', value: costing.systemUnit ?? '' },
+          { label: 'Valid until', value: costing.validUntil ? formatDate(costing.validUntil) : '' },
           { label: 'Prepared by', value: costing.owner.name },
-          { label: 'Status', value: costing.status },
-          { label: 'Duration', value: costing.durationDays ? `${costing.durationDays} days` : '—' },
-          { label: 'Date', value: formatDate(costing.createdAt) },
         ],
       },
     ];
 
-    for (const bucket of [...byCategory.values()].sort((a, b) => a.sortOrder - b.sortOrder)) {
+    // One table, the five buckets as numbered headings, each line's name bold
+    // over its description, a subtotal under every bucket that has lines.
+    const rows: PdfRow[] = [];
+    const buckets = new Map<string, { name: string; rank: number; lines: typeof lines }>();
+    for (const l of lines) {
+      const b = buckets.get(l.costCategory.id) ?? { name: l.costCategory.name, rank: ranks.get(l.costCategory.id) ?? 0, lines: [] };
+      b.lines.push(l);
+      buckets.set(l.costCategory.id, b);
+    }
+    for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
+      rows.push({ heading: `${b.rank}   ${b.name}`, shade: true });
+      let subtotal = 0;
+      for (const l of b.lines) {
+        if (l.isHeading) {
+          rows.push({ heading: l.name || l.description });
+          continue;
+        }
+        const title = l.name || l.description;
+        const body = l.name && l.description && l.description !== l.name ? l.description : undefined;
+        rows.push([
+          l.code ?? '',
+          body ? { title, body } : { title },
+          l.unit,
+          qty(l.quantity),
+          formatAmount(l.unitCost),
+          formatAmount(l.amount),
+        ]);
+        subtotal += Math.round(l.amount * 100);
+      }
+      rows.push(['', { title: `${b.name} subtotal` }, '', '', '', { title: formatAmount(subtotal / 100) }]);
+    }
+    if (rows.length) {
       sections.push({
         kind: 'table',
-        title: bucket.name,
-        head: ['Description', 'Qty', 'Unit', 'Unit cost', 'Amount'],
-        widths: [46, 9, 10, 17, 18],
-        align: ['left', 'right', 'left', 'right', 'right'],
-        rows: [...bucket.rows, ['', '', '', 'Subtotal', formatMoney(bucket.total, currency)]],
+        head: ['No.', 'Description', 'Unit', 'Qty', 'Unit cost', 'Amount (PHP)'],
+        widths: [7, 47, 8, 8, 14, 16],
+        align: ['left', 'left', 'left', 'right', 'right', 'right'],
+        rows,
       });
     }
 
+    const summary = [
+      { label: 'Project budgeted cost', value: formatMoney(view.totalCost) },
+      {
+        label: `Markup (${pct(view.markupPct)} on cost)`,
+        value: formatMoney(view.markupAmount),
+      },
+    ];
+    if (view.contingencyPct > 0) {
+      summary.push({ label: `Contingency (${pct(view.contingencyPct)})`, value: formatMoney(view.contingencyAmount) });
+    }
+    if (view.discountAmount > 0) summary.push({ label: 'Less discount', value: formatMoney(-view.discountAmount) });
+    summary.push({ label: 'Subtotal', value: formatMoney(view.contractValue) });
+    if (view.vatRate > 0) summary.push({ label: `VAT (${pct(view.vatRate, 0)})`, value: formatMoney(view.vatAmount) });
     sections.push({
-      kind: 'table',
-      title: 'How the contract amount is reached',
-      head: ['', 'Amount'],
-      widths: [70, 30],
-      align: ['left', 'right'],
+      kind: 'totals',
       rows: [
-        ['Total estimated cost', formatMoney(view.totalCost, currency)],
-        [`Markup (${(view.markupPct * 100).toFixed(2)}%)`, formatMoney(view.totalCost * view.markupPct, currency)],
-        ['Less discount', formatMoney(-view.discountAmount, currency)],
-        ['CONTRACT AMOUNT', formatMoney(view.contractValue, currency)],
-        ['Gross profit', formatMoney(view.grossProfit, currency)],
-        ['Gross margin', `${(view.grossMarginPct * 100).toFixed(2)}%`],
+        ...summary,
+        { label: 'GRAND TOTAL', value: formatMoney(view.grandTotal), bold: true },
+        { label: 'Gross margin', value: pct(view.grossMarginPct) },
       ],
     });
 
-    if (costing.scopeSections.length) {
+    if (costing.terms) sections.push({ kind: 'text', title: 'Terms & Conditions', body: costing.terms });
+    // Internal notes stay on the screen: this is the paper that leaves the office.
+
+    // The Scope of Work: the phases and their tasks on a working-day grid.
+    const scope = view.scopeSections as unknown as {
+      name: string;
+      startDay: number | null;
+      endDay: number | null;
+      planDays: number;
+      tasks: { name: string; start: number; durationDays: number }[];
+    }[];
+    const groups: PdfGanttGroup[] = scope.map((s) => ({
+      name: s.name,
+      tasks: s.tasks.map((t) => ({ name: t.name, start: t.start, days: t.durationDays })),
+    }));
+    if (groups.some((g) => g.tasks.length)) {
+      sections.push({
+        kind: 'gantt',
+        title: 'Scope of work',
+        landscape: true,
+        groups,
+        legend: `Planned duration in working days (Mon–Fri) — ${view.planDays} working day${view.planDays === 1 ? '' : 's'} in all.`,
+      });
+    } else if (scope.length) {
       sections.push({
         kind: 'table',
-        title: 'Scope of work — schedule of values',
-        head: ['#', 'Scope', 'Type', 'Duration', 'Value'],
-        widths: [6, 44, 20, 12, 18],
-        align: ['right', 'left', 'left', 'right', 'right'],
-        rows: [
-          ...costing.scopeSections.map((s, i) => [
-            String(i + 1),
-            s.tasks.length ? `${s.name}\n   ${s.tasks.map((t) => `· ${t.name}`).join('\n   ')}` : s.name,
-            KIND_LABELS[s.kind] ?? s.kind,
-            `${s.durationDays} d`,
-            formatMoney(Number(s.value), currency),
-          ]),
-          ['', 'TOTAL', '', '', formatMoney(view.scopeTotal, currency)],
-        ],
+        title: 'Scope of work',
+        head: ['#', 'Phase', 'Days'],
+        widths: [6, 80, 14],
+        align: ['right', 'left', 'right'],
+        rows: scope.map((s, i) => [String(i + 1), s.name, String(s.planDays)]),
       });
     }
 
-    if (costing.terms) sections.push({ kind: 'text', title: 'Terms', body: costing.terms });
-    if (costing.notes) sections.push({ kind: 'text', title: 'Notes', body: costing.notes });
+    // Prepared by the author at creation; then the approval engine's own
+    // sign-offs — every step but the last is a check, the last the approval.
+    // A slot nobody has acted on prints "Pending".
+    const signoffs = await approvalSignoffs('costing', costing.id);
+    const approved = costing.status === 'FINAL' ? signoffs : [];
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: costing.owner.name, position: costing.owner.position ?? undefined, at: costing.createdAt },
+      ...approved.slice(0, -1).map((s) => ({ role: 'Checked by', ...s })),
+      approved.length ? { role: 'Approved by', ...approved[approved.length - 1] } : { role: 'Approved by' },
+    ];
 
     const pdf = await renderDocument({
-      title: 'Costing Sheet',
+      title: 'Material Cost Estimate',
       documentNumber: costing.number,
       date: costing.createdAt,
       reference: `${costing.title}${costing.customer ? ` — ${costing.customer.name}` : ''}`,
       sections,
-      signatories: [
-        { role: 'Prepared by', name: costing.owner.name, at: costing.createdAt },
-        { role: 'Checked by' },
-        { role: 'Approved by' },
-      ],
+      signatories,
     });
 
     await audit(
-      { entityType: 'costing', entityId: costing.id, action: 'EXPORTED', summary: 'Printed costing sheet' },
+      { entityType: 'costing', entityId: costing.id, action: 'EXPORTED', summary: 'Printed the material cost estimate' },
       req,
     );
 
@@ -979,3 +1868,7 @@ costingRoutes.get(
     res.send(pdf);
   }),
 );
+
+function formatDate(d: Date): string {
+  return d.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}

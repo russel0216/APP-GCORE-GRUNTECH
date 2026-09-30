@@ -14,6 +14,14 @@
  *   · The lookup's `?status=` filter is what keeps DRAFT costings out of the
  *     project picker. If it silently returned everything, a project could be
  *     built on a budget that is still moving.
+ *   · The sheet (POST /costings, PUT /costings/:id/sheet) writes header, lines
+ *     and scope in one transaction, keeps row ids, and stores exactly the
+ *     figures the page showed — the web copy of costingMath is pinned to the
+ *     server's here.
+ *   · With a costing workflow active, FINAL is reached by approval only, and a
+ *     costing under approval holds still.
+ *   · Predictions and templates never become a window onto a colleague's
+ *     unit costs.
  *
  * All of it is checked over HTTP, because the guards live in the routes.
  */
@@ -24,6 +32,11 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
+import { act } from '../src/shared/approvals';
+import * as serverMath from '../src/shared/costingMath';
+import * as webMath from '../../web/src/lib/costingMath';
+// Registers the costing's onApprovalSettled subscriber in this process.
+import '../src/routes/costing';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -57,6 +70,8 @@ async function cleanup() {
   // Jobs restrict their costing, so they go first; lines, sections and tasks
   // cascade from the costing.
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
+  await prisma.costingTemplate.deleteMany({ where: { name: { startsWith: TAG } } });
+  await prisma.item.deleteMany({ where: { code: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -167,11 +182,16 @@ async function main() {
     'gops.costing.edit_own',
   ]);
   const readRole = await makeRole('zzcost_read', `${TAG} read-only costing`, ['gops.costing.view_all']);
+  // The seeded workflow routes costings to the executive role; the approver
+  // holds it, and nobody else here does.
+  const executive = await prisma.role.findUnique({ where: { key: 'executive' } });
+  if (!executive) throw new Error('Expected the seeded executive role');
 
   const estimator = await makeUser(`${TAG} Estimator`, `estimator${MAIL}`, [ownRole.id]);
   const colleague = await makeUser(`${TAG} Colleague`, `colleague${MAIL}`, [ownRole.id]);
   const manager = await makeUser(`${TAG} Manager`, `manager${MAIL}`, [allRole.id]);
   const reader = await makeUser(`${TAG} Reader`, `reader${MAIL}`, [readRole.id]);
+  const approver = await makeUser(`${TAG} Approver`, `approver${MAIL}`, [executive.id]);
 
   const tEstimator = signToken(estimator.id, estimator.email);
   const tColleague = signToken(colleague.id, colleague.email);
@@ -307,8 +327,22 @@ async function main() {
     name: 'Purity test',
     durationDays: 0,
   });
-  const finalised = await api(tEstimator, 'PATCH', `/costings/${sourceId}`, { status: 'FINAL' });
-  check('the source costing is FINAL', finalised.status === 200 && finalised.body.status === 'FINAL');
+  // With the seeded costing workflow active, FINAL is the approver's word.
+  const selfFinal = await api(tEstimator, 'PATCH', `/costings/${sourceId}`, { status: 'FINAL' });
+  check('with a costing workflow active, the author cannot mark it final', selfFinal.status === 400, `status ${selfFinal.status}`);
+  const submitted = await api(tEstimator, 'POST', `/costings/${sourceId}/submit`);
+  check('POST /costings/:id/submit sends it for approval', submitted.status === 200 && submitted.body.status === 'PENDING_APPROVAL', JSON.stringify(submitted.body));
+  const twice = await api(tEstimator, 'POST', `/costings/${sourceId}/submit`);
+  check('a second submit is refused', twice.status === 400, `status ${twice.status}`);
+  const pendingEdit = await api(tEstimator, 'PUT', `/costings/${sourceId}/sheet`, { title: `${TAG} changed under the approver` });
+  check('a costing with the approver cannot be edited', pendingEdit.status === 400, `status ${pendingEdit.status}`);
+  const pendingDelete = await api(tManager, 'DELETE', `/costings/${sourceId}`);
+  check('nor deleted', pendingDelete.status === 400 || pendingDelete.status === 403, `status ${pendingDelete.status}`);
+  const request = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sourceId, status: 'PENDING' } });
+  check('the approval request is raised in the author\'s name', request?.requesterId === estimator.id);
+  await act({ requestId: request!.id, userId: approver.id, action: 'APPROVED' });
+  const finalised = await api(tEstimator, 'GET', `/costings/${sourceId}`);
+  check('the source costing is FINAL once approved', finalised.status === 200 && finalised.body.status === 'FINAL', String(finalised.body.status));
   // 2×150,000 + 12×2,500 = 330,000 cost; ×1.2 = 396,000 contract.
   check('its contract value is cost × (1 + markup)', money(Number(finalised.body.contractValue), 396000));
 
@@ -455,6 +489,302 @@ async function main() {
   check('without gops.costing.create the duplicate is refused', asReader.status === 403, `status ${asReader.status}`);
   const missing = await api(tManager, 'POST', '/costings/no-such-costing/duplicate');
   check('duplicating a costing that does not exist is a 404', missing.status === 404, `status ${missing.status}`);
+
+  // ══ The arithmetic: the page's copy is the server's ════════════════════════
+  console.log('The arithmetic');
+
+  let seed = 20260930;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  let mathAgree = true;
+  let mathDetail = '';
+  for (let n = 0; n < 400; n++) {
+    const lines = Array.from({ length: 1 + Math.floor(rand() * 8) }, () => ({
+      quantity: (Math.floor(rand() * 100000) / 1000).toString(),
+      unitCost: (Math.floor(rand() * 10000000) / 100).toString(),
+      isHeading: rand() < 0.1,
+    }));
+    const rates = {
+      markupPct: (Math.floor(rand() * 20000) / 10000).toString(),
+      contingencyPct: (Math.floor(rand() * 1000) / 10000).toString(),
+      discountAmount: (Math.floor(rand() * 100000) / 100).toString(),
+      vatRate: rand() < 0.3 ? '0' : '0.12',
+    };
+    const a = JSON.stringify(serverMath.costingFigures(lines, rates));
+    const b = JSON.stringify(webMath.costingFigures(lines, rates));
+    if (a !== b) {
+      mathAgree = false;
+      mathDetail = `${a} vs ${b}`;
+      break;
+    }
+  }
+  check('400 random sheets: web/src/lib/costingMath equals the server\'s to the centavo', mathAgree, mathDetail);
+  const plansAgree =
+    JSON.stringify(serverMath.planTasks([{ durationDays: 0, tasks: [{ durationDays: 2 }, { startDay: 9, durationDays: 3 }, { durationDays: 0 }] }])) ===
+    JSON.stringify(webMath.planTasks([{ durationDays: 0, tasks: [{ durationDays: 2 }, { startDay: 9, durationDays: 3 }, { durationDays: 0 }] }]));
+  check('and its plan is the server\'s plan', plansAgree);
+  check('a line amount is exact where a float is not: 0.1 × 3 = 0.30', serverMath.lineAmount('3', '0.1') === 0.3);
+  check('quantity to three places, cost to two: 1.005 × 99.99 = 100.49', serverMath.lineAmount('1.005', '99.99') === 100.49);
+  const f = serverMath.costingFigures([{ quantity: 1, unitCost: 55471.43 }], { markupPct: 1.0925, contingencyPct: 0, discountAmount: 0, vatRate: 0.12 });
+  check(
+    'markup and VAT round once each, half away from zero',
+    f.markupAmount === 60602.54 && f.contractValue === 116073.97 && f.vatAmount === 13928.88 && f.grandTotal === 130002.85,
+    JSON.stringify(f),
+  );
+  check(
+    'codes run 101, 102 in a bucket and restart at 201 in the next; a subheading has none',
+    JSON.stringify(serverMath.lineCodes([{ rank: 1 }, { rank: 1, isHeading: true }, { rank: 1 }, { rank: 2 }])) === JSON.stringify(['101', null, '102', '201']),
+  );
+
+  // ══ The sheet: one save ═════════════════════════════════════════════════════
+  console.log('The sheet');
+
+  const allCats = await prisma.costCategory.findMany({ orderBy: { sortOrder: 'asc' } });
+  const [mat, eqp, lab] = allCats;
+  const costingCounter = async () =>
+    (await prisma.numberSequence.findMany({ where: { documentType: 'costing' } })).reduce((n, r) => n + r.lastNumber, 0);
+
+  const counterBefore = await costingCounter();
+  const refused = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} refused sheet`,
+    lines: [{ costCategoryId: 'no-such-category', name: 'Anything', quantity: 1, unitCost: 1 }],
+  });
+  check('a sheet naming a cost category that does not exist is refused', refused.status === 400, `status ${refused.status}`);
+  check('and burns no number', (await costingCounter()) === counterBefore);
+  const unnamed = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} refused sheet`,
+    lines: [{ costCategoryId: mat.id, quantity: 1, unitCost: 1 }],
+  });
+  check('a line with neither name nor description is refused', unnamed.status === 400, `status ${unnamed.status}`);
+  const oddVat = await api(tEstimator, 'POST', '/costings', { title: `${TAG} odd VAT`, vatRate: 0.05 });
+  check('a VAT rate that is neither the company rate nor 0% is refused', oddVat.status === 400, `status ${oddVat.status}`);
+
+  const sheet = {
+    title: `${TAG} Booster VFD controller`,
+    customerId: customer.id,
+    siteId: site.id,
+    systemUnit: `${TAG} Booster pump controller`,
+    validUntil: '2026-10-30',
+    markupPct: 0.5,
+    contingencyPct: 0.05,
+    discountAmount: 100,
+    vatRate: 0,
+    terms: `${TAG} terms: 50% down payment`,
+    notes: 'Internal only',
+    lines: [
+      { costCategoryId: mat.id, isHeading: true, name: 'Panel' },
+      { costCategoryId: mat.id, name: `${TAG} VFD 15KW`, description: 'Variable frequency drive', quantity: 2, unit: 'unit', unitCost: 45000.5 },
+      { costCategoryId: mat.id, name: `${TAG} Consumables`, quantity: 1, unit: 'lot', unitCost: 3000 },
+      { costCategoryId: lab.id, name: `${TAG} Assembly and programming`, quantity: 1, unit: 'lot', unitCost: 39400 },
+    ],
+    sections: [
+      {
+        kind: 'MAIN_WORK',
+        name: 'Planning & mobilization',
+        tasks: [
+          { name: `${TAG} Kick-off`, durationDays: 1 },
+          { name: `${TAG} Procurement`, startDay: 2, durationDays: 14 },
+        ],
+      },
+      { kind: 'MAIN_WORK', name: 'Controller assembly', tasks: [{ name: `${TAG} Wiring`, durationDays: 3 }] },
+      { kind: 'TURNOVER', name: 'Turnover', durationDays: 2, tasks: [] },
+    ],
+    spread: true,
+  };
+  const created = await api(tEstimator, 'POST', '/costings', sheet);
+  check('POST /costings writes the header, lines and scope in one save', created.status === 201, `status ${created.status}: ${JSON.stringify(created.body).slice(0, 300)}`);
+  const sheetId = created.body.id as string;
+  const stored = await prisma.costing.findUnique({
+    where: { id: sheetId },
+    include: { lines: { orderBy: { sortOrder: 'asc' } }, scopeSections: { orderBy: { sortOrder: 'asc' }, include: { tasks: { orderBy: { sortOrder: 'asc' } } } } },
+  });
+  // 2 × 45,000.50 + 3,000 + 39,400 = 132,401 cost.
+  const expected = serverMath.costingFigures(
+    sheet.lines.map((l) => ({ quantity: l.quantity ?? 0, unitCost: l.unitCost ?? 0, isHeading: l.isHeading })),
+    { markupPct: 0.5, contingencyPct: 0.05, discountAmount: 100, vatRate: 0 },
+  );
+  check('the stored cost is the sum of the lines', money(num(stored?.totalCost), 132401), String(num(stored?.totalCost)));
+  check(
+    'the contract value is cost + markup + contingency − discount, as the page computes it',
+    money(num(stored?.contractValue), expected.contractValue) && money(expected.contractValue, 132401 + 66200.5 + 6620.05 - 100),
+    `${num(stored?.contractValue)} vs ${expected.contractValue}`,
+  );
+  check('the header fields are kept (system / unit, valid until, contingency, VAT 0%)',
+    stored?.systemUnit === sheet.systemUnit &&
+      stored?.validUntil?.toISOString().slice(0, 10) === '2026-10-30' &&
+      num(stored?.contingencyPct) === 0.05 &&
+      num(stored?.vatRate) === 0,
+  );
+  check('the subheading is stored as a heading that costs nothing', stored?.lines[0].isHeading === true && num(stored?.lines[0].amount) === 0);
+  check('a line typed as a name alone carries it as its description too', stored?.lines[2].description === `${TAG} Consumables` && stored?.lines[2].name === `${TAG} Consumables`);
+  const createdLines = rows(created.body.lines);
+  check(
+    'the response codes the lines 101, 102 and 301 (Labor is the third bucket), the subheading none',
+    JSON.stringify(createdLines.map((l) => l.code)) === JSON.stringify([null, '101', '102', '301']),
+    JSON.stringify(createdLines.map((l) => l.code)),
+  );
+  check(
+    'a task with no start day follows the one before it; one with a start day keeps it',
+    stored?.scopeSections[0].tasks[0].startDay === null && stored?.scopeSections[0].tasks[1].startDay === 2,
+  );
+  const planned = rows(created.body.scopeSections);
+  const plannedTasks = planned.map((s) => rows(s.tasks).map((t) => `${t.start}-${t.end}`).join(',')).join('|');
+  check('the plan reads Day 1, Day 2–15, then Day 16–18', plannedTasks === '1-1,2-15|16-18|', plannedTasks);
+  check(
+    'a phase with tasks lasts as long as they do; one without keeps its typed duration',
+    stored?.scopeSections[0].durationDays === 15 && stored?.scopeSections[1].durationDays === 3 && stored?.scopeSections[2].durationDays === 2,
+    stored?.scopeSections.map((x) => x.durationDays).join(','),
+  );
+  check('the costing lasts as long as its plan (18 working days)', stored?.durationDays === 18, String(stored?.durationDays));
+  check(
+    'spread: the schedule of values adds up to the contract value exactly',
+    money(stored!.scopeSections.reduce((n, x) => n + num(x.value), 0), num(stored?.contractValue)),
+  );
+  check('the created lead-less sheet belongs to its author', stored?.ownerId === estimator.id);
+
+  // PUT: rows keep their ids, removed rows go, new rows arrive.
+  const keepLine = stored!.lines[1];
+  const put = await api(tEstimator, 'PUT', `/costings/${sheetId}/sheet`, {
+    ...sheet,
+    title: `${TAG} Booster VFD controller rev`,
+    vatRate: 0.12,
+    lines: [
+      { id: keepLine.id, costCategoryId: mat.id, name: keepLine.name, description: 'Variable frequency drive, 15 kW', quantity: 3, unit: 'unit', unitCost: 45000.5 },
+      { costCategoryId: eqp.id, name: `${TAG} Crane hire`, quantity: 1, unit: 'day', unitCost: 8000 },
+    ],
+    sections: [
+      {
+        id: stored!.scopeSections[0].id,
+        kind: 'MAIN_WORK',
+        name: 'Planning & mobilization',
+        tasks: [{ id: stored!.scopeSections[0].tasks[0].id, name: `${TAG} Kick-off meeting`, durationDays: 2 }],
+      },
+    ],
+  });
+  check('PUT /costings/:id/sheet saves', put.status === 200, `status ${put.status}: ${JSON.stringify(put.body).slice(0, 200)}`);
+  const afterPut = await prisma.costing.findUnique({
+    where: { id: sheetId },
+    include: { lines: { orderBy: { sortOrder: 'asc' } }, scopeSections: { include: { tasks: true } } },
+  });
+  check('a line sent with its id is updated in place, not recreated', afterPut?.lines[0].id === keepLine.id && num(afterPut?.lines[0].quantity) === 3);
+  check('lines left out are removed and new ones created', afterPut?.lines.length === 2 && afterPut.lines[1].name === `${TAG} Crane hire`);
+  check('phases and tasks likewise', afterPut?.scopeSections.length === 1 && afterPut.scopeSections[0].id === stored!.scopeSections[0].id && afterPut.scopeSections[0].tasks.length === 1 && afterPut.scopeSections[0].tasks[0].id === stored!.scopeSections[0].tasks[0].id);
+  check('the totals follow: 3 × 45,000.50 + 8,000 = 143,001.50', money(num(afterPut?.totalCost), 143001.5), String(num(afterPut?.totalCost)));
+  check('VAT switched on at the company rate', num(afterPut?.vatRate) > 0);
+  const putBody = put.body;
+  check(
+    'the grand total is the contract value plus its VAT',
+    money(Number(putBody.grandTotal), Number(putBody.contractValue) + Number(putBody.vatAmount)) && Number(putBody.vatAmount) > 0,
+  );
+  const colleaguePut = await api(tColleague, 'PUT', `/costings/${sheetId}/sheet`, { title: `${TAG} not mine` });
+  check("a colleague with own-scope editing cannot save somebody else's sheet", colleaguePut.status === 403, `status ${colleaguePut.status}`);
+  const audit = await prisma.auditLog.findFirst({ where: { entityType: 'costing', entityId: sheetId, action: 'UPDATED', actorId: estimator.id } });
+  check('the save is audited', !!audit);
+
+  // ══ Predictions ═════════════════════════════════════════════════════════════
+  console.log('Predictions');
+
+  await prisma.item.create({ data: { code: `${TAG}-ITEM1`, name: `${TAG} VFD Keypad`, unit: 'pc', standardCost: D(1500) } });
+  const mine = await api(tEstimator, 'GET', `/costings/suggest?q=${encodeURIComponent(`${TAG} VFD`)}`);
+  const mineRows = rows(mine.body);
+  const fromHistory = mineRows.find((r) => r.source === 'history' && r.name === keepLine.name);
+  check('typing a past line\'s name offers it, at its last unit cost and unit', !!fromHistory && fromHistory.unitCost === 45000.5 && fromHistory.unit === 'unit', JSON.stringify(mineRows).slice(0, 300));
+  check('and items from the item master, at their standard cost', mineRows.some((r) => r.source === 'item' && r.name === `${TAG} VFD Keypad` && r.unitCost === 1500));
+  const theirs = await api(tColleague, 'GET', `/costings/suggest?q=${encodeURIComponent(`${TAG} VFD`)}`);
+  check(
+    "own scope: a colleague is never offered somebody else's unit costs",
+    !rows(theirs.body).some((r) => r.source === 'history') && rows(theirs.body).some((r) => r.source === 'item'),
+  );
+  const managerSees = await api(tManager, 'GET', `/costings/suggest?q=${encodeURIComponent(`${TAG} VFD`)}`);
+  check('view_all: everyone\'s history is offered', rows(managerSees.body).some((r) => r.source === 'history'));
+  const lists = await api(tEstimator, 'GET', '/costings/suggest/lists');
+  check(
+    'the lists offer used units, System / Unit names and task names, and your last terms',
+    (lists.body.units as string[]).includes('unit') &&
+      (lists.body.systemUnits as string[]).includes(sheet.systemUnit) &&
+      (lists.body.tasks as string[]).includes(`${TAG} Kick-off meeting`) &&
+      lists.body.terms === sheet.terms &&
+      typeof lists.body.companyVatRate === 'number',
+    JSON.stringify(lists.body).slice(0, 300),
+  );
+  check('a search under two characters answers nothing', rows((await api(tEstimator, 'GET', '/costings/suggest?q=Z')).body).length === 0);
+
+  // ══ Templates ═══════════════════════════════════════════════════════════════
+  console.log('Templates');
+
+  const fromCosting = await api(tEstimator, 'POST', '/costings/templates', { name: `${TAG} VFD template`, costingId: sheetId, withPrices: false });
+  check('a template is saved from a costing', fromCosting.status === 201, `status ${fromCosting.status}`);
+  const tpl = await api(tColleague, 'GET', `/costings/templates/${fromCosting.body.id}`);
+  check('anyone who reads costings can open it', tpl.status === 200);
+  const tplLines = rows(tpl.body.lines);
+  check('without prices, every unit cost is zero but the quantities stay', tplLines.length === 2 && tplLines.every((l) => l.unitCost === 0) && tplLines[0].quantity === 3);
+  check('its lines come back with category ids resolved from their codes', tplLines[0].costCategoryId === mat.id && tplLines[1].costCategoryId === eqp.id);
+  check('its phases and tasks come along', rows(tpl.body.sections).length === 1 && rows(rows(tpl.body.sections)[0].tasks).length === 1);
+  const fromSheet = await api(tColleague, 'POST', '/costings/templates', {
+    name: `${TAG} sheet template`,
+    sheet: { markupPct: 0.3, lines: [{ costCategoryId: lab.id, name: 'Technician', quantity: 2, unit: 'day', unitCost: 1800 }], sections: [] },
+  });
+  check('a template is saved from an unsaved sheet', fromSheet.status === 201, `status ${fromSheet.status}`);
+  const list = await api(tEstimator, 'GET', '/costings/templates');
+  const listed = rows(list.body).filter((t) => (t.name as string).startsWith(TAG));
+  check('the list shows both, with counts and who may change each', listed.length === 2 && listed.some((t) => t.canEdit === false) && listed.some((t) => t.canEdit === true && t.lineCount === 2));
+  const notYours = await api(tEstimator, 'DELETE', `/costings/templates/${fromSheet.body.id}`);
+  check("own scope: a template somebody else saved cannot be deleted", notYours.status === 403, `status ${notYours.status}`);
+  const rename = await api(tEstimator, 'PATCH', `/costings/templates/${fromCosting.body.id}`, { name: `${TAG} VFD template v2` });
+  check('the author renames their own', rename.status === 200 && rename.body.name === `${TAG} VFD template v2`);
+  const readerSaves = await api(tReader, 'POST', '/costings/templates', { name: `${TAG} reader`, costingId: sheetId });
+  check('without gops.costing.create no template is saved', readerSaves.status === 403, `status ${readerSaves.status}`);
+  const gone = await api(tColleague, 'DELETE', `/costings/templates/${fromSheet.body.id}`);
+  check('the author deletes their own', gone.status === 200 && !(await prisma.costingTemplate.findUnique({ where: { id: fromSheet.body.id as string } })));
+
+  // ══ Approval both ways, and the printout ════════════════════════════════════
+  console.log('Approval and the estimate');
+
+  const empty = await api(tEstimator, 'POST', '/costings', { title: `${TAG} nothing in it` });
+  const emptySubmit = await api(tEstimator, 'POST', `/costings/${empty.body.id}/submit`);
+  check('a costing with no cost lines is not submitted', emptySubmit.status === 400, `status ${emptySubmit.status}`);
+  check('and stays a draft', (await prisma.costing.findUnique({ where: { id: empty.body.id as string } }))?.status === 'DRAFT');
+
+  await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
+  const rejectReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sheetId, status: 'PENDING' } });
+  await act({ requestId: rejectReq!.id, userId: approver.id, action: 'REJECTED', comment: 'Recheck the crane' });
+  check('a rejected costing comes back to draft to rework', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'DRAFT');
+  await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
+  const approveReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sheetId, status: 'PENDING' } });
+  await act({ requestId: approveReq!.id, userId: approver.id, action: 'APPROVED' });
+  check('resubmitted and approved, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
+  const reopen = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
+  check('the author can still reopen a final costing', reopen.status === 200 && reopen.body.status === 'DRAFT');
+  await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
+  const again = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sheetId, status: 'PENDING' } });
+  await act({ requestId: again!.id, userId: approver.id, action: 'APPROVED' });
+
+  // The estimate: a PDF with the landscape Scope of Work page after it.
+  await prisma.scopeTask.create({ data: { scopeSectionId: afterPut!.scopeSections[0].id, name: `${TAG} Long task`, startDay: 3, durationDays: 20, sortOrder: 5 } });
+  const pdfRes = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } });
+  const pdf = Buffer.from(await pdfRes.arrayBuffer());
+  const pdfText = pdf.toString('latin1');
+  check('GET /costings/:id/pdf renders a PDF', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf' && pdfText.startsWith('%PDF'));
+  const pages = (pdfText.match(/\/Type \/Page\b/g) ?? []).length;
+  check('the estimate is followed by the Scope of Work on its own page', pages >= 2, `${pages} page(s)`);
+  check('that page is landscape', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(pdfText));
+  const colleaguePdf = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tColleague}` } });
+  check("own scope: a colleague cannot print somebody else's estimate", colleaguePdf.status === 403, `status ${colleaguePdf.status}`);
+
+  // Duplicate carries the sheet's new fields.
+  const dupSheet = await api(tEstimator, 'POST', `/costings/${sheetId}/duplicate`);
+  const dupStored = await prisma.costing.findUnique({ where: { id: dupSheet.body.id as string }, include: { scopeSections: { include: { tasks: true } }, lines: true } });
+  check(
+    'a duplicate keeps names, contingency, VAT, System / Unit and task start days — but not the validity date',
+    dupStored?.lines.every((l) => !!l.name) === true &&
+      num(dupStored?.contingencyPct) === 0.05 &&
+      num(dupStored?.vatRate) > 0 &&
+      dupStored?.systemUnit === sheet.systemUnit &&
+      dupStored?.scopeSections[0].tasks.some((t) => t.startDay === 3) === true &&
+      dupStored?.validUntil === null,
+  );
 
   // ── Done ──────────────────────────────────────────────────────────────────
   await cleanup();

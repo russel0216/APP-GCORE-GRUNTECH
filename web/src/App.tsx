@@ -24,6 +24,7 @@ import { Categories, Warehouses } from './pages/masters/Reference';
 import { Leads, LeadDetail } from './pages/sales/Leads';
 import { Costings } from './pages/sales/Costings';
 import { CostingDetailPage } from './pages/sales/CostingDetail';
+import { CostingSheet } from './pages/sales/CostingSheet';
 import { Quotations, QuotationDetail } from './pages/sales/Quotations';
 import { QuotationEditor } from './pages/sales/QuotationEditor';
 import { SalesCalendar } from './pages/sales/Calendar';
@@ -367,11 +368,35 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/*
+          The costing sheet, a page rather than a dialog. `/new` is a static
+          segment, so React Router ranks it above `/:id`. Editing is refused by
+          the API to anyone but the author or an edit_all holder, and to a
+          costing that is final or with the approver; the page says which.
+        */}
+        <Route
+          path="/g-ops/costing/new"
+          element={
+            <GuardAny permissions={['gops.costing.view_all', 'gops.costing.view_own']}>
+              <Guard permission="gops.costing.create">
+                <CostingSheet />
+              </Guard>
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-ops/costing/:id"
           element={
             <GuardAny permissions={['gops.costing.view_all', 'gops.costing.view_own']}>
               <CostingDetailPage />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/costing/:id/edit"
+          element={
+            <GuardAny permissions={['gops.costing.view_all', 'gops.costing.view_own']}>
+              <CostingSheet key="edit" />
             </GuardAny>
           }
         />

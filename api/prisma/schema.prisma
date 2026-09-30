@@ -17,18 +17,18 @@ datasource db {
 // ════════════════════════════════════════════════════════════════════
 
 model User {
-  id           String  @id @default(cuid())
-  email        String  @unique
-  name         String
-  employeeNo   String? @unique
-  passwordHash String
-  position     String?
+  id            String  @id @default(cuid())
+  email         String  @unique
+  name          String
+  employeeNo    String? @unique
+  passwordHash  String
+  position      String?
   /// The author's mobile, printed under "Sincerely Yours," on a quotation
   /// (carried over from SCORO's quote layout). The login's own number, because
   /// an account need not have an Employee record behind it.
-  phone        String?
-  isActive     Boolean @default(true)
-  isSuperAdmin Boolean @default(false)
+  phone         String?
+  isActive      Boolean @default(true)
+  isSuperAdmin  Boolean @default(false)
   /// Invited, and not yet in: the account exists (so it can be assigned work
   /// and approvals) but nobody has chosen its password. Cleared when the
   /// invitation — or a password reset — is used. See AccountToken.
@@ -67,6 +67,7 @@ model User {
   leadsAssigned     Lead[]              @relation("LeadAssignee")
   leadsCreated      Lead[]              @relation("LeadCreator")
   costingsOwned     Costing[]           @relation("CostingOwner")
+  costingTemplates  CostingTemplate[]   @relation("CostingTemplateAuthor")
   quotationsOwned   Quotation[]         @relation("QuotationOwner")
   revisionsApproved QuotationRevision[] @relation("RevisionApprover")
   activities        SalesActivity[]     @relation("ActivityAssignee")
@@ -1009,6 +1010,8 @@ model Lead {
 
 enum CostingStatus {
   DRAFT
+  /// Submitted through the approval engine; locked until it is decided.
+  PENDING_APPROVAL
   FINAL
 }
 
@@ -1042,8 +1045,20 @@ model Costing {
   totalCost     Decimal @default(0) @db.Decimal(18, 2)
 
   durationDays Int?
+  /// Internal notes — shown on the screen, never printed.
   notes        String?
+  /// Terms & Conditions — printed on the cost estimate.
   terms        String?
+
+  /// Contingency on the project budgeted cost, priced in like the markup.
+  contingencyPct Decimal   @default(0) @db.Decimal(7, 4)
+  /// VAT shown on the estimate's grand total: the company rate, or 0 for a
+  /// zero-rated job. The contract value stays net of VAT, as it always was.
+  vatRate        Decimal   @default(0.12) @db.Decimal(6, 4)
+  /// The date the prices on the estimate stop holding.
+  validUntil     DateTime? @db.Date
+  /// "System / Unit" — the plant or equipment the estimate is for.
+  systemUnit     String?
 
   lines              CostingLine[]
   scopeSections      ScopeSection[]
@@ -1071,7 +1086,12 @@ model CostingLine {
   itemId String?
   item   Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
 
+  /// The short name, printed bold over the description. Null on a line that
+  /// predates the sheet editor; its description then serves as the name.
+  name        String?
   description String
+  /// A subheading inside its category: printed as a heading row, costs nothing.
+  isHeading   Boolean @default(false)
   quantity    Decimal @default(1) @db.Decimal(18, 3)
   unit        String  @default("pcs")
   unitCost    Decimal @default(0) @db.Decimal(18, 2)
@@ -1118,10 +1138,33 @@ model ScopeTask {
   scopeSectionId String
   scopeSection   ScopeSection @relation(fields: [scopeSectionId], references: [id], onDelete: Cascade)
   name           String
+  /// The working day (Mon–Fri, day 1 = the first) the task starts on.
+  startDay       Int?
   durationDays   Int          @default(0)
   sortOrder      Int          @default(0)
 
   @@index([scopeSectionId])
+}
+
+/// A costing to start from: its lines, scope phases and tasks, and the terms,
+/// kept as one document. Not a commercial record — nothing points at it, and
+/// a costing started from one keeps no link back, so editing or deleting a
+/// template never moves a costing already made from it.
+model CostingTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  /// { systemUnit, markupPct, contingencyPct, terms, lines[], sections[] } —
+  /// lines name their category by CODE, which is permanent (isSystem rows).
+  body        Json
+  /// With prices, or quantities and names only.
+  withPrices  Boolean  @default(true)
+  createdById String
+  createdBy   User     @relation("CostingTemplateAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([name])
 }
 
 // ── Quotations ───────────────────────────────────────────────────────────────

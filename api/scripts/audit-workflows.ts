@@ -23,6 +23,7 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   purchase_request: ['project_engineer', 'project_manager', 'service_engineer', 'procurement'],
   budget_request: ['project_manager'],
   quotation: ['sales', 'sales_manager'],
+  costing: ['sales', 'sales_manager', 'project_manager'],
   purchase_order: ['procurement'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a

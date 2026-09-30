@@ -459,7 +459,7 @@ export function LeadDetail() {
           {!closed && can('gops.costing.create') && (
             <Link
               className="btn"
-              to={`/g-ops/costing${qs({ new: 1, leadId: lead.id, customerId: lead.customer?.id })}`}
+              to={`/g-ops/costing/new${qs({ leadId: lead.id, customerId: lead.customer?.id })}`}
             >
               Start costing
             </Link>

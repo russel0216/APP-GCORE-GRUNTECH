@@ -1,0 +1,463 @@
+/*
+  Costing: the sheet (pages/sales/CostingSheet.tsx), the costing's page
+  (pages/sales/CostingDetail.tsx) and the templates list (Costings.tsx).
+  The sheet reuses the quotation editor's frame — .qe-card, .qe-head,
+  .qe-rows, .qe-lines, .qe-foot in quotation-editor.css — and the lookup menu
+  in styles.css; this file adds only what a costing has and a quotation does
+  not. Tokens only.
+*/
+
+/* ── The sheet ────────────────────────────────────────────────────────────── */
+
+.cs-section-title {
+  margin: var(--s-6) 0 var(--s-3);
+  font-size: var(--fs-lg);
+}
+
+.cs-block-head {
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+}
+
+.cs-block-head .card-title {
+  margin: 0;
+}
+
+.cs-paste-hint {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.cs-template {
+  gap: var(--s-2) var(--s-3);
+  flex-wrap: wrap;
+  padding: var(--s-3);
+  margin-bottom: var(--s-4);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.cs-template label {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+
+.cs-template select {
+  flex: 1 1 18rem;
+  width: auto;
+}
+
+/* One block per bucket, its head a button that folds it away. */
+.cs-cat {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--s-3);
+}
+
+.cs-cat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-3) var(--s-4);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cs-cat-head:hover {
+  background: var(--surface-3);
+}
+
+.cs-cat-name {
+  font-weight: 600;
+  color: var(--neon-dim);
+}
+
+.cs-cat-total {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.cs-caret {
+  width: 1rem;
+  color: var(--muted);
+}
+
+.cs-cat > div {
+  padding: var(--s-2) var(--s-3) var(--s-3);
+}
+
+table.data.cs-lines {
+  min-width: 56rem;
+}
+
+.cs-col-code {
+  width: 4rem;
+}
+
+.cs-col-unit {
+  width: 6rem;
+}
+
+.cs-col-qty {
+  width: 6rem;
+}
+
+.cs-col-cost {
+  width: 9rem;
+}
+
+.cs-col-amount {
+  width: 9rem;
+  white-space: nowrap;
+}
+
+.cs-col-tools {
+  width: 7.5rem;
+}
+
+.cs-col-day {
+  width: 6.5rem;
+}
+
+.cs-col-bar {
+  width: 22%;
+  min-width: 8rem;
+}
+
+.cs-tools {
+  display: flex;
+  gap: var(--s-1);
+  justify-content: flex-end;
+}
+
+.cs-subhead td {
+  background: var(--surface-2);
+}
+
+.cs-row-actions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-top: var(--s-2);
+}
+
+.cs-grand-cost {
+  justify-content: space-between;
+  padding: var(--s-3) var(--s-4);
+  border-top: 2px solid var(--line);
+  font-size: var(--fs-lg);
+}
+
+/* The summary beside what helps set it. */
+.cs-summary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: var(--s-5);
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .cs-summary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+table.data.cs-summary tbody tr:nth-child(even),
+table.data.cs-summary tbody tr:hover {
+  background: none;
+}
+
+.cs-summary td {
+  vertical-align: middle;
+}
+
+.cs-rate {
+  width: 9rem;
+  white-space: nowrap;
+}
+
+.cs-rate input {
+  width: 6.5rem;
+  padding: var(--s-1) var(--s-2);
+}
+
+.cs-rate span {
+  margin-left: var(--s-1);
+  color: var(--muted);
+}
+
+.cs-strong td {
+  font-weight: 600;
+  border-top: 1px solid var(--line);
+}
+
+.cs-grand td {
+  font-weight: 700;
+  font-size: var(--fs-lg);
+  color: var(--neon);
+  border-top: 2px solid var(--line);
+}
+
+.cs-note {
+  margin: var(--s-1) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.cs-target input {
+  flex: 1;
+  min-width: 0;
+}
+
+.cs-target {
+  gap: var(--s-2);
+}
+
+/* A phase: its name row, then its tasks. */
+.cs-phase {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.cs-phase-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-2);
+}
+
+.cs-phase-head select {
+  width: auto;
+}
+
+.cs-phase-name {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.cs-phase-value {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+.cs-phase-value input {
+  width: 9rem;
+  padding: var(--s-1) var(--s-2);
+}
+
+.cs-phase-span {
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+table.data.cs-tasks {
+  min-width: 44rem;
+}
+
+.cs-add-task {
+  margin-top: var(--s-2);
+}
+
+/* A task on the plan: a track the length of the project, the bar where it falls. */
+.cs-bar-track {
+  position: relative;
+  height: var(--s-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.cs-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--from);
+  width: var(--len);
+  min-width: var(--s-1);
+  border-radius: var(--radius-sm);
+  background: var(--neon-dim);
+}
+
+.cs-sov {
+  margin: var(--s-3) 0 var(--s-2);
+}
+
+.cs-sov .alert {
+  margin: var(--s-2) 0 0;
+}
+
+.cs-texts {
+  margin-top: var(--s-5);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+/* The name box's suggestions: the name, then what it cost and where from. */
+.cs-suggest {
+  min-width: 22rem;
+}
+
+.cs-suggest button {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.cs-suggest-name {
+  font-weight: 600;
+}
+
+.cs-suggest-meta,
+.cs-suggest-desc {
+  font-size: var(--fs-xs);
+}
+
+.cs-suggest-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.cs-template-save {
+  padding: var(--s-4);
+  margin-bottom: var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.cs-template-save .card-title {
+  margin-top: 0;
+}
+
+.card > .cs-template-save {
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
+/* ── The costing's page ───────────────────────────────────────────────────── */
+
+.cs-subtitle {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.cs-page-actions {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.cs-stats {
+  margin-bottom: var(--s-5);
+}
+
+.cs-stat-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+}
+
+.cs-stat-value {
+  margin-top: var(--s-2);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cs-stat-value.is-accent {
+  color: var(--neon);
+}
+
+.cs-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3) var(--s-6);
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .cs-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.cs-fact {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  gap: var(--s-3);
+}
+
+.cs-fact dt {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.cs-fact dd {
+  margin: 0;
+}
+
+.cs-cat-row td {
+  background: var(--surface-2);
+}
+
+.cs-cat-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--neon-dim);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cs-line-name {
+  font-weight: 600;
+}
+
+.cs-line-desc {
+  margin-top: var(--s-1);
+  white-space: pre-wrap;
+}
+
+.cs-task-name {
+  padding-left: var(--s-6);
+}
+
+.cs-tight {
+  margin-top: 0;
+}
+
+.cs-links {
+  margin-bottom: var(--s-3);
+}
+
+.cs-after {
+  margin: var(--s-3) 0 0;
+}
+
+.cs-pre {
+  white-space: pre-wrap;
+}
+
+.cs-rename {
+  gap: var(--s-2);
+}
+
+.cs-rename input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}

@@ -126,8 +126,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,911 assertions across twenty-two scripts** (counted 2026-09-28): foundation 128,
-masters 54, sales 178, costing 40, pipeline 44, calendar 38, numbering 46,
+**1,976 assertions across twenty-two scripts** (counted 2026-09-30): foundation 128,
+masters 54, sales 178, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39, accounts 77. They cover permission resolution, numbering
@@ -1027,3 +1027,65 @@ the detail.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
   lines and prices without the totals block; the stored totals are computed
   as always, and a new revision copies the flag.
+
+## Costing sheet notes
+
+The costing is patterned on gasiontech G-CORE's costing (and its "Material
+Cost Estimate" PDF) in G-CORE's own style.
+
+- **The sheet is a page, never a dialog**: `/g-ops/costing/new` and
+  `/g-ops/costing/:id/edit` (`CostingSheet.tsx`). **One save = one
+  transaction**: `POST /costings` and `PUT /costings/:id/sheet` take the header,
+  `lines[]` and `sections[]` (with `tasks[]`) and write them through
+  `writeSheet()`; every reference is checked before `nextNumber`, so a refused
+  sheet burns no number. Rows sent with their `id` are updated in place, rows
+  left out are deleted — never delete-and-recreate. The old
+  `?new=1&leadId=&customerId=` list links redirect to `/new`. The per-line and
+  per-section routes stay for scripts and the renewal path.
+- **One arithmetic: `shared/costingMath.ts`**, exact in BigInt: line amount =
+  qty (3 dp) × cost (2 dp) rounded half away from zero; markup and contingency
+  are % of the budgeted cost; contract value = cost + markup + contingency −
+  discount, never below 0, **net of VAT** (the SOV and billing are unchanged);
+  VAT and grand total are shown, not stored. `web/src/lib/costingMath.ts` is a
+  COPY for the page's live figures, pinned equal on 400 random sheets by
+  verify-costing. `recalc()` is the only writer of `totalCost`/`contractValue`.
+- **A line has `name` (bold) and `description`**; a line typed as a name alone
+  carries it as its description too, because every older reader prints
+  `description`. **`isHeading` is a subheading**: amount 0, no code.
+  **Codes are derived, never stored**: `lineCodes()` numbers cost lines 101,
+  102… per bucket by the bucket's rank (Materials 1 … Indirect 5).
+- **The plan is working days, not dates** (`planTasks()`): a task with a
+  `startDay` keeps it; one without starts the day after the previous task ends.
+  On save a phase with tasks takes their span as `durationDays` and the costing
+  the plan's total — the job schedule reads those. "Sequence tasks" only writes
+  the computed starts down. `spread: true` on a save runs `spreadSections()`
+  (the same rule as `/sections/distribute`) so the SOV equals the contract value.
+- **VAT is the company rate or 0%** (`checkVatRate`, as on the quotation),
+  snapshotted at creation; a draft keeps its rate after Settings change.
+- **Approval is the seeded `costing` workflow (executive)**. With it active the
+  author cannot PATCH to FINAL; `POST /:id/submit` claims DRAFT →
+  PENDING_APPROVAL with a conditional update, submits in the AUTHOR's name, and
+  reverts to DRAFT if the engine refuses. `settleCosting()` moves APPROVED →
+  FINAL, REJECTED → DRAFT. A PENDING costing refuses edits, deletion and
+  `POST /jobs`. To run without costing approval, DEACTIVATE the workflow — a
+  deleted seeded workflow is recreated by the next seed; the page then offers
+  "Mark final" again. Reopen (FINAL → DRAFT) stays the author's, and needs a
+  fresh approval.
+- **The PDF is "Material Cost Estimate"** (house style): details, one table with
+  numbered bucket headings, name-over-description cells, subtotals, the summary
+  as `totals`, Terms & Conditions — **never the internal notes** — then the
+  Scope of Work as the engine's **`gantt` section** on landscape pages. The
+  sign-offs come from `approvalSignoffs('costing', …)` once FINAL: every step
+  but the last prints as CHECKED BY, the last as APPROVED BY; a costing marked
+  final without a workflow prints "Pending" for the approver, which is true.
+- **Predictions never widen visibility**: `GET /costings/suggest?q=` offers past
+  lines (newest price, use count) only from costings the caller may read, plus
+  the item master; `/suggest/lists` feeds the datalists (units, System / Unit,
+  phase and task names, your own last terms, the company VAT rate). Both sit
+  above `/:id`.
+- **A template is `CostingTemplate.body` JSON**, categories by CODE, with
+  nothing pointing at it and no link back from a costing made from it. Saved
+  from a costing (`costingId`) or the unsaved sheet (`sheet`); `withPrices:
+  false` zeroes every unit cost. Author or `edit_all` renames/deletes; anyone
+  who reads costings uses it. No new permission keys — `gops.costing.*` covers it.
+

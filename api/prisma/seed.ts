@@ -526,6 +526,18 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // The margin a costing sets is what the company commits to on every
+    // quotation and project built from it, so management signs it off. Sales
+    // and project managers raise costings; routing to either would leave a
+    // one-person team approving their own. To go without costing approval,
+    // DEACTIVATE this workflow (Admin › Approval Workflows) rather than
+    // deleting it — a deleted seeded workflow is recreated on the next seed,
+    // a deactivated one is left alone, and the page returns to "Mark final".
+    documentType: 'costing',
+    name: 'Costing — management approval',
+    steps: [{ sequence: 1, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' }],
+  },
+  {
     documentType: 'quotation',
     name: 'Quotation — sales manager',
     steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' }],

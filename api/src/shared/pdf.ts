@@ -70,6 +70,19 @@ export interface PdfTotal {
   bold?: boolean;
 }
 
+/** One bar of a `gantt` section: a task on working days `start` … `start + days − 1`. */
+export interface PdfGanttTask {
+  name: string;
+  start: number;
+  days: number;
+}
+
+/** A phase of a `gantt` section: a shaded row whose bar spans its tasks. */
+export interface PdfGanttGroup {
+  name: string;
+  tasks: PdfGanttTask[];
+}
+
 export type PdfSection =
   | { kind: 'fields'; title?: string; columns?: 1 | 2 | 3; fields: PdfField[] }
   | { kind: 'table'; title?: string; head: string[]; rows: PdfRow[]; widths?: number[]; align?: ('left' | 'right' | 'center')[] }
@@ -77,6 +90,12 @@ export type PdfSection =
   | { kind: 'lines'; lines: PdfLine[] }
   | { kind: 'parties'; left: PdfParty; right?: PdfParty }
   | { kind: 'totals'; rows: PdfTotal[] }
+  /**
+   * A schedule drawn as bars against numbered working days: Task, Start, End,
+   * Days, then the day grid. `landscape` starts it on a landscape page (and
+   * keeps its overflow pages landscape), for the width a long plan needs.
+   */
+  | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string }
   | { kind: 'spacer'; height?: number };
 
 export type PdfStyle = 'house' | 'letter';
@@ -142,6 +161,8 @@ const BAND_INK = '#00ff5f';
 const NUMBER_INK = '#44aa00';
 /** A shaded heading row, so a group reads apart from the product names under it. */
 const SHADE = '#e9ebef';
+/** A task's bar on a schedule: the slate of the table head, lightened. */
+const BAR = '#c7ccd6';
 
 /** What differs between the two styles, so the drawing code is written once. */
 interface Layout {
@@ -306,6 +327,16 @@ function safeSection(section: PdfSection): PdfSection {
       return { ...section, left: party(section.left), right: section.right && party(section.right) };
     case 'totals':
       return { ...section, rows: section.rows.map((r) => ({ ...r, label: pdfSafe(r.label), value: pdfSafe(r.value) })) };
+    case 'gantt':
+      return {
+        ...section,
+        title: t(section.title),
+        legend: t(section.legend),
+        groups: section.groups.map((g) => ({
+          name: pdfSafe(g.name ?? ''),
+          tasks: g.tasks.map((task) => ({ ...task, name: pdfSafe(task.name ?? '') })),
+        })),
+      };
     case 'fields':
       return {
         ...section,
@@ -636,6 +667,10 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       return;
     }
 
+    case 'gantt':
+      drawGantt(doc, section);
+      return;
+
     case 'fields': {
       sectionTitle(doc, section.title);
       const cols = section.columns ?? 2;
@@ -692,6 +727,144 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       return;
     }
   }
+}
+
+/** The last working day a plan reaches. */
+export function ganttEnd(groups: PdfGanttGroup[]): number {
+  let end = 0;
+  for (const g of groups) for (const t of g.tasks) end = Math.max(end, t.start + Math.max(t.days, 1) - 1);
+  return end;
+}
+
+/** A day-label step that keeps the labels about 22pt apart. */
+function dayStep(dayWidth: number): number {
+  for (const step of [1, 2, 5, 10, 20, 30, 50, 100]) if (step * dayWidth >= 22) return step;
+  return 200;
+}
+
+/**
+ * The schedule as bars (the costing's Scope of Work page): each phase a shaded
+ * row with a slate bar over the span of its tasks, each task a row with a light
+ * bar labelled with its length. Days are numbered working days, not dates — a
+ * costing is priced before anybody knows the start date.
+ */
+function drawGantt(
+  doc: PDFKit.PDFDocument,
+  section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string },
+) {
+  const L = lay(doc);
+  const newPage = () => {
+    if (section.landscape) doc.addPage({ size: 'A4', layout: 'landscape', margins: doc.page.margins });
+    else doc.addPage();
+  };
+  if (section.landscape) newPage();
+  sectionTitle(doc, section.title);
+
+  const usable = usableWidth(doc);
+  const colTask = Math.max(150, usable * 0.24);
+  const colStart = 40;
+  const colEnd = 40;
+  const colDays = 30;
+  const fixed = colTask + colStart + colEnd + colDays;
+  const gridX = L.left + fixed;
+  const gridW = usable - fixed;
+  const total = Math.max(1, ganttEnd(section.groups));
+  const dayW = gridW / total;
+  const step = dayStep(dayW);
+  const size = 8;
+  const dayX = (day: number) => gridX + (day - 1) * dayW;
+
+  const head = () => {
+    ensureSpace(doc, 60);
+    const top = doc.y;
+    const height = 20;
+    doc.rect(L.left, top, usable, height).fill(HEAD_BG);
+    doc.fillColor(HEAD_INK).font('Helvetica-Bold').fontSize(7.5);
+    const cells: [string, number, number, 'left' | 'right'][] = [
+      ['TASK', L.left, colTask, 'left'],
+      ['START', L.left + colTask, colStart, 'left'],
+      ['END', L.left + colTask + colStart, colEnd, 'left'],
+      ['DAYS', L.left + colTask + colStart + colEnd, colDays, 'right'],
+    ];
+    for (const [text, x, w, align] of cells) {
+      doc.text(text, x + 5, top + 7, { width: w - 10, align, lineBreak: false });
+    }
+    doc.font('Helvetica').fontSize(6.5);
+    for (let day = 1; day <= total; day += step) {
+      doc.text(`Day ${day}`, dayX(day) + 1.5, top + 7.5, { width: Math.max(step * dayW - 2, 10), lineBreak: false });
+    }
+    doc.y = top + height;
+  };
+
+  const gridLines = (top: number, height: number) => {
+    for (let day = 1; day <= total; day += step) {
+      doc.moveTo(dayX(day), top).lineTo(dayX(day), top + height).strokeColor(RULE).lineWidth(0.4).stroke();
+    }
+    doc.moveTo(L.left, top + height).lineTo(L.left + usable, top + height).strokeColor(RULE).lineWidth(0.5).stroke();
+  };
+
+  const fits = (height: number) => {
+    if (doc.y + height > contentBottom(doc)) {
+      newPage();
+      head();
+    }
+  };
+
+  head();
+  for (const group of section.groups) {
+    const groupH = 17;
+    // A phase goes over with its first task, never alone at the foot of a page.
+    fits(groupH + (group.tasks.length ? 18 : 0));
+    const gTop = doc.y;
+    doc.rect(L.left, gTop, usable, groupH).fill(SHADE);
+    doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
+    doc.text(group.name, L.left + 5, gTop + 5, { width: fixed - 10, height: size + 2, ellipsis: true, lineGap: 0 });
+    if (group.tasks.length) {
+      const from = Math.min(...group.tasks.map((t) => t.start));
+      const to = Math.max(...group.tasks.map((t) => t.start + Math.max(t.days, 1) - 1));
+      doc.roundedRect(dayX(from), gTop + 6, (to - from + 1) * dayW, 5, 2).fill(HEAD_BG);
+    }
+    gridLines(gTop, groupH);
+    doc.y = gTop + groupH;
+
+    for (const task of group.tasks) {
+      doc.font('Helvetica').fontSize(size);
+      const textH = doc.heightOfString(task.name || ' ', { width: colTask - 20 });
+      const rowH = Math.max(textH + 8, 16);
+      fits(rowH);
+      const top = doc.y;
+      const end = task.start + Math.max(task.days, 1) - 1;
+      doc.font('Helvetica').fontSize(size).fillColor(INK);
+      doc.text(task.name, L.left + 14, top + 4, { width: colTask - 20 });
+      const mid = top + rowH / 2 - size / 2 + 0.5;
+      doc.text(`Day ${task.start}`, L.left + colTask + 5, mid, { width: colStart - 10, lineBreak: false });
+      doc.text(`Day ${end}`, L.left + colTask + colStart + 5, mid, { width: colEnd - 10, lineBreak: false });
+      doc.text(String(task.days), L.left + colTask + colStart + colEnd + 5, mid, {
+        width: colDays - 10,
+        align: 'right',
+        lineBreak: false,
+      });
+      const barW = Math.max(task.days, 1) * dayW;
+      doc.roundedRect(dayX(task.start) + 0.5, top + rowH / 2 - 5, Math.max(barW - 1, 2), 10, 2).fill(BAR);
+      const label = `${task.days}d`;
+      doc.font('Helvetica').fontSize(6.5).fillColor(INK);
+      if (doc.widthOfString(label) + 4 <= barW) {
+        doc.text(label, dayX(task.start) + 2.5, top + rowH / 2 - 3, { lineBreak: false });
+      }
+      gridLines(top, rowH);
+      doc.y = top + rowH;
+    }
+  }
+
+  if (section.legend) {
+    ensureSpace(doc, 20);
+    doc.y += 6;
+    const y = doc.y;
+    doc.rect(L.left, y + 1, 9, 6).fill(BAR);
+    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED).text(section.legend, L.left + 14, y, { width: usable - 14 });
+  }
+  doc.x = L.left;
+  doc.y += 6;
 }
 
 function normalise(widths: number[], usable: number): number[] {

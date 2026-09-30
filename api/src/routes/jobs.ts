@@ -462,6 +462,11 @@ jobRoutes.post(
       },
     });
     if (!costing) throw notFound('Costing not found');
+    // A costing with the approver is still being decided; building on it would
+    // finalise it underneath them.
+    if (costing.status === 'PENDING_APPROVAL') {
+      throw badRequest(`${costing.number} is awaiting approval. Build the project once it is decided.`);
+    }
     // The job's customer is the costing's customer. The screen locks it; this
     // is the half that makes it true for any caller.
     if (costing.customerId && costing.customerId !== body.customerId) {

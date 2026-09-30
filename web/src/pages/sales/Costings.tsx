@@ -1,32 +1,25 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
-import {
-  ErrorBox,
-  Field,
-  Modal,
-  StatusBadge,
-  formatDate,
-  formatMoney,
-  useToast,
-  type Tone,
-} from '../../components/ui';
+import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 
-/** A costing has two states and neither is in the shared lifecycle table. */
-export const COSTING_TONES: Record<string, Tone> = { DRAFT: 'warn', FINAL: 'ok' };
+/** A costing's statuses; none is in the shared lifecycle table as it stands. */
+export const COSTING_TONES: Record<string, Tone> = { DRAFT: 'warn', PENDING_APPROVAL: 'info', FINAL: 'ok' };
 
 export interface CostingRow {
   id: string;
   number: string;
   title: string;
-  status: 'DRAFT' | 'FINAL';
+  status: 'DRAFT' | 'PENDING_APPROVAL' | 'FINAL';
   contractValue: number;
   totalCost: number;
+  grandTotal?: number;
   grossProfit: number;
   grossMarginPct: number;
   durationDays: number | null;
+  systemUnit?: string | null;
   createdAt: string;
   customer: { id: string; name: string } | null;
   owner: { id: string; name: string };
@@ -38,30 +31,28 @@ export function Costings() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const [creating, setCreating] = useState(false);
-  const [reload, setReload] = useState(0);
 
-  // "Start costing" on a lead lands here as ?new=1&leadId=…(&customerId=…),
-  // and Customer 360's "New costing" as ?new=1&customerId=…; either opens the
-  // form prefilled. The params are cleared when the form closes so a refresh,
-  // or the browser's back button, does not reopen it.
-  const presetLeadId = params.get('leadId') ?? undefined;
-  const presetCustomerId = params.get('customerId') ?? undefined;
-  const openFromUrl = params.get('new') === '1' && can('gops.costing.create');
-  useEffect(() => {
-    if (openFromUrl) setCreating(true);
-  }, [openFromUrl]);
-
-  function closeForm() {
-    setCreating(false);
-    if (params.has('new') || params.has('leadId') || params.has('customerId')) {
-      const next = new URLSearchParams(params);
-      next.delete('new');
-      next.delete('leadId');
-      next.delete('customerId');
-      setParams(next, { replace: true });
-    }
+  // "Start costing" on a lead and Customer 360's "New costing" used to open a
+  // dialog here as ?new=1&leadId=…&customerId=…. A new costing is a page now;
+  // those links (and any bookmarked) land on it with the same preset.
+  if (params.get('new') === '1') {
+    return (
+      <Navigate
+        replace
+        to={`/g-ops/costing/new${qs({ leadId: params.get('leadId') ?? undefined, customerId: params.get('customerId') ?? undefined })}`}
+      />
+    );
   }
+
+  // ?view=templates lists the templates in place of the costings; it is in the
+  // URL so a template opened and backed out of returns here.
+  const view = params.get('view') === 'templates' ? 'templates' : 'list';
+  const showView = (next: 'list' | 'templates') => {
+    const p = new URLSearchParams(params);
+    if (next === 'templates') p.set('view', 'templates');
+    else p.delete('view');
+    setParams(p, { replace: true });
+  };
 
   const columns: Column<CostingRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '160px', render: (c) => <span className="mono">{c.number}</span> },
@@ -72,7 +63,10 @@ export function Costings() {
       render: (c) => (
         <div>
           <div>{c.title}</div>
-          <div className="faint">{c.customer?.name ?? 'No customer linked'}</div>
+          <div className="faint">
+            {c.customer?.name ?? 'No client linked'}
+            {c.systemUnit ? ` · ${c.systemUnit}` : ''}
+          </div>
         </div>
       ),
     },
@@ -83,7 +77,7 @@ export function Costings() {
       align: 'right',
       render: (c) => <span className="mono">{formatMoney(c.contractValue)}</span>,
     },
-    { key: 'totalCost', label: 'Est. cost', align: 'right', render: (c) => <span className="mono">{formatMoney(c.totalCost)}</span> },
+    { key: 'totalCost', label: 'Budgeted cost', align: 'right', render: (c) => <span className="mono">{formatMoney(c.totalCost)}</span> },
     {
       key: 'margin',
       label: 'Margin',
@@ -106,52 +100,54 @@ export function Costings() {
           <h1>Costing</h1>
           <p>
             Where the contract amount comes from. The scope of work you enter here becomes the
-            Schedule of Values — the same sections that progress reports, progress billing and the
+            Schedule of Values — the same phases that progress reports, progress billing and the
             S-curve are measured against later.
           </p>
         </div>
       </div>
 
-      <DataList<CostingRow>
-        listKey="costings"
-        endpoint="/costings"
-        columns={columns}
-        rowKey={(c) => c.id}
-        scoped
-        searchPlaceholder="Search number, title, customer…"
-        reloadToken={reload}
-        onRowClick={(c) => navigate(`/g-ops/costing/${c.id}`)}
-        emptyTitle="No costings yet"
-        emptyHint="A costing is the first thing you make when a job looks real."
-        filters={[
-          {
-            key: 'status',
-            label: 'Status',
-            options: [
-              { value: 'DRAFT', label: 'Draft' },
-              { value: 'FINAL', label: 'Final' },
-            ],
-          },
-        ]}
-        actions={
-          can('gops.costing.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + New costing
-            </button>
-          ) : null
-        }
-      />
+      <div className="row org-switch">
+        <div className="scope-switch">
+          <button type="button" className={view === 'list' ? 'active' : ''} aria-pressed={view === 'list'} onClick={() => showView('list')}>
+            Costings
+          </button>
+          <button type="button" className={view === 'templates' ? 'active' : ''} aria-pressed={view === 'templates'} onClick={() => showView('templates')}>
+            Templates
+          </button>
+        </div>
+      </div>
 
-      {creating && (
-        <CostingForm
-          leadId={presetLeadId}
-          customerId={presetCustomerId}
-          onClose={closeForm}
-          onSaved={(id) => {
-            closeForm();
-            setReload((r) => r + 1);
-            navigate(`/g-ops/costing/${id}`);
-          }}
+      {view === 'templates' ? (
+        <CostingTemplates />
+      ) : (
+        <DataList<CostingRow>
+          listKey="costings"
+          endpoint="/costings"
+          columns={columns}
+          rowKey={(c) => c.id}
+          scoped
+          searchPlaceholder="Search number, title, client, system…"
+          onRowClick={(c) => navigate(`/g-ops/costing/${c.id}`)}
+          emptyTitle="No costings yet"
+          emptyHint="A costing is the first thing you make when a job looks real."
+          filters={[
+            {
+              key: 'status',
+              label: 'Status',
+              options: [
+                { value: 'DRAFT', label: 'Draft' },
+                { value: 'PENDING_APPROVAL', label: 'Awaiting approval' },
+                { value: 'FINAL', label: 'Final' },
+              ],
+            },
+          ]}
+          actions={
+            can('gops.costing.create') ? (
+              <Link to="/g-ops/costing/new" className="btn btn-primary btn-sm">
+                + New costing
+              </Link>
+            ) : null
+          }
         />
       )}
     </div>
@@ -165,193 +161,160 @@ export function MarginBadge({ pct }: { pct: number }) {
   return <span className={`badge ${tone}`}>{value}</span>;
 }
 
-/** The slice of a lead the costing form takes its starting values from. */
-interface LeadPreset {
+interface TemplateRow {
   id: string;
-  number: string;
-  companyName: string;
+  name: string;
   description: string | null;
-  customer: { id: string; name: string } | null;
-  site: { id: string; name: string } | null;
+  withPrices: boolean;
+  systemUnit: string | null;
+  lineCount: number;
+  sectionCount: number;
+  taskCount: number;
+  createdBy: { id: string; name: string };
+  updatedAt: string;
+  canEdit: boolean;
 }
 
 /**
- * The lead's description becomes the title, cut to its first line — a costing
- * is named for the job, and the first line of a lead is what the job is.
+ * The costing templates: a costing to start from — its lines, phases, tasks,
+ * markup and terms. Saved from a costing's page or from the sheet ("Save as
+ * template"); used from the sheet ("Start from a template") or from here.
  */
-function titleFromLead(lead: LeadPreset): string {
-  const firstLine = (lead.description ?? '').split('\n')[0].trim();
-  const base = firstLine || `${lead.companyName} — requirement`;
-  return base.length > 120 ? `${base.slice(0, 117)}…` : base;
-}
-
-export function CostingForm({
-  costing,
-  leadId,
-  customerId,
-  onClose,
-  onSaved,
-}: {
-  costing?: CostingRow;
-  /** Start from this lead: customer, site and title are prefilled and the link is kept. */
-  leadId?: string;
-  /** Start for this customer — Customer 360's hand-off, or the lead's own customer. */
-  customerId?: string;
-  onClose: () => void;
-  onSaved: (id: string) => void;
-}) {
+function CostingTemplates() {
+  const { can } = useAuth();
   const toast = useToast();
-  const [busy, setBusy] = useState(false);
+  const [rows, setRows] = useState<TemplateRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [customers, setCustomers] = useState<{ id: string; name: string; code: string }[]>([]);
-  const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
-  const [lead, setLead] = useState<LeadPreset | null>(null);
-  const [form, setForm] = useState({
-    title: costing?.title ?? '',
-    customerId: costing?.customer?.id ?? customerId ?? '',
-    siteId: '',
-    markupPct: '15',
-    durationDays: costing?.durationDays?.toString() ?? '',
-  });
+  const [renaming, setRenaming] = useState<{ id: string; name: string; description: string } | null>(null);
 
+  const load = () =>
+    api
+      .get<TemplateRow[]>('/costings/templates')
+      .then(setRows)
+      .catch(setError);
   useEffect(() => {
-    api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
+    void load();
   }, []);
 
-  // Prefill from the lead, once, and only into fields still empty — nothing
-  // is retyped, and nothing typed is overwritten.
-  useEffect(() => {
-    if (!leadId || costing) return;
-    let cancelled = false;
-    api
-      .get<LeadPreset>(`/leads/${leadId}`)
-      .then((l) => {
-        if (cancelled) return;
-        setLead(l);
-        setForm((f) => ({
-          ...f,
-          title: f.title || titleFromLead(l),
-          customerId: f.customerId || l.customer?.id || '',
-          siteId: f.siteId || (f.customerId && f.customerId !== l.customer?.id ? '' : l.site?.id ?? ''),
-        }));
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [leadId, costing]);
-
-  useEffect(() => {
-    if (!form.customerId) {
-      setSites([]);
-      return;
-    }
-    api
-      .get<{ sites: { id: string; name: string }[] }>(`/customers/${form.customerId}`)
-      .then((c) => setSites(c.sites))
-      .catch(() => setSites([]));
-  }, [form.customerId]);
-
-  async function save() {
-    setBusy(true);
-    setError(null);
+  async function rename() {
+    if (!renaming) return;
     try {
-      const payload = {
-        title: form.title,
-        customerId: form.customerId || null,
-        siteId: form.siteId || null,
-        markupPct: Number(form.markupPct) / 100,
-        durationDays: form.durationDays === '' ? null : Number(form.durationDays),
-        // Only on creation: the API moves the lead to COSTING when a costing is
-        // started from it, and a Modify must never re-run that handoff.
-        ...(!costing && leadId ? { leadId } : {}),
-      };
-      const saved = costing
-        ? await api.patch<{ id: string }>(`/costings/${costing.id}`, payload)
-        : await api.post<{ id: string }>('/costings', payload);
-      toast('ok', `${form.title} saved`);
-      onSaved(saved.id);
+      await api.patch(`/costings/templates/${renaming.id}`, { name: renaming.name, description: renaming.description });
+      toast('ok', 'Template renamed');
+      setRenaming(null);
+      void load();
     } catch (err) {
       setError(err);
-      setBusy(false);
     }
   }
 
+  async function remove(t: TemplateRow) {
+    if (!window.confirm(`Delete the template “${t.name}”? Costings already made from it are not affected.`)) return;
+    try {
+      await api.del(`/costings/templates/${t.id}`);
+      toast('ok', 'Template deleted');
+      void load();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  if (error && !rows) return <ErrorBox error={error} />;
+  if (!rows) return <Loading />;
+
   return (
-    <Modal
-      title={costing ? `Modify ${costing.number}` : 'New costing'}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" onClick={save} disabled={busy || form.title.length < 2}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </>
-      }
-    >
+    <div className="card">
       <ErrorBox error={error} />
-      {lead && (
-        <div className="alert info">
-          Started from lead{' '}
-          <Link to={`/g-ops/leads/${lead.id}`} className="mono">
-            {lead.number}
-          </Link>{' '}
-          — {lead.companyName}.{' '}
-          {lead.customer
-            ? 'The customer and site are taken from it; the lead moves to Costing when you save.'
-            : 'The lead is not linked to a customer yet — pick one here, or leave it for later.'}
+      {rows.length === 0 ? (
+        <Empty
+          title="No templates yet"
+          hint="Open a costing you would build again and choose “Save as template” — or save one from the sheet while you type it."
+        />
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Template</th>
+                <th className="right">Lines</th>
+                <th className="right">Phases</th>
+                <th>Prices</th>
+                <th>Saved by</th>
+                <th>Updated</th>
+                <th>
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((t) =>
+                renaming?.id === t.id ? (
+                  <tr key={t.id}>
+                    <td colSpan={6}>
+                      <div className="row cs-rename">
+                        <input aria-label="Template name" value={renaming.name} maxLength={120} autoFocus onChange={(e) => setRenaming({ ...renaming, name: e.target.value })} />
+                        <input
+                          aria-label="Template description"
+                          placeholder="Description"
+                          value={renaming.description}
+                          maxLength={500}
+                          onChange={(e) => setRenaming({ ...renaming, description: e.target.value })}
+                        />
+                      </div>
+                    </td>
+                    <td>
+                      <div className="row cs-row-actions">
+                        <button type="button" className="btn btn-sm" onClick={() => setRenaming(null)}>
+                          Cancel
+                        </button>
+                        <button type="button" className="btn btn-sm btn-primary" onClick={rename} disabled={renaming.name.trim().length < 2}>
+                          Save
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={t.id}>
+                    <td>
+                      <div>
+                        <strong>{t.name}</strong>
+                      </div>
+                      <div className="faint">{[t.systemUnit, t.description].filter(Boolean).join(' · ') || '—'}</div>
+                    </td>
+                    <td className="right mono">{t.lineCount}</td>
+                    <td className="right mono">
+                      {t.sectionCount}
+                      {t.taskCount ? <span className="faint"> · {t.taskCount} tasks</span> : null}
+                    </td>
+                    <td>{t.withPrices ? 'With unit costs' : 'Quantities only'}</td>
+                    <td>{t.createdBy.name}</td>
+                    <td>{formatDate(t.updatedAt)}</td>
+                    <td>
+                      <div className="row cs-row-actions">
+                        {can('gops.costing.create') && (
+                          <Link to={`/g-ops/costing/new?template=${t.id}`} className="btn btn-sm btn-primary">
+                            Start costing
+                          </Link>
+                        )}
+                        {t.canEdit && (
+                          <>
+                            <button type="button" className="btn btn-sm" onClick={() => setRenaming({ id: t.id, name: t.name, description: t.description ?? '' })}>
+                              Rename
+                            </button>
+                            <button type="button" className="btn btn-sm btn-danger" onClick={() => remove(t)}>
+                              Delete
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
         </div>
       )}
-      <Field label="Title" hint="What the job is — e.g. Oxygen plant expansion, Phase 1">
-        <input value={form.title} autoFocus onChange={(e) => setForm({ ...form, title: e.target.value })} />
-      </Field>
-      <Field label="Customer">
-        <select
-          value={form.customerId}
-          onChange={(e) => setForm({ ...form, customerId: e.target.value, siteId: '' })}
-        >
-          <option value="">— not linked yet —</option>
-          {customers.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {sites.length > 0 && (
-        <Field label="Site">
-          <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
-            <option value="">— none —</option>
-            {sites.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-      <div className="grid grid-2">
-        <Field label="Markup %" hint="Applied to total cost to reach the contract amount">
-          <input
-            type="number"
-            step="0.1"
-            value={form.markupPct}
-            onChange={(e) => setForm({ ...form, markupPct: e.target.value })}
-          />
-        </Field>
-        <Field label="Duration (days)">
-          <input
-            type="number"
-            value={form.durationDays}
-            onChange={(e) => setForm({ ...form, durationDays: e.target.value })}
-          />
-        </Field>
-      </div>
-    </Modal>
+    </div>
   );
 }
