@@ -70,7 +70,7 @@ function Card({ node, depth, meId, search }: { node: Node; depth: number; meId?:
   const p = node.person;
   return (
     <Link to={`/admin/users/${p.id}${search}`} className={`org-card org-depth-${Math.min(depth, 3)}`}>
-      <Avatar name={p.name} photoId={p.photoPath} size={44} />
+      <Avatar name={p.name} photoId={p.photoPath} size={36} />
       <span className="org-card-text">
         <span className="org-name">
           {p.name}
