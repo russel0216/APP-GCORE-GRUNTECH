@@ -89,6 +89,8 @@ interface WorkflowStep {
   id: string;
   sequence: number;
   name: string;
+  /** On an open request, a step not yet taken: who may decide it. Empty: nobody can. */
+  approvers?: { id: string; name: string }[];
 }
 
 interface Request {
@@ -167,6 +169,11 @@ export function DocumentApproval({
     return last ? last.actedAt : request.createdAt;
   };
 
+  // Who a step waits on, by name: "Cecilia Tan", or "Cecilia Tan or Juan Cruz"
+  // where any of several may decide. Null when the API did not say.
+  const who = (step: WorkflowStep) =>
+    step.approvers === undefined ? null : step.approvers.length ? step.approvers.map((p) => p.name).join(' or ') : '';
+
   const steps: Step[] = workflowSteps.map((step) => {
     const acted = request.actions.find((a) => a.sequence === step.sequence);
     if (acted) {
@@ -184,11 +191,22 @@ export function DocumentApproval({
       };
     }
     if (request.status === 'PENDING' && step.sequence === request.currentSequence) {
+      const names = who(step);
+      const since = formatDateTime(new Date(lastEventAt()));
       return {
         label: step.name,
-        approver: `Waiting since ${formatDateTime(new Date(lastEventAt()))}`,
+        approver:
+          names === null
+            ? `Waiting since ${since}`
+            : names
+              ? `Waiting on ${names} since ${since}`
+              : `Waiting since ${since} — nobody can approve this step`,
         status: 'PENDING',
       };
+    }
+    if (request.status === 'PENDING') {
+      const names = who(step);
+      if (names !== null) return { label: step.name, approver: names ? `Then ${names}` : 'Nobody can approve this step', status: 'WAITING' };
     }
     return { label: step.name, status: 'WAITING' };
   });

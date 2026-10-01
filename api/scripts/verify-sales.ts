@@ -1804,6 +1804,37 @@ async function main() {
     const smallView = await http(salesToken, 'GET', `/quotations/${headed.body.id}`);
     check('under it, no such option', ((smallView.body.approvalOptions ?? []) as unknown[]).length === 0);
     const ceoOption = options.find((o) => o.label === 'Add the CEO as approver')!;
+    // Before anybody presses Submit, the page names where it goes and who decides.
+    type Route = { steps: { name: string; approvers: { id: string; name: string }[] }[] } | null;
+    const routes = bigView.body.approvalRoutes as { standard: Route; options: { id: string; route: Route }[] } | null;
+    const ceoRoute = routes?.options.find((o) => o.id === ceoOption.id)?.route;
+    check(
+      'the draft names its route: the sales manager, and with the CEO ticked the CEO too, each by name',
+      !!routes?.standard?.steps[0]?.approvers.some((p) => p.id === manager.id) &&
+        ceoRoute?.steps.length === 2 &&
+        ceoRoute.steps[1].approvers.some((p) => p.id === ceo.id),
+      JSON.stringify(routes),
+    );
+    check(
+      'never naming the submitter as their own approver',
+      !JSON.stringify(routes).includes(sales.id),
+    );
+    const draftPdf = async (option?: string) =>
+      pdfText(
+        Buffer.from(
+          await (
+            await fetch(`${BASE}/quotations/${big.body.id}/revisions/${(await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(big.body.id) } })).id}/pdf${option ? `?option=${option}` : ''}`, {
+              headers: { Authorization: `Bearer ${salesToken}` },
+            })
+          ).arrayBuffer(),
+        ),
+      );
+    // Where several hold the role, their names are joined ("A or B or C") and
+    // may wrap in the column — read the text with its line breaks as spaces.
+    const draftText = (await draftPdf()).replace(/\n/g, ' ');
+    check('a draft’s PDF names the approver who will sign, pending', draftText.includes(manager.name) && draftText.includes('Pending') && !draftText.includes(ceo.name));
+    const draftWithCeo = (await draftPdf(ceoOption.id)).replace(/\n/g, ' ');
+    check('and with the CEO ticked, the CEO too', draftWithCeo.includes(manager.name) && draftWithCeo.includes(ceo.name) && /APPROVED BY .*CEO/i.test(draftWithCeo));
     const smallRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(headed.body.id), status: 'DRAFT' } });
     const wrongBand = await http(salesToken, 'POST', `/quotations/${headed.body.id}/revisions/${smallRev.id}/submit`, { optionId: ceoOption.id });
     check('the option is refused where it does not apply (400)', wrongBand.status === 400, wrongBand.text.slice(0, 160));
@@ -1830,6 +1861,12 @@ async function main() {
       ),
     );
     check('halfway, the PDF dates the manager and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && /APPROVED BY .*CEO/i.test(halfway));
+    check('naming the CEO who will sign', halfway.includes(ceo.name));
+    const waiting = await http(salesToken, 'GET', `/approvals/history/quotation/${bigRev.id}`);
+    const openStep = ((waiting.body as unknown as { workflow: { steps: { sequence: number; approvers?: { id: string }[] }[] } }[])[0]?.workflow.steps ?? []).find(
+      (st) => st.sequence === 2,
+    );
+    check('and the approval panel says who it waits on', !!openStep?.approvers?.some((p) => p.id === ceo.id), JSON.stringify(openStep));
     await act({ requestId: ceoRequest.id, userId: ceo.id, action: 'APPROVED' });
     check('the CEO’s approval approves it', (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: bigRev.id } })).status === 'APPROVED');
     const signed = pdfText(

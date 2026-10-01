@@ -18,7 +18,7 @@ import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissio
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots, contactPhone } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots, contactPhone, routePreview } from '../shared/approvals';
 import {
   formatAmount,
   formatDate,
@@ -932,6 +932,22 @@ quotationRoutes.get(
     // "Add the CEO as approver" once it is over ₱1,000,000.
     const draft = quotation.revisions.find((r) => r.status === 'DRAFT');
     const options = draft ? await approvalOptions('quotation', Number(draft.total)) : [];
+    // Where "Submit for approval" goes from here, and who decides each step —
+    // the standard route and each option's — named before anybody presses it.
+    // The caller is the requester the submit would record; names only.
+    const brief = (route: Awaited<ReturnType<typeof routePreview>>) =>
+      route && {
+        name: route.name,
+        steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
+      };
+    const approvalRoutes = draft
+      ? {
+          standard: brief(await routePreview('quotation', Number(draft.total), me.id)),
+          options: await Promise.all(
+            options.map(async (o) => ({ id: o.id, route: brief(await routePreview('quotation', Number(draft.total), me.id, o.id)) })),
+          ),
+        }
+      : null;
 
     res.json({
       ...rest,
@@ -941,6 +957,7 @@ quotationRoutes.get(
       companyVatRate: companyRate,
       taxOptions: quotationTaxOptions(companyRate),
       approvalOptions: options,
+      approvalRoutes,
       customer: { ...customerRest, address: sites[0] ? [sites[0].address, sites[0].city].filter(Boolean).join(', ') : null },
       revisions: quotation.revisions.map((r) =>
         presentRevision(r as unknown as Record<string, unknown>, showCost),
@@ -1993,11 +2010,14 @@ export async function printableQuotation(me: ResolvedUser, id: string): Promise<
 /**
  * What a quotation prints — its fields, its lines, its totals and who signs
  * it — for the layout in Admin › PDF Templates to place. Cost is never read
- * here, so no layout can print it.
+ * here, so no layout can print it. `optionId` is an optional route the page
+ * has ticked but not yet submitted ("Add the CEO as approver"), so a draft's
+ * PDF shows the sign-offs that submitting it would bring.
  */
 export async function quotationPrintData(
   quotation: LoadedQuotation,
   revision: LoadedQuotation['revisions'][number],
+  opts: { optionId?: string | null } = {},
 ): Promise<DesignData> {
   const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } });
   const currency = company?.currency ?? 'PHP';
@@ -2106,9 +2126,15 @@ export async function quotationPrintData(
 
   // Prepared by the author; then every step of the approval route, dated
   // once it has approved and "Pending" until then — the CEO's too, when the
-  // submitter added them. Each with how to reach them, read here for the
-  // paper only: the quotation's own response never carries a mobile.
-  const slots = await approvalSlots('quotation', revision.id);
+  // submitter added them. A step still open names who will decide it; a draft
+  // shows the route submitting it would take. Each with how to reach them,
+  // read here for the paper only: the quotation's own response never carries
+  // a mobile.
+  const slots = await approvalSlots(
+    'quotation',
+    revision.id,
+    revision.status === 'DRAFT' ? { amount: Number(revision.total), requesterId: owner.id, optionId: opts.optionId } : undefined,
+  );
   const author = await prisma.user.findUnique({
     where: { id: owner.id },
     select: { phone: true, employee: { select: { mobile: true } } },
@@ -2123,14 +2149,18 @@ export async function quotationPrintData(
       at: revision.createdAt,
     },
     ...(slots.length
-      ? slots.map((sl) => ({
-          role: slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by',
-          name: sl.name,
-          position: sl.position,
-          phone: sl.phone,
-          email: sl.email,
-          at: sl.at,
-        }))
+      ? slots.map((sl): Signatory => {
+          const role = slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by';
+          if (sl.name) return { role, name: sl.name, position: sl.position, phone: sl.phone, email: sl.email, at: sl.at };
+          // Not yet signed: who will sign it, with "Pending" in place of the
+          // date. One person is named with how to reach them; where any of
+          // several may sign, all their names, and no contact to guess between.
+          const who = sl.assigned ?? [];
+          if (who.length === 1) {
+            return { role, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
+          }
+          return who.length > 1 ? { role, name: who.map((p) => p.name).join(' or ') } : { role };
+        })
       : [{ role: 'Approved by' }]),
   ];
 
@@ -2153,9 +2183,13 @@ quotationRoutes.get(
     if (!revision) throw notFound('Revision not found');
 
     // The layout is the administrator's (Admin › PDF Templates), else the
-    // standard one; the engine draws it either way.
+    // standard one; the engine draws it either way. `?option=` is a route the
+    // page has ticked on a draft but not yet submitted — the CEO — so its PDF
+    // shows the sign-offs submitting would bring; one that does not apply is
+    // ignored.
     const { design } = await quotationDesign();
-    const pdf = await renderDesigned(design, await quotationPrintData(quotation, revision));
+    const optionId = typeof req.query.option === 'string' && req.query.option ? req.query.option : null;
+    const pdf = await renderDesigned(design, await quotationPrintData(quotation, revision, { optionId }));
 
     await audit(
       {

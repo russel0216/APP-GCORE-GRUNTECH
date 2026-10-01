@@ -38,6 +38,9 @@ import {
   approvalOptions,
   approvalSlots,
   pickWorkflow,
+  namedApprovers,
+  routePreview,
+  historyFor,
 } from '../src/shared/approvals';
 import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
@@ -651,6 +654,32 @@ async function main() {
   check('asked for, the option is the route taken', optioned.workflowId === optionRoute.id);
   const slotsBefore = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`);
   check('every step is a sign-off slot, pending until it acts', slotsBefore.length === 2 && slotsBefore.every((x) => !x.name && !x.at));
+  // Who will sign is named before they do — never the requester.
+  check(
+    'an open step names who may decide it, and never the requester',
+    slotsBefore.every((x) => !!x.assigned?.some((p) => p.id === pm.id) && !x.assigned.some((p) => p.id === employee.id)),
+    JSON.stringify(slotsBefore.map((x) => x.assigned?.map((p) => p.name))),
+  );
+  const managerStep = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: optionRoute.id, sequence: 1 } });
+  check(
+    'a role holder who raised the document is left out of the names, as act() would refuse them',
+    !(await namedApprovers(managerStep, pm.id)).some((p) => p.id === pm.id) && (await namedApprovers(managerStep, employee.id)).some((p) => p.id === pm.id),
+  );
+  const routeAhead = await routePreview(`${TAG}_opt_doc`, 5_000, employee.id, optionRoute.id);
+  check(
+    'before submitting, the route it would take is named: the option’s steps, each with who decides',
+    routeAhead?.workflowId === optionRoute.id && routeAhead.steps.length === 2 && routeAhead.steps.every((st) => st.approvers.some((p) => p.id === pm.id)),
+  );
+  const draftSlots = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-draft`, { amount: 5_000, requesterId: employee.id });
+  check(
+    "and a draft's sign-off slots are the standard route, assigned but unsigned",
+    draftSlots.length === 1 && draftSlots[0].step === 'Manager' && !draftSlots[0].name && !!draftSlots[0].assigned?.some((p) => p.id === pm.id),
+  );
+  const openHistory = await historyFor(`${TAG}_opt_doc`, `${TAG}-opt-big`);
+  check(
+    'the history names who an open request waits on, step by step',
+    (openHistory[0]?.workflow?.steps ?? []).every((st) => !!(st as { approvers?: { id: string }[] }).approvers?.some((p) => p.id === pm.id)),
+  );
   await act({ requestId: optioned.id, userId: pm.id, action: 'APPROVED' });
   const slotsAfter = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`);
   check(

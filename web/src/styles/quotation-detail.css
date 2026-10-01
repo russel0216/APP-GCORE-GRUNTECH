@@ -161,6 +161,27 @@
   margin-left: auto;
 }
 
+/* Under the bar: where Submit sends a draft, and who decides each step. */
+.qd-route {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-4);
+  margin-top: var(--s-3);
+}
+
+.qd-route-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.qd-route .stepper {
+  flex: 1 1 24rem;
+  margin: 0;
+}
+
 @media (max-width: 520px) {
   .qd-bar > .row,
   .qd-bar .btn {

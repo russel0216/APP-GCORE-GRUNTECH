@@ -130,8 +130,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,094 assertions across twenty-two scripts** (counted 2026-10-02): foundation 170,
-masters 54, sales 245, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,105 assertions across twenty-two scripts** (counted 2026-10-02): foundation 175,
+masters 54, sales 251, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1092,6 +1092,22 @@ the detail.
   Admin › Approval Workflows edits the label ("Offer as an option"); a PUT
   that does not mention it keeps it, because clearing it by omission would
   make the CEO a step every quotation over a million takes.
+- **Who decides is named before they decide** (2026-10-02). In
+  `shared/approvals.ts`: `namedApprovers(step, requesterId)` — the step's
+  approvers by name, NEVER the requester (act() refuses them; empty means
+  nobody can, and submit refuses); `routePreview(type, amount, requesterId,
+  optionId?)` — the route a draft WOULD take; `approvalSlots(…, draft?)` gives
+  an open or draft step `assigned` people while `name`/`at` stay "who signed,
+  when"; `historyFor()` adds `approvers` to the open steps of a PENDING
+  request. The quotation page shows "Submit for approval sends it to …" under
+  the action bar (`approvalRoutes` on `GET /quotations/:id`: the standard
+  route and each option's, names only, the caller as requester) and switches
+  to the CEO route when it is ticked; the Approval panel says "Waiting on …"
+  and "Then …". The PDF names who will sign each open step with "Pending"
+  under them — one person with their contact lines, several as "A or B" with
+  none — and a draft's PDF prints the route submitting would take; the PDF
+  button passes the ticked option as `?option=`, and one that no longer
+  applies falls back to the standard route.
 - **`GET /quotations/suggest?q=`** offers past lines (newest price, unit,
   description, use count) from quotations the caller may read, a line's cost
   only where `canSeeQuotationCost` allows, and items with their list price

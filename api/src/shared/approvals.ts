@@ -165,6 +165,59 @@ export async function approversForStep(
   }
 }
 
+/** A person who decides a step: enough to name them on a page or a PDF. */
+export interface StepPerson {
+  id: string;
+  name: string;
+  position?: string;
+  phone?: string;
+  email: string;
+}
+
+/**
+ * Who may decide a step, by name. The requester is left out: act() never lets
+ * them approve their own document, so naming them would promise a signature
+ * that cannot happen. Empty means nobody can — a role no one else holds — and
+ * the document would stall there.
+ */
+export async function namedApprovers(
+  step: ApprovalStep,
+  requesterId: string,
+  tx: Prisma.TransactionClient = prisma,
+): Promise<StepPerson[]> {
+  const ids = [...new Set(await approversForStep(step, requesterId, tx))].filter((id) => id !== requesterId);
+  if (!ids.length) return [];
+  const users = await tx.user.findMany({
+    where: { id: { in: ids }, isActive: true },
+    select: { id: true, name: true, position: true, email: true, phone: true, employee: { select: { mobile: true } } },
+    orderBy: { name: 'asc' },
+  });
+  return users.map((u) => ({ id: u.id, name: u.name, position: u.position ?? undefined, phone: contactPhone(u), email: u.email }));
+}
+
+/**
+ * The route a document WOULD take if it were submitted now — each step and
+ * who would decide it — so a form can say where "Submit for approval" goes
+ * before anybody presses it. `optionId` previews an optional route ("Add the
+ * CEO as approver"); null when no active workflow covers the document.
+ */
+export async function routePreview(
+  documentType: string,
+  amount: number | null,
+  requesterId: string,
+  optionId?: string | null,
+): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; approvers: StepPerson[] }[] } | null> {
+  const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null });
+  if (!workflow) return null;
+  return {
+    workflowId: workflow.id,
+    name: workflow.name,
+    steps: await Promise.all(
+      workflow.steps.map(async (st) => ({ sequence: st.sequence, name: st.name, approvers: await namedApprovers(st, requesterId) })),
+    ),
+  };
+}
+
 /** Active users holding a role, by key. HR fallbacks and the clearance sweep read it. */
 export async function usersInRole(
   roleKey: string,
@@ -417,9 +470,14 @@ export async function pendingFor(
   return mine;
 }
 
-/** The full decision history of one document, for its Activity tab. */
+/**
+ * The full decision history of one document, for its Activity tab. On a
+ * request still open, each step nobody has taken carries `approvers` — who
+ * may decide it, by name — so a page says who a document waits on, not only
+ * that it waits.
+ */
 export async function historyFor(documentType: string, documentId: string) {
-  return prisma.approvalRequest.findMany({
+  const rows = await prisma.approvalRequest.findMany({
     where: { documentType, documentId },
     include: {
       requester: { select: { id: true, name: true } },
@@ -431,6 +489,20 @@ export async function historyFor(documentType: string, documentId: string) {
     },
     orderBy: { createdAt: 'desc' },
   });
+  return Promise.all(
+    rows.map(async (r) => {
+      if (r.status !== 'PENDING' || !r.workflow) return r;
+      const taken = new Set(r.actions.map((a) => a.sequence));
+      const steps = await Promise.all(
+        r.workflow.steps.map(async (st) =>
+          taken.has(st.sequence)
+            ? st
+            : { ...st, approvers: (await namedApprovers(st, r.requesterId)).map((p) => ({ id: p.id, name: p.name })) },
+        ),
+      );
+      return { ...r, workflow: { ...r.workflow, steps } };
+    }),
+  );
 }
 
 /**
@@ -468,21 +540,40 @@ export async function approvalSignoffs(
   }));
 }
 
+/** One step of a document's sign-off block. */
+export interface ApprovalSlot {
+  step: string;
+  /** Who signed it, and when — set only once the step has approved. */
+  name?: string;
+  position?: string;
+  phone?: string;
+  email?: string;
+  at?: Date;
+  /** A step still open: who may yet sign it (never the requester). */
+  assigned?: StepPerson[];
+}
+
 /**
  * Every sign-off slot of a document's latest approval request, in step order:
  * each step's name, and — once that step has approved — who and when. A step
- * still to act has no name and no time, so a printed document says "Pending"
- * there rather than borrowing anybody's signature. Empty before submission.
+ * still to act has no `name` and no time, so a printed document says
+ * "Pending" there rather than borrowing anybody's signature; while the
+ * request is open it carries `assigned`, who may yet sign it.
+ *
+ * Before submission there is no request. Given `draft`, the slots are the
+ * route the document WOULD take (`routePreview`), each step `assigned`; without
+ * it, none.
  */
 export async function approvalSlots(
   documentType: string,
   documentId: string,
-): Promise<{ step: string; name?: string; position?: string; phone?: string; email?: string; at?: Date }[]> {
+  draft?: { amount: number | null; requesterId: string; optionId?: string | null },
+): Promise<ApprovalSlot[]> {
   const request = await prisma.approvalRequest.findFirst({
     where: { documentType, documentId },
     orderBy: { createdAt: 'desc' },
     include: {
-      workflow: { select: { steps: { orderBy: { sequence: 'asc' }, select: { sequence: true, name: true } } } },
+      workflow: { select: { steps: { orderBy: { sequence: 'asc' } } } },
       actions: {
         where: { action: 'APPROVED' },
         include: {
@@ -491,22 +582,33 @@ export async function approvalSlots(
       },
     },
   });
-  if (!request) return [];
+  if (!request) {
+    if (!draft) return [];
+    // An option the document no longer qualifies for falls back to the standard route.
+    const route =
+      (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId) : null) ??
+      (await routePreview(documentType, draft.amount, draft.requesterId));
+    return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
+  }
   const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
   const steps = request.workflow?.steps ?? [];
-  return steps.map((st) => {
-    const a = bySeq.get(st.sequence);
-    return a
-      ? {
+  const open = request.status === 'PENDING';
+  return Promise.all(
+    steps.map(async (st): Promise<ApprovalSlot> => {
+      const a = bySeq.get(st.sequence);
+      if (a) {
+        return {
           step: st.name,
           name: a.approver.name,
           position: a.approver.position ?? undefined,
           phone: contactPhone(a.approver),
           email: a.approver.email,
           at: a.actedAt,
-        }
-      : { step: st.name };
-  });
+        };
+      }
+      return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId) } : { step: st.name };
+    }),
+  );
 }
 
 /**

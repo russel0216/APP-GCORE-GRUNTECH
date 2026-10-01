@@ -4,7 +4,7 @@ import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type Column } from '../../components/DataList';
-import { DocumentApproval } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 
@@ -330,6 +330,13 @@ export interface QuotationDetail {
   taxOptions?: { rate: number; label: string }[];
   /** Optional approval routes for the draft at its total — "Add the CEO as approver". */
   approvalOptions?: { id: string; label: string }[];
+  /** Where "Submit for approval" goes from here — the standard route and each option's — and who decides each step. */
+  approvalRoutes?: { standard: ApprovalRoute | null; options: { id: string; route: ApprovalRoute | null }[] } | null;
+}
+
+interface ApprovalRoute {
+  name: string;
+  steps: { name: string; approvers: { id: string; name: string }[] }[];
 }
 
 /**
@@ -439,7 +446,8 @@ export function QuotationDetail() {
 
   function printPdf() {
     if (!revision) return;
-    openPdf(`/api/quotations/${quotation!.id}/revisions/${revision.id}/pdf`, () =>
+    const option = optionId && (quotation!.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null;
+    openPdf(`/api/quotations/${quotation!.id}/revisions/${revision.id}/pdf${qs({ option })}`, () =>
       toast('error', 'Could not render the quotation'),
     );
   }
@@ -826,6 +834,29 @@ export function QuotationDetail() {
             )}
           </div>
         </div>
+        {canSubmit &&
+          (() => {
+            // The route the submit would take — the option's when it is
+            // ticked — with who decides each step, named before anybody
+            // presses Submit. The submitter is never among them.
+            const chosen = optionId ? quotation.approvalRoutes?.options.find((o) => o.id === optionId)?.route : null;
+            const route = chosen ?? quotation.approvalRoutes?.standard;
+            if (!route?.steps.length) return null;
+            return (
+              <div className="qd-route">
+                <span className="qd-route-label">Submit for approval sends it to</span>
+                <ApprovalStepper
+                  steps={route.steps.map((st) => ({
+                    label: st.name,
+                    approver: st.approvers.length
+                      ? st.approvers.map((p) => p.name).join(' or ')
+                      : 'Nobody — no one else holds this role',
+                    status: 'WAITING',
+                  }))}
+                />
+              </div>
+            );
+          })()}
       </section>
 
       {revision && (
