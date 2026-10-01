@@ -46,6 +46,11 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
     },
     { header: 'Department', example: 'Engineering', hint: 'Must match a department name' },
     {
+      header: 'Team',
+      example: 'UI',
+      hint: 'The industry team — an industry code or name (Admin › Categories). Left blank, a re-import keeps the team on file',
+    },
+    {
       header: 'Employment Type',
       example: 'REGULAR',
       hint: 'REGULAR, PROBATIONARY, PROJECT_BASED, CONTRACTUAL, PART_TIME or TRAINEE',
@@ -78,6 +83,22 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
       departmentId = dept.id;
     }
 
+    // The team is an Industry row, by code or by name. Blank sets nothing, so
+    // a sheet made before the column existed never wipes a team on re-import.
+    let industryId: string | undefined;
+    const team = optional(row, 'Team');
+    if (team) {
+      const industry = await prisma.industry.findFirst({
+        where: {
+          OR: [{ code: { equals: team, mode: 'insensitive' } }, { name: { equals: team, mode: 'insensitive' } }],
+        },
+        select: { id: true, isActive: true },
+      });
+      if (!industry) throw new Error(`Team "${team}" is not an industry code or name`);
+      if (!industry.isActive) throw new Error(`Team "${team}" is switched off`);
+      industryId = industry.id;
+    }
+
     // Resolve only. Creation waits for `write`.
     const title = optional(row, 'Position');
     let positionId: string | null = null;
@@ -99,6 +120,7 @@ const employeeSpec: ImportSpec<EmployeeImportRecord> = {
         firstName: required(row, 'First Name'),
         middleName: optional(row, 'Middle Name'),
         departmentId,
+        ...(industryId ? { industryId } : {}),
         employmentType: oneOf(row, 'Employment Type', EMPLOYMENT_TYPES, 'REGULAR'),
         dateHired: date(row, 'Date Hired'),
         periodEndDate: date(row, 'Period Ends'),

@@ -71,9 +71,14 @@ export async function liveToken(raw: unknown) {
           phone: true,
           isActive: true,
           invitePending: true,
+          position: true,
+          employeeNo: true,
           employee: {
             select: {
               id: true,
+              employeeNo: true,
+              position: true,
+              industry: { select: { name: true } },
               mobile: true,
               address: true,
               birthDate: true,

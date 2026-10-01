@@ -192,6 +192,31 @@ function presentPersonal<T extends { birthDate: Date | null }>(e: T) {
   return { ...e, birthDate: dayOf(e.birthDate) };
 }
 
+/**
+ * What HR keeps about a person's job — their team (an Industry row), position
+ * and employee number — for the invitation and My Account to SHOW. Never
+ * written from here: the employee number is the {EMP} in every quotation
+ * number they raise, and the position has one writer (shared/plantilla.ts).
+ * The employee record wins over the login's own copy.
+ */
+const FACTS_SELECT = {
+  position: true,
+  employeeNo: true,
+  employee: { select: { employeeNo: true, position: true, industry: { select: { name: true } } } },
+} as const;
+
+function hrFacts(u: {
+  position: string | null;
+  employeeNo: string | null;
+  employee: { employeeNo: string; position: string | null; industry: { name: string } | null } | null;
+}) {
+  return {
+    team: u.employee?.industry?.name ?? null,
+    position: u.employee?.position || u.position || null,
+    employeeNo: u.employee?.employeeNo || u.employeeNo || null,
+  };
+}
+
 const profileSchema = z.object({
   phone: z.string().trim().max(40).optional().nullable(),
   personal: personalSchema.optional(),
@@ -202,13 +227,16 @@ authRoutes.get(
   authenticate,
   handler(async (req, res) => {
     const me = currentUser(req);
-    const row = await prisma.user.findUnique({
-      where: { id: me.id },
-      select: { name: true, email: true, position: true, phone: true, employee: { select: PERSONAL_SELECT } },
-    });
-    if (!row) throw unauthorized();
+    const [row, facts] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: me.id },
+        select: { name: true, email: true, position: true, phone: true, employee: { select: PERSONAL_SELECT } },
+      }),
+      prisma.user.findUnique({ where: { id: me.id }, select: FACTS_SELECT }),
+    ]);
+    if (!row || !facts) throw unauthorized();
     const { employee, ...rest } = row;
-    res.json({ ...rest, personal: employee ? presentPersonal(employee) : null });
+    res.json({ ...rest, personal: employee ? presentPersonal(employee) : null, facts: hrFacts(facts) });
   }),
 );
 
@@ -238,6 +266,7 @@ authRoutes.patch(
     });
     const { employee, ...rest } = row;
     const was = before.employee;
+    const facts = await prisma.user.findUnique({ where: { id: me.id }, select: FACTS_SELECT });
     await audit(
       {
         entityType: 'user',
@@ -260,7 +289,7 @@ authRoutes.patch(
       },
       req,
     );
-    res.json({ ...rest, personal: employee ? presentPersonal(employee) : null });
+    res.json({ ...rest, personal: employee ? presentPersonal(employee) : null, facts: facts ? hrFacts(facts) : null });
   }),
 );
 
@@ -391,6 +420,8 @@ authRoutes.post(
       email: u.email,
       expiresAt: row.expiresAt,
       phone: u.phone,
+      // Shown on the invitation for the person to check, never to change.
+      facts: row.purpose === 'INVITE' ? hrFacts(u) : null,
       // An invitation also asks for the person's own details, when there is an
       // employee record to keep them on.
       personal:

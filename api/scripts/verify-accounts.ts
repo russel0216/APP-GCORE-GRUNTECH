@@ -49,6 +49,7 @@ async function cleanup() {
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.department.deleteMany({ where: { code: { startsWith: TAG } } });
+  await prisma.industry.deleteMany({ where: { name: { startsWith: TAG } } });
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[], superAdmin = false) {
@@ -405,11 +406,15 @@ async function main() {
   }
 
   console.log('\nOne creation: an employee and their login together');
+  // A throwaway team, so the seeded industries are never touched.
+  const team = await prisma.industry.create({ data: { code: 'ZQ', name: `${TAG} Utilities Team` } });
+  const offTeam = await prisma.industry.create({ data: { code: 'ZQX', name: `${TAG} Retired Team`, isActive: false } });
   const hire = await http(adminT, 'POST', '/employees', {
     employeeNo: `${TAG}-001`,
     firstName: 'Liza',
     lastName: `${TAG} Soberano`,
     departmentId: department.id,
+    industryId: team.id,
     position: 'Service Engineer',
     mobile: '0917 111 2222',
     login: { email: `liza${DOMAIN}` },
@@ -423,13 +428,37 @@ async function main() {
   const lizaToken = tokenOf(hireLogin?.invite?.link);
   const lizaLink = await http(null, 'POST', '/auth/link', { token: lizaToken });
   check('the invitation asks for their own details, since HR keeps a record', lizaLink.status === 200 && !!lizaLink.body.personal && (lizaLink.body.personal as { mobile?: string }).mobile === '0917 111 2222');
+  const lizaFacts = lizaLink.body.facts as { team?: string; position?: string; employeeNo?: string } | null;
+  check(
+    'and shows their team, position and employee number from the HR record',
+    lizaFacts?.team === `${TAG} Utilities Team` && lizaFacts?.position === 'Service Engineer' && lizaFacts?.employeeNo === `${TAG}-001`,
+    JSON.stringify(lizaFacts),
+  );
   const lizaIn = await http(null, 'POST', '/auth/welcome', {
     token: lizaToken,
     password: 'Liza-Joins-2026',
     phone: '0917 333 4444',
-    personal: { mobile: '0917 333 4444', address: '12 Rizal St, Marikina', birthDate: '1995-02-14', emergencyContactName: 'Maria Soberano', emergencyContactPhone: '0917 555 6666' },
+    personal: {
+      mobile: '0917 333 4444',
+      address: '12 Rizal St, Marikina',
+      birthDate: '1995-02-14',
+      emergencyContactName: 'Maria Soberano',
+      emergencyContactPhone: '0917 555 6666',
+      // Not theirs to change — sent anyway, as a hand-made request could.
+      employeeNo: `${TAG}-999`,
+      position: 'President',
+      industryId: offTeam.id,
+    },
+    employeeNo: `${TAG}-999`,
+    position: 'President',
   });
   const lizaEmp = await prisma.employee.findUniqueOrThrow({ where: { employeeNo: `${TAG}-001` } });
+  check(
+    'the invitation cannot change the employee number, position or team',
+    lizaEmp.position === 'Service Engineer' && lizaEmp.industryId === team.id &&
+      (await prisma.employee.count({ where: { employeeNo: `${TAG}-999` } })) === 0 &&
+      (await prisma.user.findUniqueOrThrow({ where: { id: lizaEmp.userId! } })).position === 'Service Engineer',
+  );
   check(
     'what they fill in lands on their employee record',
     lizaIn.status === 200 &&
@@ -441,6 +470,32 @@ async function main() {
   );
   const lizaProfile = await http(String(lizaIn.body.token), 'GET', '/auth/profile');
   check('and they can see it on their own profile later', (lizaProfile.body.personal as { address?: string } | null)?.address === '12 Rizal St, Marikina');
+  check(
+    'My Account shows the same team, position and employee number',
+    JSON.stringify(lizaProfile.body.facts) === JSON.stringify({ team: `${TAG} Utilities Team`, position: 'Service Engineer', employeeNo: `${TAG}-001` }),
+    JSON.stringify(lizaProfile.body.facts),
+  );
+  const selfTeam = await http(String(lizaIn.body.token), 'PATCH', '/auth/profile', { personal: { industryId: offTeam.id, position: 'President' } });
+  check(
+    'and the profile cannot change them either',
+    selfTeam.status === 200 && (await prisma.employee.findUniqueOrThrow({ where: { id: lizaEmp.id } })).industryId === team.id,
+  );
+
+  // HR sets the team; the register filters by it; a team in use is not deleted.
+  const listed = await http(adminT, 'GET', `/employees?industryId=${team.id}`);
+  check(
+    'the register filters by team and returns it on each row',
+    listed.status === 200 &&
+      (listed.body.rows as { id: string; industry: { name: string } | null }[]).some((r) => r.id === lizaEmp.id && r.industry?.name === `${TAG} Utilities Team`),
+  );
+  const noTeam = await http(adminT, 'GET', `/employees?industryId=none&search=${encodeURIComponent(TAG)}`);
+  check('?industryId=none lists only people with no team yet', noTeam.status === 200 && !(noTeam.body.rows as { id: string }[]).some((r) => r.id === lizaEmp.id));
+  const bogusTeam = await http(adminT, 'PATCH', `/employees/${lizaEmp.id}`, { industryId: 'no-such-industry' });
+  check('a team that does not exist is refused (400)', bogusTeam.status === 400, bogusTeam.text.slice(0, 120));
+  const retired = await http(adminT, 'PATCH', `/employees/${lizaEmp.id}`, { industryId: offTeam.id });
+  check('a switched-off team is refused (400)', retired.status === 400, retired.text.slice(0, 120));
+  const dropTeam = await http(adminT, 'DELETE', `/reference/industries/${team.id}`);
+  check('an industry with people on its team cannot be deleted', dropTeam.status === 400 && !!(await prisma.industry.findUnique({ where: { id: team.id } })), dropTeam.text.slice(0, 120));
   const moved = await http(String(lizaIn.body.token), 'PATCH', '/auth/profile', { personal: { address: '7 Bonifacio Ave, Pasig' } });
   check('and correct it there', moved.status === 200 && (await prisma.employee.findUniqueOrThrow({ where: { id: lizaEmp.id } })).address === '7 Bonifacio Ave, Pasig');
   const noRecord = await http(String(used.body.token), 'PATCH', '/auth/profile', { personal: { address: 'x' } });

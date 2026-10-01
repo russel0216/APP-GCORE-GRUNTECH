@@ -126,11 +126,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,976 assertions across twenty-two scripts** (counted 2026-09-30): foundation 128,
+**1,985 assertions across twenty-two scripts** (counted 2026-10-01): foundation 128,
 masters 54, sales 178, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
-insights 92, insights-brief 43, workspace 39, accounts 77. They cover permission resolution, numbering
+insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -924,6 +924,16 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **A person keeps their own contact details** through `/auth/profile`:
   mobile, address, birthday and emergency contact on their linked employee —
   never the employment, pay or statutory fields.
+- **A person's team is `Employee.industryId`** — an Industry row, the same
+  list customers are classified by; HR sets it on the employee form (or the
+  import's `Team` column, by code or name, blank keeps what is on file). An
+  industry with people on its team is deactivated, not deleted. **Team,
+  position and employee number are SHOWN, never edited, on the invitation and
+  My Account** (`hrFacts()` in `routes/auth.ts`, `components/HrFacts.tsx`): the
+  employee number is the `{EMP}` in their quotation numbers and the position
+  has one writer. `personalSchema` strips them, and verify-accounts sends them
+  anyway to prove it. The invitation asks only for mobile, photo and birthday;
+  address and emergency contact are kept from My Account.
 - **`PasswordInput` is the one password box** (Show / Hide, a real button with
   `aria-pressed`). The signed-out pages (`/welcome`, `/reset-password`,
   `/forgot-password`) are `SIGNED_OUT_PAGES` in `App.tsx`, matched before the

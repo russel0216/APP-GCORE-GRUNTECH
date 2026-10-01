@@ -428,3 +428,17 @@
   grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
   gap: var(--s-2);
 }
+
+/* ── HR's facts, shown read-only (components/HrFacts.tsx) ─────────────────── */
+
+/* Set like an input, so it lines up with the fields around it, but flat and
+   unbordered so it never reads as something to type into. */
+.hr-fact {
+  min-height: 2.4rem;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow-wrap: anywhere;
+}

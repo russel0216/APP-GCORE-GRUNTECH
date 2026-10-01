@@ -79,6 +79,9 @@ employeeRoutes.get(
     }
     if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
     if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
+    // The team: an industry id, or `none` for nobody assigned yet.
+    if (q.filters.industryId === 'none') where.industryId = null;
+    else if (q.filters.industryId) where.industryId = q.filters.industryId;
     if (q.filters.employmentType) {
       where.employmentType = q.filters.employmentType as Prisma.EnumEmploymentTypeFilter['equals'];
     }
@@ -92,6 +95,7 @@ employeeRoutes.get(
         include: {
           department: { select: { id: true, name: true } },
           positionRef: { select: { id: true, code: true, title: true } },
+          industry: { select: { id: true, code: true, name: true } },
           user: { select: { id: true, email: true, isActive: true, invitePending: true } },
         },
         orderBy: orderBy(q, ['employeeNo', 'lastName', 'dateHired', 'createdAt'], {
@@ -173,6 +177,7 @@ employeeRoutes.get(
       include: {
         department: { select: { id: true, name: true } },
         positionRef: { select: { id: true, code: true, title: true } },
+        industry: { select: { id: true, code: true, name: true } },
         user: {
           select: {
             id: true,
@@ -214,6 +219,8 @@ const employeeSchema = z.object({
   suffix: z.string().trim().optional().nullable(),
   userId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
+  /** The industry team (Utilities, Healthcare…) — an Industry row. */
+  industryId: z.string().optional().nullable(),
   position: z.string().trim().optional().nullable(),
   /** The plantilla slot; when set, `position` mirrors its title (shared/plantilla.ts). */
   positionId: z.string().optional().nullable(),
@@ -286,6 +293,18 @@ function rateData(
   return out;
 }
 
+/**
+ * A team is an Industry row that exists and is in use. One already on the
+ * record may stay after it is deactivated — the PATCH only checks a change.
+ */
+async function teamId(tx: Prisma.TransactionClient, id: string | null | undefined): Promise<string | null> {
+  if (!id) return null;
+  const industry = await tx.industry.findUnique({ where: { id }, select: { isActive: true } });
+  if (!industry) throw badRequest('That team (industry) does not exist', [{ field: 'industryId', message: 'Choose a team from the list' }]);
+  if (!industry.isActive) throw badRequest('That team (industry) is switched off', [{ field: 'industryId', message: 'Choose an active team' }]);
+  return id;
+}
+
 employeeRoutes.post(
   '/',
   require_('ghr.employees.create'),
@@ -318,6 +337,7 @@ employeeRoutes.post(
           suffix: body.suffix || null,
           userId: body.userId || null,
           departmentId: body.departmentId || null,
+          industryId: await teamId(tx, body.industryId),
           ...(await positionFields(tx, body.positionId, body.position)),
           employmentType: body.employmentType,
           dateHired: asDate(body.dateHired),
@@ -477,6 +497,9 @@ employeeRoutes.patch(
     }
     if (body.userId !== undefined) data.userId = body.userId || null;
     if (body.departmentId !== undefined) data.departmentId = body.departmentId || null;
+    if (body.industryId !== undefined && body.industryId !== before.industryId) {
+      data.industryId = await teamId(prisma, body.industryId);
+    }
     if (body.employmentType !== undefined) data.employmentType = body.employmentType;
     if (body.isActive !== undefined) data.isActive = body.isActive;
     for (const f of [

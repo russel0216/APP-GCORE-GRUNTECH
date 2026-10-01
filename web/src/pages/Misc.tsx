@@ -4,6 +4,7 @@ import { api, getToken, SHIPPED_PHASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Avatar, ErrorBox, Field, Loading, useToast } from '../components/ui';
 import { PasswordInput } from '../components/PasswordInput';
+import { HrFact, type HrFacts } from '../components/HrFacts';
 
 // ── Account ──────────────────────────────────────────────────────────────────
 
@@ -114,6 +115,8 @@ interface Profile {
   phone: string | null;
   /** Null for an account with no employee record behind it. */
   personal: Personal | null;
+  /** Team, position and employee number from HR — shown, never saved from here. */
+  facts: HrFacts | null;
 }
 
 /**
@@ -130,6 +133,7 @@ function ContactDetails() {
   const toast = useToast();
   const [phone, setPhone] = useState('');
   const [personal, setPersonal] = useState<Personal | null>(null);
+  const [facts, setFacts] = useState<HrFacts | null>(null);
   const [saved, setSaved] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -140,6 +144,7 @@ function ContactDetails() {
   function adopt(r: Profile) {
     setPhone(r.phone ?? '');
     setPersonal(r.personal);
+    setFacts(r.facts);
     setSaved(snapshot(r.phone ?? '', r.personal));
   }
 
@@ -179,6 +184,13 @@ function ContactDetails() {
     <form className="card" onSubmit={submit}>
       <h3 className="card-title">{personal ? 'Contact and personal details' : 'Contact'}</h3>
       <ErrorBox error={error} />
+      {facts && (
+        <div className="grid grid-3">
+          <HrFact label="Team (industry)" value={facts.team} />
+          <HrFact label="Position" value={facts.position} />
+          <HrFact label="Employee number" value={facts.employeeNo} mono />
+        </div>
+      )}
       <Field label="Mobile" hint="Printed under your name on the quotations you author">
         <input
           type="tel"

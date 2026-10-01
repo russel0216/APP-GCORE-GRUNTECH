@@ -605,6 +605,8 @@ model Industry {
   isSystem  Boolean    @default(false)
   isActive  Boolean    @default(true)
   customers Customer[]
+  /// The people on this industry's team (Employee.industryId).
+  employees Employee[]
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 }
@@ -734,6 +736,11 @@ model Employee {
   /// text only for an employee with no plantilla position (unclassified).
   positionId   String?
   positionRef  Position?   @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  /// The industry team the person works in (Utilities, Healthcare…), from the
+  /// same Industry rows customers are classified by. Set by HR; shown to the
+  /// person on their invitation and My Account, never edited by them.
+  industryId   String?
+  industry     Industry?   @relation(fields: [industryId], references: [id], onDelete: Restrict)
 
   employmentType  EmploymentType @default(REGULAR)
   dateHired       DateTime?      @db.Date
@@ -783,6 +790,7 @@ model Employee {
   @@index([isActive])
   @@index([lastName, firstName])
   @@index([positionId])
+  @@index([industryId])
 }
 
 /// The five cost buckets every costing, budget and cost-ledger row uses

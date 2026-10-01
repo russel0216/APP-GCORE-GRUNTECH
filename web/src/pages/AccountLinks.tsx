@@ -4,6 +4,7 @@ import { api, ApiError, setToken } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { ErrorBox, Field, Loading, formatDateTime } from '../components/ui';
 import { PasswordInput } from '../components/PasswordInput';
+import { HrFact, type HrFacts } from '../components/HrFacts';
 import { LandingBrand } from './Login';
 
 /*
@@ -22,6 +23,8 @@ interface LinkInfo {
   expiresAt: string;
   phone: string | null;
   personal: Personal | null;
+  /** Team, position and employee number from HR — shown, never sent back. */
+  facts: HrFacts | null;
 }
 
 interface Personal {
@@ -351,7 +354,9 @@ export function Welcome() {
         token,
         password,
         phone: mobile.trim() || null,
-        ...(personal ? { personal: { ...personal, mobile: mobile.trim() || null, birthDate: personal.birthDate || null } } : {}),
+        // Only what this page asks for; the address and emergency contact stay
+        // as HR has them, kept by the person from My Account.
+        ...(personal ? { personal: { mobile: mobile.trim() || null, birthDate: personal.birthDate || null } } : {}),
       });
       // The account exists now; the photo goes up with the new session. A photo
       // that fails is not worth losing the welcome over — it can be added later.
@@ -437,24 +442,21 @@ export function Welcome() {
             </div>
           </div>
 
-          {personal && (
+          {(personal || info.facts) && (
             <fieldset className="welcome-personal">
               <legend>Your details</legend>
-              <p className="faint welcome-note">HR keeps these on your employee record. Correct anything that is out of date.</p>
-              <Field label="Home address">
-                <input autoComplete="street-address" maxLength={300} value={personal.address ?? ''} onChange={(e) => setP('address', e.target.value)} />
-              </Field>
-              <Field label="Birthday">
-                <input type="date" autoComplete="bday" value={personal.birthDate ?? ''} onChange={(e) => setP('birthDate', e.target.value)} />
-              </Field>
-              <div className="grid grid-2">
-                <Field label="Emergency contact">
-                  <input maxLength={120} value={personal.emergencyContactName ?? ''} onChange={(e) => setP('emergencyContactName', e.target.value)} />
+              <p className="faint welcome-note">
+                Your team, position and employee number are on your HR record — if one is wrong, tell HR.
+                {personal ? ' Check your birthday.' : ''}
+              </p>
+              <HrFact label="Team (industry)" value={info.facts?.team ?? null} />
+              <HrFact label="Position" value={info.facts?.position ?? null} />
+              {personal && (
+                <Field label="Birthday">
+                  <input type="date" autoComplete="bday" value={personal.birthDate ?? ''} onChange={(e) => setP('birthDate', e.target.value)} />
                 </Field>
-                <Field label="Their number">
-                  <input type="tel" maxLength={40} value={personal.emergencyContactPhone ?? ''} onChange={(e) => setP('emergencyContactPhone', e.target.value)} />
-                </Field>
-              </div>
+              )}
+              <HrFact label="Employee number" value={info.facts?.employeeNo ?? null} mono />
             </fieldset>
           )}
 

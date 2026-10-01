@@ -29,6 +29,14 @@ interface PositionOption {
   filled: number;
 }
 
+/** GET /reference/industries — the teams a person can be on. */
+interface TeamOption {
+  id: string;
+  code: string;
+  name: string;
+  isActive: boolean;
+}
+
 interface EmployeeRow {
   id: string;
   employeeNo: string;
@@ -59,6 +67,8 @@ interface EmployeeRow {
   isActive: boolean;
   notes: string | null;
   department: { id: string; name: string } | null;
+  /** The industry team they work in — an Industry row. */
+  industry: { id: string; code: string; name: string } | null;
   user: {
     id: string;
     email: string;
@@ -90,6 +100,7 @@ export function Employees() {
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
   const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<TeamOption[]>([]);
   const [positions, setPositions] = useState<PositionOption[]>([]);
 
   const seeRates = can('ghr.employee_rates.view_all');
@@ -97,6 +108,8 @@ export function Employees() {
 
   useEffect(() => {
     api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
+    // Every industry, switched-off ones included: a record may still carry one.
+    api.get<TeamOption[]>('/reference/industries').then(setTeams).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -149,6 +162,7 @@ export function Employees() {
       ),
     },
     { key: 'department', label: 'Department', render: (e) => e.department?.name ?? '—' },
+    { key: 'industry', label: 'Team', render: (e) => e.industry?.name ?? '—' },
     {
       key: 'employmentType',
       label: 'Type',
@@ -251,6 +265,11 @@ export function Employees() {
             label: 'Department',
             options: departments.map((d) => ({ value: d.id, label: d.name })),
           },
+          {
+            key: 'industryId',
+            label: 'Team',
+            options: [{ value: 'none', label: 'No team yet' }, ...teams.map((t) => ({ value: t.id, label: t.name }))],
+          },
           { key: 'employmentType', label: 'Type', options: EMPLOYMENT_TYPES },
           {
             key: 'positionId',
@@ -302,6 +321,7 @@ export function Employees() {
           key={record.id}
           employee={record}
           departments={departments}
+          teams={teams}
           positions={positions}
           onClose={closeRecord}
           onSaved={() => {
@@ -315,6 +335,7 @@ export function Employees() {
         <EmployeeForm
           employee={null}
           departments={departments}
+          teams={teams}
           positions={positions}
           onClose={() => setCreating(false)}
           onSaved={() => {
@@ -340,12 +361,14 @@ export function Employees() {
 function EmployeeForm({
   employee,
   departments,
+  teams,
   positions,
   onClose,
   onSaved,
 }: {
   employee: EmployeeRow | null;
   departments: { id: string; name: string }[];
+  teams: TeamOption[];
   positions: PositionOption[];
   onClose: () => void;
   onSaved: () => void;
@@ -390,6 +413,7 @@ function EmployeeForm({
     suffix: employee?.suffix ?? '',
     userId: employee?.user?.id ?? '',
     departmentId: employee?.department?.id ?? '',
+    industryId: employee?.industry?.id ?? '',
     position: employee?.position ?? '',
     positionId: employee?.positionId ?? '',
     employmentType: employee?.employmentType ?? 'REGULAR',
@@ -541,6 +565,7 @@ function EmployeeForm({
         suffix: form.suffix || null,
         userId: form.userId || null,
         departmentId: form.departmentId || null,
+        industryId: form.industryId || null,
         employmentType: form.employmentType,
         dateHired: form.dateHired || null,
         dateRegularized: form.dateRegularized || null,
@@ -824,6 +849,19 @@ function EmployeeForm({
                     {d.name}
                   </option>
                 ))}
+              </select>
+            </Field>
+            <Field label="Team (industry)" hint="The industry team they work in — shown to them on their invitation and My Account">
+              <select value={form.industryId} onChange={(e) => setForm({ ...form, industryId: e.target.value })}>
+                <option value="">— no team yet —</option>
+                {teams
+                  .filter((t) => t.isActive || t.id === form.industryId)
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                      {t.isActive ? '' : ' (switched off)'}
+                    </option>
+                  ))}
               </select>
             </Field>
             <Field label="Employment type">

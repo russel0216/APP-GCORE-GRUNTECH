@@ -870,7 +870,7 @@ referenceRoutes.get(
     res.json(
       await prisma.industry.findMany({
         where: activeOnly ? { isActive: true } : {},
-        include: { _count: { select: { customers: true } } },
+        include: { _count: { select: { customers: true, employees: true } } },
         orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
       }),
     );
@@ -949,7 +949,7 @@ referenceRoutes.delete(
   handler(async (req, res) => {
     const industry = await prisma.industry.findUnique({
       where: { id: req.params.id },
-      include: { _count: { select: { customers: true } } },
+      include: { _count: { select: { customers: true, employees: true } } },
     });
     if (!industry) throw notFound('Industry not found');
     if (industry.isSystem) {
@@ -957,6 +957,9 @@ referenceRoutes.delete(
     }
     if (industry._count.customers > 0) {
       throw badRequest(`${industry._count.customers} customer(s) still carry this industry`);
+    }
+    if (industry._count.employees > 0) {
+      throw badRequest(`${industry._count.employees} employee(s) are on this industry's team — move them first, or deactivate it`);
     }
     await prisma.industry.delete({ where: { id: industry.id } });
     await audit(
