@@ -49,23 +49,20 @@ four databases and four copies of "customer".
    **Money is `formatMoney`, which prints `PHP 1,562.20`** — the currency code,
    not `₱`. U+20B1 is outside WinAnsiEncoding, so a standard PDF font draws it
    as `±`. Never put a non-Latin-1 character in a PDF without embedding a font.
-   **The quotation is the one customer letter**: `style: 'letter'` sets it as
-   the owner's Quotation_Template (2026-10-01): 36pt margins; the logo
-   top-left with the company block beside it (name in bold purple #5B2A8C,
-   address, `Tel No. | Email`, website, `TIN | REG NO`); `QUOTATION` large
-   purple top-right with `# number` in green #2E9A4B under it; a green rule;
-   CUSTOMER and DETAILS as purple-headed `parties` (`heading`, `facts`); a
-   head-only table (purple capitals, light #D9D9D9 rules) whose heading rows
-   are green subheadings; the totals flush right with `Total Price (PHP):` in
-   larger purple over a 2pt purple rule; the sign-offs SIDE BY SIDE above the
-   footer (PREPARED BY left, APPROVED BY right — a purple heading over
-   `Name (Position)` and the time, or "Pending"); a light rule and the
-   company's strapline in green capitals on every page; a quiet running
-   header after page one. No Conforme. Table figures are `formatAmount`,
-   because the currency is named in the head and the total. The engine still
-   draws all of that — a module picks the style and supplies `parties`,
-   `table`, `totals`, `lines` and `rule` sections, never its own header or
-   footer.
+   **The quotation is the one exception: a designed document.** Its layout is
+   DATA — boxes on an A4 page that an administrator places in Admin › PDF
+   Templates — and it prints through `renderDesigned(design, data)` in
+   `shared/pdfDesign.ts`, the same engine's other door. The module still
+   draws nothing: `quotationPrintData()` supplies fields, rows, totals and
+   signatories; the engine places every box, keeps the dated sign-offs, and
+   puts every string through `pdfSafe`. The standard layout
+   (`STANDARD_QUOTATION_DESIGN`) is the owner's Quotation_Template (36pt
+   margins, purple #5B2A8C heads, green #2E9A4B number and subheadings, light
+   #D9D9D9 rules, totals flush right, sign-offs side by side, the strapline on
+   every page, a running header after page one, no Conforme); table figures
+   are `formatAmount`, because the currency is named in the head and the
+   total. Every other document stays on the house style, which is code — see
+   "Quotation PDF template" below.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
@@ -133,8 +130,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,044 assertions across twenty-two scripts** (counted 2026-10-01): foundation 136,
-masters 54, sales 229, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,085 assertions across twenty-two scripts** (counted 2026-10-02): foundation 163,
+masters 54, sales 243, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -991,12 +988,14 @@ the detail.
   (the author, `edit_all`, or `gops.costing.view_all`) strips `unitCost`,
   `costAmount`, the provider and `costNote` server-side, and the quotation PDF
   never reads cost at all.
-- **The letterhead lives in `renderDocument`**: Tel/Fax, TIN, REG. NO. and the
+- **The letterhead lives in the engine**: Tel/Fax, TIN, REG. NO. and the
   company's `documentTagline` print on every document when set; unset lines are
-  left out — in the footer on the house style, beside the logo (and the
-  strapline under the footer rule) on the quotation's `letter` style. The
-  letter prints no subject and no validity. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
-  bold title over its description. Bank details are stored, printed nowhere yet.
+  left out — in the footer on the house style, and through the `company.*`
+  fields (which `renderDesigned` reads itself) on the quotation's layout. The
+  standard quotation layout prints no subject and no validity; both are fields
+  an administrator can place. `PdfCell` (`string | { title, body? }`) is how a
+  table cell prints a bold title over its description. Bank details are
+  fields of the quotation layout, printed only where one is placed.
 - **The quotation editor is a page, not a dialog** (SCORO's "Modify quote
   details"): `/g-ops/quotations/new` and `/g-ops/quotations/:id/edit`
   (`QuotationEditor.tsx`). **One save = one transaction** on create —
@@ -1069,9 +1068,9 @@ the detail.
 - **A line may be a subheading** (`QuotationItem.isHeading`): its title is the
   heading; `lineData()` stores it with no quantity, price, cost or provider,
   whatever was sent. `quotationTotals` (and the `quotationMath` mirror) leave
-  it out of `lineCount`. The editor has no Group column: an older line's group
-  becomes a subheading where it changes (`linesFromItems`), and the PDF and the
-  page print groups and subheadings alike (`displayRows`).
+  it out of `lineCount`. A line keeps its SCORO group in a Group column of its
+  own, on the editor and the quotation page; the PDF prints a group as a
+  heading where it changes, unless the layout gives the table a Group column.
 - **Probability is no longer asked for.** A new quotation takes its lead's
   probability, else 50; the weighted pipeline still reads the stored value.
 - **Delete** is `DELETE /quotations/:id`: `gops.quotations.delete` (the sales
@@ -1093,10 +1092,65 @@ the detail.
   description, use count) from quotations the caller may read, a line's cost
   only where `canSeeQuotationCost` allows, and items with their list price
   (standard cost only with `gops.costing.view_all` or `gchain.items.view_all`).
-- **The Product/Description column takes the width**: one `tbody` per line, the
-  product row first, the cost strip (provider, notes, unit cost, cost, margin)
-  on its own row under it. Labels and values share one size (`--fs-md`) on
-  both the quotation page and the editor.
+- **A line is ONE row, as SCORO edits it** (2026-10-02): Group | Product and
+  description | Quantity and unit | Unit price | Amount (with-VAT under) |
+  Cost and provider info (toggles and provider, then notes beside the unit
+  cost) | Margin. Every column but the product has a fixed width, so the
+  product takes what is left; narrower than the table's minimum, the table
+  scrolls inside its card. Never split a line's cost onto a row of its own.
+  Labels and values share one size (`--fs-md`) on both pages. The quotation
+  page has no Margin card — the cost panel beside the totals says it.
+
+## Quotation PDF template (2026-10-02)
+
+Admin › PDF Templates (`/admin/pdf-templates`, `admin.pdf_templates.*`,
+`PdfTemplates.tsx`) lays out the quotation's PDF: boxes on an A4 page, each
+printing fixed text and `{{fields}}`. Only the quotation is designed; adding
+another document means a field catalogue, a sample, a standard layout and a
+data builder like `quotationTemplate.ts` and `quotationPrintData()`.
+
+- **The layout is one `Setting` row, `pdfTemplate.quotation`**, read by
+  `quotationDesign()`; none (or one that no longer parses — it is logged and
+  the editor says so) prints `STANDARD_QUOTATION_DESIGN`. `PUT
+  /api/pdf-templates/quotation` checks the shape (`designSchema`: one line
+  table, one totals and one sign-off block at most, boxes on the page, colours
+  `#RRGGBB`) and every field the layout names (`unknownFields()`), so a typo is
+  a 400 naming it rather than a blank on a customer's quotation. Audited.
+  `DELETE` puts the standard back. `POST …/preview` prints whatever the editor
+  holds against the sample (one page or three) or a quotation the caller may
+  print (`printableQuotation()`, audited as EXPORTED).
+- **Anchors make a fixed layout work for a document of unknown length**:
+  `first` (page 1; a box that grows pushes down what sits under it, the line
+  table included, and never moves anything up), `every`, `later` (pages 2+),
+  `after` (follows the line table, keeping its design distance under the table
+  or under the box DIRECTLY above it — `covers()` — so a box with nothing to
+  print closes up; one that does not fit goes over whole, text of four lines
+  or more runs on), and `last` (where it was put on the last page, or a page
+  of its own if the content reaches it). The table starts where it is on page
+  1 and resumes at `flowTop` with its head repeated; content stops at
+  `flowBottom`. A row taller than a page is split, never cut off.
+- **Fields are filled by `resolveTemplate()`**: parts of a line split by
+  ` | ` drop out when every field in them is empty, a line whose parts all
+  went is left out, `{{field|—}}` prints the fallback, `**…**` is bold in the
+  TEMPLATE only (a value's `**` prints as typed), and a value with newlines
+  runs over as many lines. `web/src/lib/pdfTemplate.ts` is the editor's COPY of
+  that rule for its preview, pinned equal by verify-foundation — change both.
+- **Every string reaches the page through `pdfSafe`**, text is drawn run by
+  run with no PDFKit wrapping (margins are 0, so PDFKit never starts a page by
+  itself), and `{{pages}}` outside the page furniture renders twice to know
+  the count. Graphics anchored every/later are drawn when a page is made, so
+  they sit behind its content.
+- **"Hide total" hides the money everywhere**: `quotationPrintData()` blanks
+  the money fields as well as passing no totals, so a layout that prints
+  `{{quotation.total}}` in a box of its own still obeys it. Cost is never in
+  the data, so no layout can print it.
+- **The editor**: drag to move, handles to size, snapping to margins and other
+  boxes (Alt places freely); a focused box moves with the arrows (Shift 10pt)
+  and sizes with Ctrl+arrows; Ctrl+Z/Y undo and redo — through a reducer that
+  applies each change to the layout as it stands, so key repeats faster than
+  a render are not lost. Moving or sizing the line table moves the `after`
+  boxes with it. The page is drawn white (`--paper`) in either theme; the
+  colours on it are the layout's own.
 
 ## Costing sheet notes
 

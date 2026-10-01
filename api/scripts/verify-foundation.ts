@@ -40,6 +40,10 @@ import {
   pickWorkflow,
 } from '../src/shared/approvals';
 import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
+import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
+import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
+// The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
+import { resolveTemplate as editorResolve } from '../../web/src/lib/pdfTemplate';
 import { readAppearance } from '../src/routes/appearance';
 
 if (env.isProduction) {
@@ -866,65 +870,53 @@ async function main() {
     check('and still starts 14pt from the edge', letteredEdges.left === 14, `${letteredEdges.left}pt`);
     check('a letterhead does not cost a page', pages(lettered) === 1, `${pages(lettered)} pages`);
 
-    // ── 11. The customer's letter: Quotation_Template, drawn by the same engine ──
-    console.log('\nLetter style');
+    // ── 11. The quotation: a layout the administrator draws, the engine prints ──
+    console.log('\nDesigned documents (the quotation)');
 
-    const letter = await renderDocument({
-      style: 'letter',
+    const day = new Date('2026-08-17T02:00:00Z');
+    const blank = Object.fromEntries(QUOTATION_FIELDS.map((f) => [f.key, '']));
+    const quoteData = (over: Partial<DesignData> & { fields?: Record<string, string> } = {}): DesignData => ({
       title: 'Quotation',
-      documentNumber: `${TAG}-LT`,
-      revision: '2',
-      reference: `${TAG} Customer Inc.`,
-      date: new Date('2026-08-17T02:00:00Z'),
-      sections: [
-        {
-          kind: 'parties',
-          left: { heading: 'Customer', name: `${TAG} Customer Inc.`, lines: ['1 Test Street', 'Attention: Juan Dela Cruz'] },
-          right: {
-            heading: 'Details',
-            name: '',
-            facts: [
-              { label: 'Date', value: formatShortDate(new Date('2026-08-17T02:00:00Z')) },
-              { label: 'Payment Terms', value: '30 days' },
-              { label: 'PR Number', value: 'PR-77' },
-            ],
-          },
-        },
-        {
-          kind: 'table',
-          head: ['Product description', 'Qty', 'Unit price', 'Total'],
-          widths: [58.3, 10.8, 15.5, 15.4],
-          align: ['left', 'right', 'right', 'right'],
-          // Forty rows, alternating product name and figures, so it runs over.
-          rows: Array.from({ length: 40 }, (_, i) =>
-            i % 2 ? [`Filter element 0.1 μm, lot ${i}`, '1 lot', formatAmount(1000), formatAmount(1000)] : { heading: `PRODUCT ${i}` },
-          ),
-        },
-        {
-          kind: 'totals',
-          rows: [
-            { label: 'Sub Total Price:', value: formatAmount(20_000) },
-            { label: 'Total Price (PHP):', value: formatAmount(22_400), bold: true },
-          ],
-        },
-        { kind: 'lines', lines: [{ label: 'Delivery:', text: '2 weeks' }] },
+      rows: [],
+      totals: [
+        { label: 'Sub Total Price:', value: formatAmount(20_000) },
+        { label: 'Total Price (PHP):', value: formatAmount(22_400), bold: true },
       ],
-      signatories: [
-        { role: 'Prepared by', name: employee.name, at: ot.createdAt },
-        { role: 'Approved by' },
-      ],
+      signatories: [{ role: 'Prepared by', name: employee.name, at: ot.createdAt }, { role: 'Approved by' }],
+      ...over,
+      fields: {
+        ...blank,
+        'quotation.number': `${TAG}-LT R2`,
+        'quotation.date': formatShortDate(day),
+        'quotation.prNumber': 'PR-77',
+        'quotation.currency': 'PHP',
+        'quotation.delivery': '2 weeks',
+        'customer.name': `${TAG} Customer Inc.`,
+        'customer.address': '1 Test Street',
+        'contact.nameAndPosition': 'Juan Dela Cruz',
+        ...(over.fields ?? {}),
+      },
     });
+    const lineRow = (i: number) => ({
+      cells: { product: `Filter element 0.1 μm, lot ${i}`, qtyUnit: '1 lot', unitPrice: formatAmount(1000), amount: formatAmount(1000) },
+    });
+    // Forty rows, alternating a subheading and a line, so it runs over.
+    const longRows = Array.from({ length: 40 }, (_, i) => (i % 2 ? lineRow(i) : { heading: `PRODUCT ${i}` }));
+
+    const letter = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: longRows }));
     const letterText = pdfText(letter);
     const letterPages = pages(letter);
-    check('the letter names itself QUOTATION, with "# number" and the revision', letterText.includes('QUOTATION') && letterText.includes(`# ${TAG}-LT R2`));
+    check('the standard layout names itself QUOTATION, with "# number" and the revision', letterText.includes('QUOTATION') && letterText.includes(`# ${TAG}-LT R2`));
     check('CUSTOMER and DETAILS head the two blocks', letterText.includes('CUSTOMER') && letterText.includes('DETAILS'));
     check('the details print as labelled lines — the date the 08/17/2026 way', letterText.includes('Date: 08/17/2026') && letterText.includes('PR Number: PR-77'));
+    // WinAnsi's em dash is byte 0x97, which is how this reader decodes it.
+    check('{{field|—}} prints the dash when the field is empty', letterText.includes('Payment Terms: \u0097'));
     check(
       'its company block is on the letterhead: TIN and REG NO',
       (!co.tin || letterText.includes(`TIN: ${co.tin}`)) && (!co.regNo || letterText.includes(`REG NO: ${co.regNo}`)),
     );
-    check('the footer carries the strapline', letterText.includes((co.documentTagline ?? '\u0000').toUpperCase()));
-    check('a long letter runs over', letterPages >= 2, `${letterPages} pages`);
+    check('every page carries the strapline', letterText.split('\n').filter((l) => l === (co.documentTagline ?? '\u0000').toUpperCase()).length === letterPages);
+    check('a long quotation runs over', letterPages >= 2, `${letterPages} pages`);
     const running = letterText
       .split('\n')
       .filter((line) => line.includes(`${TAG} Customer Inc.`) && line.includes(`${TAG}-LT R2`) && line.includes('08/17/2026'));
@@ -934,11 +926,117 @@ async function main() {
       `${running.length} running headers on ${letterPages} pages`,
     );
     check('the table head repeats on the next page', letterText.split('\n').filter((l) => l === 'PRODUCT DESCRIPTION').length === letterPages);
-    check('the dated sign-offs are kept, side by side', letterText.includes('PREPARED BY') && letterText.includes('APPROVED BY') && letterText.includes(stamp(ot.createdAt)) && letterText.includes('Pending'));
+    check('and so does "Page n of m"', letterText.includes(`Page ${letterPages} of ${letterPages}`));
+    check(
+      'the dated sign-offs print once, on the last page',
+      letterText.split('\n').filter((l) => l === 'PREPARED BY').length === 1 &&
+        letterText.includes('APPROVED BY') &&
+        letterText.includes(stamp(ot.createdAt)) &&
+        letterText.includes('Pending'),
+    );
     check('the figures carry no currency; the total names it once', letterText.includes('1,000.00') && !letterText.includes('PHP 1,000.00'));
     check('Greek mu prints as the micro sign, not "?"', pdfSafe('0.1 μm') === '0.1 µm' && letterText.includes('0.1 µm'));
-    check("the letter's content starts 36pt in, as the template's does", pdfEdges(letter).left === 36, `${pdfEdges(letter).left}pt`);
+    check("the content starts 36pt in, as the template's does", pdfEdges(letter).left === 36, `${pdfEdges(letter).left}pt`);
     check('and its strapline stays clear of the bottom edge', pdfEdges(letter).bottom > 12, `${pdfEdges(letter).bottom}pt clear`);
+
+    // One page: what follows the table follows it, and closes up when empty.
+    const short = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [lineRow(1), lineRow(2)] }));
+    const shortText = pdfText(short);
+    check('a short quotation is one page, with no "Page 1 of 1"', pages(short) === 1 && !shortText.includes('Page 1 of 1'));
+    check('and no running header', !shortText.split('\n').some((l) => l.includes('08/17/2026') && l.includes(`${TAG}-LT R2`)));
+    const longer = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [1, 2, 3, 4, 5, 6].map(lineRow) }));
+    const totalsShort = textAt(short, 'Sub Total Price:');
+    const totalsLonger = textAt(longer, 'Sub Total Price:');
+    // A one-line row is 9pt type (10.4pt) plus 20pt of padding.
+    check(
+      'the totals follow the lines: four more lines, and they sit four rows lower',
+      !!totalsShort && !!totalsLonger && Math.abs(totalsLonger.y - totalsShort.y - 4 * 30.4) < 2,
+      `${totalsShort?.y} → ${totalsLonger?.y}`,
+    );
+    const signedShort = textAt(short, 'PREPARED BY');
+    check('the sign-offs stay where the layout put them on the last page', !!signedShort && Math.abs(signedShort.y - (728.9 + 8.5 * 0.718)) < 1, `${signedShort?.y}`);
+    const withNotes = await renderDesigned(
+      STANDARD_QUOTATION_DESIGN,
+      quoteData({ rows: [lineRow(1)], fields: { 'quotation.notes': `${TAG} a note` } }),
+    );
+    const thanks = (pdf: Buffer) => textAt(pdf, 'Thank you very much')?.y ?? 0;
+    const shortOne = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [lineRow(1)] }));
+    check('Notes print only when there are notes', pdfText(withNotes).includes(`${TAG} a note`) && !pdfText(shortOne).includes('Notes:'));
+    check(
+      'and without them the lines after close up into the space',
+      thanks(withNotes) - thanks(shortOne) > 20 && thanks(withNotes) - thanks(shortOne) < 45,
+      `${thanks(shortOne)} vs ${thanks(withNotes)}`,
+    );
+    check(
+      'with no totals ("Hide total") the totals print nothing',
+      !pdfText(await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [lineRow(1)], totals: null }))).includes('Total Price (PHP):'),
+    );
+
+    // A box the administrator moved prints where it was moved.
+    const moved: PdfDesign = {
+      ...STANDARD_QUOTATION_DESIGN,
+      blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.id === 'number' ? { ...b, x: 40, y: 300, align: 'left' as const } : b)),
+    };
+    const movedAt = textAt(await renderDesigned(moved, quoteData({ rows: [lineRow(1)] })), `# ${TAG}-LT R2`);
+    check('a box moved in the layout prints where it was moved', !!movedAt && Math.abs(movedAt.x - 40) < 0.5 && movedAt.y > 300 && movedAt.y < 312, JSON.stringify(movedAt));
+
+    // Text longer than a page runs on; a line taller than a page is split, not lost.
+    const longTerms = Array.from({ length: 120 }, (_, i) => `Term ${i + 1}: the customer provides access to site.`).join('\n');
+    const runOn = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [lineRow(1)], fields: { 'quotation.terms': longTerms } }));
+    check('terms longer than a page run on to the next, to the last line', pages(runOn) >= 2 && pdfText(runOn).includes('Term 120: the customer'));
+    const tallRow = { cells: { product: { title: 'Spec sheet', body: Array.from({ length: 90 }, (_, i) => `Spec line ${i + 1}`).join('\n') }, qtyUnit: '1 lot' } };
+    const split = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [tallRow] }));
+    check('a line taller than a page is carried over, not cut off', pages(split) >= 2 && pdfText(split).includes('Spec line 90'));
+    check('and nothing is drawn off the bottom of a page', pdfEdges(split).bottom > 12 && pdfEdges(runOn).bottom > 12);
+
+    // The rule for filling text, and the browser's copy of it.
+    const cases: [string, Record<string, string>, boolean][] = [
+      ['Tel No.: {{a}} | Fax: {{b}} | Email: {{c}}', { a: '', b: '', c: 'x@y.ph' }, false],
+      ['TIN: {{a}} | REG NO: {{b}}', {}, false],
+      ['**Delivery:** {{d|—}}', {}, false],
+      ['Static\n\n{{x}}\nAfter', { x: '' }, false],
+      ['{{x}}', { x: 'a**b**' }, false],
+      ['**Terms:**\n{{t}}', { t: 'one\ntwo' }, false],
+      ['A {{x}} | B', { x: '' }, true],
+      ['**open | {{gone}} | still** bold', { gone: '' }, false],
+    ];
+    const flat = (lines: { text: string; bold: boolean }[][]) => lines.map((l) => l.map((r) => (r.bold ? `<b>${r.text}</b>` : r.text)).join('')).join('/');
+    check('a part whose fields are empty drops out, alone', flat(resolveTemplate(cases[0][0], cases[0][1])) === 'Email: x@y.ph');
+    check('a line whose parts all dropped is left out', resolveTemplate(cases[1][0], cases[1][1]).length === 0);
+    check('{{field|—}} keeps the line, and ** marks bold', flat(resolveTemplate(cases[2][0], cases[2][1])) === '<b>Delivery:</b> —');
+    check('blank lines and fixed text stay', flat(resolveTemplate(cases[3][0], cases[3][1])) === 'Static//After');
+    check('a value is printed as typed — its ** is not markup', flat(resolveTemplate(cases[4][0], cases[4][1])) === 'a**b**');
+    check('a value with newlines runs over as many lines', flat(resolveTemplate(cases[5][0], cases[5][1])) === '<b>Terms:</b>/one/two');
+    check(
+      "the editor's copy of the rule reads every case the same",
+      cases.every(([text, values, bold]) => JSON.stringify(resolveTemplate(text, values, bold)) === JSON.stringify(editorResolve(text, values, bold))),
+    );
+
+    // What the save route refuses before it reaches a customer's quotation.
+    const withTypo: PdfDesign = {
+      ...STANDARD_QUOTATION_DESIGN,
+      blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.id === 'customer' && b.type === 'text' ? { ...b, text: '{{customer.nam}}' } : b)),
+    };
+    check('a field the document lacks is caught, and named', unknownFields(withTypo, QUOTATION_FIELD_KEYS).some((i) => i.message.includes('customer.nam')));
+    check('the standard layout names only fields the quotation has', unknownFields(STANDARD_QUOTATION_DESIGN, QUOTATION_FIELD_KEYS).length === 0);
+    check('the standard layout is a layout the save would take', designSchema.safeParse(STANDARD_QUOTATION_DESIGN).success);
+    const items = STANDARD_QUOTATION_DESIGN.blocks.find((b) => b.type === 'items')!;
+    check('two line tables are refused', !designSchema.safeParse({ ...STANDARD_QUOTATION_DESIGN, blocks: [...STANDARD_QUOTATION_DESIGN.blocks, { ...items, id: 'again' }] }).success);
+    check(
+      'a colour that is not #RRGGBB is refused',
+      !designSchema.safeParse({
+        ...STANDARD_QUOTATION_DESIGN,
+        blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.type === 'line' ? { ...b, color: 'red;}' } : b)),
+      }).success,
+    );
+    check(
+      'a box that runs off the page is refused',
+      !designSchema.safeParse({
+        ...STANDARD_QUOTATION_DESIGN,
+        blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.id === 'title' ? { ...b, x: 500, w: 200 } : b)),
+      }).success,
+    );
+    check('a stored layout that no longer reads falls back, never fails', readDesign({ blocks: 'nonsense' }) === null);
   } finally {
     if (companyBefore && Object.keys(borrowed).length) {
       await prisma.company.update({
@@ -1123,6 +1221,41 @@ function pdfText(pdf: Buffer): string {
  * it is measured off the rendered page. Reading it back off the constant would
  * pass even if the drawing code ignored it.
  */
+/**
+ * Where the first text run containing `needle` was drawn: x from the left
+ * edge and y from the top of its page, at the baseline — PDFKit sets each run
+ * with its own "1 0 0 1 x y Tm" just before the TJ that shows it.
+ */
+function textAt(pdf: Buffer, needle: string): { x: number; y: number } | null {
+  const raw = pdf.toString('latin1');
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    let at: { x: number; y: number } | null = null;
+    for (const t of body.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm|\[([^\]]*)\]\s*TJ/g)) {
+      if (t[1] !== undefined) {
+        at = { x: Number(t[1]), y: Math.round((841.89 - Number(t[2])) * 100) / 100 };
+        continue;
+      }
+      let piece = '';
+      for (const part of t[3].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (at && piece.includes(needle)) return at;
+    }
+  }
+  return null;
+}
+
 function pdfEdges(pdf: Buffer): { left: number; bottom: number } {
   const raw = pdf.toString('latin1');
   let left = Infinity;

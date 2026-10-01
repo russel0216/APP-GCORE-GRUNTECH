@@ -211,17 +211,11 @@
   font-weight: 600;
 }
 
-/* Margin, for whoever may see cost: one tile, not a row of repeats. */
-.qd-margin {
-  max-width: 22rem;
-  margin-bottom: var(--s-3);
-}
-
 .qd-col-product {
   min-width: 22rem;
 }
 
-/* A subheading (or an older quotation's group) between the lines. */
+/* A subheading between the lines. */
 .quote-heading-row td {
   color: var(--neon-dim);
   font-weight: 600;

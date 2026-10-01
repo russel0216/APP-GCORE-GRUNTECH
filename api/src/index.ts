@@ -10,6 +10,7 @@ import { connectDb, prisma } from './prisma';
 import { errorMiddleware, notFound } from './http/kit';
 import { authRoutes } from './routes/auth';
 import { appearanceRoutes } from './routes/appearance';
+import { pdfTemplateRoutes } from './routes/pdfTemplates';
 import { userRoutes, roleRoutes, departmentRoutes } from './routes/users';
 import {
   companyRoutes,
@@ -135,6 +136,7 @@ app.use('/api/workflows', workflowRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/settings', settingRoutes);
 app.use('/api/appearance', appearanceRoutes);
+app.use('/api/pdf-templates', pdfTemplateRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/approvals', approvalRoutes);

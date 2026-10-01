@@ -20,17 +20,15 @@ import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots } from '../shared/approvals';
 import {
-  renderDocument,
   formatAmount,
+  formatDate,
   formatDateTime,
   formatShortDate,
-  type PdfLine,
-  type PdfParty,
-  type PdfRow,
-  type PdfSection,
   type PdfTotal,
   type Signatory,
 } from '../shared/pdf';
+import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
+import { quotationDesign } from '../shared/quotationTemplate';
 import { activityWhere, type ActivityQuery } from '../shared/activities';
 import { manilaDayKey } from '../shared/day';
 import { toCsv } from '../shared/insights';
@@ -1977,159 +1975,173 @@ onApprovalSettled('quotation', async (request, outcome) => {
 
 // ── Quotation PDF ────────────────────────────────────────────────────────────
 
+type LoadedQuotation = NonNullable<Awaited<ReturnType<typeof loadQuotation>>>;
+
+/**
+ * A quotation the caller may print: anyone with `view_all`, else its author.
+ * The PDF route and the template editor's preview both come through here.
+ */
+export async function printableQuotation(me: ResolvedUser, id: string): Promise<LoadedQuotation> {
+  const quotation = await loadQuotation(id);
+  if (!quotation) throw notFound('Quotation not found');
+  if (!me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all') && quotation.ownerId !== me.id) {
+    throw forbidden('This quotation belongs to someone else');
+  }
+  return quotation;
+}
+
+/**
+ * What a quotation prints — its fields, its lines, its totals and who signs
+ * it — for the layout in Admin › PDF Templates to place. Cost is never read
+ * here, so no layout can print it.
+ */
+export async function quotationPrintData(
+  quotation: LoadedQuotation,
+  revision: LoadedQuotation['revisions'][number],
+): Promise<DesignData> {
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } });
+  const currency = company?.currency ?? 'PHP';
+  // The table's figures carry no currency; it is named once, in the head and
+  // in "Total Price (PHP):".
+  const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
+  const ratePct = `${Number((Number(revision.vatRate) * 100).toFixed(2))}%`;
+  const discountPct = Number(revision.discountPct);
+  const discountAmount = Number(revision.discountAmount);
+  const net = Number(revision.subtotal) - discountAmount;
+  // "Hide total" hides the money everywhere on the paper — a layout that
+  // prints {{quotation.total}} in a box of its own included.
+  const money = (v: string) => (revision.hideTotal ? '' : v);
+
+  const place = quotation.site?.address
+    ? [quotation.site.address, quotation.site.city]
+    : quotation.customer.sites[0]
+      ? [quotation.customer.sites[0].address, quotation.customer.sites[0].city]
+      : [];
+  const contact = quotation.contact;
+  const owner = quotation.owner;
+  const validUntil = new Date(revision.createdAt.getTime() + revision.validityDays * 86_400_000);
+  const number = revision.revision > 0 ? `${quotation.number} R${revision.revision}` : quotation.number;
+
+  const fields: Record<string, string> = {
+    'quotation.number': number,
+    'quotation.baseNumber': quotation.number,
+    'quotation.revision': String(revision.revision),
+    'quotation.date': formatShortDate(revision.createdAt),
+    'quotation.dateLong': formatDate(revision.createdAt),
+    'quotation.subject': quotation.subject,
+    'quotation.validity': `${revision.validityDays} days`,
+    'quotation.validUntil': formatShortDate(validUntil),
+    'quotation.paymentTerms': revision.paymentTerms ?? '',
+    'quotation.prNumber': revision.prNumber ?? '',
+    'quotation.delivery': revision.delivery ?? '',
+    'quotation.terms': revision.terms ?? '',
+    'quotation.notes': revision.notes ?? '',
+    'quotation.currency': currency,
+    'quotation.vatRate': ratePct,
+    'quotation.subtotal': money(amount(revision.subtotal)),
+    'quotation.discount': discountAmount > 0 ? money(amount(discountAmount)) : '',
+    'quotation.vat': money(amount(revision.vatAmount)),
+    'quotation.total': money(amount(revision.total)),
+    'customer.name': quotation.customer.legalName || quotation.customer.name,
+    'customer.tradeName': quotation.customer.name,
+    'customer.code': quotation.customer.code,
+    'customer.address': place.filter(Boolean).join(', '),
+    'customer.phone': quotation.customer.phone ?? '',
+    'customer.email': quotation.customer.email ?? '',
+    'contact.name': contact?.name ?? '',
+    'contact.position': contact?.position ?? '',
+    'contact.nameAndPosition': contact ? `${contact.name}${contact.position ? `, ${contact.position}` : ''}` : '',
+    'contact.email': contact?.email ?? '',
+    'contact.phone': contact?.phone || contact?.mobile || '',
+    'site.name': quotation.site?.name ?? '',
+    'site.address': [quotation.site?.address, quotation.site?.city].filter(Boolean).join(', '),
+    'owner.name': owner.name,
+    'owner.position': owner.position ?? '',
+    'owner.email': owner.email ?? '',
+    'owner.phone': owner.phone ?? '',
+  };
+
+  // A subheading is a heading row, and so is a group where it changes — unless
+  // the layout gives the group a column of its own, which the engine decides.
+  // A product prints its name, and its description under it when it has one.
+  const rows: DesignRow[] = [];
+  let group: string | null = null;
+  let n = 0;
+  for (const i of revision.items) {
+    if (i.isHeading) {
+      rows.push({ heading: (i.title ?? '').trim() });
+      continue;
+    }
+    if (i.group && i.group !== group) rows.push({ heading: i.group, group: true });
+    group = i.group ?? group;
+    const qty = Number(i.quantity);
+    const qtyText = Number.isInteger(qty) ? String(qty) : qty.toString();
+    const title = (i.title ?? '').trim();
+    const description = (i.description ?? '').trim();
+    rows.push({
+      cells: {
+        no: String(++n),
+        product: title && description ? { title, body: description } : title || description,
+        qtyUnit: `${qtyText} ${i.unit}`,
+        qty: qtyText,
+        unit: i.unit,
+        unitPrice: amount(i.unitPrice),
+        amount: amount(i.amount),
+        group: i.group ?? '',
+      },
+    });
+  }
+
+  const totals: PdfTotal[] = [{ label: 'Sub Total:', value: amount(revision.subtotal) }];
+  if (discountAmount > 0) {
+    totals.push({ label: `Discount (${discountPct.toFixed(discountPct % 1 ? 2 : 0)}%):`, value: `-${amount(discountAmount)}` });
+    // On an inclusive quote the net still carries the VAT, so it is not a sum without tax.
+    if (!revision.vatInclusive) totals.push({ label: 'Sum without tax:', value: amount(net) });
+  }
+  totals.push({
+    label: revision.vatInclusive ? `VAT included (${ratePct}):` : `VAT (${ratePct}):`,
+    value: amount(revision.vatAmount),
+  });
+  totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
+
+  // Prepared by the author; then every step of the approval route, dated
+  // once it has approved and "Pending" until then — the CEO's too, when the
+  // submitter added them.
+  const slots = await approvalSlots('quotation', revision.id);
+  const signatories: Signatory[] = [
+    { role: 'Prepared by', name: owner.name, position: owner.position ?? undefined, at: revision.createdAt },
+    ...(slots.length
+      ? slots.map((sl) => ({
+          role: slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by',
+          name: sl.name,
+          position: sl.position,
+          at: sl.at,
+        }))
+      : [{ role: 'Approved by' }]),
+  ];
+
+  return {
+    title: `${number} — Quotation`,
+    fields,
+    rows,
+    // "Hide total": the lines and their prices, no sum — a rate-sheet quote.
+    totals: revision.hideTotal ? null : totals,
+    signatories,
+  };
+}
+
 quotationRoutes.get(
   '/:id/revisions/:revisionId/pdf',
   requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
   handler(async (req, res) => {
-    const me = currentUser(req);
-    const quotation = await loadQuotation(req.params.id);
-    if (!quotation) throw notFound('Quotation not found');
-    if (
-      !me.isSuperAdmin &&
-      !me.permissions.has('gops.quotations.view_all') &&
-      quotation.ownerId !== me.id
-    ) {
-      throw forbidden('This quotation belongs to someone else');
-    }
-
+    const quotation = await printableQuotation(currentUser(req), req.params.id);
     const revision = quotation.revisions.find((r) => r.id === req.params.revisionId);
     if (!revision) throw notFound('Revision not found');
 
-    // The quote a customer receives (the engine's `letter` style): the
-    // letterhead with QUOTATION and the number across the top, CUSTOMER and
-    // DETAILS side by side, a light table with each subheading in green, the
-    // totals under the last two columns, Delivery, the thank-you, then who
-    // prepared it and who approved it, dated, over the strapline. Cost is
-    // never read here.
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
-    // The currency is named once, in the head and in "Total Price (PHP):".
-    const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
-    const rate = Number(revision.vatRate);
-    const ratePct = `${Number((rate * 100).toFixed(2))}%`;
-    const discountPct = Number(revision.discountPct);
-    const discountAmount = Number(revision.discountAmount);
-    const net = Number(revision.subtotal) - discountAmount;
-
-    const place = quotation.site?.address
-      ? [quotation.site.address, quotation.site.city]
-      : quotation.customer.sites[0]
-        ? [quotation.customer.sites[0].address, quotation.customer.sites[0].city]
-        : [];
-    const contact = quotation.contact;
-    const customer: PdfParty = {
-      heading: 'Customer',
-      name: quotation.customer.legalName || quotation.customer.name,
-      lines: [
-        place.filter(Boolean).join(', '),
-        quotation.customer.phone ?? '',
-        contact ? `Attention: ${contact.name}${contact.position ? `, ${contact.position}` : ''}` : '',
-      ],
-    };
-    const details: PdfParty = {
-      heading: 'Details',
-      name: '',
-      facts: [
-        { label: 'Date', value: formatShortDate(revision.createdAt) },
-        { label: 'Payment Terms', value: revision.paymentTerms || '—' },
-        { label: 'PR Number', value: revision.prNumber || '—' },
-      ],
-    };
-
-    // A subheading — or a group, where it changes — is a green heading row; a
-    // product prints its name, and its description under it when it has one.
-    const rows: PdfRow[] = [];
-    let group: string | null = null;
-    for (const i of revision.items) {
-      if (i.isHeading) {
-        rows.push({ heading: (i.title ?? '').trim() });
-        continue;
-      }
-      if (i.group && i.group !== group) rows.push({ heading: i.group });
-      group = i.group ?? group;
-      const qty = Number(i.quantity);
-      const title = (i.title ?? '').trim();
-      const description = (i.description ?? '').trim();
-      rows.push([
-        title && description ? { title, body: description } : title || description,
-        `${Number.isInteger(qty) ? qty : qty.toString()} ${i.unit}`,
-        amount(i.unitPrice),
-        amount(i.amount),
-      ]);
-    }
-
-    const totals: PdfTotal[] = [{ label: 'Sub Total:', value: amount(revision.subtotal) }];
-    if (discountAmount > 0) {
-      totals.push({ label: `Discount (${discountPct.toFixed(discountPct % 1 ? 2 : 0)}%):`, value: `-${amount(discountAmount)}` });
-      // On an inclusive quote the net still carries the VAT, so it is not a sum without tax.
-      if (!revision.vatInclusive) totals.push({ label: 'Sum without tax:', value: amount(net) });
-    }
-    totals.push({
-      label: revision.vatInclusive ? `VAT included (${ratePct}):` : `VAT (${ratePct}):`,
-      value: amount(revision.vatAmount),
-    });
-    totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
-
-    const after: PdfLine[] = [{ label: 'Delivery:', text: revision.delivery || '—' }];
-    if (revision.terms) after.push({ text: '' }, { text: 'Terms and Conditions:', bold: true }, { text: revision.terms });
-    if (revision.notes) after.push({ text: '' }, { text: 'Notes:', bold: true }, { text: revision.notes });
-
-    const sections: PdfSection[] = [
-      { kind: 'parties', left: customer, right: details },
-      {
-        kind: 'table',
-        head: ['Product description', 'Qty', `Unit price (${currency})`, `Total (${currency})`],
-        widths: [270, 57.6, 109.4, 86.4],
-        align: ['left', 'left', 'right', 'right'],
-        rows,
-      },
-      // "Hide total": the lines and their prices, no sum — a rate-sheet quote.
-      ...(revision.hideTotal ? [] : [{ kind: 'totals' as const, rows: totals }]),
-      { kind: 'lines', lines: after },
-      { kind: 'spacer', height: 10 },
-      {
-        kind: 'lines',
-        lines: [
-          {
-            text:
-              'Thank you very much for the opportunity to provide the following quotation. ' +
-              'This document is system generated and does not require signature.',
-            italic: true,
-            small: true,
-          },
-        ],
-      },
-      { kind: 'rule' },
-    ];
-
-    // Prepared by the author; then every step of the approval route, dated
-    // once it has approved and "Pending" until then — the CEO's too, when the
-    // submitter added them.
-    const owner = quotation.owner;
-    const slots = await approvalSlots('quotation', revision.id);
-    const signatories: Signatory[] = [
-      { role: 'Prepared by', name: owner.name, position: owner.position ?? undefined, at: revision.createdAt },
-      ...(slots.length
-        ? slots.map((sl) => ({
-            role: slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by',
-            name: sl.name,
-            position: sl.position,
-            at: sl.at,
-          }))
-        : [{ role: 'Approved by' }]),
-    ];
-
-    const pdf = await renderDocument({
-      style: 'letter',
-      title: 'Quotation',
-      documentNumber: quotation.number,
-      revision: String(revision.revision),
-      date: revision.createdAt,
-      // Leads the running header on every page after the first.
-      reference: quotation.customer.legalName || quotation.customer.name,
-      sections,
-      signatories,
-    });
+    // The layout is the administrator's (Admin › PDF Templates), else the
+    // standard one; the engine draws it either way.
+    const { design } = await quotationDesign();
+    const pdf = await renderDesigned(design, await quotationPrintData(quotation, revision));
 
     await audit(
       {

@@ -69,6 +69,13 @@
     one, so it came out black on a daylight screen.
   */
   --field-bg: #050706;
+  /*
+    A printed page, and the face its PDF is set in. The same in every theme:
+    Admin › PDF Templates draws the quotation as it prints, and paper is white
+    whether the screen around it is dark or light.
+  */
+  --paper: #ffffff;
+  --print: Helvetica, Arial, sans-serif;
 
   /*
     Spacing, on a 4px base. Before these existed the app used fourteen

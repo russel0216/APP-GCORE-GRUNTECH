@@ -28,6 +28,7 @@ import './styles/quotation-editor.css';
 import './styles/quotation-detail.css';
 import './styles/accounts.css';
 import './styles/costing.css';
+import './styles/pdf-templates.css';
 
 /*
   Before React draws anything. The server's copy arrives with /auth/me a

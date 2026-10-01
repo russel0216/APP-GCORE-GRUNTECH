@@ -46,7 +46,7 @@ interface Line {
   key: string;
   /** A subheading: its title is the heading; no quantity, price or cost. */
   isHeading: boolean;
-  /** SCORO's group. Read from older lines and turned into subheadings; never typed. */
+  /** SCORO's group — "Gruntech Installation", "Trading" — printed as a heading where it changes. */
   group: string;
   title: string;
   description: string;
@@ -180,7 +180,7 @@ function fromItem(i: Item): Line {
   return {
     key: nextKey(),
     isHeading: !!i.isHeading,
-    group: '',
+    group: i.group ?? '',
     title: i.title ?? '',
     description: i.description ?? '',
     quantity: String(i.quantity),
@@ -197,20 +197,9 @@ function fromItem(i: Item): Line {
   };
 }
 
-/**
- * Saved lines as the table edits them. A SCORO group — older quotations carry
- * one per line — becomes a subheading where it changes, which prints exactly
- * as the group did; the group itself is not kept.
- */
+/** Saved lines as the table edits them — groups, subheadings and all. */
 function linesFromItems(items: Item[]): Line[] {
-  const out: Line[] = [];
-  let group: string | null = null;
-  for (const i of items) {
-    if (!i.isHeading && i.group && i.group !== group) out.push({ ...blankLine(true), title: i.group });
-    if (!i.isHeading) group = i.group ?? group;
-    out.push(fromItem(i));
-  }
-  return out;
+  return items.map(fromItem);
 }
 
 function fromCostingLine(c: CostingLine): Line {
@@ -246,7 +235,7 @@ function linePayload(l: Line) {
     return { isHeading: true, title: l.title.trim(), description: '', quantity: 0, unit: 'lot', unitPrice: 0, unitCost: null };
   }
   return {
-    group: null,
+    group: l.group.trim() || null,
     title: l.title.trim() || null,
     description: l.description,
     quantity: Number(l.quantity),
@@ -1346,79 +1335,85 @@ export function QuotationEditor() {
         )}
 
         {/*
-          One tbody per line: the product's row — the description given the
-          width — and, for whoever may see cost, a second row under it with the
-          cost, who carries it and the margin. A subheading is one wide row.
+          SCORO's "Modify quote" lines: one row per line — group, the product
+          over its description, quantity beside unit, price, amount (the grey
+          with-tax figure under it), and, for whoever may see cost, the cost and
+          who carries it, then the margin, on the same row. The product and its
+          description take whatever width the fixed columns leave. A subheading
+          is one wide row.
         */}
         <div className="table-wrap qe-table-wrap">
-          <table className="data qe-lines">
+          <table className={`data qe-lines${showCost ? '' : ' qe-lines-nocost'}`}>
             <thead>
               <tr>
                 <th className="qe-col-move">
                   <span className="visually-hidden">Order</span>
                 </th>
+                <th className="qe-col-group">Group</th>
                 <th className="qe-col-product">Product | Description</th>
                 <th className="qe-col-qty">Quantity | Unit</th>
                 <th className="qe-col-price right">Unit price</th>
                 <th className="qe-col-amount right">Amount</th>
+                {showCost && <th className="qe-col-cost">Cost and provider info</th>}
+                {showCost && <th className="qe-col-margin right">Margin</th>}
                 <th className="qe-col-remove">
                   <span className="visually-hidden">Remove</span>
                 </th>
               </tr>
             </thead>
-            {lines.map((l, i) => {
-              const n = i + 1;
-              const m = marginByKey.get(l.key);
-              const last = i === lines.length - 1;
-              const err = (f: string) => errors[lineField(l.key, f)];
-              const amount = m?.amount ?? 0;
-              const what = l.isHeading ? `subheading ${n}` : `line ${n}`;
-              const moveCell = (
-                <td className="qe-col-move">
-                  <div className="qe-move">
-                    <span className="mono faint">{n}</span>
+            <tbody>
+              {lines.map((l, i) => {
+                const n = i + 1;
+                const m = marginByKey.get(l.key);
+                const last = i === lines.length - 1;
+                const err = (f: string) => errors[lineField(l.key, f)];
+                const amount = m?.amount ?? 0;
+                const what = l.isHeading ? `subheading ${n}` : `line ${n}`;
+                const moveCell = (
+                  <td className="qe-col-move">
+                    <div className="qe-move">
+                      <span className="mono faint">{n}</span>
+                      <button
+                        type="button"
+                        id={lineField(l.key, 'up')}
+                        className="btn btn-sm btn-icon btn-ghost"
+                        aria-label={`Move ${what} up`}
+                        disabled={i === 0}
+                        onClick={() => moveLine(l.key, -1)}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        id={lineField(l.key, 'down')}
+                        className="btn btn-sm btn-icon btn-ghost"
+                        aria-label={`Move ${what} down`}
+                        disabled={last}
+                        onClick={() => moveLine(l.key, 1)}
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  </td>
+                );
+                const removeCell = (
+                  <td className="qe-col-remove">
                     <button
                       type="button"
-                      id={lineField(l.key, 'up')}
+                      id={lineField(l.key, 'remove')}
                       className="btn btn-sm btn-icon btn-ghost"
-                      aria-label={`Move ${what} up`}
-                      disabled={i === 0}
-                      onClick={() => moveLine(l.key, -1)}
+                      aria-label={`Remove ${what}`}
+                      onClick={() => removeLine(l.key)}
                     >
-                      ↑
+                      ✕
                     </button>
-                    <button
-                      type="button"
-                      id={lineField(l.key, 'down')}
-                      className="btn btn-sm btn-icon btn-ghost"
-                      aria-label={`Move ${what} down`}
-                      disabled={last}
-                      onClick={() => moveLine(l.key, 1)}
-                    >
-                      ↓
-                    </button>
-                  </div>
-                </td>
-              );
-              const removeCell = (
-                <td className="qe-col-remove">
-                  <button
-                    type="button"
-                    id={lineField(l.key, 'remove')}
-                    className="btn btn-sm btn-icon btn-ghost"
-                    aria-label={`Remove ${what}`}
-                    onClick={() => removeLine(l.key)}
-                  >
-                    ✕
-                  </button>
-                </td>
-              );
-              if (l.isHeading) {
-                return (
-                  <tbody key={l.key} id={`line-${n}`} className="qe-line qe-line-heading">
-                    <tr>
+                  </td>
+                );
+                if (l.isHeading) {
+                  return (
+                    <tr key={l.key} id={`line-${n}`} className="qe-line-heading">
                       {moveCell}
-                      <td colSpan={4}>
+                      <td colSpan={showCost ? 7 : 5}>
                         <input
                           id={lineField(l.key, 'title')}
                           className="qe-heading-input"
@@ -1432,14 +1427,20 @@ export function QuotationEditor() {
                       </td>
                       {removeCell}
                     </tr>
-                  </tbody>
-                );
-              }
-              return (
-                <tbody key={l.key} id={`line-${n}`} className="qe-line">
-                  <tr>
+                  );
+                }
+                return (
+                  <tr key={l.key} id={`line-${n}`}>
                     {moveCell}
-                    <td className="qe-col-product">
+                    <td>
+                      <input
+                        aria-label={`Line ${n} group`}
+                        list="qe-groups"
+                        value={l.group}
+                        onChange={(e) => updateLine(l.key, { group: e.target.value })}
+                      />
+                    </td>
+                    <td>
                       <ProductInput
                         id={lineField(l.key, 'title')}
                         label={`Line ${n} product`}
@@ -1504,7 +1505,7 @@ export function QuotationEditor() {
                       />
                       <CellError message={err('unitPrice')} />
                     </td>
-                    <td className="right mono qe-col-amount">
+                    <td className="right mono">
                       {formatMoney(amount, currency)}
                       {/* SCORO's grey figure under the amount: the same line with the tax on. */}
                       {!header.vatInclusive && header.vatRate > 0 && amount > 0 && (
@@ -1514,38 +1515,50 @@ export function QuotationEditor() {
                         </div>
                       )}
                     </td>
-                    {removeCell}
-                  </tr>
-                  {showCost && (
-                    <tr className="qe-cost-line">
-                      <td />
-                      <td colSpan={4}>
-                        <CostStrip
+                    {showCost && (
+                      <td>
+                        <CostCell
                           line={l}
                           n={n}
                           costError={err('unitCost')}
                           amount={m?.costAmount ?? null}
-                          margin={m ?? null}
                           currency={currency}
                           onChange={(patch) => updateLine(l.key, patch)}
                         />
                       </td>
-                      <td />
-                    </tr>
-                  )}
-                </tbody>
-              );
-            })}
+                    )}
+                    {showCost && (
+                      <td className="right mono">
+                        {m?.margin == null ? (
+                          <span className="faint">—</span>
+                        ) : (
+                          <>
+                            <div className={m.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(m.margin, currency)}</div>
+                            <div className="faint">{pct(m.marginPct)}</div>
+                          </>
+                        )}
+                      </td>
+                    )}
+                    {removeCell}
+                  </tr>
+                );
+              })}
+            </tbody>
           </table>
         </div>
+        <datalist id="qe-groups">
+          {[...new Set(lines.map((l) => l.group.trim()).filter(Boolean))].map((g) => (
+            <option key={g} value={g} />
+          ))}
+        </datalist>
 
-        {/* SCORO's buttons under the lines. */}
+        {/* SCORO's buttons under the lines, in SCORO's order. */}
         <div className="row qe-line-actions">
-          <button type="button" id="qe-add-line" className="btn btn-sm" onClick={() => addLine()}>
-            + Add row
-          </button>
           <button type="button" className="btn btn-sm" onClick={() => addLine(undefined, true)}>
             + Add subheading
+          </button>
+          <button type="button" id="qe-add-line" className="btn btn-sm" onClick={() => addLine()}>
+            + Add row
           </button>
           <button type="button" className="btn btn-sm" aria-expanded={appendOpen} onClick={() => setAppendOpen((v) => !v)}>
             + Append quote
@@ -1570,7 +1583,7 @@ export function QuotationEditor() {
         {appendOpen && <AppendQuotePanel excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
           Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
-          left out when you save. A subheading prints as a heading over the lines below it.
+          left out when you save. A group prints as a heading over its lines, and so does a subheading.
           {showCost ? ' Cost, provider and margin are internal — never printed.' : ''}
         </p>
 
@@ -1728,19 +1741,16 @@ function CellError({ id, message }: { id?: string; message?: string }) {
 }
 
 /**
- * SCORO's "Cost and provider info", as a strip under the line it costs: two
- * toggles for who carries the cost — one of our people (in-house) or a
- * supplier (outsourced); pressing the one that is on clears it — the person or
- * supplier, notes, the unit cost, and what that comes to with the margin it
- * leaves. Under the line rather than beside it, so the description keeps the
- * width.
+ * SCORO's "Cost and provider info": two toggles for who carries the line's
+ * cost — one of our people (in-house) or a supplier (outsourced); pressing the
+ * one that is on clears it — the person or supplier beside them, then the
+ * notes and the unit cost. The line's cost (quantity × unit cost) sits under.
  */
-function CostStrip({
+function CostCell({
   line,
   n,
   costError,
   amount,
-  margin,
   currency,
   onChange,
 }: {
@@ -1748,7 +1758,6 @@ function CostStrip({
   n: number;
   costError?: string;
   amount: number | null;
-  margin: LineMargin | null;
   currency: string;
   onChange: (patch: Partial<Line>) => void;
 }) {
@@ -1757,8 +1766,7 @@ function CostStrip({
     ['supplier', 'building', 'Outsourced — a supplier'],
   ];
   return (
-    <div className="qe-cost-strip">
-      <span className="qe-cost-label faint">Cost</span>
+    <div className="qe-cost">
       <div className="qe-provider">
         <div className="qe-kind" role="group" aria-label={`Line ${n}: who carries the cost`}>
           {kinds.map(([value, icon, label]) => {
@@ -1790,30 +1798,28 @@ function CostStrip({
           <span className="faint qe-kind-none">No provider named</span>
         )}
       </div>
-      <input
-        className="qe-cost-note"
-        aria-label={`Line ${n} cost notes`}
-        placeholder="Notes"
-        value={line.costNote}
-        onChange={(e) => onChange({ costNote: e.target.value })}
-      />
-      <input
-        id={lineField(line.key, 'unitCost')}
-        className="qe-num qe-cost-unit"
-        type="number"
-        min={0}
-        step="0.01"
-        inputMode="decimal"
-        placeholder="Unit cost"
-        aria-label={`Line ${n} unit cost`}
-        aria-invalid={costError ? true : undefined}
-        value={line.unitCost}
-        onChange={(e) => onChange({ unitCost: e.target.value })}
-      />
-      <span className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</span>
-      <span className={`mono qe-cost-margin${margin?.margin != null && margin.margin < 0 ? ' quote-negative' : ''}`}>
-        {margin?.margin == null ? '' : `${formatMoney(margin.margin, currency)} · ${pct(margin.marginPct)}`}
-      </span>
+      <div className="qe-cost-row">
+        <input
+          aria-label={`Line ${n} cost notes`}
+          placeholder="Notes"
+          value={line.costNote}
+          onChange={(e) => onChange({ costNote: e.target.value })}
+        />
+        <input
+          id={lineField(line.key, 'unitCost')}
+          className="qe-num"
+          type="number"
+          min={0}
+          step="0.01"
+          inputMode="decimal"
+          placeholder="Unit cost"
+          aria-label={`Line ${n} unit cost`}
+          aria-invalid={costError ? true : undefined}
+          value={line.unitCost}
+          onChange={(e) => onChange({ unitCost: e.target.value })}
+        />
+      </div>
+      <div className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</div>
       <CellError message={costError} />
     </div>
   );

@@ -1834,6 +1834,116 @@ async function main() {
     const theirRow = (theirSuggest.body as unknown as { title: string; unitCost?: number | null }[]).find((r) => r.title === 'Service kit');
     check('a colleague who reads every quotation is offered the price but never the cost', !!theirRow && !('unitCost' in theirRow), JSON.stringify(theirRow));
     check('two letters at least', ((await http(salesToken, 'GET', '/quotations/suggest?q=S')).body as unknown as unknown[]).length === 0);
+
+    // ── Admin › PDF Templates: the quotation prints the administrator's layout ──
+    console.log('\nThe quotation PDF template (Admin › PDF Templates)');
+    // Whatever layout this database already has is put back afterwards, byte for byte.
+    const layoutBefore = await prisma.setting.findUnique({ where: { key: 'pdfTemplate.quotation' } });
+    try {
+      const tpl = await http(adminToken, 'GET', '/pdf-templates/quotation');
+      const standard = tpl.body.standard as { blocks: { id: string; type: string; text?: string; x: number; y: number }[] };
+      check(
+        'the editor loads a layout, the standard one, and the fields a box can print',
+        tpl.status === 200 &&
+          Array.isArray((tpl.body.layout as { blocks: unknown[] })?.blocks) &&
+          standard.blocks.some((b) => b.type === 'items') &&
+          (tpl.body.fields as { key: string }[]).some((f) => f.key === 'quotation.prNumber') &&
+          (tpl.body.fields as { key: string }[]).some((f) => f.key === 'company.tin'),
+        tpl.text.slice(0, 160),
+      );
+      check('a salesperson cannot open it', (await http(salesToken, 'GET', '/pdf-templates/quotation')).status === 403);
+      check('nor save one', (await http(salesToken, 'PUT', '/pdf-templates/quotation', standard)).status === 403);
+
+      // A box of our own, moved and worded, prints on the real quotation.
+      const mine = {
+        ...standard,
+        blocks: [
+          ...standard.blocks,
+          {
+            id: 'verify-box', name: 'Verify', type: 'text', anchor: 'first', x: 40, y: 760, w: 400, h: 12,
+            text: `${TAG} LAYOUT for {{customer.name}}`, size: 9,
+          },
+        ],
+      };
+      const saved = await http(adminToken, 'PUT', '/pdf-templates/quotation', mine);
+      check('an administrator saves a layout', saved.status === 200 && saved.body.saved === true, saved.text.slice(0, 200));
+      const printed = pdfText(
+        Buffer.from(
+          await (await fetch(`${BASE}/quotations/${qid}/revisions/${rev0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+        ),
+      );
+      check('and the quotation prints with it — the new box, filled in', printed.includes(`${TAG} LAYOUT for ${TAG} Clinic`), printed.slice(0, 200));
+      check('the rest of the layout still prints as before', printed.includes('PR Number: PR-ZZ-4471') && printed.includes('Total Price (PHP):'));
+      check(
+        'the change is audited',
+        (await prisma.auditLog.count({ where: { entityType: 'setting', entityId: 'pdfTemplate.quotation', actorId: admin.id, action: 'UPDATED' } })) === 1,
+      );
+
+      const typo = await http(adminToken, 'PUT', '/pdf-templates/quotation', {
+        ...mine,
+        blocks: mine.blocks.map((b) => (b.id === 'verify-box' ? { ...b, text: '{{customer.nmae}}' } : b)),
+      });
+      check(
+        'a field the quotation does not have is refused, and named',
+        typo.status === 400 && typo.text.includes('customer.nmae'),
+        typo.text.slice(0, 200),
+      );
+      const twoTables = await http(adminToken, 'PUT', '/pdf-templates/quotation', {
+        ...mine,
+        blocks: [...mine.blocks, { ...standard.blocks.find((b) => b.type === 'items')!, id: 'second-table' }],
+      });
+      check('so is a second line table', twoTables.status === 400, twoTables.text.slice(0, 160));
+      const offPage = await http(adminToken, 'PUT', '/pdf-templates/quotation', {
+        ...mine,
+        blocks: mine.blocks.map((b) => (b.id === 'verify-box' ? { ...b, x: 500, w: 300 } : b)),
+      });
+      check('and a box that runs off the page', offPage.status === 400, offPage.text.slice(0, 160));
+
+      // Preview prints what the editor holds, saved or not.
+      const preview = await fetch(`${BASE}/pdf-templates/quotation/preview`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layout: { ...mine, blocks: mine.blocks.map((b) => (b.id === 'verify-box' ? { ...b, text: `${TAG} UNSAVED` } : b)) },
+          quotationId: qid,
+        }),
+      });
+      const previewText = pdfText(Buffer.from(await preview.arrayBuffer()));
+      check(
+        'a preview prints the unsaved layout against a real quotation',
+        preview.status === 200 && previewText.includes(`${TAG} UNSAVED`) && previewText.includes('PR Number: PR-ZZ-4471'),
+      );
+      const sample = await fetch(`${BASE}/pdf-templates/quotation/preview`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ layout: mine, sample: 'long' }),
+      });
+      const sampleBytes = Buffer.from(await sample.arrayBuffer());
+      check(
+        'or against the sample, which runs to several pages',
+        sample.status === 200 && Number((sampleBytes.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0) >= 2,
+      );
+
+      const reset = await http(adminToken, 'DELETE', '/pdf-templates/quotation');
+      const after = await http(adminToken, 'GET', '/pdf-templates/quotation');
+      check('"Standard layout" puts the standard one back', reset.status === 200 && after.body.saved === false);
+      const plainAgain = pdfText(
+        Buffer.from(
+          await (await fetch(`${BASE}/quotations/${qid}/revisions/${rev0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+        ),
+      );
+      check('and the quotation prints without the box again', !plainAgain.includes(`${TAG} LAYOUT`) && plainAgain.includes('PR Number: PR-ZZ-4471'));
+    } finally {
+      if (layoutBefore) {
+        await prisma.setting.upsert({
+          where: { key: 'pdfTemplate.quotation' },
+          create: { key: layoutBefore.key, value: layoutBefore.value as Prisma.InputJsonValue, description: layoutBefore.description },
+          update: { value: layoutBefore.value as Prisma.InputJsonValue },
+        });
+      } else {
+        await prisma.setting.deleteMany({ where: { key: 'pdfTemplate.quotation' } });
+      }
+    }
   }
 
   await cleanup();

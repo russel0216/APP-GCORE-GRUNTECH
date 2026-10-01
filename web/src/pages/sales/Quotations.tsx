@@ -6,7 +6,6 @@ import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type Column } from '../../components/DataList';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
-import { Stat } from '../../components/charts';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 
 export const OUTCOMES = [
@@ -334,22 +333,15 @@ export interface QuotationDetail {
 }
 
 /**
- * The lines as the paper prints them: a subheading is a heading row, and so is
- * a SCORO group where it changes (older quotations carry groups, newer ones
- * subheadings — both read the same).
+ * The lines as the page shows them: a subheading is a wide heading row; every
+ * other line is numbered, its group in its own column as SCORO lists it.
  */
 export function displayRows(items: Item[]): ({ kind: 'heading'; key: string; text: string } | { kind: 'line'; item: Item; n: number })[] {
   const rows: ({ kind: 'heading'; key: string; text: string } | { kind: 'line'; item: Item; n: number })[] = [];
-  let group: string | null = null;
   let n = 0;
   for (const item of items) {
-    if (item.isHeading) {
-      rows.push({ kind: 'heading', key: item.id, text: item.title ?? '' });
-      continue;
-    }
-    if (item.group && item.group !== group) rows.push({ kind: 'heading', key: `g-${item.id}`, text: item.group });
-    group = item.group ?? group;
-    rows.push({ kind: 'line', item, n: ++n });
+    if (item.isHeading) rows.push({ kind: 'heading', key: item.id, text: item.title ?? '' });
+    else rows.push({ kind: 'line', item, n: ++n });
   }
   return rows;
 }
@@ -860,12 +852,6 @@ export function QuotationDetail() {
           {/* Who has this revision, and since when — the one approval rail. */}
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
-          {showCost && ((revision.costPanel?.costedLines ?? 0) > 0 || revision.costing?.totalCost != null) && (
-            <div className="qd-margin">
-              <MarginStat panel={revision.costPanel} costing={revision.costing} />
-            </div>
-          )}
-
           <div className="card sales-card-gap">
             <div className="row sales-card-head">
               <h2 className="card-title">Lines</h2>
@@ -909,6 +895,7 @@ export function QuotationDetail() {
                   <thead>
                     <tr>
                       <th className="sales-col-num">#</th>
+                      <th>Group</th>
                       <th className="qd-col-product">Product | Description</th>
                       <th className="right">Qty | Unit</th>
                       <th className="right">Unit price</th>
@@ -923,11 +910,12 @@ export function QuotationDetail() {
                       row.kind === 'heading' ? (
                         <tr key={row.key} className="quote-heading-row">
                           <td />
-                          <td colSpan={4 + (showCost ? 2 : 0) + (editable ? 1 : 0)}>{row.text}</td>
+                          <td colSpan={5 + (showCost ? 2 : 0) + (editable ? 1 : 0)}>{row.text}</td>
                         </tr>
                       ) : (
                       <tr key={row.item.id}>
                         <td className="mono">{row.n}</td>
+                        <td>{row.item.group || <span className="faint">—</span>}</td>
                         <td>
                           {row.item.title && <div className="quote-line-title">{row.item.title}</div>}
                           {row.item.description && <div className="quote-line-desc">{row.item.description}</div>}
@@ -1233,45 +1221,6 @@ function ProjectActions({
     >
       Request job order
     </Link>
-  );
-}
-
-/**
- * The margin tile. The quotation's own cost panel when its lines are costed
- * (SCORO's way), else the linked costing's figures. Only rendered for a viewer
- * the server sent cost to.
- */
-function MarginStat({
-  panel,
-  costing,
-}: {
-  panel?: CostPanel;
-  costing: { contractValue: number; totalCost?: number } | null;
-}) {
-  let profit: number;
-  let pctValue: number;
-  let source: string;
-  if (panel && panel.costedLines > 0) {
-    profit = panel.totalMargin;
-    pctValue = (panel.totalMarginPct ?? 0) / 100;
-    source = `on the lines (${panel.costedLines} of ${panel.lineCount} costed)`;
-  } else if (costing && costing.totalCost != null) {
-    profit = costing.contractValue - costing.totalCost;
-    pctValue = costing.contractValue > 0 ? profit / costing.contractValue : 0;
-    source = 'on the costing';
-  } else {
-    // Nothing costed yet: no tile, rather than a dash in a box.
-    return null;
-  }
-  const accent = pctValue < 0 ? 'danger' : pctValue < 0.1 ? 'warn' : 'ok';
-  return (
-    <Stat
-      label="Margin"
-      value={`${(pctValue * 100).toFixed(1)}%`}
-      figure
-      accent={accent}
-      sub={`${formatMoney(profit)} ${source}${pctValue < 0 ? ' — below cost' : pctValue < 0.1 ? ' — under 10%' : ''}`}
-    />
   );
 }
 

@@ -181,10 +181,19 @@
   overflow-x: auto;
 }
 
-/* The product and its description take whatever width the others leave. */
+/*
+  One row per line, SCORO's way. Every column but the product has a fixed
+  width, so the product and its description take whatever the others leave —
+  about 680px on a 1920px screen with the cost columns, more without them.
+  Narrower than the minimum, the table scrolls inside its card.
+*/
 table.data.qe-lines {
-  min-width: 42rem;
+  min-width: 84rem;
   table-layout: fixed;
+}
+
+table.data.qe-lines.qe-lines-nocost {
+  min-width: 60rem;
 }
 
 /* The zebra and hover tints are for reading rows, not for typing in them. */
@@ -224,11 +233,15 @@ table.data.qe-lines td {
 }
 
 .qe-col-move {
-  width: 3rem;
+  width: 2.75rem;
+}
+
+.qe-col-group {
+  width: 9.5rem;
 }
 
 .qe-col-qty {
-  width: 9rem;
+  width: 9.5rem;
 }
 
 /* Quantity and unit on one line. */
@@ -249,22 +262,22 @@ table.data.qe-lines td {
 }
 
 .qe-col-amount {
-  width: 8rem;
+  width: 8.5rem;
+  white-space: nowrap;
+}
+
+/* Cost and provider info: the toggles and who, then notes beside the unit cost. */
+.qe-col-cost {
+  width: 17rem;
+}
+
+.qe-col-margin {
+  width: 6.5rem;
   white-space: nowrap;
 }
 
 .qe-col-remove {
-  width: 2.75rem;
-}
-
-/* A line is a tbody: the product's row, then (for cost) its strip, no rule between. */
-tbody.qe-line > tr:not(:last-child) > td {
-  border-bottom: none;
-  padding-bottom: var(--s-1);
-}
-
-tbody.qe-line > tr + tr > td {
-  padding-top: 0;
+  width: 2.5rem;
 }
 
 /* A subheading: one wide box, in the heading's green. */
@@ -273,56 +286,25 @@ tbody.qe-line > tr + tr > td {
   color: var(--neon-dim);
 }
 
-tbody.qe-line-heading td {
+tr.qe-line-heading td {
   background: var(--surface-2);
 }
 
-/* The cost strip under a line. */
-.qe-cost-strip {
+.qe-cost {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+}
+
+.qe-lines .qe-cost > * + * {
+  margin-top: var(--s-1);
+}
+
+/* Notes beside the unit cost, as SCORO's second line. */
+.qe-cost-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6.5rem;
   align-items: center;
-  gap: var(--s-2);
-  padding: var(--s-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-
-.qe-cost-label {
-  font-size: var(--fs-xs);
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-}
-
-/* One line across, wrapping only when the table is narrow: the global
-   width: 100% on inputs would otherwise put each box on a line of its own. */
-.qe-cost-strip input {
-  width: auto;
-}
-
-.qe-cost-strip .qe-provider {
-  flex: 1 1 14rem;
-  min-width: 0;
-}
-
-.qe-cost-strip .qe-provider .lookup input {
-  width: 100%;
-}
-
-.qe-cost-note {
-  flex: 2 1 10rem;
-  min-width: 0;
-}
-
-.qe-cost-unit {
-  flex: 0 0 8rem;
-  width: 8rem;
-}
-
-.qe-cost-margin {
-  min-width: 9rem;
-  text-align: right;
-  font-size: var(--fs-sm);
+  gap: var(--s-1);
 }
 
 /* Line number over its move buttons — the keyboard's version of a drag handle. */
@@ -362,7 +344,6 @@ tbody.qe-line-heading td {
 }
 
 .qe-cost-sum {
-  min-width: 7rem;
   font-size: var(--fs-sm);
   text-align: right;
 }
