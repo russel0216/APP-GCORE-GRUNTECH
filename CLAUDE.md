@@ -130,7 +130,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,085 assertions across twenty-two scripts** (counted 2026-10-02): foundation 163,
+**2,086 assertions across twenty-two scripts** (counted 2026-10-02): foundation 164,
 masters 54, sales 243, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
@@ -1151,6 +1151,14 @@ data builder like `quotationTemplate.ts` and `quotationPrintData()`.
   a render are not lost. Moving or sizing the line table moves the `after`
   boxes with it. The page is drawn white (`--paper`) in either theme; the
   colours on it are the layout's own.
+- **The company's fields on the editor are the REAL Company Settings**, not
+  samples, so an empty one leaves its line out there exactly as on the PDF —
+  which reads as a broken template unless it is said. `emptyFieldsIn()` (in
+  `web/src/lib/pdfTemplate.ts`; a field with a `|fallback` and the page count
+  never count) drives the page's "Empty in Company Settings: …" note, named as
+  Company Settings names them (`COMPANY_SETTING_NAMES`) and linked there, and
+  the selected box's "Not printing now: …". Hidden, the note stays hidden only
+  until a different set of fields is empty (a per-browser convenience).
 
 ## Costing sheet notes
 

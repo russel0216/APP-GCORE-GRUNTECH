@@ -43,7 +43,7 @@ import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortD
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
 import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
 // The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
-import { resolveTemplate as editorResolve } from '../../web/src/lib/pdfTemplate';
+import { resolveTemplate as editorResolve, emptyFieldsIn } from '../../web/src/lib/pdfTemplate';
 import { readAppearance } from '../src/routes/appearance';
 
 if (env.isProduction) {
@@ -972,13 +972,15 @@ async function main() {
       !pdfText(await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [lineRow(1)], totals: null }))).includes('Total Price (PHP):'),
     );
 
-    // A box the administrator moved prints where it was moved.
+    // A box the administrator moved prints where it was moved. It goes to the
+    // top of the page, above every other box, so nothing can push it down —
+    // a letterhead that grows with the company's own details would.
     const moved: PdfDesign = {
       ...STANDARD_QUOTATION_DESIGN,
-      blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.id === 'number' ? { ...b, x: 40, y: 300, align: 'left' as const } : b)),
+      blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.id === 'number' ? { ...b, x: 40, y: 8, align: 'left' as const } : b)),
     };
     const movedAt = textAt(await renderDesigned(moved, quoteData({ rows: [lineRow(1)] })), `# ${TAG}-LT R2`);
-    check('a box moved in the layout prints where it was moved', !!movedAt && Math.abs(movedAt.x - 40) < 0.5 && movedAt.y > 300 && movedAt.y < 312, JSON.stringify(movedAt));
+    check('a box moved in the layout prints where it was moved', !!movedAt && Math.abs(movedAt.x - 40) < 0.5 && movedAt.y > 8 && movedAt.y < 20, JSON.stringify(movedAt));
 
     // Text longer than a page runs on; a line taller than a page is split, not lost.
     const longTerms = Array.from({ length: 120 }, (_, i) => `Term ${i + 1}: the customer provides access to site.`).join('\n');
@@ -1007,6 +1009,23 @@ async function main() {
     check('blank lines and fixed text stay', flat(resolveTemplate(cases[3][0], cases[3][1])) === 'Static//After');
     check('a value is printed as typed — its ** is not markup', flat(resolveTemplate(cases[4][0], cases[4][1])) === 'a**b**');
     check('a value with newlines runs over as many lines', flat(resolveTemplate(cases[5][0], cases[5][1])) === '<b>Terms:</b>/one/two');
+    // The editor says which fields a box leaves out, so an empty Company
+    // Settings field reads as empty rather than as a broken template.
+    const leftOut = emptyFieldsIn(
+      [
+        {
+          id: 'x', type: 'text', anchor: 'first', x: 0, y: 0, w: 100, h: 10, size: 9, bold: false, italic: false, color: '#222222',
+          align: 'left', uppercase: false, spacing: 0, lineGap: 0, fit: false, multiPageOnly: false,
+          text: 'Tel No.: {{company.phone}} | Email: {{company.email}}\nPR: {{quotation.prNumber|—}}\nPage {{page}} of {{pages}}',
+        },
+      ],
+      { 'company.phone': '', 'company.email': 'sales@x.ph', 'quotation.prNumber': '' },
+    );
+    check(
+      'the editor names the empty fields a box leaves out — not one with a fallback, not the page count',
+      JSON.stringify(leftOut) === '["company.phone"]',
+      JSON.stringify(leftOut),
+    );
     check(
       "the editor's copy of the rule reads every case the same",
       cases.every(([text, values, bold]) => JSON.stringify(resolveTemplate(text, values, bold)) === JSON.stringify(editorResolve(text, values, bold))),

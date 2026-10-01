@@ -18,6 +18,20 @@
   align-items: center;
 }
 
+/* What Company Settings is missing that the layout prints; Hide at the far end. */
+.pt-company-note {
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.pt-company-note > span {
+  flex: 1;
+}
+
+.pt-company-note a {
+  font-weight: 600;
+}
+
 .pt-status {
   display: flex;
   flex-wrap: wrap;
@@ -630,6 +644,17 @@
 .pt-inspector select,
 .pt-inspector textarea {
   max-width: 100%;
+}
+
+/* Under a box's text: what it has nothing for right now, and so leaves out. */
+.pt-left-out {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  background: rgb(var(--info-rgb) / 0.08);
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-sm);
 }
 
 .pt-rules {

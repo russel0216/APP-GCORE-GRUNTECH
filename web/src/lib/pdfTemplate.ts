@@ -280,6 +280,55 @@ export function tableBottom(layout: Layout): number {
 }
 
 /**
+ * What a company field is called in Admin › Company Settings — where an
+ * empty one is filled in. The strapline is the tagline, else the website.
+ */
+export const COMPANY_SETTING_NAMES: Record<string, string> = {
+  'company.name': 'Registered / legal name',
+  'company.tradeName': 'Trading name',
+  'company.address': 'Address',
+  'company.country': 'Country',
+  'company.phone': 'Tel',
+  'company.fax': 'Fax',
+  'company.email': 'Email',
+  'company.website': 'Website',
+  'company.tin': 'TIN',
+  'company.regNo': 'Reg. No.',
+  'company.tagline': 'Document tagline',
+  'company.strapline': 'Document tagline',
+  'company.bankName': 'Bank name',
+  'company.bankBranch': 'Bank branch',
+  'company.bankAccount': 'Bank account',
+};
+
+/**
+ * The fields these boxes name that have nothing in them right now, so the
+ * parts and lines that print them are left out. A field with a fallback
+ * (`{{x|—}}`) is not one of them — it prints the fallback — and neither is
+ * the page count, which is always known.
+ */
+export function emptyFieldsIn(blocks: Block[], values: Record<string, string | undefined>): string[] {
+  const out = new Set<string>();
+  for (const b of blocks) {
+    const texts = b.type === 'text' ? [b.text] : b.type === 'items' ? b.columns.map((c) => c.label) : [];
+    for (const t of texts) {
+      for (const m of t.matchAll(PLACEHOLDER)) {
+        const [, key, fallback] = m;
+        if (key === 'page' || key === 'pages' || (fallback ?? '').trim()) continue;
+        if (!(values[key] ?? '').trim()) out.add(key);
+      }
+    }
+  }
+  return [...out];
+}
+
+/** "Tel, Fax and Email". */
+export function listOf(items: string[]): string {
+  const unique = [...new Set(items)];
+  return unique.length < 2 ? (unique[0] ?? '') : `${unique.slice(0, -1).join(', ')} and ${unique[unique.length - 1]}`;
+}
+
+/**
  * The field keys a layout names that the document does not have — the same
  * check the server makes on save, shown beside the box before then.
  */

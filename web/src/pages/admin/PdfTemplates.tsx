@@ -10,6 +10,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { Link } from 'react-router-dom';
 import { api, ApiError, getToken, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, formatDateTime, useToast } from '../../components/ui';
@@ -17,11 +18,14 @@ import {
   ANCHOR_HINTS,
   ANCHOR_LABELS,
   ANCHORS_FOR,
+  COMPANY_SETTING_NAMES,
   PAGE_HEIGHT,
   PAGE_WIDTH,
   SWATCHES,
   TYPE_LABELS,
   clampToPage,
+  emptyFieldsIn,
+  listOf,
   pt,
   resolveInline,
   resolveTemplate,
@@ -306,10 +310,14 @@ function fitSize(block: TextBlock, lines: Run[][]): number {
 
 // ── The page ─────────────────────────────────────────────────────────────────
 
+/** Which "Empty in Company Settings" note this reader hid — the note, not the fields. */
+const HIDDEN_NOTE_KEY = 'pdfTemplates.hiddenCompanyNote';
+
 export function PdfTemplates() {
   const toast = useToast();
   const { can } = useAuth();
   const canEdit = can('admin.pdf_templates.edit_all');
+  const canCompany = can('admin.company.view_all');
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [hist, dispatch] = useReducer(history, null);
   const [savedJson, setSavedJson] = useState('');
@@ -323,6 +331,13 @@ export function PdfTemplates() {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [previewWith, setPreviewWith] = useState<'short' | 'long' | 'quotation'>('short');
   const [previewQuote, setPreviewQuote] = useState<{ id: string; number: string; label: string } | null>(null);
+  const [hiddenNote, setHiddenNote] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(HIDDEN_NOTE_KEY);
+    } catch {
+      return null;
+    }
+  });
 
   const layout = hist?.layout ?? null;
   const dirty = !!layout && JSON.stringify(layout) !== savedJson;
@@ -610,6 +625,44 @@ export function PdfTemplates() {
         </div>
       </div>
 
+      {(() => {
+        // The company's own details are real on this page, not samples: an
+        // empty one is left out here exactly as on the quotation. Hidden by
+        // the reader, the note stays hidden until a different field is empty.
+        const names = [
+          ...new Set(
+            emptyFieldsIn(layout.blocks, values)
+              .filter((k) => k.startsWith('company.'))
+              .map((k) => COMPANY_SETTING_NAMES[k] ?? k),
+          ),
+        ];
+        const noteKey = names.join('|');
+        if (!names.length || hiddenNote === noteKey) return null;
+        const one = names.length === 1;
+        return (
+          <div className="alert info row pt-company-note">
+            <span>
+              Empty in Company Settings: {listOf(names)}. Wherever the layout prints {one ? 'it, it is' : 'them, they are'} left
+              out — on this page, in the preview and on every quotation.{' '}
+              {canCompany && <Link to="/admin/company">Fill {one ? 'it' : 'them'} in Company Settings</Link>}
+            </span>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => {
+                setHiddenNote(noteKey);
+                try {
+                  localStorage.setItem(HIDDEN_NOTE_KEY, noteKey);
+                } catch {
+                  /* private mode: hidden for this visit only */
+                }
+              }}
+            >
+              Hide
+            </button>
+          </div>
+        );
+      })()}
       {loaded.unreadable && (
         <div className="alert warn">
           The saved layout could not be read, so quotations print with the standard one. Saving puts a layout that reads in its place.
@@ -738,6 +791,8 @@ export function PdfTemplates() {
                 fields={loaded.fields}
                 columns={loaded.columns}
                 known={known}
+                values={values}
+                canCompany={canCompany}
                 canEdit={canEdit}
                 onPatch={(patch, key) => patchBlock(selected.id, patch, key)}
                 onRemove={() => remove(selected.id)}
@@ -1297,6 +1352,8 @@ function Inspector({
   fields,
   columns,
   known,
+  values,
+  canCompany,
   canEdit,
   onPatch,
   onRemove,
@@ -1308,6 +1365,8 @@ function Inspector({
   fields: FieldDef[];
   columns: { key: ColumnKey; label: string }[];
   known: Set<string>;
+  values: Record<string, string>;
+  canCompany: boolean;
   canEdit: boolean;
   onPatch: (patch: Patch, key?: string) => void;
   onRemove: () => void;
@@ -1326,7 +1385,9 @@ function Inspector({
         </Field>
       </div>
 
-      {block.type === 'text' && <TextSettings block={block} fields={fields} disabled={ro} onPatch={onPatch} />}
+      {block.type === 'text' && (
+        <TextSettings block={block} fields={fields} values={values} canCompany={canCompany} disabled={ro} onPatch={onPatch} />
+      )}
       {unknown.length > 0 && (
         <div className="alert warn">
           Not a field of the quotation: {unknown.map((k) => `{{${k}}}`).join(', ')}. Saving is refused until it is fixed.
@@ -1424,8 +1485,27 @@ function Inspector({
   );
 }
 
-function TextSettings({ block, fields, disabled, onPatch }: { block: TextBlock; fields: FieldDef[]; disabled: boolean; onPatch: (patch: Patch, key?: string) => void }) {
+function TextSettings({
+  block,
+  fields,
+  values,
+  canCompany,
+  disabled,
+  onPatch,
+}: {
+  block: TextBlock;
+  fields: FieldDef[];
+  values: Record<string, string>;
+  canCompany: boolean;
+  disabled: boolean;
+  onPatch: (patch: Patch, key?: string) => void;
+}) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  // What this box has nothing for right now, and so leaves out.
+  const empty = emptyFieldsIn([block], values);
+  const fromCompany = empty.filter((k) => k.startsWith('company.'));
+  const fromQuotation = empty.filter((k) => !k.startsWith('company.'));
+  const labelOf = (key: string) => fields.find((f) => f.key === key)?.label ?? key;
 
   function insert(token: string, wrap?: boolean) {
     const ta = ref.current;
@@ -1456,6 +1536,17 @@ function TextSettings({ block, fields, disabled, onPatch }: { block: TextBlock; 
           Bold the selection
         </button>
       </div>
+      {fromCompany.length > 0 && (
+        <p className="pt-left-out">
+          Not printing now: {listOf(fromCompany.map((k) => COMPANY_SETTING_NAMES[k] ?? labelOf(k)))} — empty in Company Settings.{' '}
+          {canCompany && <Link to="/admin/company">Open Company Settings</Link>}
+        </p>
+      )}
+      {fromQuotation.length > 0 && (
+        <p className="pt-left-out">
+          Not printing with the sample: {listOf(fromQuotation.map(labelOf))} — a quotation that has {fromQuotation.length > 1 ? 'them' : 'it'} prints {fromQuotation.length > 1 ? 'them' : 'it'}.
+        </p>
+      )}
       <details className="pt-rules">
         <summary>How text and fields print</summary>
         <ul className="pt-help">
