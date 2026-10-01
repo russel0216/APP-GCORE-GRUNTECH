@@ -130,11 +130,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,086 assertions across twenty-two scripts** (counted 2026-10-02): foundation 164,
+**2,093 assertions across twenty-two scripts** (counted 2026-10-02): foundation 164,
 masters 54, sales 243, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
-evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
-insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
+evaluations 125, academy 97, finance 133, aftermarket 166, archive 113,
+insights 92, insights-brief 44, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
