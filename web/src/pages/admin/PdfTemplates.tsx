@@ -960,7 +960,7 @@ function Canvas({
           return (
             <div
               key={b.id}
-              className={`pt-block pt-block-${b.type}${isSel ? ' is-selected' : ''}${b.anchor === 'after' ? ' is-after' : ''}`}
+              className={`pt-block pt-block-${b.type}${isSel ? ' is-selected' : ''}${b.anchor === 'after' ? ' is-after' : ''}${b.anchor === 'last' ? ' is-last' : ''}`}
               style={geometry}
               role="button"
               tabIndex={0}
@@ -1142,12 +1142,19 @@ function SignoffsBody({ block, sample, scale }: { block: SignoffsBlock; sample: 
         <div
           key={i}
           className="pt-signoff"
-          style={{ left: step * i * scale, width: (n <= 1 ? block.w : i === n - 1 ? colW : Math.max(colW, step - 10)) * scale }}
+          style={{ marginLeft: step * i * scale, width: (n <= 1 ? block.w : i === n - 1 ? colW : Math.max(colW, step - 10)) * scale }}
         >
-          <b style={{ color: block.headColor, fontSize: (block.size + 0.5) * scale }}>{p.role}</b>
+          <b className="pt-signoff-role" style={{ color: block.headColor, fontSize: (block.size + 0.5) * scale }}>
+            {p.role}
+          </b>
           {p.name ? (
             <>
-              <span>{p.position ? `${p.name} (${p.position})` : p.name}</span>
+              <b className="pt-signoff-name" style={{ fontSize: block.nameSize * scale }}>
+                {p.name}
+              </b>
+              {block.showPosition && p.position && <span>{p.position}</span>}
+              {block.showPhone && p.phone && <span>{p.phone}</span>}
+              {block.showEmail && p.email && <span>{p.email}</span>}
               <span>{p.at ? formatDateTime(p.at) : 'Pending'}</span>
             </>
           ) : (
@@ -1452,12 +1459,19 @@ function Inspector({
         <>
           <h3 className="pt-section">Sign-offs</h3>
           <div className="pt-grid-2">
-            <NumberField label="Type size" value={block.size} min={6} max={14} disabled={ro} onChange={(v) => onPatch({ size: v }, 'size')} />
+            <NumberField label="Name size (pt)" value={block.nameSize} min={6} max={18} disabled={ro} onChange={(v) => onPatch({ nameSize: v }, 'nameSize')} />
+            <NumberField label="Details size (pt)" value={block.size} min={6} max={14} disabled={ro} onChange={(v) => onPatch({ size: v }, 'size')} />
             <NumberField label="Column width (pt)" value={block.colWidth} min={40} disabled={ro} onChange={(v) => onPatch({ colWidth: v }, 'colWidth')} />
           </div>
+          <Checkbox checked={block.showPhone} onChange={(v) => !ro && onPatch({ showPhone: v })} label="The contact number, under the name" />
+          <Checkbox checked={block.showEmail} onChange={(v) => !ro && onPatch({ showEmail: v })} label="The email, under the name" />
+          <Checkbox checked={block.showPosition} onChange={(v) => !ro && onPatch({ showPosition: v })} label="The position, under the name" />
           <ColorField label="Headings" value={block.headColor} disabled={ro} onChange={(v) => onPatch({ headColor: v }, 'headColor')} />
-          <ColorField label="Names and dates" value={block.textColor} disabled={ro} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
-          <p className="hint">One column a person: who prepared it, then every approval step, each dated once done and “Pending” until then.</p>
+          <ColorField label="Names and details" value={block.textColor} disabled={ro} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
+          <p className="hint">
+            One column a person: who prepared it, then every approval step, each dated once done and “Pending” until then. The contact
+            number is the person’s phone in Admin › Users, else the mobile they keep on My Account.
+          </p>
         </>
       )}
 

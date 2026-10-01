@@ -28,8 +28,10 @@ import { formatDateTime, pdfSafe, websiteForPrint, type PdfCell, type PdfTotal, 
  *          wherever the table ends; boxes under it keep their distance from
  *          it; a box with nothing to print closes up; a box that does not fit
  *          goes over to the next page, and a text box longer than a page runs on.
- *   last   the last page, where it was put — the sign-offs. If the content
- *          reaches it, it takes a page of its own.
+ *   last   the last page, where it was put — the sign-offs. It keeps its
+ *          bottom edge, growing upward when it prints more than its box
+ *          holds, so it never runs into the footer; if the content reaches
+ *          it, it takes a page of its own.
  *
  * The line table (`items`) starts on page 1 where it was put and carries on
  * from `flowTop` on every later page, its head repeated, down to `flowBottom`.
@@ -155,6 +157,13 @@ const signoffsBlock = z.object({
   colWidth: num(40, PAGE_WIDTH).default(133),
   headColor: color('#5B2A8C'),
   textColor: color('#222222'),
+  /** The name, in bold, at this size — larger than the lines under it. */
+  nameSize: num(6, 18).default(10),
+  /** Their position, on a line of its own under the name. */
+  showPosition: z.boolean().default(false),
+  /** How to reach them, under the name: the contact number, then the email. */
+  showPhone: z.boolean().default(true),
+  showEmail: z.boolean().default(true),
 });
 
 export const designBlockSchema = z.discriminatedUnion('type', [
@@ -822,14 +831,25 @@ class Renderer {
     return { page, bottom: y };
   }
 
-  /** The last-page boxes, where they were put — on a page of their own if the content reaches them. */
+  /**
+   * The last-page boxes, where they were put — on a page of their own if the
+   * content reaches them. Each keeps its BOTTOM edge: printing more than its
+   * box holds (a third approver, a contact line) it grows upward, so it can
+   * never run down into the footer under it.
+   */
   private lastPage(flowEnd: { page: number; y: number }) {
-    const lasts = this.design.blocks.filter((b) => b.anchor === 'last' && this.visible(b, this.pagesHint));
+    const lasts = this.design.blocks
+      .filter((b) => b.anchor === 'last' && this.visible(b, this.pagesHint))
+      .map((b) => {
+        const height = this.heightOf(b, flowEnd.page);
+        return height === null ? null : { b, top: b.y + b.h - height };
+      })
+      .filter((x): x is { b: DesignBlock; top: number } => x !== null);
     if (!lasts.length) return;
-    const highest = Math.min(...lasts.map((b) => b.y));
+    const highest = Math.min(...lasts.map((l) => l.top));
     const page = flowEnd.y + 12 > highest ? flowEnd.page + 1 : flowEnd.page;
     this.goTo(page);
-    for (const b of lasts) this.drawFixed(b, b.y, page);
+    for (const { b, top } of lasts) this.drawFixed(b, top, page);
   }
 
   /** Every-page and later-page text, once the page count is known. */
@@ -1038,47 +1058,65 @@ class Renderer {
     }));
   }
 
+  /**
+   * One person's column, laid out: the role, the name in bold at its own
+   * size, then — smaller — the position if the layout asks for it, how to
+   * reach them, and when they did their part. A step nobody has taken yet is
+   * "Pending" and nothing else.
+   */
   private signoffLines(b: SignoffsBlock, person: Signatory, width: number) {
     const head: Style = { size: b.size + 0.5, italic: false, spacing: 0, upper: true };
+    const nameStyle: Style = { size: b.nameSize, italic: false, spacing: 0, upper: false };
     const text: Style = { size: b.size, italic: false, spacing: 0, upper: false };
     const role = wrap(this.doc, [[{ text: pdfSafe(person.role), bold: true }]], width, head);
-    const lines: string[] = [];
+    const name = person.name ? wrap(this.doc, [[{ text: pdfSafe(person.name), bold: true }]], width, nameStyle) : [];
+    const details: string[] = [];
     if (person.name) {
-      lines.push(pdfSafe(person.position ? `${person.name} (${person.position})` : person.name));
-      lines.push(person.at ? formatDateTime(person.at) : 'Pending');
+      if (b.showPosition && person.position?.trim()) details.push(pdfSafe(person.position));
+      if (b.showPhone && person.phone?.trim()) details.push(pdfSafe(person.phone));
+      if (b.showEmail && person.email?.trim()) details.push(pdfSafe(person.email));
+      details.push(person.at ? formatDateTime(person.at) : 'Pending');
     } else {
-      lines.push('Pending');
+      details.push('Pending');
     }
-    const rest = wrap(this.doc, lines.map((t) => [{ text: t, bold: false }]), width, text);
-    return { role, rest, head, text };
+    const rest = wrap(this.doc, details.map((t) => [{ text: t, bold: false }]), width, text);
+    return { role, name, rest, head, nameStyle, text };
   }
 
   private signoffsHeight(b: SignoffsBlock): number {
     const cols = this.signoffColumns(b);
     let tallest = 0;
     this.data.signatories.forEach((person, i) => {
-      const { role, rest, head, text } = this.signoffLines(b, person, cols[i].width);
-      tallest = Math.max(tallest, role.length * head.size * LINE + 5 + rest.length * (text.size * LINE + 1));
+      const { role, name, rest, head, nameStyle, text } = this.signoffLines(b, person, cols[i].width);
+      tallest = Math.max(
+        tallest,
+        role.length * head.size * LINE + 5 + name.length * (nameStyle.size * LINE + 1) + rest.length * (text.size * LINE + 1),
+      );
     });
     return tallest;
   }
 
   /**
-   * Side by side, one column a person: the role as a heading, then the name
-   * and position, then when they did it — or "Pending" where nothing has
-   * happened, which is the truth rather than a borrowed date. No signature rules.
+   * Side by side, one column a person: the role as a heading, the name in
+   * bold, how to reach them, then when they did it — or "Pending" where
+   * nothing has happened, which is the truth rather than a borrowed date. No
+   * signature rules.
    */
   private drawSignoffs(b: SignoffsBlock, top: number) {
     const cols = this.signoffColumns(b);
     this.data.signatories.forEach((person, i) => {
       const { x, width } = cols[i];
-      const { role, rest, head, text } = this.signoffLines(b, person, width);
+      const { role, name, rest, head, nameStyle, text } = this.signoffLines(b, person, width);
       let y = top;
       for (const line of role) {
         drawLaid(this.doc, line, x, y, width, 'left', head, b.headColor);
         y += head.size * LINE;
       }
       y += 5;
+      for (const line of name) {
+        drawLaid(this.doc, line, x, y, width, 'left', nameStyle, b.textColor);
+        y += nameStyle.size * LINE + 1;
+      }
       for (const line of rest) {
         drawLaid(this.doc, line, x, y, width, 'left', text, b.textColor);
         y += text.size * LINE + 1;

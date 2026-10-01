@@ -18,7 +18,7 @@ import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissio
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots, contactPhone } from '../shared/approvals';
 import {
   formatAmount,
   formatDate,
@@ -2106,15 +2106,29 @@ export async function quotationPrintData(
 
   // Prepared by the author; then every step of the approval route, dated
   // once it has approved and "Pending" until then — the CEO's too, when the
-  // submitter added them.
+  // submitter added them. Each with how to reach them, read here for the
+  // paper only: the quotation's own response never carries a mobile.
   const slots = await approvalSlots('quotation', revision.id);
+  const author = await prisma.user.findUnique({
+    where: { id: owner.id },
+    select: { phone: true, employee: { select: { mobile: true } } },
+  });
   const signatories: Signatory[] = [
-    { role: 'Prepared by', name: owner.name, position: owner.position ?? undefined, at: revision.createdAt },
+    {
+      role: 'Prepared by',
+      name: owner.name,
+      position: owner.position ?? undefined,
+      phone: author ? contactPhone(author) : undefined,
+      email: owner.email ?? undefined,
+      at: revision.createdAt,
+    },
     ...(slots.length
       ? slots.map((sl) => ({
           role: slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by',
           name: sl.name,
           position: sl.position,
+          phone: sl.phone,
+          email: sl.email,
           at: sl.at,
         }))
       : [{ role: 'Approved by' }]),

@@ -101,7 +101,14 @@ export function quotationSample(long = false): DesignData {
       { label: 'Total Price (PHP):', value: '140,000.00', bold: true },
     ],
     signatories: [
-      { role: 'Prepared by', name: 'Maria Santos', position: 'Sales Engineer', at: new Date('2026-10-02T01:30:00Z') },
+      {
+        role: 'Prepared by',
+        name: 'Maria Santos',
+        position: 'Sales Engineer',
+        phone: '0917 555 0100',
+        email: 'maria.santos@gruntech.com',
+        at: new Date('2026-10-02T01:30:00Z'),
+      },
       { role: 'Approved by' },
     ],
   };
@@ -219,8 +226,11 @@ export const STANDARD_QUOTATION_DESIGN: PdfDesign = {
     }),
     { id: 'rule-end', name: 'Rule after the text', type: 'line', anchor: 'after', x: L, y: 694.2, w: W, h: 0.75, color: RULE },
     {
-      id: 'signoffs', name: 'Sign-offs', type: 'signoffs', anchor: 'last', x: L, y: 728.9, w: W, h: 46,
+      // The role, the name in bold 10pt, then the contact number, the email
+      // and when — 58pt, ending 10pt above the footer rule.
+      id: 'signoffs', name: 'Sign-offs', type: 'signoffs', anchor: 'last', x: L, y: 714, w: W, h: 60,
       size: 8, colWidth: 133, headColor: PURPLE, textColor: INK,
+      nameSize: 10, showPosition: false, showPhone: true, showEmail: true,
     },
     { id: 'footer-rule', name: 'Footer rule', type: 'line', anchor: 'every', x: L, y: 784.51, w: W, h: 0.75, color: RULE },
     text({

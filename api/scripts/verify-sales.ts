@@ -92,7 +92,43 @@ async function editorTokenIsSpare(): Promise<boolean> {
   return ![...users, ...employees].some((r) => employeeToken(r.employeeNo) === EDITOR_TOKEN);
 }
 
+/*
+  The PDF checks read the STANDARD quotation layout's wording. An
+  administrator's own layout (Admin › PDF Templates) is set aside for the run
+  — kept in a Setting of its own, not in memory — and put back by cleanup(),
+  which also runs first: a run that died half way returns it next time.
+*/
+const LAYOUT_KEY = 'pdfTemplate.quotation';
+const STASH_KEY = `${LAYOUT_KEY}.__verify__`;
+
+async function setSavedLayoutAside() {
+  const row = await prisma.setting.findUnique({ where: { key: LAYOUT_KEY } });
+  if (!row) return;
+  await prisma.$transaction([
+    prisma.setting.upsert({
+      where: { key: STASH_KEY },
+      create: { key: STASH_KEY, value: row.value as Prisma.InputJsonValue, description: row.description },
+      update: { value: row.value as Prisma.InputJsonValue, description: row.description },
+    }),
+    prisma.setting.delete({ where: { key: LAYOUT_KEY } }),
+  ]);
+}
+
+async function putSavedLayoutBack() {
+  const stash = await prisma.setting.findUnique({ where: { key: STASH_KEY } });
+  if (!stash) return;
+  await prisma.$transaction([
+    prisma.setting.upsert({
+      where: { key: LAYOUT_KEY },
+      create: { key: LAYOUT_KEY, value: stash.value as Prisma.InputJsonValue, description: stash.description },
+      update: { value: stash.value as Prisma.InputJsonValue, description: stash.description },
+    }),
+    prisma.setting.delete({ where: { key: STASH_KEY } }),
+  ]);
+}
+
 async function cleanup() {
+  await putSavedLayoutBack();
   if (await editorTokenIsSpare()) {
     await prisma.numberSequence.deleteMany({
       where: { documentType: 'quotation', periodKey: { endsWith: `@${EDITOR_TOKEN}` } },
@@ -1081,6 +1117,9 @@ async function main() {
   // ── 10. Cost is stripped server-side, and never printed ────────────────────
   console.log('\nCost visibility over HTTP, and the SCORO-style PDF');
 
+  // The checks below read the standard layout; cleanup() puts any saved one back.
+  await setSavedLayoutAside();
+
   if (!(await apiReachable())) {
     failed += 1;
     console.log(
@@ -1226,6 +1265,10 @@ async function main() {
       text.includes('Total Price (PHP):') && !text.includes('PHP 3,240.00'),
     );
     check('it keeps the dated sign-offs — prepared and approved — and no Conforme', text.includes('PREPARED BY') && text.includes('APPROVED BY') && !/CONFORME/i.test(text));
+    check(
+      "the author's sign-off is the name on its own, with their email under it",
+      text.split('\n').includes(sales.name) && text.includes(sales.email),
+    );
     check('Delivery prints as a labelled line', text.includes('Delivery:') && text.includes('4 to 6 weeks'));
     check('it prints the group as a sub-heading and the line title', text.includes('Gruntech Installation') && text.includes('Air compressor installation'));
     check('it prints the payment terms and who it is for', text.includes('Payment Terms: 30 days PDC') && text.includes(`Attention: ${TAG} Engr. Cruz, Facilities Head`));
@@ -1795,6 +1838,7 @@ async function main() {
       ),
     );
     check('and the PDF carries both approvers, dated', signed.includes(manager.name) && signed.includes(ceo.name) && !signed.includes('Pending'));
+    check('each approver with how to reach them', signed.includes(manager.email) && signed.includes(ceo.email));
     const plain = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Over a million, standard route`,

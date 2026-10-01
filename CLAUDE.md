@@ -130,8 +130,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,086 assertions across twenty-two scripts** (counted 2026-10-02): foundation 164,
-masters 54, sales 243, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,094 assertions across twenty-two scripts** (counted 2026-10-02): foundation 170,
+masters 54, sales 245, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -162,6 +162,10 @@ these scripts exist. A script that needs a module's `onApprovalSettled`,
 any workflow step routed to a role nobody holds, or to the role that normally
 raises that document. Two seeded workflows shipped with that second fault and
 were found one at a time by documents refusing to submit — run this instead.
+
+`verify-sales.ts` checks the STANDARD quotation layout's wording, so it sets an
+administrator's saved layout aside for the run (`pdfTemplate.quotation.__verify__`,
+a Setting of its own) and `cleanup()` — which also runs first — puts it back.
 
 `verify-sales.ts` imports `src/routes/sales` purely for its side effect, because
 that import is what registers the quotation's `onApprovalSettled` subscriber. If
@@ -1125,8 +1129,9 @@ data builder like `quotationTemplate.ts` and `quotationPrintData()`.
   `after` (follows the line table, keeping its design distance under the table
   or under the box DIRECTLY above it — `covers()` — so a box with nothing to
   print closes up; one that does not fit goes over whole, text of four lines
-  or more runs on), and `last` (where it was put on the last page, or a page
-  of its own if the content reaches it). The table starts where it is on page
+  or more runs on), and `last` (where it was put on the last page, keeping its
+  BOTTOM edge — printing more than its box holds it grows upward, never into
+  the footer — or on a page of its own if the content reaches it). The table starts where it is on page
   1 and resumes at `flowTop` with its head repeated; content stops at
   `flowBottom`. A row taller than a page is split, never cut off.
 - **Fields are filled by `resolveTemplate()`**: parts of a line split by
@@ -1140,6 +1145,15 @@ data builder like `quotationTemplate.ts` and `quotationPrintData()`.
   itself), and `{{pages}}` outside the page furniture renders twice to know
   the count. Graphics anchored every/later are drawn when a page is made, so
   they sit behind its content.
+- **The sign-offs** (2026-10-02, the owner's call): each column is the role,
+  the NAME in bold at `nameSize` (10pt), then smaller the contact number, the
+  email and the date — or "Pending". No position unless the layout ticks
+  `showPosition`; `showPhone` / `showEmail` drop either line. The number is
+  `contactPhone()` in `shared/approvals.ts`: the login's `User.phone`, else the
+  linked employee's `mobile` (kept on My Account). `approvalSlots()` returns
+  each approver's phone and email; the author's are read in
+  `quotationPrintData()` for the paper only — `GET /quotations/:id` never
+  carries a mobile. The house style's one-line sign-offs are unchanged.
 - **"Hide total" hides the money everywhere**: `quotationPrintData()` blanks
   the money fields as well as passing no totals, so a layout that prints
   `{{quotation.total}}` in a box of its own still obeys it. Cost is never in

@@ -657,6 +657,7 @@ async function main() {
     'once a step approves, its slot carries who and when; the next stays pending',
     slotsAfter[0].name === pm.name && !!slotsAfter[0].at && slotsAfter[0].step === 'Manager' && !slotsAfter[1].name && slotsAfter[1].step === 'Boss',
   );
+  check('and how to reach them: the approver’s email; nothing for a step not yet taken', slotsAfter[0].email === pm.email && !slotsAfter[1].email);
   check('a document never submitted has no slots', (await approvalSlots(`${TAG}_opt_doc`, `${TAG}-never`)).length === 0);
 
   // ── 6. Audit trail ─────────────────────────────────────────────────────────
@@ -882,7 +883,17 @@ async function main() {
         { label: 'Sub Total Price:', value: formatAmount(20_000) },
         { label: 'Total Price (PHP):', value: formatAmount(22_400), bold: true },
       ],
-      signatories: [{ role: 'Prepared by', name: employee.name, at: ot.createdAt }, { role: 'Approved by' }],
+      signatories: [
+        {
+          role: 'Prepared by',
+          name: employee.name,
+          position: `${TAG} Sales Engineer`,
+          phone: '0917 555 0199',
+          email: `${TAG}.sales@verify.local`,
+          at: ot.createdAt,
+        },
+        { role: 'Approved by' },
+      ],
       ...over,
       fields: {
         ...blank,
@@ -934,6 +945,15 @@ async function main() {
         letterText.includes(stamp(ot.createdAt)) &&
         letterText.includes('Pending'),
     );
+    const signLines = letterText.split('\n');
+    check(
+      'a sign-off prints the name on its own, then the contact number and the email under it',
+      signLines.includes(employee.name) && signLines.includes('0917 555 0199') && signLines.includes(`${TAG}.sales@verify.local`),
+    );
+    check('and no position, unless the layout asks for it', !letterText.includes(`${TAG} Sales Engineer`));
+    const nameAt = textAt(letter, employee.name);
+    const phoneAt = textAt(letter, '0917 555 0199');
+    check('the name sits over the contact number, larger', !!nameAt && !!phoneAt && phoneAt.y - nameAt.y > 9, `${nameAt?.y} → ${phoneAt?.y}`);
     check('the figures carry no currency; the total names it once', letterText.includes('1,000.00') && !letterText.includes('PHP 1,000.00'));
     check('Greek mu prints as the micro sign, not "?"', pdfSafe('0.1 μm') === '0.1 µm' && letterText.includes('0.1 µm'));
     check("the content starts 36pt in, as the template's does", pdfEdges(letter).left === 36, `${pdfEdges(letter).left}pt`);
@@ -954,7 +974,35 @@ async function main() {
       `${totalsShort?.y} → ${totalsLonger?.y}`,
     );
     const signedShort = textAt(short, 'PREPARED BY');
-    check('the sign-offs stay where the layout put them on the last page', !!signedShort && Math.abs(signedShort.y - (728.9 + 8.5 * 0.718)) < 1, `${signedShort?.y}`);
+    const signBox = STANDARD_QUOTATION_DESIGN.blocks.find((b) => b.type === 'signoffs')!;
+    check(
+      'the sign-offs stay where the layout put them on the last page',
+      !!signedShort && Math.abs(signedShort.y - (signBox.y + 8.5 * 0.718)) < 1,
+      `${signedShort?.y} vs ${signBox.y}`,
+    );
+    // Drawn too short for what it prints, a last-page box keeps its bottom
+    // edge and grows upward — never down into the footer under it.
+    const cramped: PdfDesign = {
+      ...STANDARD_QUOTATION_DESIGN,
+      blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.type === 'signoffs' ? { ...b, y: 750, h: 20 } : b)),
+    };
+    const crampedDoc = await renderDesigned(cramped, quoteData({ rows: [lineRow(1)] }));
+    const crampedHead = textAt(crampedDoc, 'PREPARED BY');
+    const crampedLast = textAt(crampedDoc, stamp(ot.createdAt));
+    check(
+      'a last-page box too short for its lines grows upward, its foot where it was drawn',
+      !!crampedHead && !!crampedLast && crampedHead.y < 750 && crampedLast.y <= 770 && crampedLast.y > 760,
+      `${crampedHead?.y} … ${crampedLast?.y}`,
+    );
+    const withPosition: PdfDesign = {
+      ...STANDARD_QUOTATION_DESIGN,
+      blocks: STANDARD_QUOTATION_DESIGN.blocks.map((b) => (b.type === 'signoffs' ? { ...b, showPosition: true, showEmail: false } : b)),
+    };
+    const positioned = pdfText(await renderDesigned(withPosition, quoteData({ rows: [lineRow(1)] })));
+    check(
+      'a layout can put the position back, and leave the email out',
+      positioned.includes(`${TAG} Sales Engineer`) && !positioned.includes(`${TAG}.sales@verify.local`),
+    );
     const withNotes = await renderDesigned(
       STANDARD_QUOTATION_DESIGN,
       quoteData({ rows: [lineRow(1)], fields: { 'quotation.notes': `${TAG} a note` } }),

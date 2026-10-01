@@ -477,7 +477,7 @@ export async function approvalSignoffs(
 export async function approvalSlots(
   documentType: string,
   documentId: string,
-): Promise<{ step: string; name?: string; position?: string; at?: Date }[]> {
+): Promise<{ step: string; name?: string; position?: string; phone?: string; email?: string; at?: Date }[]> {
   const request = await prisma.approvalRequest.findFirst({
     where: { documentType, documentId },
     orderBy: { createdAt: 'desc' },
@@ -485,7 +485,9 @@ export async function approvalSlots(
       workflow: { select: { steps: { orderBy: { sequence: 'asc' }, select: { sequence: true, name: true } } } },
       actions: {
         where: { action: 'APPROVED' },
-        include: { approver: { select: { name: true, position: true } } },
+        include: {
+          approver: { select: { name: true, position: true, email: true, phone: true, employee: { select: { mobile: true } } } },
+        },
       },
     },
   });
@@ -494,6 +496,24 @@ export async function approvalSlots(
   const steps = request.workflow?.steps ?? [];
   return steps.map((st) => {
     const a = bySeq.get(st.sequence);
-    return a ? { step: st.name, name: a.approver.name, position: a.approver.position ?? undefined, at: a.actedAt } : { step: st.name };
+    return a
+      ? {
+          step: st.name,
+          name: a.approver.name,
+          position: a.approver.position ?? undefined,
+          phone: contactPhone(a.approver),
+          email: a.approver.email,
+          at: a.actedAt,
+        }
+      : { step: st.name };
   });
+}
+
+/**
+ * The number a document prints for a person: their login's own phone — the
+ * one Admin › Users keeps for exactly this — else the mobile they keep on My
+ * Account. Nothing, rather than an empty line, when neither is set.
+ */
+export function contactPhone(user: { phone?: string | null; employee?: { mobile?: string | null } | null }): string | undefined {
+  return user.phone?.trim() || user.employee?.mobile?.trim() || undefined;
 }

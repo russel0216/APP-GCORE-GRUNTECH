@@ -90,6 +90,11 @@ export interface SignoffsBlock extends Base {
   colWidth: number;
   headColor: string;
   textColor: string;
+  /** The name, in bold, at this size. */
+  nameSize: number;
+  showPosition: boolean;
+  showPhone: boolean;
+  showEmail: boolean;
 }
 
 export type Block = TextBlock | LineBlock | BoxBlock | LogoBlock | ItemsBlock | TotalsBlock | SignoffsBlock;
@@ -114,7 +119,7 @@ export type PdfCell = string | { title: string; body?: string };
 export interface Sample {
   rows: ({ heading: string; group?: boolean } | { cells: Partial<Record<ColumnKey, PdfCell>> })[];
   totals: { label: string; value: string; bold?: boolean }[] | null;
-  signatories: { role: string; name?: string; position?: string; at?: string | null }[];
+  signatories: { role: string; name?: string; position?: string; phone?: string; email?: string; at?: string | null }[];
 }
 
 export const ANCHOR_LABELS: Record<Anchor, string> = {
@@ -131,7 +136,7 @@ export const ANCHOR_HINTS: Record<Anchor, string> = {
   every: 'Printed on every page, where you put it — a footer, a strapline, a page number.',
   later: 'Printed on every page after the first — a running header.',
   after: 'Follows the lines: it keeps its distance below the table, or below the box above it, wherever the table ends. With nothing to print it closes up.',
-  last: 'Stays where you put it on the last page. If the content reaches it, it starts a page of its own.',
+  last: 'Stays where you put it on the last page, keeping its bottom edge: when it prints more than the box holds it grows upward, never into the footer. If the content reaches it, it starts a page of its own.',
 };
 
 /** The anchors a kind of box may take. */

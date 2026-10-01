@@ -113,6 +113,13 @@ export interface Signatory {
    * honest blank rather than borrowing the date of the document.
    */
   at?: Date | null;
+  /**
+   * How to reach them. The quotation's sign-offs print these under the name,
+   * because a customer who reads it calls the person who prepared it; the
+   * house style's one-line sign-offs leave them out.
+   */
+  phone?: string;
+  email?: string;
 }
 
 export interface PdfDocumentSpec {
@@ -345,6 +352,8 @@ function safeSpec(spec: PdfDocumentSpec): PdfDocumentSpec {
       role: pdfSafe(p.role),
       name: t(p.name),
       position: t(p.position),
+      phone: t(p.phone),
+      email: t(p.email),
     })),
   };
 }

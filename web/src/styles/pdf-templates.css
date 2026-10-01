@@ -502,21 +502,53 @@
   text-align: right;
 }
 
+/*
+  Every column in one grid cell, each set in from the left by its own margin:
+  the block is then as tall as its tallest column — which is what lets a
+  last-page box grow upward from its foot below, as the PDF does.
+*/
 .pt-signoffs {
-  position: relative;
-  height: 100%;
+  display: grid;
 }
 
 .pt-signoff {
-  position: absolute;
-  top: 0;
+  grid-area: 1 / 1;
+  align-self: start;
   display: flex;
   flex-direction: column;
 }
 
-.pt-signoff b {
+/*
+  A last-page box keeps its bottom edge. Its content is at least as tall as
+  the box (so a short one still starts at the top), and when it is taller it
+  is packed to the box's foot and grows upward, never down into the footer.
+*/
+.pt-block.is-last {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.pt-block.is-last > :first-child {
+  flex: none;
+  min-height: 100%;
+}
+
+/* Its tag goes under it: above, it would sit on what grew upward. */
+.pt-block.is-last .pt-tag {
+  top: 100%;
+  bottom: auto;
+  margin: var(--s-1) 0 0;
+}
+
+.pt-signoff-role {
   margin-bottom: calc(5px * var(--pt));
   text-transform: uppercase;
+}
+
+/* The name: bold, at its own size, a point's gap under it as the PDF sets it. */
+.pt-signoff-name {
+  margin-bottom: calc(1px * var(--pt));
 }
 
 /* ── The side panel ──────────────────────────────────────────────────────── */
