@@ -160,8 +160,10 @@ export function DocumentApproval({
     every step then reads "Not yet" on a document whose own badge says
     Approved, which is a straight contradiction on screen. Saying "we do not
     know who" is honest; showing an approved document as still queued is not.
+    A CANCELLED request with none is not one of those: it was withdrawn before
+    anybody decided — a later revision raised, a filing cancelled.
   */
-  const unrecorded = request.actions.length === 0 && request.status !== 'PENDING';
+  const unrecorded = request.actions.length === 0 && (request.status === 'APPROVED' || request.status === 'REJECTED');
 
   /** When the ball last moved — the submission, or the most recent decision. */
   const lastEventAt = () => {
@@ -189,6 +191,9 @@ export function DocumentApproval({
         approver: 'Approver not recorded',
         status: request.status === 'APPROVED' ? 'APPROVED' : 'REJECTED',
       };
+    }
+    if (request.status === 'CANCELLED' && step.sequence === request.currentSequence) {
+      return { label: step.name, approver: 'Withdrawn before a decision', status: 'WAITING' };
     }
     if (request.status === 'PENDING' && step.sequence === request.currentSequence) {
       const names = who(step);

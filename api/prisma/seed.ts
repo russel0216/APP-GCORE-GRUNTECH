@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { backfillPositions } from '../src/shared/plantilla';
+import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -903,6 +904,19 @@ async function main() {
     });
   }
   console.log(`  ✓ Approval workflows (${WORKFLOWS.length})`);
+
+  // Raising a quotation revision once superseded the last one without
+  // withdrawing its approval request, which then sat in the approver's queue
+  // for good. Any still open is withdrawn — CANCELLED, never deleted. One
+  // definition, shared with the API; a second run withdraws nothing.
+  {
+    const withdrawn = await withdrawStaleQuotationApprovals();
+    if (withdrawn.length) {
+      console.log(
+        `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
+      );
+    }
+  }
 
   // ── Departments ────────────────────────────────────────────────────────────
   for (const d of [

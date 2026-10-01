@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
+import { cancelOpenRequest } from './approvals';
 
 /**
  * A quotation's money, SCORO-style, in ONE place.
@@ -307,4 +308,45 @@ export function stripLineCost<T extends Record<string, unknown>>(line: T): Omit<
   const copy: Record<string, unknown> = { ...line };
   for (const k of LINE_COST_KEYS) delete copy[k];
   return copy as Omit<T, (typeof LINE_COST_KEYS)[number]>;
+}
+
+// ── Approvals left open on revisions that moved on ──────────────────────────
+
+/**
+ * Withdraws every quotation approval request still open on a revision that is
+ * no longer waiting for it. Raising a revision used to supersede the latest
+ * one without withdrawing its request (it now does, through
+ * `cancelOpenRequest`), and each such request sat in its approvers' queue for
+ * good. The rule this restores: a quotation's request is open only while its
+ * revision is PENDING_APPROVAL.
+ *
+ * Idempotent — the seed runs it on every deploy, and a second run withdraws
+ * nothing. Nothing is deleted: each request stays in the history, CANCELLED.
+ * `revisionIds` narrows it to those revisions (a verify script's own). Returns
+ * the revisions it withdrew a request from, as "GT-QT-2026-0161 R0".
+ */
+export async function withdrawStaleQuotationApprovals(revisionIds?: string[]): Promise<string[]> {
+  const open = await prisma.approvalRequest.findMany({
+    where: { documentType: 'quotation', status: 'PENDING', ...(revisionIds ? { documentId: { in: revisionIds } } : {}) },
+    select: { documentId: true, documentNumber: true },
+  });
+  const withdrawn: string[] = [];
+  for (const { documentId, documentNumber } of open) {
+    const label = await prisma.$transaction(async (tx) => {
+      const revision = await tx.quotationRevision.findUnique({
+        where: { id: documentId },
+        select: { revision: true, status: true, quotation: { select: { number: true } } },
+      });
+      if (revision?.status === 'PENDING_APPROVAL') return null; // still waiting: its request is right
+      const reason = !revision
+        ? 'its revision no longer exists'
+        : revision.status === 'SUPERSEDED'
+          ? 'superseded before anybody decided'
+          : `its revision is no longer waiting for approval (${revision.status.toLowerCase()})`;
+      if (!(await cancelOpenRequest('quotation', documentId, tx, reason)).length) return null;
+      return revision ? `${revision.quotation.number} R${revision.revision}` : (documentNumber ?? documentId);
+    });
+    if (label && !withdrawn.includes(label)) withdrawn.push(label);
+  }
+  return withdrawn;
 }

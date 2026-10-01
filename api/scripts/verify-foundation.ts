@@ -41,6 +41,7 @@ import {
   namedApprovers,
   routePreview,
   historyFor,
+  cancelOpenRequest,
 } from '../src/shared/approvals';
 import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
@@ -688,6 +689,144 @@ async function main() {
   );
   check('and how to reach them: the approver’s email; nothing for a step not yet taken', slotsAfter[0].email === pm.email && !slotsAfter[1].email);
   check('a document never submitted has no slots', (await approvalSlots(`${TAG}_opt_doc`, `${TAG}-never`)).length === 0);
+
+  // ── 5c. Withdrawing a request the document moved on from ───────────────────
+  // A quotation revision superseded while it waits on the approver: its
+  // request is withdrawn in the same transaction, never left in a queue.
+  console.log('\nWithdrawing an open request');
+
+  // A role only these test users hold, so nobody real is asked or told.
+  const wdRole = await prisma.role.create({ data: { key: `${TAG}_wd`, name: 'Verify Withdrawal Checker' } });
+  await prisma.userRole.createMany({ data: [pm, pm2].map((u) => ({ userId: u.id, roleId: wdRole.id })) });
+  await prisma.approvalWorkflow.create({
+    data: {
+      documentType: `${TAG}_wd_doc`,
+      name: 'Verify — one step, two checkers',
+      steps: { create: [{ sequence: 1, name: 'Checker', approverType: 'ROLE', roleId: wdRole.id }] },
+    },
+  });
+  let wdSettled = 0;
+  onApprovalSettled(`${TAG}_wd_doc`, async () => {
+    wdSettled++;
+  });
+  const wdSubmit = (documentId: string) =>
+    submitForApproval({
+      documentType: `${TAG}_wd_doc`,
+      documentId,
+      documentNumber: `VERIFY ${documentId}`,
+      subject: 'Verify — withdrawn request',
+      requesterId: employee.id,
+      link: `/verify/${documentId}`,
+    });
+  const withdraw = (documentId: string, actorId: string | null) =>
+    prisma.$transaction((tx) => cancelOpenRequest(`${TAG}_wd_doc`, documentId, tx, 'superseded by R1', actorId));
+  const toldOf = (documentId: string) =>
+    prisma.notification.findMany({ where: { type: 'approval.withdrawn', link: `/verify/${documentId}` } });
+
+  const wd = await wdSubmit(`${TAG}-wd-1`);
+  const wdGone = await withdraw(`${TAG}-wd-1`, employee.id);
+  const wdAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: wd.id } });
+  check(
+    'a withdrawn request closes CANCELLED, with the moment it closed',
+    wdGone.length === 1 && wdGone[0].id === wd.id && wdAfter.status === 'CANCELLED' && !!wdAfter.closedAt,
+    wdAfter.status,
+  );
+  check(
+    'it leaves every approver’s queue',
+    !(await pendingFor(pm.id)).some((r) => r.id === wd.id) && !(await pendingFor(pm2.id)).some((r) => r.id === wd.id),
+  );
+  const wdTold = await toldOf(`${TAG}-wd-1`);
+  check(
+    'the approvers it waited on are told, linked to the record, with the reason',
+    [pm.id, pm2.id].every((id) => wdTold.some((n) => n.userId === id)) &&
+      wdTold.every((n) => n.title === 'Withdrawn: Verify — withdrawn request' && n.body === `VERIFY ${TAG}-wd-1 — superseded by R1`),
+    JSON.stringify(wdTold.map((n) => [n.title, n.body])),
+  );
+  check('the requester who withdrew it is not told what they just did', !wdTold.some((n) => n.userId === employee.id));
+  check('no subscriber hears of it — a withdrawal is not an outcome', wdSettled === 0, String(wdSettled));
+  const wdTrail = await prisma.auditLog.findMany({ where: { entityId: `${TAG}-wd-1`, action: 'CANCELLED' } });
+  check(
+    'the withdrawal is audited at its step, with its reason and who did it',
+    wdTrail.length === 1 && wdTrail[0].summary === 'Withdrawn from approval at Checker — superseded by R1' && wdTrail[0].actorId === employee.id,
+    JSON.stringify(wdTrail.map((t) => t.summary)),
+  );
+  await expectRejection(
+    'a withdrawn request cannot be decided',
+    () => act({ requestId: wd.id, userId: pm.id, action: 'APPROVED' }),
+    'no longer open',
+  );
+  check(
+    'withdrawing again finds nothing open, and audits nothing',
+    (await withdraw(`${TAG}-wd-1`, employee.id)).length === 0 &&
+      (await prisma.auditLog.count({ where: { entityId: `${TAG}-wd-1`, action: 'CANCELLED' } })) === 1,
+  );
+  const resubmitted = await wdSubmit(`${TAG}-wd-1`);
+  check('the document can be submitted afresh — nothing is left awaiting approval', resubmitted.status === 'PENDING');
+  await withdraw(`${TAG}-wd-1`, null);
+  check(
+    'withdrawn by anybody else, the requester is told as well',
+    (await toldOf(`${TAG}-wd-1`)).filter((n) => n.userId === employee.id).length === 1,
+  );
+
+  // In the caller's transaction: rolled back, it never happened.
+  const wdRolled = await wdSubmit(`${TAG}-wd-2`);
+  await prisma
+    .$transaction(async (tx) => {
+      await cancelOpenRequest(`${TAG}_wd_doc`, `${TAG}-wd-2`, tx, 'superseded by R1', employee.id);
+      throw new Error('the caller failed after withdrawing');
+    })
+    .catch(() => undefined);
+  check(
+    'withdrawn in a transaction that rolls back, the request is still open — unaudited, untold',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: wdRolled.id } })).status === 'PENDING' &&
+      (await prisma.auditLog.count({ where: { entityId: `${TAG}-wd-2`, action: 'CANCELLED' } })) === 0 &&
+      (await toldOf(`${TAG}-wd-2`)).length === 0,
+  );
+
+  // A decision that landed first stands.
+  await act({ requestId: wdRolled.id, userId: pm.id, action: 'APPROVED' });
+  check(
+    'a decision that landed first stands — withdrawing then finds nothing open',
+    (await withdraw(`${TAG}-wd-2`, employee.id)).length === 0 &&
+      (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: wdRolled.id } })).status === 'APPROVED',
+  );
+  check('and the subscriber heard that decision', wdSettled === 1, String(wdSettled));
+
+  // A decision arriving while the withdrawal is being written reads the
+  // request open, waits on the row, and is then refused — never written over it.
+  const wdRaced = await wdSubmit(`${TAG}-wd-3`);
+  const late: { outcome?: Promise<string> } = {};
+  await prisma.$transaction(async (tx) => {
+    await cancelOpenRequest(`${TAG}_wd_doc`, `${TAG}-wd-3`, tx, 'superseded by R1', employee.id);
+    late.outcome = act({ requestId: wdRaced.id, userId: pm.id, action: 'APPROVED' }).then(
+      () => 'decided',
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+  const lateOutcome = await late.outcome;
+  const racedAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: wdRaced.id }, include: { actions: true } });
+  check(
+    'a decision arriving while a withdrawal is written is refused, not written over it',
+    racedAfter.status === 'CANCELLED' && racedAfter.actions.length === 0 && lateOutcome !== 'decided',
+    `${racedAfter.status}, ${racedAfter.actions.length} action(s) — ${lateOutcome}`,
+  );
+
+  // Two approvers deciding the same step at the same moment: one decision.
+  const wdBoth = await wdSubmit(`${TAG}-wd-4`);
+  const bothOutcomes = await Promise.allSettled([
+    act({ requestId: wdBoth.id, userId: pm.id, action: 'APPROVED' }),
+    act({ requestId: wdBoth.id, userId: pm2.id, action: 'REJECTED' }),
+  ]);
+  const bothAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: wdBoth.id }, include: { actions: true } });
+  check(
+    'two approvers deciding one step at once: one decision is recorded, the other refused',
+    bothOutcomes.filter((o) => o.status === 'fulfilled').length === 1 &&
+      bothAfter.actions.length === 1 &&
+      bothAfter.status === bothAfter.actions[0].action,
+    `${bothOutcomes.map((o) => o.status).join(' / ')} → ${bothAfter.status}, ${bothAfter.actions.length} action(s)`,
+  );
+  check('and the subscriber heard it once', wdSettled === 2, String(wdSettled));
 
   // ── 6. Audit trail ─────────────────────────────────────────────────────────
   console.log('\nAudit trail');

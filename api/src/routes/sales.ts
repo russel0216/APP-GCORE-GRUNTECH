@@ -18,7 +18,15 @@ import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissio
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots, contactPhone, routePreview } from '../shared/approvals';
+import {
+  submitForApproval,
+  onApprovalSettled,
+  approvalOptions,
+  approvalSlots,
+  cancelOpenRequest,
+  contactPhone,
+  routePreview,
+} from '../shared/approvals';
 import {
   formatAmount,
   formatDate,
@@ -1497,6 +1505,12 @@ quotationRoutes.delete(
  *
  * Copying rather than editing is the whole point: R0 is what the customer was
  * sent, and it stays readable after R1 changes the price.
+ *
+ * Raising one while the latest waits on the approver is how a pending
+ * quotation is changed, and the superseded revision's approval request is
+ * withdrawn in the same transaction. Left open, it sat in the approver's queue
+ * for good — and approving it would have offered an outdated revision as the
+ * one a project is built from.
  */
 quotationRoutes.post(
   '/:id/revisions',
@@ -1518,18 +1532,22 @@ quotationRoutes.post(
         `Revision ${latest.revision} is still a draft — finish or submit it before raising another.`,
       );
     }
+    const nextRevision = (latest?.revision ?? -1) + 1;
 
-    const created = await prisma.$transaction(async (tx) => {
+    const { created, withdrawn } = await prisma.$transaction(async (tx) => {
+      let withdrawn = false;
       if (latest) {
         await tx.quotationRevision.update({
           where: { id: latest.id },
           data: { status: 'SUPERSEDED' },
         });
+        // Whatever it was read as above: a request still open on it goes with it.
+        withdrawn = (await cancelOpenRequest('quotation', latest.id, tx, `superseded by R${nextRevision}`, me.id)).length > 0;
       }
-      return tx.quotationRevision.create({
+      const created = await tx.quotationRevision.create({
         data: {
           quotationId: req.params.id,
-          revision: (latest?.revision ?? -1) + 1,
+          revision: nextRevision,
           status: 'DRAFT',
           costingId: latest?.costingId ?? null,
           validityDays: latest?.validityDays ?? 30,
@@ -1564,6 +1582,7 @@ quotationRoutes.post(
             : undefined,
         },
       });
+      return { created, withdrawn };
     });
 
     await recalcRevision(created.id);
@@ -1573,7 +1592,9 @@ quotationRoutes.post(
         entityType: 'quotation',
         entityId: req.params.id,
         action: 'CREATED',
-        summary: `Raised revision ${created.revision} of ${quotation.number}`,
+        summary: `Raised revision ${created.revision} of ${quotation.number}${
+          withdrawn ? ` — R${latest!.revision} withdrawn from approval` : ''
+        }`,
       },
       req,
     );
@@ -1951,6 +1972,12 @@ quotationRoutes.post(
  *
  * The module subscribes rather than the engine knowing about quotations — see
  * `api/src/shared/approvals.ts`.
+ *
+ * Only a revision still PENDING_APPROVAL takes the outcome, claimed with a
+ * conditional update. A decision on one that has moved on — superseded while
+ * its request was still open — changes nothing: approving it must never bring
+ * an outdated revision back as the approved one, nor supersede the revision
+ * that really is.
  */
 onApprovalSettled('quotation', async (request, outcome) => {
   const revision = await prisma.quotationRevision.findUnique({
@@ -1959,8 +1986,16 @@ onApprovalSettled('quotation', async (request, outcome) => {
   });
   if (!revision) return;
 
-  if (outcome === 'APPROVED') {
-    await prisma.$transaction(async (tx) => {
+  // The status the revision had moved on to, or null once it took the outcome.
+  const movedOn = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.quotationRevision.updateMany({
+      where: { id: revision.id, status: 'PENDING_APPROVAL' },
+      data: outcome === 'APPROVED' ? { status: 'APPROVED', approvedAt: new Date() } : { status: 'REJECTED' },
+    });
+    if (!claimed.count) {
+      return (await tx.quotationRevision.findUnique({ where: { id: revision.id }, select: { status: true } }))?.status ?? revision.status;
+    }
+    if (outcome === 'APPROVED') {
       // Only one revision of a quotation may be APPROVED (model §10).
       await tx.quotationRevision.updateMany({
         where: {
@@ -1970,16 +2005,20 @@ onApprovalSettled('quotation', async (request, outcome) => {
         },
         data: { status: 'SUPERSEDED' },
       });
-      await tx.quotationRevision.update({
-        where: { id: revision.id },
-        data: { status: 'APPROVED', approvedAt: new Date() },
-      });
+    }
+    return null;
+  });
+
+  if (movedOn) {
+    // The engine has recorded the decision — it is the record of fact — and
+    // the trail says why the revision did not follow it.
+    await audit({
+      entityType: 'quotation',
+      entityId: revision.quotationId,
+      action: 'UPDATED',
+      summary: `Revision ${revision.revision} of ${revision.quotation.number} was ${outcome.toLowerCase()} after it was ${movedOn.toLowerCase().replace(/_/g, ' ')} — not applied`,
     });
-  } else {
-    await prisma.quotationRevision.update({
-      where: { id: revision.id },
-      data: { status: 'REJECTED' },
-    });
+    return;
   }
 
   await audit({

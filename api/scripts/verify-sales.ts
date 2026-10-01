@@ -16,11 +16,16 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken } from '../src/shared/numbering';
-import { submitForApproval, act } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
 import { signToken } from '../src/auth/middleware';
-import { quotationTotals, lineAmount, recalcQuotationRevision } from '../src/shared/quotation';
+import {
+  quotationTotals,
+  lineAmount,
+  recalcQuotationRevision,
+  withdrawStaleQuotationApprovals,
+} from '../src/shared/quotation';
 // The quotation editor's live figures. DOM-free, so it runs here as it does in
 // the page; the checks below pin it to the server's arithmetic.
 import {
@@ -138,7 +143,21 @@ async function cleanup() {
   await prisma.salesActivity.deleteMany({
     where: { OR: [{ subject: { startsWith: TAG } }, { lead: { companyName: { startsWith: TAG } } }] },
   });
+  // The trail of the test quotations and their revisions — the settle
+  // subscriber and a withdrawal by nobody write it with no actor.
+  const quoteTrail = (
+    await prisma.quotation.findMany({
+      where: { subject: { startsWith: TAG } },
+      select: { id: true, revisions: { select: { id: true } } },
+    })
+  ).flatMap((q) => [q.id, ...q.revisions.map((r) => r.id)]);
+  if (quoteTrail.length) {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'quotation', entityId: { in: quoteTrail } } });
+  }
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
+  // Quotations route to the seeded sales_manager role, so whoever really holds
+  // it was asked about, and told of, the test quotations too.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
@@ -532,6 +551,95 @@ async function main() {
     where: { quotationId: quotation.id, status: 'APPROVED' },
   });
   check('only one revision can be approved at a time', approvedCount === 1, `${approvedCount}`);
+
+  // ── 6b. A decision on a revision that has moved on ─────────────────────────
+  // How raising a revision used to leave a pending one (GT-QT-2026-0161 on the
+  // owner's laptop): superseded, its request still open in the approver's
+  // queue. The route now withdraws it (the HTTP half, below); these are the
+  // subscriber's guard and the seed's repair for what is already there.
+  console.log('\nA decision on a revision that has moved on');
+
+  const staleQuote = await prisma.quotation.create({
+    data: {
+      number: `${TAG}-STALE-${Date.now() % 100_000}`,
+      customerId: customer.id,
+      ownerId: sales.id,
+      subject: `${TAG} Superseded while pending`,
+    },
+  });
+  /** A revision submitted for approval — then, if asked, superseded the old way, its request left open. */
+  async function submittedRevision(revision: number, supersede: boolean) {
+    const rev = await prisma.quotationRevision.create({
+      data: { quotationId: staleQuote.id, revision, status: 'PENDING_APPROVAL', vatRate: d(0.12) },
+    });
+    const request = await submitForApproval({
+      documentType: 'quotation',
+      documentId: rev.id,
+      documentNumber: `${staleQuote.number} R${revision}`,
+      subject: staleQuote.subject,
+      amount: 1_000,
+      link: `/g-ops/quotations/${staleQuote.id}`,
+      requesterId: sales.id,
+    });
+    if (supersede) await prisma.quotationRevision.update({ where: { id: rev.id }, data: { status: 'SUPERSEDED' } });
+    return { rev, request };
+  }
+  const statusOf = async (id: string) => (await prisma.quotationRevision.findUniqueOrThrow({ where: { id } })).status;
+
+  const staleR0 = await submittedRevision(0, true);
+  const liveR1 = await submittedRevision(1, false);
+  await act({ requestId: liveR1.request.id, userId: manager.id, action: 'APPROVED' });
+  check('R1 is approved through its own request', (await statusOf(liveR1.rev.id)) === 'APPROVED');
+
+  await act({ requestId: staleR0.request.id, userId: manager.id, action: 'APPROVED' });
+  const r0After = await prisma.quotationRevision.findUniqueOrThrow({ where: { id: staleR0.rev.id } });
+  check(
+    'approving the request left open on superseded R0 does not bring R0 back',
+    r0After.status === 'SUPERSEDED' && r0After.approvedAt === null,
+    r0After.status,
+  );
+  const staleStatuses = (await prisma.quotationRevision.findMany({ where: { quotationId: staleQuote.id }, orderBy: { revision: 'asc' } })).map((r) => r.status);
+  check(
+    'and R1 stays the one approved revision — the one a project is built from',
+    staleStatuses.join(',') === 'SUPERSEDED,APPROVED',
+    staleStatuses.join(','),
+  );
+  check(
+    'the trail says the late decision was not applied',
+    (await prisma.auditLog.count({
+      where: { entityType: 'quotation', entityId: staleQuote.id, summary: `Revision 0 of ${staleQuote.number} was approved after it was superseded — not applied` },
+    })) === 1,
+  );
+
+  const staleR2 = await submittedRevision(2, true);
+  await act({ requestId: staleR2.request.id, userId: manager.id, action: 'REJECTED' });
+  check('rejecting one leaves it superseded, not rejected', (await statusOf(staleR2.rev.id)) === 'SUPERSEDED');
+
+  // The repair the seed runs on every deploy, narrowed to this quotation's revisions.
+  const staleR3 = await submittedRevision(3, true);
+  const waitingR4 = await submittedRevision(4, false);
+  const repaired = await withdrawStaleQuotationApprovals([staleR3.rev.id, waitingR4.rev.id]);
+  const r3Request = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: staleR3.request.id } });
+  check(
+    'the repair withdraws a request left open on a superseded revision — CANCELLED, not deleted',
+    repaired.length === 1 && repaired[0] === `${staleQuote.number} R3` && r3Request.status === 'CANCELLED' && !!r3Request.closedAt,
+    `${JSON.stringify(repaired)} ${r3Request.status}`,
+  );
+  check('it leaves the approver’s queue', !(await pendingFor(manager.id)).some((r) => r.id === staleR3.request.id));
+  const r3Told = await prisma.notification.findFirst({ where: { userId: manager.id, type: 'approval.withdrawn', body: { startsWith: `${staleQuote.number} R3` } } });
+  check(
+    'and the approver is told why',
+    r3Told?.title === `Withdrawn: ${staleQuote.subject}` && r3Told.body === `${staleQuote.number} R3 — superseded before anybody decided`,
+    JSON.stringify(r3Told),
+  );
+  check(
+    'a request whose revision still waits on the approver is left alone',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: waitingR4.request.id } })).status === 'PENDING',
+  );
+  check(
+    'and a second run withdraws nothing',
+    (await withdrawStaleQuotationApprovals([staleR3.rev.id, waitingR4.rev.id])).length === 0,
+  );
 
   // ── 7. Lead follows the quotation ──────────────────────────────────────────
   console.log('\nLead and pipeline');
@@ -1915,6 +2023,86 @@ async function main() {
     const theirRow = (theirSuggest.body as unknown as { title: string; unitCost?: number | null }[]).find((r) => r.title === 'Service kit');
     check('a colleague who reads every quotation is offered the price but never the cost', !!theirRow && !('unitCost' in theirRow), JSON.stringify(theirRow));
     check('two letters at least', ((await http(salesToken, 'GET', '/quotations/suggest?q=S')).body as unknown as unknown[]).length === 0);
+
+    // ── Raising a revision while the last one waits on the approver ──────────
+    console.log('\nRaising a revision while the last one waits on the approver');
+    const changed = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Changed while pending`,
+      lines: [editorLines[2]],
+    });
+    const changedId = String(changed.body.id);
+    const changedR0 = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: changedId } });
+    await http(salesToken, 'POST', `/quotations/${changedId}/revisions/${changedR0.id}/submit`);
+    const changedRequest = await prisma.approvalRequest.findFirstOrThrow({
+      where: { documentType: 'quotation', documentId: changedR0.id, status: 'PENDING' },
+    });
+    check('submitted, R0 waits in the sales manager’s queue', (await pendingFor(manager.id)).some((r) => r.id === changedRequest.id));
+    const raisedWhilePending = await http(salesToken, 'POST', `/quotations/${changedId}/revisions`);
+    check('a revision can still be raised while R0 waits', raisedWhilePending.status === 201, raisedWhilePending.text.slice(0, 160));
+    const changedAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: changedRequest.id } });
+    check(
+      'and R0’s request is withdrawn with it — CANCELLED, closed, kept',
+      changedAfter.status === 'CANCELLED' && !!changedAfter.closedAt,
+      changedAfter.status,
+    );
+    check('gone from the approver’s queue', !(await pendingFor(manager.id)).some((r) => r.id === changedRequest.id));
+    const toldManager = await prisma.notification.findFirst({
+      where: { userId: manager.id, type: 'approval.withdrawn', link: `/g-ops/quotations/${changedId}` },
+    });
+    check(
+      'the approver is told it was withdrawn, linked to the quotation',
+      toldManager?.title === `Withdrawn: ${TAG} Changed while pending` && toldManager.body === `${changed.body.number} R0 — superseded by R1`,
+      JSON.stringify(toldManager),
+    );
+    check(
+      'the author who raised the revision is not told what they just did',
+      (await prisma.notification.count({ where: { userId: sales.id, type: 'approval.withdrawn', link: `/g-ops/quotations/${changedId}` } })) === 0,
+    );
+    const changedRevs = await prisma.quotationRevision.findMany({ where: { quotationId: changedId }, orderBy: { revision: 'asc' } });
+    check(
+      'R0 is superseded and R1 a draft',
+      changedRevs.map((r) => r.status).join(',') === 'SUPERSEDED,DRAFT',
+      changedRevs.map((r) => r.status).join(','),
+    );
+    check(
+      'both trails say so: the request withdrawn at its step, and the revision raised over it',
+      (await prisma.auditLog.count({
+        where: {
+          entityType: 'quotation',
+          entityId: changedR0.id,
+          action: 'CANCELLED',
+          actorId: sales.id,
+          summary: { startsWith: 'Withdrawn from approval at ', endsWith: ' — superseded by R1' },
+        },
+      })) === 1 &&
+        (await prisma.auditLog.count({
+          where: { entityType: 'quotation', entityId: changedId, summary: `Raised revision 1 of ${changed.body.number} — R0 withdrawn from approval` },
+        })) === 1,
+    );
+    let lateApproval = '';
+    try {
+      await act({ requestId: changedRequest.id, userId: manager.id, action: 'APPROVED' });
+      lateApproval = 'approved';
+    } catch (err) {
+      lateApproval = err instanceof Error ? err.message : String(err);
+    }
+    check('the approver can no longer approve it', lateApproval.includes('no longer open'), lateApproval);
+    check('and R0 stays superseded', (await statusOf(changedR0.id)) === 'SUPERSEDED');
+    const resubmitted = await http(salesToken, 'POST', `/quotations/${changedId}/revisions/${changedRevs[1].id}/submit`);
+    check(
+      'R1 goes to the approver in its place',
+      resubmitted.status === 200 && (await pendingFor(manager.id)).some((r) => r.documentId === changedRevs[1].id),
+      resubmitted.text.slice(0, 160),
+    );
+    const overApproved = await http(salesToken, 'POST', `/quotations/${big.body.id}/revisions`);
+    check(
+      'raising one over an approved revision withdraws nothing — its request was decided, and stays so',
+      overApproved.status === 201 &&
+        (await prisma.auditLog.count({ where: { entityType: 'quotation', entityId: String(big.body.id), summary: `Raised revision 1 of ${big.body.number}` } })) === 1 &&
+        (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: ceoRequest.id } })).status === 'APPROVED',
+      overApproved.text.slice(0, 160),
+    );
 
     // ── Admin › PDF Templates: the quotation prints the administrator's layout ──
     console.log('\nThe quotation PDF template (Admin › PDF Templates)');

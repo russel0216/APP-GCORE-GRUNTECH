@@ -555,7 +555,15 @@ export function QuotationDetail() {
             {quotation.canEdit && revision?.status !== 'DRAFT' && (
               <button
                 className="btn"
-                onClick={() => act(() => api.post(`/quotations/${quotation.id}/revisions`), 'New revision raised')}
+                onClick={() => {
+                  // The server withdraws a pending revision's approval request
+                  // as it supersedes it; say so, since the approver is told.
+                  const pending = quotation.revisions[0]?.status === 'PENDING_APPROVAL' ? quotation.revisions[0] : null;
+                  return act(
+                    () => api.post(`/quotations/${quotation.id}/revisions`),
+                    pending ? `New revision raised — R${pending.revision} is withdrawn from approval` : 'New revision raised',
+                  );
+                }}
               >
                 New revision
               </button>
@@ -864,7 +872,8 @@ export function QuotationDetail() {
           {revision.status === 'PENDING_APPROVAL' && (
             <div className="alert info">
               Revision {revision.revision} is with the approver. It cannot be edited until they
-              decide — raise a new revision if something must change.
+              decide — raise a new revision if something must change, and this one is withdrawn
+              from their queue.
             </div>
           )}
           {revision.status === 'APPROVED' && (

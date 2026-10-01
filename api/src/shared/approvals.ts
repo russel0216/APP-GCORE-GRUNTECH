@@ -353,6 +353,9 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
   });
   if (!request) throw notFound('Approval request not found');
+  // CANCELLED is a request withdrawn (see cancelOpenRequest) or returned:
+  // either way, nothing is waiting on it now.
+  if (request.status === 'CANCELLED') throw badRequest('This request is no longer open — nothing is waiting on it');
   if (request.status !== 'PENDING') throw badRequest('This request has already been decided');
 
   const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
@@ -379,7 +382,27 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     throw forbidden('This approval is not yours to act on');
   }
 
+  const steps = request.workflow!.steps;
+  const next = steps[steps.findIndex((s) => s.sequence === step.sequence) + 1];
+
   const settled = await prisma.$transaction(async (tx) => {
+    // Claimed, never simply written: the request must still be open at this
+    // step. One withdrawn (cancelOpenRequest) or decided by somebody else since
+    // it was read above is refused here — written over, a withdrawn request
+    // would come back decided, and two approvers on one step would both count.
+    const claimed = await tx.approvalRequest.updateMany({
+      where: { id: request.id, status: 'PENDING', currentSequence: step.sequence },
+      data:
+        input.action !== 'APPROVED'
+          ? { status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED', closedAt: new Date() }
+          : next
+            ? { currentSequence: next.sequence }
+            : { status: 'APPROVED', closedAt: new Date() },
+    });
+    if (!claimed.count) {
+      throw badRequest('This request was decided or withdrawn a moment ago — reload to see where it stands');
+    }
+
     await tx.approvalAction.create({
       data: {
         requestId: request.id,
@@ -390,32 +413,7 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
         comment: input.comment ?? null,
       },
     });
-
-    if (input.action !== 'APPROVED') {
-      return tx.approvalRequest.update({
-        where: { id: request.id },
-        data: {
-          status: input.action === 'REJECTED' ? 'REJECTED' : 'CANCELLED',
-          closedAt: new Date(),
-        },
-      });
-    }
-
-    const steps = request.workflow!.steps;
-    const index = steps.findIndex((s) => s.sequence === step.sequence);
-    const next = steps[index + 1];
-
-    if (next) {
-      return tx.approvalRequest.update({
-        where: { id: request.id },
-        data: { currentSequence: next.sequence },
-      });
-    }
-
-    return tx.approvalRequest.update({
-      where: { id: request.id },
-      data: { status: 'APPROVED', closedAt: new Date() },
-    });
+    return tx.approvalRequest.findUniqueOrThrow({ where: { id: request.id } });
   });
 
   await audit({
@@ -441,6 +439,82 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
   }
 
   return settled;
+}
+
+// ── Withdrawing ──────────────────────────────────────────────────────────────
+
+/**
+ * Withdraws a document's open approval request, in the caller's transaction,
+ * because the document moved on before anybody decided — a quotation revision
+ * superseded by the next. Left open, the request would sit in its approvers'
+ * queues for good, and a decision on it would land on a document that no
+ * longer waits for one.
+ *
+ * It closes CANCELLED, as a returned request does in act(), and is audited and
+ * told like any other step: the approvers it was waiting on hear it was
+ * withdrawn, and so does the requester when somebody else withdrew it. It is
+ * not an outcome, so no onApprovalSettled subscriber hears of it — the module
+ * withdrawing it already knows why.
+ *
+ * Claimed with a conditional update: a decision that landed first stands and
+ * nothing is withdrawn; one arriving after is refused by act(). Returns what
+ * it withdrew — nothing when nothing was open, so calling it twice is safe.
+ */
+export async function cancelOpenRequest(
+  documentType: string,
+  documentId: string,
+  tx: Prisma.TransactionClient,
+  reason: string,
+  actorId: string | null = null,
+): Promise<ApprovalRequest[]> {
+  // One open request per document is the engine's rule (submitForApproval),
+  // but every open one goes: a request left behind is the fault this fixes.
+  const open = await tx.approvalRequest.findMany({
+    where: { documentType, documentId, status: 'PENDING' },
+    select: { id: true },
+  });
+  const withdrawn: ApprovalRequest[] = [];
+  for (const { id } of open) {
+    const claimed = await tx.approvalRequest.updateMany({
+      where: { id, status: 'PENDING' },
+      data: { status: 'CANCELLED', closedAt: new Date() },
+    });
+    if (!claimed.count) continue; // decided while this ran: the decision stands
+
+    const { workflow, ...request } = await tx.approvalRequest.findUniqueOrThrow({
+      where: { id },
+      include: { workflow: { include: { steps: true } } },
+    });
+    const step = workflow?.steps.find((s) => s.sequence === request.currentSequence);
+    await audit(
+      {
+        entityType: documentType,
+        entityId: documentId,
+        action: 'CANCELLED',
+        summary: `Withdrawn from approval${step ? ` at ${step.name}` : ''} — ${reason}`,
+        actorId,
+      },
+      undefined,
+      tx,
+    );
+
+    // Whoever it was waiting on, and whoever raised it — never the person who
+    // withdrew it, who knows.
+    const told = new Set([...(step ? await approversForStep(step, request.requesterId, tx) : []), request.requesterId]);
+    if (actorId) told.delete(actorId);
+    await notify(
+      [...told].map((userId) => ({
+        userId,
+        type: 'approval.withdrawn' as const,
+        title: `Withdrawn: ${request.subject}`,
+        body: [request.documentNumber, reason].filter(Boolean).join(' — '),
+        link: request.link ?? undefined,
+      })),
+      tx,
+    );
+    withdrawn.push(request);
+  }
+  return withdrawn;
 }
 
 // ── Reading ──────────────────────────────────────────────────────────────────

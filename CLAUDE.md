@@ -20,8 +20,11 @@ four databases and four copies of "customer".
    permission string that the registry does not define.
 2. **Never invent a second approval path.** Every document type routes through
    `api/src/shared/approvals.ts`. Call `submitForApproval(...)`, subscribe with
-   `onApprovalSettled(...)`. Do not write per-module routing, notification or
-   history.
+   `onApprovalSettled(...)`, and when a document moves on before anybody
+   decides, withdraw its request with `cancelOpenRequest(..., tx, reason)` in
+   the same transaction. Do not write per-module routing, notification or
+   history. `act()` claims a request with a conditional update, so a decision
+   is never written over a withdrawal or over another approver's decision.
 3. **A requester can never approve their own document.** Enforced in `act()`,
    before the eligibility check, and for super admins too.
 4. **Cost posts only when every step has approved.** Overtime is the live
@@ -130,8 +133,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,105 assertions across twenty-two scripts** (counted 2026-10-02): foundation 175,
-masters 54, sales 251, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,143 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
+masters 54, sales 273, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1108,6 +1111,19 @@ the detail.
   none — and a draft's PDF prints the route submitting would take; the PDF
   button passes the ticked option as `?option=`, and one that no longer
   applies falls back to the standard route.
+- **A revision superseded while PENDING_APPROVAL takes its request with it**
+  (2026-10-02). `POST /quotations/:id/revisions` calls
+  `cancelOpenRequest('quotation', revisionId, tx, reason, actorId)` in the same
+  transaction: the request closes CANCELLED (kept, never deleted), audited,
+  and its approvers are told (`approval.withdrawn`; the requester too when
+  someone else raised the revision). Left open, it sat in My Work for good —
+  GT-QT-2026-0161 R0–R2 on the laptop — and approving it resurrected an
+  outdated revision. The settle subscriber applies an outcome only to a
+  revision still PENDING_APPROVAL (a conditional `updateMany`); a late decision
+  changes nothing, and the quotation's trail says "… not applied". The seed
+  runs `withdrawStaleQuotationApprovals()` (`shared/quotation.ts`) on every
+  deploy: a quotation's request is open only while its revision is
+  PENDING_APPROVAL. Idempotent; a second run withdraws nothing.
 - **`GET /quotations/suggest?q=`** offers past lines (newest price, unit,
   description, use count) from quotations the caller may read, a line's cost
   only where `canSeeQuotationCost` allows, and items with their list price

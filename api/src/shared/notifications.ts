@@ -14,6 +14,7 @@ export type NotificationType =
   | 'approval.approved'
   | 'approval.rejected'
   | 'approval.returned'
+  | 'approval.withdrawn'
   | 'quotation.awaiting'
   | 'project.behind_schedule'
   | 'po.received'
