@@ -11,22 +11,25 @@ import {
   notFound,
   badRequest,
   forbidden,
+  conflict,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, approvalOptions, approvalSlots } from '../shared/approvals';
 import {
   renderDocument,
   formatAmount,
   formatDateTime,
+  formatShortDate,
   type PdfLine,
   type PdfParty,
   type PdfRow,
   type PdfSection,
   type PdfTotal,
+  type Signatory,
 } from '../shared/pdf';
 import { activityWhere, type ActivityQuery } from '../shared/activities';
 import { manilaDayKey } from '../shared/day';
@@ -48,6 +51,8 @@ import {
   stripLineCost,
   quotationLinesFromSections,
   costingScopeSections,
+  quotationTaxOptions,
+  QUOTATION_EXTRA_TAX_RATES,
 } from '../shared/quotation';
 
 const d = (v: number | string | null | undefined) =>
@@ -469,6 +474,59 @@ function presentRevision(rev: Record<string, unknown>, showCost: boolean) {
 /** The one arithmetic lives in shared/quotation.ts; this is only its name here. */
 const recalcRevision = recalcQuotationRevision;
 
+/**
+ * Quote numbers may be typed by hand (SCORO allowed it, and a customer's own
+ * reference sometimes has to be honoured), so a number is checked in ONE
+ * place: its shape, and that no other quotation — and no quote in the SCORO
+ * archive, whose numbers stay unissuable — already carries it. Case-blind,
+ * because "q-12" and "Q-12" on two letters to one customer is the same number.
+ */
+const QUOTE_NUMBER = /^[A-Za-z0-9][A-Za-z0-9\-/_.]{0,39}$/;
+
+async function numberTakenBy(
+  number: string,
+  excludeId?: string | null,
+  tx: Prisma.TransactionClient = prisma,
+): Promise<string | null> {
+  const live = await tx.quotation.findFirst({
+    where: { number: { equals: number, mode: 'insensitive' }, ...(excludeId ? { id: { not: excludeId } } : {}) },
+    select: { number: true, subject: true },
+  });
+  if (live) return `already used by another quotation (${live.subject})`;
+  const archived = await tx.legacyQuote.findFirst({
+    where: { number: { equals: number, mode: 'insensitive' } },
+    select: { number: true, continuedQuotationId: true },
+  });
+  // The quotation that continues an archived SCORO quote keeps its number.
+  if (archived && (!excludeId || archived.continuedQuotationId !== excludeId)) {
+    return `a SCORO quote in the archive (${archived.number}) — archive numbers are never reissued`;
+  }
+  return null;
+}
+
+async function checkQuoteNumber(number: string, excludeId?: string | null, tx: Prisma.TransactionClient = prisma) {
+  if (!QUOTE_NUMBER.test(number)) {
+    throw badRequest('A quote number is letters and digits, with - / _ or . — up to 40 characters', [
+      { field: 'number', message: 'Letters, digits and - / _ . only' },
+    ]);
+  }
+  const taken = await numberTakenBy(number, excludeId, tx);
+  if (taken) throw conflict(`${number} is ${taken}. Choose another number.`);
+}
+
+/**
+ * The next number in the author's series that nobody has taken — a number
+ * typed by hand ahead of the counter is stepped over, not issued twice. Inside
+ * the caller's transaction, so a rollback burns nothing.
+ */
+async function nextFreeQuoteNumber(tx: Prisma.TransactionClient, ownerId: string): Promise<string> {
+  let number = await nextNumber('quotation', tx, { ownerId });
+  for (let tries = 0; tries < 200 && (await numberTakenBy(number, null, tx)); tries++) {
+    number = await nextNumber('quotation', tx, { ownerId });
+  }
+  return number;
+}
+
 /** A revision re-read with its lines, for the line routes to answer with. */
 async function revisionWithItems(revisionId: string) {
   return prisma.quotationRevision.findUnique({
@@ -613,13 +671,16 @@ quotationRoutes.get(
     // same people POST / lets name another author, ignored for everyone else.
     const asked = typeof req.query.ownerId === 'string' ? req.query.ownerId.trim() : '';
     const ownerId = asked && mayAuthorForOthers(me) ? asked : me.id;
-    const [preview, template, company] = await Promise.all([
-      previewNext('quotation', { ownerId }),
+    const [preview, template, company, last] = await Promise.all([
+      previewNext('quotation', { ownerId }, prisma, async (n) => (await numberTakenBy(n)) !== null),
       prisma.numberSequence.findFirst({ where: { documentType: 'quotation', periodKey: '' }, select: { pattern: true } }),
       prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true, currency: true } }),
+      // "Your last quotation": what the suggestion continues from.
+      prisma.quotation.findFirst({ where: { ownerId }, orderBy: { createdAt: 'desc' }, select: { number: true } }),
     ]);
     res.json({
       number: preview.number,
+      lastNumber: last?.number ?? null,
       employeeNo: preview.employeeNo,
       linked: preview.linked,
       // Whether the pattern prints the author's digits at all — an unlinked
@@ -629,7 +690,117 @@ quotationRoutes.get(
       // so the editor's live tax line is the one the saved quotation stores.
       vatRate: company ? Number(company.vatRate) : 0.12,
       currency: company?.currency ?? 'PHP',
+      taxOptions: quotationTaxOptions(company ? Number(company.vatRate) : 0.12),
     });
+  }),
+);
+
+/**
+ * Whether a quote number is free — the editor asks as the number is typed, so
+ * a duplicate is said beside the box rather than after Save. The same check
+ * POST and PATCH make. Declared above `/:id` or that route swallows it.
+ */
+quotationRoutes.get(
+  '/number-available',
+  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  handler(async (req, res) => {
+    const number = String(req.query.number ?? '').trim();
+    const excludeId = typeof req.query.excludeId === 'string' ? req.query.excludeId : null;
+    if (!QUOTE_NUMBER.test(number)) {
+      res.json({ available: false, message: 'Letters, digits and - / _ . only — up to 40 characters' });
+      return;
+    }
+    const taken = await numberTakenBy(number, excludeId);
+    res.json({ available: !taken, message: taken ? `${number} is ${taken}` : null });
+  }),
+);
+
+/**
+ * What was quoted before, as a product is typed: past lines (their latest
+ * price, unit and description, and how often) and items from the item master.
+ * Only from quotations the caller may read; a line's cost only where they may
+ * see that quotation's cost; an item's standard cost only with a right that
+ * shows cost. Declared above `/:id` or that route swallows it.
+ */
+quotationRoutes.get(
+  '/suggest',
+  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = String(req.query.q ?? '').trim().slice(0, 100);
+    if (q.length < 2) {
+      res.json([]);
+      return;
+    }
+    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
+    const past = await prisma.quotationItem.findMany({
+      where: {
+        isHeading: false,
+        OR: [{ title: { contains: q, mode: 'insensitive' } }, { description: { contains: q, mode: 'insensitive' } }],
+        revision: { quotation: onlyOwn ? { ownerId: me.id } : {} },
+      },
+      select: {
+        title: true,
+        description: true,
+        unit: true,
+        unitPrice: true,
+        unitCost: true,
+        revision: { select: { createdAt: true, quotation: { select: { number: true, ownerId: true } } } },
+      },
+      orderBy: { revision: { createdAt: 'desc' } },
+      take: 400,
+    });
+    const byName = new Map<
+      string,
+      { title: string; description: string; unit: string; unitPrice: number; unitCost?: number | null; source: 'history'; uses: number; lastNumber: string }
+    >();
+    for (const l of past) {
+      const title = (l.title || l.description.split('\n')[0]).trim();
+      if (!title) continue;
+      const key = title.toUpperCase();
+      const seen = byName.get(key);
+      if (seen) {
+        seen.uses++;
+        continue;
+      }
+      const mayCost = canSeeQuotationCost(me, l.revision.quotation.ownerId);
+      byName.set(key, {
+        title,
+        description: l.title ? l.description : '',
+        unit: l.unit,
+        unitPrice: num(l.unitPrice),
+        ...(mayCost ? { unitCost: l.unitCost == null ? null : num(l.unitCost) } : {}),
+        source: 'history',
+        uses: 1,
+        lastNumber: l.revision.quotation.number,
+      });
+    }
+    const starts = (t: string) => t.toUpperCase().startsWith(q.toUpperCase());
+    const history = [...byName.values()].sort((a, b) => Number(starts(b.title)) - Number(starts(a.title)) || b.uses - a.uses).slice(0, 10);
+
+    const seeItemCost = can(me, 'gops.costing.view_all') || can(me, 'gchain.items.view_all');
+    const items = await prisma.item.findMany({
+      where: { isActive: true, OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] },
+      select: { id: true, code: true, name: true, description: true, unit: true, listPrice: true, standardCost: seeItemCost },
+      orderBy: { name: 'asc' },
+      take: 6,
+    });
+    const named = new Set(history.map((h) => h.title.toUpperCase()));
+    res.json([
+      ...history,
+      ...items
+        .filter((i) => !named.has(i.name.toUpperCase()))
+        .map((i) => ({
+          title: i.name,
+          description: i.description ?? '',
+          unit: i.unit,
+          unitPrice: i.listPrice == null ? null : num(i.listPrice),
+          ...(seeItemCost ? { unitCost: i.standardCost == null ? null : num(i.standardCost) } : {}),
+          source: 'item' as const,
+          itemCode: i.code,
+          uses: 0,
+        })),
+    ]);
   }),
 );
 
@@ -756,15 +927,22 @@ quotationRoutes.get(
       quotation.decidedAt,
       new Date(),
     );
-    // The editor's Tax dropdown offers this or 0% (see checkVatRate).
+    // The editor's Tax dropdown (see checkVatRate).
     const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+    const companyRate = company ? Number(company.vatRate) : 0.12;
+    // The routes a submitter may opt into for the draft, at its total — e.g.
+    // "Add the CEO as approver" once it is over ₱1,000,000.
+    const draft = quotation.revisions.find((r) => r.status === 'DRAFT');
+    const options = draft ? await approvalOptions('quotation', Number(draft.total)) : [];
 
     res.json({
       ...rest,
       statusHistory,
       stages,
       closedInDays,
-      companyVatRate: company ? Number(company.vatRate) : 0.12,
+      companyVatRate: companyRate,
+      taxOptions: quotationTaxOptions(companyRate),
+      approvalOptions: options,
       customer: { ...customerRest, address: sites[0] ? [sites[0].address, sites[0].city].filter(Boolean).join(', ') : null },
       revisions: quotation.revisions.map((r) =>
         presentRevision(r as unknown as Record<string, unknown>, showCost),
@@ -784,6 +962,8 @@ quotationRoutes.get(
  */
 const itemFields = {
   group: z.string().trim().max(120).optional().nullable(),
+  /** A subheading: its title is the heading; it carries no quantity, price or cost. */
+  isHeading: z.boolean().optional(),
   title: z.string().trim().max(300).optional().nullable(),
   description: z.string().optional().nullable(),
   quantity: z.number().min(0),
@@ -808,6 +988,7 @@ const itemPatchSchema = z.object(itemFields).partial();
  */
 async function checkLine(
   line: {
+    isHeading?: boolean | null;
     title?: string | null;
     description?: string | null;
     providerSupplierId?: string | null;
@@ -816,6 +997,10 @@ async function checkLine(
   tx: Prisma.TransactionClient = prisma,
   where = '',
 ) {
+  if (line.isHeading) {
+    if (!(line.title ?? '').trim()) throw badRequest(`${where}Give the subheading its text`);
+    return;
+  }
   if (!(line.title ?? '').trim() && !(line.description ?? '').trim()) {
     throw badRequest(`${where}Give the line a product title or a description`);
   }
@@ -839,8 +1024,28 @@ async function checkLine(
  * write through this, so a line cannot be stored three slightly different ways.
  */
 function lineData(line: z.infer<typeof itemSchema>, sortOrder: number) {
+  // A subheading is words only: nothing to sell, nothing to cost.
+  if (line.isHeading) {
+    return {
+      group: null,
+      isHeading: true,
+      title: (line.title ?? '').trim(),
+      description: '',
+      quantity: d(0),
+      unit: line.unit || 'lot',
+      unitPrice: d(0),
+      amount: d(0),
+      sortOrder,
+      unitCost: null,
+      costAmount: null,
+      providerSupplierId: null,
+      providerUserId: null,
+      costNote: null,
+    };
+  }
   const hasCost = line.unitCost !== undefined && line.unitCost !== null;
   return {
+    isHeading: false,
     group: line.group || null,
     title: line.title || null,
     description: line.description ?? '',
@@ -876,6 +1081,9 @@ const quotationSchema = z.object({
   siteId: z.string().optional().nullable(),
   leadId: z.string().optional().nullable(),
   subject: z.string().trim().min(2, 'Give the quotation a subject'),
+  /** Typed by hand. Omitted, the next free number in the author's series is issued. */
+  number: z.string().trim().min(1).max(40).optional(),
+  /** No longer asked for on the page; a quotation takes its lead's, else 50. */
   probability: z.number().int().min(0).max(100).optional(),
   costingId: z.string().optional().nullable(),
   terms: z.string().optional().nullable(),
@@ -936,7 +1144,7 @@ quotationRoutes.post(
     const lead = body.leadId
       ? await prisma.lead.findUnique({
           where: { id: body.leadId },
-          select: { id: true, customerId: true, siteId: true, expectedClosing: true },
+          select: { id: true, customerId: true, siteId: true, expectedClosing: true, probability: true },
         })
       : null;
     if (body.leadId && !lead) throw notFound('Lead not found');
@@ -962,8 +1170,9 @@ quotationRoutes.post(
       select: { paymentTerms: true },
     });
     const lines = body.lines ?? [];
-    // Before the transaction, so a refused rate burns no number.
+    // Before the transaction, so a refused rate or number burns no number.
     await checkVatRate(body.vatRate);
+    if (body.number) await checkQuoteNumber(body.number);
 
     /*
       One transaction: the number, the quotation, its lines and their totals,
@@ -971,9 +1180,11 @@ quotationRoutes.post(
       including the number, which is why nextNumber is handed `tx`.
     */
     const quotation = await prisma.$transaction(async (tx) => {
-      // The author's employee digits go into the number (seeded pattern
-      // {EMP}{YY}{MM}{SEQ}); an unlinked account numbers under 000.
-      const number = await nextNumber('quotation', tx, { ownerId });
+      // A number typed on the page is used as it is (checked again here, in the
+      // transaction, against a race); otherwise the next free one in the
+      // author's series — their employee digits, {EMP}{YY}{MM}{SEQ}.
+      if (body.number) await checkQuoteNumber(body.number, null, tx);
+      const number = body.number || (await nextFreeQuoteNumber(tx, ownerId));
       const created = await tx.quotation.create({
         data: {
           number,
@@ -983,7 +1194,9 @@ quotationRoutes.post(
           leadId: body.leadId || null,
           ownerId,
           subject: body.subject,
-          probability: body.probability ?? 50,
+          // The page no longer asks: the lead's own read, else even odds. The
+          // weighted pipeline multiplies by it.
+          probability: body.probability ?? (lead?.probability ? lead.probability : 50),
           expectedClosing,
           revisions: {
             create: [
@@ -1038,6 +1251,7 @@ quotationRoutes.post(
         action: 'CREATED',
         summary:
           `Created quotation ${quotation.number} — ${quotation.subject}` +
+          (body.number ? ' (number typed by hand)' : '') +
           (lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : '') +
           (ownerId !== me.id ? `, authored for ${ownerName}` : ''),
       },
@@ -1106,7 +1320,11 @@ quotationRoutes.patch(
       });
     }
 
+    const renumber = body.number !== undefined && body.number !== before.number;
+    if (renumber) await checkQuoteNumber(body.number!, before.id);
+
     const data: Prisma.QuotationUpdateInput = {};
+    if (renumber) data.number = body.number;
     if (body.subject !== undefined) data.subject = body.subject;
     if (body.probability !== undefined) data.probability = body.probability;
     if (body.lostReason !== undefined) data.lostReason = body.lostReason || null;
@@ -1171,7 +1389,9 @@ quotationRoutes.patch(
         action: body.outcome === 'WON' ? 'COMPLETED' : 'UPDATED',
         summary: moved
           ? `Quotation ${quotation.number}: ${before.outcome} → ${body.outcome}`
-          : `Updated quotation ${quotation.number}`,
+          : renumber
+            ? `Renumbered quotation ${before.number} → ${quotation.number}`
+            : `Updated quotation ${quotation.number}`,
         // The move itself, which is what the quotation page's status history
         // reads (outcomeChanges in shared/pipeline.ts).
         ...(moved ? { before: { outcome: before.outcome }, after: { outcome: body.outcome } } : {}),
@@ -1179,6 +1399,79 @@ quotationRoutes.patch(
       req,
     );
     res.json(quotation);
+  }),
+);
+
+/**
+ * Deletes a quotation — the author's, or anyone's for edit_all, and only with
+ * gops.quotations.delete. Refused while it is a commercial fact somebody built
+ * on: won, made into a project or a job order, or with the approver (decide
+ * first). Its revisions and lines go with it; a SCORO quote it continued can
+ * be continued again; calendar activities keep their place without it.
+ *
+ * Its lead: when this was the lead's last quotation, the lead steps back to
+ * Costing (it has one) or Qualified, rather than sitting at "quotation created"
+ * with no quotation — the board would show a quote that no longer exists.
+ */
+quotationRoutes.delete(
+  '/:id',
+  require_('gops.quotations.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const quotation = await prisma.quotation.findUnique({
+      where: { id: req.params.id },
+      include: {
+        revisions: { select: { status: true, jobs: { select: { number: true }, take: 1 } } },
+        _count: { select: { jobOrders: true } },
+      },
+    });
+    if (!quotation) throw notFound('Quotation not found');
+    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
+      throw forbidden('Only the author can delete this quotation');
+    }
+    const job = quotation.revisions.flatMap((r) => r.jobs)[0];
+    if (job) throw badRequest(`${quotation.number} became project ${job.number} — it stays as that project's record`);
+    if (quotation._count.jobOrders) throw badRequest(`A job order was raised from ${quotation.number} — it stays as that order's record`);
+    if (quotation.outcome === 'WON') throw badRequest(`${quotation.number} is won — reopen it before deleting it`);
+    if (quotation.revisions.some((r) => r.status === 'PENDING_APPROVAL')) {
+      throw badRequest(`${quotation.number} is with the approver — let them decide before deleting it`);
+    }
+
+    const leadMoved = await prisma.$transaction(async (tx) => {
+      await tx.quotation.delete({ where: { id: quotation.id } });
+      if (!quotation.leadId) return null;
+      const lead = await tx.lead.findUnique({
+        where: { id: quotation.leadId },
+        select: { id: true, number: true, status: true, _count: { select: { quotations: true, costings: true } } },
+      });
+      if (!lead || lead._count.quotations > 0) return null;
+      if (!['QUOTATION_CREATED', 'QUOTATION_SUBMITTED', 'NEGOTIATION'].includes(lead.status)) return null;
+      const status = lead._count.costings > 0 ? 'COSTING' : 'QUALIFIED';
+      await tx.lead.update({ where: { id: lead.id }, data: { status } });
+      return { ...lead, to: status };
+    });
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'DELETED',
+        summary: `Deleted quotation ${quotation.number} — ${quotation.subject}`,
+      },
+      req,
+    );
+    if (leadMoved) {
+      await audit(
+        {
+          entityType: 'lead',
+          entityId: leadMoved.id,
+          action: 'UPDATED',
+          summary: `Lead ${leadMoved.number} back to ${leadMoved.to} — its quotation ${quotation.number} was deleted`,
+        },
+        req,
+      );
+    }
+    res.json({ ok: true });
   }),
 );
 
@@ -1238,6 +1531,7 @@ quotationRoutes.post(
             ? {
                 create: latest.items.map((i) => ({
                   group: i.group,
+                  isHeading: i.isHeading,
                   title: i.title,
                   description: i.description,
                   quantity: i.quantity,
@@ -1298,10 +1592,10 @@ async function checkVatRate(rate: number | undefined, keep?: Prisma.Decimal | nu
   if (rate === undefined) return;
   const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
   const companyRate = company?.vatRate ?? d(0.12);
-  const allowed = [d(0), companyRate, ...(keep ? [keep] : [])];
+  const allowed = [d(0), companyRate, ...QUOTATION_EXTRA_TAX_RATES.map((o) => d(o.rate)), ...(keep ? [keep] : [])];
   if (!allowed.some((r) => r.equals(d(rate)))) {
     throw badRequest(
-      `VAT on a quotation is the company rate (${Number(companyRate.mul(100).toFixed(2))}%) or 0% for a zero-rated sale`,
+      `VAT on a quotation is the company rate (${Number(companyRate.mul(100).toFixed(2))}%), 8%, 6% for a government client, or 0% for a zero-rated sale`,
     );
   }
 }
@@ -1504,12 +1798,19 @@ quotationRoutes.patch(
     });
     if (!existing) throw notFound('Line not found');
 
-    const quantity = body.quantity ?? Number(existing.quantity);
-    const unitPrice = body.unitPrice ?? Number(existing.unitPrice);
+    const heading = body.isHeading ?? existing.isHeading;
+    const quantity = heading ? 0 : (body.quantity ?? Number(existing.quantity));
+    const unitPrice = heading ? 0 : (body.unitPrice ?? Number(existing.unitPrice));
     // undefined keeps the stored cost; null clears it.
-    const unitCost =
-      body.unitCost === undefined ? (existing.unitCost == null ? null : Number(existing.unitCost)) : body.unitCost;
+    const unitCost = heading
+      ? null
+      : body.unitCost === undefined
+        ? existing.unitCost == null
+          ? null
+          : Number(existing.unitCost)
+        : body.unitCost;
     const merged = {
+      isHeading: heading,
       title: body.title !== undefined ? body.title : existing.title,
       description: body.description !== undefined ? body.description : existing.description,
       providerSupplierId: body.providerSupplierId !== undefined ? body.providerSupplierId || null : existing.providerSupplierId,
@@ -1531,8 +1832,9 @@ quotationRoutes.patch(
           ...(body.unit !== undefined ? { unit: body.unit } : {}),
           ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
           ...(body.costNote !== undefined ? { costNote: body.costNote || null } : {}),
-          providerSupplierId: merged.providerSupplierId,
-          providerUserId: merged.providerUserId,
+          isHeading: heading,
+          providerSupplierId: heading ? null : merged.providerSupplierId,
+          providerUserId: heading ? null : merged.providerUserId,
           quantity: d(quantity),
           unitPrice: d(unitPrice),
           amount: lineAmount(quantity, unitPrice),
@@ -1591,12 +1893,14 @@ quotationRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
+    // An optional route the submitter ticked — "Add the CEO as approver".
+    const { optionId } = parseBody(z.object({ optionId: z.string().optional().nullable() }), req.body ?? {});
 
     const withItems = await prisma.quotationRevision.findUnique({
       where: { id: revision.id },
       include: { items: true },
     });
-    if (!withItems?.items.length) {
+    if (!withItems?.items.some((i) => !i.isHeading)) {
       throw badRequest('Add at least one line before submitting for approval');
     }
 
@@ -1605,15 +1909,23 @@ quotationRoutes.post(
       data: { status: 'PENDING_APPROVAL' },
     });
 
-    await submitForApproval({
-      documentType: 'quotation',
-      documentId: revision.id,
-      documentNumber: `${quotation.number} R${revision.revision}`,
-      subject: `${quotation.subject}`,
-      amount: Number(withItems.total),
-      link: `/g-ops/quotations/${quotation.id}`,
-      requesterId: me.id,
-    });
+    try {
+      await submitForApproval({
+        documentType: 'quotation',
+        documentId: revision.id,
+        documentNumber: `${quotation.number} R${revision.revision}`,
+        subject: `${quotation.subject}`,
+        amount: Number(withItems.total),
+        link: `/g-ops/quotations/${quotation.id}`,
+        requesterId: me.id,
+        optionId: optionId || null,
+      });
+    } catch (err) {
+      // Refused (no route, nobody to approve, an option that does not apply):
+      // back to a draft, never pending with no approval behind it.
+      await prisma.quotationRevision.update({ where: { id: revision.id }, data: { status: 'DRAFT' } });
+      throw err;
+    }
 
     res.json({ ok: true });
   }),
@@ -1683,134 +1995,140 @@ quotationRoutes.get(
     const revision = quotation.revisions.find((r) => r.id === req.params.revisionId);
     if (!revision) throw notFound('Revision not found');
 
-    // The quote a customer receives, set the way SCORO printed it for years
-    // (the engine's `letter` style): letterhead across the top, the client and
-    // the person it is for side by side, each product name as a bold row over
-    // its description and figures, the totals under the last two columns.
-    // The one thing SCORO never had is kept: who prepared and who approved it,
-    // with the time, above the band. No subject and no validity line, because
-    // SCORO printed neither and customers know the page without them.
+    // The quote a customer receives (the engine's `letter` style): the
+    // letterhead with QUOTATION and the number across the top, CUSTOMER and
+    // DETAILS side by side, a light table with each subheading in green, the
+    // totals under the last two columns, Delivery, the thank-you, then who
+    // prepared it and who approved it, dated, over the strapline. Cost is
+    // never read here.
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     const currency = company?.currency ?? 'PHP';
-    // The currency is named once, in "Total Price (PHP):"; the figures carry none, as SCORO's did.
+    // The currency is named once, in the head and in "Total Price (PHP):".
     const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
     const rate = Number(revision.vatRate);
-    const ratePct = `${(rate * 100).toFixed(0)}%`;
+    const ratePct = `${Number((rate * 100).toFixed(2))}%`;
     const discountPct = Number(revision.discountPct);
     const discountAmount = Number(revision.discountAmount);
     const net = Number(revision.subtotal) - discountAmount;
 
-    // SCORO's client block: name, address, phone, website — and on the right
-    // the person it is for.
     const place = quotation.site?.address
       ? [quotation.site.address, quotation.site.city]
       : quotation.customer.sites[0]
         ? [quotation.customer.sites[0].address, quotation.customer.sites[0].city]
         : [];
-    const client: PdfParty = {
-      name: quotation.customer.legalName || quotation.customer.name,
-      lines: [place.filter(Boolean).join(', '), quotation.customer.phone ?? '', quotation.customer.website ?? ''],
-      label: 'Payment Terms :',
-      value: revision.paymentTerms ?? '',
-    };
     const contact = quotation.contact;
-    const attention: PdfParty = {
-      name: contact?.name ?? '',
-      lines: contact ? [contact.position ?? '', contact.mobile || contact.phone || '', contact.email ?? ''] : [],
-      label: 'PR Number :',
-      value: revision.prNumber ?? '',
+    const customer: PdfParty = {
+      heading: 'Customer',
+      name: quotation.customer.legalName || quotation.customer.name,
+      lines: [
+        place.filter(Boolean).join(', '),
+        quotation.customer.phone ?? '',
+        contact ? `Attention: ${contact.name}${contact.position ? `, ${contact.position}` : ''}` : '',
+      ],
+    };
+    const details: PdfParty = {
+      heading: 'Details',
+      name: '',
+      facts: [
+        { label: 'Date', value: formatShortDate(revision.createdAt) },
+        { label: 'Payment Terms', value: revision.paymentTerms || '—' },
+        { label: 'PR Number', value: revision.prNumber || '—' },
+      ],
     };
 
-    // Each product name is a bold row of its own over the row carrying its
-    // description and figures; a group, where it changes, is a shaded row
-    // above them. Cost is never read here.
+    // A subheading — or a group, where it changes — is a green heading row; a
+    // product prints its name, and its description under it when it has one.
     const rows: PdfRow[] = [];
     let group: string | null = null;
     for (const i of revision.items) {
-      if (i.group && i.group !== group) rows.push({ heading: i.group.toUpperCase(), shade: true });
+      if (i.isHeading) {
+        rows.push({ heading: (i.title ?? '').trim() });
+        continue;
+      }
+      if (i.group && i.group !== group) rows.push({ heading: i.group });
       group = i.group ?? group;
       const qty = Number(i.quantity);
       const title = (i.title ?? '').trim();
-      if (title) rows.push({ heading: title });
+      const description = (i.description ?? '').trim();
       rows.push([
-        (i.description ?? '').trim(),
+        title && description ? { title, body: description } : title || description,
         `${Number.isInteger(qty) ? qty : qty.toString()} ${i.unit}`,
         amount(i.unitPrice),
         amount(i.amount),
       ]);
     }
 
-    const totals: PdfTotal[] = [{ label: 'Sub Total Price:', value: amount(revision.subtotal) }];
+    const totals: PdfTotal[] = [{ label: 'Sub Total:', value: amount(revision.subtotal) }];
     if (discountAmount > 0) {
       totals.push({ label: `Discount (${discountPct.toFixed(discountPct % 1 ? 2 : 0)}%):`, value: `-${amount(discountAmount)}` });
       // On an inclusive quote the net still carries the VAT, so it is not a sum without tax.
       if (!revision.vatInclusive) totals.push({ label: 'Sum without tax:', value: amount(net) });
     }
-    if (revision.vatInclusive) {
-      totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
-      totals.push({ label: `VAT included (${ratePct}):`, value: amount(revision.vatAmount) });
-    } else {
-      totals.push({ label: `VAT (${ratePct}):`, value: amount(revision.vatAmount) });
-      totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
-    }
+    totals.push({
+      label: revision.vatInclusive ? `VAT included (${ratePct}):` : `VAT (${ratePct}):`,
+      value: amount(revision.vatAmount),
+    });
+    totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
 
-    const after: PdfLine[] = [{ label: 'Delivery:', text: revision.delivery ?? '' }];
+    const after: PdfLine[] = [{ label: 'Delivery:', text: revision.delivery || '—' }];
     if (revision.terms) after.push({ text: '' }, { text: 'Terms and Conditions:', bold: true }, { text: revision.terms });
     if (revision.notes) after.push({ text: '' }, { text: 'Notes:', bold: true }, { text: revision.notes });
 
-    const owner = quotation.owner;
     const sections: PdfSection[] = [
-      { kind: 'parties', left: client, right: attention },
-      { kind: 'spacer', height: 20 },
-      { kind: 'lines', lines: [{ text: 'Thank you very much for the opportunity to provide the following quotation.' }] },
-      { kind: 'spacer', height: 14 },
+      { kind: 'parties', left: customer, right: details },
       {
         kind: 'table',
-        head: ['Product description', 'Qty', 'Unit price', 'Total'],
-        widths: [58.3, 10.8, 15.5, 15.4],
-        align: ['left', 'right', 'right', 'right'],
+        head: ['Product description', 'Qty', `Unit price (${currency})`, `Total (${currency})`],
+        widths: [270, 57.6, 109.4, 86.4],
+        align: ['left', 'left', 'right', 'right'],
         rows,
       },
-      // "Hide total": the lines and their prices, no sum — SCORO's rate-sheet quote.
+      // "Hide total": the lines and their prices, no sum — a rate-sheet quote.
       ...(revision.hideTotal ? [] : [{ kind: 'totals' as const, rows: totals }]),
       { kind: 'lines', lines: after },
-      { kind: 'spacer', height: 28 },
-      {
-        kind: 'lines',
-        lines: [{ text: 'I trust that the above offer meets your requirements, and I am looking forward to your positive response.' }],
-      },
-      { kind: 'spacer', height: 12 },
+      { kind: 'spacer', height: 10 },
       {
         kind: 'lines',
         lines: [
-          { text: 'Sincerely Yours,' },
-          { text: owner.name, bold: true },
-          ...(owner.phone ? [{ text: owner.phone }] : []),
-          { text: owner.email },
+          {
+            text:
+              'Thank you very much for the opportunity to provide the following quotation. ' +
+              'This document is system generated and does not require signature.',
+            italic: true,
+            small: true,
+          },
         ],
       },
-      { kind: 'spacer', height: 26 },
-      {
-        kind: 'lines',
-        lines: [{ text: 'This document is system generated and does not require signature.', italic: true, small: true }],
-      },
+      { kind: 'rule' },
+    ];
+
+    // Prepared by the author; then every step of the approval route, dated
+    // once it has approved and "Pending" until then — the CEO's too, when the
+    // submitter added them.
+    const owner = quotation.owner;
+    const slots = await approvalSlots('quotation', revision.id);
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: owner.name, position: owner.position ?? undefined, at: revision.createdAt },
+      ...(slots.length
+        ? slots.map((sl) => ({
+            role: slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by',
+            name: sl.name,
+            position: sl.position,
+            at: sl.at,
+          }))
+        : [{ role: 'Approved by' }]),
     ];
 
     const pdf = await renderDocument({
       style: 'letter',
-      // SCORO's word: "Quote No. 0012608040".
-      title: 'Quote',
+      title: 'Quotation',
       documentNumber: quotation.number,
       revision: String(revision.revision),
       date: revision.createdAt,
       // Leads the running header on every page after the first.
       reference: quotation.customer.legalName || quotation.customer.name,
       sections,
-      signatories: [
-        { role: 'Prepared by', name: owner.name, position: owner.position ?? undefined, at: revision.createdAt },
-        { role: 'Approved by', name: revision.approvedBy?.name, at: revision.approvedAt },
-        { role: 'Conforme', name: quotation.contact?.name },
-      ],
+      signatories,
     });
 
     await audit(

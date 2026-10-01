@@ -360,6 +360,11 @@ model ApprovalWorkflow {
   minAmount Decimal? @db.Decimal(18, 2)
   maxAmount Decimal? @db.Decimal(18, 2)
 
+  /// Set: an OPTIONAL route, offered to the submitter under this label when
+  /// the amount is in its band ("Add the CEO as approver") and used only when
+  /// they tick it. Null: a standard route, picked by amount alone.
+  optionLabel String?
+
   steps    ApprovalStep[]
   requests ApprovalRequest[]
 
@@ -1309,6 +1314,9 @@ model QuotationItem {
   /// Product name, printed in bold above the description.
   title       String?
   description String
+  /// A subheading over the lines below it: its title is the heading, it has no
+  /// quantity or price, and it prints as a heading row.
+  isHeading   Boolean @default(false)
   quantity    Decimal @default(1) @db.Decimal(18, 3)
   unit        String  @default("lot")
   unitPrice   Decimal @default(0) @db.Decimal(18, 2)

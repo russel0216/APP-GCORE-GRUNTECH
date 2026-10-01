@@ -135,6 +135,8 @@ export interface QuotationLineMoney {
   costAmount?: Money;
   providerUserId?: string | null;
   providerSupplierId?: string | null;
+  /** A subheading: no money, and not a line the cost panel counts. */
+  isHeading?: boolean | null;
 }
 
 export interface QuotationTotalsInput {
@@ -269,7 +271,7 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
       inHouseMarginPct: pctOf(inHouseMargin, netOfTax),
       outsourcedMarginPct: pctOf(outsourcedMargin, netOfTax),
       costedLines,
-      lineCount: input.lines.length,
+      lineCount: input.lines.filter((l) => !l.isHeading).length,
     },
     lines,
   };

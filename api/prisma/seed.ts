@@ -56,6 +56,9 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('gops', 'quotations'),
       'gops.quotations.view_all',
       'gops.quotations.export',
+      // Their own only: the route also requires authorship (canEditRecord),
+      // and refuses a won, delivered or pending quotation.
+      'gops.quotations.delete',
       // The SCORO history they are continuing from. Read-only.
       'gops.quote_archive.view_all',
       ...VIEW_OWN_SELF('gops', 'costing'),
@@ -465,6 +468,8 @@ interface WorkflowSeed {
   name: string;
   minAmount?: number;
   maxAmount?: number;
+  /** An optional route the submitter may tick (ApprovalWorkflow.optionLabel). */
+  optionLabel?: string;
   steps: {
     sequence: number;
     name: string;
@@ -541,6 +546,20 @@ const WORKFLOWS: WorkflowSeed[] = [
     documentType: 'quotation',
     name: 'Quotation — sales manager',
     steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' }],
+  },
+  {
+    // An OPTION, not a rule: a quotation over ₱1,000,000 may also go to the
+    // CEO when whoever submits it ticks "Add the CEO as approver". The sales
+    // manager still decides first. Routed to the executive role; point the CEO
+    // step at one person in Admin › Approval Workflows if several hold it.
+    documentType: 'quotation',
+    name: 'Quotation — over ₱1,000,000, with the CEO',
+    minAmount: 1_000_000.01,
+    optionLabel: 'Add the CEO as approver',
+    steps: [
+      { sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' },
+      { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
   },
   {
     documentType: 'purchase_order',
@@ -871,6 +890,7 @@ async function main() {
         name: seed.name,
         minAmount: seed.minAmount ?? null,
         maxAmount: seed.maxAmount ?? null,
+        optionLabel: seed.optionLabel ?? null,
         steps: {
           create: seed.steps.map((s) => ({
             sequence: s.sequence,

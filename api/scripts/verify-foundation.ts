@@ -35,8 +35,11 @@ import {
   pendingFor,
   onApprovalSettled,
   approvalSignoffs,
+  approvalOptions,
+  approvalSlots,
+  pickWorkflow,
 } from '../src/shared/approvals';
-import { renderDocument, formatAmount, formatDateTime, formatMoney, pdfSafe } from '../src/shared/pdf';
+import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
 import { readAppearance } from '../src/routes/appearance';
 
 if (env.isProduction) {
@@ -591,6 +594,67 @@ async function main() {
     'already awaiting approval',
   );
 
+  // ── 5b. An optional route, taken only when the submitter asks ─────────────
+  console.log('\nOptional routes (the CEO on a quotation over ₱1,000,000)');
+
+  const pmRole = await prisma.role.findUniqueOrThrow({ where: { key: 'project_manager' } });
+  const standardRoute = await prisma.approvalWorkflow.create({
+    data: {
+      documentType: `${TAG}_opt_doc`,
+      name: 'Verify — standard route',
+      steps: { create: [{ sequence: 1, name: 'Manager', approverType: 'ROLE', roleId: pmRole.id }] },
+    },
+  });
+  const optionRoute = await prisma.approvalWorkflow.create({
+    data: {
+      documentType: `${TAG}_opt_doc`,
+      name: 'Verify — with the boss',
+      optionLabel: 'Verify — add the boss',
+      minAmount: 1_000,
+      steps: {
+        create: [
+          { sequence: 1, name: 'Manager', approverType: 'ROLE', roleId: pmRole.id },
+          { sequence: 2, name: 'Boss', approverType: 'ROLE', roleId: pmRole.id },
+        ],
+      },
+    },
+  });
+  check('below its band, no option is offered', (await approvalOptions(`${TAG}_opt_doc`, 500)).length === 0);
+  const offered = await approvalOptions(`${TAG}_opt_doc`, 5_000);
+  check('in its band, the option is offered by its label', offered.length === 1 && offered[0].id === optionRoute.id && offered[0].label === 'Verify — add the boss');
+  check('a standard pick never lands on an option, whatever the amount', (await pickWorkflow(`${TAG}_opt_doc`, 5_000))?.id === standardRoute.id);
+  await expectRejection(
+    'an option asked for outside its band is refused',
+    () =>
+      submitForApproval({
+        documentType: `${TAG}_opt_doc`,
+        documentId: `${TAG}-opt-small`,
+        subject: 'Verify — option too small',
+        amount: 500,
+        requesterId: employee.id,
+        optionId: optionRoute.id,
+      }),
+    'does not apply',
+  );
+  const optioned = await submitForApproval({
+    documentType: `${TAG}_opt_doc`,
+    documentId: `${TAG}-opt-big`,
+    subject: 'Verify — option taken',
+    amount: 5_000,
+    requesterId: employee.id,
+    optionId: optionRoute.id,
+  });
+  check('asked for, the option is the route taken', optioned.workflowId === optionRoute.id);
+  const slotsBefore = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`);
+  check('every step is a sign-off slot, pending until it acts', slotsBefore.length === 2 && slotsBefore.every((x) => !x.name && !x.at));
+  await act({ requestId: optioned.id, userId: pm.id, action: 'APPROVED' });
+  const slotsAfter = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`);
+  check(
+    'once a step approves, its slot carries who and when; the next stays pending',
+    slotsAfter[0].name === pm.name && !!slotsAfter[0].at && slotsAfter[0].step === 'Manager' && !slotsAfter[1].name && slotsAfter[1].step === 'Boss',
+  );
+  check('a document never submitted has no slots', (await approvalSlots(`${TAG}_opt_doc`, `${TAG}-never`)).length === 0);
+
   // ── 6. Audit trail ─────────────────────────────────────────────────────────
   console.log('\nAudit trail');
 
@@ -802,12 +866,12 @@ async function main() {
     check('and still starts 14pt from the edge', letteredEdges.left === 14, `${letteredEdges.left}pt`);
     check('a letterhead does not cost a page', pages(lettered) === 1, `${pages(lettered)} pages`);
 
-    // ── 11. The customer's letter: SCORO's quote, drawn by the same engine ──
+    // ── 11. The customer's letter: Quotation_Template, drawn by the same engine ──
     console.log('\nLetter style');
 
     const letter = await renderDocument({
       style: 'letter',
-      title: 'Quote',
+      title: 'Quotation',
       documentNumber: `${TAG}-LT`,
       revision: '2',
       reference: `${TAG} Customer Inc.`,
@@ -815,8 +879,16 @@ async function main() {
       sections: [
         {
           kind: 'parties',
-          left: { name: `${TAG} Customer Inc.`, lines: ['1 Test Street'], label: 'Payment Terms :', value: '30 days' },
-          right: { name: 'Juan Dela Cruz', lines: ['Procurement'], label: 'PR Number :', value: 'PR-77' },
+          left: { heading: 'Customer', name: `${TAG} Customer Inc.`, lines: ['1 Test Street', 'Attention: Juan Dela Cruz'] },
+          right: {
+            heading: 'Details',
+            name: '',
+            facts: [
+              { label: 'Date', value: formatShortDate(new Date('2026-08-17T02:00:00Z')) },
+              { label: 'Payment Terms', value: '30 days' },
+              { label: 'PR Number', value: 'PR-77' },
+            ],
+          },
         },
         {
           kind: 'table',
@@ -844,11 +916,14 @@ async function main() {
     });
     const letterText = pdfText(letter);
     const letterPages = pages(letter);
-    check('the letter names itself as SCORO did, with the revision', letterText.includes(`Quote No. ${TAG}-LT R2`));
-    check('and dates itself the SCORO way', letterText.includes('Date:  08/17/2026'));
-    check('its company block is on the letterhead: REG. NO. and TIN', letterText.includes('REG. NO.:') && (!co.tin || letterText.includes(co.tin)));
-    check('the band carries the tagline', letterText.includes(co.documentTagline ?? '\u0000'));
-    check('both parties print their labelled line', letterText.includes('Payment Terms :') && letterText.includes('PR-77'));
+    check('the letter names itself QUOTATION, with "# number" and the revision', letterText.includes('QUOTATION') && letterText.includes(`# ${TAG}-LT R2`));
+    check('CUSTOMER and DETAILS head the two blocks', letterText.includes('CUSTOMER') && letterText.includes('DETAILS'));
+    check('the details print as labelled lines — the date the 08/17/2026 way', letterText.includes('Date: 08/17/2026') && letterText.includes('PR Number: PR-77'));
+    check(
+      'its company block is on the letterhead: TIN and REG NO',
+      (!co.tin || letterText.includes(`TIN: ${co.tin}`)) && (!co.regNo || letterText.includes(`REG NO: ${co.regNo}`)),
+    );
+    check('the footer carries the strapline', letterText.includes((co.documentTagline ?? '\u0000').toUpperCase()));
     check('a long letter runs over', letterPages >= 2, `${letterPages} pages`);
     const running = letterText
       .split('\n')
@@ -859,11 +934,11 @@ async function main() {
       `${running.length} running headers on ${letterPages} pages`,
     );
     check('the table head repeats on the next page', letterText.split('\n').filter((l) => l === 'PRODUCT DESCRIPTION').length === letterPages);
-    check('the dated sign-offs are kept', letterText.includes('PREPARED BY :') && letterText.includes(stamp(ot.createdAt)) && letterText.includes('Pending'));
+    check('the dated sign-offs are kept, side by side', letterText.includes('PREPARED BY') && letterText.includes('APPROVED BY') && letterText.includes(stamp(ot.createdAt)) && letterText.includes('Pending'));
     check('the figures carry no currency; the total names it once', letterText.includes('1,000.00') && !letterText.includes('PHP 1,000.00'));
     check('Greek mu prints as the micro sign, not "?"', pdfSafe('0.1 μm') === '0.1 µm' && letterText.includes('0.1 µm'));
-    check("the letter's content starts where SCORO's did, 43.5pt in", pdfEdges(letter).left === 44, `${pdfEdges(letter).left}pt`);
-    check('and its band stays clear of the bottom edge', pdfEdges(letter).bottom > 12, `${pdfEdges(letter).bottom}pt clear`);
+    check("the letter's content starts 36pt in, as the template's does", pdfEdges(letter).left === 36, `${pdfEdges(letter).left}pt`);
+    check('and its strapline stays clear of the bottom edge', pdfEdges(letter).bottom > 12, `${pdfEdges(letter).bottom}pt clear`);
   } finally {
     if (companyBefore && Object.keys(borrowed).length) {
       await prisma.company.update({

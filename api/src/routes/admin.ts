@@ -392,6 +392,8 @@ const workflowSchema = z.object({
   isActive: z.boolean().default(true),
   minAmount: z.number().nonnegative().optional().nullable(),
   maxAmount: z.number().nonnegative().optional().nullable(),
+  /** Set: an optional route the submitter may tick, under this label. */
+  optionLabel: z.string().trim().max(120).optional().nullable(),
   steps: z.array(stepSchema).min(1, 'A workflow needs at least one step'),
 });
 
@@ -423,6 +425,7 @@ workflowRoutes.post(
         isActive: body.isActive,
         minAmount: body.minAmount != null ? new Prisma.Decimal(body.minAmount) : null,
         maxAmount: body.maxAmount != null ? new Prisma.Decimal(body.maxAmount) : null,
+        optionLabel: body.optionLabel || null,
         steps: {
           create: body.steps.map((s) => ({
             sequence: s.sequence,
@@ -473,6 +476,9 @@ workflowRoutes.put(
           isActive: body.isActive,
           minAmount: body.minAmount != null ? new Prisma.Decimal(body.minAmount) : null,
           maxAmount: body.maxAmount != null ? new Prisma.Decimal(body.maxAmount) : null,
+          // Absent: left as it is. Clearing an option by omission would turn
+          // "Add the CEO" into a route every quotation over a million takes.
+          ...(body.optionLabel !== undefined ? { optionLabel: body.optionLabel || null } : {}),
           steps: {
             create: body.steps.map((s) => ({
               sequence: s.sequence,

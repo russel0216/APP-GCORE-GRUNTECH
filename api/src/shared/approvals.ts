@@ -72,20 +72,26 @@ async function emitSettled(req: ApprovalRequest, outcome: ApprovalOutcome): Prom
  * "approval thresholds should be configurable in Settings" is expressed —
  * a PR under ₱50k takes one route, over it takes another.
  */
-export async function pickWorkflow(documentType: string, amount?: number | null) {
+export async function pickWorkflow(documentType: string, amount?: number | null, opts: { option?: string | null } = {}) {
   const candidates = await prisma.approvalWorkflow.findMany({
     where: { documentType, isActive: true },
     include: { steps: { orderBy: { sequence: 'asc' } } },
     orderBy: { createdAt: 'asc' },
   });
   const value = amount ?? 0;
-  const matching = candidates.filter((w) => {
+  const inBand = (w: (typeof candidates)[number]) => {
     const min = w.minAmount ? Number(w.minAmount) : null;
     const max = w.maxAmount ? Number(w.maxAmount) : null;
     if (min !== null && value < min) return false;
     if (max !== null && value > max) return false;
     return true;
-  });
+  };
+  // An optional route is only ever the one the submitter asked for, and only
+  // where it applies; a standard pick never lands on one.
+  if (opts.option) {
+    return candidates.find((w) => w.id === opts.option && w.optionLabel && inBand(w)) ?? null;
+  }
+  const matching = candidates.filter((w) => !w.optionLabel && inBand(w));
   // Prefer the most specific band (the narrowest one that still matches).
   matching.sort((a, b) => {
     const span = (w: typeof a) =>
@@ -94,6 +100,24 @@ export async function pickWorkflow(documentType: string, amount?: number | null)
     return span(a) - span(b);
   });
   return matching[0] ?? null;
+}
+
+/**
+ * The optional routes a submitter may choose for this document and amount —
+ * e.g. "Add the CEO as approver" on a quotation over ₱1,000,000. Each is an
+ * ordinary workflow with an `optionLabel`, so what it adds is data an
+ * administrator edits like any other route.
+ */
+export async function approvalOptions(documentType: string, amount?: number | null): Promise<{ id: string; label: string }[]> {
+  const value = amount ?? 0;
+  const rows = await prisma.approvalWorkflow.findMany({
+    where: { documentType, isActive: true, optionLabel: { not: null } },
+    select: { id: true, optionLabel: true, minAmount: true, maxAmount: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows
+    .filter((w) => (w.minAmount == null || value >= Number(w.minAmount)) && (w.maxAmount == null || value <= Number(w.maxAmount)))
+    .map((w) => ({ id: w.id, label: w.optionLabel! }));
 }
 
 // ── Resolving who may act on a step ──────────────────────────────────────────
@@ -163,6 +187,8 @@ export interface SubmitInput {
   amount?: number | null;
   link?: string | null;
   requesterId: string;
+  /** An optional route the submitter chose (see `approvalOptions`); the standard pick otherwise. */
+  optionId?: string | null;
 }
 
 export async function submitForApproval(input: SubmitInput): Promise<ApprovalRequest> {
@@ -175,7 +201,10 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   });
   if (existing) throw badRequest('This document is already awaiting approval');
 
-  const workflow = await pickWorkflow(input.documentType, input.amount);
+  const workflow = await pickWorkflow(input.documentType, input.amount, { option: input.optionId });
+  if (input.optionId && !workflow) {
+    throw badRequest('That approval option does not apply to this document — the amount is outside its band, or it was switched off');
+  }
   if (!workflow || workflow.steps.length === 0) {
     throw badRequest(
       `No approval workflow is configured for "${input.documentType}". Set one up in Admin › Approval Workflows.`,
@@ -437,4 +466,34 @@ export async function approvalSignoffs(
     position: a.approver.position ?? undefined,
     at: a.actedAt,
   }));
+}
+
+/**
+ * Every sign-off slot of a document's latest approval request, in step order:
+ * each step's name, and — once that step has approved — who and when. A step
+ * still to act has no name and no time, so a printed document says "Pending"
+ * there rather than borrowing anybody's signature. Empty before submission.
+ */
+export async function approvalSlots(
+  documentType: string,
+  documentId: string,
+): Promise<{ step: string; name?: string; position?: string; at?: Date }[]> {
+  const request = await prisma.approvalRequest.findFirst({
+    where: { documentType, documentId },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      workflow: { select: { steps: { orderBy: { sequence: 'asc' }, select: { sequence: true, name: true } } } },
+      actions: {
+        where: { action: 'APPROVED' },
+        include: { approver: { select: { name: true, position: true } } },
+      },
+    },
+  });
+  if (!request) return [];
+  const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
+  const steps = request.workflow?.steps ?? [];
+  return steps.map((st) => {
+    const a = bySeq.get(st.sequence);
+    return a ? { step: st.name, name: a.approver.name, position: a.approver.position ?? undefined, at: a.actedAt } : { step: st.name };
+  });
 }

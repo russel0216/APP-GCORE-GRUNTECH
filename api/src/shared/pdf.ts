@@ -58,10 +58,14 @@ export interface PdfLine {
  * other side's.
  */
 export interface PdfParty {
+  /** A small heading over the block — the quotation's CUSTOMER and DETAILS. */
+  heading?: string;
   name: string;
   lines?: string[];
   label?: string;
   value?: string;
+  /** Labelled lines in bold, one under another: "Date: 09/28/2026". */
+  facts?: { label: string; value: string }[];
 }
 
 export interface PdfTotal {
@@ -96,6 +100,8 @@ export type PdfSection =
    * keeps its overflow pages landscape), for the width a long plan needs.
    */
   | { kind: 'gantt'; title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string }
+  /** A light hairline across the page, with room above and below. */
+  | { kind: 'rule' }
   | { kind: 'spacer'; height?: number };
 
 export type PdfStyle = 'house' | 'letter';
@@ -156,9 +162,12 @@ const RULE = '#cccccc';
 const HEAD_BG = '#70798a';
 const HEAD_INK = '#ffffff';
 /** The letter's brand colours, off SCORO's quote: the purple band, the green on it, the green number. */
-const BAND_BG = '#cb00ff';
-const BAND_INK = '#00ff5f';
-const NUMBER_INK = '#44aa00';
+/** The quotation's letter (Quotation_Template): purple heads, green accents, light rules. */
+const LETTER_PURPLE = '#5B2A8C';
+const LETTER_GREEN = '#2E9A4B';
+const LETTER_INK = '#222222';
+const LETTER_RULE = '#D9D9D9';
+const LETTER_BODY = '#555555';
 /** A shaded heading row, so a group reads apart from the product names under it. */
 const SHADE = '#e9ebef';
 /** A task's bar on a schedule: the slate of the table head, lightened. */
@@ -182,12 +191,11 @@ interface Layout {
 const HOUSE: Layout = { style: 'house', left: MARGIN, right: MARGIN, footerTop: FOOTER_TOP, size: 9, padX: 8, padTop: 7, padRow: 14 };
 
 /**
- * Measured off SCORO's quote: content from 43.5pt in to 30pt short of the
- * right edge, 10pt text, a tight 18pt table head, the band 30pt off the
- * bottom. The 40pt footer leaves the sign-offs and the page number clear of
- * the band.
+ * The quotation's letter, measured off Quotation_Template: 36pt margins, 9pt
+ * text, rows 30pt tall on a single line, the footer rule 57pt off the bottom
+ * with the strapline under it.
  */
-const LETTER: Layout = { style: 'letter', left: 43.5, right: 30, footerTop: 40, size: 10, padX: 3, padTop: 3.5, padRow: 8 };
+const LETTER: Layout = { style: 'letter', left: 36, right: 36, footerTop: 57, size: 9, padX: 7, padTop: 10, padRow: 20 };
 
 const layouts = new WeakMap<PDFKit.PDFDocument, Layout>();
 const lay = (doc: PDFKit.PDFDocument): Layout => layouts.get(doc) ?? HOUSE;
@@ -230,7 +238,8 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   if (layout.style === 'letter') drawLetterhead(doc, spec, company);
   else drawHeader(doc, spec, company);
   for (const section of spec.sections) drawSection(doc, section);
-  drawSignoffs(doc, spec.signatories);
+  if (layout.style === 'letter') drawLetterSignoffs(doc, spec.signatories);
+  else drawSignoffs(doc, spec.signatories);
   if (layout.style === 'letter') paginateLetter(doc, spec, company);
   else paginate(doc, spec, company);
 
@@ -311,13 +320,16 @@ function safeSection(section: PdfSection): PdfSection {
   const t = (v?: string) => (v === undefined ? v : pdfSafe(v));
   const party = (p: PdfParty): PdfParty => ({
     ...p,
+    heading: t(p.heading),
     name: pdfSafe(p.name ?? ''),
     lines: p.lines?.map((line) => pdfSafe(line ?? '')),
     label: t(p.label),
     value: t(p.value),
+    facts: p.facts?.map((f) => ({ label: pdfSafe(f.label ?? ''), value: pdfSafe(f.value ?? '') })),
   });
   switch (section.kind) {
     case 'spacer':
+    case 'rule':
       return section;
     case 'text':
       return { ...section, title: t(section.title), body: pdfSafe(section.body) };
@@ -476,72 +488,69 @@ function drawHeader(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Com
 }
 
 /**
- * The letter's first page, as SCORO's quote set it: the logo top-left, the
- * company block top-right (name, address, Tel/Fax, email, website, TIN,
- * REG. NO.), then "Date: 08/17/2026" on the left and the document's number,
- * in the brand green, on the right.
+ * The quotation's first page, as Quotation_Template sets it: the logo
+ * top-left with the company block beside it — the name in bold purple, then
+ * the address, "Tel No. | Email", the website and "TIN | REG NO" — and on the
+ * right QUOTATION in large purple with "# number" in green under it. A green
+ * rule runs across under all of it. Unset company lines are left out.
  */
 function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
   const L = lay(doc);
   const right = doc.page.width - L.right;
-  const top = 23;
-  let bottom = top;
+  const titleWidth = 185;
+  let bottom = 30;
 
   if (company?.logoPath && fs.existsSync(company.logoPath)) {
     try {
-      doc.image(company.logoPath, 54, top, { fit: [88, 75] });
-      bottom = top + 75;
+      doc.image(company.logoPath, L.left, 30, { fit: [72, 72] });
+      bottom = 102;
     } catch {
       /* a broken logo must never stop a document printing */
     }
   }
 
-  const x = 336;
-  const width = right - x;
-  let y = top;
+  const x = L.left + 81;
+  const width = right - titleWidth - x - 2;
+  let y = 37;
   const name = (company?.legalName || company?.name || '').toUpperCase();
   if (name) {
-    doc.font('Helvetica-Bold').fontSize(12).fillColor(INK).text(name, x, y, { width });
-    y = doc.y + 6;
+    // One line, as the template has it: the size steps down from 15pt until
+    // the name fits beside QUOTATION, and wraps only below 11pt.
+    let size = 15;
+    doc.font('Helvetica-Bold');
+    while (size > 11 && doc.fontSize(size).widthOfString(name) > width) size -= 0.5;
+    doc.fontSize(size).fillColor(LETTER_PURPLE).text(name, x, y, { width });
+    y = doc.y + 3;
   }
-  const reach = [company?.phone ? `Tel No.: ${company.phone}` : '', company?.fax ? `Fax No.: ${company.fax}` : '']
-    .filter(Boolean)
-    .join(' ');
+  const join = (parts: string[]) => parts.filter((t) => t.trim()).join(' | ');
   const lines = [
     [company?.address, company?.city].filter(Boolean).join(', '),
-    reach,
-    company?.email ? `Email: ${company.email}` : '',
-    company?.website ?? '',
+    join([company?.phone ? `Tel No.: ${company.phone}` : '', company?.fax ? `Fax No.: ${company.fax}` : '', company?.email ? `Email: ${company.email}` : '']),
+    company?.website ? `Website: ${company.website.replace(/^https?:\/\//i, '').replace(/\/+$/, '')}` : '',
+    join([company?.tin ? `TIN: ${company.tin}` : '', company?.regNo ? `REG NO: ${company.regNo}` : '']),
   ].filter((t) => t.trim());
-  doc.font('Helvetica').fontSize(8).fillColor(INK);
+  doc.font('Helvetica').fontSize(7.5).fillColor(LETTER_INK);
   for (const line of lines) {
     doc.text(line, x, y, { width });
-    y = doc.y + 7.3;
+    y = doc.y + 2.5;
   }
-  const ids: [string, string][] = [];
-  if (company?.tin) ids.push(['TIN :', ` ${company.tin}`]);
-  if (company?.regNo) ids.push(['REG. NO.:', company.regNo]);
-  for (const [label, value] of ids) {
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(INK).text(label, x, y, { width, continued: true });
-    doc.font('Helvetica').text(value);
-    y = doc.y + 7.3;
-  }
-  bottom = Math.max(bottom, y - 7.3);
+  bottom = Math.max(bottom, y);
 
-  const line = bottom + 18;
-  doc.font('Helvetica').fontSize(10).fillColor(INK);
-  doc.text(`Date:  ${formatShortDate(spec.date ?? new Date())}`, L.left, line + 1.5, { lineBreak: false });
+  // QUOTATION, and the number under it.
+  doc.font('Helvetica').fontSize(24).fillColor(LETTER_PURPLE);
+  doc.text(spec.title.toUpperCase(), right - titleWidth, 26, { width: titleWidth, align: 'right', lineBreak: false });
   const number = numberForPrint(spec);
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(NUMBER_INK);
-  doc.text(number ? `${spec.title} No. ${number}` : spec.title, L.left, line, {
-    width: right - L.left,
-    align: 'right',
-    lineBreak: false,
-  });
+  if (number) {
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(LETTER_GREEN);
+    doc.text(`# ${number}`, right - titleWidth, 62, { width: titleWidth, align: 'right', lineBreak: false });
+  }
+
+  const rule = Math.max(bottom + 6, 115);
+  doc.moveTo(L.left, rule).lineTo(right, rule).strokeColor(LETTER_GREEN).lineWidth(1.5).stroke();
 
   doc.fillColor(INK);
   doc.x = L.left;
-  doc.y = line + 30;
+  doc.y = rule + 22;
 }
 
 function sectionTitle(doc: PDFKit.PDFDocument, title?: string) {
@@ -562,6 +571,20 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
     case 'spacer':
       doc.y += section.height ?? 12;
       return;
+
+    case 'rule': {
+      ensureSpace(doc, 30);
+      const y = doc.y + 12;
+      doc
+        .moveTo(L.left, y)
+        .lineTo(doc.page.width - L.right, y)
+        .strokeColor(L.style === 'letter' ? LETTER_RULE : RULE)
+        .lineWidth(0.75)
+        .stroke();
+      doc.x = L.left;
+      doc.y = y + 12;
+      return;
+    }
 
     case 'text':
       sectionTitle(doc, section.title);
@@ -602,6 +625,10 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       return;
 
     case 'parties': {
+      if (L.style === 'letter') {
+        drawLetterParties(doc, section.left, section.right);
+        return;
+      }
       ensureSpace(doc, 80);
       const width = usableWidth(doc);
       const rightX = L.left + width * 0.5785;
@@ -640,6 +667,10 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
     }
 
     case 'totals': {
+      if (L.style === 'letter') {
+        drawLetterTotals(doc, section.rows);
+        return;
+      }
       // Labels end where the second-last column does and the figures sit in
       // the last, under Unit price and Total, as SCORO sets them.
       const width = usableWidth(doc);
@@ -647,7 +678,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       const valueWidth = Math.max(80, width * 0.154);
       const labelRight = right - valueWidth;
       const step = L.size * 1.9;
-      const lead = L.style === 'letter' ? 3.7 : 6;
+      const lead = 6;
       // The block goes over whole: a total on a page of its own, away from
       // the subtotal and the tax it adds up, reads as a different figure.
       if (doc.y + lead + section.rows.length * step > contentBottom(doc)) doc.addPage();
@@ -883,24 +914,20 @@ function drawTableHead(
   const top = doc.y;
 
   if (L.style === 'letter') {
-    // SCORO's head: 18pt, one slate cell per column with a hairline of white
-    // between them, bold 10pt white text.
-    const height = 18;
+    // Quotation_Template's head: no fill — the column names in purple bold
+    // capitals on a 30pt row, a light rule under it.
+    const height = 30;
+    doc.fillColor(LETTER_PURPLE).font('Helvetica-Bold').fontSize(8.5);
     let x = L.left;
-    widths.forEach((w, i) => {
-      doc.rect(x, top, w - (i < widths.length - 1 ? 0.75 : 0), height).fill(HEAD_BG);
-      x += w;
-    });
-    doc.fillColor(HEAD_INK).font('Helvetica-Bold').fontSize(10);
-    x = L.left;
     head.forEach((cell, i) => {
-      doc.text(cell.toUpperCase(), x + L.padX, top + 3, {
-        width: widths[i] - 0.75 - L.padX * 2,
+      doc.text(cell.toUpperCase(), x + L.padX, top + 11, {
+        width: widths[i] - L.padX * 2,
         align: align[i],
         lineBreak: false,
       });
       x += widths[i];
     });
+    doc.moveTo(L.left, top + height).lineTo(L.left + sum(widths), top + height).strokeColor(LETTER_RULE).lineWidth(0.75).stroke();
     doc.y = top + height;
     return;
   }
@@ -933,6 +960,10 @@ function cellHeight(doc: PDFKit.PDFDocument, cell: PdfCell, width: number): numb
 function rowHeight(doc: PDFKit.PDFDocument, row: PdfRow, widths: number[]): number {
   const L = lay(doc);
   if (isHeading(row)) {
+    if (L.style === 'letter') {
+      doc.font('Helvetica').fontSize(L.size + 0.5);
+      return doc.heightOfString(row.heading || ' ', { width: widths[0] - L.padX * 2 }) + L.padRow;
+    }
     doc.font('Helvetica-Bold').fontSize(L.size);
     return doc.heightOfString(row.heading || ' ', { width: sum(widths) - L.padX * 2 }) + L.padRow;
   }
@@ -954,15 +985,10 @@ function rowRule(doc: PDFKit.PDFDocument, y: number, widths: number[], underHead
     doc.moveTo(L.left, y).lineTo(L.left + total, y).strokeColor(RULE).lineWidth(0.5).stroke();
     return;
   }
-  if (!underHeading) {
-    doc.rect(L.left, y, total, 0.7).fill(HEAD_BG);
-    return;
-  }
-  let x = L.left;
-  widths.forEach((w, i) => {
-    doc.rect(x, y, w - (i < widths.length - 1 ? 0.75 : 0), 0.7).fill(HEAD_BG);
-    x += w;
-  });
+  // The letter: a light hairline — under a subheading only as far as the
+  // description column, as the template draws it.
+  const width = underHeading ? widths[0] : total;
+  doc.moveTo(L.left, y).lineTo(L.left + width, y).strokeColor(LETTER_RULE).lineWidth(0.75).stroke();
 }
 
 function drawHeadingRow(
@@ -974,6 +1000,17 @@ function drawHeadingRow(
   const L = lay(doc);
   const top = doc.y;
   const total = sum(widths);
+  if (L.style === 'letter') {
+    // A subheading in green, regular weight, as "General Requirements" sits.
+    doc
+      .font('Helvetica')
+      .fontSize(L.size + 0.5)
+      .fillColor(LETTER_GREEN)
+      .text(row.heading, L.left + L.padX, top + L.padTop, { width: widths[0] - L.padX * 2 });
+    rowRule(doc, top + height, widths, true);
+    doc.y = top + height;
+    return;
+  }
   if (row.shade) doc.rect(L.left, top, total, height).fill(SHADE);
   doc
     .font('Helvetica-Bold')
@@ -993,14 +1030,21 @@ function drawTableRow(
 ) {
   const L = lay(doc);
   const top = doc.y;
-  doc.font('Helvetica').fontSize(L.size).fillColor(INK);
+  const ink = L.style === 'letter' ? LETTER_INK : INK;
+  doc.font('Helvetica').fontSize(L.size).fillColor(ink);
   let x = L.left;
   row.forEach((cell, i) => {
     const opts = { width: widths[i] - L.padX * 2, align: align[i] };
     if (typeof cell === 'object' && cell !== null) {
-      doc.font('Helvetica-Bold').fontSize(L.size).fillColor(INK).text(cell.title, x + L.padX, top + L.padTop, opts);
-      if (cell.body) doc.font('Helvetica').fontSize(L.size).text(cell.body, x + L.padX, doc.y + 2, opts);
-      doc.font('Helvetica').fontSize(L.size);
+      doc.font('Helvetica-Bold').fontSize(L.size).fillColor(ink).text(cell.title, x + L.padX, top + L.padTop, opts);
+      if (cell.body) {
+        doc
+          .font('Helvetica')
+          .fontSize(L.size)
+          .fillColor(L.style === 'letter' ? LETTER_BODY : ink)
+          .text(cell.body, x + L.padX, doc.y + 2, opts);
+      }
+      doc.font('Helvetica').fontSize(L.size).fillColor(ink);
     } else {
       doc.text(cell ?? '', x + L.padX, top + L.padTop, opts);
     }
@@ -1177,20 +1221,21 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
 }
 
 /**
- * The letter's furniture on every page, drawn once the content is laid out:
- * the brand band along the foot, "Page n of m" just above it when there is
- * more than one, and on every page after the first SCORO's running header —
- * who it is for, the number and the date, centred in bold — so a loose second
- * page still says which quote it belongs to. The company block is on page
- * one's letterhead, so the band carries only the strapline.
+ * The letter's furniture on every page, drawn once the content is laid out: a
+ * light rule 57pt off the bottom with the company's strapline under it in
+ * green capitals; "Page n of m" at the right when there is more than one; and
+ * on every page after the first a quiet running header — who it is for, the
+ * number and the date — so a loose second page still says which quotation it
+ * belongs to.
  */
 function paginateLetter(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
   const L = lay(doc);
   const range = doc.bufferedPageRange();
-  const band = footerTagline(company, ' '.repeat(10)) || websiteForPrint(company?.website);
-  const running = [spec.reference ?? '', numberForPrint(spec), formatShortDate(spec.date ?? new Date())]
+  const strap = (company?.documentTagline?.trim() || websiteForPrint(company?.website)).toUpperCase();
+  const number = numberForPrint(spec);
+  const running = [spec.reference ?? '', number ? `${spec.title} # ${number}` : '', formatShortDate(spec.date ?? new Date())]
     .filter((t) => t.trim())
-    .join(' '.repeat(16));
+    .join('   ·   ');
 
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
@@ -1198,30 +1243,155 @@ function paginateLetter(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company:
     const bottomMargin = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
     const right = doc.page.width - L.right;
-    const bandTop = doc.page.height - 30;
+    const ruleY = doc.page.height - L.footerTop;
 
     if (i > 0 && running) {
-      doc.font('Helvetica-Bold').fontSize(10).fillColor(INK);
-      doc.text(running, L.left, 24, { width: right - L.left, align: 'center', height: 12, ellipsis: true, lineGap: 0 });
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED);
+      doc.text(running, L.left, 22, { width: right - L.left, align: 'center', height: 10, ellipsis: true, lineGap: 0 });
     }
 
-    doc.rect(14, bandTop, right + 0.7 - 14, 18).fill(BAND_BG);
-    if (band) {
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(BAND_INK);
-      doc.text(band, 14, bandTop + 2, { width: right + 0.7 - 14, align: 'center', height: 14, ellipsis: true, lineGap: 0 });
+    doc.moveTo(L.left, ruleY).lineTo(right, ruleY).strokeColor(LETTER_RULE).lineWidth(0.75).stroke();
+    if (strap) {
+      doc.font('Helvetica-Bold').fontSize(14).fillColor(LETTER_GREEN);
+      doc.text(strap, L.left, ruleY + 12, {
+        width: right - L.left,
+        align: 'center',
+        characterSpacing: 1.5,
+        height: 16,
+        ellipsis: true,
+        lineGap: 0,
+      });
     }
-
     doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
     if (spec.footerNote) {
-      doc.text(spec.footerNote, L.left, bandTop - 11, { width: right - L.left - 70, height: 9, ellipsis: true, lineGap: 0 });
+      doc.text(spec.footerNote, L.left, ruleY - 11, { width: right - L.left - 70, height: 9, ellipsis: true, lineGap: 0 });
     }
     if (range.count > 1) {
-      doc.text(`Page ${i + 1} of ${range.count}`, right - 60, bandTop - 11, { width: 60, align: 'right', lineBreak: false });
+      doc.text(`Page ${i + 1} of ${range.count}`, right - 60, ruleY + 32, { width: 60, align: 'right', lineBreak: false });
     }
 
     doc.page.margins.bottom = bottomMargin;
   }
   doc.switchToPage(range.start + range.count - 1);
+}
+
+/**
+ * CUSTOMER and DETAILS side by side: a small purple heading over each, the
+ * customer's name in bold over its lines, and the details as bold labelled
+ * lines. The right block starts where the template's DETAILS does.
+ */
+function drawLetterParties(doc: PDFKit.PDFDocument, left: PdfParty, right?: PdfParty) {
+  const L = lay(doc);
+  ensureSpace(doc, 90);
+  const width = usableWidth(doc);
+  const rightX = L.left + 266;
+  const top = doc.y;
+  const draw = (p: PdfParty, x: number, w: number): number => {
+    let y = top;
+    if (p.heading) {
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(LETTER_PURPLE).text(p.heading.toUpperCase(), x, y, { width: w });
+      y += 22;
+    }
+    if (p.name) {
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(LETTER_INK).text(p.name, x, y, { width: w });
+      y = doc.y + 2;
+    }
+    doc.font('Helvetica').fontSize(9.5).fillColor(LETTER_INK);
+    for (const line of p.lines ?? []) {
+      if (!line.trim()) continue;
+      doc.text(line, x, y, { width: w });
+      y = doc.y + 1;
+    }
+    for (const f of p.facts ?? []) {
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(LETTER_INK).text(`${f.label}: ${f.value || '—'}`, x, y, { width: w });
+      y = doc.y + 4;
+    }
+    // A party's own labelled line, as the house parties carry it.
+    if (p.label) {
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(LETTER_INK).text(`${p.label} ${p.value || '—'}`, x, y, { width: w });
+      y = doc.y + 4;
+    }
+    return y;
+  };
+  const end = Math.max(draw(left, L.left, rightX - L.left - 20), right ? draw(right, rightX, L.left + width - rightX) : top);
+  doc.x = L.left;
+  doc.y = end + 16;
+}
+
+/**
+ * The totals as the template sets them, flush with the right edge: label and
+ * figure on 24pt rows with a light rule under each, and the total — the bold
+ * row — in larger purple over a heavier purple rule. Kept together on one
+ * page, so the total never strays from the figures it adds up.
+ */
+function drawLetterTotals(doc: PDFKit.PDFDocument, rows: PdfTotal[]) {
+  const L = lay(doc);
+  const right = doc.page.width - L.right;
+  const labelW = 129.6;
+  const valueW = 102.2;
+  const x = right - labelW - valueW;
+  const heightOf = (r: PdfTotal) => (r.bold ? 30 : 24.5);
+  const needed = 18 + rows.reduce((n, r) => n + heightOf(r), 0);
+  if (doc.y + needed > contentBottom(doc)) doc.addPage();
+  let y = doc.y + 18;
+  for (const r of rows) {
+    const h = heightOf(r);
+    const size = r.bold ? 11 : L.size;
+    const color = r.bold ? LETTER_PURPLE : LETTER_INK;
+    doc.font(r.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).fillColor(color);
+    const textY = y + (h - size) / 2;
+    doc.text(r.label, x + L.padX, textY, { width: labelW - L.padX, lineBreak: false });
+    doc.text(r.value, x + labelW, textY, { width: valueW - L.padX, align: 'right', lineBreak: false });
+    y += h;
+    doc
+      .moveTo(x, y)
+      .lineTo(right, y)
+      .strokeColor(r.bold ? LETTER_PURPLE : LETTER_RULE)
+      .lineWidth(r.bold ? 2 : 0.75)
+      .stroke();
+  }
+  doc.x = L.left;
+  doc.y = y + 16;
+}
+
+/**
+ * The letter's sign-offs, as the template sets them: side by side above the
+ * footer — PREPARED BY at the left, APPROVED BY at the right (more approvers
+ * share the width) — each a purple heading over the name and position, then
+ * the date and time, or "Pending" where nothing has happened yet.
+ */
+function drawLetterSignoffs(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
+  const people = signatories ?? [];
+  if (!people.length) return;
+  const L = lay(doc);
+  const right = doc.page.width - L.right;
+  const width = right - L.left;
+  const xs =
+    people.length === 2
+      ? [L.left, right - 133]
+      : people.map((_, i) => L.left + (width / people.length) * i);
+  const colW = (i: number) => (i < xs.length - 1 ? xs[i + 1] - xs[i] - 10 : right - xs[i]);
+  const blockH = 46;
+  const floor = doc.page.height - L.footerTop - 10;
+  if (doc.y + 20 + blockH > floor) doc.addPage();
+  const top = Math.max(doc.y + 20, floor - blockH);
+
+  people.forEach((person, i) => {
+    const x = xs[i];
+    const w = colW(i);
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(LETTER_PURPLE).text(person.role.toUpperCase(), x, top, { width: w });
+    let y = doc.y + 5;
+    doc.font('Helvetica').fontSize(8).fillColor(LETTER_INK);
+    if (person.name) {
+      doc.text(person.position ? `${person.name} (${person.position})` : person.name, x, y, { width: w });
+      y = doc.y + 1;
+      doc.text(person.at ? formatDateTime(person.at) : 'Pending', x, y, { width: w });
+    } else {
+      doc.text('Pending', x, y, { width: w });
+    }
+  });
+  doc.x = L.left;
+  doc.y = top + blockH;
 }
 
 function ensureSpace(doc: PDFKit.PDFDocument, needed: number) {

@@ -43,6 +43,8 @@ export interface QuotationLineMoney {
   costAmount?: Money;
   providerUserId?: string | null;
   providerSupplierId?: string | null;
+  /** A subheading: no money, and not a line the cost panel counts. */
+  isHeading?: boolean | null;
 }
 
 export interface QuotationTotalsInput {
@@ -181,10 +183,28 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
       inHouseMarginPct: pctOf(inHouseMargin, netOfTax),
       outsourcedMarginPct: pctOf(outsourcedMargin, netOfTax),
       costedLines,
-      lineCount: input.lines.length,
+      lineCount: input.lines.filter((l) => !l.isHeading).length,
     },
     lines,
   };
+}
+
+/**
+ * The Tax dropdown: the company's VAT rate, 8%, 6% for a government client,
+ * and 0% for a zero-rated sale (PEZA or BOI-registered, or an export). A rate
+ * typed by hand is how a quote goes out at 1.2%, so these are the only rates a
+ * revision takes — plus the one a draft was already snapshotted with.
+ */
+export const QUOTATION_EXTRA_TAX_RATES: { rate: number; label: string }[] = [
+  { rate: 0.08, label: '8%' },
+  { rate: 0.06, label: '6% (Government)' },
+];
+
+export function quotationTaxOptions(companyRate: number): { rate: number; label: string }[] {
+  const pct = (r: number) => `${Number((r * 100).toFixed(2))}%`;
+  const options = [{ rate: companyRate, label: pct(companyRate) }, ...QUOTATION_EXTRA_TAX_RATES, { rate: 0, label: '0% (zero-rated)' }];
+  const seen = new Set<string>();
+  return options.filter((o) => (seen.has(o.rate.toFixed(4)) ? false : (seen.add(o.rate.toFixed(4)), true)));
 }
 
 /** A line's stored amount: quantity × price, to the centavo, in Decimal. */

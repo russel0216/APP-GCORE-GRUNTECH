@@ -49,16 +49,23 @@ four databases and four copies of "customer".
    **Money is `formatMoney`, which prints `PHP 1,562.20`** — the currency code,
    not `₱`. U+20B1 is outside WinAnsiEncoding, so a standard PDF font draws it
    as `±`. Never put a non-Latin-1 character in a PDF without embedding a font.
-   **The quotation is the one customer letter**: `style: 'letter'` sets it the
-   way SCORO printed quotes — logo top-left, company block top-right,
-   `Date: 08/17/2026` and a green `Quote No.`, client and contact side by side,
-   each product name a bold row over its description and figures, the magenta
-   band with the strapline on every page, and a running header (customer,
-   number, date) on every page after the first. It keeps the dated sign-offs
-   above the band. Its table figures are `formatAmount` (`13,100,000.00`),
-   because the currency is named once in `Total Price (PHP):`. The engine still
+   **The quotation is the one customer letter**: `style: 'letter'` sets it as
+   the owner's Quotation_Template (2026-10-01): 36pt margins; the logo
+   top-left with the company block beside it (name in bold purple #5B2A8C,
+   address, `Tel No. | Email`, website, `TIN | REG NO`); `QUOTATION` large
+   purple top-right with `# number` in green #2E9A4B under it; a green rule;
+   CUSTOMER and DETAILS as purple-headed `parties` (`heading`, `facts`); a
+   head-only table (purple capitals, light #D9D9D9 rules) whose heading rows
+   are green subheadings; the totals flush right with `Total Price (PHP):` in
+   larger purple over a 2pt purple rule; the sign-offs SIDE BY SIDE above the
+   footer (PREPARED BY left, APPROVED BY right — a purple heading over
+   `Name (Position)` and the time, or "Pending"); a light rule and the
+   company's strapline in green capitals on every page; a quiet running
+   header after page one. No Conforme. Table figures are `formatAmount`,
+   because the currency is named in the head and the total. The engine still
    draws all of that — a module picks the style and supplies `parties`,
-   `totals` and `lines` sections, never its own header or footer.
+   `table`, `totals`, `lines` and `rule` sections, never its own header or
+   footer.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
@@ -126,8 +133,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**1,985 assertions across twenty-two scripts** (counted 2026-10-01): foundation 128,
-masters 54, sales 178, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,044 assertions across twenty-two scripts** (counted 2026-10-01): foundation 136,
+masters 54, sales 229, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
 evaluations 119, academy 97, finance 133, aftermarket 166, archive 113,
 insights 92, insights-brief 43, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -986,9 +993,9 @@ the detail.
   never reads cost at all.
 - **The letterhead lives in `renderDocument`**: Tel/Fax, TIN, REG. NO. and the
   company's `documentTagline` print on every document when set; unset lines are
-  left out — in the footer on the house style, across the top (and the band) on
-  the quotation's `letter` style. The letter prints no subject and no validity,
-  because SCORO's never did. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
+  left out — in the footer on the house style, beside the logo (and the
+  strapline under the footer rule) on the quotation's `letter` style. The
+  letter prints no subject and no validity. `PdfCell` (`string | { title, body? }`) is how a table cell prints a
   bold title over its description. Bank details are stored, printed nowhere yet.
 - **The quotation editor is a page, not a dialog** (SCORO's "Modify quote
   details"): `/g-ops/quotations/new` and `/g-ops/quotations/:id/edit`
@@ -1027,8 +1034,11 @@ the detail.
   cost only where the server sends it. **Status** on the Modify page is applied
   on Save through the same `PATCH /quotations/:id` and `assertOutcomeChange`
   as the quotation page and the board — never a second move path.
-- **SCORO's Tax dropdown is `vatRate` on the revision: the company rate or 0%**
-  (a zero-rated PEZA/BOI customer or an export), checked by `checkVatRate()`
+- **The Tax dropdown is `vatRate` on the revision: the company rate, 8%, 6%
+  (Government) or 0%** (a zero-rated PEZA/BOI customer or an export) —
+  `quotationTaxOptions()` / `QUOTATION_EXTRA_TAX_RATES` in `shared/quotation.ts`,
+  sent to the page as `taxOptions` so the dropdown cannot drift from the rule —
+  checked by `checkVatRate()`
   before anything is written so a refused rate burns no number; a draft may
   keep the rate it was snapshotted with. A new revision copies it. **Progress
   billing still takes the company rate** (`routes/progress.ts`), so a job won
@@ -1037,6 +1047,56 @@ the detail.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
   lines and prices without the totals block; the stored totals are computed
   as always, and a new revision copies the flag.
+
+## Quotation module rework (2026-10-01)
+
+- **No dialog anywhere in the quotation module.** Modify always opens
+  `/g-ops/quotations/:id/edit`: the full editor on a DRAFT, or — when no
+  revision is a draft — `QuotationDetailsEditor` (number, name, contact, site,
+  closing date, status) with "Raise a new revision" to change the lines. Lost
+  asks its reason in the page, Delete confirms in the page, Append quote is a
+  panel, "Fill from costing" and leaving unsaved confirm in the page.
+- **The quote number may be typed by hand.** `number` on `POST` and `PATCH
+  /quotations/:id`, checked by `checkQuoteNumber()` — shape, then case-blind
+  against every quotation and every SCORO archive number (a continued
+  quotation keeps its own). A duplicate is a 409 before anything is written,
+  so it burns no number. Unsent, the next number comes from
+  `nextFreeQuoteNumber()`, which STEPS OVER numbers taken by hand rather than
+  issuing them twice; `previewNext(..., isTaken)` does the same for the
+  suggestion. Counters are never raised for a typed number, so a typo far
+  ahead does not move the series. `/next-number` also returns `lastNumber` and
+  `taxOptions`; `/number-available` answers the page as the number is typed.
+- **A line may be a subheading** (`QuotationItem.isHeading`): its title is the
+  heading; `lineData()` stores it with no quantity, price, cost or provider,
+  whatever was sent. `quotationTotals` (and the `quotationMath` mirror) leave
+  it out of `lineCount`. The editor has no Group column: an older line's group
+  becomes a subheading where it changes (`linesFromItems`), and the PDF and the
+  page print groups and subheadings alike (`displayRows`).
+- **Probability is no longer asked for.** A new quotation takes its lead's
+  probability, else 50; the weighted pipeline still reads the stored value.
+- **Delete** is `DELETE /quotations/:id`: `gops.quotations.delete` (the sales
+  role holds it) AND authorship (`canEditRecord`); refused when won, built into
+  a project or a job order, or pending approval. A lead left with no
+  quotation steps back to COSTING (it has a costing) or QUALIFIED, audited.
+- **Optional approval routes are data.** `ApprovalWorkflow.optionLabel` marks a
+  route the submitter may tick; `pickWorkflow` never picks one unasked;
+  `approvalOptions(type, amount)` lists those in band; `submitForApproval({
+  optionId })` uses it or refuses. Seeded: "Quotation — over ₱1,000,000, with
+  the CEO" (Sales Manager → CEO approval, role executive), offered as "Add the
+  CEO as approver". A refused submit puts the revision back to DRAFT.
+  `approvalSlots(type, id)` lists every step of the latest request — the PDF
+  prints one APPROVED BY per step, "Pending" until it acts.
+  Admin › Approval Workflows edits the label ("Offer as an option"); a PUT
+  that does not mention it keeps it, because clearing it by omission would
+  make the CEO a step every quotation over a million takes.
+- **`GET /quotations/suggest?q=`** offers past lines (newest price, unit,
+  description, use count) from quotations the caller may read, a line's cost
+  only where `canSeeQuotationCost` allows, and items with their list price
+  (standard cost only with `gops.costing.view_all` or `gchain.items.view_all`).
+- **The Product/Description column takes the width**: one `tbody` per line, the
+  product row first, the cost strip (provider, notes, unit cost, cost, margin)
+  on its own row under it. Labels and values share one size (`--fs-md`) on
+  both the quotation page and the editor.
 
 ## Costing sheet notes
 

@@ -5,7 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, isDayKey, parseDay, todayLocal } from '../../lib/day';
 import { lineAmount, quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
-import { Checkbox, ErrorBox, Field, Loading, Modal, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import {
   CostPanelBlock,
@@ -21,7 +21,11 @@ import {
   SCORO's "Modify quote details", as a page rather than a dialog.
 
   `/g-ops/quotations/new` writes a new quotation and `/g-ops/quotations/:id/edit`
-  modifies its DRAFT revision. Everything is typed in place — the header in two
+  modifies its DRAFT revision — or, when no revision is a draft, the
+  quotation's own details (number, name, contact, site, closing date, status)
+  while the sent revision's lines stay as they were sent. No dialog anywhere:
+  appending another quote, confirming a replace and leaving unsaved all happen
+  in the page. Everything is typed in place — the header in two
   columns, then the lines table with an empty row to start in, then the totals
   and the cost panel — and one Save sends it all:
 
@@ -40,6 +44,9 @@ type ProviderKind = 'none' | 'user' | 'supplier';
 interface Line {
   /** Client-side identity for React and for field ids; never sent. */
   key: string;
+  /** A subheading: its title is the heading; no quantity, price or cost. */
+  isHeading: boolean;
+  /** SCORO's group. Read from older lines and turned into subheadings; never typed. */
   group: string;
   title: string;
   description: string;
@@ -53,6 +60,8 @@ interface Line {
 }
 
 interface Header {
+  /** The quote number — the suggested next one, or typed by hand. */
+  number: string;
   customer: CustomerRef | null;
   contactId: string;
   siteId: string;
@@ -63,7 +72,6 @@ interface Header {
   /** SCORO's "Due date": the day the offer lapses, stored as validity days. */
   dueDate: string;
   expectedClosing: string;
-  probability: string;
   leadId: string;
   costingId: string;
   prNumber: string;
@@ -83,6 +91,9 @@ interface Header {
 
 interface Preview {
   number: string;
+  /** The author's latest quotation — what the suggestion follows on from. */
+  lastNumber: string | null;
+  taxOptions: TaxOption[];
   employeeNo: string | null;
   linked: boolean;
   usesEmployeeDigits: boolean;
@@ -111,14 +122,33 @@ interface CostingLine {
 }
 
 type Option = { id: string; name: string };
+type TaxOption = { rate: number; label: string };
+
+/** What /quotations/suggest offers as a product is typed. */
+interface ProductSuggestion {
+  title: string;
+  description: string;
+  unit: string;
+  unitPrice: number | null;
+  /** Only where the server decided this viewer may see it. */
+  unitCost?: number | null;
+  source: 'history' | 'item';
+  uses: number;
+  lastNumber?: string;
+  itemCode?: string;
+}
+
+/** The shape the API takes for a quote number. */
+const NUMBER_RX = /^[A-Za-z0-9][A-Za-z0-9\-/_.]{0,39}$/;
 type CostingOption = { id: string; number: string; title: string };
 
 let keySeq = 0;
 const nextKey = () => `l${++keySeq}`;
 
-function blankLine(): Line {
+function blankLine(isHeading = false): Line {
   return {
     key: nextKey(),
+    isHeading,
     group: '',
     title: '',
     description: '',
@@ -134,6 +164,7 @@ function blankLine(): Line {
 
 /** Nothing typed — the starter row, or one added and left empty. Not saved. */
 function isBlank(l: Line): boolean {
+  if (l.isHeading) return !l.title.trim();
   return (
     !l.group.trim() &&
     !l.title.trim() &&
@@ -148,7 +179,8 @@ function isBlank(l: Line): boolean {
 function fromItem(i: Item): Line {
   return {
     key: nextKey(),
-    group: i.group ?? '',
+    isHeading: !!i.isHeading,
+    group: '',
     title: i.title ?? '',
     description: i.description ?? '',
     quantity: String(i.quantity),
@@ -163,6 +195,22 @@ function fromItem(i: Item): Line {
         : null,
     costNote: i.costNote ?? '',
   };
+}
+
+/**
+ * Saved lines as the table edits them. A SCORO group — older quotations carry
+ * one per line — becomes a subheading where it changes, which prints exactly
+ * as the group did; the group itself is not kept.
+ */
+function linesFromItems(items: Item[]): Line[] {
+  const out: Line[] = [];
+  let group: string | null = null;
+  for (const i of items) {
+    if (!i.isHeading && i.group && i.group !== group) out.push({ ...blankLine(true), title: i.group });
+    if (!i.isHeading) group = i.group ?? group;
+    out.push(fromItem(i));
+  }
+  return out;
 }
 
 function fromCostingLine(c: CostingLine): Line {
@@ -182,6 +230,7 @@ const withTax = (amount: number, rate: number) => Math.round(amount * (1 + rate)
 
 /** The mirror's view of a line — the same fields the server's arithmetic reads. */
 function moneyOf(l: Line) {
+  if (l.isHeading) return { amount: 0, costAmount: null, providerUserId: null, providerSupplierId: null, isHeading: true };
   const qty = figure(l.quantity);
   return {
     amount: lineAmount(qty, figure(l.unitPrice)),
@@ -193,8 +242,11 @@ function moneyOf(l: Line) {
 
 /** A line as the API's itemSchema takes it. */
 function linePayload(l: Line) {
+  if (l.isHeading) {
+    return { isHeading: true, title: l.title.trim(), description: '', quantity: 0, unit: 'lot', unitPrice: 0, unitCost: null };
+  }
   return {
-    group: l.group.trim() || null,
+    group: null,
     title: l.title.trim() || null,
     description: l.description,
     quantity: Number(l.quantity),
@@ -258,6 +310,7 @@ export function QuotationEditor() {
   const [wantContact, setWantContact] = useState<string | null>(null);
 
   const [header, setHeader] = useState<Header>(() => ({
+    number: '',
     customer: null,
     contactId: '',
     siteId: '',
@@ -266,7 +319,6 @@ export function QuotationEditor() {
     notes: '',
     dueDate: addDays(today, 30),
     expectedClosing: addDays(today, 30),
-    probability: '50',
     leadId: preset.leadId,
     costingId: preset.costingId,
     prNumber: '',
@@ -282,6 +334,15 @@ export function QuotationEditor() {
   }));
   /** Once somebody picks a tax rate, the company rate arriving late never replaces it. */
   const vatTouched = useRef(false);
+  /** Once somebody types a number, the suggestion never replaces it. */
+  const numberTouched = useRef(false);
+  /** Why the typed number cannot be used — said beside the box as it is typed. */
+  const [numberProblem, setNumberProblem] = useState<string | null>(null);
+  /** In-page confirmations, where a dialog used to ask. */
+  const [confirmFill, setConfirmFill] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  /** Bumped to re-read the quotation (after raising a new revision here). */
+  const [reloadKey, setReloadKey] = useState(0);
   const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
   const [appendOpen, setAppendOpen] = useState(false);
   /** Once somebody has typed in the table, a costing never replaces it unasked. */
@@ -328,6 +389,7 @@ export function QuotationEditor() {
           const issued = dayKeyOf(new Date(draft.createdAt));
           termsTouched.current = true;
           setHeader({
+            number: q.number,
             customer: { id: q.customer.id, name: q.customer.name },
             contactId: q.contact?.id ?? '',
             siteId: q.site?.id ?? '',
@@ -336,7 +398,6 @@ export function QuotationEditor() {
             notes: draft.notes ?? '',
             dueDate: addDays(issued, draft.validityDays),
             expectedClosing: q.expectedClosing?.slice(0, 10) ?? '',
-            probability: String(q.probability),
             leadId: q.lead?.id ?? '',
             costingId: draft.costing?.id ?? '',
             prNumber: draft.prNumber ?? '',
@@ -352,7 +413,7 @@ export function QuotationEditor() {
           });
           vatTouched.current = true;
           if (draft.costing) setPinnedCostings([draft.costing]);
-          setLines(draft.items.length ? draft.items.map(fromItem) : [blankLine()]);
+          setLines(draft.items.length ? linesFromItems(draft.items) : [blankLine()]);
           linesTouched.current = draft.items.length > 0;
         }
       })
@@ -361,7 +422,7 @@ export function QuotationEditor() {
     return () => {
       live = false;
     };
-  }, [id]);
+  }, [id, reloadKey]);
 
   // ── Lookups ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -395,7 +456,11 @@ export function QuotationEditor() {
       .get<Preview>(`/quotations/next-number${qs({ ownerId: header.ownerId && header.ownerId !== myId ? header.ownerId : undefined })}`)
       .then((p) => {
         setPreview(p);
-        if (!vatTouched.current) setHeader((h) => ({ ...h, vatRate: p.vatRate }));
+        setHeader((h) => ({
+          ...h,
+          ...(vatTouched.current ? {} : { vatRate: p.vatRate }),
+          ...(numberTouched.current ? {} : { number: p.number }),
+        }));
       })
       .catch(() => setPreview(null));
   }, [editing, header.ownerId, myId]);
@@ -505,7 +570,7 @@ export function QuotationEditor() {
           discountPct: String(src.discountPct ?? 0),
         }));
         if (src.vatRate === 0) vatTouched.current = true;
-        if (src.items.length) setLines(src.items.map(fromItem));
+        if (src.items.length) setLines(linesFromItems(src.items));
         setDuplicateOf(src.revision > 0 ? `${q.number} R${src.revision}` : q.number);
       })
       .catch((err) => live && setError(err));
@@ -513,6 +578,29 @@ export function QuotationEditor() {
       live = false;
     };
   }, [editing, preset, today]);
+
+  // ── The number, checked as it is typed ───────────────────────────────────
+  const original = editing ? (quotation?.number ?? '') : (preview?.number ?? '');
+  useEffect(() => {
+    const n = header.number.trim();
+    if (!n || n === original) {
+      setNumberProblem(null);
+      return;
+    }
+    if (!NUMBER_RX.test(n)) {
+      setNumberProblem('Letters, digits and - / _ . only — up to 40 characters');
+      return;
+    }
+    const t = setTimeout(() => {
+      api
+        .get<{ available: boolean; message: string | null }>(
+          `/quotations/number-available${qs({ number: n, excludeId: editing ? id : undefined })}`,
+        )
+        .then((r) => setNumberProblem(r.available ? null : r.message))
+        .catch(() => setNumberProblem(null));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [header.number, original, editing, id]);
 
   // ── The chosen customer's contacts, sites and payment terms ───────────────
   const customerId = header.customer?.id ?? '';
@@ -573,10 +661,14 @@ export function QuotationEditor() {
     };
   }, [editing, header.costingId, loadCostingLines]);
 
-  async function fillFromCosting() {
+  async function fillFromCosting(confirmed = false) {
     if (!header.costingId) return;
     const hasLines = lines.some((l) => !isBlank(l));
-    if (hasLines && !window.confirm('Replace the lines in the table with the costing’s scope of work?')) return;
+    if (hasLines && !confirmed) {
+      setConfirmFill(true);
+      return;
+    }
+    setConfirmFill(false);
     try {
       const filled = await loadCostingLines(header.costingId);
       if (!filled.length) {
@@ -606,8 +698,8 @@ export function QuotationEditor() {
     });
   }
 
-  function addLine(after?: string) {
-    const fresh = blankLine();
+  function addLine(after?: string, heading = false) {
+    const fresh = blankLine(heading);
     linesTouched.current = true;
     setLines((list) => {
       if (!after) return [...list, fresh];
@@ -641,7 +733,7 @@ export function QuotationEditor() {
       setError(new Error(`${from} has no lines to append`));
       return;
     }
-    const added = items.map(fromItem);
+    const added = linesFromItems(items);
     linesTouched.current = true;
     setDirty(true);
     setLines((list) => [...list.filter((l) => !isBlank(l)), ...added]);
@@ -702,6 +794,18 @@ export function QuotationEditor() {
     document.getElementById(lineField(line.key, 'title'))?.focus();
   }, [location.hash, lines, loading]);
 
+  /** A product picked from what was quoted before: its words, unit and price come with it. */
+  function pickProduct(l: Line, sg: ProductSuggestion) {
+    updateLine(l.key, {
+      title: sg.title,
+      description: l.description.trim() ? l.description : sg.description,
+      unit: sg.unit || l.unit,
+      unitPrice: sg.unitPrice != null ? String(sg.unitPrice) : l.unitPrice,
+      ...(sg.unitCost != null && l.unitCost.trim() === '' ? { unitCost: String(sg.unitCost) } : {}),
+    });
+    focusAfterRender.current = [lineField(l.key, 'quantity')];
+  }
+
   // ── Live figures (the server's arithmetic, mirrored) ──────────────────────
   const priced = useMemo(() => lines.filter((l) => !isBlank(l)), [lines]);
   const totals = useMemo(
@@ -715,7 +819,6 @@ export function QuotationEditor() {
     [priced, header.discountPct, header.vatInclusive, vatRate],
   );
   const marginByKey = new Map<string, LineMargin>(priced.map((l, i) => [l.key, totals.lines[i]]));
-  const groups = [...new Set(lines.map((l) => l.group.trim()).filter(Boolean))];
 
   // Leaving with unsaved work asks first — the browser's own prompt.
   useEffect(() => {
@@ -742,11 +845,12 @@ export function QuotationEditor() {
     if (!isDayKey(header.dueDate) || daysBetween(issueDate, header.dueDate) < 1) {
       flag('dueDate', 'The due date must be after the date of issue', 'qe-dueDate');
     }
-    const prob = Number(header.probability);
-    if (!Number.isInteger(prob) || prob < 0 || prob > 100) flag('probability', 'A whole number from 0 to 100', 'qe-probability');
+    if (!header.number.trim()) flag('number', 'Give the quotation a number', 'qe-number');
+    else if (numberProblem) flag('number', numberProblem, 'qe-number');
 
-    if (priced.length === 0) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'title') : 'qe-add-line');
+    if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'title') : 'qe-add-line');
     for (const l of priced) {
+      if (l.isHeading) continue;
       if (!l.title.trim() && !l.description.trim()) {
         flag(lineField(l.key, 'title'), 'Give the line a product title or a description');
       }
@@ -783,7 +887,9 @@ export function QuotationEditor() {
           leadId: header.leadId || null,
           costingId: header.costingId || null,
           subject: header.subject.trim(),
-          probability: Number(header.probability),
+          // Sent only when it is not the suggestion: otherwise the next free
+          // number is issued as the quotation is saved.
+          ...(header.number.trim() && header.number.trim() !== preview?.number ? { number: header.number.trim() } : {}),
           expectedClosing: header.expectedClosing || null,
           validityDays,
           notes: header.notes || null,
@@ -827,7 +933,7 @@ export function QuotationEditor() {
       const moved = header.outcome !== quotation!.outcome;
       await api.patch(`/quotations/${quotation!.id}`, {
         subject: header.subject.trim(),
-        probability: Number(header.probability),
+        ...(header.number.trim() !== quotation!.number ? { number: header.number.trim() } : {}),
         expectedClosing: header.expectedClosing || null,
         contactId: header.contactId || null,
         siteId: header.siteId || null,
@@ -835,7 +941,7 @@ export function QuotationEditor() {
         ...(moved && header.outcome === 'LOST' ? { lostReason: header.lostReason.trim() } : {}),
       });
       setDirty(false);
-      toast('ok', `Saved ${quotation!.number}`);
+      toast('ok', `Saved ${header.number.trim() || quotation!.number}`);
       navigate(`/g-ops/quotations/${quotation!.id}`);
       window.scrollTo(0, 0);
     } catch (err) {
@@ -845,7 +951,15 @@ export function QuotationEditor() {
   }
 
   function cancel() {
-    if (dirty && !window.confirm('Leave without saving? What you typed here will be lost.')) return;
+    if (dirty && !leaving) {
+      setLeaving(true);
+      return;
+    }
+    leave();
+  }
+
+  function leave() {
+    setLeaving(false);
     setDirty(false);
     if (editing) navigate(`/g-ops/quotations/${id}`);
     else if (location.key !== 'default') navigate(-1);
@@ -855,16 +969,17 @@ export function QuotationEditor() {
   // ── What to draw ──────────────────────────────────────────────────────────
   if (loading) return <Loading />;
   if (editing && !quotation) return <ErrorBox error={loadError ?? new Error('Quotation not found')} />;
-  if (editing && quotation && (!quotation.canEdit || !quotation.canSeeCost || !revision)) {
+  if (editing && quotation && quotation.canEdit && !revision) {
+    return <QuotationDetailsEditor quotation={quotation} onRevisionRaised={() => setReloadKey((k) => k + 1)} />;
+  }
+  if (editing && quotation && (!quotation.canEdit || !quotation.canSeeCost)) {
     return (
       <div className="card">
         <h3 className="card-title">{quotation.number} cannot be modified here</h3>
         <p className="muted">
           {!quotation.canEdit
             ? 'Only the author can edit this quotation (or someone who may edit every quotation).'
-            : !revision
-              ? 'None of its revisions is a draft. An approved, pending or superseded revision is what the customer was sent — raise a new revision on the quotation to change it.'
-              : 'Its cost is not visible to you, so its lines cannot be rewritten here.'}
+            : 'Its cost is not visible to you, so its lines cannot be rewritten here.'}
         </p>
         <Link className="btn" to={`/g-ops/quotations/${quotation.id}`}>
           Back to {quotation.number}
@@ -898,9 +1013,16 @@ export function QuotationEditor() {
   const wonMove = quotation?.statusHistory ? [...quotation.statusHistory].reverse().find((c) => c.to === 'WON') : undefined;
   const confirmedAt = wonMove?.at ?? quotation?.decidedAt ?? null;
 
-  // SCORO's Tax dropdown: the company's rate and 0%, plus a draft's own snapshot.
-  const taxOptions = [...new Set([companyRate, 0, header.vatRate])].sort((a, b) => b - a);
+  // The Tax dropdown: the company rate, 8%, 6% (Government) and 0% — and a
+  // draft's own snapshot, should Settings have moved since.
   const pctLabel = (r: number) => `${Number((r * 100).toFixed(2))}%`;
+  const serverTax: TaxOption[] = (editing ? quotation?.taxOptions : preview?.taxOptions) ?? [
+    { rate: companyRate, label: pctLabel(companyRate) },
+    { rate: 0, label: '0% (zero-rated)' },
+  ];
+  const taxOptions: TaxOption[] = serverTax.some((o) => Math.abs(o.rate - header.vatRate) < 0.00005)
+    ? serverTax
+    : [...serverTax, { rate: header.vatRate, label: `${pctLabel(header.vatRate)} (this draft)` }];
 
   return (
     <div className="qe">
@@ -968,21 +1090,22 @@ export function QuotationEditor() {
           </div>
         </div>
 
+        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
+
         <div className="qe-header qe-rows">
           <div className="qe-col">
-            <Static label="Quote No.">
-              {editing ? (
-                <span className="mono">
-                  {quotation!.number}
-                  {revision!.revision > 0 ? ` R${revision!.revision}` : ''}
-                </span>
-              ) : (
-                <>
-                  <span className="mono">{preview?.number ?? '…'}</span>{' '}
-                  <span className="faint">— assigned when saved</span>
-                </>
-              )}
-            </Static>
+            <NumberField
+              value={header.number}
+              error={errors.number ?? numberProblem ?? undefined}
+              suggestion={editing ? null : (preview?.number ?? null)}
+              lastNumber={editing ? null : (preview?.lastNumber ?? null)}
+              revision={editing && revision!.revision > 0 ? revision!.revision : null}
+              editing={editing}
+              onChange={(v) => {
+                numberTouched.current = true;
+                set('number', v);
+              }}
+            />
             <Static label="Date of issue">{formatDate(parseDay(issueDate))}</Static>
 
             {/* SCORO puts the contact beside the client, on the same line. */}
@@ -1142,18 +1265,6 @@ export function QuotationEditor() {
                 )}
               </Static>
             )}
-            <Field label="Probability %" error={errors.probability} hint="Your own read — the weighted pipeline multiplies by it">
-              <input
-                id="qe-probability"
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                inputMode="numeric"
-                value={header.probability}
-                onChange={(e) => set('probability', e.target.value)}
-              />
-            </Field>
             {editing ? (
               <Static label="Enquiry">
                 {quotation!.lead ? (
@@ -1234,82 +1345,114 @@ export function QuotationEditor() {
           </div>
         )}
 
+        {/*
+          One tbody per line: the product's row — the description given the
+          width — and, for whoever may see cost, a second row under it with the
+          cost, who carries it and the margin. A subheading is one wide row.
+        */}
         <div className="table-wrap qe-table-wrap">
-          <table className={`data qe-lines${showCost ? '' : ' qe-lines-nocost'}`}>
+          <table className="data qe-lines">
             <thead>
               <tr>
                 <th className="qe-col-move">
                   <span className="visually-hidden">Order</span>
                 </th>
-                <th className="qe-col-group">Group</th>
                 <th className="qe-col-product">Product | Description</th>
                 <th className="qe-col-qty">Quantity | Unit</th>
                 <th className="qe-col-price right">Unit price</th>
                 <th className="qe-col-amount right">Amount</th>
-                {showCost && <th className="qe-col-cost">Cost and provider info</th>}
-                {showCost && <th className="qe-col-margin right">Margin</th>}
                 <th className="qe-col-remove">
                   <span className="visually-hidden">Remove</span>
                 </th>
               </tr>
             </thead>
-            <tbody>
-              {lines.map((l, i) => {
-                const n = i + 1;
-                const m = marginByKey.get(l.key);
-                const last = i === lines.length - 1;
-                const err = (f: string) => errors[lineField(l.key, f)];
-                const amount = m?.amount ?? 0;
+            {lines.map((l, i) => {
+              const n = i + 1;
+              const m = marginByKey.get(l.key);
+              const last = i === lines.length - 1;
+              const err = (f: string) => errors[lineField(l.key, f)];
+              const amount = m?.amount ?? 0;
+              const what = l.isHeading ? `subheading ${n}` : `line ${n}`;
+              const moveCell = (
+                <td className="qe-col-move">
+                  <div className="qe-move">
+                    <span className="mono faint">{n}</span>
+                    <button
+                      type="button"
+                      id={lineField(l.key, 'up')}
+                      className="btn btn-sm btn-icon btn-ghost"
+                      aria-label={`Move ${what} up`}
+                      disabled={i === 0}
+                      onClick={() => moveLine(l.key, -1)}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      id={lineField(l.key, 'down')}
+                      className="btn btn-sm btn-icon btn-ghost"
+                      aria-label={`Move ${what} down`}
+                      disabled={last}
+                      onClick={() => moveLine(l.key, 1)}
+                    >
+                      ↓
+                    </button>
+                  </div>
+                </td>
+              );
+              const removeCell = (
+                <td className="qe-col-remove">
+                  <button
+                    type="button"
+                    id={lineField(l.key, 'remove')}
+                    className="btn btn-sm btn-icon btn-ghost"
+                    aria-label={`Remove ${what}`}
+                    onClick={() => removeLine(l.key)}
+                  >
+                    ✕
+                  </button>
+                </td>
+              );
+              if (l.isHeading) {
                 return (
-                  <tr key={l.key} id={`line-${n}`}>
-                    <td className="qe-col-move">
-                      <div className="qe-move">
-                        <span className="mono faint">{n}</span>
-                        <button
-                          type="button"
-                          id={lineField(l.key, 'up')}
-                          className="btn btn-sm btn-icon btn-ghost"
-                          aria-label={`Move line ${n} up`}
-                          disabled={i === 0}
-                          onClick={() => moveLine(l.key, -1)}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          id={lineField(l.key, 'down')}
-                          className="btn btn-sm btn-icon btn-ghost"
-                          aria-label={`Move line ${n} down`}
-                          disabled={last}
-                          onClick={() => moveLine(l.key, 1)}
-                        >
-                          ↓
-                        </button>
-                      </div>
-                    </td>
-                    <td>
-                      <input
-                        aria-label={`Line ${n} group`}
-                        list="qe-groups"
-                        value={l.group}
-                        onChange={(e) => updateLine(l.key, { group: e.target.value })}
-                      />
-                    </td>
-                    <td>
-                      <input
+                  <tbody key={l.key} id={`line-${n}`} className="qe-line qe-line-heading">
+                    <tr>
+                      {moveCell}
+                      <td colSpan={4}>
+                        <input
+                          id={lineField(l.key, 'title')}
+                          className="qe-heading-input"
+                          aria-label={`Subheading ${n}`}
+                          placeholder="Subheading — e.g. General Requirements"
+                          value={l.title}
+                          aria-invalid={err('title') ? true : undefined}
+                          onChange={(e) => updateLine(l.key, { title: e.target.value })}
+                        />
+                        <CellError message={err('title')} />
+                      </td>
+                      {removeCell}
+                    </tr>
+                  </tbody>
+                );
+              }
+              return (
+                <tbody key={l.key} id={`line-${n}`} className="qe-line">
+                  <tr>
+                    {moveCell}
+                    <td className="qe-col-product">
+                      <ProductInput
                         id={lineField(l.key, 'title')}
-                        className="qe-title"
-                        aria-label={`Line ${n} product`}
-                        placeholder="Product"
+                        label={`Line ${n} product`}
                         value={l.title}
-                        aria-invalid={err('title') ? true : undefined}
-                        aria-describedby={err('title') ? `${lineField(l.key, 'title')}-error` : undefined}
-                        onChange={(e) => updateLine(l.key, { title: e.target.value })}
+                        invalid={!!err('title')}
+                        describedBy={err('title') ? `${lineField(l.key, 'title')}-error` : undefined}
+                        onChange={(v) => updateLine(l.key, { title: v })}
+                        onPick={(sg) => pickProduct(l, sg)}
                       />
                       <textarea
                         aria-label={`Line ${n} description`}
                         placeholder="Description"
-                        rows={2}
+                        rows={Math.min(10, Math.max(2, l.description.split('\n').length + 1))}
                         value={l.description}
                         onChange={(e) => updateLine(l.key, { description: e.target.value })}
                       />
@@ -1361,7 +1504,7 @@ export function QuotationEditor() {
                       />
                       <CellError message={err('unitPrice')} />
                     </td>
-                    <td className="right mono">
+                    <td className="right mono qe-col-amount">
                       {formatMoney(amount, currency)}
                       {/* SCORO's grey figure under the amount: the same line with the tax on. */}
                       {!header.vatInclusive && header.vatRate > 0 && amount > 0 && (
@@ -1371,70 +1514,63 @@ export function QuotationEditor() {
                         </div>
                       )}
                     </td>
-                    {showCost && (
-                      <td>
-                        <CostCell
+                    {removeCell}
+                  </tr>
+                  {showCost && (
+                    <tr className="qe-cost-line">
+                      <td />
+                      <td colSpan={4}>
+                        <CostStrip
                           line={l}
                           n={n}
                           costError={err('unitCost')}
                           amount={m?.costAmount ?? null}
+                          margin={m ?? null}
                           currency={currency}
                           onChange={(patch) => updateLine(l.key, patch)}
                         />
                       </td>
-                    )}
-                    {showCost && (
-                      <td className="right mono">
-                        {m?.margin == null ? (
-                          <span className="faint">—</span>
-                        ) : (
-                          <>
-                            <div className={m.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(m.margin, currency)}</div>
-                            <div className="faint">{pct(m.marginPct)}</div>
-                          </>
-                        )}
-                      </td>
-                    )}
-                    <td>
-                      <button
-                        type="button"
-                        id={lineField(l.key, 'remove')}
-                        className="btn btn-sm btn-icon btn-ghost"
-                        aria-label={`Remove line ${n}`}
-                        onClick={() => removeLine(l.key)}
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
+                      <td />
+                    </tr>
+                  )}
+                </tbody>
+              );
+            })}
           </table>
         </div>
-        <datalist id="qe-groups">
-          {groups.map((g) => (
-            <option key={g} value={g} />
-          ))}
-        </datalist>
 
         {/* SCORO's buttons under the lines. */}
         <div className="row qe-line-actions">
           <button type="button" id="qe-add-line" className="btn btn-sm" onClick={() => addLine()}>
             + Add row
           </button>
-          <button type="button" className="btn btn-sm" onClick={() => setAppendOpen(true)}>
+          <button type="button" className="btn btn-sm" onClick={() => addLine(undefined, true)}>
+            + Add subheading
+          </button>
+          <button type="button" className="btn btn-sm" aria-expanded={appendOpen} onClick={() => setAppendOpen((v) => !v)}>
             + Append quote
           </button>
-          {header.costingId && (
-            <button type="button" className="btn btn-sm" onClick={() => void fillFromCosting()}>
-              Fill from costing
-            </button>
-          )}
+          {header.costingId &&
+            (confirmFill ? (
+              <span className="row qe-confirm" role="group" aria-label="Replace the lines">
+                <span>Replace the lines with the costing’s scope of work?</span>
+                <button type="button" className="btn btn-sm btn-primary" onClick={() => void fillFromCosting(true)}>
+                  Replace
+                </button>
+                <button type="button" className="btn btn-sm" onClick={() => setConfirmFill(false)}>
+                  Keep mine
+                </button>
+              </span>
+            ) : (
+              <button type="button" className="btn btn-sm" onClick={() => void fillFromCosting()}>
+                Fill from costing
+              </button>
+            ))}
         </div>
+        {appendOpen && <AppendQuotePanel excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
-          Enter on the last line’s price adds a line. Empty lines are left out when you save. A group
-          prints as a heading over its lines.
+          Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
+          left out when you save. A subheading prints as a heading over the lines below it.
           {showCost ? ' Cost, provider and margin are internal — never printed.' : ''}
         </p>
 
@@ -1485,9 +1621,9 @@ export function QuotationEditor() {
                         set('vatRate', Number(e.target.value));
                       }}
                     >
-                      {taxOptions.map((r) => (
-                        <option key={r} value={String(r)}>
-                          {pctLabel(r)}
+                      {taxOptions.map((o) => (
+                        <option key={o.rate} value={String(o.rate)}>
+                          {o.label}
                         </option>
                       ))}
                     </select>
@@ -1501,7 +1637,7 @@ export function QuotationEditor() {
               </div>
             </dl>
             <p id="qe-tax-hint" className="faint sales-hint">
-              0% is for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
+              6% is for a government client; 0% for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
             </p>
             {errors.discountPct && <CellError message={errors.discountPct} />}
             <Checkbox
@@ -1518,6 +1654,7 @@ export function QuotationEditor() {
           {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} />}
         </div>
 
+        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
         <div className="row qe-foot">
           <button type="button" className="btn" onClick={cancel} disabled={busy}>
             Back
@@ -1527,10 +1664,6 @@ export function QuotationEditor() {
           </button>
         </div>
       </section>
-
-      {appendOpen && (
-        <AppendQuoteModal excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />
-      )}
     </div>
   );
 }
@@ -1595,16 +1728,19 @@ function CellError({ id, message }: { id?: string; message?: string }) {
 }
 
 /**
- * SCORO's "Cost and provider info": two toggles for who carries the line's
- * cost — one of our people (in-house) or a supplier (outsourced); pressing the
- * one that is on clears it — the person or supplier beside them, then the
- * notes and the unit cost. The line's cost (quantity × unit cost) sits under.
+ * SCORO's "Cost and provider info", as a strip under the line it costs: two
+ * toggles for who carries the cost — one of our people (in-house) or a
+ * supplier (outsourced); pressing the one that is on clears it — the person or
+ * supplier, notes, the unit cost, and what that comes to with the margin it
+ * leaves. Under the line rather than beside it, so the description keeps the
+ * width.
  */
-function CostCell({
+function CostStrip({
   line,
   n,
   costError,
   amount,
+  margin,
   currency,
   onChange,
 }: {
@@ -1612,6 +1748,7 @@ function CostCell({
   n: number;
   costError?: string;
   amount: number | null;
+  margin: LineMargin | null;
   currency: string;
   onChange: (patch: Partial<Line>) => void;
 }) {
@@ -1620,7 +1757,8 @@ function CostCell({
     ['supplier', 'building', 'Outsourced — a supplier'],
   ];
   return (
-    <div className="qe-cost">
+    <div className="qe-cost-strip">
+      <span className="qe-cost-label faint">Cost</span>
       <div className="qe-provider">
         <div className="qe-kind" role="group" aria-label={`Line ${n}: who carries the cost`}>
           {kinds.map(([value, icon, label]) => {
@@ -1652,28 +1790,30 @@ function CostCell({
           <span className="faint qe-kind-none">No provider named</span>
         )}
       </div>
-      <div className="qe-cost-row">
-        <input
-          aria-label={`Line ${n} cost notes`}
-          placeholder="Notes"
-          value={line.costNote}
-          onChange={(e) => onChange({ costNote: e.target.value })}
-        />
-        <input
-          id={lineField(line.key, 'unitCost')}
-          className="qe-num"
-          type="number"
-          min={0}
-          step="0.01"
-          inputMode="decimal"
-          placeholder="Unit cost"
-          aria-label={`Line ${n} unit cost`}
-          aria-invalid={costError ? true : undefined}
-          value={line.unitCost}
-          onChange={(e) => onChange({ unitCost: e.target.value })}
-        />
-      </div>
-      <div className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</div>
+      <input
+        className="qe-cost-note"
+        aria-label={`Line ${n} cost notes`}
+        placeholder="Notes"
+        value={line.costNote}
+        onChange={(e) => onChange({ costNote: e.target.value })}
+      />
+      <input
+        id={lineField(line.key, 'unitCost')}
+        className="qe-num qe-cost-unit"
+        type="number"
+        min={0}
+        step="0.01"
+        inputMode="decimal"
+        placeholder="Unit cost"
+        aria-label={`Line ${n} unit cost`}
+        aria-invalid={costError ? true : undefined}
+        value={line.unitCost}
+        onChange={(e) => onChange({ unitCost: e.target.value })}
+      />
+      <span className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</span>
+      <span className={`mono qe-cost-margin${margin?.margin != null && margin.margin < 0 ? ' quote-negative' : ''}`}>
+        {margin?.margin == null ? '' : `${formatMoney(margin.margin, currency)} · ${pct(margin.marginPct)}`}
+      </span>
       <CellError message={costError} />
     </div>
   );
@@ -1703,12 +1843,12 @@ interface QuotationListRow {
 }
 
 /**
- * SCORO's "Append quote": pick another quotation and its newest revision's
- * lines are added under these. The search is the quotation list's own, so it
- * finds only what this person may read, and a line's cost comes along only
- * where the server sends it to them.
+ * SCORO's "Append quote", in the page: find another quotation and its newest
+ * revision's lines are added under these. The search is the quotation list's
+ * own, so it finds only what this person may read, and a line's cost comes
+ * along only where the server sends it to them.
  */
-function AppendQuoteModal({
+function AppendQuotePanel({
   excludeId,
   onClose,
   onPick,
@@ -1725,7 +1865,7 @@ function AppendQuoteModal({
   useEffect(() => {
     const t = setTimeout(() => {
       api
-        .get<{ rows: QuotationListRow[] }>(`/quotations${qs({ search: text.trim() || undefined, pageSize: 12 })}`)
+        .get<{ rows: QuotationListRow[] }>(`/quotations${qs({ search: text.trim() || undefined, pageSize: 8 })}`)
         .then((r) => setRows(r.rows.filter((q) => q.id !== excludeId)))
         .catch(setError);
     }, 250);
@@ -1746,19 +1886,26 @@ function AppendQuoteModal({
   }
 
   return (
-    <Modal
-      title="Append quote"
-      onClose={onClose}
-      footer={
-        <button type="button" className="btn" onClick={onClose}>
-          Cancel
+    <section className="qe-append" aria-label="Append quote">
+      <div className="row qe-append-head">
+        <label htmlFor="qe-append-find" className="qe-append-title">
+          Append another quotation’s lines
+        </label>
+        <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
+          Close
         </button>
-      }
-    >
+      </div>
       <ErrorBox error={error} />
-      <Field label="Find a quotation" hint="By number, name or client. Its newest revision’s lines are added under yours.">
-        <input autoFocus value={text} onChange={(e) => setText(e.target.value)} />
-      </Field>
+      <input
+        id="qe-append-find"
+        autoFocus
+        placeholder="Find by number, name or client"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose();
+        }}
+      />
       {rows === null ? (
         <Loading />
       ) : rows.length === 0 ? (
@@ -1779,7 +1926,7 @@ function AppendQuoteModal({
           ))}
         </ul>
       )}
-    </Modal>
+    </section>
   );
 }
 
@@ -1885,6 +2032,443 @@ function ProviderLookup({
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+/**
+ * The quote number: the next free one in the author's series, suggested and
+ * already filled in — or typed by hand. A number already used (by another
+ * quotation, or by a SCORO quote in the archive) is said beside the box as it
+ * is typed, and Save refuses it; "Use the suggested number" puts it back.
+ */
+function NumberField({
+  value,
+  error,
+  suggestion,
+  lastNumber,
+  revision,
+  editing,
+  onChange,
+}: {
+  value: string;
+  error?: string;
+  suggestion: string | null;
+  lastNumber: string | null;
+  revision: number | null;
+  editing: boolean;
+  onChange: (v: string) => void;
+}) {
+  const hint = editing
+    ? 'Changing it renumbers this quotation; a number already used is refused.'
+    : suggestion
+      ? `Suggested: the next in your series${lastNumber ? ` after ${lastNumber}` : ''}. Type another if you need to.`
+      : 'The next in your series is filled in when it loads.';
+  return (
+    <div className={`field${error ? ' invalid' : ''}`}>
+      <label htmlFor="qe-number">
+        Quote No.
+        <span className="req" aria-hidden="true">
+          *
+        </span>
+      </label>
+      <div>
+        <div className="row qe-number">
+          <input
+            id="qe-number"
+            className="mono"
+            value={value}
+            maxLength={40}
+            autoComplete="off"
+            aria-invalid={error ? true : undefined}
+            aria-describedby="qe-number-hint"
+            onChange={(e) => onChange(e.target.value.trim())}
+          />
+          {revision !== null && <span className="mono faint">R{revision}</span>}
+          {!editing && suggestion && value !== suggestion && (
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => onChange(suggestion)}>
+              Use {suggestion}
+            </button>
+          )}
+        </div>
+        <div className="hint" id="qe-number-hint">
+          {hint}
+        </div>
+        {error && (
+          <div className="field-error">
+            <span aria-hidden="true">⚠</span>
+            {error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Leaving with unsaved work, asked in the page rather than in a dialog. */
+function LeaveBar({ onLeave, onStay }: { onLeave: () => void; onStay: () => void }) {
+  return (
+    <div className="alert warn row qe-leave" role="alert">
+      <span>You have changes that are not saved.</span>
+      <button type="button" className="btn btn-sm btn-danger" onClick={onLeave}>
+        Leave without saving
+      </button>
+      <button type="button" className="btn btn-sm" autoFocus onClick={onStay}>
+        Keep editing
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A line's product, with what was quoted before offered as it is typed: past
+ * lines (latest price, unit and description, and how often) and items from the
+ * item master. Keyboard: ArrowDown reaches the list, arrows move in it, Escape
+ * closes it, and focus leaving the box and its list closes it too.
+ */
+function ProductInput({
+  id,
+  label,
+  value,
+  invalid,
+  describedBy,
+  onChange,
+  onPick,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  invalid?: boolean;
+  describedBy?: string;
+  onChange: (v: string) => void;
+  onPick: (sg: ProductSuggestion) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [matches, setMatches] = useState<ProductSuggestion[]>([]);
+  const menuRef = useRef<HTMLUListElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const term = value.trim();
+    if (!open || term.length < 2) {
+      setMatches([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      api
+        .get<ProductSuggestion[]>(`/quotations/suggest${qs({ q: term })}`)
+        .then((rows) => setMatches(rows.filter((r) => r.title.toUpperCase() !== term.toUpperCase() || r.unitPrice != null)))
+        .catch(() => setMatches([]));
+    }, 220);
+    return () => clearTimeout(t);
+  }, [value, open]);
+
+  function choose(sg: ProductSuggestion) {
+    onPick(sg);
+    setOpen(false);
+    setMatches([]);
+  }
+
+  const buttons = () => [...(menuRef.current?.querySelectorAll<HTMLElement>('button') ?? [])];
+
+  return (
+    <div
+      className="lookup"
+      onBlur={(e: FocusEvent<HTMLDivElement>) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
+      <input
+        ref={inputRef}
+        id={id}
+        className="qe-title"
+        aria-label={label}
+        placeholder="Product"
+        autoComplete="off"
+        aria-autocomplete="list"
+        aria-expanded={open && matches.length > 0}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
+        value={value}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+          if (e.key === 'Escape' && open) {
+            e.preventDefault();
+            setOpen(false);
+          }
+          if (e.key === 'ArrowDown' && matches.length) {
+            e.preventDefault();
+            buttons()[0]?.focus();
+          }
+        }}
+      />
+      {open && matches.length > 0 && (
+        <ul className="lookup-menu qe-suggest" ref={menuRef}>
+          {matches.map((sg, i) => (
+            <li key={`${sg.source}-${sg.title}-${i}`}>
+              <button
+                type="button"
+                onClick={() => choose(sg)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setOpen(false);
+                    inputRef.current?.focus();
+                  }
+                  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    const list = buttons();
+                    const next = list[list.indexOf(e.currentTarget) + (e.key === 'ArrowDown' ? 1 : -1)];
+                    if (next) next.focus();
+                    else if (e.key === 'ArrowUp') inputRef.current?.focus();
+                  }
+                }}
+              >
+                <span className="qe-suggest-name">{sg.title}</span>
+                <span className="faint qe-suggest-meta">
+                  {sg.unitPrice != null ? `${formatMoney(sg.unitPrice)} / ${sg.unit}` : sg.unit}
+                  {sg.source === 'item'
+                    ? ` · item ${sg.itemCode ?? ''}`
+                    : ` · quoted ${sg.uses}×${sg.lastNumber ? `, last on ${sg.lastNumber}` : ''}`}
+                </span>
+                {sg.description && <span className="faint qe-suggest-desc">{sg.description}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Modify, once no revision is a draft: the quotation's own details — number,
+ * name, contact, site, closing date and status — on the page, with the sent
+ * revision's lines, prices, terms and tax left exactly as they were sent. To
+ * change those, a new revision is raised right here and the full editor opens
+ * on it.
+ */
+function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: QuotationDetail; onRevisionRaised: () => void }) {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const latest = quotation.revisions[0] ?? null;
+  const [form, setForm] = useState({
+    number: quotation.number,
+    subject: quotation.subject,
+    contactId: quotation.contact?.id ?? '',
+    siteId: quotation.site?.id ?? '',
+    expectedClosing: quotation.expectedClosing?.slice(0, 10) ?? '',
+    outcome: quotation.outcome,
+    lostReason: quotation.lostReason ?? '',
+  });
+  const [contacts, setContacts] = useState<Option[]>([]);
+  const [sites, setSites] = useState<Option[]>([]);
+  const [numberProblem, setNumberProblem] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .get<{ contacts: Option[]; sites: Option[] }>(`/customers/${quotation.customer.id}`)
+      .then((c) => {
+        setContacts(c.contacts);
+        setSites(c.sites);
+      })
+      .catch(() => {});
+  }, [quotation.customer.id]);
+
+  useEffect(() => {
+    const n = form.number.trim();
+    if (!n || n === quotation.number) {
+      setNumberProblem(null);
+      return;
+    }
+    if (!NUMBER_RX.test(n)) {
+      setNumberProblem('Letters, digits and - / _ . only — up to 40 characters');
+      return;
+    }
+    const t = setTimeout(() => {
+      api
+        .get<{ available: boolean; message: string | null }>(`/quotations/number-available${qs({ number: n, excludeId: quotation.id })}`)
+        .then((r) => setNumberProblem(r.available ? null : r.message))
+        .catch(() => setNumberProblem(null));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [form.number, quotation.id, quotation.number]);
+
+  const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
+  const hasApproved = quotation.revisions.some((r) => r.status === 'APPROVED');
+  const current = quotation.outcome;
+  const statusOptions = [current, ...(current === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[current] ?? []))].map((value) => ({
+    value,
+    label: `${OUTCOMES.find((o) => o.value === value)?.label ?? value}${value === 'WON' && value !== current && !hasApproved ? ' (needs an approved revision)' : ''}`,
+    disabled: value === 'WON' && value !== current && !hasApproved,
+  }));
+
+  async function save() {
+    if (!form.number.trim() || numberProblem) {
+      setError(new Error(numberProblem ?? 'Give the quotation a number'));
+      return;
+    }
+    if (form.subject.trim().length < 2) {
+      setError(new Error('Give the quotation a name'));
+      return;
+    }
+    if (form.outcome === 'LOST' && current !== 'LOST' && !form.lostReason.trim()) {
+      setError(new Error('Say why it was lost — Sales Analytics reports the reasons'));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const moved = form.outcome !== current;
+      await api.patch(`/quotations/${quotation.id}`, {
+        ...(form.number.trim() !== quotation.number ? { number: form.number.trim() } : {}),
+        subject: form.subject.trim(),
+        contactId: form.contactId || null,
+        siteId: form.siteId || null,
+        expectedClosing: form.expectedClosing || null,
+        ...(moved ? { outcome: form.outcome } : {}),
+        ...(moved && form.outcome === 'LOST' ? { lostReason: form.lostReason.trim() } : {}),
+      });
+      toast('ok', `Saved ${form.number.trim()}`);
+      navigate(`/g-ops/quotations/${quotation.id}`);
+      window.scrollTo(0, 0);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function raiseRevision() {
+    setBusy(true);
+    try {
+      await api.post(`/quotations/${quotation.id}/revisions`);
+      toast('ok', 'New revision raised — its lines are ready to change');
+      onRevisionRaised();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="qe">
+      <div className="breadcrumb">
+        <Link to="/g-ops/quotations">Quotations</Link>
+        <span className="sep">›</span>
+        <Link to={`/g-ops/quotations/${quotation.id}`} className="mono">
+          {quotation.number}
+        </Link>
+        <span className="sep">›</span>
+        <span>Modify</span>
+      </div>
+      <section className="card qe-card" aria-labelledby="qe-details-title">
+        <div className="qe-head">
+          <div>
+            <h1 id="qe-details-title" className="qe-heading">
+              Modify quote details
+            </h1>
+            <p className="faint qe-lead">Nothing changes until you save.</p>
+          </div>
+          <div className="row qe-actions">
+            <Link className="btn" to={`/g-ops/quotations/${quotation.id}`}>
+              Back
+            </Link>
+            <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+        <ErrorBox error={error} />
+        {latest && (
+          <div className="alert info row qe-locked">
+            <span>
+              R{latest.revision} is {latest.status.toLowerCase().replace(/_/g, ' ')}: its lines, prices, terms and tax are
+              what the customer was sent, and stay as they are.
+            </span>
+            {latest.status !== 'PENDING_APPROVAL' && (
+              <button type="button" className="btn btn-sm" onClick={() => void raiseRevision()} disabled={busy}>
+                Raise a new revision to change them
+              </button>
+            )}
+          </div>
+        )}
+        <div className="qe-header qe-rows">
+          <div className="qe-col">
+            <NumberField
+              value={form.number}
+              error={numberProblem ?? undefined}
+              suggestion={null}
+              lastNumber={null}
+              revision={null}
+              editing
+              onChange={(v) => setForm((f) => ({ ...f, number: v }))}
+            />
+            <Static label="Client">
+              <Link to={`/g-ops/customers/${quotation.customer.id}`}>{quotation.customer.name}</Link>
+            </Static>
+            {contacts.length > 0 && (
+              <Field label="Contact person">
+                <select value={form.contactId} onChange={(e) => setForm((f) => ({ ...f, contactId: e.target.value }))}>
+                  <option value="">— none —</option>
+                  {contacts.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {sites.length > 0 && (
+              <Field label="Site">
+                <select value={form.siteId} onChange={(e) => setForm((f) => ({ ...f, siteId: e.target.value }))}>
+                  <option value="">— none —</option>
+                  {sites.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            <Field label="Quote name" required>
+              <input value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} />
+            </Field>
+          </div>
+          <div className="qe-col">
+            <Static label="Author">{quotation.owner.name}</Static>
+            <Field label="Estimated closing date" hint="When you expect the decision — the pipeline forecast reads it">
+              <input
+                type="date"
+                value={form.expectedClosing}
+                onChange={(e) => setForm((f) => ({ ...f, expectedClosing: e.target.value }))}
+              />
+            </Field>
+            <Field label="Status" hint="Applied when you save — it moves the lead too">
+              <select
+                value={form.outcome}
+                disabled={statusOptions.length <= 1}
+                onChange={(e) => setForm((f) => ({ ...f, outcome: e.target.value }))}
+              >
+                {statusOptions.map((o) => (
+                  <option key={o.value} value={o.value} disabled={o.disabled}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {form.outcome === 'LOST' && current !== 'LOST' && (
+              <Field label="Why it was lost" required hint="Sales Analytics reports the reasons">
+                <textarea rows={2} value={form.lostReason} onChange={(e) => setForm((f) => ({ ...f, lostReason: e.target.value }))} />
+              </Field>
+            )}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

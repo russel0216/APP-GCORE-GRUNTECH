@@ -276,6 +276,11 @@ export async function previewNext(
   documentType: string,
   ctx: NumberContext = {},
   tx: Prisma.TransactionClient = prisma,
+  /**
+   * Where numbers may also be typed by hand (the quotation's), the preview
+   * steps past any already taken — the same ones `nextNumber`'s caller skips.
+   */
+  isTaken?: (number: string) => Promise<boolean>,
 ): Promise<{ number: string; employeeNo: string | null; linked: boolean; periodKey: string }> {
   const at = ctx.at ?? new Date();
   const { template, period, scope, emp, employeeNo } = await templateFor(documentType, tx, ctx, {
@@ -291,15 +296,17 @@ export async function previewNext(
           where: { documentType_periodKey: { documentType, periodKey } },
         });
 
+  const prefix = await prefixFor(tx);
+  const render = (seq: number) =>
+    renderPattern(template.pattern, { prefix, typeCode: template.typeCode, seq, padding: template.padding, at, emp });
+  let seq = (counter?.lastNumber ?? 0) + 1;
+  let number = render(seq);
+  // A bounded walk: a run of 200 hand-typed numbers ahead of the counter is
+  // not a series anyone means to continue.
+  for (let tries = 0; isTaken && tries < 200 && (await isTaken(number)); tries++) number = render(++seq);
+
   return {
-    number: renderPattern(template.pattern, {
-      prefix: await prefixFor(tx),
-      typeCode: template.typeCode,
-      seq: (counter?.lastNumber ?? 0) + 1,
-      padding: template.padding,
-      at,
-      emp,
-    }),
+    number,
     employeeNo,
     linked: employeeNo !== null,
     periodKey,

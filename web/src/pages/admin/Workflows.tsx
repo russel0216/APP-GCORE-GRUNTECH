@@ -23,6 +23,8 @@ interface Workflow {
   isActive: boolean;
   minAmount: number | null;
   maxAmount: number | null;
+  /** Set: an optional route the submitter may tick, under this label. */
+  optionLabel: string | null;
   steps: Step[];
   requestCount: number;
 }
@@ -119,10 +121,14 @@ export function Workflows() {
               >
                 <div className="row" style={{ justifyContent: 'space-between' }}>
                   <strong>{w.name}</strong>
-                  <span className={`badge ${w.isActive ? 'ok' : ''}`}>
-                    {w.isActive ? 'active' : 'inactive'}
+                  <span className="row" style={{ gap: 'var(--s-1)' }}>
+                    {w.optionLabel && <span className="badge info">option</span>}
+                    <span className={`badge ${w.isActive ? 'ok' : ''}`}>
+                      {w.isActive ? 'active' : 'inactive'}
+                    </span>
                   </span>
                 </div>
+                {w.optionLabel && <div className="faint">Offered as “{w.optionLabel}”</div>}
                 <div className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
                   {w.minAmount === null && w.maxAmount === null
                     ? 'Any amount'
@@ -204,6 +210,7 @@ function WorkflowEditor({
   const [isActive, setIsActive] = useState(workflow?.isActive ?? true);
   const [minAmount, setMinAmount] = useState(workflow?.minAmount?.toString() ?? '');
   const [maxAmount, setMaxAmount] = useState(workflow?.maxAmount?.toString() ?? '');
+  const [optionLabel, setOptionLabel] = useState(workflow?.optionLabel ?? '');
   const [steps, setSteps] = useState<Step[]>(
     workflow?.steps.map((s) => ({ ...s })) ?? [
       { sequence: 1, name: 'Approval', approverType: 'SUPERVISOR', roleId: null, userId: null },
@@ -243,6 +250,7 @@ function WorkflowEditor({
         isActive,
         minAmount: minAmount === '' ? null : Number(minAmount),
         maxAmount: maxAmount === '' ? null : Number(maxAmount),
+        optionLabel: optionLabel.trim() || null,
         steps: steps.map((s) => ({
           sequence: s.sequence,
           name: s.name,
@@ -316,6 +324,12 @@ function WorkflowEditor({
         </Field>
         <Field label="Applies up to (amount)" hint="Blank = no upper bound">
           <input type="number" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} />
+        </Field>
+        <Field
+          label="Offer as an option"
+          hint="Blank = a standard route, taken by amount. A label (e.g. Add the CEO as approver) makes it a choice the submitter ticks."
+        >
+          <input value={optionLabel} maxLength={120} onChange={(e) => setOptionLabel(e.target.value)} />
         </Field>
       </div>
 

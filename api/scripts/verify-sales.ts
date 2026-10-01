@@ -1067,6 +1067,16 @@ async function main() {
     }
     check('and on 500 generated quotations, not one figure differs', mismatches === 0, `${mismatches} differ`);
   }
+  {
+    // A subheading is words only: both sides leave it out of the line count.
+    const withHeadings = [{ amount: 0, isHeading: true }, ...mirrorLines, { amount: 0, isHeading: true }];
+    const server = quotationTotals({ lines: withHeadings, discountPct: 10, vatRate: 0.12 });
+    check(
+      'with subheadings among the lines, the page still equals the server, and neither counts them as lines',
+      same(editorTotals({ lines: withHeadings, discountPct: 10, vatRate: 0.12 }), server) && server.cost.lineCount === mirrorLines.length,
+      String(server.cost.lineCount),
+    );
+  }
 
   // ── 10. Cost is stripped server-side, and never printed ────────────────────
   console.log('\nCost visibility over HTTP, and the SCORO-style PDF');
@@ -1199,9 +1209,14 @@ async function main() {
     const pdfBytes = Buffer.from(await pdfRes.arrayBuffer());
     const text = pdfText(pdfBytes);
     check('the quotation PDF renders', pdfRes.status === 200 && pdfBytes.subarray(0, 5).toString() === '%PDF-', String(pdfRes.status));
-    check('it prints the PR Number field and its value', text.includes('PR Number :') && text.includes('PR-ZZ-4471'));
-    check("it carries SCORO's opening and closing sentences", text.includes('Thank you very much for the opportunity') && text.includes('looking forward to your positive response'));
-    check('it names itself as SCORO did, "Quote No." and the number', text.includes(`Quote No. ${String(created.body.number)}`));
+    check('it prints the PR Number in the details, with its value', text.includes('PR Number: PR-ZZ-4471'));
+    check(
+      'it carries the one thank-you line, and no closing letter any more',
+      text.includes('Thank you very much for the opportunity to provide the following quotation. This document is system generated and does not require signature.') &&
+        !text.includes('looking forward to your positive response'),
+    );
+    check('it names itself QUOTATION, with "# number"', text.includes('QUOTATION') && text.includes(`# ${String(created.body.number)}`));
+    check('the customer and the details are headed as the template has them', text.includes('CUSTOMER') && text.includes('DETAILS'));
     check(
       "it prints SCORO's totals: the discount, the sum without tax, then VAT on the discounted figure",
       text.includes('Discount (10%):') && text.includes('Sum without tax:') && text.includes('27,000.00') && text.includes('VAT (12%):') && text.includes('3,240.00'),
@@ -1210,10 +1225,10 @@ async function main() {
       'the currency is named once, in the total, and the figures carry none',
       text.includes('Total Price (PHP):') && !text.includes('PHP 3,240.00'),
     );
-    check('it keeps the dated sign-offs under the letter', text.includes('PREPARED BY :') && text.includes('APPROVED BY :') && text.includes('CONFORME :'));
+    check('it keeps the dated sign-offs — prepared and approved — and no Conforme', text.includes('PREPARED BY') && text.includes('APPROVED BY') && !/CONFORME/i.test(text));
     check('Delivery prints as a labelled line', text.includes('Delivery:') && text.includes('4 to 6 weeks'));
-    check('it prints the group as a sub-heading and the line title', text.includes('GRUNTECH INSTALLATION') && text.includes('Air compressor installation'));
-    check('it prints the payment terms and the contact', text.includes('30 days PDC') && text.includes('0917 555 0101'));
+    check('it prints the group as a sub-heading and the line title', text.includes('Gruntech Installation') && text.includes('Air compressor installation'));
+    check('it prints the payment terms and who it is for', text.includes('Payment Terms: 30 days PDC') && text.includes(`Attention: ${TAG} Engr. Cruz, Facilities Head`));
     check(
       'and never a cost figure, a margin or a cost note',
       !text.includes('7,777.77') && !text.includes('15,555.54') && !text.includes('supplier quote 88') && !text.includes(supplier.name),
@@ -1266,7 +1281,12 @@ async function main() {
       zeroRated.text.slice(0, 200),
     );
     const oddRate = await http(salesToken, 'PATCH', base, { vatRate: 0.05 });
-    check('but not to a rate typed by hand — the company rate or 0% only', oddRate.status === 400, oddRate.text.slice(0, 160));
+    check('but not to a rate typed by hand — the company rate, 8%, 6% or 0% only', oddRate.status === 400, oddRate.text.slice(0, 160));
+    const eight = await http(salesToken, 'PATCH', base, { vatRate: 0.08 });
+    check('8% is offered and taken', eight.status === 200 && eight.body.vatRate === 0.08, eight.text.slice(0, 160));
+    const six = await http(salesToken, 'PATCH', base, { vatRate: 0.06 });
+    check('6% (Government) is offered and taken', six.status === 200 && six.body.vatRate === 0.06, six.text.slice(0, 160));
+    await http(salesToken, 'PATCH', base, { vatRate: 0 });
     check(
       'the change of rate is audited as such',
       (await prisma.auditLog.count({
@@ -1289,7 +1309,7 @@ async function main() {
       'a hidden-total quote prints its lines and prices but no totals',
       hiddenText.includes('Air compressor installation') &&
         hiddenText.includes('12,500.00') &&
-        !hiddenText.includes('Sub Total Price:') &&
+        !hiddenText.includes('Sub Total:') &&
         !hiddenText.includes('Total Price (PHP):'),
     );
     const restored = await http(salesToken, 'PATCH', base, { hideTotal: false, vatRate: companyVat });
@@ -1582,6 +1602,238 @@ async function main() {
       nextRev.status < 300 && Number(carried?.vatRate) === 0 && carried?.hideTotal === true,
       nextRev.text.slice(0, 160),
     );
+
+    // ── 12. The quotation module, reworked: number, subheadings, delete, CEO ──
+    console.log('\nQuote numbers typed by hand, subheadings, delete, the CEO option, suggestions');
+
+    // Tax options are said by the server, so the dropdown cannot drift from the rule.
+    const taxFor = await http(salesToken, 'GET', '/quotations/next-number');
+    const taxLabels = (taxFor.body.taxOptions as { rate: number; label: string }[] | undefined)?.map((o) => o.label) ?? [];
+    check(
+      'the Tax dropdown offers the company rate, 8%, 6% (Government) and 0%',
+      taxLabels.includes('8%') && taxLabels.includes('6% (Government)') && taxLabels.includes('0% (zero-rated)') && taxLabels.length === 4,
+      JSON.stringify(taxLabels),
+    );
+    check('and the preview names the author’s last quotation', 'lastNumber' in taxFor.body);
+
+    // A number typed by hand is used as typed; a duplicate is refused before anything is written.
+    const handNumber = `ZZQ-${Date.now() % 100000}`;
+    const typed = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Hand-numbered`,
+      number: handNumber,
+      lines: [editorLines[2]],
+    });
+    check('a quote number typed by hand is the number it gets', typed.status === 201 && typed.body.number === handNumber, typed.text.slice(0, 160));
+    const free = await http(salesToken, 'GET', `/quotations/number-available?number=${encodeURIComponent(handNumber.toLowerCase())}`);
+    check('the editor is told, as it types, that the number is taken — case-blind', free.status === 200 && free.body.available === false, JSON.stringify(free.body));
+    const fresh = await http(salesToken, 'GET', `/quotations/number-available?number=${encodeURIComponent(`${handNumber}-X`)}`);
+    check('and that an unused one is free', fresh.body.available === true);
+    const badShape = await http(salesToken, 'GET', '/quotations/number-available?number=' + encodeURIComponent('two words'));
+    check('a number with spaces is not a number', badShape.body.available === false);
+    const counterBefore = await prisma.numberSequence.aggregate({ where: { documentType: 'quotation' }, _sum: { lastNumber: true } });
+    const dupe = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Dupe`, number: handNumber });
+    check('a duplicate number is refused (409)', dupe.status === 409, dupe.text.slice(0, 160));
+    const counterAfter = await prisma.numberSequence.aggregate({ where: { documentType: 'quotation' }, _sum: { lastNumber: true } });
+    check('and burns no number in any series', counterBefore._sum.lastNumber === counterAfter._sum.lastNumber);
+    check('and writes no quotation', (await prisma.quotation.count({ where: { subject: `${TAG} Dupe` } })) === 0);
+
+    // The next number in the series steps over one typed by hand ahead of it.
+    const suggested = await http(salesToken, 'GET', '/quotations/next-number');
+    const ahead = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Took the suggestion by hand`,
+      number: String(suggested.body.number),
+      lines: [editorLines[2]],
+    });
+    check('the suggested number can be typed in by hand', ahead.status === 201 && ahead.body.number === suggested.body.number, ahead.text.slice(0, 160));
+    const afterwards = await http(salesToken, 'GET', '/quotations/next-number');
+    check('the next suggestion steps past it', afterwards.body.number !== suggested.body.number, `${afterwards.body.number}`);
+    const issued = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Issued after`, lines: [editorLines[2]] });
+    check(
+      'and the number issued on save is never the one taken by hand',
+      issued.status === 201 && issued.body.number !== suggested.body.number,
+      `${issued.body.number} vs ${suggested.body.number}`,
+    );
+
+    // Renumbering an existing quotation.
+    const renumbered = await http(salesToken, 'PATCH', `/quotations/${typed.body.id}`, { number: `${handNumber}-R` });
+    check('a quotation can be renumbered', renumbered.status === 200 && renumbered.body.number === `${handNumber}-R`, renumbered.text.slice(0, 160));
+    const clash = await http(salesToken, 'PATCH', `/quotations/${typed.body.id}`, { number: String(issued.body.number) });
+    check('but not onto another quotation’s number (409)', clash.status === 409, clash.text.slice(0, 160));
+    check(
+      'the renumbering is audited from → to',
+      (await prisma.auditLog.count({ where: { entityType: 'quotation', entityId: String(typed.body.id), summary: { contains: `${handNumber} → ${handNumber}-R` } } })) === 1,
+    );
+
+    // Subheadings: words only, no money, not counted as lines.
+    const headed = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} With subheadings`,
+      lines: [
+        { isHeading: true, title: 'General Requirements', quantity: 5, unit: 'lot', unitPrice: 999, unitCost: 1 },
+        { title: 'Service kit', description: '', quantity: 1, unit: 'lot', unitPrice: 7000, unitCost: 4000 },
+        { isHeading: true, title: 'Installation', quantity: 0, unit: 'lot', unitPrice: 0 },
+        { title: 'Labour', description: 'Assembly and programming', quantity: 1, unit: 'lot', unitPrice: 39400 },
+      ],
+    });
+    check('a quotation saves with subheadings among its lines', headed.status === 201, headed.text.slice(0, 200));
+    const headedRev = await prisma.quotationRevision.findFirstOrThrow({
+      where: { quotationId: String(headed.body.id) },
+      include: { items: { orderBy: { sortOrder: 'asc' } } },
+    });
+    check(
+      'a subheading carries no quantity, price, cost or amount, whatever was sent',
+      headedRev.items[0].isHeading === true &&
+        Number(headedRev.items[0].quantity) === 0 &&
+        Number(headedRev.items[0].unitPrice) === 0 &&
+        headedRev.items[0].unitCost === null &&
+        Number(headedRev.items[0].amount) === 0,
+    );
+    check('the subtotal is the lines only: 7,000 + 39,400', money(Number(headedRev.subtotal), 46_400), String(headedRev.subtotal));
+    const headedView = await http(salesToken, 'GET', `/quotations/${headed.body.id}`);
+    const headedPanel = (headedView.body.revisions as { costPanel?: { lineCount: number; costedLines: number } }[])[0]?.costPanel;
+    check('the cost panel counts the two lines, not the subheadings', headedPanel?.lineCount === 2 && headedPanel?.costedLines === 1, JSON.stringify(headedPanel));
+    const blankHeading = await http(salesToken, 'PUT', `/quotations/${headed.body.id}/revisions/${headedRev.id}/lines`, {
+      lines: [{ isHeading: true, title: '  ', quantity: 0, unit: 'lot', unitPrice: 0 }],
+    });
+    check('a subheading with no words is refused (400)', blankHeading.status === 400, blankHeading.text.slice(0, 160));
+    const headedPdf = pdfText(
+      Buffer.from(
+        await (
+          await fetch(`${BASE}/quotations/${headed.body.id}/revisions/${headedRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
+        ).arrayBuffer(),
+      ),
+    );
+    check('the PDF prints each subheading over its lines', headedPdf.includes('General Requirements') && headedPdf.includes('Installation'));
+    await http(salesToken, 'POST', `/quotations/${headed.body.id}/revisions/${headedRev.id}/submit`);
+    const managerApproval = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: headedRev.id, status: 'PENDING' } });
+    await act({ requestId: managerApproval.id, userId: manager.id, action: 'APPROVED' });
+    const nextHeaded = await http(salesToken, 'POST', `/quotations/${headed.body.id}/revisions`);
+    const r1 = await prisma.quotationRevision.findFirst({ where: { quotationId: String(headed.body.id), revision: 1 }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
+    check('a new revision keeps its subheadings', nextHeaded.status === 201 && r1?.items.filter((i) => i.isHeading).length === 2);
+
+    // Probability: no longer asked for — the lead's, else even odds.
+    const fromLead = await prisma.lead.create({
+      data: { number: await nextNumber('lead'), companyName: `${TAG} Probability lead`, customerId: clinic.id, assignedToId: sales.id, createdById: sales.id, probability: 35 },
+    });
+    const withLead = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, leadId: fromLead.id, subject: `${TAG} From a 35% lead`, lines: [editorLines[2]] });
+    check('a quotation from a lead takes the lead’s probability', withLead.status === 201 && withLead.body.probability === 35, String(withLead.body.probability));
+    check('one with no lead takes 50%', issued.body.probability === 50, String(issued.body.probability));
+
+    // Delete.
+    const salesDelete = await http(otherToken, 'DELETE', `/quotations/${typed.body.id}`);
+    check('a colleague cannot delete somebody else’s quotation (403)', salesDelete.status === 403, salesDelete.text.slice(0, 160));
+    const pending = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(issued.body.id) } });
+    await http(salesToken, 'POST', `/quotations/${issued.body.id}/revisions/${pending.id}/submit`);
+    const whilePending = await http(salesToken, 'DELETE', `/quotations/${issued.body.id}`);
+    check('one with the approver is not deleted (400)', whilePending.status === 400, whilePending.text.slice(0, 160));
+    const ownDelete = await http(salesToken, 'DELETE', `/quotations/${typed.body.id}`);
+    check('the author deletes their own', ownDelete.status === 200 && !(await prisma.quotation.findUnique({ where: { id: String(typed.body.id) } })));
+    check(
+      'the delete is audited',
+      (await prisma.auditLog.count({ where: { entityType: 'quotation', entityId: String(typed.body.id), action: 'DELETED' } })) === 1,
+    );
+    const leadDelete = await http(salesToken, 'DELETE', `/quotations/${withLead.body.id}`);
+    const leadAfter = await prisma.lead.findUniqueOrThrow({ where: { id: fromLead.id } });
+    check(
+      'its lead, left with no quotation, steps back rather than claiming a quote that is gone',
+      leadDelete.status === 200 && leadAfter.status === 'QUALIFIED',
+      `${leadDelete.status} ${leadAfter.status}`,
+    );
+    await prisma.quotation.update({ where: { id: String(ahead.body.id) }, data: { outcome: 'WON' } });
+    const wonDelete = await http(salesToken, 'DELETE', `/quotations/${ahead.body.id}`);
+    check('a won quotation is not deleted (400)', wonDelete.status === 400, wonDelete.text.slice(0, 160));
+    const reader = await makeUser('Verify Reader', 'reader@verifys.local', []);
+    const readerDelete = await http(signToken(reader.id, reader.email), 'DELETE', `/quotations/${ahead.body.id}`);
+    check('without gops.quotations.delete nobody deletes (403)', readerDelete.status === 403);
+
+    // The CEO as an optional approver, over ₱1,000,000.
+    const ceo = await makeUser('Verify CEO', 'ceo@verifys.local', ['executive']);
+    const big = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Over a million`,
+      lines: [{ title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
+    });
+    const bigView = await http(salesToken, 'GET', `/quotations/${big.body.id}`);
+    const options = (bigView.body.approvalOptions ?? []) as { id: string; label: string }[];
+    check('over ₱1,000,000 the submitter is offered "Add the CEO as approver"', options.some((o) => o.label === 'Add the CEO as approver'), JSON.stringify(options));
+    const smallView = await http(salesToken, 'GET', `/quotations/${headed.body.id}`);
+    check('under it, no such option', ((smallView.body.approvalOptions ?? []) as unknown[]).length === 0);
+    const ceoOption = options.find((o) => o.label === 'Add the CEO as approver')!;
+    const smallRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(headed.body.id), status: 'DRAFT' } });
+    const wrongBand = await http(salesToken, 'POST', `/quotations/${headed.body.id}/revisions/${smallRev.id}/submit`, { optionId: ceoOption.id });
+    check('the option is refused where it does not apply (400)', wrongBand.status === 400, wrongBand.text.slice(0, 160));
+    check(
+      'and the refused revision is back to a draft, not pending with nothing behind it',
+      (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: smallRev.id } })).status === 'DRAFT',
+    );
+    const bigRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(big.body.id) } });
+    const withCeo = await http(salesToken, 'POST', `/quotations/${big.body.id}/revisions/${bigRev.id}/submit`, { optionId: ceoOption.id });
+    check('ticked, it is submitted along the CEO route', withCeo.status === 200, withCeo.text.slice(0, 160));
+    const ceoRequest = await prisma.approvalRequest.findFirstOrThrow({
+      where: { documentType: 'quotation', documentId: bigRev.id, status: 'PENDING' },
+      include: { workflow: { include: { steps: true } } },
+    });
+    check('that route is the sales manager, then the CEO', ceoRequest.workflow?.steps.length === 2 && ceoRequest.workflowId === ceoOption.id);
+    await act({ requestId: ceoRequest.id, userId: manager.id, action: 'APPROVED' });
+    check(
+      'the sales manager’s approval alone does not approve it',
+      (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: bigRev.id } })).status === 'PENDING_APPROVAL',
+    );
+    const halfway = pdfText(
+      Buffer.from(
+        await (await fetch(`${BASE}/quotations/${big.body.id}/revisions/${bigRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+      ),
+    );
+    check('halfway, the PDF dates the manager and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && /APPROVED BY .*CEO/i.test(halfway));
+    await act({ requestId: ceoRequest.id, userId: ceo.id, action: 'APPROVED' });
+    check('the CEO’s approval approves it', (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: bigRev.id } })).status === 'APPROVED');
+    const signed = pdfText(
+      Buffer.from(
+        await (await fetch(`${BASE}/quotations/${big.body.id}/revisions/${bigRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+      ),
+    );
+    check('and the PDF carries both approvers, dated', signed.includes(manager.name) && signed.includes(ceo.name) && !signed.includes('Pending'));
+    const plain = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Over a million, standard route`,
+      lines: [{ title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
+    });
+    const plainRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(plain.body.id) } });
+    await http(salesToken, 'POST', `/quotations/${plain.body.id}/revisions/${plainRev.id}/submit`);
+    const plainRequest = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: plainRev.id }, include: { workflow: { include: { steps: true } } } });
+    check('unticked, a quotation over a million keeps the standard route — the CEO is an option, not a rule', plainRequest.workflow?.steps.length === 1);
+
+    // Admin › Approval Workflows: saving the CEO route without mentioning its
+    // label must not quietly make it a standard route every big quote takes.
+    const admin = await makeUser('Verify Admin', 'admin@verifys.local', []);
+    await prisma.user.update({ where: { id: admin.id }, data: { isSuperAdmin: true } });
+    const adminToken = signToken(admin.id, admin.email);
+    const route = await prisma.approvalWorkflow.findUniqueOrThrow({ where: { id: ceoOption.id }, include: { steps: { orderBy: { sequence: 'asc' } } } });
+    const resaved = await http(adminToken, 'PUT', `/workflows/${route.id}`, {
+      documentType: route.documentType,
+      name: route.name,
+      isActive: route.isActive,
+      minAmount: route.minAmount == null ? null : Number(route.minAmount),
+      maxAmount: route.maxAmount == null ? null : Number(route.maxAmount),
+      steps: route.steps.map((st) => ({ sequence: st.sequence, name: st.name, approverType: st.approverType, roleId: st.roleId, userId: st.userId })),
+    });
+    check(
+      'saving the CEO route in Admin without its label keeps it an option',
+      resaved.status === 200 && (await prisma.approvalWorkflow.findUniqueOrThrow({ where: { id: route.id } })).optionLabel === 'Add the CEO as approver',
+      resaved.text.slice(0, 160),
+    );
+
+    // Suggestions: what was quoted before, within what the caller may read.
+    const mineSuggest = await http(salesToken, 'GET', `/quotations/suggest?q=${encodeURIComponent('Service kit')}`);
+    const mineRow = (mineSuggest.body as unknown as { title: string; unitPrice: number; unitCost?: number | null; source: string }[]).find((r) => r.title === 'Service kit');
+    check('typing a product offers what it was quoted at before', mineSuggest.status === 200 && mineRow?.unitPrice === 7000 && mineRow?.source === 'history', JSON.stringify(mineRow));
+    check('with its cost, on the author’s own quotation', mineRow?.unitCost === 4000);
+    const theirSuggest = await http(otherToken, 'GET', `/quotations/suggest?q=${encodeURIComponent('Service kit')}`);
+    const theirRow = (theirSuggest.body as unknown as { title: string; unitCost?: number | null }[]).find((r) => r.title === 'Service kit');
+    check('a colleague who reads every quotation is offered the price but never the cost', !!theirRow && !('unitCost' in theirRow), JSON.stringify(theirRow));
+    check('two letters at least', ((await http(salesToken, 'GET', '/quotations/suggest?q=S')).body as unknown as unknown[]).length === 0);
   }
 
   await cleanup();

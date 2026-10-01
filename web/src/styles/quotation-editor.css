@@ -50,7 +50,15 @@
   column-gap: var(--s-3);
   row-gap: var(--s-1);
   align-items: center;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--s-2);
+  font-size: var(--fs-md);
+}
+
+/* One size for every label, value and box; labels differ by weight only. */
+.qe-rows input,
+.qe-rows select,
+.qe-rows textarea {
+  font-size: var(--fs-md);
 }
 
 /* A read-only value is a .field too, so its label needs the same weight as the rule below. */
@@ -59,7 +67,7 @@
   grid-column: 1;
   grid-row: 1;
   margin: 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: 600;
   letter-spacing: 0;
   text-transform: none;
@@ -173,12 +181,10 @@
   overflow-x: auto;
 }
 
+/* The product and its description take whatever width the others leave. */
 table.data.qe-lines {
-  min-width: 68rem;
-}
-
-table.data.qe-lines.qe-lines-nocost {
-  min-width: 48rem;
+  min-width: 42rem;
+  table-layout: fixed;
 }
 
 /* The zebra and hover tints are for reading rows, not for typing in them. */
@@ -201,7 +207,7 @@ table.data.qe-lines td {
 
 .qe-lines td > input + input,
 .qe-lines td > input + textarea,
-.qe-lines .qe-cost > * + * {
+.qe-lines td > .lookup + textarea {
   margin-top: var(--s-1);
 }
 
@@ -221,16 +227,8 @@ table.data.qe-lines td {
   width: 3rem;
 }
 
-.qe-col-group {
-  width: 9rem;
-}
-
-.qe-col-product {
-  min-width: 16rem;
-}
-
 .qe-col-qty {
-  width: 10rem;
+  width: 9rem;
 }
 
 /* Quantity and unit on one line. */
@@ -247,25 +245,84 @@ table.data.qe-lines td {
 }
 
 .qe-col-price {
-  width: 9rem;
+  width: 7.5rem;
 }
 
 .qe-col-amount {
-  width: 9rem;
-  white-space: nowrap;
-}
-
-.qe-col-cost {
-  width: 17rem;
-}
-
-.qe-col-margin {
   width: 8rem;
   white-space: nowrap;
 }
 
 .qe-col-remove {
-  width: 2.5rem;
+  width: 2.75rem;
+}
+
+/* A line is a tbody: the product's row, then (for cost) its strip, no rule between. */
+tbody.qe-line > tr:not(:last-child) > td {
+  border-bottom: none;
+  padding-bottom: var(--s-1);
+}
+
+tbody.qe-line > tr + tr > td {
+  padding-top: 0;
+}
+
+/* A subheading: one wide box, in the heading's green. */
+.qe-heading-input {
+  font-weight: 600;
+  color: var(--neon-dim);
+}
+
+tbody.qe-line-heading td {
+  background: var(--surface-2);
+}
+
+/* The cost strip under a line. */
+.qe-cost-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.qe-cost-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+/* One line across, wrapping only when the table is narrow: the global
+   width: 100% on inputs would otherwise put each box on a line of its own. */
+.qe-cost-strip input {
+  width: auto;
+}
+
+.qe-cost-strip .qe-provider {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.qe-cost-strip .qe-provider .lookup input {
+  width: 100%;
+}
+
+.qe-cost-note {
+  flex: 2 1 10rem;
+  min-width: 0;
+}
+
+.qe-cost-unit {
+  flex: 0 0 8rem;
+  width: 8rem;
+}
+
+.qe-cost-margin {
+  min-width: 9rem;
+  text-align: right;
+  font-size: var(--fs-sm);
 }
 
 /* Line number over its move buttons — the keyboard's version of a drag handle. */
@@ -274,11 +331,6 @@ table.data.qe-lines td {
   flex-direction: column;
   align-items: center;
   gap: var(--s-1);
-}
-
-.qe-cost {
-  display: flex;
-  flex-direction: column;
 }
 
 /* SCORO's two toggles — a person for in-house, a building for a supplier — then who. */
@@ -309,15 +361,8 @@ table.data.qe-lines td {
   font-size: var(--fs-sm);
 }
 
-/* Notes beside the unit cost, as SCORO's second line. */
-.qe-cost-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 7rem;
-  align-items: center;
-  gap: var(--s-1);
-}
-
 .qe-cost-sum {
+  min-width: 7rem;
   font-size: var(--fs-sm);
   text-align: right;
 }
@@ -335,12 +380,29 @@ table.data.qe-lines td {
   padding: var(--s-1) var(--s-2);
 }
 
-/* Append quote: one row per quotation, the number beside its name. */
+/* Append quote, in the page: a find box and the matches under it. */
+.qe-append {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.qe-append-head {
+  justify-content: space-between;
+  margin-bottom: var(--s-2);
+}
+
+.qe-append-title {
+  font-weight: 600;
+}
+
 .qe-append-list {
   list-style: none;
-  margin: 0;
+  margin: var(--s-2) 0 0;
   padding: 0;
-  max-height: 50vh;
+  max-height: 22rem;
   overflow-y: auto;
   border-top: 1px solid var(--line-soft);
 }
@@ -402,4 +464,51 @@ table.data.qe-lines td {
     flex: 1 1 auto;
     justify-content: center;
   }
+}
+
+/* The quote number: the box, its revision, and "Use the suggested number". */
+.qe-number {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.qe-number input {
+  width: 15rem;
+  max-width: 100%;
+}
+
+/* Product suggestions: the name, then what it went for and where from. */
+.qe-suggest {
+  min-width: 24rem;
+}
+
+.qe-suggest button {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.qe-suggest-name {
+  font-weight: 600;
+}
+
+.qe-suggest-meta,
+.qe-suggest-desc {
+  font-size: var(--fs-xs);
+}
+
+.qe-suggest-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* In-page confirmations where a dialog used to ask. */
+.qe-leave,
+.qe-confirm,
+.qe-locked {
+  gap: var(--s-2);
+  align-items: center;
+  flex-wrap: wrap;
 }

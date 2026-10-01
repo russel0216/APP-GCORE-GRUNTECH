@@ -7,21 +7,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { Stat } from '../../components/charts';
-import {
-  Checkbox,
-  Empty,
-  ErrorBox,
-  Field,
-  Loading,
-  Modal,
-  StatusBadge,
-  formatDate,
-  formatDateTime,
-  formatMoney,
-  useToast,
-  type Tone,
-} from '../../components/ui';
-import { LostReasonModal } from './LostReasonModal';
+import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 
 export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -142,7 +128,6 @@ export function Quotations() {
       align: 'right',
       render: (q) => (q.latest ? <span className="mono">{formatMoney(q.latest.total)}</span> : '—'),
     },
-    { key: 'probability', label: 'Prob.', align: 'right', render: (q) => `${q.probability}%` },
     { key: 'owner', label: 'Owner', render: (q) => q.owner.name },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (q) => formatDate(q.createdAt) },
     {
@@ -208,6 +193,8 @@ export interface SupplierRef {
 export interface Item {
   id: string;
   group: string | null;
+  /** A subheading: its title is the heading; no quantity, price or cost. */
+  isHeading?: boolean;
   title: string | null;
   description: string;
   quantity: number;
@@ -338,8 +325,33 @@ export interface QuotationDetail {
   stages?: OutcomeStage[];
   /** Issue to decision, once the quotation is won or lost. */
   closedInDays?: number | null;
-  /** The company's VAT rate — with 0%, what the editor's Tax dropdown offers. */
+  /** The company's VAT rate. */
   companyVatRate?: number;
+  /** What the Tax dropdown offers: the company rate, 8%, 6% (Government), 0%. */
+  taxOptions?: { rate: number; label: string }[];
+  /** Optional approval routes for the draft at its total — "Add the CEO as approver". */
+  approvalOptions?: { id: string; label: string }[];
+}
+
+/**
+ * The lines as the paper prints them: a subheading is a heading row, and so is
+ * a SCORO group where it changes (older quotations carry groups, newer ones
+ * subheadings — both read the same).
+ */
+export function displayRows(items: Item[]): ({ kind: 'heading'; key: string; text: string } | { kind: 'line'; item: Item; n: number })[] {
+  const rows: ({ kind: 'heading'; key: string; text: string } | { kind: 'line'; item: Item; n: number })[] = [];
+  let group: string | null = null;
+  let n = 0;
+  for (const item of items) {
+    if (item.isHeading) {
+      rows.push({ kind: 'heading', key: item.id, text: item.title ?? '' });
+      continue;
+    }
+    if (item.group && item.group !== group) rows.push({ kind: 'heading', key: `g-${item.id}`, text: item.group });
+    group = item.group ?? group;
+    rows.push({ kind: 'line', item, n: ++n });
+  }
+  return rows;
 }
 
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
@@ -353,9 +365,13 @@ export function QuotationDetail() {
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** "Lost" chosen: the reason is asked for here, in the page. */
   const [losing, setLosing] = useState(false);
+  const [lostReason, setLostReason] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [optionId, setOptionId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const navigate = useNavigate();
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -386,10 +402,15 @@ export function QuotationDetail() {
   const approved = quotation.revisions.find((r) => r.status === 'APPROVED') ?? null;
   const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
   const showCost = quotation.canSeeCost;
-  // A draft is written on the full-page editor; the dialog only ever holds
-  // what may still change once a revision has left draft.
-  const draft = quotation.revisions.find((r) => r.status === 'DRAFT') ?? null;
+  // Everything is changed on the full-page editor — a draft's lines and terms,
+  // or, once no revision is a draft, the quotation's own details.
   const editHref = `/g-ops/quotations/${quotation.id}/edit`;
+  const canDelete =
+    quotation.canEdit &&
+    can('gops.quotations.delete') &&
+    quotation.outcome !== 'WON' &&
+    jobs.length === 0 &&
+    !quotation.revisions.some((r) => r.status === 'PENDING_APPROVAL');
 
   async function act(fn: () => Promise<unknown>, message: string) {
     try {
@@ -401,12 +422,27 @@ export function QuotationDetail() {
     }
   }
 
-  /** Throws on refusal so LostReasonModal keeps the reason and shows why. */
-  async function markLost(reason: string) {
-    await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: reason });
-    setLosing(false);
-    toast('ok', `${quotation!.number} marked lost`);
-    await load();
+  async function markLost() {
+    try {
+      await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: lostReason.trim() });
+      setLosing(false);
+      setLostReason('');
+      toast('ok', `${quotation!.number} marked lost`);
+      await load();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function remove() {
+    try {
+      await api.del(`/quotations/${quotation!.id}`);
+      toast('ok', `${quotation!.number} deleted`);
+      navigate('/g-ops/quotations');
+    } catch (err) {
+      setError(err);
+      setDeleting(false);
+    }
   }
 
   function printPdf() {
@@ -445,6 +481,7 @@ export function QuotationDetail() {
   function changeOutcome(next: string) {
     if (!next) return;
     if (next === 'LOST') {
+      setLostReason(quotation!.lostReason ?? '');
       setLosing(true);
       return;
     }
@@ -523,14 +560,25 @@ export function QuotationDetail() {
                 New revision
               </button>
             )}
-            {quotation.canEdit &&
-              (draft ? (
-                <Link className="btn btn-primary" to={editHref}>
-                  Modify
-                </Link>
+            {quotation.canEdit && (
+              <Link className="btn btn-primary" to={editHref}>
+                Modify
+              </Link>
+            )}
+            {canDelete &&
+              (deleting ? (
+                <span className="row qd-confirm" role="group" aria-label="Confirm delete">
+                  <span className="qd-confirm-text">Delete {quotation.number}?</span>
+                  <button className="btn btn-danger" onClick={() => void remove()}>
+                    Delete
+                  </button>
+                  <button className="btn" onClick={() => setDeleting(false)}>
+                    Keep it
+                  </button>
+                </span>
               ) : (
-                <button className="btn btn-primary" onClick={() => setSettingsOpen(true)}>
-                  Modify
+                <button className="btn btn-danger" onClick={() => setDeleting(true)}>
+                  Delete
                 </button>
               ))}
           </div>
@@ -549,7 +597,7 @@ export function QuotationDetail() {
                     {quotation.revisions.map((r) => (
                       <button
                         key={r.id}
-                        className={`btn btn-sm${r.id === revision?.id ? ' btn-primary' : ''}`}
+                        className={`btn btn-sm qd-revision${r.id === revision?.id ? ' btn-primary is-selected' : ''}`}
                         onClick={() => setSelected(r.id)}
                         aria-pressed={r.id === revision?.id}
                       >
@@ -627,7 +675,6 @@ export function QuotationDetail() {
                 ) : null}
               </Detail>
               <Detail label="Estimated closing date">{quotation.expectedClosing ? formatDate(quotation.expectedClosing) : null}</Detail>
-              <Detail label="Probability">{`${quotation.probability}%`}</Detail>
             </dl>
 
             <dl className="qd-group">
@@ -639,6 +686,15 @@ export function QuotationDetail() {
                   <StatusBadge status={quotation.outcome} extra={QUOTATION_OUTCOME_TONES} />
                   <Stamp at={lastMove?.at ?? quotation.createdAt} by={lastMove?.by} />
                 </span>
+                {/* SCORO's days-in-status, as one quiet line rather than a row of tiles. */}
+                {((quotation.stages?.length ?? 0) > 0 || quotation.closedInDays != null) && (
+                  <div className="qd-sub qd-days">
+                    {(quotation.stages ?? [])
+                      .map((st) => `${outcomeLabel(st.outcome)} ${dayCount(st.days)}${st.current ? ' so far' : ''}`)
+                      .join(' · ')}
+                    {quotation.closedInDays != null ? ` · ${quotation.outcome === 'WON' ? 'won' : 'lost'} in ${dayCount(quotation.closedInDays)}` : ''}
+                  </div>
+                )}
                 {quotation.canEdit && moves.length > 0 && (
                   <div className="qd-status-change">
                     <select
@@ -665,6 +721,29 @@ export function QuotationDetail() {
                         ? ' Won is available once a revision is approved — only the approved revision becomes a project.'
                         : ''}
                     </p>
+                  </div>
+                )}
+                {losing && (
+                  <div className="qd-lost">
+                    <label htmlFor="qd-lost-reason" className="qd-lost-label">
+                      Why was it lost?
+                    </label>
+                    <textarea
+                      id="qd-lost-reason"
+                      rows={2}
+                      autoFocus
+                      value={lostReason}
+                      onChange={(e) => setLostReason(e.target.value)}
+                    />
+                    <div className="row qd-lost-actions">
+                      <button className="btn btn-danger btn-sm" disabled={!lostReason.trim()} onClick={() => void markLost()}>
+                        Mark lost
+                      </button>
+                      <button className="btn btn-sm" onClick={() => setLosing(false)}>
+                        Cancel
+                      </button>
+                      <span className="faint sales-hint">Sales Analytics reports the reasons.</span>
+                    </div>
                   </div>
                 )}
               </Detail>
@@ -708,31 +787,6 @@ export function QuotationDetail() {
           </div>
         </div>
 
-        {/* SCORO's strip: how long it sat in each status, and how long it took to close. */}
-        {((quotation.stages?.length ?? 0) > 0 || quotation.closedInDays != null) && (
-          <div className="kpi-grid qd-stages" aria-label="Days in each status">
-            {(quotation.stages ?? []).map((s) => (
-              <Stat
-                key={s.outcome}
-                label={outcomeLabel(s.outcome)}
-                value={dayCount(s.days)}
-                figure
-                accent={STAGE_ACCENT[s.outcome] ?? 'quiet'}
-                sub={s.current ? 'so far' : undefined}
-              />
-            ))}
-            {quotation.closedInDays != null && (
-              <Stat
-                label="Closed in"
-                value={dayCount(quotation.closedInDays)}
-                figure
-                accent={quotation.outcome === 'WON' ? 'ok' : 'danger'}
-                sub={quotation.outcome === 'WON' ? 'won' : 'lost'}
-              />
-            )}
-          </div>
-        )}
-
         {/* SCORO's action bar, at the foot of the details it acts on. */}
         <div className="qd-bar">
           <div className="row">
@@ -742,12 +796,24 @@ export function QuotationDetail() {
             <button className="btn" onClick={printPdf} disabled={!revision}>
               PDF
             </button>
+            {canSubmit &&
+              (quotation.approvalOptions ?? []).map((o) => (
+                <Checkbox
+                  key={o.id}
+                  checked={optionId === o.id}
+                  onChange={(v) => setOptionId(v ? o.id : null)}
+                  label={o.label}
+                />
+              ))}
             {canSubmit && (
               <button
                 className="btn btn-ok"
                 onClick={() =>
                   act(
-                    () => api.post(`/quotations/${quotation.id}/revisions/${revision!.id}/submit`),
+                    () =>
+                      api.post(`/quotations/${quotation.id}/revisions/${revision!.id}/submit`, {
+                        optionId: optionId && (quotation.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null,
+                      }),
                     'Submitted for approval',
                   )
                 }
@@ -794,22 +860,11 @@ export function QuotationDetail() {
           {/* Who has this revision, and since when — the one approval rail. */}
           <DocumentApproval documentType="quotation" documentId={revision.id} reloadToken={reload} />
 
-          <div className="kpi-grid">
-            <Stat
-              label="Subtotal"
-              value={formatMoney(revision.subtotal)}
-              figure
-              sub={revision.discountAmount > 0 ? `less ${formatMoney(revision.discountAmount)} discount` : 'no discount'}
-            />
-            <Stat
-              label={`VAT ${(revision.vatRate * 100).toFixed(0)}%`}
-              value={formatMoney(revision.vatAmount)}
-              figure
-              sub={revision.vatInclusive ? 'backed out of the prices' : 'added on'}
-            />
-            <Stat label="Total" value={formatMoney(revision.total)} figure accent="neon" />
-            {showCost && <MarginStat panel={revision.costPanel} costing={revision.costing} />}
-          </div>
+          {showCost && ((revision.costPanel?.costedLines ?? 0) > 0 || revision.costing?.totalCost != null) && (
+            <div className="qd-margin">
+              <MarginStat panel={revision.costPanel} costing={revision.costing} />
+            </div>
+          )}
 
           <div className="card sales-card-gap">
             <div className="row sales-card-head">
@@ -854,8 +909,7 @@ export function QuotationDetail() {
                   <thead>
                     <tr>
                       <th className="sales-col-num">#</th>
-                      <th>Group</th>
-                      <th>Product | Description</th>
+                      <th className="qd-col-product">Product | Description</th>
                       <th className="right">Qty | Unit</th>
                       <th className="right">Unit price</th>
                       <th className="right">Amount</th>
@@ -865,32 +919,37 @@ export function QuotationDetail() {
                     </tr>
                   </thead>
                   <tbody>
-                    {revision.items.map((item, i) => (
-                      <tr key={item.id}>
-                        <td className="mono">{i + 1}</td>
-                        <td>{item.group || <span className="faint">—</span>}</td>
+                    {displayRows(revision.items).map((row) =>
+                      row.kind === 'heading' ? (
+                        <tr key={row.key} className="quote-heading-row">
+                          <td />
+                          <td colSpan={4 + (showCost ? 2 : 0) + (editable ? 1 : 0)}>{row.text}</td>
+                        </tr>
+                      ) : (
+                      <tr key={row.item.id}>
+                        <td className="mono">{row.n}</td>
                         <td>
-                          {item.title && <div className="quote-line-title">{item.title}</div>}
-                          {item.description && <div className="quote-line-desc">{item.description}</div>}
+                          {row.item.title && <div className="quote-line-title">{row.item.title}</div>}
+                          {row.item.description && <div className="quote-line-desc">{row.item.description}</div>}
                         </td>
                         <td className="right mono">
-                          {item.quantity} <span className="faint">{item.unit}</span>
+                          {row.item.quantity} <span className="faint">{row.item.unit}</span>
                         </td>
-                        <td className="right mono">{formatMoney(item.unitPrice)}</td>
-                        <td className="right mono">{formatMoney(item.amount)}</td>
+                        <td className="right mono">{formatMoney(row.item.unitPrice)}</td>
+                        <td className="right mono">{formatMoney(row.item.amount)}</td>
                         {showCost && (
                           <td>
-                            <LineCost item={item} />
+                            <LineCost item={row.item} />
                           </td>
                         )}
                         {showCost && (
                           <td className="right mono">
-                            {item.margin == null ? (
+                            {row.item.margin == null ? (
                               <span className="faint">—</span>
                             ) : (
                               <>
-                                <div className={item.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(item.margin)}</div>
-                                <div className="faint">{pct(item.marginPct)}</div>
+                                <div className={row.item.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(row.item.margin)}</div>
+                                <div className="faint">{pct(row.item.marginPct)}</div>
                               </>
                             )}
                           </td>
@@ -899,15 +958,16 @@ export function QuotationDetail() {
                           <td>
                             <Link
                               className="btn btn-sm"
-                              to={`${editHref}#line-${i + 1}`}
-                              aria-label={`Modify line ${i + 1}`}
+                              to={`${editHref}#line-${row.n}`}
+                              aria-label={`Modify line ${row.n}`}
                             >
                               Modify
                             </Link>
                           </td>
                         )}
                       </tr>
-                    ))}
+                      ),
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -931,26 +991,6 @@ export function QuotationDetail() {
         </>
       )}
 
-      {settingsOpen && revision && (
-        <QuotationSettings
-          quotation={quotation}
-          revision={revision}
-          onClose={() => setSettingsOpen(false)}
-          onSaved={() => {
-            setSettingsOpen(false);
-            void load();
-          }}
-        />
-      )}
-
-      {losing && (
-        <LostReasonModal
-          what={quotation.number}
-          initial={quotation.lostReason ?? ''}
-          onClose={() => setLosing(false)}
-          onSave={markLost}
-        />
-      )}
     </div>
   );
 }
@@ -1220,7 +1260,8 @@ function MarginStat({
     pctValue = costing.contractValue > 0 ? profit / costing.contractValue : 0;
     source = 'on the costing';
   } else {
-    return <Stat label="Margin" value="—" sub="no line costs or costing yet" />;
+    // Nothing costed yet: no tile, rather than a dash in a box.
+    return null;
   }
   const accent = pctValue < 0 ? 'danger' : pctValue < 0.1 ? 'warn' : 'ok';
   return (
@@ -1276,193 +1317,4 @@ const initials = (name: string) =>
     .join('')
     .toUpperCase();
 
-/** The strip's colours follow the status pill's: open waits on us, the rest are the lifecycle. */
-const STAGE_ACCENT: Record<string, 'ok' | 'warn' | 'danger' | 'info' | 'neon' | 'quiet'> = {
-  OPEN: 'warn',
-  SUBMITTED: 'info',
-  NEGOTIATION: 'neon',
-};
 
-// ── Modals ───────────────────────────────────────────────────────────────────
-
-function QuotationSettings({
-  quotation,
-  revision,
-  onClose,
-  onSaved,
-}: {
-  quotation: QuotationDetail;
-  revision: Revision;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [costings, setCostings] = useState<{ id: string; number: string; title: string }[]>([]);
-  const [form, setForm] = useState({
-    subject: quotation.subject,
-    probability: quotation.probability.toString(),
-    expectedClosing: quotation.expectedClosing?.slice(0, 10) ?? '',
-    costingId: revision.costing?.id ?? '',
-    validityDays: revision.validityDays.toString(),
-    terms: revision.terms ?? '',
-    notes: revision.notes ?? '',
-    vatInclusive: revision.vatInclusive,
-    prNumber: revision.prNumber ?? '',
-    delivery: revision.delivery ?? '',
-    // The customer's own terms, unless this revision already says otherwise.
-    paymentTerms: revision.paymentTerms ?? quotation.customer.paymentTerms ?? '',
-  });
-
-  useEffect(() => {
-    api.get<typeof costings>('/costings/lookup').then(setCostings).catch(() => {});
-  }, []);
-
-  const editableRevision = revision.status === 'DRAFT';
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.patch(`/quotations/${quotation.id}`, {
-        subject: form.subject,
-        probability: Number(form.probability),
-        expectedClosing: form.expectedClosing || null,
-      });
-      if (editableRevision) {
-        await api.patch(`/quotations/${quotation.id}/revisions/${revision.id}`, {
-          costingId: form.costingId || null,
-          validityDays: Number(form.validityDays),
-          terms: form.terms || null,
-          notes: form.notes || null,
-          vatInclusive: form.vatInclusive,
-          prNumber: form.prNumber || null,
-          delivery: form.delivery || null,
-          paymentTerms: form.paymentTerms || null,
-        });
-      }
-      toast('ok', 'Saved');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      wide
-      title={`Modify ${quotation.number}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      {!editableRevision && (
-        <div className="alert info">
-          Revision {revision.revision} is {revision.status.toLowerCase().replace(/_/g, ' ')}, so its
-          commercial terms are locked. Only the subject, probability and expected closing can change
-          here.
-        </div>
-      )}
-
-      <div className="grid grid-2">
-        <Field label="Subject">
-          <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
-        </Field>
-        <Field label="Probability %" hint="Your own read — the weighted pipeline multiplies by it">
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={form.probability}
-            onChange={(e) => setForm({ ...form, probability: e.target.value })}
-          />
-        </Field>
-        <Field label="Expected closing" hint="When you expect the decision — the pipeline forecast reads it">
-          <input
-            type="date"
-            value={form.expectedClosing}
-            onChange={(e) => setForm({ ...form, expectedClosing: e.target.value })}
-          />
-        </Field>
-        <Field label="Costing" hint="Where the price and the margin come from">
-          <select
-            value={form.costingId}
-            disabled={!editableRevision}
-            onChange={(e) => setForm({ ...form, costingId: e.target.value })}
-          >
-            <option value="">— none —</option>
-            {costings.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.number} — {c.title}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="PR number" hint="The customer's purchase request reference — printed on the quotation">
-          <input
-            value={form.prNumber}
-            disabled={!editableRevision}
-            onChange={(e) => setForm({ ...form, prNumber: e.target.value })}
-          />
-        </Field>
-        <Field
-          label="Payment terms"
-          hint={quotation.customer.paymentTerms ? `The customer's usual: ${quotation.customer.paymentTerms}` : undefined}
-        >
-          <input
-            value={form.paymentTerms}
-            disabled={!editableRevision}
-            onChange={(e) => setForm({ ...form, paymentTerms: e.target.value })}
-          />
-        </Field>
-        <Field label="Delivery" hint="e.g. 4 to 6 weeks upon receipt of PO">
-          <input
-            value={form.delivery}
-            disabled={!editableRevision}
-            onChange={(e) => setForm({ ...form, delivery: e.target.value })}
-          />
-        </Field>
-        <Field label="Validity (days)">
-          <input
-            type="number"
-            disabled={!editableRevision}
-            value={form.validityDays}
-            onChange={(e) => setForm({ ...form, validityDays: e.target.value })}
-          />
-        </Field>
-      </div>
-
-      <Field label="Terms and conditions">
-        <textarea
-          value={form.terms}
-          disabled={!editableRevision}
-          onChange={(e) => setForm({ ...form, terms: e.target.value })}
-        />
-      </Field>
-      <Field label="Notes">
-        <textarea
-          value={form.notes}
-          disabled={!editableRevision}
-          onChange={(e) => setForm({ ...form, notes: e.target.value })}
-        />
-      </Field>
-
-      <Checkbox
-        checked={form.vatInclusive}
-        onChange={(v) => editableRevision && setForm({ ...form, vatInclusive: v })}
-        label="Prices are VAT inclusive — the tax is backed out rather than added on"
-      />
-    </Modal>
-  );
-}
