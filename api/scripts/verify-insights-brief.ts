@@ -31,6 +31,8 @@ import { nextNumber } from '../src/shared/numbering';
 import { receiveStock } from '../src/shared/inventory';
 import { quotationValue } from '../src/shared/pipeline';
 import { cents, parseRange, SUMMARY_FIGURES } from '../src/shared/insights';
+import { periodWhere } from '../src/shared/gops';
+import { manilaDayKey } from '../src/shared/day';
 // HR's day key is the LOCAL date (the same convention as web/src/lib/day.ts's
 // todayLocal), not Insights' UTC one. An attendance fixture keyed by the UTC
 // day would land on yesterday for eight hours of every Manila morning.
@@ -61,6 +63,14 @@ const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v)
 const TAG = 'ZZINB';
 const MAIL = '@verifyib.local';
 const BASE = `http://localhost:${env.port}/api`;
+
+/**
+ * The day the screens send as `to`: todayLocal() in a browser in Manila. Not
+ * the UTC date. G-OPS ends `to` at 23:59:59.999 on the server clock
+ * (periodWhere), so for the eight hours after Manila midnight a UTC `to`
+ * closed the window at the end of yesterday and dropped everything since.
+ */
+const screenDay = (at: Date) => manilaDayKey(at);
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -170,6 +180,19 @@ async function main() {
   );
   check('and it still starts at the first instant of its first day', r.from.toISOString() === '2026-01-01T00:00:00.000Z');
 
+  // Pinned at both ends of a Manila day rather than at whatever hour this
+  // runs: at 00:30 and 07:59 the UTC date is still the 1st.
+  const sameDay = ['00:30', '07:59', '23:59'].map((hhmm) => new Date(`2026-10-02T${hhmm}:00+08:00`));
+  const missed = sameDay.filter((at) => {
+    const end = (periodWhere({ query: { to: screenDay(at) } }) as { createdAt?: { lte?: Date } }).createdAt?.lte;
+    return !end || end.getTime() < at.getTime();
+  });
+  check(
+    'a G-OPS window to "today" holds every hour of the Manila day, the ones before 08:00 included',
+    missed.length === 0,
+    `outside it: ${missed.map((at) => at.toISOString()).join(', ')}`,
+  );
+
   const badLinks = Object.entries(SUMMARY_FIGURES).filter(([, f]) => !f.to.startsWith('/'));
   check('every brief figure opens an app path', badLinks.length === 0, badLinks.map(([k]) => k).join(', '));
 
@@ -205,7 +228,11 @@ async function main() {
   });
 
   const now = new Date();
+  const today = screenDay(now);
+  // Insights' own day, for the checks on its UTC range below.
   const todayUtc = now.toISOString().slice(0, 10);
+  // Finance counts "collected this year" from 1 January UTC, so the window
+  // starts there too.
   const yearStart = `${now.getUTCFullYear()}-01-01`;
 
   // Sales: a qualified lead on a hospital, a lead with no customer yet, a
@@ -312,8 +339,8 @@ async function main() {
       status: 'COMPLETED',
       contractId: contract.id,
       customerId: hospital.id,
-      dueDate: new Date(`${todayUtc}T00:00:00.000Z`),
-      performedAt: new Date(`${todayUtc}T00:00:00.000Z`),
+      dueDate: new Date(`${today}T00:00:00.000Z`),
+      performedAt: new Date(`${today}T00:00:00.000Z`),
     },
   });
 
@@ -369,7 +396,7 @@ async function main() {
       return { status: res.status, body: body as T, text };
     };
 
-    const window = `from=${yearStart}&to=${todayUtc}`;
+    const window = `from=${yearStart}&to=${today}`;
     const dash = await api<{ summary: Summary; sales: { won: number } }>('GET', `/insights/dashboard?${window}`);
     const S = dash.body.summary;
     check('the company overview carries the brief', dash.status === 200 && !!S, String(dash.status));
@@ -539,7 +566,7 @@ async function main() {
         money(cash.body.totals.advances, val(f, 'advancesToRelease') ?? NaN),
       JSON.stringify(cash.body.totals),
     );
-    const range = parseRange(yearStart, todayUtc);
+    const range = parseRange(yearStart, today);
     const collectedDirect = await prisma.payment.aggregate({
       where: { kind: 'RECEIPT', customerId: { not: null }, clearedAt: { gte: range.from, lte: range.to } },
       _sum: { amount: true },

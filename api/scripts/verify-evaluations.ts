@@ -26,6 +26,7 @@ import { act, approvalSignoffs } from '../src/shared/approvals';
 import { globalSearch } from '../src/shared/search';
 import { hrSettings } from '../src/shared/hr';
 import { addMonths } from '../src/shared/aftermarket';
+import { manilaDate } from '../src/shared/day';
 import {
   allowedRecommendations,
   dueEvaluations,
@@ -84,12 +85,15 @@ const utc = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d))
 const iso = (d: Date | string | null | undefined) =>
   d == null ? null : (typeof d === 'string' ? d : d.toISOString()).slice(0, 10);
 
-/** Today as a date-only value, the way a @db.Date column stores it. */
-function today(): Date {
-  const n = new Date();
-  return utc(n.getFullYear(), n.getMonth() + 1, n.getDate());
-}
+/**
+ * Today as a date-only value, the way a @db.Date column stores it, and on the
+ * server's rule: the MANILA date. The host's own date agrees only on a host
+ * set to Manila time.
+ */
+const today = () => manilaDate(new Date());
 const plusDays = (d: Date, days: number) => new Date(d.getTime() + days * 86_400_000);
+/** An instant at a Manila wall-clock time on a calendar date. */
+const manilaAt = (day: Date, hhmm: string) => new Date(`${iso(day)}T${hhmm}:00+08:00`);
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -414,6 +418,40 @@ async function main() {
   );
   check('a regular employee is never due', (await dueEvaluations({ employeeId: e3.id })).length === 0);
 
+  // The same milestone read at chosen instants, not at whatever hour this runs
+  // — `asOf` is the clock. 00:30 in Manila is 16:30Z the day before: the eight
+  // hours a UTC "today" was a day behind the Manila one.
+  const month3Due = addMonths(hiredE1, 3);
+  const month3At = async (at: Date) =>
+    (await dueEvaluations({ employeeId: e1.id, asOf: at })).find((r) => r.milestone === 'MONTH_3');
+  const atDawn = await month3At(manilaAt(plusDays(month3Due, -5), '00:30'));
+  const atNight = await month3At(manilaAt(plusDays(month3Due, -5), '23:30'));
+  check(
+    'at 00:30 in Manila, with the UTC date still yesterday, month 3 is five days off — as it is at 23:30',
+    atDawn?.daysLeft === 5 && atNight?.daysLeft === 5,
+    `${atDawn?.daysLeft} at 00:30, ${atNight?.daysLeft} at 23:30`,
+  );
+  const dayAfter = await month3At(manilaAt(plusDays(month3Due, 1), '00:30'));
+  check(
+    'at 00:30 on the morning after it fell due it is a day overdue, not "due today"',
+    dayAfter?.daysLeft === -1 && dayAfter.overdue,
+    JSON.stringify(dayAfter && [dayAfter.daysLeft, dayAfter.overdue]),
+  );
+  const notice = settings.evaluationNoticeDays;
+  const noticeOpens = await month3At(manilaAt(plusDays(month3Due, -notice), '00:30'));
+  const eveBefore = await month3At(manilaAt(plusDays(month3Due, -notice - 1), '23:30'));
+  check(
+    `the ${notice}-day notice is whole Manila days — listed from 00:30 on its first day, not the evening before`,
+    noticeOpens?.daysLeft === notice && eveBefore === undefined,
+    `${noticeOpens?.daysLeft ?? 'not listed'} at 00:30, ${eveBefore?.daysLeft ?? 'not listed'} the evening before`,
+  );
+  const tabAtDawn = await milestonesFor(e1.id, manilaAt(plusDays(month3Due, -5), '00:30'));
+  check(
+    "the employee's Evaluations tab counts the same days at the same hour",
+    tabAtDawn?.milestones.find((m) => m.milestone === 'MONTH_3')?.daysLeft === 5,
+    JSON.stringify(tabAtDawn?.milestones.map((m) => [m.milestone, m.daysLeft])),
+  );
+
   const due = await api(tok.hr, 'GET', '/evaluations/due');
   const dueRows = (due.body.rows ?? []) as { employee: { id: string }; milestone: string; dueDate: string; evaluation: unknown }[];
   check('GET /evaluations/due lists the probationer at month 3', due.status === 200 && dueRows.some((r) => r.employee.id === e1.id && r.milestone === 'MONTH_3'), `${due.status}`);
@@ -602,6 +640,11 @@ async function main() {
     regularised.employmentType === 'REGULAR' && regularised.dateRegularized !== null && regularised.periodEndDate === null,
     `${regularised.employmentType} ${iso(regularised.dateRegularized)}`,
   );
+  check(
+    'with no effective date typed, it takes effect the day it was approved — the Manila date',
+    iso(regularised.dateRegularized) === iso(today()) && iso(evDone.effectiveDate) === iso(today()),
+    `${iso(regularised.dateRegularized)} / ${iso(evDone.effectiveDate)} vs ${iso(today())}`,
+  );
   check('the hire date is untouched', iso(regularised.dateHired) === iso(hiredE1));
 
   // ══ 12. The subject reads it ═════════════════════════════════════════════
@@ -722,8 +765,13 @@ async function main() {
   console.log('\nThe subject is never an approver');
 
   const sched4 = await api(tok.hr2, 'POST', '/evaluations/schedule', { employeeId: e4.id, milestone: 'ADHOC', evaluatorId: supervisor.id });
-  const ev4 = sched4.body as { id: string; lines: Line[] };
+  const ev4 = sched4.body as { id: string; dueDate: string; lines: Line[] };
   check('an ad hoc evaluation of an HR officer on probation is scheduled', sched4.status === 201, `${sched4.status} ${sched4.body.error ?? ''}`);
+  check(
+    'given no date, an ad hoc evaluation is due today — the Manila date, not the UTC one',
+    iso(ev4.dueDate) === iso(today()),
+    `${iso(ev4.dueDate)} vs ${iso(today())}`,
+  );
   await api(tok.supervisor, 'PATCH', `/evaluations/${ev4.id}`, { lines: ev4.lines.map((l) => ({ id: l.id, rating: 4 })), recommendation: 'REGULARIZE' });
   const sub4 = await api(tok.supervisor, 'POST', `/evaluations/${ev4.id}/submit`);
   check(

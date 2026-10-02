@@ -28,3 +28,14 @@ export function manilaDayKey(d: Date): string {
 export function manilaMonthKey(d: Date): string {
   return manilaDayKey(d).slice(0, 7);
 }
+
+/**
+ * A calendar date (the @db.Date columns) for the Manila day an instant falls
+ * on: midnight UTC of that date. This is "today" for anything compared with,
+ * or written into, a DATE column. The UTC date of the same instant is still
+ * yesterday's until 08:00 in Manila, and a bare `new Date()` written into a
+ * DATE column is stored as that UTC date.
+ */
+export function manilaDate(at: Date): Date {
+  return new Date(`${manilaDayKey(at)}T00:00:00.000Z`);
+}

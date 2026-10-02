@@ -3,6 +3,7 @@ import { prisma } from '../prisma';
 import type { ResolvedUser } from '../permissions/resolve';
 import { can } from '../permissions/resolve';
 import { addMonths, daysBetween } from './aftermarket';
+import { manilaDate } from './day';
 import { hrSettings, settingList, type HrSettings } from './hr';
 
 /**
@@ -276,8 +277,12 @@ export async function dueEvaluations(
   opts: { employeeId?: string; asOf?: Date; includeCovered?: boolean } = {},
 ): Promise<DueRow[]> {
   const settings = await hrSettings();
-  const asOf = opts.asOf ?? new Date();
-  const horizon = new Date(asOf.getTime() + settings.evaluationNoticeDays * 86_400_000);
+  // Days are counted from the MANILA date, the same kind of value as every due
+  // date here. Counted from the UTC date, until 08:00 each morning a milestone
+  // five days off read "in 6 days" and one a day late read "due today". The
+  // notice window counts the same whole days, so its edge does not move with
+  // the hour either.
+  const today = manilaDate(opts.asOf ?? new Date());
 
   const employees = await prisma.employee.findMany({
     where: {
@@ -325,8 +330,8 @@ export async function dueEvaluations(
       );
       if (covering && covering.status === 'APPROVED') continue;
       if (covering && !opts.includeCovered) continue;
-      if (m.dueDate.getTime() > horizon.getTime()) continue;
-      const daysLeft = daysBetween(asOf, m.dueDate);
+      const daysLeft = daysBetween(today, m.dueDate);
+      if (daysLeft > settings.evaluationNoticeDays) continue;
       rows.push({
         employee: {
           id: employee.id,
@@ -355,8 +360,9 @@ export async function dueEvaluations(
 /**
  * The full milestone picture for one employee — every milestone, covered or
  * not, past or future. The employee record's Evaluations tab reads this.
+ * Days left count from the Manila date of `asOf`, as in `dueEvaluations`.
  */
-export async function milestonesFor(employeeId: string) {
+export async function milestonesFor(employeeId: string, asOf: Date = new Date()) {
   const settings = await hrSettings();
   const employee = await prisma.employee.findUnique({
     where: { id: employeeId },
@@ -387,7 +393,7 @@ export async function milestonesFor(employeeId: string) {
         milestone: m.milestone,
         label: milestoneLabel(m.milestone),
         dueDate: m.dueDate,
-        daysLeft: daysBetween(new Date(), m.dueDate),
+        daysLeft: daysBetween(manilaDate(asOf), m.dueDate),
         evaluation: covering
           ? { id: covering.id, number: covering.number, status: covering.status, recommendation: covering.recommendation }
           : null,
