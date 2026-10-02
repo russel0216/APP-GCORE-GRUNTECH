@@ -88,6 +88,9 @@ const TAG = 'ZZFIN';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // Approvals route to whoever really holds the role, so real people were told
+  // about this script's documents too. Every such title carries TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // Advances first: their allocations point at payments, their liquidations at
   // them, and they point at the fixture job and users with Restrict.
   const advances = await prisma.cashAdvance.findMany({

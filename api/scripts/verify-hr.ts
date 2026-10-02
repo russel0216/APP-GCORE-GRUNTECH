@@ -87,6 +87,9 @@ const BASE = `http://localhost:${env.port}/api`;
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  // Approvals route to whoever really holds the role, so real people were told
+  // about this script's documents too. Every such title carries TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   await prisma.overtimeRequest.deleteMany({ where: { reason: { startsWith: TAG } } });
   await prisma.leaveRequest.deleteMany({ where: { reason: { startsWith: TAG } } });
   const employees = await prisma.employee.findMany({

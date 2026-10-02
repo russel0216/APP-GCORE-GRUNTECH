@@ -79,8 +79,16 @@ async function expectRejection(label: string, fn: () => Promise<unknown>, expect
 }
 
 const TAG = '__verify__';
+/**
+ * What every approval this script submits is about. A seeded workflow routes
+ * to whoever really holds the role, so its notifications reach real people;
+ * cleanup() takes them back by this. Letters only: in a Prisma `contains`,
+ * `_` and `%` are wildcards, and TAG would match far more than this script's.
+ */
+const SUBJECT = 'ZZFOUNDATION';
 
 async function cleanup() {
+  await prisma.notification.deleteMany({ where: { title: { contains: SUBJECT } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verify.local' } },
     select: { id: true },
@@ -395,7 +403,7 @@ async function main() {
     documentType: 'leave_request',
     documentId: `${TAG}-leave-1`,
     documentNumber: 'GT-LV-2026-0001',
-    subject: 'Verify — 1 day vacation leave',
+    subject: `${SUBJECT} 1 day vacation leave`,
     requesterId: employee.id,
     link: '/g-hr/leave/verify-1',
   });
@@ -473,7 +481,7 @@ async function main() {
     documentType: 'overtime_request',
     documentId: `${TAG}-ot-1`,
     documentNumber: 'GT-OT-2026-0001',
-    subject: 'Verify — 3 hours overtime',
+    subject: `${SUBJECT} 3 hours overtime`,
     amount: 1875,
     requesterId: employee.id,
   });
@@ -502,7 +510,7 @@ async function main() {
   const small = await submitForApproval({
     documentType: 'purchase_request',
     documentId: `${TAG}-pr-small`,
-    subject: 'Verify — small PR',
+    subject: `${SUBJECT} small PR`,
     amount: 20_000,
     requesterId: employee.id,
   });
@@ -539,7 +547,7 @@ async function main() {
       submitForApproval({
         documentType: `${TAG}_solo_doc`,
         documentId: `${TAG}-solo`,
-        subject: 'Verify — sole approver raises their own document',
+        subject: `${SUBJECT} sole approver raises their own document`,
         amount: 20_000,
         requesterId: pm.id,
       }),
@@ -552,7 +560,7 @@ async function main() {
   const pmOwnRequest = await submitForApproval({
     documentType: 'purchase_request',
     documentId: `${TAG}-pr-pm-own`,
-    subject: 'Verify — PM raises their own PR',
+    subject: `${SUBJECT} PM raises their own PR`,
     amount: 20_000,
     requesterId: pm.id,
   });
@@ -579,7 +587,7 @@ async function main() {
   const large = await submitForApproval({
     documentType: 'purchase_request',
     documentId: `${TAG}-pr-large`,
-    subject: 'Verify — large PR',
+    subject: `${SUBJECT} large PR`,
     amount: 450_000,
     requesterId: employee.id,
   });
@@ -595,7 +603,7 @@ async function main() {
       submitForApproval({
         documentType: 'purchase_request',
         documentId: `${TAG}-pr-small`,
-        subject: 'Verify — duplicate',
+        subject: `${SUBJECT} duplicate`,
         amount: 20_000,
         requesterId: employee.id,
       }),
@@ -637,7 +645,7 @@ async function main() {
       submitForApproval({
         documentType: `${TAG}_opt_doc`,
         documentId: `${TAG}-opt-small`,
-        subject: 'Verify — option too small',
+        subject: `${SUBJECT} option too small`,
         amount: 500,
         requesterId: employee.id,
         optionId: optionRoute.id,
@@ -647,7 +655,7 @@ async function main() {
   const optioned = await submitForApproval({
     documentType: `${TAG}_opt_doc`,
     documentId: `${TAG}-opt-big`,
-    subject: 'Verify — option taken',
+    subject: `${SUBJECT} option taken`,
     amount: 5_000,
     requesterId: employee.id,
     optionId: optionRoute.id,
@@ -714,7 +722,7 @@ async function main() {
       documentType: `${TAG}_wd_doc`,
       documentId,
       documentNumber: `VERIFY ${documentId}`,
-      subject: 'Verify — withdrawn request',
+      subject: `${SUBJECT} withdrawn request`,
       requesterId: employee.id,
       link: `/verify/${documentId}`,
     });
@@ -739,7 +747,7 @@ async function main() {
   check(
     'the approvers it waited on are told, linked to the record, with the reason',
     [pm.id, pm2.id].every((id) => wdTold.some((n) => n.userId === id)) &&
-      wdTold.every((n) => n.title === 'Withdrawn: Verify — withdrawn request' && n.body === `VERIFY ${TAG}-wd-1 — superseded by R1`),
+      wdTold.every((n) => n.title === `Withdrawn: ${SUBJECT} withdrawn request` && n.body === `VERIFY ${TAG}-wd-1 — superseded by R1`),
     JSON.stringify(wdTold.map((n) => [n.title, n.body])),
   );
   check('the requester who withdrew it is not told what they just did', !wdTold.some((n) => n.userId === employee.id));

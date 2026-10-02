@@ -163,6 +163,16 @@ these scripts exist. A script that needs a module's `onApprovalSettled`,
 (`verify-academy` imports `routes/academy`, `verify-numbering` imports
 `issuedThisPeriod` from `routes/admin`).
 
+**Cleaning up includes what a script told real people.** A document submitted
+through a seeded workflow notifies whoever really holds the role, and deleting
+the test users leaves those notifications behind — about 4,900 on the laptop's
+sandbox users by 2026-10-02. Every subject a script submits carries its TAG,
+and `cleanup()` deletes the notifications whose title contains it (or whose
+link points at its records, as verify-evaluations and verify-plantilla do). A
+tag is letters only: a Prisma `contains` passes `_` and `%` through as LIKE
+wildcards, which is why verify-foundation's subjects carry `ZZFOUNDATION`
+rather than its `__verify__` TAG.
+
 `npx tsx scripts/audit-workflows.ts` is a separate read-only check: it reports
 any workflow step routed to a role nobody holds, or to the role that normally
 raises that document. Two seeded workflows shipped with that second fault and

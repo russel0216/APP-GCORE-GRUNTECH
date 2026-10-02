@@ -47,6 +47,9 @@ const ROLE_PREFIX = 'zzdeliv-';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // Approvals route to whoever really holds the role, so real people were told
+  // about this script's documents too. Every such title carries TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // Children that RESTRICT their parent go first: invoices hold the job and the
   // customer, quotations hold the customer and their owner, installed assets
   // hold the customer.

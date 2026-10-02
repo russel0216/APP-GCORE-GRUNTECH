@@ -95,6 +95,9 @@ const TAG = 'ZZAM';
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  // Approvals route to whoever really holds the role, so real people were told
+  // about this script's documents too. Every such title carries TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // An invoice raised from a job order holds it (Restrict), so invoices go first.
   await prisma.invoice.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceReport.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });

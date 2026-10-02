@@ -122,6 +122,9 @@ async function makeRole(key: string, name: string, permissionKeys: string[]) {
 }
 
 async function cleanup() {
+  // Approvals route to whoever really holds the role, so real people were told
+  // about this script's documents too. Every such title carries TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // Audit rows written without an actor (approval outcomes) are keyed only by
   // the record, so clear them by record id before the records go.
   const taggedOrders = await prisma.purchaseOrder.findMany({

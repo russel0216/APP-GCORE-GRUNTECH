@@ -67,6 +67,9 @@ const BASE = `http://localhost:${env.port}/api`;
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  // Approvals route to whoever really holds the role, so real people were told
+  // about this script's documents too. Every such title carries TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
   // Jobs restrict their costing, so they go first; lines, sections and tasks
   // cascade from the costing.
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
