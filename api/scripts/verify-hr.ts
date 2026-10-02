@@ -29,7 +29,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor } from '../src/shared/approvals';
 import {
   hrSettings,
   classifyArrival,
@@ -1110,15 +1110,97 @@ async function main() {
       | undefined;
     check('somebody who never filed starts on no job', colleagueDefaults?.jobId === null);
 
-    // Every write audits — the two overtime writes that did not.
-    const cancelOt = await api(workerToken, 'POST', `/overtime/${unauthorised.id}/cancel`);
-    const cancelAudit = await prisma.auditLog.findFirst({
+    // ══ Cancelling withdraws the approval ════════════════════════════════
+    // A filing cancelled while it waits on the supervisor takes its request
+    // with it, through the engine: CANCELLED, out of the queue, and the
+    // supervisor told who cancelled it. The routes used to close the request
+    // by hand, which told nobody and audited nothing on the request.
+    console.log('\nCancelling withdraws the approval (over HTTP)');
+
+    const cancelWithdraws = async (what: string, documentType: string, documentId: string, cancelPath: string, link: string) => {
+      const open = await prisma.approvalRequest.findFirst({ where: { documentType, documentId, status: 'PENDING' } });
+      const queued = !!open && (await pendingFor(supervisor.id)).some((r) => r.id === open.id);
+      const res = await api(workerToken, 'POST', cancelPath);
+      const closed = open ? await prisma.approvalRequest.findUnique({ where: { id: open.id } }) : null;
+      check(
+        `${what}: cancelling it closes its request CANCELLED`,
+        res.status === 200 && closed?.status === 'CANCELLED' && !!closed.closedAt,
+        `${res.status}, request ${closed?.status ?? 'none was open'}`,
+      );
+      check(
+        `${what}: and takes it out of the supervisor's queue`,
+        queued && !(await pendingFor(supervisor.id)).some((r) => r.id === open?.id),
+      );
+      const told = await prisma.notification.findMany({ where: { type: 'approval.withdrawn', link } });
+      check(
+        `${what}: the supervisor is told it was withdrawn, and by whom`,
+        told.some((n) => n.userId === supervisor.id && n.body === `${open?.documentNumber} — cancelled by ${worker.name}`),
+        JSON.stringify(told.map((n) => n.body)),
+      );
+      check(`${what}: the worker who cancelled it is not told what they just did`, !told.some((n) => n.userId === worker.id));
+      return res;
+    };
+    // The engine audits the withdrawal on the same record the module audits
+    // the cancellation on; both rows are kept, as they are on submission.
+    const withdrawalRow = (summary: string | null) =>
+      !!summary?.startsWith('Withdrawn from approval at ') && summary.endsWith(` — cancelled by ${worker.name}`);
+
+    // The leave filed over HTTP above is still with the supervisor.
+    const filedNumber = (await prisma.leaveRequest.findUniqueOrThrow({ where: { id: filedId } })).number;
+    await cancelWithdraws('leave', 'leave_request', filedId, `/leave/${filedId}/cancel`, `/g-hr/leave/${filedId}`);
+    const leaveTrail = await prisma.auditLog.findMany({
+      where: { entityType: 'leave_request', entityId: filedId, action: 'CANCELLED' },
+    });
+    check(
+      "the leave's trail keeps both: the engine's withdrawal at its step, and the leave's own cancellation",
+      leaveTrail.length === 2 &&
+        leaveTrail.some((a) => withdrawalRow(a.summary) && a.actorId === worker.id) &&
+        leaveTrail.some((a) => a.summary === `${filedNumber} cancelled` && a.actorId === worker.id),
+      JSON.stringify(leaveTrail.map((a) => a.summary)),
+    );
+
+    // Overtime called off while its prior approval is still being asked for.
+    const calledOff = await api(workerToken, 'POST', '/overtime', {
+      date: '2026-09-24',
+      plannedStart: '17:00',
+      plannedEnd: '20:00',
+      dinnerBreak: false,
+      reason: `${TAG} called off before it started`,
+    });
+    const calledOffId = String(calledOff.body.id ?? '');
+    await cancelWithdraws(
+      'overtime awaiting prior approval',
+      'overtime_prior',
+      calledOffId,
+      `/overtime/${calledOffId}/cancel`,
+      `/g-hr/overtime/${calledOffId}`,
+    );
+
+    // Every write audits — the two overtime writes that did not. The actual
+    // hours filed above wait on the supervisor.
+    const cancelOt = await cancelWithdraws(
+      'overtime whose actual hours are filed',
+      'overtime_request',
+      unauthorised.id,
+      `/overtime/${unauthorised.id}/cancel`,
+      `/g-hr/overtime/${unauthorised.id}`,
+    );
+    const otTrail = await prisma.auditLog.findMany({
       where: { entityType: 'overtime_request', entityId: unauthorised.id, action: 'CANCELLED' },
     });
     const actualAudit = await prisma.auditLog.findFirst({
       where: { entityType: 'overtime_request', entityId: unauthorised.id, action: 'SUBMITTED' },
     });
-    check('cancelling overtime is audited', cancelOt.status === 200 && !!cancelAudit, String(cancelOt.status));
+    check(
+      'cancelling overtime is audited',
+      cancelOt.status === 200 && otTrail.some((a) => a.summary === `${unauthorised.number} cancelled`),
+      String(cancelOt.status),
+    );
+    check(
+      "and the engine's withdrawal sits beside it on the same record",
+      otTrail.length === 2 && otTrail.some((a) => withdrawalRow(a.summary)),
+      JSON.stringify(otTrail.map((a) => a.summary)),
+    );
     check('filing the actual hours is audited', !!actualAudit);
     const again2 = await api(workerToken, 'POST', `/overtime/${unauthorised.id}/cancel`);
     check('cancelling twice is refused', again2.status === 400, String(again2.status));

@@ -17,7 +17,7 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approversForStep } from '../shared/approvals';
+import { submitForApproval, onApprovalSettled, approversForStep, cancelOpenRequest } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
@@ -1096,10 +1096,9 @@ leaveRoutes.post(
           .catch(() => {});
       }
       await tx.leaveRequest.update({ where: { id: request.id }, data: { status: 'CANCELLED' } });
-      await tx.approvalRequest.updateMany({
-        where: { documentType: 'leave_request', documentId: request.id, status: 'PENDING' },
-        data: { status: 'CANCELLED', closedAt: new Date() },
-      });
+      // Still with the approver: withdrawn through the engine, so it leaves
+      // their queue and they are told.
+      await cancelOpenRequest('leave_request', request.id, tx, `cancelled by ${me.name}`, me.id);
     });
 
     await audit(
@@ -1625,14 +1624,11 @@ overtimeRoutes.post(
 
     await prisma.$transaction(async (tx) => {
       await tx.overtimeRequest.update({ where: { id: ot.id }, data: { stage: 'CANCELLED' } });
-      await tx.approvalRequest.updateMany({
-        where: {
-          documentType: { in: ['overtime_prior', 'overtime_request'] },
-          documentId: ot.id,
-          status: 'PENDING',
-        },
-        data: { status: 'CANCELLED', closedAt: new Date() },
-      });
+      // Whichever filing is with the approver — the prior approval or the
+      // actual hours — is withdrawn through the engine, and they are told.
+      for (const documentType of ['overtime_prior', 'overtime_request']) {
+        await cancelOpenRequest(documentType, ot.id, tx, `cancelled by ${me.name}`, me.id);
+      }
     });
 
     await audit(

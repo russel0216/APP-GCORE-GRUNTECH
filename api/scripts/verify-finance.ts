@@ -25,7 +25,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, pendingFor } from '../src/shared/approvals';
 import { postJobCost, availableBudget } from '../src/shared/inventory';
 import {
   taxBreakdown,
@@ -1537,6 +1537,79 @@ async function main() {
       'an approved liquidation cannot be cancelled by its owner',
       cancelSettled.status === 400 && String(cancelSettled.body.error).includes('approved'),
       `${cancelSettled.status} ${JSON.stringify(cancelSettled.body).slice(0, 140)}`,
+    );
+
+    // A claim or an advance cancelled while it waits on the supervisor takes
+    // its request with it, through the engine: CANCELLED, out of the queue,
+    // and the supervisor told who cancelled it and why. The routes used to
+    // close the request by hand, which told nobody and audited nothing on it.
+    const cancelWithdraws = async (
+      what: string,
+      documentType: string,
+      documentId: string,
+      cancelPath: string,
+      link: string,
+      reason?: string,
+    ) => {
+      const open = await prisma.approvalRequest.findFirst({ where: { documentType, documentId, status: 'PENDING' } });
+      const queued = !!open && (await pendingFor(pm.id)).some((r) => r.id === open.id);
+      const res = await eng('POST', cancelPath, reason ? { reason } : undefined);
+      const closed = open ? await prisma.approvalRequest.findUnique({ where: { id: open.id } }) : null;
+      check(
+        `${what}: cancelling it closes its request CANCELLED`,
+        res.status === 200 && closed?.status === 'CANCELLED' && !!closed.closedAt,
+        `${res.status}, request ${closed?.status ?? 'none was open'}`,
+      );
+      check(`${what}: and takes it out of the supervisor's queue`, queued && !(await pendingFor(pm.id)).some((r) => r.id === open?.id));
+      const why = `cancelled by ${engineer.name}${reason ? `: ${reason}` : ''}`;
+      const told = await prisma.notification.findMany({ where: { type: 'approval.withdrawn', link } });
+      check(
+        `${what}: the supervisor is told it was withdrawn, by whom and why`,
+        told.some((n) => n.userId === pm.id && n.body === `${open?.documentNumber} — ${why}`),
+        JSON.stringify(told.map((n) => n.body)),
+      );
+      check(`${what}: the engineer who cancelled it is not told what they just did`, !told.some((n) => n.userId === engineer.id));
+      return (summary: string | null) => !!summary?.startsWith('Withdrawn from approval at ') && summary.endsWith(` — ${why}`);
+    };
+
+    const calledOffClaim = await eng('POST', '/expense-claims', { purpose: `${TAG} trip called off`, lines: receipt1 });
+    const calledOffClaimId = String(calledOffClaim.body.id ?? '');
+    await eng('POST', `/expense-claims/${calledOffClaimId}/submit`);
+    const claimWithdrawal = await cancelWithdraws(
+      'a claim',
+      'expense',
+      calledOffClaimId,
+      `/expense-claims/${calledOffClaimId}/cancel`,
+      `/g-fin/expenses/${calledOffClaimId}`,
+    );
+    const claimTrail = await prisma.auditLog.findMany({ where: { entityId: calledOffClaimId, action: 'CANCELLED' } });
+    check(
+      "the claim keeps its own cancellation row, and the engine's withdrawal is filed under the approval's type",
+      claimTrail.length === 2 &&
+        claimTrail.some((a) => a.entityType === 'expense_claim' && a.summary === `${calledOffClaim.body.number} cancelled`) &&
+        claimTrail.some((a) => a.entityType === 'expense' && claimWithdrawal(a.summary) && a.actorId === engineer.id),
+      JSON.stringify(claimTrail.map((a) => [a.entityType, a.summary])),
+    );
+
+    const postponed = await newAdvance(engineer, 1_500, 'trip postponed');
+    await eng('POST', `/cash-advances/${postponed.id}/submit`);
+    const advanceWithdrawal = await cancelWithdraws(
+      'an advance',
+      'cash_advance',
+      postponed.id,
+      `/cash-advances/${postponed.id}/cancel`,
+      `/g-fin/cash-advances/${postponed.id}`,
+      'trip postponed',
+    );
+    const advanceTrail = await prisma.auditLog.findMany({
+      where: { entityType: 'cash_advance', entityId: postponed.id, action: 'CANCELLED' },
+    });
+    check(
+      "the advance's trail keeps both: the engine's withdrawal at its step, and the advance's own cancellation",
+      advanceTrail.length === 2 &&
+        advanceTrail.some((a) => advanceWithdrawal(a.summary) && a.actorId === engineer.id) &&
+        advanceTrail.some((a) => a.summary === `${postponed.number} cancelled — trip postponed` && a.actorId === engineer.id),
+      JSON.stringify(advanceTrail.map((a) => a.summary)),
     );
 
     // The project view, and who may see it.

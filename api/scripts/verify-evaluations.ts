@@ -22,7 +22,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
-import { act, approvalSignoffs } from '../src/shared/approvals';
+import { act, approvalSignoffs, pendingFor } from '../src/shared/approvals';
 import { globalSearch } from '../src/shared/search';
 import { hrSettings } from '../src/shared/hr';
 import { addMonths } from '../src/shared/aftermarket';
@@ -821,6 +821,43 @@ async function main() {
   check('the evaluator cancels a draft', cancelled.status === 200 && cancelled.body.status === 'CANCELLED', String(cancelled.status));
   const due4 = await dueEvaluations({ employeeId: e4.id, asOf: addMonths(t, 3) });
   check('a cancelled evaluation covers nothing — the milestones stay due', due4.length > 0 && due4.every((r) => r.evaluation === null), JSON.stringify(due4.map((r) => r.milestone)));
+
+  // Cancelled while HR has it: the request is withdrawn through the engine,
+  // not closed by hand — out of HR's queue, and HR told. The person evaluated
+  // is neither the requester nor on the chain, so they hear nothing.
+  const sched8 = await api(tok.hr, 'POST', '/evaluations/schedule', { employeeId: e7.id, milestone: 'ADHOC', evaluatorId: supervisor.id });
+  const ev8 = sched8.body as { id: string; number: string; lines: Line[] };
+  await api(tok.supervisor, 'PATCH', `/evaluations/${ev8.id}`, { lines: (ev8.lines ?? []).map((l) => ({ id: l.id, rating: 4 })), recommendation: 'REGULARIZE' });
+  const sub8 = await api(tok.supervisor, 'POST', `/evaluations/${ev8.id}/submit`);
+  const req8 = await pendingRequest(ev8.id);
+  const queued8 = !!req8 && (await pendingFor(hr.id)).some((r) => r.id === req8.id);
+  const cancel8 = await api(tok.supervisor, 'POST', `/evaluations/${ev8.id}/cancel`);
+  const closed8 = req8 ? await prisma.approvalRequest.findUnique({ where: { id: req8.id } }) : null;
+  check(
+    'the evaluator cancels a submitted evaluation; its request closes CANCELLED',
+    cancel8.status === 200 && cancel8.body.status === 'CANCELLED' && closed8?.status === 'CANCELLED' && !!closed8.closedAt,
+    `submit ${sub8.status} ${sub8.body.error ?? ''}; cancel ${cancel8.status}; request ${closed8?.status ?? 'none was open'}`,
+  );
+  check("it leaves HR's queue", queued8 && !(await pendingFor(hr.id)).some((r) => r.id === req8?.id));
+  const told8 = await prisma.notification.findMany({ where: { type: 'approval.withdrawn', link: `/g-hr/evaluations/${ev8.id}` } });
+  check(
+    'HR is told it was withdrawn, and by whom',
+    told8.some((n) => n.userId === hr.id && n.body === `${ev8.number} — cancelled by ${supervisor.name}`),
+    JSON.stringify(told8.map((n) => n.body)),
+  );
+  check(
+    'the evaluator who cancelled it is not told, and the person evaluated hears nothing of it',
+    told8.length > 0 && !told8.some((n) => n.userId === supervisor.id || n.userId === late.id),
+  );
+  const trail8 = await prisma.auditLog.findMany({ where: { entityType: 'evaluation', entityId: ev8.id, action: 'CANCELLED' } });
+  check(
+    "the trail keeps the engine's withdrawal and the evaluation's own cancellation, neither carrying a rating",
+    trail8.length === 2 &&
+      trail8.some((a) => !!a.summary?.startsWith('Withdrawn from approval at ') && a.summary.endsWith(` — cancelled by ${supervisor.name}`)) &&
+      trail8.some((a) => a.summary === `${ev8.number} cancelled`) &&
+      trail8.every((a) => a.actorId === supervisor.id && a.before === null && a.after === null),
+    JSON.stringify(trail8.map((a) => [a.summary, a.before, a.after])),
+  );
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

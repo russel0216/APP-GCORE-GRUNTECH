@@ -27,6 +27,7 @@ import {
   submitForApproval,
   onApprovalSettled,
   approvalSignoffs,
+  cancelOpenRequest,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
@@ -1444,10 +1445,9 @@ expenseRoutes.post(
 
     await prisma.$transaction(async (tx) => {
       await tx.expenseClaim.update({ where: { id: claim.id }, data: { status: 'CANCELLED' } });
-      await tx.approvalRequest.updateMany({
-        where: { documentType: 'expense', documentId: claim.id, status: 'PENDING' },
-        data: { status: 'CANCELLED', closedAt: new Date() },
-      });
+      // Still with the approver: withdrawn through the engine, so it leaves
+      // their queue and they are told.
+      await cancelOpenRequest('expense', claim.id, tx, `cancelled by ${me.name}`, me.id);
     });
     await audit(
       { entityType: 'expense_claim', entityId: claim.id, action: 'CANCELLED', summary: `${claim.number} cancelled` },

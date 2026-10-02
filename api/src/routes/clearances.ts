@@ -25,6 +25,7 @@ import {
   pickWorkflow,
   usersInRole,
   approvalSignoffs,
+  cancelOpenRequest,
 } from '../shared/approvals';
 import { renderDocument, formatDate, formatDateTime, type PdfSection } from '../shared/pdf';
 import { toCsv } from '../shared/csv';
@@ -706,10 +707,15 @@ clearanceRoutes.post(
 
     await prisma.$transaction(async (tx) => {
       await tx.employeeClearance.update({ where: { id: head.id }, data: { status: 'CANCELLED' } });
-      await tx.approvalRequest.updateMany({
-        where: { documentType: 'clearance', documentId: head.id, status: 'PENDING' },
-        data: { status: 'CANCELLED', closedAt: new Date() },
-      });
+      // Still with a signatory: withdrawn through the engine, so it leaves their
+      // queue and they are told — and so is the leaver, whose request it is.
+      await cancelOpenRequest(
+        'clearance',
+        head.id,
+        tx,
+        `cancelled by ${me.name}${body.reason ? `: ${body.reason}` : ''}`,
+        me.id,
+      );
     });
     await audit(
       {

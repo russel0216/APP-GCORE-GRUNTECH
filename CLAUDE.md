@@ -21,10 +21,12 @@ four databases and four copies of "customer".
 2. **Never invent a second approval path.** Every document type routes through
    `api/src/shared/approvals.ts`. Call `submitForApproval(...)`, subscribe with
    `onApprovalSettled(...)`, and when a document moves on before anybody
-   decides, withdraw its request with `cancelOpenRequest(..., tx, reason)` in
-   the same transaction. Do not write per-module routing, notification or
-   history. `act()` claims a request with a conditional update, so a decision
-   is never written over a withdrawal or over another approver's decision.
+   decides — superseded, or cancelled — withdraw its request with
+   `cancelOpenRequest(documentType, documentId, tx, reason, actorId)` in the
+   same transaction, never by writing to `approvalRequest` yourself. Do not
+   write per-module routing, notification or history. `act()` claims a request
+   with a conditional update, so a decision is never written over a withdrawal
+   or over another approver's decision.
 3. **A requester can never approve their own document.** Enforced in `act()`,
    before the eligibility check, and for super admins too.
 4. **Cost posts only when every step has approved.** Overtime is the live
@@ -133,10 +135,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,150 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
+**2,184 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
 masters 54, sales 273, costing 105, pipeline 44, calendar 38, numbering 46,
-partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
-evaluations 125, academy 97, finance 133, aftermarket 166, archive 113,
+partners 82, delivery 78, chain 63, hr 118, plantilla 96, meetings 86,
+evaluations 130, academy 97, finance 143, aftermarket 166, archive 113,
 insights 92, insights-brief 44, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -575,6 +577,19 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `job_order`, `clearance`, `evaluation` and `training_certification`, and also
   reports an HR step on a document HR sometimes raises while only one person
   holds `hr` — the HR-typed version of the single-holder fault.
+- **Cancelling a document withdraws its request through `cancelOpenRequest`**
+  (2026-10-02): leave, overtime (whichever of `overtime_prior` and
+  `overtime_request` is open), clearance, evaluation, expense claim and cash
+  advance, each passing `cancelled by <name>[: <reason typed>]` and the
+  canceller's id. The routes used to set the request CANCELLED by hand, which
+  told nobody and audited nothing on it. Now the open step's approvers are
+  told, and the requester too when somebody else cancelled (a clearance's
+  leaver, when HR cancels it). **Both CANCELLED audit rows are kept**: the
+  engine's names the step and the reason, the module's is the document's own
+  — the pairing submission already makes — so a cancelled draft leaves one
+  row and a cancelled pending document two. The engine files under the
+  approval's type: an expense claim's withdrawal is under `expense` (its own
+  row under `expense_claim`), a prior approval's under `overtime_prior`.
 - **Employee routes live in `routes/employees.ts`, the employee import in
   `routes/imports/employees.ts`.** `imports.ts` exports `Registered`, so a module
   (the Academy's `courseImport`) is wired into `REGISTRY` with one line.

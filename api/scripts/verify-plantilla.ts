@@ -33,6 +33,7 @@ import { runImport } from '../src/shared/csv';
 import { employeesImport } from '../src/routes/imports/employees';
 import { plantillaSummary } from '../src/shared/plantilla';
 import { hrSignsOwnWork, sweepSeparations, turnover, tenureMonths } from '../src/shared/clearance';
+import { pendingFor } from '../src/shared/approvals';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -248,6 +249,7 @@ async function main() {
   const plain = await makeUser(`${TAG} Plain`, 'plain', ['zzpl_plain']);
   const leaverUser = await makeUser(`${TAG} Leaver One`, 'leaver1', ['zzpl_leaver'], supervisor.id);
   const leaver2User = await makeUser(`${TAG} Leaver Two`, 'leaver2', ['zzpl_leaver'], supervisor.id);
+  const leaver3User = await makeUser(`${TAG} Leaver Three`, 'leaver3', ['zzpl_leaver'], supervisor.id);
 
   const tok = (u: { id: string; email: string }) => signToken(u.id, u.email);
   const T = {
@@ -660,6 +662,59 @@ async function main() {
     where: { entityType: 'employee', entityId: leaver2.id, action: 'SEPARATED', actorName: 'system' },
   });
   check('the sweep is audited as the system, with pay data stripped', sweptAudit !== null && !JSON.stringify(sweptAudit?.after ?? {}).includes('dailyRate'));
+
+  // ══ 10b. Cancelled while a signatory has it ══════════════════════════════
+  // The request is withdrawn through the engine, not closed by hand: it
+  // leaves the supervisor's queue and they are told — and so is the leaver,
+  // whose request it is, because HR cancelled it rather than they.
+  console.log('\nClearance — cancelled while it waits on the supervisor');
+  const leaver3 = await prisma.employee.create({
+    data: { employeeNo: `${TAG}-L3`, firstName: 'Lio', lastName: `${TAG}Leaver`, userId: leaver3User.id, departmentId: dept.id },
+  });
+  const raised3 = await http(T.hr, 'POST', '/clearances', {
+    employeeId: leaver3.id,
+    reason: 'RESIGNATION',
+    lastWorkingDay: iso(addDays(dayKey(new Date()), 14)),
+  });
+  const cid3 = String(raised3.body.id);
+  d = (await http(T.hr, 'GET', `/clearances/${cid3}`)).body as unknown as typeof d;
+  for (const i of d.items.filter((x) => x.status === 'PENDING')) {
+    const r = await http(T.hr, 'POST', `/clearances/${cid3}/items/${i.id}/${i.sourceType ? 'waive' : 'clear'}`, {
+      reason: 'Settled outside the system for this test',
+    });
+    if (r.status !== 200) check(`HR clears "${i.description}"`, false, msg(r));
+  }
+  const submitted3 = await http(T.hr, 'POST', `/clearances/${cid3}/submit`);
+  const open3 = await prisma.approvalRequest.findFirst({ where: { documentType: 'clearance', documentId: cid3, status: 'PENDING' } });
+  const queued3 = !!open3 && (await pendingFor(supervisor.id)).some((r) => r.id === open3.id);
+  const cancelled3 = await http(T.hr, 'POST', `/clearances/${cid3}/cancel`, { reason: 'Resignation withdrawn' });
+  const closed3 = open3 ? await prisma.approvalRequest.findUnique({ where: { id: open3.id } }) : null;
+  check(
+    'HR cancels a submitted clearance; its request closes CANCELLED',
+    cancelled3.status === 200 && closed3?.status === 'CANCELLED' && !!closed3.closedAt,
+    `submit ${submitted3.status} ${msg(submitted3)}; cancel ${cancelled3.status}; request ${closed3?.status ?? 'none was open'}`,
+  );
+  check("…and it leaves the supervisor's queue", queued3 && !(await pendingFor(supervisor.id)).some((r) => r.id === open3?.id));
+  const told3 = await prisma.notification.findMany({ where: { type: 'approval.withdrawn', link: `/g-hr/clearances/${cid3}` } });
+  check(
+    'the supervisor is told it was withdrawn, by whom and why',
+    told3.some((n) => n.userId === supervisor.id && n.body === `${raised3.body.number} — cancelled by ${hr.name}: Resignation withdrawn`),
+    JSON.stringify(told3.map((n) => n.body)),
+  );
+  check('…and so is the leaver, whose request it was', told3.some((n) => n.userId === leaver3User.id));
+  const trail3 = await prisma.auditLog.findMany({ where: { entityType: 'clearance', entityId: cid3, action: 'CANCELLED' } });
+  check(
+    "the trail keeps both: the engine's withdrawal at its step, and the clearance's own cancellation, each by HR",
+    trail3.length === 2 &&
+      trail3.some(
+        (a) =>
+          !!a.summary?.startsWith('Withdrawn from approval at ') &&
+          a.summary.endsWith(` — cancelled by ${hr.name}: Resignation withdrawn`) &&
+          a.actorId === hr.id,
+      ) &&
+      trail3.some((a) => a.summary === `${raised3.body.number} cancelled — Resignation withdrawn` && a.actorId === hr.id),
+    JSON.stringify(trail3.map((a) => a.summary)),
+  );
 
   // ══ 13b. A hand-typed separation ═════════════════════════════════════════
   console.log('\nSeparation typed on the employee form');

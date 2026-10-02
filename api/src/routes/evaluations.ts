@@ -25,6 +25,7 @@ import {
   approversForStep,
   approvalSignoffs,
   usersInRole,
+  cancelOpenRequest,
 } from '../shared/approvals';
 import { renderDocument, formatDate, type PdfSection } from '../shared/pdf';
 import { hrSettings } from '../shared/hr';
@@ -808,10 +809,10 @@ evaluationRoutes.post(
 
     await prisma.$transaction(async (tx) => {
       await tx.employeeEvaluation.update({ where: { id: ev.id }, data: { status: 'CANCELLED' } });
-      await tx.approvalRequest.updateMany({
-        where: { documentType: 'evaluation', documentId: ev.id, status: 'PENDING' },
-        data: { status: 'CANCELLED', closedAt: new Date() },
-      });
+      // Still with HR or management: withdrawn through the engine, so it leaves
+      // their queue and they are told. That is the chain and the requester
+      // only — the person evaluated, whom submit keeps off the chain, is not.
+      await cancelOpenRequest('evaluation', ev.id, tx, `cancelled by ${me.name}`, me.id);
     });
     await audit({ entityType: 'evaluation', entityId: ev.id, action: 'CANCELLED', summary: `${ev.number} cancelled` }, req);
     res.json(present(await loadFull(ev.id)));

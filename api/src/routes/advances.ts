@@ -16,7 +16,13 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
-import { submitForApproval, onApprovalSettled, approvalSignoffs, type ApprovalOutcome } from '../shared/approvals';
+import {
+  submitForApproval,
+  onApprovalSettled,
+  approvalSignoffs,
+  cancelOpenRequest,
+  type ApprovalOutcome,
+} from '../shared/approvals';
 import { registerSearch } from '../shared/search';
 import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
@@ -413,10 +419,15 @@ advanceRoutes.post(
         where: { id: advance.id },
         data: { status: 'CANCELLED', notes: body.reason ? `${advance.notes ? `${advance.notes}\n` : ''}Cancelled: ${body.reason}` : advance.notes },
       });
-      await tx.approvalRequest.updateMany({
-        where: { documentType: 'cash_advance', documentId: advance.id, status: 'PENDING' },
-        data: { status: 'CANCELLED', closedAt: new Date() },
-      });
+      // Still with the approver: withdrawn through the engine, so it leaves
+      // their queue and they are told.
+      await cancelOpenRequest(
+        'cash_advance',
+        advance.id,
+        tx,
+        `cancelled by ${me.name}${body.reason ? `: ${body.reason}` : ''}`,
+        me.id,
+      );
     });
     await audit(
       {
