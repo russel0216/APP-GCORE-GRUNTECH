@@ -381,8 +381,14 @@ async function main() {
   };
 
   const t = today();
-  // Month 3 falls in five days: hired three months and five days short of now.
+  // Month 3 falls about five days out: hired three months back from five days
+  // ahead. addMonths clamps at a month end, so the round trip can come up short
+  // (Dec 31 back to Sep 30, forward to Dec 30), and some days — Dec 31, Jul 31,
+  // the last days of May — are never a month-3 date at all. So the days are
+  // counted to where month 3 really falls: five, or two to four a few days a year.
   const hiredE1 = addMonths(plusDays(t, 5), -3);
+  const month3Due = addMonths(hiredE1, 3);
+  const month3Days = Math.round((month3Due.getTime() - t.getTime()) / 86_400_000);
   const e1 = await prisma.employee.create({
     data: { employeeNo: `${TAG}-001`, firstName: 'Zia', lastName: 'Probationer', employmentType: 'PROBATIONARY', dateHired: hiredE1, userId: subject.id },
   });
@@ -398,7 +404,8 @@ async function main() {
   const e4 = await prisma.employee.create({
     data: { employeeNo: `${TAG}-004`, firstName: 'Zak', lastName: 'Hrofficer', employmentType: 'PROBATIONARY', dateHired: addMonths(t, -4), userId: hrSubject.id },
   });
-  // The end of probation falls in three days.
+  // The end of probation falls in three days, or fewer at a month end (the
+  // same clamp as month 3); nothing below counts on the three.
   const e5 = await prisma.employee.create({
     data: { employeeNo: `${TAG}-005`, firstName: 'Zul', lastName: 'Extendee', employmentType: 'PROBATIONARY', dateHired: addMonths(plusDays(t, 3), -settings.probationMonths) },
   });
@@ -412,16 +419,16 @@ async function main() {
 
   const dueDirect = await dueEvaluations({ employeeId: e1.id });
   check(
-    'month 3 is due in five days and uncovered',
-    dueDirect.length === 1 && dueDirect[0].milestone === 'MONTH_3' && dueDirect[0].daysLeft === 5 && !dueDirect[0].overdue && dueDirect[0].evaluation === null,
-    JSON.stringify(dueDirect.map((r) => [r.milestone, r.daysLeft, r.evaluation])),
+    `month 3 is due in ${month3Days} days and uncovered`,
+    dueDirect.length === 1 && dueDirect[0].milestone === 'MONTH_3' && iso(dueDirect[0].dueDate) === iso(month3Due) &&
+      dueDirect[0].daysLeft === month3Days && !dueDirect[0].overdue && dueDirect[0].evaluation === null,
+    JSON.stringify(dueDirect.map((r) => [r.milestone, iso(r.dueDate), r.daysLeft, r.evaluation])),
   );
   check('a regular employee is never due', (await dueEvaluations({ employeeId: e3.id })).length === 0);
 
   // The same milestone read at chosen instants, not at whatever hour this runs
   // — `asOf` is the clock. 00:30 in Manila is 16:30Z the day before: the eight
   // hours a UTC "today" was a day behind the Manila one.
-  const month3Due = addMonths(hiredE1, 3);
   const month3At = async (at: Date) =>
     (await dueEvaluations({ employeeId: e1.id, asOf: at })).find((r) => r.milestone === 'MONTH_3');
   const atDawn = await month3At(manilaAt(plusDays(month3Due, -5), '00:30'));
