@@ -32,10 +32,10 @@ import { receiveStock } from '../src/shared/inventory';
 import { quotationValue } from '../src/shared/pipeline';
 import { cents, parseRange, SUMMARY_FIGURES } from '../src/shared/insights';
 import { periodWhere } from '../src/shared/gops';
-import { manilaDayKey } from '../src/shared/day';
+import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../src/shared/day';
 // HR's day key is the LOCAL date (the same convention as web/src/lib/day.ts's
-// todayLocal), not Insights' UTC one. An attendance fixture keyed by the UTC
-// day would land on yesterday for eight hours of every Manila morning.
+// todayLocal), never the UTC one. An attendance fixture keyed by the UTC day
+// would land on yesterday for eight hours of every Manila morning.
 import { dayKey as hrDayKey } from '../src/shared/hr';
 
 if (env.isProduction) {
@@ -66,9 +66,9 @@ const BASE = `http://localhost:${env.port}/api`;
 
 /**
  * The day the screens send as `to`: todayLocal() in a browser in Manila. Not
- * the UTC date. G-OPS ends `to` at 23:59:59.999 on the server clock
- * (periodWhere), so for the eight hours after Manila midnight a UTC `to`
- * closed the window at the end of yesterday and dropped everything since.
+ * the UTC date. G-OPS ends `to` at 23:59:59.999 in Manila (periodWhere), so
+ * for the eight hours after Manila midnight a UTC `to` closed the window at
+ * the end of yesterday and dropped everything since.
  */
 const screenDay = (at: Date) => manilaDayKey(at);
 
@@ -192,6 +192,38 @@ async function main() {
     missed.length === 0,
     `outside it: ${missed.map((at) => at.toISOString()).join(', ')}`,
   );
+  // And from the other end: a window that STARTS today used to open at 08:00
+  // (UTC midnight), leaving out whatever was raised before it.
+  const notYetOpen = sameDay.filter((at) => {
+    const w = (periodWhere({ query: { from: screenDay(at), to: screenDay(at) } }) as {
+      createdAt?: { gte?: Date; lte?: Date };
+    }).createdAt;
+    return !w?.gte || !w.lte || w.gte.getTime() > at.getTime() || w.lte.getTime() < at.getTime();
+  });
+  check(
+    'a G-OPS window from "today" holds every hour of it too, from Manila midnight',
+    notYetOpen.length === 0,
+    `outside it: ${notYetOpen.map((at) => at.toISOString()).join(', ')}`,
+  );
+  const performed = (periodWhere({ query: { from: '2026-10-02', to: '2026-10-02' } }, 'performedAt') as {
+    performedAt: { gte: Date; lte: Date };
+  }).performedAt;
+  check(
+    'work performed, a DATE, still starts at UTC midnight — Manila midnight would read as the day before',
+    performed.gte.toISOString() === '2026-10-02T00:00:00.000Z' &&
+      performed.lte.toISOString().slice(0, 10) === '2026-10-02',
+    `${performed.gte.toISOString()} → ${performed.lte.toISOString()}`,
+  );
+  check(
+    'an Insights range over a timestamp runs from Manila midnight of its first day',
+    r.fromAt.toISOString() === '2025-12-31T16:00:00.000Z',
+    r.fromAt.toISOString(),
+  );
+  check(
+    'to the last instant of its last day in Manila',
+    r.toAt.toISOString() === '2026-06-30T15:59:59.999Z',
+    r.toAt.toISOString(),
+  );
 
   const badLinks = Object.entries(SUMMARY_FIGURES).filter(([, f]) => !f.to.startsWith('/'));
   check('every brief figure opens an app path', badLinks.length === 0, badLinks.map(([k]) => k).join(', '));
@@ -229,15 +261,14 @@ async function main() {
 
   const now = new Date();
   const today = screenDay(now);
-  // Insights' own day, for the checks on its UTC range below.
-  const todayUtc = now.toISOString().slice(0, 10);
-  // Finance counts "collected this year" from 1 January UTC, so the window
-  // starts there too.
-  const yearStart = `${now.getUTCFullYear()}-01-01`;
+  // Finance counts "collected this year" from 1 January of Manila's year, so
+  // the window starts there too.
+  const thisYear = Number(today.slice(0, 4));
+  const yearStart = `${thisYear}-01-01`;
 
   // Sales: a qualified lead on a hospital, a lead with no customer yet, a
-  // quotation out, and one won THIS MORNING (10:00Z) — the case the old
-  // midnight range end silently dropped.
+  // quotation out, and one won THIS MORNING (10:00 in Manila) — the case the
+  // old midnight range end silently dropped.
   await prisma.lead.create({
     data: {
       number: await nextNumber('lead'),
@@ -285,7 +316,24 @@ async function main() {
     return q;
   }
   await quotation('Oxygen plant', 'SUBMITTED', 1_200_000);
-  const wonThisMorning = await quotation('Won this morning', 'WON', 300_000, new Date(`${todayUtc}T10:00:00.000Z`));
+  const wonThisMorning = await quotation('Won this morning', 'WON', 300_000, new Date(`${today}T10:00:00.000+08:00`));
+  // Raised and won at 00:30 in Manila on a day long past. A range that
+  // started at UTC midnight (08:00 here) left it out of its own day.
+  const dawnDay = '2019-09-12';
+  const dawn = new Date(`${dawnDay}T00:30:00.000+08:00`);
+  const wonBeforeDawn = await prisma.quotation.create({
+    data: {
+      number: await nextNumber('quotation', prisma, { ownerId: director.id }),
+      customerId: hospital.id,
+      ownerId: director.id,
+      subject: `${TAG} Won before dawn`,
+      outcome: 'WON',
+      probability: 100,
+      submittedAt: dawn,
+      decidedAt: dawn,
+      createdAt: dawn,
+    },
+  });
 
   // Delivery: a project in progress, and a running service contract with a
   // PM visit done today.
@@ -327,7 +375,7 @@ async function main() {
       status: 'ACTIVE',
       jobId: contractJob.id,
       startsAt: new Date(`${yearStart}T00:00:00.000Z`),
-      endsAt: new Date(Date.UTC(now.getUTCFullYear() + 1, 11, 31)),
+      endsAt: new Date(Date.UTC(thisYear + 1, 11, 31)),
       frequencyMonths: 3,
       createdById: director.id,
     },
@@ -586,18 +634,37 @@ async function main() {
       val(f, 'billingsAwaitingInvoice') === fd.queue.billingsAwaitingInvoice,
     );
 
-    // ── The range ends at the end of its last day ──────────────────────────
-    const todayOnly = await api<{ sales: { won: number } }>('GET', `/insights/dashboard?from=${todayUtc}&to=${todayUtc}`);
+    // ── A range is Manila's days, first to last ─────────────────────────────
+    const todayOnly = await api<{ sales: { won: number } }>('GET', `/insights/dashboard?from=${today}&to=${today}`);
     const wonToday = await prisma.quotation.count({
-      where: {
-        outcome: 'WON',
-        decidedAt: { gte: new Date(`${todayUtc}T00:00:00.000Z`), lte: new Date(`${todayUtc}T23:59:59.999Z`) },
-      },
+      where: { outcome: 'WON', decidedAt: { gte: manilaDayStart(today), lte: manilaDayEnd(today) } },
     });
     check(
       'a quotation won at 10:00 today is counted in a range that ends today',
       todayOnly.body.sales.won === wonToday && wonToday >= 1,
       `won ${todayOnly.body.sales.won}, decided today ${wonToday} (fixture ${wonThisMorning.number})`,
+    );
+    const [dawnInsights, dawnGops, wonThatDay, raisedThatDay] = await Promise.all([
+      api<{ sales: { won: number } }>('GET', `/insights/dashboard?from=${dawnDay}&to=${dawnDay}`),
+      api<{ sales: { quotations: Record<string, number> | null } | null }>(
+        'GET',
+        `/gops/overview?from=${dawnDay}&to=${dawnDay}`,
+      ),
+      prisma.quotation.count({
+        where: { outcome: 'WON', decidedAt: { gte: manilaDayStart(dawnDay), lte: manilaDayEnd(dawnDay) } },
+      }),
+      prisma.quotation.count({ where: { createdAt: { gte: manilaDayStart(dawnDay), lte: manilaDayEnd(dawnDay) } } }),
+    ]);
+    check(
+      'a quotation won at 00:30 counts on its own day in Insights, not the day before',
+      dawnInsights.body.sales.won === wonThatDay && wonThatDay >= 1,
+      `won ${dawnInsights.body.sales.won}, decided that Manila day ${wonThatDay} (fixture ${wonBeforeDawn.number})`,
+    );
+    const raisedOnGops = Object.values(dawnGops.body.sales?.quotations ?? {}).reduce((s, n) => s + n, 0);
+    check(
+      'and one raised at 00:30 counts on its own day on the G-OPS dashboard',
+      raisedOnGops === raisedThatDay && raisedThatDay >= 1,
+      `G-OPS ${raisedOnGops}, raised that Manila day ${raisedThatDay}`,
     );
 
     // ── Who sees what ──────────────────────────────────────────────────────

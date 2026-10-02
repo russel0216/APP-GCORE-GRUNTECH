@@ -16,6 +16,7 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import { manilaDate } from '../shared/day';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -702,6 +703,9 @@ billingRoutes.post(
         data: {
           number,
           billingNo: (last?.billingNo ?? 0) + 1,
+          // Set here rather than left to the column's now(), which the
+          // database takes in UTC — yesterday's date until 08:00 Manila.
+          billingDate: manilaDate(new Date()),
           jobId: report.jobId,
           progressReportId: report.id,
           grossAmount: d(gross),

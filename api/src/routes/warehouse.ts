@@ -19,6 +19,7 @@ import { stockOnHand } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { renderDocument, formatMoney, formatDate } from '../shared/pdf';
+import { manilaDate } from '../shared/day';
 import {
   receiveStock,
   issueStock,
@@ -39,6 +40,13 @@ function asDate(v: string | null | undefined): Date | null {
   if (Number.isNaN(date.getTime())) throw badRequest(`"${v}" is not a valid date`);
   return date;
 }
+
+/**
+ * Today, for a DATE column: Manila's date. A bare `new Date()` written into,
+ * or compared with, a DATE column is the UTC date — yesterday's until 08:00,
+ * which is when crews collect their materials and tools.
+ */
+const today = () => manilaDate(new Date());
 
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING
@@ -247,7 +255,7 @@ receivingRoutes.post(
           orderId: order.id,
           warehouseId,
           receivedById: me.id,
-          receivedDate: asDate(body.receivedDate) ?? new Date(),
+          receivedDate: asDate(body.receivedDate) ?? today(),
           deliveryRefNo: body.deliveryRefNo || null,
           invoiceRefNo: body.invoiceRefNo || null,
           notes: body.notes || null,
@@ -498,7 +506,7 @@ stockIssueRoutes.post(
           issuedById: me.id,
           issuedToId: body.issuedToId || null,
           issuedToName: body.issuedToName || null,
-          issueDate: asDate(body.issueDate) ?? new Date(),
+          issueDate: asDate(body.issueDate) ?? today(),
           purpose: body.purpose,
           notes: body.notes || null,
         },
@@ -694,9 +702,12 @@ borrowRoutes.get(
     const where: Prisma.BorrowSlipWhereInput = {};
     if (q.filters.status) where.status = q.filters.status as Prisma.EnumBorrowStatusFilter['equals'];
     if (q.filters.jobId) where.jobId = q.filters.jobId;
+    // One "today" for the filter, each row's flag and both dashboard tiles, so a
+    // slip the list flags as overdue is one the Overdue filter finds.
+    const day = today();
     if (q.filters.overdue === 'true') {
       where.status = { in: ['OUT', 'PARTIALLY_RETURNED'] };
-      where.dueAt = { lt: new Date() };
+      where.dueAt = { lt: day };
     }
     if (q.search) {
       where.OR = [
@@ -721,7 +732,6 @@ borrowRoutes.get(
       prisma.borrowSlip.count({ where }),
     ]);
 
-    const now = new Date();
     res.json(
       listResult(
         rows.map((r) => ({
@@ -739,11 +749,14 @@ borrowRoutes.get(
           outstandingQty: cents(
             r.items.reduce((s, i) => s + num(i.quantity) - num(i.returnedQty), 0),
           ),
+          // Against the DAY, not the instant: dueAt is a date, held as UTC
+          // midnight, so `dueAt < new Date()` flagged a slip from 08:00 on the
+          // day it was due back.
           isOverdue:
-            (r.status === 'OUT' || r.status === 'PARTIALLY_RETURNED') && r.dueAt < now,
+            (r.status === 'OUT' || r.status === 'PARTIALLY_RETURNED') && r.dueAt < day,
           daysOverdue:
-            (r.status === 'OUT' || r.status === 'PARTIALLY_RETURNED') && r.dueAt < now
-              ? Math.floor((now.getTime() - r.dueAt.getTime()) / 86400000)
+            (r.status === 'OUT' || r.status === 'PARTIALLY_RETURNED') && r.dueAt < day
+              ? Math.floor((day.getTime() - r.dueAt.getTime()) / 86400000)
               : 0,
         })),
         total,
@@ -823,6 +836,9 @@ borrowRoutes.post(
           borrowerId: body.borrowerId || null,
           borrowerName: body.borrowerName,
           issuedById: me.id,
+          // Set here rather than left to the column's now(): the database
+          // takes its date in UTC.
+          borrowedAt: today(),
           dueAt: new Date(body.dueAt),
           purpose: body.purpose,
           notes: body.notes || null,
@@ -916,7 +932,7 @@ borrowRoutes.post(
         where: { id: slip.id },
         data: {
           status: allBack ? 'RETURNED' : 'PARTIALLY_RETURNED',
-          returnedAt: allBack ? new Date() : null,
+          returnedAt: allBack ? today() : null,
         },
       });
     });
@@ -1106,7 +1122,7 @@ inventoryRoutes.get(
 
     const [overdueBorrows, stock] = await Promise.all([
       prisma.borrowSlip.count({
-        where: { status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: new Date() } },
+        where: { status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: today() } },
       }),
       // Stock value is decided once, in shared/chain.ts — the same figure the
       // G-CHAIN dashboard and the Insights brief print.

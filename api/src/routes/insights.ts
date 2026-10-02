@@ -8,6 +8,7 @@ import { audit } from '../shared/audit';
 import { financePosition, claimPayable } from '../shared/finance';
 import { stockOnHand } from '../shared/chain';
 import { quotationValue } from '../shared/pipeline';
+import { manilaDayStart } from '../shared/day';
 import {
   cents,
   num,
@@ -129,8 +130,9 @@ insightRoutes.get(
           revisions: { select: { total: true, status: true, revision: true } },
         },
       }),
-      prisma.quotation.count({ where: { outcome: 'WON', decidedAt: { gte: range.from, lte: range.to } } }),
-      prisma.quotation.count({ where: { outcome: 'LOST', decidedAt: { gte: range.from, lte: range.to } } }),
+      // decidedAt is a timestamp: Manila's days, fromAt..toAt (parseRange).
+      prisma.quotation.count({ where: { outcome: 'WON', decidedAt: { gte: range.fromAt, lte: range.toAt } } }),
+      prisma.quotation.count({ where: { outcome: 'LOST', decidedAt: { gte: range.fromAt, lte: range.toAt } } }),
       prisma.job.count({ where: { status: { in: ['PLANNING', 'IN_PROGRESS'] } } }),
       prisma.job.count({
         where: { status: { in: ['COMPLETED', 'TURNED_OVER'] }, actualEndDate: { gte: range.from, lte: range.to } },
@@ -253,7 +255,9 @@ insightRoutes.get(
   handler(async (req, res) => {
     const months = Math.min(36, Math.max(3, Number(req.query.months ?? 12)));
     const keys = monthsBack(months);
+    // DATE columns start at the 1st as a date; timestamps at Manila midnight of it.
     const start = new Date(`${keys[0]}-01T00:00:00.000Z`);
+    const startAt = manilaDayStart(`${keys[0]}-01`);
 
     const [billings, receipts, incurred, quotations] = await Promise.all([
       prisma.progressBilling.findMany({
@@ -269,11 +273,11 @@ insightRoutes.get(
         // occurredAt, not createdAt: a cost entered late still belongs to the
         // month the work happened in, and a trend built on entry dates shows
         // the bookkeeping rather than the business.
-        where: { state: 'INCURRED', occurredAt: { gte: start } },
+        where: { state: 'INCURRED', occurredAt: { gte: startAt } },
         select: { occurredAt: true, amount: true },
       }),
       prisma.quotation.findMany({
-        where: { outcome: 'WON', decidedAt: { gte: start } },
+        where: { outcome: 'WON', decidedAt: { gte: startAt } },
         select: {
           decidedAt: true,
           revisions: { select: { total: true, status: true, revision: true } },
@@ -447,7 +451,7 @@ insightRoutes.get(
     const industrySelect = { select: { code: true, name: true } } as const;
     const [leads, quotations, activeIndustries] = await Promise.all([
       prisma.lead.findMany({
-        where: { createdAt: { gte: range.from, lte: range.to } },
+        where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
         select: {
           id: true,
           status: true,
@@ -488,7 +492,7 @@ insightRoutes.get(
     const valueOf = (q: (typeof quotations)[number]) => quotationValue(q.revisions);
 
     const decidedInRange = quotations.filter(
-      (q) => q.decidedAt && q.decidedAt >= range.from && q.decidedAt <= range.to,
+      (q) => q.decidedAt && q.decidedAt >= range.fromAt && q.decidedAt <= range.toAt,
     );
     const open = quotations.filter((q) => ['OPEN', 'SUBMITTED', 'NEGOTIATION'].includes(q.outcome));
 
@@ -569,14 +573,14 @@ insightRoutes.get(
       const person = touch(q.owner.id, q.owner.name);
       const industry = industryRow(q.customer.industry);
       const value = valueOf(q);
-      const inRange = q.createdAt >= range.from && q.createdAt <= range.to;
+      const inRange = q.createdAt >= range.fromAt && q.createdAt <= range.toAt;
       if (inRange) {
         person.quotations++;
         person.quotedValue = cents(person.quotedValue + value);
         industry.quotations++;
         industry.quotedValue = cents(industry.quotedValue + value);
       }
-      if (q.decidedAt && q.decidedAt >= range.from && q.decidedAt <= range.to) {
+      if (q.decidedAt && q.decidedAt >= range.fromAt && q.decidedAt <= range.toAt) {
         if (q.outcome === 'WON') {
           person.won++;
           person.wonValue = cents(person.wonValue + value);
@@ -679,7 +683,7 @@ insightRoutes.get(
   handler(async (req, res) => {
     const range = parseRange(req.query.from as string, req.query.to as string);
     const quotations = await prisma.quotation.findMany({
-      where: { createdAt: { gte: range.from, lte: range.to } },
+      where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
       include: {
         customer: { select: { name: true, industry: { select: { code: true, name: true } } } },
         owner: { select: { name: true } },
@@ -1040,7 +1044,8 @@ insightRoutes.get(
   handler(async (req, res) => {
     const sinceDays = Math.min(730, Math.max(30, Number(req.query.sinceDays ?? 90)));
     const months = 6;
-    const start = new Date(`${monthsBack(months)[0]}-01T00:00:00.000Z`);
+    // occurredAt is a timestamp: the first month starts at Manila midnight.
+    const start = manilaDayStart(`${monthsBack(months)[0]}-01`);
 
     const [balances, moves, slow, reorder] = await Promise.all([
       prisma.inventoryBalance.findMany({
@@ -1182,7 +1187,7 @@ insightRoutes.get(
 
     const [quotations, jobs, reports, pending, billings] = await Promise.all([
       prisma.quotation.findMany({
-        where: { createdAt: { gte: range.from, lte: range.to } },
+        where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
         select: {
           outcome: true,
           owner: { select: { id: true, name: true } },

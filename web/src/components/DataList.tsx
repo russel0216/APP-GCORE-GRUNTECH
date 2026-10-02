@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, qs, type ListResult } from '../lib/api';
+import { todayLocal } from '../lib/day';
 import { Empty, ErrorBox, Loading } from './ui';
 
 /**
@@ -276,7 +277,7 @@ export function DataList<T>({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${listKey}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `${listKey}-${todayLocal()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }

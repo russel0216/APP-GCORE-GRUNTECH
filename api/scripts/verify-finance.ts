@@ -42,6 +42,7 @@ import {
   saveFinanceSettings,
   type AgedRow,
 } from '../src/shared/finance';
+import { manilaDayKey } from '../src/shared/day';
 import zlib from 'node:zlib';
 // Side-effect imports: register the bill, expense and cash-advance approval
 // subscribers, and the procurement ones the receiving path depends on. The
@@ -340,6 +341,33 @@ async function main() {
   );
 
   check('thirty days added lands thirty days later', daysBetween(dayKey(new Date()), addDays(dayKey(new Date()), 30)) === 30);
+
+  // ══ Manila's day ═════════════════════════════════════════════════════════
+  // Until 08:00 in Manila the UTC date is still yesterday's. Every "today" in
+  // G-FIN is dayKey(new Date()), so it is pinned here at both ends of one
+  // Manila day, whatever hour this script happens to run.
+  console.log('\nManila’s day');
+  const ymd = (d: Date) => d.toISOString().slice(0, 10);
+  const earlyFirst = new Date('2026-10-01T00:30:00+08:00');
+  check(
+    'at 00:30 in Manila, today is already the new day',
+    ymd(dayKey(earlyFirst)) === '2026-10-01',
+    `${ymd(dayKey(earlyFirst))} — the UTC date is still the 30th`,
+  );
+  check(
+    'and at 23:30 it is still that day',
+    ymd(dayKey(new Date('2026-10-01T23:30:00+08:00'))) === '2026-10-01',
+  );
+  check(
+    'an invoice due yesterday is a day overdue from Manila’s midnight, not from 08:00',
+    daysBetween(new Date('2026-09-30'), earlyFirst) === 1,
+    String(daysBetween(new Date('2026-09-30'), earlyFirst)),
+  );
+  let storedUnchanged = true;
+  for (let d = new Date('2026-01-01'); d < new Date('2027-01-01'); d = addDays(d, 1)) {
+    if (dayKey(d).getTime() !== d.getTime()) storedUnchanged = false;
+  }
+  check('a stored date comes back from dayKey() unchanged, every day of a year', storedUnchanged);
 
   // ══ Fixtures ═════════════════════════════════════════════════════════════
 
@@ -1725,6 +1753,7 @@ async function main() {
       earlyInv.status === 400 && String(earlyInv.body.error).includes('report is approved'),
       `${earlyInv.status} ${JSON.stringify(earlyInv.body).slice(0, 140)}`,
     );
+    const orderDay = manilaDayKey(new Date());
     const doneInv = await billOrder(doneOrder.id, doneOrder.number);
     check(
       'a completed chargeable order is invoiced, carrying the order',
@@ -1733,6 +1762,13 @@ async function main() {
         doneInv.body.customer?.id === customer.id &&
         doneInv.body.poReference === `${TAG}-PO-77`,
       `${doneInv.status} ${JSON.stringify(doneInv.body).slice(0, 160)}`,
+    );
+    // The job-order screen sends no invoice date, so the server's is the one
+    // the invoice prints. Either side of the request, in case midnight passed.
+    check(
+      'and, given no date, it is dated Manila’s today',
+      [orderDay, manilaDayKey(new Date())].includes(String(doneInv.body.invoiceDate).slice(0, 10)),
+      String(doneInv.body.invoiceDate),
     );
     check(
       'at net collectible = invoice total less EWT',
@@ -1777,6 +1813,31 @@ async function main() {
         `${billingView.status} ${JSON.stringify(billingView.body.invoice ?? null)}`,
       );
     }
+
+    // Both "Mark cleared" buttons post no body, so the server's date is the
+    // only one a cleared cheque ever gets. It must be Manila's: cleared at
+    // 07:30 on the 1st, the UTC date put the money in last month.
+    const cheque = await prisma.payment.create({
+      data: {
+        number: await nextNumber('payment'),
+        kind: 'RECEIPT',
+        method: 'CHECK',
+        paymentDate: dayKey(new Date()),
+        customerId: customer.id,
+        amount: D(1_000),
+        reference: `${TAG}-CHK-CLEAR`,
+        recordedById: finance.id,
+        allocations: { create: [{ invoiceId: secondInvoice.id, amount: D(1_000) }] },
+      },
+    });
+    const clearDay = manilaDayKey(new Date());
+    const cleared = await fin('POST', `/payments/${cheque.id}/clear`);
+    const clearedOn = (await prisma.payment.findUnique({ where: { id: cheque.id } }))?.clearedAt;
+    check(
+      'a cheque marked cleared with no date clears on Manila’s today',
+      cleared.status === 200 && !!clearedOn && [clearDay, manilaDayKey(new Date())].includes(ymd(clearedOn)),
+      `${cleared.status} ${clearedOn?.toISOString()}`,
+    );
   }
 
   await cleanup();

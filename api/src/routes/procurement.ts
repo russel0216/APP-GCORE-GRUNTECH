@@ -19,6 +19,7 @@ import { registerSearch } from '../shared/search';
 import { nextNumber } from '../shared/numbering';
 import { submitForApproval, onApprovalSettled, approvalSignoffs } from '../shared/approvals';
 import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import { manilaDate } from '../shared/day';
 import {
   postJobCost,
   releaseCommitment,
@@ -1160,6 +1161,9 @@ purchaseOrderRoutes.post(
           jobId: pr?.jobId ?? null,
           warehouseId: pr?.warehouseId ?? null,
           createdById: me.id,
+          // Set here rather than left to the column's now(), which the
+          // database takes in UTC — yesterday's date until 08:00 Manila.
+          orderDate: manilaDate(new Date()),
           deliveryDate: asDate(body.deliveryDate),
           deliverTo: body.deliverTo || null,
           terms: body.terms || null,

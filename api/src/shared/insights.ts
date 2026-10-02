@@ -6,6 +6,7 @@ import { gopsOverview } from './gops';
 import { chainOverview } from './chain';
 import { attendanceDay, dayKey as hrDayKey } from './hr';
 import { financePosition } from './finance';
+import { manilaDate, manilaDayEnd, manilaDayStart, manilaMonthKey } from './day';
 
 /**
  * The reporting layer.
@@ -29,49 +30,72 @@ export const cents = (n: number) => Math.round(n * 100) / 100;
 export const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 export const pct = (part: number, whole: number) => (whole > 0 ? cents((part / whole) * 100) : 0);
 
-export const dayKey = (at: Date): Date =>
-  new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
+/**
+ * The Manila date as UTC midnight — the same rule as G-FIN's `dayKey`, which
+ * the overview's position is read through. Before 08:00 the UTC date is still
+ * yesterday's: "this month" on the 1st meant last month.
+ */
+export const dayKey = (at: Date): Date => manilaDate(at);
 
+/**
+ * The Manila month a date or an instant falls in. A stored DATE (UTC midnight,
+ * 08:00 in Manila) keeps its own month; an instant from the first eight hours
+ * of the 1st no longer lands in the month before.
+ */
 export function monthKey(d: Date): string {
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  return manilaMonthKey(d);
 }
 
-/** A list of month keys, oldest first, ending with the month `to` falls in. */
+/** A list of month keys, oldest first, ending with the Manila month `to` falls in. */
 export function monthsBack(count: number, to = new Date()): string[] {
+  const day = dayKey(to);
   const out: string[] = [];
   for (let i = count - 1; i >= 0; i--) {
-    out.push(monthKey(new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - i, 1))));
+    out.push(monthKey(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() - i, 1))));
   }
   return out;
 }
 
 export interface Range {
+  /** The first day, for a DATE column: UTC midnight, which a DATE reads as that day. */
   from: Date;
+  /** The last day, for a DATE column: 23:59:59.999Z, still that day. */
   to: Date;
+  /** Manila midnight of the first day, for a TIMESTAMP column. */
+  fromAt: Date;
+  /** The last instant of the last day in Manila, for a TIMESTAMP column. */
+  toAt: Date;
 }
 
 /**
- * The window a report covers.
+ * The window a report covers, as Manila's days.
  *
  * Defaults to the current year rather than "everything", because a report over
  * all of history answers a different question than the one anybody asked.
  *
- * `from` is the first instant of its day and `to` the LAST — 23:59:59.999Z.
- * Every range filter is `lte: range.to`, so ending at midnight used to drop
- * the whole of the last day for anything dated by a TIMESTAMP (`decidedAt`,
- * `createdAt`, `clearedAt`): "this month, to today" left out a quotation won
- * this morning. Columns stored as `@db.Date` were never affected — midnight
- * is the day itself — and still compare the same way.
+ * Two pairs of edges, one per kind of column. `from`/`to` are for `@db.Date`
+ * columns (`billingDate`, `clearedAt`), which Prisma binds as their UTC date.
+ * `fromAt`/`toAt` are for TIMESTAMPS (`decidedAt`, `createdAt`): Manila
+ * midnight to 23:59:59.999 in Manila. Using `from`/`to` on a timestamp made the
+ * day run from 08:00 to 08:00, so a quotation won at 07:00 on the 1st counted
+ * in the month before. Ending at midnight, before that, dropped the last day.
  */
 export function parseRange(fromRaw?: string, toRaw?: string): Range {
   const now = new Date();
-  const from = fromRaw ? new Date(fromRaw) : new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+  const from = fromRaw ? new Date(fromRaw) : new Date(Date.UTC(dayKey(now).getUTCFullYear(), 0, 1));
   const to = toRaw ? new Date(toRaw) : now;
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
     throw badRequest('That is not a valid date range');
   }
   if (to < from) throw badRequest('The range ends before it starts');
-  return { from: dayKey(from), to: new Date(dayKey(to).getTime() + 86_399_999) };
+  const first = dayKey(from);
+  const last = dayKey(to);
+  return {
+    from: first,
+    to: new Date(last.getTime() + 86_399_999),
+    fromAt: manilaDayStart(first.toISOString().slice(0, 10)),
+    toAt: manilaDayEnd(last.toISOString().slice(0, 10)),
+  };
 }
 
 // ── Project profitability ────────────────────────────────────────────────────
@@ -125,7 +149,7 @@ export async function projectProfitability(opts: {
   if (opts.type) where.type = opts.type;
   if (opts.status) where.status = opts.status as Prisma.EnumJobStatusFilter['equals'];
   if (opts.customerId) where.customerId = opts.customerId;
-  if (opts.range) where.createdAt = { gte: opts.range.from, lte: opts.range.to };
+  if (opts.range) where.createdAt = { gte: opts.range.fromAt, lte: opts.range.toAt };
 
   const jobs = await prisma.job.findMany({
     where,
@@ -417,10 +441,11 @@ export async function approvalBottleneck(now = Date.now()): Promise<BottleneckRo
  * the server. A figure the caller may not see is OMITTED, never sent as 0:
  * a zero that is really "not yours to know" reads as an empty queue.
  *
- * Day conventions meet on this panel and are never mixed in one line: G-OPS
- * period figures use the G-OPS dashboard's own boundary (server clock), the
- * G-HR day is HR's local `dayKey`, and G-FIN / G-CHAIN use Insights' UTC day.
- * The screen's caption says so.
+ * Every day on this panel is Manila's, each read the way its own module reads
+ * it: G-OPS ranges through `periodWhere`, G-FIN and G-CHAIN through `dayKey`
+ * (`manilaDate`) and `parseRange`, and the G-HR day through HR's local
+ * `dayKey` — the server clock, which is Manila's on the server. The screen's
+ * caption says so.
  */
 
 export type SummaryModule = 'gops' | 'gchain' | 'ghr' | 'gfin';

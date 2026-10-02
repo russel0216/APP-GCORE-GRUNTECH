@@ -415,7 +415,7 @@ export function CompanyOverview() {
           >
             <Brief
               lines={briefLines}
-              caption={`Queues and balances are live, as of ${clockOf(data.summary.asOf)}. Figures marked "in range" follow the dates above (${from} → ${to}); G-OPS counts them on the G-OPS dashboard's own day boundary, the rest on the calendar day.`}
+              caption={`Queues and balances are live, as of ${clockOf(data.summary.asOf)}. Figures marked "in range" follow the dates above (${from} → ${to}), counted on Manila's calendar days.`}
             />
           </Panel>
         </div>

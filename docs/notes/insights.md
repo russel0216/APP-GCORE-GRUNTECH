@@ -53,17 +53,21 @@ Notes for the model doc (§9, §11) and CLAUDE.md's Phase 9 notes.
   `/gops/overview` route so that response did not change). A view_own holder's
   quotations are marked "(yours)" in the sentence and `mine` in the CSV's
   `Scope` column. G-CHAIN's purchase-request count is scoped the same way.
-- **Three day conventions, never mixed in one line.** G-OPS period figures use
-  `periodWhere`'s server-clock end of day (deliberately untouched —
-  verify-aftermarket pins `/gops/overview`); the G-HR day is HR's local
-  `dayKey`, and the brief's overtime window is parsed exactly as
-  `/hr-reports/overtime-by-project` parses it (`hrReportWindow()`); G-FIN and
-  G-CHAIN use Insights' UTC day. The caption on the panel says so.
-- **`parseRange().to` is now 23:59:59.999Z of the last day.** It used to be
-  midnight, which silently dropped the last day for anything dated by a
-  timestamp (`decidedAt`, `createdAt`, `clearedAt`) — "this month, to today"
-  left out a quotation won this morning. `@db.Date` columns were never
-  affected. Every Insights range figure may move by one day's documents.
+- **Every day on the panel is Manila's, each line read its own module's way.**
+  G-OPS period figures through `periodWhere`; the G-HR day through HR's local
+  `dayKey` (the server clock), with the brief's overtime window parsed exactly
+  as `/hr-reports/overtime-by-project` parses it (`hrReportWindow()`); G-FIN
+  and G-CHAIN through `dayKey`, which is `manilaDate`. Until 2026-10-02 these
+  were three different days: G-FIN and G-CHAIN took the UTC date, yesterday's
+  until 08:00, and G-OPS ranges opened at UTC midnight, 08:00 in Manila
+  (`docs/notes/day-boundaries.md`). The caption on the panel says so.
+- **`parseRange()` has two pairs of edges.** `from`/`to` are for `@db.Date`
+  columns: UTC midnight to 23:59:59.999Z of the last day. (`to` used to be
+  midnight, which silently dropped the last day for timestamps — "this month,
+  to today" left out a quotation won this morning.) `fromAt`/`toAt` are for
+  timestamps (`decidedAt`, `createdAt`): Manila midnight to 23:59:59.999 in
+  Manila. On the DATE edges a timestamp's day ran 08:00 to 08:00, and a
+  quotation won at 07:00 on the 1st counted in the month before.
 - **The working position is G-FIN's, to the centavo.**
   `receivable − payable − reimbursable − advancesToRelease`, from
   `financePosition()`. The Insights tile used to print receivable − payable and
