@@ -6,6 +6,7 @@ import { gopsOverview } from './gops';
 import { chainOverview } from './chain';
 import { attendanceDay, dayKey as hrDayKey } from './hr';
 import { financePosition } from './finance';
+import { manilaDate } from './day';
 
 /**
  * The reporting layer.
@@ -29,18 +30,23 @@ export const cents = (n: number) => Math.round(n * 100) / 100;
 export const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 export const pct = (part: number, whole: number) => (whole > 0 ? cents((part / whole) * 100) : 0);
 
-export const dayKey = (at: Date): Date =>
-  new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
+/**
+ * The Manila date as UTC midnight — the same rule as G-FIN's `dayKey`, which
+ * the overview's position is read through. Before 08:00 the UTC date is still
+ * yesterday's: "this month" on the 1st meant last month.
+ */
+export const dayKey = (at: Date): Date => manilaDate(at);
 
 export function monthKey(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
-/** A list of month keys, oldest first, ending with the month `to` falls in. */
+/** A list of month keys, oldest first, ending with the Manila month `to` falls in. */
 export function monthsBack(count: number, to = new Date()): string[] {
+  const day = dayKey(to);
   const out: string[] = [];
   for (let i = count - 1; i >= 0; i--) {
-    out.push(monthKey(new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - i, 1))));
+    out.push(monthKey(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() - i, 1))));
   }
   return out;
 }
@@ -65,7 +71,7 @@ export interface Range {
  */
 export function parseRange(fromRaw?: string, toRaw?: string): Range {
   const now = new Date();
-  const from = fromRaw ? new Date(fromRaw) : new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+  const from = fromRaw ? new Date(fromRaw) : new Date(Date.UTC(dayKey(now).getUTCFullYear(), 0, 1));
   const to = toRaw ? new Date(toRaw) : now;
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
     throw badRequest('That is not a valid date range');
@@ -419,8 +425,8 @@ export async function approvalBottleneck(now = Date.now()): Promise<BottleneckRo
  *
  * Day conventions meet on this panel and are never mixed in one line: G-OPS
  * period figures use the G-OPS dashboard's own boundary (server clock), the
- * G-HR day is HR's local `dayKey`, and G-FIN / G-CHAIN use Insights' UTC day.
- * The screen's caption says so.
+ * G-HR day is HR's local `dayKey`, and G-FIN / G-CHAIN use Manila's day
+ * (`dayKey` is `manilaDate`). The screen's caption says so.
  */
 
 export type SummaryModule = 'gops' | 'gchain' | 'ghr' | 'gfin';

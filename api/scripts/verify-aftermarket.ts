@@ -240,6 +240,21 @@ async function main() {
     expiryState(inDays(45), 90).daysRemaining === 45,
     `got ${expiryState(inDays(45), 90).daysRemaining}`,
   );
+  // Manila's day, pinned at both ends of it: until 08:00 the UTC date is still
+  // yesterday's, and a warranty that ended then read as "Expiring, 0 days".
+  const earlyFirst = new Date('2026-10-01T00:30:00+08:00');
+  const lapsed = expiryState(new Date('2026-09-30'), 90, earlyFirst);
+  check(
+    'at 00:30 in Manila, a warranty that ended yesterday has expired',
+    lapsed.state === 'EXPIRED' && lapsed.daysRemaining === -1,
+    `${lapsed.state} ${lapsed.daysRemaining}`,
+  );
+  const lastDay = expiryState(new Date('2026-10-01'), 90, new Date('2026-10-01T23:30:00+08:00'));
+  check(
+    'and at 23:30 one ending that day is still expiring, with 0 days left',
+    lastDay.state === 'EXPIRING' && lastDay.daysRemaining === 0,
+    `${lastDay.state} ${lastDay.daysRemaining}`,
+  );
 
   // ══ Templates ════════════════════════════════════════════════════════════
   console.log('\nReport templates');

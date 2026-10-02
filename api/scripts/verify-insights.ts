@@ -40,6 +40,7 @@ import {
   FORECAST_WINDOWS,
   dayKey,
 } from '../src/shared/insights';
+import { manilaDayKey } from '../src/shared/day';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -197,6 +198,14 @@ async function main() {
   check('and starts twelve months earlier', twelve[0] === '2025-10', twelve[0]);
   check('crossing a year boundary keeps the months in order', twelve.join(',').includes('2025-12,2026-01'));
   check('a month key is zero-padded so it sorts as text', monthKey(day('2026-03-01')) === '2026-03');
+  // At 07:00 in Manila on the 1st the UTC date is still last month's: the
+  // trend used to end on last month and leave the current one out.
+  const onTheFirst = monthsBack(3, new Date('2026-10-01T07:00:00+08:00'));
+  check(
+    'at 07:00 in Manila on the 1st, the trend already ends on the new month',
+    onTheFirst.join(',') === '2026-08,2026-09,2026-10',
+    onTheFirst.join(','),
+  );
 
   // The forecast windows must tile the number line with no gap and no overlap.
   const windows = [-500, -1, 0, 3, 7, 8, 30, 31, 60, 61, 90, 91, 5000];
@@ -229,6 +238,11 @@ async function main() {
   check(
     'with no range given it covers this year, not all of history',
     defaulted.from.getUTCMonth() === 0 && defaulted.from.getUTCDate() === 1,
+    defaulted.from.toISOString(),
+  );
+  check(
+    'and "this year" is Manila’s year',
+    defaulted.from.getUTCFullYear() === Number(manilaDayKey(new Date()).slice(0, 4)),
     defaulted.from.toISOString(),
   );
 

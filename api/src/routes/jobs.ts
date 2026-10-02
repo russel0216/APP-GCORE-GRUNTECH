@@ -531,7 +531,8 @@ jobRoutes.post(
     }
     const type = renewing ? ('SERVICE_CONTRACT' as const) : body.type;
 
-    const start = asDate(body.startDate) ?? new Date();
+    // Manila's date: a bare new Date() is stored as the UTC date, yesterday's until 08:00.
+    const start = asDate(body.startDate) ?? dayKey(new Date());
 
     const job = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('project', tx);

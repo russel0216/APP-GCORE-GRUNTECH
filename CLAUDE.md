@@ -130,11 +130,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,112 assertions across twenty-two scripts** (counted 2026-10-02): foundation 175,
+**2,131 assertions across twenty-two scripts** (counted 2026-10-02): foundation 175,
 masters 54, sales 251, costing 105, pipeline 44, calendar 38, numbering 46,
-partners 82, delivery 78, chain 63, hr 104, plantilla 91, meetings 86,
-evaluations 125, academy 97, finance 133, aftermarket 166, archive 113,
-insights 92, insights-brief 44, workspace 39, accounts 86. They cover permission resolution, numbering
+partners 82, delivery 78, chain 72, hr 104, plantilla 91, meetings 86,
+evaluations 125, academy 97, finance 139, aftermarket 168, archive 113,
+insights 94, insights-brief 44, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -525,6 +525,17 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `manilaMonthKey`). Deep links and forecast columns bucket on these, never on
   the host clock, because the server's clock is not the business's day.
   Numbering keeps its local-getter `{YYYY}`/`{MM}`.
+- **Today, for a DATE column, is `manilaDate(new Date())`** (`shared/day.ts`).
+  Until 08:00 in Manila the UTC date is still yesterday's, and it arrives
+  unasked three ways: `getUTC*`; a bare `new Date()` written into, or compared
+  with, a `@db.Date` column (Prisma binds it as a DATE and drops the time); and
+  a DATE column's `@default(now())`, which the database evaluates in UTC — so a
+  route sets that column itself. The `dayKey()`s of `shared/finance.ts`,
+  `shared/aftermarket.ts` and `shared/insights.ts` ARE `manilaDate()`; a stored
+  DATE or a parsed `'YYYY-MM-DD'` is UTC midnight, 08:00 in Manila, and comes
+  back unchanged. A DATE compared in JavaScript is compared with that day, never
+  with the instant — a borrow slip once flagged itself overdue at 08:00 on the
+  day it was due. `docs/notes/day-boundaries.md` has the audit.
 - **"Today" in My Work is a timestamp window**, local midnight to the next, not
   `dayKey()`. `dayKey()` is a key for `@db.Date` columns (UTC midnight of the
   local date) and would put the boundary at 08:00 Manila. A provider comparing a

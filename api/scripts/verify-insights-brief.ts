@@ -34,8 +34,8 @@ import { cents, parseRange, SUMMARY_FIGURES } from '../src/shared/insights';
 import { periodWhere } from '../src/shared/gops';
 import { manilaDayKey } from '../src/shared/day';
 // HR's day key is the LOCAL date (the same convention as web/src/lib/day.ts's
-// todayLocal), not Insights' UTC one. An attendance fixture keyed by the UTC
-// day would land on yesterday for eight hours of every Manila morning.
+// todayLocal), never the UTC one. An attendance fixture keyed by the UTC day
+// would land on yesterday for eight hours of every Manila morning.
 import { dayKey as hrDayKey } from '../src/shared/hr';
 
 if (env.isProduction) {
@@ -231,9 +231,10 @@ async function main() {
   const today = screenDay(now);
   // Insights' own day, for the checks on its UTC range below.
   const todayUtc = now.toISOString().slice(0, 10);
-  // Finance counts "collected this year" from 1 January UTC, so the window
-  // starts there too.
-  const yearStart = `${now.getUTCFullYear()}-01-01`;
+  // Finance counts "collected this year" from 1 January of Manila's year, so
+  // the window starts there too.
+  const thisYear = Number(today.slice(0, 4));
+  const yearStart = `${thisYear}-01-01`;
 
   // Sales: a qualified lead on a hospital, a lead with no customer yet, a
   // quotation out, and one won THIS MORNING (10:00Z) — the case the old
@@ -327,7 +328,7 @@ async function main() {
       status: 'ACTIVE',
       jobId: contractJob.id,
       startsAt: new Date(`${yearStart}T00:00:00.000Z`),
-      endsAt: new Date(Date.UTC(now.getUTCFullYear() + 1, 11, 31)),
+      endsAt: new Date(Date.UTC(thisYear + 1, 11, 31)),
       frequencyMonths: 3,
       createdById: director.id,
     },

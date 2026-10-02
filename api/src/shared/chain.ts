@@ -1,6 +1,7 @@
 import { prisma } from '../prisma';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { cents } from './finance';
+import { manilaDate } from './day';
 
 /**
  * G-CHAIN figures that more than one screen shows.
@@ -46,7 +47,9 @@ export interface ChainOverview {
  * The other three are view_all-only lists, so the count is all or nothing.
  */
 export async function chainOverview(me: ResolvedUser): Promise<ChainOverview> {
-  const now = new Date();
+  // Manila's date: `dueAt` is a DATE, and an instant compared with it is read
+  // as its UTC date — yesterday's until 08:00.
+  const today = manilaDate(new Date());
 
   const seesRequests =
     can(me, 'gchain.purchase_requests.view_all') || can(me, 'gchain.purchase_requests.view_own');
@@ -63,7 +66,7 @@ export async function chainOverview(me: ResolvedUser): Promise<ChainOverview> {
       : null,
     can(me, 'gchain.borrow_slips.view_all')
       ? prisma.borrowSlip.count({
-          where: { status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: now } },
+          where: { status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: today } },
         })
       : null,
     can(me, 'gchain.inventory.view_all') ? stockOnHand() : null,

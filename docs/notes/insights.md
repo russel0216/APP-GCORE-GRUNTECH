@@ -58,7 +58,9 @@ Notes for the model doc (§9, §11) and CLAUDE.md's Phase 9 notes.
   verify-aftermarket pins `/gops/overview`); the G-HR day is HR's local
   `dayKey`, and the brief's overtime window is parsed exactly as
   `/hr-reports/overtime-by-project` parses it (`hrReportWindow()`); G-FIN and
-  G-CHAIN use Insights' UTC day. The caption on the panel says so.
+  G-CHAIN use Manila's day — until 2026-10-02 that was the UTC date, which is
+  yesterday's until 08:00 (`docs/notes/day-boundaries.md`). The caption on the
+  panel says so.
 - **`parseRange().to` is now 23:59:59.999Z of the last day.** It used to be
   midnight, which silently dropped the last day for anything dated by a
   timestamp (`decidedAt`, `createdAt`, `clearedAt`) — "this month, to today"

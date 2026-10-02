@@ -18,6 +18,7 @@ import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
 import { stockOnHand } from '../src/shared/chain';
+import { manilaDayKey } from '../src/shared/day';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
@@ -915,6 +916,7 @@ async function main() {
     );
 
     // Editing a draft order.
+    const draftDay = manilaDayKey(new Date());
     const created = await api(buyerToken, 'POST', '/purchase-orders', {
       supplierId: supplier.id,
       notes: `${TAG} draft order`,
@@ -1025,6 +1027,120 @@ async function main() {
     check(
       'and the order says which canvass decided it',
       (canvassRead.body.fromCanvass as { id: string } | null)?.id !== undefined,
+    );
+
+    // ── Manila's day ──────────────────────────────────────────────────────
+    // A DATE the server fills in or compares with is Manila's date; the UTC
+    // date is still yesterday's until 08:00, when crews collect materials and
+    // tools. A stored date is checked against the Manila day either side of
+    // its request, so a run that crosses midnight cannot fail it.
+    console.log('\nManila’s day (over HTTP)');
+    const onDay = (v: Date | string | null | undefined, dayBefore: string) =>
+      v != null && [dayBefore, manilaDayKey(new Date())].includes(new Date(v).toISOString().slice(0, 10));
+
+    const draftRow = await prisma.purchaseOrder.findUnique({ where: { id: draftId }, select: { orderDate: true } });
+    check(
+      'a new purchase order is dated Manila’s today, not the database’s UTC date',
+      onDay(draftRow?.orderDate, draftDay),
+      draftRow?.orderDate.toISOString(),
+    );
+
+    const storeRole = await makeRole('zzchain_store', 'ZZ Storekeeper', [
+      'gchain.dashboard.view_all',
+      'gchain.borrow_slips.view_all',
+      'gchain.borrow_slips.create',
+      'gchain.borrow_slips.edit_all',
+      'gchain.stock_issuance.create',
+      'gchain.reports.view_all',
+    ]);
+    const keeper = await mkUser('Verify Keeper', 'keeper@verifyc.local', storeRole.id);
+    const keeperToken = signToken(keeper.id, keeper.email);
+
+    let day = manilaDayKey(new Date());
+    const issueRes = await api(keeperToken, 'POST', '/stock-issues', {
+      warehouseId: warehouse.id,
+      purpose: `${TAG} early issue`,
+    });
+    const issueRow = issueRes.status === 201
+      ? await prisma.stockIssue.findUnique({ where: { id: String(issueRes.body.id) } })
+      : null;
+    check(
+      'a stock issue given no date is dated Manila’s today',
+      onDay(issueRow?.issueDate, day),
+      `${issueRes.status} ${issueRow?.issueDate.toISOString() ?? JSON.stringify(issueRes.body).slice(0, 120)}`,
+    );
+
+    // One slip due back yesterday and one due back today, by Manila's calendar.
+    const todayKey = manilaDayKey(new Date());
+    const yesterdayKey = manilaDayKey(new Date(Date.now() - 86_400_000));
+    const lend = (dueAt: string, label: string) =>
+      api(keeperToken, 'POST', '/borrow-slips', {
+        warehouseId: warehouse.id,
+        borrowerName: 'Verify Rigger',
+        dueAt,
+        purpose: `${TAG} ${label}`,
+        items: [{ itemId: item.id, quantity: 1 }],
+      });
+    day = manilaDayKey(new Date());
+    const lateSlip = await lend(yesterdayKey, 'due back yesterday');
+    const dueSlip = await lend(todayKey, 'due back today');
+    check(
+      'two slips are lent out',
+      lateSlip.status === 201 && dueSlip.status === 201,
+      `${lateSlip.status} ${dueSlip.status} ${JSON.stringify(lateSlip.body).slice(0, 120)}`,
+    );
+    const lateId = String(lateSlip.body.id);
+    const dueId = String(dueSlip.body.id);
+    const lateRow = await prisma.borrowSlip.findUnique({ where: { id: lateId } });
+    check(
+      'a slip is dated out on Manila’s today, not the database’s UTC date',
+      onDay(lateRow?.borrowedAt, day),
+      lateRow?.borrowedAt.toISOString(),
+    );
+
+    type SlipRow = { id: string; isOverdue: boolean; daysOverdue: number };
+    const rowsOf = (r: HttpResult) => (r.body.rows ?? []) as SlipRow[];
+    const all = rowsOf(await api(keeperToken, 'GET', `/borrow-slips?search=${TAG}&pageSize=200`));
+    const late = all.find((r) => r.id === lateId);
+    const due = all.find((r) => r.id === dueId);
+    check(
+      'a slip due back yesterday is flagged overdue, by one day',
+      late?.isOverdue === true && late.daysOverdue === 1,
+      JSON.stringify(late),
+    );
+    check(
+      'a slip due back today is not overdue on its own due day',
+      due?.isOverdue === false && due.daysOverdue === 0,
+      `${JSON.stringify(due)} — the row compared a date with the instant, so 08:00 on the due day read as late`,
+    );
+    const overdueRows = rowsOf(await api(keeperToken, 'GET', `/borrow-slips?overdue=true&search=${TAG}&pageSize=200`));
+    check(
+      'the Overdue filter finds the slip the row flags, and not the one due today',
+      overdueRows.some((r) => r.id === lateId) && !overdueRows.some((r) => r.id === dueId),
+      overdueRows.map((r) => r.id).join(','),
+    );
+    const [chainTiles, overdueTotal, summaryTiles] = await Promise.all([
+      api(keeperToken, 'GET', '/gchain/overview'),
+      api(keeperToken, 'GET', '/borrow-slips?overdue=true&pageSize=1'),
+      api(keeperToken, 'GET', '/inventory/reports/summary'),
+    ]);
+    check(
+      'the dashboard tile, the warehouse tile and the Overdue filter count the same slips',
+      chainTiles.body.borrowSlipsOverdue === overdueTotal.body.total &&
+        summaryTiles.body.overdueBorrows === overdueTotal.body.total,
+      `${chainTiles.body.borrowSlipsOverdue} / ${summaryTiles.body.overdueBorrows} / ${overdueTotal.body.total}`,
+    );
+
+    const lateLines = await prisma.borrowSlipItem.findMany({ where: { slipId: lateId } });
+    day = manilaDayKey(new Date());
+    const back = await api(keeperToken, 'POST', `/borrow-slips/${lateId}/return`, {
+      items: lateLines.map((l) => ({ itemId: l.id, quantity: Number(l.quantity) })),
+    });
+    const backRow = await prisma.borrowSlip.findUnique({ where: { id: lateId } });
+    check(
+      'the last tool back dates the slip returned on Manila’s today',
+      back.status === 200 && backRow?.status === 'RETURNED' && onDay(backRow.returnedAt, day),
+      `${back.status} ${backRow?.status} ${backRow?.returnedAt?.toISOString()}`,
     );
   }
 

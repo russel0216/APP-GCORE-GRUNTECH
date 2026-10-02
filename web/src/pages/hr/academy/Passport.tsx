@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
+import { todayLocal } from '../../../lib/day';
 import { Attachments } from '../../../components/Attachments';
 import { Meter, Stat } from '../../../components/charts';
 import {
@@ -573,7 +574,8 @@ export function ExternalCertModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const course = courses.find((c) => c.id === form.courseId);
-  const today = new Date().toISOString().slice(0, 10);
+  // The local day: the UTC date would cap the picker at yesterday until 08:00.
+  const today = todayLocal();
   const valid = form.courseId && form.completedAt && form.provider.trim().length >= 2;
 
   async function save() {
