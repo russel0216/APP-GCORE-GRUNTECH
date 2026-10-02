@@ -39,3 +39,22 @@ export function manilaMonthKey(d: Date): string {
 export function manilaDate(at: Date): Date {
   return new Date(`${manilaDayKey(at)}T00:00:00.000Z`);
 }
+
+/**
+ * The first and last instants of a Manila day ('YYYY-MM-DD'): the edges of a
+ * range over a TIMESTAMP column (`createdAt`, `decidedAt`). UTC midnight is
+ * 08:00 here, and a range that started there left out the night before it.
+ *
+ * Never for a DATE column: Prisma binds a DATE parameter as its UTC date, and
+ * Manila midnight is 16:00Z the day before — it would read as the previous
+ * day. The end works for both: 23:59 in Manila is still that day in UTC.
+ *
+ * Manila keeps UTC+8 all year, with no daylight saving, so the offset is fixed.
+ */
+export function manilaDayStart(key: string): Date {
+  return new Date(`${key}T00:00:00.000+08:00`);
+}
+
+export function manilaDayEnd(key: string): Date {
+  return new Date(`${key}T23:59:59.999+08:00`);
+}

@@ -130,11 +130,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,131 assertions across twenty-two scripts** (counted 2026-10-02): foundation 175,
+**2,137 assertions across twenty-two scripts** (counted 2026-10-02): foundation 175,
 masters 54, sales 251, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 72, hr 104, plantilla 91, meetings 86,
 evaluations 125, academy 97, finance 139, aftermarket 168, archive 113,
-insights 94, insights-brief 44, workspace 39, accounts 86. They cover permission resolution, numbering
+insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -902,10 +902,17 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   needs that module's `*.dashboard.view_all`; the summary CSV needs
   `insights.dashboard.export` plus each module's `*.dashboard.export` — seeing a
   number is not the right to take a file of it away.
-- **`parseRange().to` is 23:59:59.999Z of the last day**; midnight dropped the
-  last day for timestamp-dated documents. G-OPS period figures keep
-  `periodWhere`'s server-clock end of day (verify-aftermarket pins
-  `/gops/overview`); three day conventions, never mixed in one line.
+- **A range is Manila's days, with a pair of edges for each kind of column.**
+  `parseRange()` returns `from`/`to` for `@db.Date` columns (UTC midnight, and
+  23:59:59.999Z, still that day) and `fromAt`/`toAt` for timestamps
+  (`decidedAt`, `createdAt`): Manila midnight to 23:59:59.999 in Manila
+  (`manilaDayStart`/`manilaDayEnd`, `shared/day.ts`). `periodWhere()` does the
+  same for G-OPS: `createdAt` from Manila midnight, `performedAt` (a DATE) from
+  UTC midnight, both to the end of the Manila day. A timestamp given the DATE
+  edges ran 08:00 to 08:00, so a quotation won at 07:00 on the 1st counted in
+  the month before; a DATE given Manila midnight reads as the day before.
+  verify-aftermarket pins the PM count, verify-insights-brief both edges and a
+  quotation raised and won at 00:30.
 - **CSV columns are appended, never reordered**, so a sheet built on an export
   keeps working.
 - **Industry reporting puts UNCLASSIFIED last**, and the industry table sums to

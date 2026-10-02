@@ -1,5 +1,6 @@
 import { prisma } from '../prisma';
 import type { ResolvedUser } from '../permissions/resolve';
+import { manilaDayEnd, manilaDayStart } from './day';
 
 /**
  * The G-OPS overview, decided once.
@@ -20,6 +21,8 @@ import type { ResolvedUser } from '../permissions/resolve';
  * wearing a number, and the client cannot be the one to decide that.
  */
 
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
 /**
  * The from/to range, as a Prisma filter on one date column.
  *
@@ -32,11 +35,14 @@ import type { ResolvedUser } from '../permissions/resolve';
  * date wouldn't narrow the dashboard, it would hide what is open. Those
  * stay unfiltered whatever range is showing.
  *
- * NOTE the day boundary: `to` runs to 23:59:59.999 on the SERVER's clock
- * (no `Z`), which is not the UTC end-of-day Insights' own `parseRange` uses.
- * Deliberately left alone — verify-aftermarket pins `/gops/overview` against
- * it — and the Insights brief says in its caption that G-OPS period figures
- * follow the G-OPS dashboard's own boundary.
+ * The days are Manila's. A document raised is an instant, so its range runs
+ * from Manila midnight of `from` to the last instant of `to` in Manila. `from`
+ * used to be UTC midnight — 08:00 here — and a range left out whatever was
+ * raised before 08:00 on its first day: "this month" on the 1st, "this year"
+ * on 1 January. Work performed is a DATE, which Prisma binds as its UTC date,
+ * so there UTC midnight IS the day, and Manila midnight would read as the day
+ * before. The end of a Manila day is still that day to a DATE, so `to` serves
+ * both. verify-aftermarket pins the PM count through `/gops/overview`.
  */
 export function periodWhere(
   req: { query: { from?: unknown; to?: unknown } },
@@ -45,12 +51,14 @@ export function periodWhere(
   const from = typeof req.query.from === 'string' ? req.query.from : undefined;
   const to = typeof req.query.to === 'string' ? req.query.to : undefined;
   if (!from && !to) return {};
+  const start = (key: string) =>
+    column === 'createdAt' && DAY_KEY.test(key) ? manilaDayStart(key) : new Date(key);
   return {
     [column]: {
-      ...(from ? { gte: new Date(from) } : {}),
+      ...(from ? { gte: start(from) } : {}),
       // A bare date is midnight, which would cut off "to" before its own day
       // has started — push it to the end of that day instead.
-      ...(to ? { lte: new Date(`${to}T23:59:59.999`) } : {}),
+      ...(to ? { lte: DAY_KEY.test(to) ? manilaDayEnd(to) : new Date(to) } : {}),
     },
   };
 }
