@@ -23,7 +23,11 @@ export interface Step {
   label: string;
   /** Who acted and when — or who it is waiting on. */
   approver?: string;
-  status: 'APPROVED' | 'PENDING' | 'REJECTED' | 'WAITING';
+  /**
+   * RETURNED is an approver sending the document back to be changed and
+   * submitted again — neither an approval nor a rejection.
+   */
+  status: 'APPROVED' | 'PENDING' | 'REJECTED' | 'RETURNED' | 'WAITING';
 }
 
 /** `APPROVED` → `approved`, matching the class names in styles.css. */
@@ -31,7 +35,17 @@ const CLASS: Record<Step['status'], string> = {
   APPROVED: 'approved',
   PENDING: 'pending',
   REJECTED: 'rejected',
+  RETURNED: 'returned',
   WAITING: 'waiting',
+};
+
+/** A decided step's mark. A step still to come shows its number instead. */
+const MARK: Partial<Record<Step['status'], string>> = {
+  APPROVED: '✓',
+  REJECTED: '✕',
+  // U+FE0E asks for the plain glyph: bare, ↩ can come out as a coloured emoji
+  // where the font falls back to one.
+  RETURNED: '↩\uFE0E',
 };
 
 export function ApprovalStepper({ steps }: { steps: Step[] }) {
@@ -48,7 +62,7 @@ export function ApprovalStepper({ steps }: { steps: Step[] }) {
             {/* Decoration. The status is already in the text below it, and a
                 screen reader announcing "✓" adds nothing. */}
             <span className="step-node" aria-hidden="true">
-              {step.status === 'APPROVED' ? '✓' : step.status === 'REJECTED' ? '✕' : idx + 1}
+              {MARK[step.status] ?? idx + 1}
             </span>
             <div className="step-body">
               <strong className="step-name">{step.label}</strong>
@@ -58,6 +72,7 @@ export function ApprovalStepper({ steps }: { steps: Step[] }) {
                   nothing at all. */}
               <span className="step-who">
                 {step.status === 'REJECTED' && 'Rejected — '}
+                {step.status === 'RETURNED' && 'Returned — '}
                 {step.approver ?? (step.status === 'WAITING' ? 'Not yet' : '')}
               </span>
             </div>
@@ -165,11 +180,14 @@ export function DocumentApproval({
   */
   const unrecorded = request.actions.length === 0 && (request.status === 'APPROVED' || request.status === 'REJECTED');
 
+  // act() closes a returned request CANCELLED, the status a withdrawal leaves
+  // too, so the last action is what tells them apart: sent back by an approver
+  // to be changed and submitted again, or withdrawn before anybody decided.
+  const lastAction = request.actions[request.actions.length - 1];
+  const returned = request.status === 'CANCELLED' && lastAction?.action === 'RETURNED';
+
   /** When the ball last moved — the submission, or the most recent decision. */
-  const lastEventAt = () => {
-    const last = request.actions[request.actions.length - 1];
-    return last ? last.actedAt : request.createdAt;
-  };
+  const lastEventAt = () => (lastAction ? lastAction.actedAt : request.createdAt);
 
   // Who a step waits on, by name: "Cecilia Tan", or "Cecilia Tan or Juan Cruz"
   // where any of several may decide. Null when the API did not say.
@@ -182,7 +200,9 @@ export function DocumentApproval({
       return {
         label: step.name,
         approver: `${acted.approver.name} · ${formatDateTime(new Date(acted.actedAt))}`,
-        status: acted.action === 'REJECTED' ? 'REJECTED' : 'APPROVED',
+        // The action as taken. Folding RETURNED into APPROVED drew a document
+        // sent back for changes with the tick of one that had passed.
+        status: acted.action,
       };
     }
     if (unrecorded) {
@@ -221,18 +241,24 @@ export function DocumentApproval({
       ? 'Approved'
       : request.status === 'REJECTED'
         ? 'Rejected'
-        : request.status === 'CANCELLED'
-          ? 'Cancelled'
-          : `Step ${request.currentSequence} of ${workflowSteps.length}`;
+        : returned
+          ? 'Returned'
+          : request.status === 'CANCELLED'
+            ? 'Cancelled'
+            : `Step ${request.currentSequence} of ${workflowSteps.length}`;
 
+  // Returned is amber, as it is on every other badge that says it: the
+  // document is waiting again, this time on the person who raised it.
   const tone =
     request.status === 'APPROVED'
       ? 'ok'
       : request.status === 'REJECTED'
         ? 'danger'
-        : request.status === 'CANCELLED'
-          ? ''
-          : 'warn';
+        : returned
+          ? 'warn'
+          : request.status === 'CANCELLED'
+            ? ''
+            : 'warn';
 
   return (
     <section className={compact ? 'panel-block' : 'card panel-block'} aria-label="Approval">
@@ -263,7 +289,10 @@ export function DocumentApproval({
       {request.actions
         .filter((a) => a.comment)
         .map((a) => (
-          <div key={a.id} className={`alert ${a.action === 'REJECTED' ? 'error' : 'info'}`}>
+          <div
+            key={a.id}
+            className={`alert ${a.action === 'REJECTED' ? 'error' : a.action === 'RETURNED' ? 'warn' : 'info'}`}
+          >
             <strong>{a.approver.name}</strong> — {a.comment}
           </div>
         ))}

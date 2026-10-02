@@ -3049,7 +3049,8 @@ a.funnel-row:hover .funnel-label {
   Magenta for the pending step, not amber. Magenta is this app's "you are here"
   colour - the active nav item, the focused control - and the pending step is
   exactly that: where the document currently sits. Amber stays for status
-  badges, which say something different.
+  badges, which say something different — and for a returned step, which says
+  what the "Returned" badge above it says.
 */
 .stepper {
   display: flex;
@@ -3119,6 +3120,17 @@ a.funnel-row:hover .funnel-label {
   color: var(--danger);
 }
 
+/*
+  Sent back to the person who raised it, to change and submit again. Neither
+  the tick nor the cross: drawn as approved, a returned document read as if it
+  had passed. Amber, the tone "Returned" carries on its badges and alerts.
+*/
+.step-item.returned .step-node {
+  background: rgb(var(--warn-rgb) / 0.15);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
 .step-divider {
   flex: 1;
   height: 2px;
@@ -3161,6 +3173,10 @@ a.funnel-row:hover .funnel-label {
 
 .step-item.rejected .step-who {
   color: var(--danger);
+}
+
+.step-item.returned .step-who {
+  color: var(--warn);
 }
 
 @media (max-width: 640px) {
