@@ -135,9 +135,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,209 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
+**2,219 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
 masters 54, sales 273, costing 105, pipeline 44, calendar 38, numbering 46,
-partners 82, delivery 78, chain 72, hr 118, plantilla 96, meetings 86,
+partners 82, delivery 78, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -611,6 +611,17 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   row and a cancelled pending document two. The engine files under the
   approval's type: an expense claim's withdrawal is under `expense` (its own
   row under `expense_claim`), a prior approval's under `overtime_prior`.
+  **A decision that lands after a cancel changes nothing.** The withdrawal
+  only covers a cancel that wins the race; a final decision committed a
+  moment before reaches the subscriber after the document reads CANCELLED. So
+  every cancellable document's subscriber applies its outcome only while the
+  document is still pending — leave (`PENDING_APPROVAL`), overtime (`PRIOR`,
+  then `ACTUAL_FILED`) and clearance (`PENDING_APPROVAL`) claim it with a
+  conditional `updateMany`, as the quotation does, and expense, advance and
+  evaluation check the status first — and otherwise write "… after it was
+  cancelled — not applied" to the trail. Unguarded, a cancelled leave came
+  back APPROVED and drew its days, cancelled overtime posted its cost, and a
+  cancelled clearance closed the leaver's login.
 - **Employee routes live in `routes/employees.ts`, the employee import in
   `routes/imports/employees.ts`.** `imports.ts` exports `Registered`, so a module
   (the Academy's `courseImport`) is wired into `REGISTRY` with one line.

@@ -716,6 +716,51 @@ async function main() {
     JSON.stringify(trail3.map((a) => a.summary)),
   );
 
+  // ══ 10c. A sign-off that lands after a cancel ════════════════════════════
+  // The cancel ran between the last signatory's decision and the subscriber:
+  // the clearance reads CANCELLED while its request is the one being decided.
+  // The last day has passed, so applying that decision would close the
+  // employee and the login. It must change nothing.
+  console.log('\nClearance — a sign-off that lands after a cancel');
+  const raised4 = await http(T.hr, 'POST', '/clearances', {
+    employeeId: leaver3.id,
+    reason: 'RESIGNATION',
+    lastWorkingDay: iso(yesterday),
+  });
+  const cid4 = String(raised4.body.id);
+  d = (await http(T.hr, 'GET', `/clearances/${cid4}`)).body as unknown as typeof d;
+  for (const i of d.items.filter((x) => x.status === 'PENDING')) {
+    const r = await http(T.hr, 'POST', `/clearances/${cid4}/items/${i.id}/${i.sourceType ? 'waive' : 'clear'}`, {
+      reason: 'Settled outside the system for this test',
+    });
+    if (r.status !== 200) check(`HR clears "${i.description}"`, false, msg(r));
+  }
+  const submitted4 = await http(T.hr, 'POST', `/clearances/${cid4}/submit`);
+  const req4 = await prisma.approvalRequest.findFirst({ where: { documentType: 'clearance', documentId: cid4, status: 'PENDING' } });
+  if (!req4) throw new Error(`The clearance for the late sign-off did not submit: ${submitted4.status} ${msg(submitted4)}`);
+  await http(T.supervisor, 'POST', `/approvals/${req4.id}/act`, { action: 'APPROVED' });
+  await http(T.finance, 'POST', `/approvals/${req4.id}/act`, { action: 'APPROVED' });
+  await prisma.employeeClearance.update({ where: { id: cid4 }, data: { status: 'CANCELLED' } });
+  const lastSign = await http(T.hr2, 'POST', `/approvals/${req4.id}/act`, { action: 'APPROVED' });
+  const cleared4 = await prisma.employeeClearance.findUnique({ where: { id: cid4 } });
+  const stillHere = await prisma.employee.findUnique({ where: { id: leaver3.id }, include: { user: true } });
+  check(
+    'the last sign-off is recorded, but the cancelled clearance stays CANCELLED',
+    lastSign.status === 200 && cleared4?.status === 'CANCELLED' && cleared4.clearedAt === null,
+    `${lastSign.status} ${msg(lastSign)}; ${cleared4?.status}`,
+  );
+  check(
+    '…and records no separation: the employee and the login stay open',
+    stillHere?.dateSeparated === null && stillHere.isActive && stillHere.user?.isActive === true,
+    `separated ${stillHere?.dateSeparated?.toISOString() ?? 'no'}, active ${stillHere?.isActive}, login ${stillHere?.user?.isActive}`,
+  );
+  check(
+    'the trail says the approval came too late to apply',
+    !!(await prisma.auditLog.findFirst({
+      where: { entityType: 'clearance', entityId: cid4, summary: `${raised4.body.number} was approved after it was cancelled — not applied` },
+    })),
+  );
+
   // ══ 13b. A hand-typed separation ═════════════════════════════════════════
   console.log('\nSeparation typed on the employee form');
   const typedUser = await makeUser(`${TAG} Typed`, 'typed', []);

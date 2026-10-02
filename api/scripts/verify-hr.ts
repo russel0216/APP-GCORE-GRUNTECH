@@ -751,6 +751,123 @@ async function main() {
     `${rejectedLedger.count} entries — the rejected one should not have added a second`,
   );
 
+  // ══ A decision that lands after a cancel ═════════════════════════════════
+  // The cancel route ran between the last approver's decision and the
+  // subscriber: the filing already reads CANCELLED while its request is the
+  // one the approver decided. Nothing may follow from that decision — no days
+  // drawn, no authorisation, no cost.
+  console.log('\nA decision that lands after a cancel');
+
+  const lateLeave = await fileLeave('2026-10-12', '2026-10-13', 2);
+  await prisma.leaveRequest.update({ where: { id: lateLeave.request.id }, data: { status: 'CANCELLED' } });
+  const usedBeforeLate = (await leaveBalance(employee.id, leaveType.id, 2026)).used;
+  await act({ requestId: lateLeave.approval.id, userId: supervisor.id, action: 'APPROVED' });
+  const lateLeaveAfter = await prisma.leaveRequest.findUnique({ where: { id: lateLeave.request.id } });
+  const usedAfterLate = (await leaveBalance(employee.id, leaveType.id, 2026)).used;
+  check(
+    'a leave cancelled before its approval took effect stays CANCELLED and draws no days',
+    lateLeaveAfter?.status === 'CANCELLED' && usedAfterLate === usedBeforeLate,
+    `${lateLeaveAfter?.status}, used ${usedBeforeLate} → ${usedAfterLate}`,
+  );
+  check(
+    'its trail says the approval came too late to apply',
+    !!(await prisma.auditLog.findFirst({
+      where: {
+        entityType: 'leave_request',
+        entityId: lateLeave.request.id,
+        summary: `${lateLeave.request.number} was approved after it was cancelled — not applied`,
+      },
+    })),
+  );
+  const lateRejected = await fileLeave('2026-10-19', '2026-10-19', 1);
+  await prisma.leaveRequest.update({ where: { id: lateRejected.request.id }, data: { status: 'CANCELLED' } });
+  await act({ requestId: lateRejected.approval.id, userId: supervisor.id, action: 'REJECTED' });
+  const lateRejectedAfter = await prisma.leaveRequest.findUnique({ where: { id: lateRejected.request.id } });
+  check('a late rejection leaves it CANCELLED too, not REJECTED', lateRejectedAfter?.status === 'CANCELLED', lateRejectedAfter?.status);
+
+  const latePrior = await prisma.overtimeRequest.create({
+    data: {
+      number: await nextNumber('overtime_request'),
+      employeeId: employee.id,
+      date: day('2026-09-25'),
+      plannedStart: '17:00',
+      plannedEnd: '20:00',
+      estimatedHours: D(2),
+      reason: `${TAG} called off while it was being authorised`,
+    },
+  });
+  const latePriorRequest = await submitForApproval({
+    documentType: 'overtime_prior',
+    documentId: latePrior.id,
+    documentNumber: latePrior.number,
+    subject: `${TAG} late prior`,
+    requesterId: worker.id,
+  });
+  await prisma.overtimeRequest.update({ where: { id: latePrior.id }, data: { stage: 'CANCELLED' } });
+  await act({ requestId: latePriorRequest.id, userId: supervisor.id, action: 'APPROVED' });
+  const latePriorAfter = await prisma.overtimeRequest.findUnique({ where: { id: latePrior.id } });
+  check(
+    'overtime cancelled while its prior approval was decided stays CANCELLED, never authorised',
+    latePriorAfter?.stage === 'CANCELLED' && latePriorAfter.priorApprovedAt === null,
+    `${latePriorAfter?.stage}, authorised ${latePriorAfter?.priorApprovedAt?.toISOString() ?? 'never'}`,
+  );
+
+  const lateActual = await prisma.overtimeRequest.create({
+    data: {
+      number: await nextNumber('overtime_request'),
+      employeeId: employee.id,
+      date: day('2026-09-26'),
+      plannedStart: '17:00',
+      plannedEnd: '20:00',
+      estimatedHours: D(2),
+      stage: 'ACTUAL_FILED',
+      actualStart: '17:00',
+      actualEnd: '20:00',
+      actualHours: D(2),
+      reason: `${TAG} called off before HR signed`,
+      jobId: job.id,
+      costCategoryId: labour.id,
+    },
+  });
+  const lateActualRequest = await submitForApproval({
+    documentType: 'overtime_request',
+    documentId: lateActual.id,
+    documentNumber: lateActual.number,
+    subject: `${TAG} late actual`,
+    requesterId: worker.id,
+  });
+  await act({ requestId: lateActualRequest.id, userId: supervisor.id, action: 'APPROVED' });
+  const chargedNotices = () =>
+    prisma.notification.count({ where: { userId: supervisor.id, title: `Overtime charged to ${job.number}` } });
+  const noticesBeforeLate = await chargedNotices();
+  await prisma.overtimeRequest.update({ where: { id: lateActual.id }, data: { stage: 'CANCELLED' } });
+  await act({ requestId: lateActualRequest.id, userId: hrOfficer.id, action: 'APPROVED' });
+  const lateActualAfter = await prisma.overtimeRequest.findUnique({ where: { id: lateActual.id } });
+  const lateRows = await prisma.jobCostEntry.count({ where: { sourceType: 'overtime_request', sourceId: lateActual.id } });
+  check(
+    "overtime cancelled before HR's final approval took effect stays CANCELLED",
+    lateActualAfter?.stage === 'CANCELLED',
+    lateActualAfter?.stage,
+  );
+  check(
+    'and posts no cost: no ledger row, no rate or amount on the filing, no "charged" notice to the project manager',
+    lateRows === 0 &&
+      lateActualAfter?.amount === null &&
+      lateActualAfter.hourlyRate === null &&
+      (await chargedNotices()) === noticesBeforeLate,
+    `${lateRows} ledger row(s), amount ${lateActualAfter?.amount}`,
+  );
+  check(
+    'its trail says the approval came too late to apply',
+    !!(await prisma.auditLog.findFirst({
+      where: {
+        entityType: 'overtime_request',
+        entityId: lateActual.id,
+        summary: `${lateActual.number} was approved after it was cancelled — not applied`,
+      },
+    })),
+  );
+
   // ══ Route guards ═════════════════════════════════════════════════════════
   console.log('\nRoute guards (over HTTP)');
 

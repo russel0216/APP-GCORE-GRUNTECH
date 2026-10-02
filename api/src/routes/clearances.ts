@@ -813,6 +813,10 @@ clearanceRoutes.get(
  * login are switched off here, otherwise `sweepSeparations()` does it on the
  * day. A rejection leaves the items as they are for HR to fix and resubmit.
  *
+ * Only a clearance still PENDING_APPROVAL takes the outcome, claimed with a
+ * conditional update. One cancelled while the last signatory was deciding
+ * stays cancelled: no separation is recorded and no login is closed.
+ *
  * Errors are logged loudly, never thrown — the decision is the record of
  * fact, and the subscriber cannot roll it back.
  */
@@ -823,8 +827,24 @@ onApprovalSettled('clearance', async (approval, outcome) => {
   });
   if (!head) return;
 
+  // The decision stands in the engine; the trail says why the clearance did
+  // not follow it.
+  const notApplied = async () => {
+    const current = await prisma.employeeClearance.findUnique({ where: { id: head.id }, select: { status: true } });
+    await audit({
+      entityType: 'clearance',
+      entityId: head.id,
+      action: 'UPDATED',
+      summary: `${head.number} was ${outcome.toLowerCase()} after it was ${(current?.status ?? head.status).toLowerCase().replace(/_/g, ' ')} — not applied`,
+    });
+  };
+
   if (outcome !== 'APPROVED') {
-    await prisma.employeeClearance.update({ where: { id: head.id }, data: { status: 'REJECTED' } });
+    const claimed = await prisma.employeeClearance.updateMany({
+      where: { id: head.id, status: 'PENDING_APPROVAL' },
+      data: { status: 'REJECTED' },
+    });
+    if (!claimed.count) await notApplied();
     return;
   }
 
@@ -833,8 +853,12 @@ onApprovalSettled('clearance', async (approval, outcome) => {
   const gone = head.lastWorkingDay <= today;
   const e = head.employee;
 
-  await prisma.$transaction(async (tx) => {
-    await tx.employeeClearance.update({ where: { id: head.id }, data: { status: 'CLEARED', clearedAt: now } });
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.employeeClearance.updateMany({
+      where: { id: head.id, status: 'PENDING_APPROVAL' },
+      data: { status: 'CLEARED', clearedAt: now },
+    });
+    if (!claimed.count) return false;
     await tx.employee.update({
       where: { id: e.id },
       data: {
@@ -845,7 +869,12 @@ onApprovalSettled('clearance', async (approval, outcome) => {
     if (gone && e.user?.isActive) {
       await tx.user.update({ where: { id: e.user.id }, data: { isActive: false } });
     }
+    return true;
   });
+  if (!applied) {
+    await notApplied();
+    return;
+  }
 
   await audit({
     entityType: 'clearance',

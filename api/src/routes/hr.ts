@@ -17,7 +17,13 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approversForStep, cancelOpenRequest } from '../shared/approvals';
+import {
+  submitForApproval,
+  onApprovalSettled,
+  approversForStep,
+  cancelOpenRequest,
+  type ApprovalOutcome,
+} from '../shared/approvals';
 import { registerSearch } from '../shared/search';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
@@ -1019,11 +1025,33 @@ leaveRoutes.post(
 );
 
 /**
+ * A decision that reaches a filing after it moved on — cancelled while the
+ * last approver was deciding — changes nothing. The engine keeps the decision
+ * as its record of fact; the filing's trail says why it did not follow.
+ */
+async function decidedTooLate(
+  entityType: 'leave_request' | 'overtime_request',
+  entityId: string,
+  what: string,
+  outcome: ApprovalOutcome,
+  movedOn: string,
+) {
+  await audit({
+    entityType,
+    entityId,
+    action: 'UPDATED',
+    summary: `${what} was ${outcome.toLowerCase()} after it was ${movedOn.toLowerCase().replace(/_/g, ' ')} — not applied`,
+  });
+}
+
+/**
  * An approved leave request draws down the balance.
  *
  * Only on approval — a pending request is shown against the balance separately
  * so nobody over-commits, but it does not consume the entitlement until
- * somebody has said yes.
+ * somebody has said yes. And only while the request is still
+ * PENDING_APPROVAL, claimed with a conditional update: one cancelled while the
+ * approver was deciding stays cancelled and draws nothing.
  */
 onApprovalSettled('leave_request', async (approval, outcome) => {
   const request = await prisma.leaveRequest.findUnique({
@@ -1032,30 +1060,38 @@ onApprovalSettled('leave_request', async (approval, outcome) => {
   });
   if (!request) return;
 
-  if (outcome !== 'APPROVED') {
-    await prisma.leaveRequest.update({ where: { id: request.id }, data: { status: 'REJECTED' } });
+  const year = request.startDate.getFullYear();
+  if (outcome === 'APPROVED') await ensureBalance(request.employeeId, request.leaveTypeId, year);
+
+  // The status the request had moved on to, or null once it took the outcome.
+  const movedOn = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.leaveRequest.updateMany({
+      where: { id: request.id, status: 'PENDING_APPROVAL' },
+      data: outcome === 'APPROVED' ? { status: 'APPROVED', decidedAt: new Date() } : { status: 'REJECTED' },
+    });
+    if (!claimed.count) {
+      return (await tx.leaveRequest.findUnique({ where: { id: request.id }, select: { status: true } }))?.status ?? request.status;
+    }
+    if (outcome === 'APPROVED') {
+      await tx.leaveBalance.update({
+        where: {
+          employeeId_leaveTypeId_year: {
+            employeeId: request.employeeId,
+            leaveTypeId: request.leaveTypeId,
+            year,
+          },
+        },
+        data: { used: { increment: request.days } },
+      });
+    }
+    return null;
+  });
+
+  if (movedOn) {
+    await decidedTooLate('leave_request', request.id, request.number, outcome, movedOn);
     return;
   }
-
-  const year = request.startDate.getFullYear();
-  await ensureBalance(request.employeeId, request.leaveTypeId, year);
-
-  await prisma.$transaction(async (tx) => {
-    await tx.leaveRequest.update({
-      where: { id: request.id },
-      data: { status: 'APPROVED', decidedAt: new Date() },
-    });
-    await tx.leaveBalance.update({
-      where: {
-        employeeId_leaveTypeId_year: {
-          employeeId: request.employeeId,
-          leaveTypeId: request.leaveTypeId,
-          year,
-        },
-      },
-      data: { used: { increment: request.days } },
-    });
-  });
+  if (outcome !== 'APPROVED') return;
 
   await audit({
     entityType: 'leave_request',
@@ -1395,18 +1431,27 @@ overtimeRoutes.post(
   }),
 );
 
-/** Prior approval is authorisation to work, and nothing more. */
+/**
+ * Prior approval is authorisation to work, and nothing more — taken only by a
+ * filing still waiting on it, claimed with a conditional update, so one
+ * cancelled while the supervisor was deciding stays cancelled.
+ */
 onApprovalSettled('overtime_prior', async (approval, outcome) => {
   const ot = await prisma.overtimeRequest.findUnique({ where: { id: approval.documentId } });
   if (!ot) return;
 
-  await prisma.overtimeRequest.update({
-    where: { id: ot.id },
+  const claimed = await prisma.overtimeRequest.updateMany({
+    where: { id: ot.id, stage: 'PRIOR' },
     data:
       outcome === 'APPROVED'
         ? { stage: 'PRIOR_APPROVED', priorApprovedAt: new Date() }
         : { stage: 'REJECTED' },
   });
+  if (!claimed.count) {
+    const now = await prisma.overtimeRequest.findUnique({ where: { id: ot.id }, select: { stage: true } });
+    await decidedTooLate('overtime_request', ot.id, `The prior approval of ${ot.number}`, outcome, now?.stage ?? ot.stage);
+    return;
+  }
 
   await audit({
     entityType: 'overtime_request',
@@ -1523,7 +1568,9 @@ overtimeRoutes.post(
  * The workflow has TWO steps — the supervisor who directed the work, then HR.
  * This subscriber fires only when the approval has SETTLED, which means both
  * have approved. Cost reaches the project's budget at that moment and not
- * before.
+ * before — and only for a filing whose actual hours still wait on this
+ * approval, claimed with a conditional update. One cancelled while HR was
+ * deciding stays cancelled, and nothing posts.
  */
 onApprovalSettled('overtime_request', async (approval, outcome) => {
   const ot = await prisma.overtimeRequest.findUnique({
@@ -1531,9 +1578,18 @@ onApprovalSettled('overtime_request', async (approval, outcome) => {
     include: { employee: true, job: true, costCategory: true },
   });
   if (!ot) return;
+  const stageNow = async () =>
+    (await prisma.overtimeRequest.findUnique({ where: { id: ot.id }, select: { stage: true } }))?.stage ?? ot.stage;
 
   if (outcome !== 'APPROVED') {
-    await prisma.overtimeRequest.update({ where: { id: ot.id }, data: { stage: 'REJECTED' } });
+    const claimed = await prisma.overtimeRequest.updateMany({
+      where: { id: ot.id, stage: 'ACTUAL_FILED' },
+      data: { stage: 'REJECTED' },
+    });
+    if (!claimed.count) {
+      await decidedTooLate('overtime_request', ot.id, ot.number, outcome, await stageNow());
+      return;
+    }
     await audit({
       entityType: 'overtime_request',
       entityId: ot.id,
@@ -1547,9 +1603,9 @@ onApprovalSettled('overtime_request', async (approval, outcome) => {
   const rate = await overtimeRate(ot.employeeId);
   const amount = cents(hours * rate.hourlyRate * rate.multiplier);
 
-  await prisma.$transaction(async (tx) => {
-    await tx.overtimeRequest.update({
-      where: { id: ot.id },
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.overtimeRequest.updateMany({
+      where: { id: ot.id, stage: 'ACTUAL_FILED' },
       data: {
         stage: 'APPROVED',
         hourlyRate: D(rate.hourlyRate),
@@ -1558,6 +1614,7 @@ onApprovalSettled('overtime_request', async (approval, outcome) => {
         postedAt: ot.jobId ? new Date() : null,
       },
     });
+    if (!claimed.count) return false;
 
     // Only a job-assigned overtime posts. Overtime with no project is approved
     // for payroll but has no budget line to charge.
@@ -1573,7 +1630,12 @@ onApprovalSettled('overtime_request', async (approval, outcome) => {
         description: `${ot.employee.firstName} ${ot.employee.lastName} — ${hours}h overtime`,
       });
     }
+    return true;
   });
+  if (!applied) {
+    await decidedTooLate('overtime_request', ot.id, ot.number, outcome, await stageNow());
+    return;
+  }
 
   await audit({
     entityType: 'overtime_request',
