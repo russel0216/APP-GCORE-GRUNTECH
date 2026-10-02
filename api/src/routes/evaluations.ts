@@ -29,6 +29,7 @@ import {
 import { renderDocument, formatDate, type PdfSection } from '../shared/pdf';
 import { hrSettings } from '../shared/hr';
 import { addMonths } from '../shared/aftermarket';
+import { manilaDate } from '../shared/day';
 import {
   allowedRecommendations,
   dueEvaluations,
@@ -338,7 +339,7 @@ async function openEvaluation(
   const settings = await hrSettings();
   const anchor = await periodAnchor(employee);
   const computed = evaluationMilestones(employee, settings, anchor).find((m) => m.milestone === body.milestone);
-  const dueDate = asDate(body.dueDate) ?? computed?.dueDate ?? (body.milestone === 'ADHOC' ? new Date() : null);
+  const dueDate = asDate(body.dueDate) ?? computed?.dueDate ?? (body.milestone === 'ADHOC' ? manilaDate(new Date()) : null);
   if (!dueDate) {
     throw badRequest(
       `${milestoneLabel(body.milestone)} has no date for ${fullName(employee)} — set the period end on the employee record, or give a due date`,
@@ -713,7 +714,10 @@ onApprovalSettled('evaluation', async (approval, outcome) => {
 
   const settings = await hrSettings();
   const approvedAt = new Date();
-  const effective = ev.effectiveDate ?? approvedAt;
+  // With no effective date typed, the day it was approved: the Manila date,
+  // because `approvedAt` itself would be stored as its UTC date, which is
+  // yesterday's until 08:00.
+  const effective = ev.effectiveDate ?? manilaDate(approvedAt);
   const rec = ev.recommendation;
 
   let change = 'no change to the employee record';

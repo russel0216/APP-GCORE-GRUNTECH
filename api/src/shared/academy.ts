@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest, conflict } from '../http/kit';
 import { addMonths, expiryState } from './aftermarket';
-import { manilaDayKey } from './day';
+import { manilaDate, manilaDayKey } from './day';
 import { notify } from './notifications';
 
 /**
@@ -76,11 +76,6 @@ export async function saveAcademySettings(value: Partial<AcademySettings>): Prom
 }
 
 // ── Dates ────────────────────────────────────────────────────────────────────
-
-/** A calendar date (the @db.Date columns) for the Manila day an instant falls on. */
-export function manilaDate(at: Date): Date {
-  return new Date(`${manilaDayKey(at)}T00:00:00.000Z`);
-}
 
 /** Where a completion expires: never when the course has no validity. */
 export function expiryFor(completedAt: Date, validityMonths: number | null | undefined): Date | null {

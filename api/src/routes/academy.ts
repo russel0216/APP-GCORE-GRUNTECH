@@ -25,7 +25,7 @@ import { onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/ap
 import { renderDocument, formatDate, formatDateTime, type PdfSection } from '../shared/pdf';
 import { buildIcs, googleCalendarUrl, parseGoogleLink, timeWindow } from '../shared/calendar-links';
 import { myEmployee } from '../shared/hr';
-import { manilaDayKey } from '../shared/day';
+import { manilaDate, manilaDayKey } from '../shared/day';
 import { required, optional, decimal, bool, type ImportSpec } from '../shared/csv';
 import { registerSchedule } from './workspace';
 import type { Registered } from './imports';
@@ -38,7 +38,6 @@ import {
   applyResults,
   completeSession,
   expiryFor,
-  manilaDate,
   passportFor,
   readinessFor,
   saveAcademySettings,
