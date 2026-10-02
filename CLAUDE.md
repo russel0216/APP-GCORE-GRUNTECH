@@ -135,8 +135,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,219 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
-masters 54, sales 273, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,223 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
+masters 54, sales 277, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1240,6 +1240,15 @@ data builder like `quotationTemplate.ts` and `quotationPrintData()`.
   each approver's phone and email; the author's are read in
   `quotationPrintData()` for the paper only — `GET /quotations/:id` never
   carries a mobile. The house style's one-line sign-offs are unchanged.
+- **A layout travels as a FILE, never with a push.** It is a Setting row in
+  one database, so a layout tried on the laptop reaches the live server by
+  Export layout (`{ type, exportedAt, layout }`, downloaded in the browser)
+  and Import layout, which posts it to `POST /api/pdf-templates/:type/check` —
+  the save's own checks, an older file's gaps filled from the schema's
+  defaults, nothing stored — and loads the result as unsaved, undoable
+  changes for the administrator to preview and Save. A file for another
+  document type is refused. Never carry a layout in the seed: it would
+  overwrite what an administrator saved on the live server.
 - **"Hide total" hides the money everywhere**: `quotationPrintData()` blanks
   the money fields as well as passing no totals, so a layout that prints
   `{{quotation.total}}` in a box of its own still obeys it. Cost is never in

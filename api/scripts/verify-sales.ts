@@ -2168,6 +2168,37 @@ async function main() {
       });
       check('and a box that runs off the page', offPage.status === 400, offPage.text.slice(0, 160));
 
+      // Import: a file exported from another G-CORE is checked before it is
+      // shown, with what an older file leaves out filled in — and nothing saved.
+      const settingBefore = await prisma.setting.findUnique({ where: { key: 'pdfTemplate.quotation' } });
+      const older = {
+        ...mine,
+        blocks: mine.blocks.map((b) => {
+          if (b.type !== 'signoffs') return b;
+          // A sign-off block from before the contact lines existed.
+          const { nameSize: _a, showPosition: _b, showPhone: _c, showEmail: _d, ...rest } = b as Record<string, unknown>;
+          return rest as unknown as (typeof mine.blocks)[number];
+        }),
+      };
+      const imported = await http(adminToken, 'POST', '/pdf-templates/quotation/check', older);
+      const importedSign = ((imported.body.layout as { blocks: Record<string, unknown>[] } | undefined)?.blocks ?? []).find((b) => b.type === 'signoffs');
+      check(
+        'an imported layout is checked and handed back, an older file’s gaps filled in',
+        imported.status === 200 && importedSign?.nameSize === 10 && importedSign?.showPhone === true && importedSign?.showPosition === false,
+        imported.text.slice(0, 200),
+      );
+      const importTypo = await http(adminToken, 'POST', '/pdf-templates/quotation/check', {
+        ...mine,
+        blocks: mine.blocks.map((b) => (b.id === 'verify-box' ? { ...b, text: '{{customer.nmae}}' } : b)),
+      });
+      check('one naming a field the quotation lacks is refused on import, and the field named', importTypo.status === 400 && importTypo.text.includes('customer.nmae'));
+      check('a salesperson cannot import', (await http(salesToken, 'POST', '/pdf-templates/quotation/check', mine)).status === 403);
+      const settingAfter = await prisma.setting.findUnique({ where: { key: 'pdfTemplate.quotation' } });
+      check(
+        'and checking an import saves nothing',
+        JSON.stringify(settingAfter?.value ?? null) === JSON.stringify(settingBefore?.value ?? null),
+      );
+
       // Preview prints what the editor holds, saved or not.
       const preview = await fetch(`${BASE}/pdf-templates/quotation/preview`, {
         method: 'POST',

@@ -13,6 +13,7 @@ import {
 import { Link } from 'react-router-dom';
 import { api, ApiError, getToken, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { dayKeyOf } from '../../lib/day';
 import { Checkbox, ErrorBox, Field, Loading, formatDateTime, useToast } from '../../components/ui';
 import {
   ANCHOR_HINTS,
@@ -331,6 +332,7 @@ export function PdfTemplates() {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [previewWith, setPreviewWith] = useState<'short' | 'long' | 'quotation'>('short');
   const [previewQuote, setPreviewQuote] = useState<{ id: string; number: string; label: string } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [hiddenNote, setHiddenNote] = useState<string | null>(() => {
     try {
       return localStorage.getItem(HIDDEN_NOTE_KEY);
@@ -508,6 +510,61 @@ export function PdfTemplates() {
     }
   }
 
+  /**
+   * The layout on screen, as a file — how a layout tried on the laptop reaches
+   * the live server, since a push carries code and never this database's
+   * settings. It names the document, so Import refuses one meant for another.
+   */
+  function exportLayout() {
+    if (!layout) return;
+    const body = JSON.stringify({ type: 'quotation', exportedAt: new Date().toISOString(), layout }, null, 2);
+    const url = URL.createObjectURL(new Blob([body], { type: 'application/json' }));
+    try {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `quotation-layout-${dayKeyOf(new Date())}.json`;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+  }
+
+  /**
+   * An exported file, read back. The server checks it with the rules a save
+   * uses and fills in what an older file leaves out; it then sits in the
+   * editor as unsaved changes — preview it, then Save, or Undo it.
+   */
+  async function importLayout(file: File) {
+    setBusy(true);
+    setError(null);
+    try {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await file.text());
+      } catch {
+        throw new Error('That file is not a layout — it does not read as one.');
+      }
+      const wrapped = parsed && typeof parsed === 'object' && 'layout' in parsed ? (parsed as { type?: unknown; layout: unknown }) : null;
+      if (wrapped && wrapped.type !== undefined && wrapped.type !== 'quotation') {
+        throw new Error(`That file is a layout for ${String(wrapped.type)}, not the quotation.`);
+      }
+      const res = await api.post<{ layout: Layout }>('/pdf-templates/quotation/check', wrapped ? wrapped.layout : parsed);
+      edit(res.layout);
+      setSelectedId(null);
+      setTab('boxes');
+      toast('ok', 'Layout imported — look it over and preview it, then Save to use it');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+      // The same file chosen again must still read.
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }
+
   function discard() {
     setConfirm(null);
     const last = JSON.parse(savedJson) as Layout;
@@ -607,8 +664,24 @@ export function PdfTemplates() {
           <button type="button" className="btn btn-sm" onClick={() => dispatch({ type: 'redo' })} disabled={!hist.future.length || !canEdit} title="Redo (Ctrl+Y)">
             Redo
           </button>
+          <button type="button" className="btn btn-sm" onClick={exportLayout} title="Download this layout as a file, to import on another G-CORE">
+            Export layout
+          </button>
           {canEdit && (
             <>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void importLayout(file);
+                }}
+              />
+              <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy} title="Load a layout file exported from another G-CORE">
+                Import layout
+              </button>
               {dirty && (
                 <button type="button" className="btn btn-sm" onClick={() => setConfirm('discard')} disabled={busy}>
                   Discard changes
@@ -1348,6 +1421,10 @@ function PageSettings({ layout, canEdit, onChange }: { layout: Layout; canEdit: 
         <li>From the keyboard: Tab to a box, then the arrow keys move it (Shift for 10pt) and Ctrl with the arrows sizes it.</li>
         <li>Every box has a place: the first page, every page, pages 2 onward, after the lines, or the last page.</li>
         <li>Preview PDF prints the layout as it stands, saved or not. Save makes quotations print with it.</li>
+        <li>
+          To use a layout from another G-CORE — the laptop’s on the live server — Export layout there and Import layout here, then
+          preview it and Save. A push carries code, never a layout.
+        </li>
       </ul>
     </div>
   );

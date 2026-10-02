@@ -146,6 +146,19 @@ pdfTemplateRoutes.delete(
   }),
 );
 
+// Import: a layout exported from another G-CORE — the laptop's, to put on the
+// live server — read with the rules a save uses (its shape, every field it
+// names) and handed back with whatever an older file leaves out filled in, so
+// the editor can show it before anything is saved. Nothing is stored here.
+pdfTemplateRoutes.post(
+  '/:type/check',
+  require_('admin.pdf_templates.edit_all'),
+  handler(async (req, res) => {
+    documentType(req.params.type);
+    res.json({ layout: checkedDesign(req.body) });
+  }),
+);
+
 const previewSchema = z.object({
   layout: z.unknown(),
   /** A real quotation to print with the layout; its newest revision unless one is named. */
