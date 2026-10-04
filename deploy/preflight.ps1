@@ -101,6 +101,23 @@ $existing = schtasks /Query /TN $task 2>$null
 if ($LASTEXITCODE -eq 0) { Warn "Scheduled task '$task' already exists - install.ps1 will replace it (that is ours, so it is fine)" }
 else                     { Ok "Scheduled task '$task' is free" }
 
+# Windows' default for a task made by schtasks is to stop it after 3 days and
+# on battery power. That took the site down twice (Error 1033); tasks.ps1 lifts
+# both, and rebuild.ps1 runs it every time. Reported here, never changed.
+foreach ($t in @('GCoreGruntechApi', 'GCoreGruntechTunnel')) {
+    $st = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+    if (-not $st) { continue }
+    $lim = $st.Settings.ExecutionTimeLimit
+    if (($lim -and $lim -ne 'PT0S') -or $st.Settings.StopIfGoingOnBatteries -or $st.Settings.DisallowStartIfOnBatteries) {
+        Warn "'$t' stops after $(if ($lim) { $lim } else { 'no limit' }) or on battery power - run deploy\tasks.ps1 -Ensure $(if ($t -like '*Tunnel') { 'tunnel' } else { 'api' })"
+    } else {
+        Ok "'$t' has no time limit ($($st.State))"
+    }
+}
+if (-not (Get-ScheduledTask -TaskName 'GCoreGruntechTunnel' -ErrorAction SilentlyContinue)) {
+    Warn "No 'GCoreGruntechTunnel' task - the site is not reachable from outside until step 6 of deploy\README.md is done (expected on a laptop)."
+}
+
 foreach ($t in @('GCoreHrApi', 'GCoreDbBackup')) {
     $r = schtasks /Query /TN $t 2>$null
     if ($LASTEXITCODE -eq 0) { Ok "'$t' exists and belongs to the other app - untouched" }

@@ -111,6 +111,10 @@ Step "register the $task scheduled task"
 $cmd = "cmd /c `"$root\deploy\start-api.cmd`""
 schtasks /Create /F /TN $task /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $cmd | Out-Null
 Write-Host "    $task registered - starts at boot, runs as SYSTEM." -ForegroundColor Green
+# schtasks cannot switch off Windows' 3-day limit or the battery stop; without
+# this the API would stop by itself three days after any start.
+& powershell -ExecutionPolicy Bypass -File "$root\deploy\tasks.ps1" -Ensure api
+if ($LASTEXITCODE -ne 0) { throw "Could not update the $task task settings." }
 
 Step "start $task"
 schtasks /Run /TN $task | Out-Null
@@ -153,7 +157,9 @@ Still to do, and none of it can be scripted:
      reachable on this machine only.
         cloudflared tunnel create gcore-gruntech
      Do NOT run 'cloudflared service install': it would replace the existing
-     Cloudflared service and take gasiontech offline.
+     Cloudflared service and take gasiontech offline. Finish with
+        deploy\tasks.ps1 -Ensure tunnel
+     or Windows stops the tunnel 3 days after it starts.
 
   2. Sign in and change the admin password. It is sitting in api\.env in plain
      text until you do.

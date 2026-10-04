@@ -120,6 +120,12 @@ npm run build
 [ -f "$ROOT/web/dist/index.html" ] || { echo "web/dist/index.html was not produced. The web build failed." >&2; exit 1; }
 
 # ── 7. Start and prove it answers ────────────────────────────────────────────
+# Windows stops a task created by schtasks after 3 days, and on battery power.
+# Lifted here, while the API is stopped, so the copy started below has neither.
+TASKS_PS1=$(cygpath -w "$ROOT/deploy/tasks.ps1")
+step "keep $TASK running for good"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$TASKS_PS1" -Ensure api
+
 step "start $TASK"
 schtasks //Run //TN "$TASK" >/dev/null
 sleep 8
@@ -145,7 +151,16 @@ if [ "$healthy" -ne 1 ]; then
   exit 1
 fi
 
-# ── 8. Confirm we disturbed nothing ──────────────────────────────────────────
+# ── 8. The tunnel, and the public address ────────────────────────────────────
+# A rebuild never restarts the tunnel, so nothing else would notice it had
+# stopped — Windows stopped it twice after 3 days (Error 1033). Lift the limit,
+# start it if it is not running, and prove the public address answers.
+# Only G-Core's own GCoreGruntechTunnel task; never the Cloudflared service.
+step "tunnel and public address"
+public_ok=1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$TASKS_PS1" -Ensure tunnel || public_ok=0
+
+# ── 9. Confirm we disturbed nothing ──────────────────────────────────────────
 step "the neighbour (read-only)"
 if command -v pm2 >/dev/null 2>&1; then
   pm2 list 2>/dev/null | head -15 || true
@@ -153,6 +168,11 @@ elif [ -f "$APPDATA/npm/pm2.cmd" ]; then
   "$APPDATA/npm/pm2.cmd" list 2>/dev/null | head -15 || true
 fi
 
+if [ "$public_ok" -ne 1 ]; then
+  echo >&2
+  echo "The new code is running on http://localhost:${API_PORT}, but the public address is NOT answering — see above." >&2
+  exit 1
+fi
 echo
 echo "G-CORE Gruntech is up on http://localhost:${API_PORT} — https://gruntech.gcore.tech"
 echo

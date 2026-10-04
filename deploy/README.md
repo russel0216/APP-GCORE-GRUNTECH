@@ -152,12 +152,20 @@ not `Cloudflared`:
 ```powershell
 schtasks /Create /F /TN GCoreGruntechTunnel /SC ONSTART /RU SYSTEM /RL HIGHEST `
   /TR "cmd /c cloudflared --config C:\Users\<you>\.cloudflared\gcore-gruntech.yml tunnel run"
-schtasks /Run /TN GCoreGruntechTunnel
+powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\tasks.ps1 -Ensure tunnel
 ```
 
 A scheduled task rather than `cloudflared service install`, because that
 command would replace the existing `Cloudflared` service and take gasiontech
 offline.
+
+**`tasks.ps1` is not optional.** `schtasks /Create` cannot switch off Windows'
+default "stop the task if it runs longer than 3 days", nor "stop on battery
+power" (a UPS on USB counts). Without it the tunnel stops by itself three days
+after it starts — which took the site down twice (Error 1033, 30 Sep and
+4 Oct 2026). `tasks.ps1 -Ensure tunnel` lifts both limits, starts the task and
+checks `APP_URL` answers from outside. `rebuild.ps1` runs it on every deploy,
+and lifts the same limits from `GCoreGruntechApi`.
 
 ### 7. Backups
 
@@ -189,7 +197,10 @@ Both do the same thing in the same order, and the order matters:
 4. **stop ours** — frees the Prisma query-engine DLL, which the running process holds open. Skipping this is what causes `EPERM: operation not permitted, rename query_engine-windows.dll.node`
 5. **generate** — the typed client, or `tsc` fails
 6. **build** — api, then web
-7. **start and health-check** — and prove it answers
+7. **start and health-check** — lift the API task's 3-day limit, start it, and prove it answers
+8. **tunnel** — lift the tunnel task's limit, start it if it stopped, and prove
+   `https://gruntech.gcore.tech` answers. A rebuild that ends in red here has
+   deployed the code; it is the public address that is down.
 
 If the rebuild stops with *"port 5100 is held by a process that is not ours"*,
 it has done the right thing. Look at what it printed and deal with that process
@@ -212,6 +223,30 @@ pm2 list                                  # the vision stack — should be onlin
 Get-Service Cloudflared                   # gasiontech's tunnel — should be Running
 docker ps --filter name=gasion_db         # the other database — should be up
 ```
+
+## The site shows Cloudflare "Error 1033"
+
+The tunnel is not connected; the app may be perfectly well. In PowerShell as
+Administrator on the server:
+
+```powershell
+Invoke-RestMethod http://localhost:5100/api/health
+powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\tasks.ps1 -Ensure tunnel
+```
+
+The first proves the API is up (if not, run `rebuild.ps1`). The second lifts
+the 3-day limit, starts G-Core's tunnel task if it stopped, and waits for the
+public address to answer. If it still does not, look at our tunnel **with its
+own config** — the server's default `config.yml` is G-CORE HR's tunnel, so a
+plain `cloudflared tunnel info gcore-gruntech` reports on the wrong one:
+
+```powershell
+schtasks /Query /TN GCoreGruntechTunnel /V /FO LIST | findstr /i "Status Last Stop"
+cloudflared tunnel --config C:\Users\Administrator\.cloudflared\gcore-gruntech.yml info gcore-gruntech
+```
+
+Last Result `267014` means Windows (or a person) ended the task. Never restart
+the `Cloudflared` service to fix this — it is gasiontech's.
 
 ## Email for invitations and password resets
 

@@ -255,6 +255,15 @@ would collide; `install.ps1` runs once and refuses if the preflight fails;
 the **`gcore-gruntech-db`** container on **5435**, and the **`gcore-gruntech`**
 tunnel — nothing else on that machine.
 
+**A task made by `schtasks /Create` stops after 3 days** (Windows' default
+`ExecutionTimeLimit` PT72H, plus "stop on battery power", which a UPS on USB
+trips), and schtasks has no switch for either. The tunnel task, which no
+deploy restarts, died that way twice (Error 1033, 30 Sep and 4 Oct 2026).
+`deploy/tasks.ps1 -Ensure api|tunnel` lifts both from G-Core's own two tasks
+(it refuses any other name); install and both rebuilds call it, and the
+rebuilds then start the tunnel if it stopped and prove `APP_URL` answers from
+outside. Any new G-Core task goes through it too.
+
 Two traps worth knowing before you edit those scripts:
 
 - **The repository's root `docker-compose.yml` must never run on that server.**

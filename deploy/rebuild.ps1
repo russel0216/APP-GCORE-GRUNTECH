@@ -148,6 +148,12 @@ npm run build
 if (-not (Test-Path "$root\web\dist\index.html")) { throw 'web\dist\index.html was not produced. The web build failed.' }
 
 # -- 7. Start and prove it answers --------------------------------------------
+# Windows stops a task created by schtasks after 3 days, and on battery power.
+# Lifted here, while the API is stopped, so the copy started below has neither.
+Step "keep $task running for good"
+& powershell -ExecutionPolicy Bypass -File "$root\deploy\tasks.ps1" -Ensure api
+if ($LASTEXITCODE -ne 0) { throw "Could not update the $task task settings." }
+
 Step "start $task"
 schtasks /Run /TN $task | Out-Null
 Start-Sleep -Seconds 8
@@ -173,7 +179,16 @@ if (-not $healthy) {
     exit 1
 }
 
-# -- 8. Confirm we disturbed nothing ------------------------------------------
+# -- 8. The tunnel, and the public address --------------------------------------
+# A rebuild never restarts the tunnel, so nothing else would notice it had
+# stopped - Windows stopped it twice after 3 days (Error 1033). Lift the limit,
+# start it if it is not running, and prove https://gruntech.gcore.tech answers.
+# Only G-Core's own GCoreGruntechTunnel task; never the Cloudflared service.
+Step 'tunnel and public address'
+& powershell -ExecutionPolicy Bypass -File "$root\deploy\tasks.ps1" -Ensure tunnel
+$publicOk = $LASTEXITCODE -eq 0
+
+# -- 9. Confirm we disturbed nothing ------------------------------------------
 # Read-only. If the vision stack is down, this script did not do it - but it is
 # worth knowing before you walk away.
 Step 'the neighbour (read-only)'
@@ -187,4 +202,8 @@ if ($pm2) {
 $svc = Get-Service -Name 'Cloudflared' -ErrorAction SilentlyContinue
 if ($svc) { Write-Host "    Cloudflared service: $($svc.Status)" -ForegroundColor DarkGray }
 
+if (-not $publicOk) {
+    Write-Host "`nThe new code is running on http://localhost:$apiPort, but the public address is NOT answering - see above.`n" -ForegroundColor Red
+    exit 1
+}
 Write-Host "`nG-CORE Gruntech is up on http://localhost:$apiPort - https://gruntech.gcore.tech`n" -ForegroundColor Green
