@@ -162,6 +162,12 @@ export interface MenuSubmodule {
   note?: string;
   /** Sidebar heading, set in the permission registry. Absent means "flat". */
   group?: string;
+  /**
+   * Not listed in the menu, but still a screen this person may open by link.
+   * Kept in the payload so the sidebar still knows which module and section a
+   * page such as /g-ops/quote-archive/:id belongs to.
+   */
+  hidden?: boolean;
   actions: string[];
 }
 

@@ -193,6 +193,14 @@ async function main() {
   check('the registry defines ghr.clearances.approve', permissionKeys.has('ghr.clearances.approve'));
   check('and does not define ghr.plantilla.approve', !permissionKeys.has('ghr.plantilla.approve'));
 
+  // The SCORO Archive is off the menu but still a screen: its permissions
+  // stay (the guards and the links depend on them) and the menu carries it
+  // flagged hidden, so the sidebar knows which section its page sits in.
+  check('the SCORO Archive keeps its permissions', permissionKeys.has('gops.quote_archive.view_all') && permissionKeys.has('gops.quote_archive.create'));
+  const superMenu = menuFor(superUser).flatMap((m) => m.submodules.map((s) => ({ id: `${m.key}.${s.key}`, hidden: s.hidden === true })));
+  check('the SCORO Archive is in the menu payload marked hidden', superMenu.some((s) => s.id === 'gops.quote_archive' && s.hidden));
+  check('and it is the only hidden screen', superMenu.filter((s) => s.hidden).map((s) => s.id).join() === 'gops.quote_archive');
+
   // ── 2. Document numbering ──────────────────────────────────────────────────
   console.log('\nNumbering');
 

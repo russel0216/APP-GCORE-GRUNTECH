@@ -36,6 +36,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     const out: Hit[] = [];
     for (const mod of me.menu) {
       for (const sub of mod.submodules) {
+        if (sub.hidden) continue;
         const label = `${mod.label} › ${sub.label}`;
         if (label.toLowerCase().includes(q)) {
           out.push({ kind: 'nav', id: `${mod.key}.${sub.key}`, title: sub.label, subtitle: mod.label, link: sub.path });

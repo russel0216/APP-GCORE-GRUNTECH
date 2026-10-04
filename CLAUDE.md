@@ -135,7 +135,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,223 assertions across twenty-two scripts** (counted 2026-10-02): foundation 191,
+**2,226 assertions across twenty-two scripts** (counted 2026-10-04): foundation 194,
 masters 54, sales 277, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
@@ -1017,6 +1017,13 @@ the detail.
   which creates a real quotation with the SAME number from an OPEN SCORO status.
   Never report archive values as pipeline — Insights and the board read
   `Quotation` only.
+- **The SCORO Archive is off the menu** (2026-10-04, the owner's call):
+  `hidden: true` on its registry entry keeps it out of the sidebar, the
+  section strip and Ctrl+K's screen list, while its route, its
+  `gops.quote_archive.*` permissions and every link to it (Customer 360, a
+  continued quotation, a search hit) work as before. `menuFor()` still sends it,
+  flagged, so an archive page opens under Sales. Hide a screen this way —
+  never by deleting its registry entry, which would drop its permissions.
 - **Import is `importBundle()` in `shared/legacyQuotes.ts`**, from the CLI
   (`scripts/import-scoro-quotes.ts <bundle> [--commit]`) or the archive's Import
   button — one function, dry run by default. Re-import upserts on

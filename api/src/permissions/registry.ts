@@ -77,6 +77,13 @@ export interface SubmoduleDef {
    * that sets none renders flat, exactly as it did before.
    */
   group?: string;
+  /**
+   * Kept off the sidebar, the strip and Ctrl+K's screen list, but still a
+   * screen: its route, permissions and every link to it work as before. The
+   * owner's call for the SCORO Archive (2026-10-04) — reached from a
+   * customer, a continued quotation or a search hit, not browsed.
+   */
+  hidden?: boolean;
 }
 
 export interface ModuleDef {
@@ -99,7 +106,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
       // The SCORO history, read-only. Continuing an open SCORO quote raises a live
       // quotation under the quotations permission; 'create' here is the admin import.
-      { key: 'quote_archive', group: 'Sales', label: 'SCORO Archive', path: '/g-ops/quote-archive', actions: ['view_all', 'export', 'create'], phase: 3,
+      { key: 'quote_archive', group: 'Sales', label: 'SCORO Archive', path: '/g-ops/quote-archive', actions: ['view_all', 'export', 'create'], phase: 3, hidden: true,
         note: 'Read-only SCORO quotation history. Create = run the SCORO import; continuing a quote uses the Quotations create permission.' },
       { key: 'pipeline', group: 'Sales', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
       { key: 'projects', group: 'Project', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },

@@ -94,6 +94,8 @@ export interface MenuSubmodule {
   note?: string;
   /** Sidebar heading this screen sits under; see SubmoduleDef.group. */
   group?: string;
+  /** Off the menu, still a screen; see SubmoduleDef.hidden. */
+  hidden?: boolean;
   actions: string[];
 }
 export interface MenuModule {
@@ -121,6 +123,7 @@ export function menuFor(user: ResolvedUser): MenuModule[] {
         phase: sub.phase,
         note: sub.note,
         group: sub.group,
+        hidden: sub.hidden,
         actions: sub.actions.filter((a) => can(user, `${mod.key}.${sub.key}.${a}`)),
       });
     }

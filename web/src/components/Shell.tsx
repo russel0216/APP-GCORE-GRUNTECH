@@ -218,6 +218,7 @@ export function Shell() {
     if (!activeModule) return [];
     const out: { name: string | null; items: typeof activeModule.submodules }[] = [];
     for (const sub of activeModule.submodules) {
+      if (sub.hidden) continue;
       const name = sub.group ?? null;
       // Merged by name rather than by adjacency. G-OPS lists Costing after the
       // delivery screens, which as a run-length grouping produced a second
@@ -246,7 +247,11 @@ export function Shell() {
   const sectioned = navGroups.length > 1 && navGroups.every((g) => g.name);
 
   const activeGroup = sectioned
-    ? (navGroups.find((g) => g.items.some((s) => s.key === activeKey)) ?? navGroups[0])
+    ? // A hidden screen (the SCORO Archive) lists in no group, so its page opens
+      // the section it is declared under rather than the first one.
+      (navGroups.find((g) => g.items.some((s) => s.key === activeKey)) ??
+      navGroups.find((g) => g.name === activeModule?.submodules.find((s) => s.key === activeKey)?.group) ??
+      navGroups[0])
     : null;
 
   /** Where a section's name points: its first screen that actually exists. */
@@ -421,7 +426,7 @@ export function Shell() {
                     </Link>
                   );
                 })
-              : activeModule.submodules.map((sub) => {
+              : activeModule.submodules.filter((sub) => !sub.hidden).map((sub) => {
                   const upcoming = sub.phase > SHIPPED_PHASE;
                   const active = sub.key === activeKey;
                   if (upcoming) {
