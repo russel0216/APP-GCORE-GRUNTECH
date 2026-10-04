@@ -3,6 +3,7 @@ import { api, getToken } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Empty, ErrorBox, Loading, formatDateTime, useToast } from './ui';
 import { Icon } from './Icon';
+import { isSpreadsheet } from '../lib/spreadsheet';
 
 /**
  * Files hung off a record — the one way, for every record that has any.
@@ -31,14 +32,24 @@ interface Attachment {
 /**
  * Opens a stored file. The route needs the bearer token, so the bytes are
  * fetched and handed to the browser as a blob — pointing a link straight at
- * the URL gets a 401. Images and PDFs open in a tab; anything the browser
- * cannot show downloads under its original name.
+ * the URL gets a 401. Images and PDFs open in a tab; a spreadsheet opens in
+ * G-CORE's own viewer (`/files/:id`) in a tab, because a browser cannot show
+ * one; anything else downloads under its original name.
  *
  * Exported so a screen that shows a file outside this card — a partner's
  * catalogue — opens it the same way rather than keeping a second copy of the
  * token-bearing idiom. Resolves false when the file could not be opened.
  */
 export async function openAttachment(file: { id: string; fileName: string; mimeType: string }): Promise<boolean> {
+  if (isSpreadsheet(file)) {
+    // Before any await, so the new tab still counts as the click's own.
+    const a = document.createElement('a');
+    a.href = `/files/${encodeURIComponent(file.id)}`;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.click();
+    return true;
+  }
   try {
     const res = await fetch(`/api/attachments/file/${file.id}`, {
       headers: { Authorization: `Bearer ${getToken()}` },
@@ -62,7 +73,7 @@ export async function openAttachment(file: { id: string; fileName: string; mimeT
 }
 
 /** Bytes as somebody would say them. */
-function readableSize(bytes: number): string {
+export function readableSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;

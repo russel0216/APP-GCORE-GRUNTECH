@@ -5,6 +5,7 @@ import { Shell } from './components/Shell';
 import { Login } from './pages/Login';
 import { ForgotPassword, ResetPassword, Welcome } from './pages/AccountLinks';
 import { Home } from './pages/Home';
+import { FileViewer } from './pages/FileViewer';
 import { MyWork } from './pages/MyWork';
 import { Account, SystemSettings, ComingSoon } from './pages/Misc';
 import { OpsDashboard } from './pages/OpsDashboard';
@@ -183,6 +184,10 @@ function Routed() {
 
   return (
     <Routes>
+      {/* A stored spreadsheet, read in its own tab and at full width — the
+          sheet needs the room the menu would take. The file route behind it
+          keeps each record's own guard. */}
+      <Route path="/files/:id" element={<FileViewer />} />
       <Route element={<Shell />}>
         <Route path="/" element={<Home />} />
         <Route path="/my-work" element={<MyWork />} />

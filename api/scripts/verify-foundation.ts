@@ -48,6 +48,17 @@ import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownField
 import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
 // The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
 import { resolveTemplate as editorResolve, emptyFieldsIn } from '../../web/src/lib/pdfTemplate';
+import {
+  MAX_ROWS,
+  columnName,
+  isSpreadsheet,
+  looksNumeric,
+  matchRanges,
+  matchingRows,
+  rowKeys,
+} from '../../web/src/lib/spreadsheet';
+import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
+import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 
 if (env.isProduction) {
@@ -1404,6 +1415,140 @@ async function main() {
   check(
     'and a selector with nothing left to say is not stored as an empty rule',
     editor.rules['.empty'] === undefined,
+  );
+
+  // ── Spreadsheet viewer (web/src/lib/spreadsheet*.ts) ───────────────────────
+  // An attached workbook opens at /files/:id instead of downloading. The page
+  // parses in a worker; these are the rules that worker and page share.
+  console.log('\nSpreadsheet viewer');
+
+  check(
+    'a spreadsheet is known by its extension, not its MIME type',
+    isSpreadsheet({ fileName: 'Price List.XLSX' }) &&
+      isSpreadsheet({ fileName: 'rates.csv' }) &&
+      isSpreadsheet({ fileName: 'old.xls' }) &&
+      !isSpreadsheet({ fileName: 'quote.pdf' }) &&
+      !isSpreadsheet({ fileName: 'xlsx' }),
+  );
+  check(
+    'columns are named as Excel names them',
+    [0, 25, 26, 701, 702].map(columnName).join() === 'A,Z,AA,ZZ,AAA',
+  );
+  const numericCases: [string, boolean][] = [
+    ['12,500.00', true], ['(1,234.00)', true], ['PHP 1,562.20', true], ['₱12,500.00', true],
+    ['15%', true], ['1.2E+10', true], ['-3.5', true],
+    ['00123', false], ['ACS580', false], ['6/1/26', false], ['', false], ['USD', false],
+  ];
+  const wrongNumeric = numericCases.filter(([text, want]) => looksNumeric(text) !== want).map(([t]) => t);
+  check('a CSV cell reads as a number only when it is one (codes keep their zeros)', wrongNumeric.length === 0, wrongNumeric.join(' | '));
+
+  // A price list shaped like a real one: a merged title, a validity line, a
+  // blank row, then the headings — and formatting that runs past the data.
+  const vfd = XLSX.utils.aoa_to_sheet([
+    ['FY2026 JUNE PRICELIST - DISTRIBUTORS'],
+    ['Valid from 1 June 2026'],
+    [],
+    ['Model', 'Description', 'Frame', 'List price', 'Stock', 'Updated'],
+    ['ACS580-01-02A7-4', '0.75 kW drive', 'R1', 12500, 3, new Date(Date.UTC(2026, 5, 1))],
+    ['00123', 'Spare fan', '', 850.5, 0],
+    ['ACS580-01-04A1-4', '1.5 kW drive\nIP21', 'R1', 1562.2, 2],
+  ], { cellDates: true });
+  vfd['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 4 } }];
+  for (const ref of ['D5', 'D6', 'D7']) vfd[ref].z = '#,##0.00';
+  vfd['F5'].z = 'yyyy-mm-dd';
+  vfd['!ref'] = 'A1:J60';
+  const book = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(book, vfd, 'VFD');
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['internal']]), 'Rates');
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['secret']]), 'Calc');
+  book.Workbook = { Sheets: [{ Hidden: 0 }, { Hidden: 1 }, { Hidden: 2 }] };
+
+  const xlsxBytes = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const viewed = readWorkbook(new Uint8Array(xlsxBytes), 'FY2026 JUNE PRICELIST.xlsx');
+  const sheet = viewed.sheets[0];
+  check(
+    'only the sheets Excel shows are shown; a hidden one is named, a very hidden one is not',
+    viewed.sheets.map((s) => s.name).join() === 'VFD' && viewed.hiddenSheets.join() === 'Rates',
+    JSON.stringify({ sheets: viewed.sheets.map((s) => s.name), hidden: viewed.hiddenSheets }),
+  );
+  check('the headings row is found under the title rows (row 4)', sheet?.headerRow === 3, String(sheet?.headerRow));
+  check(
+    'a number reads as Excel shows it, through its own format, and aligns as a number',
+    sheet?.rows[4][3] === '12,500.00' && sheet?.kinds[4][3] === 'n',
+    `${sheet?.rows[4][3]} ${sheet?.kinds[4]}`,
+  );
+  check(
+    'a part number typed as text keeps its leading zeros and stays text',
+    sheet?.rows[5][0] === '00123' && sheet?.kinds[5][0] !== 'n',
+  );
+  check('a date reads through its format', sheet?.rows[4][5] === '2026-06-01', sheet?.rows[4][5]);
+  check('a line break inside a cell survives', !!sheet?.rows[6][1].includes('\n'));
+  check(
+    'a merged title spans its columns',
+    !!sheet?.spans.some((s) => s.r === 0 && s.c === 0 && s.cols === 5),
+    JSON.stringify(sheet?.spans),
+  );
+  check(
+    'formatting past the data is trimmed (six columns, seven rows)',
+    sheet?.colCount === 6 && sheet?.rows.length === 7,
+    `${sheet?.colCount} × ${sheet?.rows.length}`,
+  );
+  const keys = sheet ? rowKeys(sheet) : [];
+  check(
+    'search is case- and comma-blind and never matches across two cells',
+    matchingRows(keys, '12500').join() === '4' &&
+      matchingRows(keys, 'acs580').join() === '4,6' &&
+      matchingRows(keys, 'R1 0.75').length === 0 &&
+      matchingRows(keys, '  ').length === 0,
+  );
+  check(
+    'and marks what it found the same way, commas included',
+    JSON.stringify(matchRanges('9,137.25', '9137.25')) === '[[0,8]]' &&
+      JSON.stringify(matchRanges('ACS580 / acs580', 'ACS')) === '[[0,3],[9,12]]' &&
+      matchRanges('Drive', 'pump').length === 0,
+    JSON.stringify([matchRanges('9,137.25', '9137.25'), matchRanges('ACS580 / acs580', 'ACS')]),
+  );
+
+  const xlsBytes = XLSX.write(book, { type: 'buffer', bookType: 'biff8' }) as Buffer;
+  const fromXls = readWorkbook(new Uint8Array(xlsBytes), 'old price list.xls');
+  check(
+    'an old .xls reads the same',
+    fromXls.sheets[0]?.rows[4][3] === '12,500.00' && fromXls.sheets[0]?.headerRow === 3,
+    fromXls.sheets[0]?.rows[4]?.join(' | '),
+  );
+
+  const csvText = 'Part,Description,Price\r\n00123,Señor fan ₱,"1,250.00"\r\nACS580,Drive,12500\r\n';
+  const csvBytes = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(csvText)]);
+  const csv = readWorkbook(csvBytes, 'rates.csv').sheets[0];
+  check(
+    'a CSV is read as written: zeros kept, UTF-8 and its BOM handled, numbers aligned',
+    csv?.rows[1][0] === '00123' &&
+      csv?.rows[1][1] === 'Señor fan ₱' &&
+      csv?.rows[1][2] === '1,250.00' &&
+      csv?.kinds[1] === 'ssn' &&
+      csv?.rows[0][0] === 'Part' &&
+      csv?.headerRow === 0,
+    JSON.stringify({ rows: csv?.rows, kinds: csv?.kinds }),
+  );
+  // "Peñalosa" as an older Excel saves it, in Windows-1252.
+  const ansi = new Uint8Array([...'Name\r\nPe'].map((ch) => ch.charCodeAt(0)).concat([0xf1], [...'alosa\r\n'].map((ch) => ch.charCodeAt(0))));
+  check(
+    'a CSV that is not UTF-8 is read as Windows-1252',
+    readWorkbook(ansi, 'old.csv').sheets[0]?.rows[1][0] === 'Peñalosa',
+    readWorkbook(ansi, 'old.csv').sheets[0]?.rows[1]?.[0],
+  );
+
+  const tall = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    tall,
+    XLSX.utils.aoa_to_sheet(Array.from({ length: MAX_ROWS + 5 }, (_, i) => [`row ${i + 1}`])),
+    'Long',
+  );
+  const long = readWorkbook(new Uint8Array(XLSX.write(tall, { type: 'buffer', bookType: 'xlsx' }) as Buffer), 'long.xlsx').sheets[0];
+  check(
+    `a sheet past ${MAX_ROWS.toLocaleString()} rows is cut there and says so`,
+    long?.rows.length === MAX_ROWS && long?.truncatedRows === true,
+    `${long?.rows.length} ${long?.truncatedRows}`,
   );
 
   // ── Done ───────────────────────────────────────────────────────────────────

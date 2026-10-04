@@ -1,0 +1,205 @@
+/* ── Spreadsheet viewer (pages/FileViewer.tsx, /files/:id) ─────────────────
+
+   A page of its own, the height of the window: the sheet scrolls inside
+   .xv-grid, so its column letters, its row numbers and its headings row can
+   stay in view the way Excel's Freeze Panes keeps them. */
+
+.xv {
+  --xv-letters-h: calc(var(--s-6) + var(--s-1));
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* The page itself never scrolls, so the bar need not stick. */
+.xv-top {
+  position: static;
+  flex: none;
+}
+
+.xv-file {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.xv-name {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xv-meta {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.xv-bar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--content-pad-x);
+  border-bottom: 1px solid var(--line);
+}
+
+.xv-tabs {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.xv-tab-count {
+  margin-left: var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.xv-tabs button.active .xv-tab-count {
+  color: inherit;
+}
+
+.xv-search {
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 28rem;
+}
+
+.xv-headings {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.xv-status {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.xv-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-6) var(--content-pad-x);
+}
+
+.xv-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface);
+}
+
+/* Separate borders: a collapsed border is drawn by the table, not the cell,
+   and does not travel with a sticky cell. */
+.xv-table {
+  /* As wide as the sheet needs, scrolling sideways inside .xv-grid. Fitted
+     to the window instead, a phone squeezed every column to a few letters. */
+  width: max-content;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--fs-sm);
+}
+
+.xv-table th,
+.xv-table td {
+  min-width: 3rem;
+  max-width: 28rem;
+  padding: var(--s-1) var(--s-2);
+  border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  vertical-align: top;
+  /* A line break typed in a cell (Alt+Enter) is kept; long text wraps at the
+     28rem cap. break-word, not anywhere: anywhere lets a column shrink to one
+     letter, and a model number would then wrap a character at a time. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.xv-table .n {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.xv-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--xv-letters-h);
+  padding-block: 0;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  text-align: center;
+}
+
+.xv-table .xv-rownum {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 3rem;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  text-align: right;
+}
+
+.xv-table thead .xv-corner {
+  left: 0;
+  z-index: 4;
+}
+
+/* The headings row: in its place, then held under the column letters as the
+   rows below it scroll — and first in a search's results. */
+.xv-table .xv-head-row > * {
+  position: sticky;
+  top: var(--xv-letters-h);
+  z-index: 2;
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.xv-table .xv-head-row > .xv-rownum {
+  left: 0;
+  z-index: 3;
+  background: var(--surface-3);
+  color: var(--muted);
+}
+
+.xv-table mark {
+  background: rgb(var(--warn-rgb) / 0.35);
+  color: inherit;
+  border-radius: var(--radius-sm);
+}
+
+.xv-more {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+}
+
+.xv-foot {
+  flex: none;
+  margin: 0;
+  padding: var(--s-2) var(--content-pad-x);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}

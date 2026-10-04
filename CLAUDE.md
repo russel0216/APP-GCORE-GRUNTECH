@@ -135,7 +135,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,226 assertions across twenty-two scripts** (counted 2026-10-04): foundation 194,
+**2,243 assertions across twenty-two scripts** (counted 2026-10-05): foundation 211,
 masters 54, sales 277, costing 105, pipeline 44, calendar 38, numbering 46,
 partners 82, delivery 78, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
@@ -1284,6 +1284,40 @@ data builder like `quotationTemplate.ts` and `quotationPrintData()`.
   Company Settings names them (`COMPANY_SETTING_NAMES`) and linked there, and
   the selected box's "Not printing now: …". Hidden, the note stays hidden only
   until a different set of fields is empty (a per-browser convenience).
+
+## Spreadsheet attachments (2026-10-05)
+
+A browser cannot show a workbook, so an attached price list downloaded every
+time somebody only wanted one figure. `openAttachment()` now sends a
+spreadsheet (by EXTENSION — `isSpreadsheet()`; Windows uploads a .csv as
+`application/vnd.ms-excel`) to `/files/:id` (`pages/FileViewer.tsx`) in a tab
+of its own, outside the Shell and in the day theme. Every screen that opens a
+file goes through that one function, so all of them got it.
+
+- **Read-only, values only**: the text Excel shows (`cell.w`, through the
+  cell's own number format), one tab per visible sheet (a hidden sheet is
+  named in the footer, a very hidden one is not), merged titles spanning their
+  columns, the headings row guessed (`detectHeaderRow()`) and changeable, held
+  under the column letters like Freeze Panes, and a search that is case- and
+  comma-blind ("12500" finds 12,500.00) across every sheet. No formulas,
+  links, colours or pictures — what reaches the page is plain text, rendered
+  as text. Download stays, from the bytes already fetched.
+- **The bytes come through `/api/attachments/file/:id`**, so each record's
+  attachment guard still decides; refused or missing reads "not available".
+  No API change: the name comes from its Content-Disposition.
+- **Parsed in a worker** (`lib/spreadsheet.worker.ts`) — an upload is
+  untrusted input, so a hostile or broken file fails, or hits the 60-second
+  stop, in a thread holding no token and no page. Caps: 25 MB, 50,000 rows a
+  sheet, 256 columns, each said on screen when it bites.
+- **`lib/spreadsheet.ts` never imports the library**, so the main bundle does
+  not carry it; only `lib/spreadsheetRead.ts` does, and it reaches the browser
+  inside the worker chunk alone. verify-foundation pins both.
+- **The library is SheetJS CE 0.20.3 from the vendor's CDN**, pinned in
+  `web/package.json` by URL and in the lockfile by integrity hash. The npm
+  registry's `xlsx` (0.18.5) is years stale with known flaws reading crafted
+  files — never `npm install xlsx` by name. The first `npm install` after
+  pulling this fetches it from cdn.sheetjs.com, so the server must reach it
+  then; after that it is in `node_modules`.
 
 ## Costing sheet notes
 
