@@ -2123,19 +2123,17 @@ export async function quotationPrintData(
     'owner.phone': owner.phone ?? '',
   };
 
-  // A subheading is a heading row, and so is a group where it changes — unless
-  // the layout gives the group a column of its own, which the engine decides.
-  // A product prints its name, and its description under it when it has one.
+  // A subheading is a heading row. A group is NOT (2026-10-06, the owner's
+  // call): it is the salesperson's filing, not the customer's reading, so it
+  // prints only where the layout gives the table a Group column of its own.
+  // A product prints its name in bold, and its description under it.
   const rows: DesignRow[] = [];
-  let group: string | null = null;
   let n = 0;
   for (const i of revision.items) {
     if (i.isHeading) {
       rows.push({ heading: (i.title ?? '').trim() });
       continue;
     }
-    if (i.group && i.group !== group) rows.push({ heading: i.group, group: true });
-    group = i.group ?? group;
     const qty = Number(i.quantity);
     const qtyText = Number.isInteger(qty) ? String(qty) : qty.toString();
     const title = (i.title ?? '').trim();
@@ -2143,7 +2141,7 @@ export async function quotationPrintData(
     rows.push({
       cells: {
         no: String(++n),
-        product: title && description ? { title, body: description } : title || description,
+        product: title ? (description ? { title, body: description } : { title }) : description,
         qtyUnit: `${qtyText} ${i.unit}`,
         qty: qtyText,
         unit: i.unit,

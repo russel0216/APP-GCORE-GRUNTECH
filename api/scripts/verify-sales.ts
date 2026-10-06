@@ -1378,7 +1378,11 @@ async function main() {
       text.split('\n').includes(sales.name) && text.includes(sales.email),
     );
     check('Delivery prints as a labelled line', text.includes('Delivery:') && text.includes('4 to 6 weeks'));
-    check('it prints the group as a sub-heading and the line title', text.includes('Gruntech Installation') && text.includes('Air compressor installation'));
+    check('it prints the line title and its description', text.includes('Air compressor installation') && text.includes('Mechanical and electrical tie-in'));
+    check(
+      'and never the group as a heading — a group prints only in a Group column the layout places',
+      !text.includes('Gruntech Installation') && !text.includes('Gruntech Services'),
+    );
     check('it prints the payment terms and who it is for', text.includes('Payment Terms: 30 days PDC') && text.includes(`Attention: ${TAG} Engr. Cruz, Facilities Head`));
     check(
       'and never a cost figure, a margin or a cost note',

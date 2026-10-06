@@ -135,8 +135,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,256 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
-masters 54, sales 277, costing 105, pipeline 46, calendar 38, numbering 46,
+**2,257 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
+masters 54, sales 278, costing 105, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1151,8 +1151,10 @@ the detail.
   heading; `lineData()` stores it with no quantity, price, cost or provider,
   whatever was sent. `quotationTotals` (and the `quotationMath` mirror) leave
   it out of `lineCount`. A line keeps its SCORO group in a Group column of its
-  own, on the editor and the quotation page; the PDF prints a group as a
-  heading where it changes, unless the layout gives the table a Group column.
+  own, on the editor and the quotation page. **The PDF never prints a group
+  as a heading** (2026-10-06, the owner's call, after SCORO's own PDF): only
+  subheadings are heading rows, and a group prints only in a Group column the
+  layout places. A product cell is the title in bold over its description.
 - **Probability is no longer asked for.** A new quotation takes its lead's
   probability, else 50; the weighted pipeline still reads the stored value.
 - **Delete** is `DELETE /quotations/:id`: `gops.quotations.delete` (the sales
