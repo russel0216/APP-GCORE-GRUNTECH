@@ -15,6 +15,7 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { groupKey } from '../shared/quotationGroups';
 import { nextNumber } from '../shared/numbering';
 
 // The employee routes live in ./employees; re-exported here so the mount in
@@ -970,6 +971,108 @@ referenceRoutes.delete(
         summary: `Deleted industry ${industry.code} — ${industry.name}`,
         before: industry,
       },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ── Quotation groups ─────────────────────────────────────────────────────────
+// SCORO's Group column as a list: what the quotation editor suggests and what
+// Sales Analytics' "By group" names. A line keeps its group as text, so a
+// group is never a reference a line points at — see shared/quotationGroups.ts.
+// Any authenticated user may read the list: the quotation editor needs it.
+
+referenceRoutes.get(
+  '/quotation-groups',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    const [groups, used] = await Promise.all([
+      prisma.quotationGroup.findMany({
+        where: activeOnly ? { isActive: true } : {},
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }),
+      prisma.quotationItem.groupBy({ by: ['group'], where: { group: { not: null } }, _count: { _all: true } }),
+    ]);
+    const lines = new Map<string, number>();
+    for (const u of used) {
+      const key = groupKey(u.group!);
+      lines.set(key, (lines.get(key) ?? 0) + u._count._all);
+    }
+    res.json(groups.map((g) => ({ ...g, lineCount: lines.get(g.key) ?? 0 })));
+  }),
+);
+
+const quotationGroupSchema = z.object({
+  name: z.string().trim().min(1, 'Name the group').max(120),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+referenceRoutes.post(
+  '/quotation-groups',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(quotationGroupSchema, req.body);
+    const key = groupKey(body.name);
+    if (await prisma.quotationGroup.findUnique({ where: { key } })) {
+      throw conflict(`There is already a group "${body.name}"`);
+    }
+    const created = await prisma.quotationGroup.create({ data: { ...body, name: body.name.replace(/\s+/g, ' '), key } });
+    await audit(
+      { entityType: 'quotation_group', entityId: created.id, action: 'CREATED', summary: `Created quotation group "${created.name}"` },
+      req,
+    );
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/quotation-groups/:id',
+  require_('admin.categories.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(quotationGroupSchema.partial(), req.body);
+    const before = await prisma.quotationGroup.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Quotation group not found');
+    const data: Prisma.QuotationGroupUpdateInput = { ...body };
+    if (body.name !== undefined) {
+      const key = groupKey(body.name);
+      if (key !== before.key && (await prisma.quotationGroup.findUnique({ where: { key } }))) {
+        throw conflict(`There is already a group "${body.name}"`);
+      }
+      data.name = body.name.replace(/\s+/g, ' ');
+      data.key = key;
+    }
+    const updated = await prisma.quotationGroup.update({ where: { id: before.id }, data });
+    await audit(
+      {
+        entityType: 'quotation_group',
+        entityId: updated.id,
+        action: 'UPDATED',
+        summary:
+          before.name !== updated.name ? `Renamed quotation group "${before.name}" to "${updated.name}"` : `Updated quotation group "${updated.name}"`,
+        before,
+        after: updated,
+      },
+      req,
+    );
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/quotation-groups/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const group = await prisma.quotationGroup.findUnique({ where: { id: req.params.id } });
+    if (!group) throw notFound('Quotation group not found');
+    // Lines keep the text, so deleting a used group would only see it added
+    // back the next time one of those quotations is saved.
+    const used = await prisma.quotationItem.count({ where: { group: { equals: group.name, mode: 'insensitive' } } });
+    if (used > 0) throw badRequest(`${used} quotation line(s) are filed under "${group.name}" — deactivate it instead`);
+    await prisma.quotationGroup.delete({ where: { id: group.id } });
+    await audit(
+      { entityType: 'quotation_group', entityId: group.id, action: 'DELETED', summary: `Deleted quotation group "${group.name}"`, before: group },
       req,
     );
     res.json({ ok: true });

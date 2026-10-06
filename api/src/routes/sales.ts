@@ -18,6 +18,7 @@ import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissio
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
+import { rememberGroups } from '../shared/quotationGroups';
 import {
   submitForApproval,
   onApprovalSettled,
@@ -1265,6 +1266,7 @@ quotationRoutes.post(
         await tx.quotationItem.createMany({
           data: lines.map((line, i) => ({ revisionId, ...lineData(line, i) })),
         });
+        await rememberGroups(tx, lines.map((l) => l.group));
         await recalcRevision(revisionId, tx);
       }
 
@@ -1774,6 +1776,7 @@ quotationRoutes.put(
         await tx.quotationItem.createMany({
           data: body.lines.map((line, i) => ({ revisionId, ...lineData(line, i) })),
         });
+        await rememberGroups(tx, body.lines.map((l) => l.group));
       }
       await recalcRevision(revisionId, tx);
       return removed.count;
@@ -1820,6 +1823,7 @@ quotationRoutes.post(
           ...lineData(body, body.sortOrder ?? (last ? last.sortOrder + 1 : 0)),
         },
       });
+      await rememberGroups(tx, [body.group]);
       await recalcRevision(req.params.revisionId, tx);
       return created;
     });
@@ -1874,6 +1878,7 @@ quotationRoutes.patch(
     await checkLine(merged);
 
     await prisma.$transaction(async (tx) => {
+      if (body.group) await rememberGroups(tx, [body.group]);
       await tx.quotationItem.update({
         where: { id: req.params.itemId },
         data: {

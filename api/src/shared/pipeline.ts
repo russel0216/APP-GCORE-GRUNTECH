@@ -28,13 +28,54 @@ import { manilaDayKey, manilaMonthKey } from './day';
 export function quotationValue(
   revisions: { status: string; total: Prisma.Decimal | number; revision: number }[],
 ): number {
-  const approved = revisions.find((r) => r.status === 'APPROVED');
-  const latest = revisions.reduce<(typeof revisions)[number] | null>(
-    (best, r) => (best === null || r.revision > best.revision ? r : best),
-    null,
-  );
-  const chosen = approved ?? latest;
+  const chosen = valueRevision(revisions);
   return chosen ? Number(chosen.total) : 0;
+}
+
+/** The revision `quotationValue` reads: the approved one, else the latest. */
+export function valueRevision<R extends { status: string; revision: number }>(revisions: R[]): R | null {
+  const approved = revisions.find((r) => r.status === 'APPROVED');
+  const latest = revisions.reduce<R | null>((best, r) => (best === null || r.revision > best.revision ? r : best), null);
+  return approved ?? latest;
+}
+
+/** Where a quotation's value goes when none of its lines names a group. */
+export const NO_GROUP = 'No group';
+
+/**
+ * A quotation's value split across the groups its lines are filed under, in
+ * proportion to the line amounts — so "By group" in Sales Analytics adds up
+ * to the same quoted and won figures as the rest of the report (the value is
+ * the revision's TOTAL, discount and VAT included, and line amounts are
+ * neither). Exact in centavos: the rounding remainder goes to the largest
+ * share. Groups match case-blind (`key`); the first spelling seen names one.
+ * Subheadings carry no amount and are left out.
+ */
+export function groupShares(
+  total: number,
+  lines: { group: string | null; amount: Prisma.Decimal | number; isHeading?: boolean }[],
+  key: (name: string) => string = (n) => n.trim().toLowerCase(),
+): { key: string; group: string; value: number }[] {
+  const totalCents = Math.round(total * 100);
+  if (totalCents === 0) return [];
+  const sums = new Map<string, { group: string; amount: number }>();
+  let all = 0;
+  for (const line of lines) {
+    if (line.isHeading) continue;
+    const amount = Number(line.amount);
+    if (!(amount > 0)) continue;
+    const name = line.group?.trim() || NO_GROUP;
+    const k = name === NO_GROUP ? '' : key(name);
+    const entry = sums.get(k) ?? { group: name, amount: 0 };
+    entry.amount += amount;
+    sums.set(k, entry);
+    all += amount;
+  }
+  if (all <= 0) return [{ key: '', group: NO_GROUP, value: total }];
+  const shares = [...sums].map(([k, e]) => ({ key: k, group: e.group, cents: Math.round((totalCents * e.amount) / all) }));
+  const remainder = totalCents - shares.reduce((s, x) => s + x.cents, 0);
+  if (remainder !== 0) shares.reduce((a, b) => (b.cents > a.cents ? b : a)).cents += remainder;
+  return shares.map((x) => ({ key: x.key, group: x.group, value: x.cents / 100 }));
 }
 
 // ── Columns ──────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { backfillPositions } from '../src/shared/plantilla';
 import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
+import { seedQuotationGroups } from '../src/shared/quotationGroups';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -971,6 +972,13 @@ async function main() {
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
       );
     }
+  }
+
+  // The Quotation Groups master (Admin › Categories) starts from the groups
+  // the quotation lines already use; a second run adds none.
+  {
+    const added = await seedQuotationGroups();
+    if (added) console.log(`  · Added ${added} quotation group(s) from the lines that use them`);
   }
 
   // Costing.finalAt arrived after costings were already final. Their last

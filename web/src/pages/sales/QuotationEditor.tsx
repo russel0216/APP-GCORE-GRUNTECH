@@ -47,7 +47,7 @@ interface Line {
   key: string;
   /** A subheading: its title is the heading; no quantity, price or cost. */
   isHeading: boolean;
-  /** SCORO's group — "Gruntech Installation", "Trading" — printed as a heading where it changes. */
+  /** SCORO's group — "Gruntech Installation", "Trading". Suggested from Admin › Categories; never printed as a heading. */
   group: string;
   title: string;
   description: string;
@@ -296,6 +296,14 @@ export function QuotationEditor() {
   const [lead, setLead] = useState<LeadForQuote | null>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
   const [pinnedCostings, setPinnedCostings] = useState<CostingOption[]>([]);
+  /** The Quotation Groups master (Admin › Categories), active ones only: what Group suggests. */
+  const [knownGroups, setKnownGroups] = useState<string[]>([]);
+  useEffect(() => {
+    api
+      .get<{ name: string }[]>('/reference/quotation-groups?active=true')
+      .then((rows) => setKnownGroups(rows.map((g) => g.name)))
+      .catch(() => setKnownGroups([]));
+  }, []);
   /** The contact to pick once the customer's contacts arrive, by name (a lead's). */
   const [wantContact, setWantContact] = useState<string | null>(null);
 
@@ -1546,7 +1554,7 @@ export function QuotationEditor() {
           </table>
         </div>
         <datalist id="qe-groups">
-          {[...new Set(lines.map((l) => l.group.trim()).filter(Boolean))].map((g) => (
+          {[...new Set([...knownGroups, ...lines.map((l) => l.group.trim()).filter(Boolean)])].map((g) => (
             <option key={g} value={g} />
           ))}
         </datalist>
@@ -1582,7 +1590,7 @@ export function QuotationEditor() {
         {appendOpen && <AppendQuotePanel excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
           Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
-          left out when you save. A group prints as a heading over its lines, and so does a subheading.
+          left out when you save. A subheading prints as a heading over its lines; a group does not, unless the PDF layout has a Group column.
           {showCost ? ' Cost, provider and margin are internal — never printed.' : ''}
         </p>
 

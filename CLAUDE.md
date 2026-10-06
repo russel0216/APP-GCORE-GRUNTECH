@@ -149,11 +149,11 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,280 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 278, costing 120, pipeline 46, calendar 38, numbering 46,
+**2,288 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 283, costing 120, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
-insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
+insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -1252,6 +1252,32 @@ the detail.
   scrolls inside its card. Never split a line's cost onto a row of its own.
   Labels and values share one size (`--fs-md`) on both pages. The quotation
   page has no Margin card — the cost panel beside the totals says it.
+
+## Quotation groups (2026-10-06)
+
+- **`QuotationGroup` is a list, not a reference.** A line keeps its group
+  as text (`QuotationItem.group`); the master (Admin › Categories ›
+  Quotation groups, `/api/reference/quotation-groups`, `admin.categories.*`
+  to change, anyone signed in to read) is what the editor's Group box
+  suggests (active ones) and what "By group" names. `key` is the name
+  trimmed, single-spaced and lower-cased: one group per spelling. Renaming a
+  group never rewrites a saved line; a group any line uses is deactivated,
+  not deleted (the next save would only add it back).
+- **Every save that writes a line calls `rememberGroups(tx, names)`**
+  (`shared/quotationGroups.ts`) — create with lines, replace lines, add a
+  line, edit a line — so a group typed on a quotation joins the master with
+  nobody filing it first. `createMany … skipDuplicates`: an administrator's
+  spelling or a deactivated group is never overwritten. The seed's
+  `seedQuotationGroups()` adds the groups lines already use, and any `group`
+  a SCORO archive line carries (the PDF converter keeps none today).
+- **"By group" in Sales Analytics splits each quotation's value across its
+  value revision's groups in proportion to the line amounts**
+  (`groupShares()` in `shared/pipeline.ts`, exact in centavos, remainder on
+  the largest share; subheadings left out; no priced line → "No group"), so
+  the table adds up to the report's own quoted and won figures —
+  verify-insights asserts both. Every active group is listed, even at zero;
+  "No group" is last. The pipeline CSV appends a Groups column. Verify
+  scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
 
 ## Quotation PDF template (2026-10-02)
 

@@ -1363,6 +1363,23 @@ model QuotationItem {
 /// be "continued in G-CORE", which raises a real Quotation under the SAME
 /// number and records it in continuedQuotationId. Figures are stored exactly as
 /// SCORO held them; nothing recomputes them.
+/// The groups a quotation line is filed under ("Gruntech Installation",
+/// "Trading") — SCORO's Group column. A line keeps its group as TEXT
+/// (`QuotationItem.group`), so this is the list the editor suggests from and
+/// Sales Analytics' "By group" names, not a reference a line points at. Every
+/// group a saved line uses is added here (`rememberGroups`). Admin › Categories.
+model QuotationGroup {
+  id        String   @id @default(cuid())
+  name      String
+  /// The name trimmed and lower-cased: one group per spelling, case-blind.
+  key       String   @unique
+  sortOrder Int      @default(0)
+  /// Inactive: no longer suggested. Lines already filed under it keep it.
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model LegacyQuote {
   id       String @id @default(cuid())
   source   String @default("SCORO")

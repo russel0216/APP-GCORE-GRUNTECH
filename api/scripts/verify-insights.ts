@@ -991,6 +991,28 @@ async function main() {
       `overview ${d.sales.weightedPipeline} vs report ${pipelineTotals.weightedValue}`,
     );
 
+    // "By group" splits each quotation's value by its groups, so its sums are
+    // the report's own figures: quoted = what the salespeople raised, won =
+    // the won total.
+    const byGroup = (pipeline.body as unknown as { byGroup: { group: string; quotedValue: number; wonValue: number }[] }).byGroup;
+    const peopleQuoted = (pl.people as unknown as { quotedValue: number }[]).reduce((t, x) => t + x.quotedValue, 0);
+    const wonTotal = (pl.totals as unknown as { wonValue: number }).wonValue;
+    check(
+      'By group adds up to the quoted value the salespeople raised, to the centavo',
+      Array.isArray(byGroup) && money(byGroup.reduce((t, g) => t + g.quotedValue, 0), peopleQuoted),
+      `${byGroup?.reduce((t, g) => t + g.quotedValue, 0)} vs ${peopleQuoted}`,
+    );
+    check(
+      'and to the won value',
+      money(byGroup.reduce((t, g) => t + g.wonValue, 0), wonTotal),
+      `${byGroup.reduce((t, g) => t + g.wonValue, 0)} vs ${wonTotal}`,
+    );
+    check(
+      'with "No group" last when it is there',
+      !byGroup.some((g, i) => g.group === 'No group' && i !== byGroup.length - 1),
+      byGroup.map((g) => g.group).join(', '),
+    );
+
     const cash = await api('GET', '/insights/cash-forecast');
     const cf = cash.body as unknown as {
       buckets: { label: string; invoiced: number; unbilled: number; net: number }[];
