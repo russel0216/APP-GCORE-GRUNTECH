@@ -18,6 +18,7 @@ import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissio
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { notify } from '../shared/notifications';
+import { rememberGroups } from '../shared/quotationGroups';
 import {
   submitForApproval,
   onApprovalSettled,
@@ -30,15 +31,21 @@ import {
 import {
   formatAmount,
   formatDate,
-  formatDateTime,
   formatShortDate,
   type PdfTotal,
   type Signatory,
 } from '../shared/pdf';
 import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
 import { quotationDesign } from '../shared/quotationTemplate';
-import { activityWhere, type ActivityQuery } from '../shared/activities';
-import { manilaDayKey } from '../shared/day';
+import {
+  activityLink,
+  activityWhen,
+  activityWhere,
+  MAX_ACTIVITY_MINUTES,
+  REMINDER_MINUTES,
+  tellAboutActivity,
+  type ActivityQuery,
+} from '../shared/activities';
 import { toCsv } from '../shared/insights';
 import {
   assertLeadStatusChange,
@@ -118,6 +125,7 @@ leadRoutes.get(
       where.status = { in: asked as LeadStatus[] };
     }
     if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
+    if (q.filters.createdById) where.createdById = q.filters.createdById;
     if (q.filters.source) where.source = q.filters.source;
 
     const [rows, total] = await Promise.all([
@@ -125,6 +133,8 @@ leadRoutes.get(
         where,
         include: {
           assignedTo: { select: { id: true, name: true } },
+          // Who recorded the enquiry — not always who is chasing it.
+          createdBy: { select: { id: true, name: true } },
           customer: { select: { id: true, name: true } },
           _count: { select: { quotations: true } },
         },
@@ -172,7 +182,19 @@ leadRoutes.get(
         // is "start a costing" or "create the quotation", and it can only
         // offer the right one if it knows what already exists.
         costings: {
-          select: { id: true, number: true, title: true, status: true, contractValue: true, createdAt: true },
+          select: {
+            id: true,
+            number: true,
+            title: true,
+            status: true,
+            contractValue: true,
+            createdAt: true,
+            // "Assign costing": whose work it is, who handed it over, when, and why.
+            owner: { select: { id: true, name: true } },
+            assignedBy: { select: { id: true, name: true } },
+            assignedAt: true,
+            assignmentNote: true,
+          },
           orderBy: { createdAt: 'desc' },
         },
         activities: { orderBy: { startsAt: 'asc' } },
@@ -1250,6 +1272,7 @@ quotationRoutes.post(
         await tx.quotationItem.createMany({
           data: lines.map((line, i) => ({ revisionId, ...lineData(line, i) })),
         });
+        await rememberGroups(tx, lines.map((l) => l.group));
         await recalcRevision(revisionId, tx);
       }
 
@@ -1759,6 +1782,7 @@ quotationRoutes.put(
         await tx.quotationItem.createMany({
           data: body.lines.map((line, i) => ({ revisionId, ...lineData(line, i) })),
         });
+        await rememberGroups(tx, body.lines.map((l) => l.group));
       }
       await recalcRevision(revisionId, tx);
       return removed.count;
@@ -1805,6 +1829,7 @@ quotationRoutes.post(
           ...lineData(body, body.sortOrder ?? (last ? last.sortOrder + 1 : 0)),
         },
       });
+      await rememberGroups(tx, [body.group]);
       await recalcRevision(req.params.revisionId, tx);
       return created;
     });
@@ -1859,6 +1884,7 @@ quotationRoutes.patch(
     await checkLine(merged);
 
     await prisma.$transaction(async (tx) => {
+      if (body.group) await rememberGroups(tx, [body.group]);
       await tx.quotationItem.update({
         where: { id: req.params.itemId },
         data: {
@@ -2120,19 +2146,17 @@ export async function quotationPrintData(
     'owner.phone': owner.phone ?? '',
   };
 
-  // A subheading is a heading row, and so is a group where it changes — unless
-  // the layout gives the group a column of its own, which the engine decides.
-  // A product prints its name, and its description under it when it has one.
+  // A subheading is a heading row. A group is NOT (2026-10-06, the owner's
+  // call): it is the salesperson's filing, not the customer's reading, so it
+  // prints only where the layout gives the table a Group column of its own.
+  // A product prints its name in bold, and its description under it.
   const rows: DesignRow[] = [];
-  let group: string | null = null;
   let n = 0;
   for (const i of revision.items) {
     if (i.isHeading) {
       rows.push({ heading: (i.title ?? '').trim() });
       continue;
     }
-    if (i.group && i.group !== group) rows.push({ heading: i.group, group: true });
-    group = i.group ?? group;
     const qty = Number(i.quantity);
     const qtyText = Number.isInteger(qty) ? String(qty) : qty.toString();
     const title = (i.title ?? '').trim();
@@ -2140,7 +2164,7 @@ export async function quotationPrintData(
     rows.push({
       cells: {
         no: String(++n),
-        product: title && description ? { title, body: description } : title || description,
+        product: title ? (description ? { title, body: description } : { title }) : description,
         qtyUnit: `${qtyText} ${i.unit}`,
         qty: qtyText,
         unit: i.unit,
@@ -2268,7 +2292,7 @@ activityRoutes.get(
       ...activityWhere(query),
       include: ACTIVITY_INCLUDE,
     });
-    res.json(rows);
+    res.json(rows.map(presentActivity));
   }),
 );
 
@@ -2277,7 +2301,13 @@ const ACTIVITY_INCLUDE = {
   lead: { select: { id: true, number: true, companyName: true } },
   quotation: { select: { id: true, number: true } },
   customer: { select: { id: true, name: true } },
+  invitees: { select: { userId: true, notifiedAt: true, user: { select: { id: true, name: true } } }, orderBy: { createdAt: 'asc' } },
 } as const;
+
+/** Every activity leaves with its end: the form asks Starts and Ends, the row stores a duration. */
+function presentActivity<A extends { startsAt: Date; durationMinutes: number }>(a: A) {
+  return { ...a, endsAt: new Date(a.startsAt.getTime() + a.durationMinutes * 60_000) };
+}
 
 /** One activity, for a deep link (`/g-ops/calendar?activity=<id>`). */
 activityRoutes.get(
@@ -2289,7 +2319,7 @@ activityRoutes.get(
       include: ACTIVITY_INCLUDE,
     });
     if (!row) throw notFound('Activity not found');
-    res.json(row);
+    res.json(presentActivity(row));
   }),
 );
 
@@ -2303,9 +2333,48 @@ const activitySchema = z.object({
   quotationId: z.string().optional().nullable(),
   customerId: z.string().optional().nullable(),
   startsAt: z.string().min(1, 'When?'),
-  durationMinutes: z.number().int().min(5).max(1440).default(60),
+  /** Ends: the API derives durationMinutes from it. Sent instead of durationMinutes. */
+  endsAt: z.string().optional(),
+  durationMinutes: z.number().int().min(5).max(MAX_ACTIVITY_MINUTES).default(60),
   status: z.enum(['PLANNED', 'DONE', 'CANCELLED']).optional(),
+  /** Others asked along — told on save, shown it on their calendar and in My Work. */
+  inviteeIds: z.array(z.string().min(1)).max(50).optional(),
+  /** Minutes before the start to remind everyone on it; null for none. */
+  reminderMinutes: z
+    .number()
+    .int()
+    .refine((m) => (REMINDER_MINUTES as readonly number[]).includes(m), 'Remind 15 minutes, 1 hour, 2 hours or 1 day before')
+    .nullable()
+    .optional(),
 });
+
+/** The duration an activity's Starts and Ends describe, checked. */
+function minutesBetween(startsAt: string, endsAt: string): number {
+  const start = new Date(startsAt).getTime();
+  const end = new Date(endsAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) throw badRequest('Starts and Ends must be dates and times');
+  const minutes = Math.round((end - start) / 60_000);
+  if (minutes < 5) throw badRequest('Ends must be at least 5 minutes after Starts');
+  if (minutes > MAX_ACTIVITY_MINUTES) throw badRequest('An activity can run at most 7 days');
+  return minutes;
+}
+
+/**
+ * Invitees, checked: each must be able to open the sales calendar (the
+ * notification links to it, as the assignee picker already requires), and
+ * the assignee is left out — they are on it already.
+ */
+async function checkInvitees(ids: string[], assignedToId: string, keep: string[] = []): Promise<string[]> {
+  const wanted = [...new Set(ids)].filter((id) => id !== assignedToId);
+  for (const id of wanted) {
+    // Somebody invited before they lost access stays invited; nobody new is.
+    if (keep.includes(id)) continue;
+    const person = await resolveUser(id);
+    if (!person) throw badRequest('An invitee is not an active user');
+    if (!can(person, 'gops.calendar.view_all')) throw badRequest(`${person.name} cannot open the sales calendar, so cannot be invited`);
+  }
+  return wanted;
+}
 
 activityRoutes.post(
   '/',
@@ -2314,6 +2383,8 @@ activityRoutes.post(
     const me = currentUser(req);
     const body = parseBody(activitySchema, req.body);
     const assignedToId = body.assignedToId || me.id;
+    const durationMinutes = body.endsAt ? minutesBetween(body.startsAt, body.endsAt) : body.durationMinutes;
+    const inviteeIds = await checkInvitees(body.inviteeIds ?? [], assignedToId);
 
     const activity = await prisma.salesActivity.create({
       data: {
@@ -2326,7 +2397,9 @@ activityRoutes.post(
         quotationId: body.quotationId || null,
         customerId: body.customerId || null,
         startsAt: new Date(body.startsAt),
-        durationMinutes: body.durationMinutes,
+        durationMinutes,
+        reminderMinutes: body.reminderMinutes ?? null,
+        invitees: { create: inviteeIds.map((userId) => ({ userId, notifiedAt: new Date() })) },
         /*
           The schema has accepted a status since this was written and the
           create never wrote one, so everything came back PLANNED. Nothing
@@ -2340,28 +2413,37 @@ activityRoutes.post(
       },
     });
 
+    // Manila-pinned, like every timestamp a document prints; the link lands
+    // on the activity itself, on the day it falls in Manila. A bell each, and
+    // an email each where email is set up.
     if (assignedToId !== me.id) {
-      await notify({
-        userId: assignedToId,
+      await tellAboutActivity([assignedToId], {
         type: 'system',
         title: `Scheduled for you: ${activity.subject}`,
-        // Manila-pinned, like every timestamp a document prints; the link
-        // lands on the activity itself, on the day it falls in Manila.
-        body: formatDateTime(activity.startsAt),
-        link: `/g-ops/calendar?activity=${activity.id}&date=${manilaDayKey(activity.startsAt)}`,
+        body: `${activityWhen(activity)} · from ${me.name}`,
+        link: activityLink(activity),
       });
     }
+    await tellAboutActivity(
+      inviteeIds.filter((id) => id !== me.id),
+      {
+        type: 'activity.invited',
+        title: `Invited: ${activity.subject}`,
+        body: `${activityWhen(activity)}${activity.location ? ` · ${activity.location}` : ''} · from ${me.name}`,
+        link: activityLink(activity),
+      },
+    );
     await audit(
       {
         entityType: 'sales_activity',
         entityId: activity.id,
         action: 'CREATED',
         summary: `${activity.status === 'DONE' ? 'Logged' : 'Scheduled'} ${activity.type.toLowerCase().replace(/_/g, ' ')}: ${activity.subject}`,
-        after: activity,
+        after: { ...activity, inviteeIds },
       },
       req,
     );
-    res.status(201).json(activity);
+    res.status(201).json(presentActivity(activity));
   }),
 );
 
@@ -2369,13 +2451,46 @@ activityRoutes.patch(
   '/:id',
   require_('gops.calendar.view_all'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const body = parseBody(activitySchema.partial(), req.body);
-    const existing = await prisma.salesActivity.findUnique({ where: { id: req.params.id } });
+    const existing = await prisma.salesActivity.findUnique({
+      where: { id: req.params.id },
+      include: { invitees: { select: { userId: true } } },
+    });
     if (!existing) throw notFound('Activity not found');
 
+    const startsAt = body.startsAt !== undefined ? body.startsAt : existing.startsAt.toISOString();
+    const durationMinutes = body.endsAt
+      ? minutesBetween(startsAt, body.endsAt)
+      : body.durationMinutes !== undefined
+        ? body.durationMinutes
+        : existing.durationMinutes;
+    const assignedToId = body.assignedToId ?? existing.assignedToId;
+    const before = existing.invitees.map((i) => i.userId);
+    const inviteeIds =
+      body.inviteeIds !== undefined ? await checkInvitees(body.inviteeIds, assignedToId, before) : before.filter((id) => id !== assignedToId);
+    const added = inviteeIds.filter((id) => !before.includes(id));
+    const removed = before.filter((id) => !inviteeIds.includes(id));
+    const moved =
+      new Date(startsAt).getTime() !== existing.startsAt.getTime() || durationMinutes !== existing.durationMinutes;
+    const reminderChanged = body.reminderMinutes !== undefined && body.reminderMinutes !== existing.reminderMinutes;
+
+    const { invitees: _invitees, ...existingRow } = existing;
+    void _invitees;
     const updated = await prisma.salesActivity.update({
         where: { id: req.params.id },
         data: {
+          ...(body.reminderMinutes !== undefined ? { reminderMinutes: body.reminderMinutes } : {}),
+          // A new time or a new reminder is a reminder not yet sent.
+          ...(moved || reminderChanged ? { reminderSentAt: null } : {}),
+          ...(added.length || removed.length
+            ? {
+                invitees: {
+                  ...(removed.length ? { deleteMany: { userId: { in: removed } } } : {}),
+                  ...(added.length ? { create: added.map((userId) => ({ userId, notifiedAt: new Date() })) } : {}),
+                },
+              }
+            : {}),
           ...(body.type !== undefined ? { type: body.type } : {}),
           ...(body.subject !== undefined ? { subject: body.subject } : {}),
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
@@ -2387,12 +2502,31 @@ activityRoutes.patch(
           ...(body.quotationId !== undefined ? { quotationId: body.quotationId || null } : {}),
           ...(body.customerId !== undefined ? { customerId: body.customerId || null } : {}),
           ...(body.startsAt !== undefined ? { startsAt: new Date(body.startsAt) } : {}),
-          ...(body.durationMinutes !== undefined ? { durationMinutes: body.durationMinutes } : {}),
+          ...(durationMinutes !== existing.durationMinutes ? { durationMinutes } : {}),
           ...(body.status !== undefined
             ? { status: body.status, completedAt: body.status === 'DONE' ? new Date() : null }
             : {}),
         },
     });
+    // Who hears about it: the newly invited; and, when it moved or was
+    // cancelled, everybody already on it — except whoever made the change.
+    const link = activityLink(updated);
+    await tellAboutActivity(added.filter((id) => id !== me.id), {
+      type: 'activity.invited',
+      title: `Invited: ${updated.subject}`,
+      body: `${activityWhen(updated)}${updated.location ? ` · ${updated.location}` : ''} · from ${me.name}`,
+      link,
+    });
+    const stayed = [updated.assignedToId, ...inviteeIds.filter((id) => !added.includes(id))].filter((id) => id !== me.id);
+    if (body.status === 'CANCELLED' && existing.status !== 'CANCELLED') {
+      await tellAboutActivity(stayed, { type: 'activity.updated', title: `Cancelled: ${updated.subject}`, body: `${activityWhen(updated)} · by ${me.name}`, link });
+    } else if (moved && updated.status === 'PLANNED') {
+      await tellAboutActivity(stayed, { type: 'activity.updated', title: `Moved: ${updated.subject}`, body: `Now ${activityWhen(updated)} · by ${me.name}`, link });
+    }
+    if (body.assignedToId && body.assignedToId !== existing.assignedToId && body.assignedToId !== me.id) {
+      await tellAboutActivity([body.assignedToId], { type: 'system', title: `Scheduled for you: ${updated.subject}`, body: `${activityWhen(updated)} · from ${me.name}`, link });
+    }
+
     await audit(
       {
         entityType: 'sales_activity',
@@ -2402,12 +2536,12 @@ activityRoutes.patch(
           body.status && body.status !== existing.status
             ? `${updated.subject}: ${existing.status} → ${body.status}`
             : `Updated activity: ${updated.subject}`,
-        before: existing,
-        after: updated,
+        before: { ...existingRow, inviteeIds: before },
+        after: { ...updated, inviteeIds },
       },
       req,
     );
-    res.json(updated);
+    res.json(presentActivity(updated));
   }),
 );
 

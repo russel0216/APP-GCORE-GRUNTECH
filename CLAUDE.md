@@ -129,17 +129,31 @@ four databases and four copies of "customer".
     equal). A page mounting two DataLists at once passes `urlState={false}` on
     one of them, or they share `?page=`.
 
+17. **Every numeric input is `components/NumberInput.tsx`** (2026-10-06, the
+    owner's call) — never `<input type="number">`, never a hand-rolled
+    `inputMode` text box. It takes `kind`: `money` / `quantity` / `percent`
+    (commas, at least 2 decimals), `count` (commas, whole), `decimal` (commas,
+    its own decimals) or `plain` (a year: no commas). It shows the plain number
+    while focused, accepts typed commas, refuses a keystroke that cannot be
+    part of a number, and hands `onChange` `{ target: { value } }` with the
+    commas removed — so a handler written for a number box works unchanged.
+    `min`/`max` go through `setCustomValidity`, so `checkValidity()` still
+    sees them; the arrows step by `step`. A value is never rounded for
+    display (a 3-dp quantity shows its third decimal). The rules are
+    `lib/number.ts`, DOM-free and pinned by verify-foundation. `Field` wires
+    its label to it because it carries a static `fieldControl`.
+
 ## Verification
 
 ```bash
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,254 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
-masters 54, sales 277, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,296 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 283, costing 120, pipeline 46, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
-insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
+insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -493,8 +507,10 @@ are permission-configurable — that is deliberate, not a stub left behind.
   freely — it is written on site, often on bad signal, and a form that refuses to
   save gets filled in afterwards from memory instead.
 - **Expiry and missed visits are swept on read**, in `sweepOverdue()`, called
-  when the aftermarket screens load. G-Core has no scheduler, and a status that
-  is only correct when a cron job ran is worse than one derived on read.
+  when the aftermarket screens load. G-Core has no scheduler (its one timer
+  sends calendar reminders — see "Sales: board, calendar, costing"), and a
+  status that is only correct when a cron job ran is worse than one derived on
+  read.
 - **The renewal pipeline has two sources**: contracts ending, and warranties
   lapsing on equipment with no active contract. The second is the one nobody
   sees and usually the larger opportunity.
@@ -730,10 +746,52 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **`activityWhere()` in `shared/activities.ts` is the one rule** for which sales
   activities a query means (inclusive `lte`, 14-day default). Activity writes are
   audited like every other write.
+- **A lead says who added it** (2026-10-06): `Lead.createdById`, set once on
+  create and never edited, is the list's "Added by" column (with the date) and
+  `?createdById=` filter, and the lead page's "Added by" row. It is not the
+  owner — a manager often records an enquiry and assigns it on.
 - **"Start costing" moves a lead forwards only** (from NEW, CONTACTED, QUALIFIED
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
   nothing.
+- **A sales activity has Starts and Ends, invitees and a reminder**
+  (2026-10-06). `durationMinutes` stays the stored figure: the form sends
+  `endsAt` and the API derives the duration (5 minutes to 7 days), and every
+  response carries `endsAt`. `SalesActivityInvitee` (one row per person,
+  cascade) holds the others asked along; an invitee must hold
+  `gops.calendar.view_all` (the notification links to the calendar), except
+  one invited before losing it. Invitees are told on save
+  (`activity.invited`); moving or cancelling tells everyone already on it
+  (`activity.updated`), never the person who made the change. "Whose
+  activities" and `activityWhere({ assignedToId })` match the assignee OR an
+  invitee, and the My Work provider in `routes/workspace.ts` does the same.
+  **Telling people is `tellAboutActivity()`**: a bell each, plus an email
+  each through `shared/mail.ts` when SMTP is set, sent after the save and
+  never allowed to fail it. No SMS (the owner's call).
+- **Reminders are the one thing G-CORE runs on a timer.** `reminderMinutes`
+  is null, 15, 60, 120 or 1440 (`REMINDER_MINUTES`).
+  `startActivityReminders()` (called from `index.ts` after `listen`, never
+  from a script) runs `sendDueReminders()` once a minute; each due reminder
+  is CLAIMED with a conditional `updateMany` on `reminderSentAt: null` (and
+  the start and offset it was read with) before anyone is told, so two ticks
+  or two processes never send it twice. A reminder whose moment passed while
+  the API was down still goes before the start; one for an activity already
+  started is never sent. Changing the time or the offset clears
+  `reminderSentAt`. Everything else that looks scheduled (expiry, missed
+  visits, evaluations due) is still swept on read — do not move those onto
+  the timer.
+- **"Assign costing" replaced the lead page's "Start costing"** (2026-10-06,
+  the owner's call): a panel in the page, never a dialog. `POST
+  /costings/assign { leadId, assigneeId, note }` needs the right to EDIT THE
+  LEAD (`gops.leads.edit_own` + `canEditRecord`), not to cost; the ASSIGNEE
+  must hold `gops.costing.create`. It creates the DRAFT in the assignee's name
+  (`ownerId`), with the lead's customer and site, `assignedById`,
+  `assignedAt` and `assignmentNote`, numbers it with the caller's `tx` after
+  every refusal, moves the lead forwards only (same rule as below), notifies
+  the assignee and audits. Picking yourself opens the new costing's sheet.
+  The lead page lists each costing with whose it is and who assigned it,
+  when; the costing page shows "Assigned by". The picker is
+  `/users/lookup?holding=gops.costing.create`.
 - **A duplicated costing copies the numbers and not the history** — DRAFT, owned
   by the copier, no lead, revisions or jobs, totals recomputed through
   `recalc(tx)` rather than copied, so it can never carry a figure its own lines
@@ -1147,8 +1205,10 @@ the detail.
   heading; `lineData()` stores it with no quantity, price, cost or provider,
   whatever was sent. `quotationTotals` (and the `quotationMath` mirror) leave
   it out of `lineCount`. A line keeps its SCORO group in a Group column of its
-  own, on the editor and the quotation page; the PDF prints a group as a
-  heading where it changes, unless the layout gives the table a Group column.
+  own, on the editor and the quotation page. **The PDF never prints a group
+  as a heading** (2026-10-06, the owner's call, after SCORO's own PDF): only
+  subheadings are heading rows, and a group prints only in a Group column the
+  layout places. A product cell is the title in bold over its description.
 - **Probability is no longer asked for.** A new quotation takes its lead's
   probability, else 50; the weighted pipeline still reads the stored value.
 - **Delete** is `DELETE /quotations/:id`: `gops.quotations.delete` (the sales
@@ -1166,6 +1226,19 @@ the detail.
   Admin › Approval Workflows edits the label ("Offer as an option"); a PUT
   that does not mention it keeps it, because clearing it by omission would
   make the CEO a step every quotation over a million takes.
+- **A quotation goes to the salesperson's supervisor first** (2026-10-06,
+  the owner's call). Both seeded quotation workflows open with a SUPERVISOR
+  step whose `roleId` is `sales_manager`: **on a SUPERVISOR step, `roleId`
+  is the fallback** when the requester has no "Reports to" — HR when it is
+  null, which is every other supervisor step (leave, overtime, claims,
+  advances) and must stay so. `approversForStep()` is the one rule; Admin ›
+  Approval Workflows offers "No supervisor set: <role>" on such a step, and
+  `audit-workflows.ts` checks the fallback role is held. The seed's
+  `previously` moved a workflow that has routed documents only where its
+  steps were still exactly as first seeded, updating the step rows in place
+  by sequence (an open request stays at its step; past decisions keep their
+  step). **Set "Reports to" for every salesperson** — without it their
+  quotations go to whoever holds Sales Manager.
 - **Who decides is named before they decide** (2026-10-02). In
   `shared/approvals.ts`: `namedApprovers(step, requesterId)` — the step's
   approvers by name, NEVER the requester (act() refuses them; empty means
@@ -1207,6 +1280,32 @@ the detail.
   scrolls inside its card. Never split a line's cost onto a row of its own.
   Labels and values share one size (`--fs-md`) on both pages. The quotation
   page has no Margin card — the cost panel beside the totals says it.
+
+## Quotation groups (2026-10-06)
+
+- **`QuotationGroup` is a list, not a reference.** A line keeps its group
+  as text (`QuotationItem.group`); the master (Admin › Categories ›
+  Quotation groups, `/api/reference/quotation-groups`, `admin.categories.*`
+  to change, anyone signed in to read) is what the editor's Group box
+  suggests (active ones) and what "By group" names. `key` is the name
+  trimmed, single-spaced and lower-cased: one group per spelling. Renaming a
+  group never rewrites a saved line; a group any line uses is deactivated,
+  not deleted (the next save would only add it back).
+- **Every save that writes a line calls `rememberGroups(tx, names)`**
+  (`shared/quotationGroups.ts`) — create with lines, replace lines, add a
+  line, edit a line — so a group typed on a quotation joins the master with
+  nobody filing it first. `createMany … skipDuplicates`: an administrator's
+  spelling or a deactivated group is never overwritten. The seed's
+  `seedQuotationGroups()` adds the groups lines already use, and any `group`
+  a SCORO archive line carries (the PDF converter keeps none today).
+- **"By group" in Sales Analytics splits each quotation's value across its
+  value revision's groups in proportion to the line amounts**
+  (`groupShares()` in `shared/pipeline.ts`, exact in centavos, remainder on
+  the largest share; subheadings left out; no priced line → "No group"), so
+  the table adds up to the report's own quoted and won figures —
+  verify-insights asserts both. Every active group is listed, even at zero;
+  "No group" is last. The pipeline CSV appends a Groups column. Verify
+  scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
 
 ## Quotation PDF template (2026-10-02)
 
@@ -1405,6 +1504,15 @@ Cost Estimate" PDF) in G-CORE's own style.
   deleted seeded workflow is recreated by the next seed; the page then offers
   "Mark final" again. Reopen (FINAL → DRAFT) stays the author's, and needs a
   fresh approval.
+- **The Costing page has three tiles** (2026-10-06): Being costed (DRAFT),
+  Awaiting approval, Final this month. `GET /costings/summary` counts them
+  through `costingListWhere()`, the list's own query, under the page's
+  Mine/All scope, so a tile equals the total of the list it opens
+  (`?status=`, `?finalised=this-month`) — verify-costing asserts it. "Final
+  this month" reads `Costing.finalAt`, set when the costing becomes FINAL
+  (approval, "Mark final", a job built on a draft) and cleared on reopen;
+  the seed dates older final costings from `updatedAt`, once. The G-OPS
+  funnel no longer has a "Being costed" stage.
 - **The PDF is "Material Cost Estimate"** (house style): details, one table with
   numbered bucket headings, name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — then the

@@ -16,6 +16,7 @@ import {
   type QuotationDetail,
   type Revision,
 } from './Quotations';
+import { NumberInput } from '../../components/NumberInput';
 
 /*
   SCORO's "Modify quote details", as a page rather than a dialog.
@@ -46,7 +47,7 @@ interface Line {
   key: string;
   /** A subheading: its title is the heading; no quantity, price or cost. */
   isHeading: boolean;
-  /** SCORO's group — "Gruntech Installation", "Trading" — printed as a heading where it changes. */
+  /** SCORO's group — "Gruntech Installation", "Trading". Suggested from Admin › Categories; never printed as a heading. */
   group: string;
   title: string;
   description: string;
@@ -295,6 +296,14 @@ export function QuotationEditor() {
   const [lead, setLead] = useState<LeadForQuote | null>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
   const [pinnedCostings, setPinnedCostings] = useState<CostingOption[]>([]);
+  /** The Quotation Groups master (Admin › Categories), active ones only: what Group suggests. */
+  const [knownGroups, setKnownGroups] = useState<string[]>([]);
+  useEffect(() => {
+    api
+      .get<{ name: string }[]>('/reference/quotation-groups?active=true')
+      .then((rows) => setKnownGroups(rows.map((g) => g.name)))
+      .catch(() => setKnownGroups([]));
+  }, []);
   /** The contact to pick once the customer's contacts arrive, by name (a lead's). */
   const [wantContact, setWantContact] = useState<string | null>(null);
 
@@ -1462,13 +1471,12 @@ export function QuotationEditor() {
                     <td>
                       {/* Quantity and unit side by side, as SCORO sets them. */}
                       <div className="qe-qty">
-                        <input
+                        <NumberInput
+                          kind="quantity"
                           id={lineField(l.key, 'quantity')}
                           className="qe-num"
-                          type="number"
                           min={0}
                           step="any"
-                          inputMode="decimal"
                           aria-label={`Line ${n} quantity`}
                           value={l.quantity}
                           aria-invalid={err('quantity') ? true : undefined}
@@ -1484,13 +1492,12 @@ export function QuotationEditor() {
                       <CellError message={err('quantity')} />
                     </td>
                     <td>
-                      <input
+                      <NumberInput
+                        kind="money"
                         id={lineField(l.key, 'unitPrice')}
                         className="qe-num"
-                        type="number"
                         min={0}
                         step="0.01"
-                        inputMode="decimal"
                         aria-label={`Line ${n} unit price`}
                         value={l.unitPrice}
                         aria-invalid={err('unitPrice') ? true : undefined}
@@ -1547,7 +1554,7 @@ export function QuotationEditor() {
           </table>
         </div>
         <datalist id="qe-groups">
-          {[...new Set(lines.map((l) => l.group.trim()).filter(Boolean))].map((g) => (
+          {[...new Set([...knownGroups, ...lines.map((l) => l.group.trim()).filter(Boolean)])].map((g) => (
             <option key={g} value={g} />
           ))}
         </datalist>
@@ -1583,7 +1590,7 @@ export function QuotationEditor() {
         {appendOpen && <AppendQuotePanel excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
           Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
-          left out when you save. A group prints as a heading over its lines, and so does a subheading.
+          left out when you save. A subheading prints as a heading over its lines; a group does not, unless the PDF layout has a Group column.
           {showCost ? ' Cost, provider and margin are internal — never printed.' : ''}
         </p>
 
@@ -1599,13 +1606,12 @@ export function QuotationEditor() {
                 <dt>
                   <label className="quote-discount" htmlFor="qe-discount">
                     Discount
-                    <input
+                    <NumberInput
+                      kind="percent"
                       id="qe-discount"
-                      type="number"
                       min={0}
                       max={100}
                       step="0.01"
-                      inputMode="decimal"
                       value={header.discountPct}
                       aria-invalid={errors.discountPct ? true : undefined}
                       onChange={(e) => set('discountPct', e.target.value)}
@@ -1805,13 +1811,12 @@ function CostCell({
           value={line.costNote}
           onChange={(e) => onChange({ costNote: e.target.value })}
         />
-        <input
+        <NumberInput
+          kind="money"
           id={lineField(line.key, 'unitCost')}
           className="qe-num"
-          type="number"
           min={0}
           step="0.01"
-          inputMode="decimal"
           placeholder="Unit cost"
           aria-label={`Line ${n} unit cost`}
           aria-invalid={costError ? true : undefined}

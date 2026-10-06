@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { BarList, Meter, Panel, Stat } from '../../components/charts';
 import { Checkbox, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * The plantilla — the authorised staffing pattern.
@@ -446,8 +447,8 @@ function PositionModal({
               : 'How many of this position the company has approved'
           }
         >
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={0}
             step={1}
             value={form.authorisedHeadcount}

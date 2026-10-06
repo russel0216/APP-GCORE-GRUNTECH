@@ -21,6 +21,7 @@ import {
 import { todayLocal } from '../../lib/day';
 import { KINDS, KIND_LABEL, NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Job orders — a request for service work: a breakdown call, an installation,
@@ -669,8 +670,8 @@ export function JobOrderModal({
             label="Agreed amount (before VAT)"
             hint={form.quotationId ? 'Empty takes the quotation’s price' : 'Leave empty to bill on completion'}
           >
-            <input
-              type="number"
+            <NumberInput
+              kind="money"
               min={0}
               step="0.01"
               value={form.amount}
@@ -1201,7 +1202,7 @@ function InvoiceModal({
           label="Amount (before VAT)"
           hint={order.amount != null ? 'The agreed price' : 'Time and materials — type what was agreed'}
         >
-          <input type="number" min={0} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <NumberInput kind="money" min={0} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
         <Field label="Due date" hint="Empty uses the default payment terms">
           <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />

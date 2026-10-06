@@ -58,6 +58,8 @@ interface Pipeline {
     openValue: number;
     weightedValue: number;
   }[];
+  /** One row per quotation group — every active one in the master, then any in use, "No group" last. */
+  byGroup: { group: string; quotations: number; quotedValue: number; won: number; wonValue: number }[];
   sources: { source: string; leads: number; won: number; value: number }[];
   lostReasons: { reason: string; count: number }[];
   openQuotations: {
@@ -326,6 +328,49 @@ export function SalesAnalytics() {
                   </td>
                   <td className="right mono faint">{i.openValue ? formatMoney(i.openValue) : '—'}</td>
                   <td className="right mono">{i.weightedValue ? formatMoney(i.weightedValue) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">By group</h3>
+        <p className="muted">
+          What was quoted and won, by the group its lines are filed under (Admin › Categories ›
+          Quotation groups). A quotation with lines in several groups is shared between them in
+          proportion to the line amounts, so this table adds up to the same quoted and won figures as
+          the rest of the report; a quotation counts once in each group it carries.
+        </p>
+        <BarList
+          caption="Won in range, by quotation group"
+          slices={data.byGroup.map((g) => ({
+            label: g.group,
+            value: g.wonValue,
+            display: formatMoney(g.wonValue),
+            tone: g.group === 'No group' ? 'muted' : 'neon',
+          }))}
+        />
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Group</th>
+                <th className="right">Quotations</th>
+                <th className="right">Quoted value</th>
+                <th className="right">Won</th>
+                <th className="right">Won value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.byGroup.map((g) => (
+                <tr key={g.group}>
+                  <td>{g.group === 'No group' ? <span className="faint">{g.group}</span> : g.group}</td>
+                  <td className="right mono">{g.quotations}</td>
+                  <td className="right mono">{g.quotedValue ? formatMoney(g.quotedValue) : '—'}</td>
+                  <td className="right mono">{g.won}</td>
+                  <td className="right mono">{g.wonValue ? formatMoney(g.wonValue) : '—'}</td>
                 </tr>
               ))}
             </tbody>

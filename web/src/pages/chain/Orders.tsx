@@ -19,6 +19,7 @@ import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { ProgressBar } from '../delivery/Projects';
 import { openPdf } from '../../lib/api';
+import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
 //  CANVASS
@@ -438,8 +439,8 @@ function AddSupplierModal({
       </Field>
       <div className="grid grid-2">
         <Field label="Lead time (days)">
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             value={form.leadTimeDays}
             onChange={(e) => setForm({ ...form, leadTimeDays: e.target.value })}
           />
@@ -533,8 +534,8 @@ function QuoteModal({
                   {i.quantity} {i.unit}
                 </td>
                 <td>
-                  <input
-                    type="number"
+                  <NumberInput
+                    kind="money"
                     step="0.01"
                     className="mono proc-cell-input"
                     aria-label={`Unit price for ${i.description}`}
@@ -1444,8 +1445,8 @@ function PoLineModal({
       )}
       <div className="grid grid-3">
         <Field label="Quantity">
-          <input
-            type="number"
+          <NumberInput
+            kind="quantity"
             step="0.001"
             min="0"
             value={form.quantity}
@@ -1456,8 +1457,8 @@ function PoLineModal({
           <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
         </Field>
         <Field label="Unit price" hint="The price agreed with the supplier">
-          <input
-            type="number"
+          <NumberInput
+            kind="money"
             step="0.01"
             min="0"
             value={form.unitPrice}
@@ -1577,9 +1578,9 @@ function ReceiveModal({
                 <td className="right mono">{i.quantity}</td>
                 <td className="right mono faint">{i.receivedQty}</td>
                 <td>
-                  <input
+                  <NumberInput
+                    kind="quantity"
                     className="mono proc-cell-input"
-                    type="number"
                     step="0.001"
                     max={i.outstandingQty}
                     aria-label={`Quantity received of ${i.description}`}

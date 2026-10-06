@@ -826,8 +826,8 @@ async function main() {
     const plCsv = await api('GET', `/insights/pipeline.csv?${window}`);
     const plHeader = plCsv.text.replace(/^﻿/, '').split('\r\n')[0];
     check(
-      'the pipeline CSV appends an Industry column',
-      plCsv.status === 200 && plHeader.endsWith(',Industry') && plCsv.text.includes('HI '),
+      'the pipeline CSV appends an Industry column, then Groups — columns are appended, never reordered',
+      plCsv.status === 200 && plHeader.endsWith(',Lost reason,Industry,Groups') && plCsv.text.includes('HI '),
       plHeader,
     );
   }

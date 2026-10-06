@@ -7,7 +7,8 @@ import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { financePosition, claimPayable } from '../shared/finance';
 import { stockOnHand } from '../shared/chain';
-import { quotationValue } from '../shared/pipeline';
+import { groupShares, quotationValue, valueRevision } from '../shared/pipeline';
+import { groupKey } from '../shared/quotationGroups';
 import { manilaDayStart } from '../shared/day';
 import {
   cents,
@@ -442,6 +443,15 @@ interface IndustryRow {
   weightedValue: number;
 }
 
+/** One row of "By group": quotations raised and won that carry the group, and their share of value. */
+interface GroupRow {
+  group: string;
+  quotations: number;
+  quotedValue: number;
+  won: number;
+  wonValue: number;
+}
+
 insightRoutes.get(
   '/pipeline',
   require_('insights.pipeline.view_all'),
@@ -449,7 +459,7 @@ insightRoutes.get(
     const range = parseRange(req.query.from as string, req.query.to as string);
 
     const industrySelect = { select: { code: true, name: true } } as const;
-    const [leads, quotations, activeIndustries] = await Promise.all([
+    const [leads, quotations, activeIndustries, groupMaster] = await Promise.all([
       prisma.lead.findMany({
         where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
         select: {
@@ -478,13 +488,25 @@ insightRoutes.get(
           createdAt: true,
           customer: { select: { id: true, name: true, industry: industrySelect } },
           owner: { select: { id: true, name: true } },
-          revisions: { select: { total: true, status: true, revision: true } },
+          revisions: {
+            select: {
+              total: true,
+              status: true,
+              revision: true,
+              // For "By group": the value revision's lines, to split its value by group.
+              items: { select: { group: true, amount: true, isHeading: true } },
+            },
+          },
         },
       }),
       prisma.industry.findMany({
         where: { isActive: true },
         select: { code: true, name: true },
         orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+      }),
+      prisma.quotationGroup.findMany({
+        select: { key: true, name: true, isActive: true },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       }),
     ]);
 
@@ -610,6 +632,44 @@ insightRoutes.get(
     const unclassified = industries.get(UNCLASSIFIED.code) ?? industryRow(UNCLASSIFIED);
     industries.delete(UNCLASSIFIED.code);
 
+    // By group (2026-10-06): what was quoted and won per quotation group.
+    // Each quotation's value is split across its value revision's groups in
+    // proportion to the line amounts (`groupShares`), so the table's sums are
+    // the report's own quoted and won figures. Every active group in the
+    // master is listed, even at zero; "No group" is always last.
+    const groupRows = new Map<string, GroupRow>();
+    const groupRow = (key: string, name: string) => {
+      let row = groupRows.get(key);
+      if (!row) {
+        row = { group: name, quotations: 0, quotedValue: 0, won: 0, wonValue: 0 };
+        groupRows.set(key, row);
+      }
+      return row;
+    };
+    for (const g of groupMaster) if (g.isActive) groupRow(g.key, g.name);
+    const masterName = new Map(groupMaster.map((g) => [g.key, g.name]));
+    for (const q of quotations) {
+      const inRange = q.createdAt >= range.fromAt && q.createdAt <= range.toAt;
+      const wonInRange = q.outcome === 'WON' && !!q.decidedAt && q.decidedAt >= range.fromAt && q.decidedAt <= range.toAt;
+      if (!inRange && !wonInRange) continue;
+      const revision = valueRevision(q.revisions);
+      for (const share of groupShares(valueOf(q), revision?.items ?? [], groupKey)) {
+        const row = groupRow(share.key, masterName.get(share.key) ?? share.group);
+        if (inRange) {
+          row.quotations++;
+          row.quotedValue = cents(row.quotedValue + share.value);
+        }
+        if (wonInRange) {
+          row.won++;
+          row.wonValue = cents(row.wonValue + share.value);
+        }
+      }
+    }
+    const noGroup = groupRows.get('');
+    groupRows.delete('');
+    const byGroup = [...groupRows.values()].sort((a, b) => b.quotedValue - a.quotedValue || a.group.localeCompare(b.group));
+    if (noGroup) byGroup.push(noGroup);
+
     // Where the work comes from.
     const bySource = new Map<string, { source: string; leads: number; won: number; value: number }>();
     for (const lead of leads) {
@@ -654,6 +714,7 @@ insightRoutes.get(
       },
       people: [...people.values()].sort((a, b) => b.wonValue - a.wonValue),
       industries: [...industries.values(), unclassified],
+      byGroup,
       sources: [...bySource.values()].sort((a, b) => b.leads - a.leads),
       lostReasons: [...lostReasons.entries()]
         .map(([reason, count]) => ({ reason, count }))
@@ -687,7 +748,7 @@ insightRoutes.get(
       include: {
         customer: { select: { name: true, industry: { select: { code: true, name: true } } } },
         owner: { select: { name: true } },
-        revisions: { select: { total: true, status: true, revision: true } },
+        revisions: { select: { total: true, status: true, revision: true, items: { select: { group: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -698,7 +759,7 @@ insightRoutes.get(
       'sales-pipeline',
       // Industry is APPENDED, not slotted in beside Customer: a sheet somebody
       // already built on this export keeps its columns where they were.
-      ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason', 'Industry'],
+      ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason', 'Industry', 'Groups'],
       quotations.map((q) => {
         const value = quotationValue(q.revisions);
         return [
@@ -715,6 +776,8 @@ insightRoutes.get(
           day(q.decidedAt),
           q.lostReason ?? '',
           q.customer.industry ? `${q.customer.industry.code} ${q.customer.industry.name}` : UNCLASSIFIED.name,
+          // The value revision's groups, as "By group" splits it.
+          [...new Set((valueRevision(q.revisions)?.items ?? []).map((i) => i.group?.trim()).filter(Boolean))].join('; '),
         ];
       }),
     );

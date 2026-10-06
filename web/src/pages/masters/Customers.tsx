@@ -6,6 +6,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatMoney, useToast } from '../../components/ui';
 import type { Industry } from './Reference';
+import { NumberInput } from '../../components/NumberInput';
 
 export interface CustomerRow {
   id: string;
@@ -342,8 +343,8 @@ export function CustomerForm({
           />
         </Field>
         <Field label="Credit limit">
-          <input
-            type="number"
+          <NumberInput
+            kind="money"
             value={form.creditLimit}
             onChange={(e) => setForm({ ...form, creditLimit: e.target.value })}
           />

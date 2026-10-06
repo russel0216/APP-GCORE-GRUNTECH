@@ -8,6 +8,7 @@ import { Checkbox, ErrorBox, Field, Loading, Modal, formatDate, formatMoney, use
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
+import { NumberInput } from '../../components/NumberInput';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -1019,8 +1020,8 @@ function EmployeeForm({
 
           <div className="grid grid-2">
             <Field label="Daily rate">
-              <input
-                type="number"
+              <NumberInput
+                kind="money"
                 step="0.01"
                 value={form.dailyRate}
                 disabled={!setRates}
@@ -1031,8 +1032,8 @@ function EmployeeForm({
               label="Burden multiplier"
               hint="Covers statutory contributions, leave accrual and overhead. 1.0 means no burden."
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="decimal"
                 step="0.001"
                 min="1"
                 value={form.burdenMultiplier}

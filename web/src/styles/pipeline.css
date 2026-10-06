@@ -490,6 +490,17 @@
   min-width: 0;
 }
 
+/* Who a costing is with, under its line on the lead page. */
+.sales-linked-meta {
+  flex: 1 0 100%;
+  font-size: var(--fs-sm);
+}
+
+.sales-assign-actions {
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
 .sales-revisions {
   gap: var(--s-2);
   margin-bottom: var(--s-4);

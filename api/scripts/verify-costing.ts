@@ -286,6 +286,70 @@ async function main() {
     `status ${relink.status}, lead ${spareAfter?.status}`,
   );
 
+  // ══ Assign costing from a lead ══════════════════════════════════════════════
+  console.log('Assign costing from a lead');
+
+  // A salesperson who works the lead but does not cost: they hand it over.
+  const sellRole = await makeRole('zzcost_sell', `${TAG} salesperson`, ['gops.leads.view_own', 'gops.leads.edit_own']);
+  const seller = await makeUser(`${TAG} Seller`, `seller${MAIL}`, [sellRole.id]);
+  const tSeller = signToken(seller.id, seller.email);
+  const sellersLead = await prisma.lead.create({
+    data: {
+      number: await nextNumber('lead'),
+      status: 'QUALIFIED',
+      companyName: `${TAG} assigned lead`,
+      customerId: customer.id,
+      siteId: site.id,
+      description: 'Nitrogen generator\nsecond line',
+      assignedToId: seller.id,
+      createdById: seller.id,
+    },
+  });
+  const costingsBefore = await prisma.costing.count();
+  const toReader = await api(tSeller, 'POST', '/costings/assign', { leadId: sellersLead.id, assigneeId: reader.id });
+  check(
+    'assigning to someone who cannot make costings is refused, and names them',
+    toReader.status === 400 && String(toReader.body.error ?? '').includes(reader.name) && (await prisma.costing.count()) === costingsBefore,
+    `${toReader.status} ${JSON.stringify(toReader.body)}`,
+  );
+  const notTheirs = await api(tColleague, 'POST', '/costings/assign', { leadId: sellersLead.id, assigneeId: estimator.id });
+  check('somebody who cannot edit the lead cannot assign its costing', notTheirs.status === 403, `status ${notTheirs.status}`);
+  const assigned = await api(tSeller, 'POST', '/costings/assign', {
+    leadId: sellersLead.id,
+    assigneeId: estimator.id,
+    note: 'Two units, need it by Friday',
+  });
+  check('the lead owner assigns a costing without the right to cost', assigned.status === 201, `${assigned.status} ${JSON.stringify(assigned.body)}`);
+  const made = await prisma.costing.findUnique({ where: { id: String(assigned.body.id) } });
+  check(
+    "it is a DRAFT in the assignee's name, carrying the lead, its customer and site",
+    made?.status === 'DRAFT' && made.ownerId === estimator.id && made.leadId === sellersLead.id && made.customerId === customer.id && made.siteId === site.id,
+    JSON.stringify(made),
+  );
+  check(
+    'it records who assigned it, when, and the note; the title is the company and the enquiry',
+    made?.assignedById === seller.id && !!made.assignedAt && made.assignmentNote === 'Two units, need it by Friday' && made.title === `${TAG} assigned lead — Nitrogen generator`,
+    `${made?.assignedById} ${made?.title}`,
+  );
+  const assignedLead = await prisma.lead.findUnique({ where: { id: sellersLead.id } });
+  check('the lead moves to COSTING', assignedLead?.status === 'COSTING', assignedLead?.status);
+  const toldEstimator = await prisma.notification.findFirst({ where: { userId: estimator.id, link: `/g-ops/costing/${made?.id}` } });
+  check('the assignee is told, with the note', !!toldEstimator && (toldEstimator.body ?? '').includes('need it by Friday'), toldEstimator?.body ?? 'none');
+  const assignAudit = await prisma.auditLog.findFirst({ where: { entityType: 'costing', entityId: made?.id, action: 'CREATED' } });
+  check('and it is audited', !!assignAudit && (assignAudit.summary ?? '').includes(`to ${estimator.name}`), assignAudit?.summary ?? 'none');
+  const leadPage = await api(tSeller, 'GET', `/leads/${sellersLead.id}`);
+  const leadCosting = rows(leadPage.body.costings).find((c) => c.id === made?.id);
+  check(
+    'the lead page says whose it is and who assigned it',
+    (leadCosting?.owner as Row | undefined)?.name === estimator.name && (leadCosting?.assignedBy as Row | undefined)?.name === seller.name && !!leadCosting?.assignedAt,
+    JSON.stringify(leadCosting),
+  );
+  const estimatorSees = await api(tEstimator, 'GET', `/costings/${made?.id}`);
+  check('the assignee can open and own it', estimatorSees.status === 200 && estimatorSees.body.canEdit === true, `status ${estimatorSees.status}`);
+  await prisma.lead.update({ where: { id: sellersLead.id }, data: { status: 'LOST', lostReason: 'verify' } });
+  const onLost = await api(tSeller, 'POST', '/costings/assign', { leadId: sellersLead.id, assigneeId: estimator.id });
+  check('a lost lead takes no new costing', onLost.status === 400, `status ${onLost.status}`);
+
   // ══ Where it goes next: jobs on the costing ═════════════════════════════════
   console.log('Where it goes next');
 
@@ -348,6 +412,36 @@ async function main() {
   check('the source costing is FINAL once approved', finalised.status === 200 && finalised.body.status === 'FINAL', String(finalised.body.status));
   // 2×150,000 + 12×2,500 = 330,000 cost; ×1.2 = 396,000 contract.
   check('its contract value is cost × (1 + markup)', money(Number(finalised.body.contractValue), 396000));
+  const finalRow = await prisma.costing.findUnique({ where: { id: sourceId }, select: { finalAt: true } });
+  check('approval dates it final (finalAt)', !!finalRow?.finalAt && Date.now() - finalRow.finalAt.getTime() < 60_000);
+
+  // The Costing page's tiles: each is the total of the list it opens.
+  const tiles = await api(tEstimator, 'GET', '/costings/summary');
+  const listTotal = async (query: string) => Number((await api(tEstimator, 'GET', `/costings?${query}`)).body.total);
+  const [draftTotal, pendingTotal, finalTotal] = await Promise.all([
+    listTotal('status=DRAFT'),
+    listTotal('status=PENDING_APPROVAL'),
+    listTotal('finalised=this-month'),
+  ]);
+  check(
+    'GET /costings/summary: each tile equals the total of the list it links to',
+    tiles.status === 200 &&
+      tiles.body.draft === draftTotal &&
+      tiles.body.pending === pendingTotal &&
+      tiles.body.finalThisMonth === finalTotal,
+    `${JSON.stringify(tiles.body)} vs ${draftTotal}/${pendingTotal}/${finalTotal}`,
+  );
+  check(
+    'the approved costing is final this month, and the draft is being costed',
+    finalTotal >= 1 && draftTotal >= 1,
+    `${finalTotal} final, ${draftTotal} draft`,
+  );
+  const colleagueTiles = await api(tColleague, 'GET', '/costings/summary');
+  check(
+    "an own-scope colleague's tiles count none of the estimator's costings",
+    colleagueTiles.body.finalThisMonth === 0 && colleagueTiles.body.draft === 0,
+    JSON.stringify(colleagueTiles.body),
+  );
 
   const job = await prisma.job.create({
     data: {

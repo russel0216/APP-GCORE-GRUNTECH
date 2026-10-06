@@ -46,11 +46,14 @@ import {
   manilaDaysBetween,
   type BoardLead,
   type BoardQuotation,
+  groupShares,
+  NO_GROUP,
 } from '../src/shared/pipeline';
 // Imported for its side effect: this is what registers the quotation's
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
+import { groupKey, rememberGroups } from '../src/shared/quotationGroups';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -139,6 +142,8 @@ async function cleanup() {
       where: { documentType: 'quotation', periodKey: { endsWith: `@${EDITOR_TOKEN}` } },
     });
   }
+  // Groups the test lines added to the Quotation Groups master.
+  await prisma.quotationGroup.deleteMany({ where: { key: { startsWith: TAG.toLowerCase() } } });
   // Activities point at leads and quotations; they go first.
   await prisma.salesActivity.deleteMany({
     where: { OR: [{ subject: { startsWith: TAG } }, { lead: { companyName: { startsWith: TAG } } }] },
@@ -941,6 +946,46 @@ async function main() {
   check('the owner may move their own', b6.columns.every((c) => c.cards.every((card) => card.canMove)));
 
   // ── 8. PDFs ────────────────────────────────────────────────────────────────
+  // ── By group (Sales Analytics): a quotation's value split by its groups ──
+  console.log('\nQuotation groups');
+  const shares = groupShares(1_120.0, [
+    { group: 'Trading', amount: D(600) },
+    { group: ' trading', amount: D(100) },
+    { group: 'Installation', amount: D(300) },
+    { group: 'Heading', amount: D(0), isHeading: true },
+  ]);
+  check(
+    "a quotation's value is split by its groups in proportion to the line amounts, case-blind",
+    shares.length === 2 && money(shares.find((x) => x.group === 'Trading')!.value, 784) && money(shares.find((x) => x.group === 'Installation')!.value, 336),
+    JSON.stringify(shares),
+  );
+  const thirds = groupShares(100, [
+    { group: 'A', amount: 1 },
+    { group: 'B', amount: 1 },
+    { group: 'C', amount: 1 },
+  ]);
+  check(
+    'the shares add up to the value to the centavo — the remainder goes to one share',
+    Math.round(thirds.reduce((t, x) => t + x.value * 100, 0)) === 10_000,
+    JSON.stringify(thirds),
+  );
+  check(
+    'lines with no group, or no priced lines at all, report as No group',
+    groupShares(50, [{ group: null, amount: 10 }])[0]?.group === NO_GROUP &&
+      groupShares(50, [])[0]?.value === 50 &&
+      groupShares(0, [{ group: 'A', amount: 1 }]).length === 0,
+  );
+  const remembered = await prisma.$transaction((tx) =>
+    rememberGroups(tx, [`${TAG} Trading`, ` ${TAG.toLowerCase()}  trading `, '', null, `${TAG} Pumps`]),
+  );
+  const again = await prisma.$transaction((tx) => rememberGroups(tx, [`${TAG} TRADING`]));
+  const tradingRow = await prisma.quotationGroup.findUnique({ where: { key: groupKey(`${TAG} Trading`) } });
+  check(
+    'a group typed on a line is added to the master once, case- and space-blind, keeping the first spelling',
+    remembered === 2 && again === 0 && tradingRow?.name === `${TAG} Trading`,
+    `${remembered} ${again} ${tradingRow?.name}`,
+  );
+
   console.log('\nDocuments');
 
   const quotePdf = await renderDocument({
@@ -1275,7 +1320,7 @@ async function main() {
     const COST_AMOUNT = 15_555.54;
     const base = `/quotations/${qid}/revisions/${rev0.id}`;
     const l1 = await http(salesToken, 'POST', `${base}/items`, {
-      group: 'Gruntech Installation',
+      group: `${TAG} Installation`,
       title: 'Air compressor installation',
       description: 'Mechanical and electrical tie-in',
       quantity: 2,
@@ -1286,7 +1331,7 @@ async function main() {
       costNote: `${TAG} supplier quote 88`,
     });
     const l2 = await http(salesToken, 'POST', `${base}/items`, {
-      group: 'Gruntech Services',
+      group: `${TAG} Services`,
       title: 'Commissioning',
       description: 'Start-up and hand-over',
       quantity: 1,
@@ -1378,7 +1423,20 @@ async function main() {
       text.split('\n').includes(sales.name) && text.includes(sales.email),
     );
     check('Delivery prints as a labelled line', text.includes('Delivery:') && text.includes('4 to 6 weeks'));
-    check('it prints the group as a sub-heading and the line title', text.includes('Gruntech Installation') && text.includes('Air compressor installation'));
+    check('it prints the line title and its description', text.includes('Air compressor installation') && text.includes('Mechanical and electrical tie-in'));
+    const masterGroups = await http(salesToken, 'GET', '/reference/quotation-groups?active=true');
+    const installation = (masterGroups.body as unknown as { name: string; lineCount: number }[]).find(
+      (g) => g.name === `${TAG} Installation`,
+    );
+    check(
+      'saving a line adds its group to the master, which anyone signed in may read, with its line count',
+      masterGroups.status === 200 && !!installation && installation.lineCount >= 1,
+      JSON.stringify(installation),
+    );
+    check(
+      'and never the group as a heading — a group prints only in a Group column the layout places',
+      !text.includes(`${TAG} Installation`) && !text.includes(`${TAG} Services`),
+    );
     check('it prints the payment terms and who it is for', text.includes('Payment Terms: 30 days PDC') && text.includes(`Attention: ${TAG} Engr. Cruz, Facilities Head`));
     check(
       'and never a cost figure, a margin or a cost note',
@@ -1488,7 +1546,7 @@ async function main() {
     });
     const editorLines = [
       {
-        group: 'Gruntech Installation',
+        group: `${TAG} Installation`,
         title: 'First',
         description: 'one',
         quantity: 2,

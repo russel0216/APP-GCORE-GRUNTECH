@@ -47,6 +47,7 @@ import {
   type TextBlock,
   type TotalsBlock,
 } from '../../lib/pdfTemplate';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Admin › PDF Templates — the quotation's PDF, laid out by hand.
@@ -1316,9 +1317,8 @@ function NumberField({
   }, [value]);
   return (
     <Field label={label} hint={hint}>
-      <input
-        type="number"
-        inputMode="decimal"
+      <NumberInput
+        kind="decimal"
         step={step}
         min={min}
         max={max}
@@ -1727,8 +1727,8 @@ function ItemsSettings({
             </div>
             <input value={c.label} disabled={disabled} aria-label={`Column ${i + 1}: heading`} onChange={(e) => change(i, { label: e.target.value }, 'label')} />
             <div className="pt-column-row">
-              <input
-                type="number"
+              <NumberInput
+                kind="decimal"
                 min={1}
                 step={0.5}
                 value={pt(c.width)}

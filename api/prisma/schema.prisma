@@ -67,10 +67,12 @@ model User {
   leadsAssigned     Lead[]              @relation("LeadAssignee")
   leadsCreated      Lead[]              @relation("LeadCreator")
   costingsOwned     Costing[]           @relation("CostingOwner")
+  costingsAssigned  Costing[]           @relation("CostingAssigner")
   costingTemplates  CostingTemplate[]   @relation("CostingTemplateAuthor")
   quotationsOwned   Quotation[]         @relation("QuotationOwner")
   revisionsApproved QuotationRevision[] @relation("RevisionApprover")
   activities        SalesActivity[]     @relation("ActivityAssignee")
+  activityInvites   SalesActivityInvitee[]
 
   clearancesRaised       EmployeeClearance[]  @relation("ClearanceRaiser")
   clearancesReceived     EmployeeClearance[]  @relation("ClearanceReceiver")
@@ -1078,6 +1080,17 @@ model Costing {
   quotationRevisions QuotationRevision[]
   jobs               Job[]
 
+  /// When it last became FINAL (approval, "Mark final", or a job built on
+  /// it); cleared when reopened. The Costing page's "Final this month" tile.
+  finalAt DateTime?
+
+  /// "Assign costing" on a lead: who handed the work to the owner, when, and
+  /// what they asked for. Null on a costing somebody started for themselves.
+  assignedById   String?
+  assignedBy     User?     @relation("CostingAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedAt     DateTime?
+  assignmentNote String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1351,6 +1364,23 @@ model QuotationItem {
 /// be "continued in G-CORE", which raises a real Quotation under the SAME
 /// number and records it in continuedQuotationId. Figures are stored exactly as
 /// SCORO held them; nothing recomputes them.
+/// The groups a quotation line is filed under ("Gruntech Installation",
+/// "Trading") — SCORO's Group column. A line keeps its group as TEXT
+/// (`QuotationItem.group`), so this is the list the editor suggests from and
+/// Sales Analytics' "By group" names, not a reference a line points at. Every
+/// group a saved line uses is added here (`rememberGroups`). Admin › Categories.
+model QuotationGroup {
+  id        String   @id @default(cuid())
+  name      String
+  /// The name trimmed and lower-cased: one group per spelling, case-blind.
+  key       String   @unique
+  sortOrder Int      @default(0)
+  /// Inactive: no longer suggested. Lines already filed under it keep it.
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model LegacyQuote {
   id       String @id @default(cuid())
   source   String @default("SCORO")
@@ -1452,14 +1482,42 @@ model SalesActivity {
   customer    Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   startsAt        DateTime
+  /// Stored; the form asks for Starts and Ends and the API derives this from
+  /// them (`endsAt` = startsAt + durationMinutes in every response).
   durationMinutes Int       @default(60)
   completedAt     DateTime?
+
+  /// Minutes before `startsAt` to remind the assignee and invitees: null (none),
+  /// 15, 60, 120 or 1440. Sent by the API's once-a-minute timer
+  /// (`sendDueReminders` in shared/activities.ts).
+  reminderMinutes Int?
+  /// Set when the reminder went out — claimed with a conditional update so it
+  /// is sent once. Cleared when the time or the reminder changes.
+  reminderSentAt  DateTime?
+
+  invitees SalesActivityInvitee[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([assignedToId, startsAt])
   @@index([startsAt])
+}
+
+/// Someone else asked along to a sales activity: told on save, reminded with
+/// the assignee, and shown the activity on their calendar and in My Work.
+model SalesActivityInvitee {
+  id         String        @id @default(cuid())
+  activityId String
+  activity   SalesActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// When they were told they are invited (null until the save that told them).
+  notifiedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@unique([activityId, userId])
+  @@index([userId])
 }
 
 // ════════════════════════════════════════════════════════════════════

@@ -18,6 +18,7 @@ import {
 import { Stat } from '../../components/charts';
 import { openPdf } from '../../lib/api';
 import { label } from './PurchaseRequests';
+import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING
@@ -691,8 +692,8 @@ function AddIssueItemModal({
         </div>
       )}
       <Field label="Quantity">
-        <input
-          type="number"
+        <NumberInput
+          kind="quantity"
           step="0.001"
           max={chosen?.available}
           value={form.quantity}
@@ -956,8 +957,8 @@ function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated
                 </option>
               ))}
           </select>
-          <input
-            type="number"
+          <NumberInput
+            kind="quantity"
             step="0.001"
             className="proc-qty"
             aria-label={`Quantity of item ${i + 1}`}
@@ -1089,9 +1090,9 @@ export function BorrowSlipDetail() {
                   <td className="right mono">{i.outstandingQty || '—'}</td>
                   {!done && can('gchain.borrow_slips.edit_all') && (
                     <td>
-                      <input
+                      <NumberInput
+                        kind="quantity"
                         className="mono proc-cell-input"
-                        type="number"
                         step="0.001"
                         max={i.outstandingQty}
                         aria-label="Quantity returning now"

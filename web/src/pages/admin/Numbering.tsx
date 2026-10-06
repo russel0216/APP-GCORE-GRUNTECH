@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 type Period = 'YEAR' | 'MONTH' | 'NONE';
 type Scope = 'GLOBAL' | 'OWNER';
@@ -247,8 +248,8 @@ function SequenceEditor({
           <input value={typeCode} onChange={(e) => setTypeCode(e.target.value.toUpperCase())} />
         </Field>
         <Field label="Digits">
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={1}
             max={10}
             value={padding}

@@ -18,6 +18,7 @@ import {
 } from '../../components/ui';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
+import { NumberInput } from '../../components/NumberInput';
 
 export const PR_STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
@@ -861,8 +862,8 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
       )}
       <div className="grid grid-3">
         <Field label="Quantity">
-          <input
-            type="number"
+          <NumberInput
+            kind="quantity"
             step="0.001"
             value={form.quantity}
             onChange={(e) => setForm({ ...form, quantity: e.target.value })}
@@ -872,8 +873,8 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
           <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
         </Field>
         <Field label="Estimated cost">
-          <input
-            type="number"
+          <NumberInput
+            kind="money"
             step="0.01"
             value={form.estimatedCost}
             onChange={(e) => setForm({ ...form, estimatedCost: e.target.value })}

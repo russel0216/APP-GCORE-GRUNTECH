@@ -12,11 +12,13 @@ import {
   Modal,
   StatusBadge,
   formatDate,
+  formatDateTime,
   formatMoney,
   useToast,
 } from '../../components/ui';
 import { LostReasonModal } from './LostReasonModal';
 import { QUOTATION_OUTCOME_TONES } from './Quotations';
+import { NumberInput } from '../../components/NumberInput';
 
 /** Somebody a lead can be handed to, and whether selling is their job. */
 export interface Person {
@@ -210,6 +212,8 @@ interface LeadRow {
   notes: string | null;
   lostReason: string | null;
   assignedTo: { id: string; name: string };
+  /** Who recorded the enquiry; a manager often adds a lead and assigns it on. */
+  createdBy: { id: string; name: string } | null;
   customer: { id: string; name: string } | null;
   quotationCount?: number;
   createdAt: string;
@@ -282,6 +286,17 @@ export function Leads() {
     },
     { key: 'assignedTo', label: 'Owner', render: (l) => l.assignedTo.name },
     {
+      key: 'createdBy',
+      label: 'Added by',
+      sortKey: 'createdAt',
+      render: (l) => (
+        <div>
+          <div>{l.createdBy?.name ?? '—'}</div>
+          <div className="faint">{formatDate(l.createdAt)}</div>
+        </div>
+      ),
+    },
+    {
       key: 'nextAction',
       label: 'Next action',
       render: (l) =>
@@ -330,6 +345,7 @@ export function Leads() {
         filters={[
           { key: 'status', label: 'Status', options: LEAD_STATUSES },
           { key: 'assignedToId', label: 'Owner', options: people.map((p) => ({ value: p.id, label: p.name })) },
+          { key: 'createdById', label: 'Added by', options: people.map((p) => ({ value: p.id, label: p.name })) },
         ]}
         actions={
           can('gops.leads.create') ? (
@@ -361,7 +377,7 @@ export function Leads() {
 export function LeadDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const toast = useToast();
 
   const [lead, setLead] = useState<LeadDetailRow | null>(null);
@@ -370,6 +386,7 @@ export function LeadDetail() {
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
   const [losing, setLosing] = useState(false);
+  const [assigning, setAssigning] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -456,13 +473,16 @@ export function LeadDetail() {
           </p>
         </div>
         <div className="row">
-          {!closed && can('gops.costing.create') && (
-            <Link
+          {!closed && lead.canEdit && (
+            <button
+              type="button"
               className="btn"
-              to={`/g-ops/costing/new${qs({ leadId: lead.id, customerId: lead.customer?.id })}`}
+              aria-expanded={assigning}
+              aria-controls="assign-costing"
+              onClick={() => setAssigning((v) => !v)}
             >
-              Start costing
-            </Link>
+              Assign costing
+            </button>
           )}
           {!closed &&
             can('gops.quotations.create') &&
@@ -496,6 +516,22 @@ export function LeadDetail() {
         <div className="alert info">A quotation is raised for a customer on file. {quotationBlocked}.</div>
       )}
 
+      {assigning && !closed && lead.canEdit && (
+        <AssignCostingPanel
+          leadId={lead.id}
+          onCancel={() => setAssigning(false)}
+          onAssigned={async (made) => {
+            setAssigning(false);
+            if (made.ownerId === me?.user.id) {
+              navigate(`/g-ops/costing/${made.id}/edit`);
+              return;
+            }
+            toast('ok', `Costing ${made.number} assigned`);
+            await load();
+          }}
+        />
+      )}
+
       <LeadProgress
         status={lead.status}
         lostReason={lead.lostReason}
@@ -527,7 +563,10 @@ export function LeadDetail() {
             }
           />
           <Row label="Enquiry came via" value={lead.source} />
-          <Row label="First recorded" value={formatDate(lead.createdAt)} />
+          <Row
+            label="Added by"
+            value={`${lead.createdBy?.name ?? 'Unknown'}, ${formatDateTime(lead.createdAt)}`}
+          />
         </div>
 
         <div className="card">
@@ -585,7 +624,7 @@ export function LeadDetail() {
             {lead.costings.length > 0 && <span className="badge">{lead.costings.length}</span>}
           </h3>
           {lead.costings.length === 0 ? (
-            <p className="faint">Nothing priced yet. Start a costing to work out what this will take.</p>
+            <p className="faint">Nothing priced yet. Assign a costing to whoever will work out what this will take.</p>
           ) : (
             <ul className="sales-linked">
               {lead.costings.map((c) => (
@@ -596,6 +635,12 @@ export function LeadDetail() {
                   <span className="sales-linked-title">{c.title}</span>
                   <span className="mono">{formatMoney(c.contractValue)}</span>
                   <StatusBadge status={c.status} extra={{ FINAL: 'ok' }} />
+                  <span className="sales-linked-meta faint">
+                    {c.assignedBy
+                      ? `Assigned to ${c.owner.name} by ${c.assignedBy.name}, ${formatDateTime(c.assignedAt)}`
+                      : `Prepared by ${c.owner.name}, ${formatDateTime(c.createdAt)}`}
+                    {c.assignmentNote ? ` — ${c.assignmentNote}` : ''}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -696,7 +741,117 @@ interface LeadDetailRow extends LeadRow {
     outcome: string;
     latest: { revision: number; status: string; total: number } | null;
   }[];
-  costings: { id: string; number: string; title: string; status: string; contractValue: number }[];
+  costings: {
+    id: string;
+    number: string;
+    title: string;
+    status: string;
+    contractValue: number;
+    createdAt: string;
+    owner: { id: string; name: string };
+    assignedBy: { id: string; name: string } | null;
+    assignedAt: string | null;
+    assignmentNote: string | null;
+  }[];
+}
+
+interface Assignable {
+  id: string;
+  name: string;
+  position: string | null;
+}
+
+/**
+ * "Assign costing", in the page — no dialog. The people offered are those who
+ * may make a costing (`/users/lookup?holding=gops.costing.create`); the costing
+ * is created in the chosen person's name, and they are told.
+ */
+function AssignCostingPanel({
+  leadId,
+  onCancel,
+  onAssigned,
+}: {
+  leadId: string;
+  onCancel: () => void;
+  onAssigned: (made: { id: string; number: string; ownerId: string }) => void | Promise<void>;
+}) {
+  const { me } = useAuth();
+  const [people, setPeople] = useState<Assignable[] | null>(null);
+  const [assigneeId, setAssigneeId] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    api
+      .get<Assignable[]>(`/users/lookup${qs({ holding: 'gops.costing.create' })}`)
+      .then((rows) => {
+        setPeople(rows);
+        // Yourself first when you can cost; otherwise nobody is picked for you.
+        if (rows.some((p) => p.id === me?.user.id)) setAssigneeId(me!.user.id);
+      })
+      .catch(setError);
+  }, [me]);
+
+  async function assign() {
+    if (!assigneeId) return;
+    setBusy(true);
+    try {
+      const made = await api.post<{ id: string; number: string; ownerId: string }>('/costings/assign', {
+        leadId,
+        assigneeId,
+        note: note.trim() || null,
+      });
+      await onAssigned(made);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section id="assign-costing" className="card sales-card-gap" aria-labelledby="assign-costing-title">
+      <h3 id="assign-costing-title" className="card-title">
+        Assign costing
+      </h3>
+      <p className="faint">
+        A draft costing is made in their name from this lead — its customer, site and enquiry — and they are
+        notified. Pick yourself to start it now.
+      </p>
+      <ErrorBox error={error} />
+      {people === null ? (
+        <Loading />
+      ) : people.length === 0 ? (
+        <p className="faint">Nobody can make costings yet. An administrator gives that right in Roles.</p>
+      ) : (
+        <div className="grid grid-2">
+          <Field label="Who will cost it" required>
+            <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
+              <option value="">Choose…</option>
+              {people.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.id === me?.user.id ? `${p.name} (me)` : p.name}
+                  {p.position ? ` — ${p.position}` : ''}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Note" hint="What to price, what the customer said, when you need it">
+            <textarea rows={3} value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+        </div>
+      )}
+      <div className="row sales-assign-actions">
+        <button type="button" className="btn btn-primary" disabled={!assigneeId || busy} onClick={assign}>
+          {busy ? 'Assigning…' : assigneeId && assigneeId === me?.user.id ? 'Start costing' : 'Assign'}
+        </button>
+        <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </section>
+  );
 }
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
@@ -1059,15 +1214,15 @@ export function LeadForm({
       {lead && (
         <div className="grid grid-2">
           <Field label="Estimated value">
-            <input
-              type="number"
+            <NumberInput
+              kind="money"
               value={form.estimatedValue}
               onChange={(e) => setForm({ ...form, estimatedValue: e.target.value })}
             />
           </Field>
           <Field label="Probability %" hint="Drives the weighted pipeline">
-            <input
-              type="number"
+            <NumberInput
+              kind="percent"
               min={0}
               max={100}
               value={form.probability}

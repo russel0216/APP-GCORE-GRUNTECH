@@ -3,6 +3,7 @@ import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { SettingListCard } from '../../../components/SettingListCard';
 import { ErrorBox, Field, Loading, useToast } from '../../../components/ui';
+import { NumberInput } from '../../../components/NumberInput';
 
 /**
  * HR Settings › Probation and evaluations — how long probation runs, when the
@@ -143,8 +144,8 @@ export function ProbationCard() {
         <fieldset className="eval-settings-fields" disabled={!editable}>
           <div className="grid grid-3">
             <Field label="Probation (months)" hint="From the hire date, when the employee record gives no period end">
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={1}
                 max={24}
                 value={rules.probationMonths}
@@ -162,8 +163,8 @@ export function ProbationCard() {
               />
             </Field>
             <Field label="Tell HR this many days ahead" hint="A milestone shows as due from this far out">
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={90}
                 value={rules.evaluationNoticeDays}
@@ -173,7 +174,7 @@ export function ProbationCard() {
           </div>
 
           <Field label="Rating scale" hint="Ratings run from 1 to this; every point needs a name">
-            <input type="number" min={2} max={10} value={rules.ratingScale} onChange={(e) => setScale(Number(e.target.value))} />
+            <NumberInput kind="count" min={2} max={10} value={rules.ratingScale} onChange={(e) => setScale(Number(e.target.value))} />
           </Field>
           <ol className="eval-labels">
             {rules.ratingLabels.map((label, i) => (

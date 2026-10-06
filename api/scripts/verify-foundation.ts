@@ -16,7 +16,7 @@
 import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
-import type { Prisma } from '@prisma/client';
+import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { allPermissions } from '../src/permissions/registry';
@@ -42,12 +42,14 @@ import {
   routePreview,
   historyFor,
   cancelOpenRequest,
+  approversForStep,
 } from '../src/shared/approvals';
 import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
 import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
 // The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
 import { resolveTemplate as editorResolve, emptyFieldsIn } from '../../web/src/lib/pdfTemplate';
+import { cleanNumberText, editNumberText, formatNumberText, isPartialNumber } from '../../web/src/lib/number';
 import {
   MAX_ROWS,
   columnName,
@@ -541,6 +543,24 @@ async function main() {
   const afterHr = await prisma.approvalRequest.findUnique({ where: { id: ot.id } });
   check('after HR it is approved', afterHr?.status === 'APPROVED');
   check('cost posts only once BOTH have approved', overtimePosted);
+
+  // A SUPERVISOR step may name the role that decides when the requester has
+  // no supervisor (the quotation's: sales managers); one naming none keeps
+  // HR, which is what leave, overtime and claims rely on.
+  const salesManagerRole = await prisma.role.findUnique({ where: { key: 'sales_manager' } });
+  const salesHead = await makeUser('Verify Sales Head', 'saleshead@verify.local', ['sales_manager']);
+  const supervisorElse = (roleId: string | null) =>
+    ({ approverType: 'SUPERVISOR', roleId, userId: null }) as unknown as ApprovalStep;
+  const withSupervisor = await approversForStep(supervisorElse(salesManagerRole!.id), employee.id);
+  check('a supervisor step with a fallback role still goes to the supervisor when there is one', withSupervisor.length === 1 && withSupervisor[0] === supervisor.id);
+  const unsupervised = await approversForStep(supervisorElse(salesManagerRole!.id), hrPerson.id);
+  check(
+    'with no supervisor set it goes to the fallback role, not to HR',
+    unsupervised.includes(salesHead.id) && !unsupervised.includes(hrPerson.id),
+    JSON.stringify(unsupervised),
+  );
+  const plainFallback = await approversForStep(supervisorElse(null), salesHead.id);
+  check('a supervisor step naming no role still falls back to HR', plainFallback.includes(hrPerson.id) && !plainFallback.includes(salesHead.id));
 
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
   console.log('\nApproval thresholds');
@@ -1438,6 +1458,35 @@ async function main() {
   check(
     'and a selector with nothing left to say is not stored as an empty rule',
     editor.rules['.empty'] === undefined,
+  );
+
+  // ── Numeric inputs (web/src/lib/number.ts) ─────────────────────────────────
+  console.log('\nNumeric inputs');
+  check(
+    'money and quantities print with commas and two decimals',
+    formatNumberText(1562.2, 'money') === '1,562.20' && formatNumberText('1250000', 'quantity') === '1,250,000.00',
+    `${formatNumberText(1562.2, 'money')} ${formatNumberText('1250000', 'quantity')}`,
+  );
+  check(
+    'a value is never rounded for display: a 3-dp quantity keeps its third decimal',
+    formatNumberText('1.125', 'quantity') === '1.125' && formatNumberText(0.5, 'percent') === '0.50',
+  );
+  check(
+    'counts print whole with commas, a year prints plain',
+    formatNumberText(12500, 'count') === '12,500' && formatNumberText(7.5, 'count') === '7.5' && formatNumberText(2026, 'plain') === '2026',
+  );
+  check(
+    'typed commas are accepted and dropped, and only a number can be typed',
+    cleanNumberText('1,250.50') === '1250.50' &&
+      isPartialNumber('12.') &&
+      isPartialNumber('-') &&
+      !isPartialNumber('-', false) &&
+      !isPartialNumber('1.2.3') &&
+      !isPartialNumber('12a'),
+  );
+  check(
+    'empty stays empty, and the edit text has no commas',
+    formatNumberText('', 'money') === '' && formatNumberText(null, 'money') === '' && editNumberText('1,000.5') === '1000.5' && editNumberText(42) === '42',
   );
 
   // ── Spreadsheet viewer (web/src/lib/spreadsheet*.ts) ───────────────────────

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, formatMoney, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 interface Step {
   id?: string;
@@ -144,7 +145,10 @@ export function Workflows() {
                       </span>
                       <span>{s.name}</span>
                       <span className="faint">
-                        → {s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType]}
+                        →{' '}
+                        {s.approverType === 'SUPERVISOR'
+                          ? `${APPROVER_LABELS.SUPERVISOR}, else ${s.role?.name ?? 'HR'}`
+                          : (s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType])}
                       </span>
                       {s.approverCount === 0 && (
                         <span className="badge danger" title="Documents reaching this step would stall">
@@ -320,10 +324,10 @@ function WorkflowEditor({
           <input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         <Field label="Applies from (amount)" hint="Blank = no lower bound">
-          <input type="number" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} />
+          <NumberInput kind="money" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} />
         </Field>
         <Field label="Applies up to (amount)" hint="Blank = no upper bound">
-          <input type="number" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} />
+          <NumberInput kind="money" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} />
         </Field>
         <Field
           label="Offer as an option"
@@ -388,11 +392,23 @@ function WorkflowEditor({
                 </option>
               ))}
             </select>
+          ) : step.approverType === 'SUPERVISOR' ? (
+            /* Who decides when the requester has no "Reports to" — HR unless a role is named. */
+            <select
+              value={step.roleId ?? ''}
+              aria-label="When no supervisor is set"
+              onChange={(e) => update(i, { roleId: e.target.value || null })}
+            >
+              <option value="">No supervisor set: HR</option>
+              {roles.map((r) => (
+                <option key={r.id} value={r.id}>
+                  No supervisor set: {r.name}
+                </option>
+              ))}
+            </select>
           ) : (
             <span className="faint" style={{ fontSize: 12 }}>
-              {step.approverType === 'SUPERVISOR'
-                ? 'Falls through to HR when no supervisor is set'
-                : 'Everyone holding the HR role'}
+              Everyone holding the HR role
             </span>
           )}
 

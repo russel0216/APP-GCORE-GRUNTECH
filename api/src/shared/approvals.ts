@@ -128,7 +128,10 @@ export async function approvalOptions(documentType: string, amount?: number | nu
  * SUPERVISOR falls back to HR when the requester has no supervisor set —
  * "Approvers are to whom they are directly reporting … otherwise HR will
  * approve". Without that fallback a new hire's first leave request would
- * silently route to nobody.
+ * silently route to nobody. A SUPERVISOR step that names a role (`roleId`)
+ * falls back to that role instead: a quotation from a salesperson with no
+ * "Reports to" goes to the sales managers, not to HR. HR stays the fallback
+ * for every step that names none (leave, overtime, claims…).
  */
 export async function approversForStep(
   step: ApprovalStep,
@@ -154,6 +157,13 @@ export async function approversForStep(
         select: { supervisorId: true },
       });
       if (requester?.supervisorId) return [requester.supervisorId];
+      if (step.roleId) {
+        const rows = await tx.userRole.findMany({
+          where: { roleId: step.roleId, user: { isActive: true } },
+          select: { userId: true },
+        });
+        return rows.map((r) => r.userId);
+      }
       return usersInRole('hr', tx);
     }
 

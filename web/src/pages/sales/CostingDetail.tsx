@@ -90,6 +90,10 @@ export interface CostingDetail extends Omit<CostingRow, 'status'> {
   site: (Ref & { address?: string | null; city?: string | null }) | null;
   /** The lead this costing was started from, when it was. */
   lead: { id: string; number: string; companyName: string; status: string } | null;
+  /** Set when a salesperson assigned this costing from a lead. */
+  assignedBy: { id: string; name: string } | null;
+  assignedAt: string | null;
+  assignmentNote: string | null;
   quotationRevisions: {
     id: string;
     revision: number;
@@ -378,6 +382,12 @@ export function CostingDetailPage() {
                   {costing.lead.number}
                 </Link>
               }
+            />
+          )}
+          {costing.assignedBy && (
+            <Fact
+              label="Assigned by"
+              value={`${costing.assignedBy.name}, ${formatDateTime(costing.assignedAt)}${costing.assignmentNote ? ` — ${costing.assignmentNote}` : ''}`}
             />
           )}
           <Fact label="Last edited" value={formatDateTime(costing.updatedAt)} />

@@ -7,6 +7,7 @@ import { DataList, type Column } from '../../components/DataList';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -1101,12 +1102,11 @@ function TotalsBlock({
           {editable ? (
             <label className="quote-discount">
               Discount
-              <input
-                type="number"
+              <NumberInput
+                kind="percent"
                 min={0}
                 max={100}
                 step="0.01"
-                inputMode="decimal"
                 value={discount}
                 disabled={busy}
                 aria-label="Discount percent"

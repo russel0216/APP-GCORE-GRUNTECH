@@ -19,6 +19,7 @@ import {
 } from '../../components/ui';
 import { RecordPaymentModal, CellLink, paymentLink } from './Receivables';
 import { todayLocal } from '../../lib/day';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Accounts Payable — supplier bills and expense claims.
@@ -509,8 +510,8 @@ function NewBillModal({
           />
         </Field>
         <Field label="Terms (days)" hint={`Due ${formatDate(dueDate)}`}>
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={0}
             max={365}
             value={form.terms}
@@ -571,8 +572,8 @@ function NewBillModal({
                   />
                 </td>
                 <td>
-                  <input
-                    type="number"
+                  <NumberInput
+                    kind="quantity"
                     step="0.01"
                     value={l.quantity}
                     onChange={(e) => {
@@ -584,8 +585,8 @@ function NewBillModal({
                   />
                 </td>
                 <td>
-                  <input
-                    type="number"
+                  <NumberInput
+                    kind="money"
                     step="0.01"
                     value={l.unitPrice}
                     onChange={(e) => {

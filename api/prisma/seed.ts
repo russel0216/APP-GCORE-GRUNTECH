@@ -4,6 +4,7 @@ import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { backfillPositions } from '../src/shared/plantilla';
 import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
+import { seedQuotationGroups } from '../src/shared/quotationGroups';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -471,12 +472,23 @@ interface WorkflowSeed {
   maxAmount?: number;
   /** An optional route the submitter may tick (ApprovalWorkflow.optionLabel). */
   optionLabel?: string;
-  steps: {
-    sequence: number;
-    name: string;
-    approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR';
-    roleKey?: string;
-  }[];
+  steps: SeedStep[];
+  /**
+   * The steps this workflow was seeded with before a correction. A workflow
+   * that has routed documents is normally left alone, but one whose steps are
+   * STILL exactly these was never edited by anybody, so the correction is
+   * applied to it in place — step rows updated by sequence, never deleted, so
+   * past decisions keep their step and an open request stays at its step.
+   */
+  previously?: SeedStep[];
+}
+
+interface SeedStep {
+  sequence: number;
+  name: string;
+  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR';
+  /** The role a ROLE step routes to; on a SUPERVISOR step, who decides when the requester has no supervisor. */
+  roleKey?: string;
 }
 
 const WORKFLOWS: WorkflowSeed[] = [
@@ -544,9 +556,13 @@ const WORKFLOWS: WorkflowSeed[] = [
     steps: [{ sequence: 1, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' }],
   },
   {
+    // The salesperson's own supervisor ("Reports to" on their login) decides
+    // first (2026-10-06, the owner's call); somebody with none set goes to the
+    // sales managers rather than to HR, who have no business pricing work.
     documentType: 'quotation',
     name: 'Quotation — sales manager',
-    steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' }],
+    steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' }],
+    previously: [{ sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' }],
   },
   {
     // An OPTION, not a rule: a quotation over ₱1,000,000 may also go to the
@@ -558,6 +574,10 @@ const WORKFLOWS: WorkflowSeed[] = [
     minAmount: 1_000_000.01,
     optionLabel: 'Add the CEO as approver',
     steps: [
+      { sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+    previously: [
       { sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' },
       { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
@@ -864,6 +884,42 @@ async function main() {
       include: { _count: { select: { requests: true } } },
     });
 
+    // In use, but still exactly as first seeded: nobody edited it, so the
+    // correction reaches it — in place, step by step (see `previously`).
+    if (already && already._count.requests > 0 && seed.previously) {
+      const current = await prisma.approvalStep.findMany({
+        where: { workflowId: already.id },
+        orderBy: { sequence: 'asc' },
+      });
+      const same = (a: typeof current, b: SeedStep[]) =>
+        a.length === b.length &&
+        b.every(
+          (s, i) =>
+            a[i].sequence === s.sequence &&
+            a[i].name === s.name &&
+            a[i].approverType === s.approverType &&
+            a[i].userId === null &&
+            a[i].roleId === (s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null),
+        );
+      if (same(current, seed.previously) && seed.steps.length === current.length) {
+        await prisma.$transaction(
+          seed.steps.map((s, i) =>
+            prisma.approvalStep.update({
+              where: { id: current[i].id },
+              data: {
+                sequence: s.sequence,
+                name: s.name,
+                approverType: s.approverType,
+                roleId: s.roleKey ? (roleByKey.get(s.roleKey) ?? null) : null,
+              },
+            }),
+          ),
+        );
+        console.log(`  · Updated "${seed.name}" to its corrected route (it was still as first seeded)`);
+      }
+      continue;
+    }
+
     if (already) {
       // An unused seeded workflow is refreshed, so a corrected routing reaches
       // an existing database. One that has already routed documents is left
@@ -916,6 +972,20 @@ async function main() {
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
       );
     }
+  }
+
+  // The Quotation Groups master (Admin › Categories) starts from the groups
+  // the quotation lines already use; a second run adds none.
+  {
+    const added = await seedQuotationGroups();
+    if (added) console.log(`  · Added ${added} quotation group(s) from the lines that use them`);
+  }
+
+  // Costing.finalAt arrived after costings were already final. Their last
+  // update is the best date on file; set once, and a second run finds none.
+  {
+    const dated = await prisma.$executeRaw`UPDATE "Costing" SET "finalAt" = "updatedAt" WHERE "status" = 'FINAL' AND "finalAt" IS NULL`;
+    if (dated) console.log(`  · Dated ${dated} final costing(s) from their last update`);
   }
 
   // ── Departments ────────────────────────────────────────────────────────────

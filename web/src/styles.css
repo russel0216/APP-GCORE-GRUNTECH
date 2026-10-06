@@ -424,6 +424,17 @@ select:disabled {
   opacity: 0.5;
 }
 
+/* The one numeric input (components/NumberInput.tsx): figures line up on the right. */
+.num-input {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Out of its min/max once the person has left it. */
+.num-input:invalid:not(:focus) {
+  border-color: var(--danger);
+}
+
 /*
   Chrome paints an autofilled field with its own near-white background, which
   on a dark form gives a white box with pale text in it - unreadable, and on

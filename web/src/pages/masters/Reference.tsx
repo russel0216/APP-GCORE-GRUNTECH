@@ -2,9 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
-//  CATEGORIES — cost categories, item categories and industries
+//  CATEGORIES — cost categories, item categories, industries, quotation groups
 // ════════════════════════════════════════════════════════════════════
 
 interface CostCategory {
@@ -30,6 +31,15 @@ export interface Industry {
   _count?: { customers: number };
 }
 
+/** A quotation line's group (SCORO's Group column), with how many lines use it. */
+export interface QuotationGroup {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  lineCount?: number;
+}
+
 interface ItemCategory {
   id: string;
   code: string;
@@ -49,18 +59,22 @@ export function Categories() {
   const [editingItem, setEditingItem] = useState<ItemCategory | 'new' | null>(null);
   const [industries, setIndustries] = useState<Industry[]>([]);
   const [editingIndustry, setEditingIndustry] = useState<Industry | 'new' | null>(null);
+  const [groups, setGroups] = useState<QuotationGroup[]>([]);
+  const [editingGroup, setEditingGroup] = useState<QuotationGroup | 'new' | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, i, ind] = await Promise.all([
+      const [c, i, ind, g] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
+        api.get<QuotationGroup[]>('/reference/quotation-groups'),
       ]);
       setCost(c);
       setItems(i);
       setIndustries(ind);
+      setGroups(g);
       setError(null);
     } catch (err) {
       setError(err);
@@ -86,7 +100,8 @@ export function Categories() {
             Cost categories are the five buckets every costing, budget and cost-ledger row is
             grouped by. Item categories are how you organise the item master for browsing — they
             have no effect on money. Industries classify customers — HI, BI, UI, GI, SI — so sales
-            can be counted by the market they come from.
+            can be counted by the market they come from. Quotation groups are what a quotation
+            line is filed under, and how Sales Analytics counts what was quoted and won.
           </p>
         </div>
       </div>
@@ -258,6 +273,77 @@ export function Categories() {
         </p>
       </div>
 
+      {/*
+        Quotation groups: a reference card like Industries. The editor suggests
+        from it, and a group typed on a quotation line is added here on save.
+      */}
+      <div className="card m-industries">
+        <div className="m-card-head">
+          <h3 className="card-title">Quotation groups</h3>
+          {can('admin.categories.create') && (
+            <button className="btn btn-sm" onClick={() => setEditingGroup('new')}>
+              + Add
+            </button>
+          )}
+        </div>
+
+        {groups.length === 0 ? (
+          <Empty
+            title="No quotation groups yet"
+            hint="A group typed on a quotation line is added here when the quotation is saved."
+          />
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th className="right">Lines</th>
+                  <th>Status</th>
+                  {mayEdit && <th className="m-col-action" />}
+                </tr>
+              </thead>
+              <tbody>
+                {groups.map((g) => (
+                  <tr key={g.id}>
+                    <td>{g.name}</td>
+                    <td className="right">{(g.lineCount ?? 0).toLocaleString('en-US')}</td>
+                    <td>
+                      <StatusBadge status={g.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
+                    </td>
+                    {mayEdit && (
+                      <td className="m-col-action">
+                        <button className="btn btn-sm" onClick={() => setEditingGroup(g)}>
+                          Modify
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p className="m-footnote">
+          The quotation editor suggests these for a line&apos;s Group. A line keeps the group it was
+          saved with, so renaming one here does not rewrite quotations already issued; a group in use
+          is deactivated rather than deleted.
+        </p>
+      </div>
+
+      {editingGroup && (
+        <QuotationGroupModal
+          group={editingGroup === 'new' ? null : editingGroup}
+          onClose={() => setEditingGroup(null)}
+          onSaved={() => {
+            setEditingGroup(null);
+            void load();
+            toast('ok', 'Saved');
+          }}
+        />
+      )}
+
       {editingIndustry && (
         <IndustryModal
           industry={editingIndustry === 'new' ? null : editingIndustry}
@@ -382,13 +468,105 @@ function CostCategoryModal({
         />
       </Field>
       <Field label="Sort order">
-        <input
-          type="number"
+        <NumberInput
+          kind="count"
           value={form.sortOrder}
           onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })}
         />
       </Field>
       <Checkbox checked={form.isActive} onChange={(v) => setForm({ ...form, isActive: v })} label="Active" />
+    </Modal>
+  );
+}
+
+function QuotationGroupModal({
+  group,
+  onClose,
+  onSaved,
+}: {
+  group: QuotationGroup | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    name: group?.name ?? '',
+    sortOrder: group?.sortOrder ?? 0,
+    isActive: group?.isActive ?? true,
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (group) await api.patch(`/reference/quotation-groups/${group.id}`, form);
+      else await api.post('/reference/quotation-groups', form);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!group) return;
+    setBusy(true);
+    try {
+      await api.del(`/reference/quotation-groups/${group.id}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const inUse = group?.lineCount ?? 0;
+
+  return (
+    <Modal
+      title={group ? `Modify ${group.name}` : 'Add quotation group'}
+      onClose={onClose}
+      footer={
+        <>
+          {group && inUse === 0 && can('admin.categories.delete') && (
+            <button className="btn btn-danger" onClick={remove} disabled={busy}>
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !form.name.trim()}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      {group && inUse > 0 && (
+        <div className="alert info">
+          {inUse === 1 ? 'One quotation line is' : `${inUse.toLocaleString('en-US')} quotation lines are`} filed
+          under this group, so it cannot be deleted — untick Active to stop it being suggested.
+        </div>
+      )}
+      <Field label="Name" hint="e.g. Gruntech Installation, Trading">
+        <input value={form.name} autoFocus maxLength={120} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Sort order">
+        <NumberInput
+          kind="count"
+          value={form.sortOrder}
+          onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })}
+        />
+      </Field>
+      <Checkbox
+        checked={form.isActive}
+        onChange={(v) => setForm({ ...form, isActive: v })}
+        label="Active — an inactive group stays on its lines but is not suggested"
+      />
     </Modal>
   );
 }
@@ -487,8 +665,8 @@ function IndustryModal({
         />
       </Field>
       <Field label="Sort order">
-        <input
-          type="number"
+        <NumberInput
+          kind="count"
           value={form.sortOrder}
           onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })}
         />

@@ -4,6 +4,7 @@ import { api, qs } from '../../lib/api';
 import { Empty, ErrorBox, Field, Loading, formatMoney } from '../../components/ui';
 import { todayLocal } from '../../lib/day';
 import { TurnoverReport } from './reports/TurnoverReport';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * HR reports.
@@ -206,8 +207,8 @@ function LeaveReport() {
     <div>
       <div className="card">
         <Field label="Year">
-          <input
-            type="number"
+          <NumberInput
+            kind="plain"
             min={2000}
             max={2100}
             value={year}
