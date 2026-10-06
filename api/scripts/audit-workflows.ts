@@ -113,7 +113,19 @@ async function main() {
           `step ${step.sequence} "${step.name}" routes to HR, which only one person holds — when HR raises this document they would be approving their own work`,
         );
       }
-      if (step.approverType === 'SUPERVISOR' && hrHolders === 0 && unsupervised > 0) {
+      // A SUPERVISOR step that names a role falls back to that role, not HR.
+      if (step.approverType === 'SUPERVISOR' && step.role) {
+        const fallback = roleMembers.get(step.role.key) ?? [];
+        if (fallback.length === 0 && unsupervised > 0) {
+          issues.push(
+            `step ${step.sequence} "${step.name}" routes to each requester's supervisor, but ${unsupervised} active user(s) have none — and the ${step.role.name} fallback is unheld, so their documents route to nobody`,
+          );
+        } else if (fallback.length === 1 && (TYPICAL_REQUESTER[wf.documentType] ?? []).includes(step.role.key)) {
+          issues.push(
+            `step ${step.sequence} "${step.name}" falls back to ${step.role.name}, which only ${fallback[0]} holds — set their "Reports to", or a document they raise has nobody to approve it`,
+          );
+        }
+      } else if (step.approverType === 'SUPERVISOR' && hrHolders === 0 && unsupervised > 0) {
         issues.push(
           `step ${step.sequence} "${step.name}" routes to each requester's supervisor, but ${unsupervised} active user(s) have none — and the HR fallback is unheld, so their documents route to nobody`,
         );
@@ -125,7 +137,11 @@ async function main() {
     }
 
     const route = wf.steps
-      .map((s) => `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`)
+      .map((s) =>
+        s.approverType === 'SUPERVISOR'
+          ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}`
+          : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,
+      )
       .join(' → ');
 
     if (issues.length) {

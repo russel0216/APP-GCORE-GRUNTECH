@@ -144,7 +144,10 @@ export function Workflows() {
                       </span>
                       <span>{s.name}</span>
                       <span className="faint">
-                        → {s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType]}
+                        →{' '}
+                        {s.approverType === 'SUPERVISOR'
+                          ? `${APPROVER_LABELS.SUPERVISOR}, else ${s.role?.name ?? 'HR'}`
+                          : (s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType])}
                       </span>
                       {s.approverCount === 0 && (
                         <span className="badge danger" title="Documents reaching this step would stall">
@@ -388,11 +391,23 @@ function WorkflowEditor({
                 </option>
               ))}
             </select>
+          ) : step.approverType === 'SUPERVISOR' ? (
+            /* Who decides when the requester has no "Reports to" — HR unless a role is named. */
+            <select
+              value={step.roleId ?? ''}
+              aria-label="When no supervisor is set"
+              onChange={(e) => update(i, { roleId: e.target.value || null })}
+            >
+              <option value="">No supervisor set: HR</option>
+              {roles.map((r) => (
+                <option key={r.id} value={r.id}>
+                  No supervisor set: {r.name}
+                </option>
+              ))}
+            </select>
           ) : (
             <span className="faint" style={{ fontSize: 12 }}>
-              {step.approverType === 'SUPERVISOR'
-                ? 'Falls through to HR when no supervisor is set'
-                : 'Everyone holding the HR role'}
+              Everyone holding the HR role
             </span>
           )}
 

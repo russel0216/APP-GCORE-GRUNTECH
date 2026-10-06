@@ -135,7 +135,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,261 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
+**2,264 assertions across twenty-two scripts** (counted 2026-10-06): foundation 217,
 masters 54, sales 278, costing 109, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
@@ -1172,6 +1172,19 @@ the detail.
   Admin › Approval Workflows edits the label ("Offer as an option"); a PUT
   that does not mention it keeps it, because clearing it by omission would
   make the CEO a step every quotation over a million takes.
+- **A quotation goes to the salesperson's supervisor first** (2026-10-06,
+  the owner's call). Both seeded quotation workflows open with a SUPERVISOR
+  step whose `roleId` is `sales_manager`: **on a SUPERVISOR step, `roleId`
+  is the fallback** when the requester has no "Reports to" — HR when it is
+  null, which is every other supervisor step (leave, overtime, claims,
+  advances) and must stay so. `approversForStep()` is the one rule; Admin ›
+  Approval Workflows offers "No supervisor set: <role>" on such a step, and
+  `audit-workflows.ts` checks the fallback role is held. The seed's
+  `previously` moved a workflow that has routed documents only where its
+  steps were still exactly as first seeded, updating the step rows in place
+  by sequence (an open request stays at its step; past decisions keep their
+  step). **Set "Reports to" for every salesperson** — without it their
+  quotations go to whoever holds Sales Manager.
 - **Who decides is named before they decide** (2026-10-02). In
   `shared/approvals.ts`: `namedApprovers(step, requesterId)` — the step's
   approvers by name, NEVER the requester (act() refuses them; empty means

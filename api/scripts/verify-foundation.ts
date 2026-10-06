@@ -16,7 +16,7 @@
 import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
-import type { Prisma } from '@prisma/client';
+import type { ApprovalStep, Prisma } from '@prisma/client';
 import { env } from '../src/env';
 import { resolveUser, can, canEditRecord, menuFor } from '../src/permissions/resolve';
 import { allPermissions } from '../src/permissions/registry';
@@ -42,6 +42,7 @@ import {
   routePreview,
   historyFor,
   cancelOpenRequest,
+  approversForStep,
 } from '../src/shared/approvals';
 import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
@@ -541,6 +542,24 @@ async function main() {
   const afterHr = await prisma.approvalRequest.findUnique({ where: { id: ot.id } });
   check('after HR it is approved', afterHr?.status === 'APPROVED');
   check('cost posts only once BOTH have approved', overtimePosted);
+
+  // A SUPERVISOR step may name the role that decides when the requester has
+  // no supervisor (the quotation's: sales managers); one naming none keeps
+  // HR, which is what leave, overtime and claims rely on.
+  const salesManagerRole = await prisma.role.findUnique({ where: { key: 'sales_manager' } });
+  const salesHead = await makeUser('Verify Sales Head', 'saleshead@verify.local', ['sales_manager']);
+  const supervisorElse = (roleId: string | null) =>
+    ({ approverType: 'SUPERVISOR', roleId, userId: null }) as unknown as ApprovalStep;
+  const withSupervisor = await approversForStep(supervisorElse(salesManagerRole!.id), employee.id);
+  check('a supervisor step with a fallback role still goes to the supervisor when there is one', withSupervisor.length === 1 && withSupervisor[0] === supervisor.id);
+  const unsupervised = await approversForStep(supervisorElse(salesManagerRole!.id), hrPerson.id);
+  check(
+    'with no supervisor set it goes to the fallback role, not to HR',
+    unsupervised.includes(salesHead.id) && !unsupervised.includes(hrPerson.id),
+    JSON.stringify(unsupervised),
+  );
+  const plainFallback = await approversForStep(supervisorElse(null), salesHead.id);
+  check('a supervisor step naming no role still falls back to HR', plainFallback.includes(hrPerson.id) && !plainFallback.includes(salesHead.id));
 
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
   console.log('\nApproval thresholds');

@@ -431,7 +431,8 @@ workflowRoutes.post(
             sequence: s.sequence,
             name: s.name,
             approverType: s.approverType,
-            roleId: s.approverType === 'ROLE' ? s.roleId : null,
+            // On a SUPERVISOR step the role is its fallback when the requester has no supervisor.
+            roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' ? (s.roleId ?? null) : null,
             userId: s.approverType === 'USER' ? s.userId : null,
           })),
         },
@@ -484,7 +485,8 @@ workflowRoutes.put(
               sequence: s.sequence,
               name: s.name,
               approverType: s.approverType,
-              roleId: s.approverType === 'ROLE' ? s.roleId : null,
+              // On a SUPERVISOR step the role is its fallback when the requester has no supervisor.
+              roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' ? (s.roleId ?? null) : null,
               userId: s.approverType === 'USER' ? s.userId : null,
             })),
           },

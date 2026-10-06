@@ -419,7 +419,10 @@ export async function approvalBottleneck(now = Date.now()): Promise<BottleneckRo
       subject: p.subject,
       amount: p.amount ? num(p.amount) : null,
       requester: p.requester.name,
-      waitingOn: step?.user?.name ?? step?.role?.name ?? step?.approverType.toLowerCase() ?? 'nobody',
+      waitingOn:
+        step?.approverType === 'SUPERVISOR'
+          ? 'supervisor'
+          : (step?.user?.name ?? step?.role?.name ?? step?.approverType.toLowerCase() ?? 'nobody'),
       step: step?.name ?? `Step ${p.currentSequence}`,
       waitingDays: Math.floor((now - p.createdAt.getTime()) / 86_400_000),
       link: p.link,
