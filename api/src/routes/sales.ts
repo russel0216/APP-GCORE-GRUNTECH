@@ -175,7 +175,19 @@ leadRoutes.get(
         // is "start a costing" or "create the quotation", and it can only
         // offer the right one if it knows what already exists.
         costings: {
-          select: { id: true, number: true, title: true, status: true, contractValue: true, createdAt: true },
+          select: {
+            id: true,
+            number: true,
+            title: true,
+            status: true,
+            contractValue: true,
+            createdAt: true,
+            // "Assign costing": whose work it is, who handed it over, when, and why.
+            owner: { select: { id: true, name: true } },
+            assignedBy: { select: { id: true, name: true } },
+            assignedAt: true,
+            assignmentNote: true,
+          },
           orderBy: { createdAt: 'desc' },
         },
         activities: { orderBy: { startsAt: 'asc' } },

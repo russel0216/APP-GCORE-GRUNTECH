@@ -15,7 +15,8 @@ import {
 } from '../http/kit';
 import { manilaDayStart, manilaMonthKey } from '../shared/day';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { canEditRecord } from '../permissions/resolve';
+import { can, canEditRecord, resolveUser } from '../permissions/resolve';
+import { notify } from '../shared/notifications';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { approvalSignoffs, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
@@ -789,6 +790,7 @@ async function loadFull(id: string, tx: Tx = prisma) {
       customer: { select: { id: true, name: true, code: true } },
       site: { select: { id: true, name: true, address: true, city: true } },
       owner: { select: { id: true, name: true, position: true } },
+      assignedBy: { select: { id: true, name: true } },
       lead: { select: { id: true, number: true, companyName: true, status: true } },
       lines: {
         orderBy: { sortOrder: 'asc' },
@@ -1118,6 +1120,103 @@ costingRoutes.post(
       );
     }
     res.status(201).json(present(costing as unknown as Record<string, unknown>, await categoryRanks()));
+  }),
+);
+
+/**
+ * "Assign costing" on a lead: the salesperson hands the pricing to an
+ * estimator. A DRAFT costing is created in the ASSIGNEE's name (they own it
+ * and edit it), carrying the lead, its customer and site, who assigned it,
+ * when, and the note. The lead moves to COSTING forwards only, as "Start
+ * costing" does. The caller needs the right to edit the lead, not to cost —
+ * the assignee is the one who must hold gops.costing.create.
+ */
+const assignSchema = z.object({
+  leadId: z.string().min(1),
+  assigneeId: z.string().min(1, 'Choose who will do the costing'),
+  note: z.string().trim().max(2000).optional().nullable(),
+});
+
+costingRoutes.post(
+  '/assign',
+  require_('gops.leads.edit_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(assignSchema, req.body);
+
+    const { costing, leadMoved, lead } = await prisma.$transaction(async (tx) => {
+      // Everything that can be refused is refused before the number is taken.
+      const lead = await tx.lead.findUnique({
+        where: { id: body.leadId },
+        select: { id: true, number: true, companyName: true, description: true, customerId: true, siteId: true, status: true, assignedToId: true },
+      });
+      if (!lead) throw notFound('Lead not found');
+      if (!canEditRecord(me, 'gops', 'leads', lead.assignedToId)) {
+        throw forbidden('This lead is assigned to someone else');
+      }
+      if (lead.status === 'WON' || lead.status === 'LOST') throw badRequest(`This lead is ${lead.status.toLowerCase()} — there is nothing to cost`);
+      const assignee = await resolveUser(body.assigneeId);
+      if (!assignee) throw badRequest('That person is not an active user');
+      if (!can(assignee, 'gops.costing.create')) throw badRequest(`${assignee.name} cannot make costings — pick someone who does`);
+
+      const company = await tx.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+      const what = (lead.description ?? '').split('\n')[0].trim();
+      const title = (what ? `${lead.companyName} — ${what}` : lead.companyName).slice(0, 200);
+
+      const number = await nextNumber('costing', tx);
+      const created = await tx.costing.create({
+        data: {
+          number,
+          title,
+          customerId: lead.customerId,
+          siteId: lead.siteId,
+          leadId: lead.id,
+          ownerId: assignee.id,
+          vatRate: d(company ? Number(company.vatRate) : 0.12),
+          assignedById: me.id,
+          assignedAt: new Date(),
+          assignmentNote: body.note || null,
+        },
+      });
+      let moved = false;
+      if (LEAD_STAGES_BEFORE_COSTING.has(lead.status)) {
+        await tx.lead.update({ where: { id: lead.id }, data: { status: 'COSTING' } });
+        moved = true;
+      }
+      return { costing: created, leadMoved: moved, lead };
+    });
+
+    if (costing.ownerId !== me.id) {
+      await notify({
+        userId: costing.ownerId,
+        type: 'system',
+        title: `Costing assigned to you: ${costing.title}`,
+        body: `${costing.number} · from ${me.name}${costing.assignmentNote ? ` — ${costing.assignmentNote}` : ''}`,
+        link: `/g-ops/costing/${costing.id}`,
+      });
+    }
+    await audit(
+      {
+        entityType: 'costing',
+        entityId: costing.id,
+        action: 'CREATED',
+        summary: `Assigned costing ${costing.number} — ${costing.title} — to ${costing.ownerId === me.id ? 'themselves' : (await prisma.user.findUnique({ where: { id: costing.ownerId }, select: { name: true } }))?.name} from lead ${lead.number}`,
+        after: { ownerId: costing.ownerId, leadId: lead.id, assignmentNote: costing.assignmentNote },
+      },
+      req,
+    );
+    if (leadMoved) {
+      await audit(
+        {
+          entityType: 'lead',
+          entityId: lead.id,
+          action: 'UPDATED',
+          summary: `Lead ${lead.number} moved to COSTING — costing ${costing.number} assigned`,
+        },
+        req,
+      );
+    }
+    res.status(201).json({ id: costing.id, number: costing.number, ownerId: costing.ownerId });
   }),
 );
 

@@ -67,6 +67,7 @@ model User {
   leadsAssigned     Lead[]              @relation("LeadAssignee")
   leadsCreated      Lead[]              @relation("LeadCreator")
   costingsOwned     Costing[]           @relation("CostingOwner")
+  costingsAssigned  Costing[]           @relation("CostingAssigner")
   costingTemplates  CostingTemplate[]   @relation("CostingTemplateAuthor")
   quotationsOwned   Quotation[]         @relation("QuotationOwner")
   revisionsApproved QuotationRevision[] @relation("RevisionApprover")
@@ -1081,6 +1082,13 @@ model Costing {
   /// When it last became FINAL (approval, "Mark final", or a job built on
   /// it); cleared when reopened. The Costing page's "Final this month" tile.
   finalAt DateTime?
+
+  /// "Assign costing" on a lead: who handed the work to the owner, when, and
+  /// what they asked for. Null on a costing somebody started for themselves.
+  assignedById   String?
+  assignedBy     User?     @relation("CostingAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedAt     DateTime?
+  assignmentNote String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

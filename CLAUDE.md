@@ -135,8 +135,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,264 assertions across twenty-two scripts** (counted 2026-10-06): foundation 217,
-masters 54, sales 278, costing 109, pipeline 46, calendar 38, numbering 46,
+**2,275 assertions across twenty-two scripts** (counted 2026-10-06): foundation 217,
+masters 54, sales 278, costing 120, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -738,6 +738,18 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
   nothing.
+- **"Assign costing" replaced the lead page's "Start costing"** (2026-10-06,
+  the owner's call): a panel in the page, never a dialog. `POST
+  /costings/assign { leadId, assigneeId, note }` needs the right to EDIT THE
+  LEAD (`gops.leads.edit_own` + `canEditRecord`), not to cost; the ASSIGNEE
+  must hold `gops.costing.create`. It creates the DRAFT in the assignee's name
+  (`ownerId`), with the lead's customer and site, `assignedById`,
+  `assignedAt` and `assignmentNote`, numbers it with the caller's `tx` after
+  every refusal, moves the lead forwards only (same rule as below), notifies
+  the assignee and audits. Picking yourself opens the new costing's sheet.
+  The lead page lists each costing with whose it is and who assigned it,
+  when; the costing page shows "Assigned by". The picker is
+  `/users/lookup?holding=gops.costing.create`.
 - **A duplicated costing copies the numbers and not the history** — DRAFT, owned
   by the copier, no lead, revisions or jobs, totals recomputed through
   `recalc(tx)` rather than copied, so it can never carry a figure its own lines
