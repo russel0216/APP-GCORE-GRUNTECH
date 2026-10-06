@@ -118,6 +118,7 @@ leadRoutes.get(
       where.status = { in: asked as LeadStatus[] };
     }
     if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
+    if (q.filters.createdById) where.createdById = q.filters.createdById;
     if (q.filters.source) where.source = q.filters.source;
 
     const [rows, total] = await Promise.all([
@@ -125,6 +126,8 @@ leadRoutes.get(
         where,
         include: {
           assignedTo: { select: { id: true, name: true } },
+          // Who recorded the enquiry — not always who is chasing it.
+          createdBy: { select: { id: true, name: true } },
           customer: { select: { id: true, name: true } },
           _count: { select: { quotations: true } },
         },

@@ -12,6 +12,7 @@ import {
   Modal,
   StatusBadge,
   formatDate,
+  formatDateTime,
   formatMoney,
   useToast,
 } from '../../components/ui';
@@ -210,6 +211,8 @@ interface LeadRow {
   notes: string | null;
   lostReason: string | null;
   assignedTo: { id: string; name: string };
+  /** Who recorded the enquiry; a manager often adds a lead and assigns it on. */
+  createdBy: { id: string; name: string } | null;
   customer: { id: string; name: string } | null;
   quotationCount?: number;
   createdAt: string;
@@ -282,6 +285,17 @@ export function Leads() {
     },
     { key: 'assignedTo', label: 'Owner', render: (l) => l.assignedTo.name },
     {
+      key: 'createdBy',
+      label: 'Added by',
+      sortKey: 'createdAt',
+      render: (l) => (
+        <div>
+          <div>{l.createdBy?.name ?? '—'}</div>
+          <div className="faint">{formatDate(l.createdAt)}</div>
+        </div>
+      ),
+    },
+    {
       key: 'nextAction',
       label: 'Next action',
       render: (l) =>
@@ -330,6 +344,7 @@ export function Leads() {
         filters={[
           { key: 'status', label: 'Status', options: LEAD_STATUSES },
           { key: 'assignedToId', label: 'Owner', options: people.map((p) => ({ value: p.id, label: p.name })) },
+          { key: 'createdById', label: 'Added by', options: people.map((p) => ({ value: p.id, label: p.name })) },
         ]}
         actions={
           can('gops.leads.create') ? (
@@ -527,7 +542,10 @@ export function LeadDetail() {
             }
           />
           <Row label="Enquiry came via" value={lead.source} />
-          <Row label="First recorded" value={formatDate(lead.createdAt)} />
+          <Row
+            label="Added by"
+            value={`${lead.createdBy?.name ?? 'Unknown'}, ${formatDateTime(lead.createdAt)}`}
+          />
         </div>
 
         <div className="card">

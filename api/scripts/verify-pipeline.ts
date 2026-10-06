@@ -476,6 +476,21 @@ async function main() {
   const leadCostings = (leadRead.body.costings ?? []) as { id: string }[];
   check('GET /leads/:id lists the costings raised for it', leadCostings.some((c) => c.id === costing.id));
 
+  // "Added by" on the list: who recorded the enquiry, and a filter on it.
+  const addedBy = await http(managerToken, 'GET', `/leads?search=${encodeURIComponent(TAG)}&createdById=${manager.id}`);
+  const addedRows = (addedBy.body.rows ?? []) as { id: string; createdBy?: { name: string } }[];
+  check(
+    'GET /leads names who added each lead',
+    addedRows.length >= 3 && addedRows.every((r) => r.createdBy?.name === manager.name),
+    JSON.stringify(addedRows.map((r) => r.createdBy)),
+  );
+  const addedBySeller = await http(managerToken, 'GET', `/leads?search=${encodeURIComponent(TAG)}&createdById=${seller.id}`);
+  check(
+    'and ?createdById= filters on it',
+    addedBySeller.status === 200 && (addedBySeller.body.rows as unknown[]).length === 0,
+    `${addedBySeller.status} ${(addedBySeller.body.rows as unknown[] | undefined)?.length}`,
+  );
+
   const detail = await http(managerToken, 'GET', `/quotations/${negotiating.id}`);
   const revs = (detail.body.revisions ?? []) as { jobs?: unknown }[];
   check('GET /quotations/:id says which project each revision became', revs.length > 0 && revs.every((r) => Array.isArray(r.jobs)));

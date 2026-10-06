@@ -135,8 +135,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,254 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
-masters 54, sales 277, costing 105, pipeline 44, calendar 38, numbering 46,
+**2,256 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
+masters 54, sales 277, costing 105, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -730,6 +730,10 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **`activityWhere()` in `shared/activities.ts` is the one rule** for which sales
   activities a query means (inclusive `lte`, 14-day default). Activity writes are
   audited like every other write.
+- **A lead says who added it** (2026-10-06): `Lead.createdById`, set once on
+  create and never edited, is the list's "Added by" column (with the date) and
+  `?createdById=` filter, and the lead page's "Added by" row. It is not the
+  owner — a manager often records an enquiry and assigns it on.
 - **"Start costing" moves a lead forwards only** (from NEW, CONTACTED, QUALIFIED
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
