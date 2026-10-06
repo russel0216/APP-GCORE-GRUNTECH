@@ -728,3 +728,102 @@
   gap: var(--s-2) var(--s-4);
   margin-bottom: var(--s-3);
 }
+
+/* ── Sales orders ─────────────────────────────────────────────────────────── */
+
+.so-confirm {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.so-confirm input {
+  flex: 1 1 14rem;
+}
+
+.so-heading td {
+  font-weight: 600;
+  background: var(--panel-2, rgb(255 255 255 / 0.03));
+}
+
+.so-totals-wrap {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-7);
+  margin-top: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.so-totals {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: var(--s-1) var(--s-5);
+  margin: 0;
+  justify-items: end;
+}
+
+.so-totals dt {
+  color: var(--faint);
+  font-size: var(--fs-sm);
+}
+
+.so-totals dd {
+  margin: 0;
+}
+
+.so-totals .so-grand {
+  font-weight: 700;
+  font-size: var(--fs-lg);
+  color: inherit;
+}
+
+.so-edit-lines td {
+  vertical-align: top;
+}
+
+.so-edit-lines textarea {
+  margin-top: var(--s-1);
+  font-size: var(--fs-sm);
+}
+
+.so-col-group {
+  width: 9rem;
+}
+
+.so-col-qty,
+.so-col-unit {
+  width: 5.5rem;
+}
+
+.so-col-money {
+  width: 8.5rem;
+}
+
+.so-col-x {
+  width: 2.5rem;
+}
+
+.so-add {
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
+/* The Create Sales Order panel on the quotation page. */
+.so-create-modes {
+  display: flex;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+  margin: var(--s-2) 0;
+}
+
+.so-create-lines {
+  display: grid;
+  gap: var(--s-1);
+  margin: var(--s-2) 0;
+  padding-left: var(--s-4);
+}
+
+.so-create-actions {
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}

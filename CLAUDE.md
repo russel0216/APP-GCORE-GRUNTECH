@@ -155,10 +155,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,297 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 284, costing 120, pipeline 46, calendar 46, numbering 46,
+**2,331 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 306, costing 120, pipeline 52, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
-evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
+evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -752,10 +752,22 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **`activityWhere()` in `shared/activities.ts` is the one rule** for which sales
   activities a query means (inclusive `lte`, 14-day default). Activity writes are
   audited like every other write.
+- **Leads print** (2026-10-07): `GET /leads/:id/pdf` is the whole lead on
+  house-style paper (details, enquiry, costings, quotations, activities,
+  notes) under the lead's own visibility rule, and `GET /leads/pdf` — above
+  `/:id`, the route-order trap — is the LIST as the screen shows it, through
+  `leadListWhere()`, the same where-builder the list uses, so the paper never
+  shows a different set (its filter line says what narrowed it; capped at
+  1,000 rows). Both audit EXPORTED; the list export's entityId is `list`.
 - **A lead says who added it** (2026-10-06): `Lead.createdById`, set once on
   create and never edited, is the list's "Added by" column (with the date) and
   `?createdById=` filter, and the lead page's "Added by" row. It is not the
   owner — a manager often records an enquiry and assigns it on.
+- **The calendar's activity form picks no lead, quotation or customer**
+  (2026-10-07, the owner's call): the calendar books time; an activity gets
+  its links where the record lives — `ActivityLog` on the lead, quotation and
+  customer pages still sends them. An already-linked activity keeps its links
+  (the form never sends a value it did not load) and still shows the banner.
 - **"Start costing" moves a lead forwards only** (from NEW, CONTACTED, QUALIFIED
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
@@ -835,6 +847,24 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 
 ### Aftermarket: Service Schedule and job orders
 
+- **The register asks for an equipment type, an address and a specification**
+  (2026-10-07, the owner's call). "Equipment type" is still
+  `InstalledAsset.name` — text, with suggestions from `EquipmentType`
+  (seeded CAPSLOCK: COMPRESSOR, DRYER, FILTER, GENERATOR, PUMPS, VFD,
+  INSTRUMENT, FIRE PUMP, OTHERS; anything typed since is remembered through
+  `rememberEquipmentTypes`, upper-cased, `GET /installed-assets/types`).
+  `address` is where the machine is, free text — the form no longer offers
+  the CustomerSite picker, but `siteId` stays and is still written by the
+  turnover flow; screens show `site?.name ?? address`. `capacity` is now
+  labelled Specification (voltage, power, flow, pressure, application);
+  `location` is "Location". The form's Customer is predicted from
+  `/customers/lookup` as it is typed, and — for a `gops.customers.create`
+  holder — "Add as a new customer" files one properly (name + industry)
+  through the ordinary `POST /customers` before registering.
+- **The register prints**: `GET /installed-assets/pdf` (above `/:id`) is the
+  list as the screen filters it, through `assetListWhere()`, the list's own
+  where-builder; audited EXPORTED with entityId `list`. The toolbar's own
+  Export stays the Excel-ready CSV twin.
 - **`regenerateSchedule` only touches GENERATED visits** (`sequence: { not:
   null }` in both the delete and the kept count). A hand-booked call-out or a job
   order's visit has no sequence and must survive; this `where` is the one place
@@ -1261,6 +1291,15 @@ the detail.
   none — and a draft's PDF prints the route submitting would take; the PDF
   button passes the ticked option as `?option=`, and one that no longer
   applies falls back to the standard route.
+- **A pending revision can be pulled back to draft** (2026-10-07, the
+  owner's call): the author (or `edit_all`) on the Modify page — "Pull it
+  back and edit", confirmed in the page — calls `POST
+  /quotations/:id/revisions/:revisionId/withdraw`, which claims
+  PENDING_APPROVAL → DRAFT with a conditional `updateMany` (a decision that
+  lands first wins and the route says so) and withdraws the open request
+  through `cancelOpenRequest`, telling the approvers. The SAME revision
+  returns to draft — no revision number burned on a document the customer
+  never saw; raising a new revision stays the path once anything was sent.
 - **A revision superseded while PENDING_APPROVAL takes its request with it**
   (2026-10-02). `POST /quotations/:id/revisions` calls
   `cancelOpenRequest('quotation', revisionId, tx, reason, actorId)` in the same
@@ -1312,6 +1351,41 @@ the detail.
   verify-insights asserts both. Every active group is listed, even at zero;
   "No group" is last. The pipeline CSV appends a Groups column. Verify
   scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
+
+## Sales orders (2026-10-07)
+
+SCORO's "Create invoice", under its real name: the document that books a
+quotation's work in operations (`/g-ops/sales-orders`, `gops.sales_orders.*`
+OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
+4622 / 4622.1 and the owner's sample PDF).
+
+- **Raised FROM a quotation only** — the quotation page's "Create Sales
+  Order" panel (in the page, no dialog) with SCORO's three choices: transfer
+  all details, chosen lines, or one summarised line worth the whole
+  quotation. The server builds it from the VALUE revision
+  (`valueRevision()`: approved, else latest) — the revision everything else
+  prices the quotation by.
+- **One quotation, one number family**: the first order takes the next
+  `sales_order` number; every later one is `<base>.1`, `<base>.2`…
+  (progress booking), computed inside the creating transaction
+  (`nextOrderNumber`), so a refused order burns no number and two creates
+  cannot share a suffix.
+- **The money is the quotation's own arithmetic** (`quotationTotals`), and
+  `recalcOrder()` is the only writer of its stored totals. Cost visibility
+  is the quotation's rule (author, `edit_all`, or `gops.costing.view_all`);
+  everybody else gets lines with the cost keys REMOVED server-side
+  (`stripLineCost`), on the JSON and on the paper alike.
+- **DRAFT → ISSUED (booked) → CANCELLED (reason kept)**: Issue claims DRAFT
+  with a conditional update; an issued order refuses the full save but still
+  takes its release references (`PATCH`: SI/BS No., DR No., payment method,
+  reference); Reopen goes back to DRAFT; Delete is DRAFT-only. Editing is
+  one PUT — header and lines together — and saved groups go through
+  `rememberGroups`.
+- **The PDF is the owner's sample**: customer details against the PO and
+  notes, the Group column only when a line carries one, cost + supplier and
+  margin columns ONLY for a caller who may see cost (it is the internal
+  booking record, never the customer's copy — the invoice is G-FIN's),
+  Prepared / Noted / Approved sign-offs, DRAFT watermark note until issued.
 
 ## Quotation PDF template (2026-10-02)
 

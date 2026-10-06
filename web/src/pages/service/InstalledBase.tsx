@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -55,6 +55,7 @@ export interface Asset {
   serialNo: string | null;
   capacity: string | null;
   location: string | null;
+  address: string | null;
   installedAt: string | null;
   commissionedAt: string | null;
   warrantyEndsAt: string | null;
@@ -70,6 +71,7 @@ export interface Asset {
 export function InstalledBase() {
   const { can } = useAuth();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const [creating, setCreating] = useState(false);
   const [reload, setReload] = useState(0);
 
@@ -102,7 +104,7 @@ export function InstalledBase() {
         <div>
           <div>{r.customer.name}</div>
           <div className="faint">
-            {r.site?.name ?? '—'}
+            {r.site?.name ?? r.address ?? '—'}
             {r.location && ` · ${r.location}`}
           </div>
         </div>
@@ -200,11 +202,33 @@ export function InstalledBase() {
           },
         ]}
         actions={
-          can('gops.installed_base.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + Register equipment
+          <>
+            {/* The paper matches the screen: the same q/filters the list holds in the URL.
+                The toolbar's own Export is the Excel-ready CSV twin. */}
+            <button
+              className="btn btn-sm"
+              onClick={() =>
+                openPdf(
+                  `/api/installed-assets/pdf${qs({
+                    search: params.get('q') ?? undefined,
+                    warranty: params.get('warranty') ?? undefined,
+                    uncovered: params.get('uncovered') ?? undefined,
+                    status: params.get('status') ?? undefined,
+                    sort: params.get('sort') ?? undefined,
+                    dir: params.get('dir') ?? undefined,
+                  })}`,
+                  () => {},
+                )
+              }
+            >
+              Export PDF
             </button>
-          ) : null
+            {can('gops.installed_base.create') && (
+              <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+                + Register equipment
+              </button>
+            )}
+          </>
         }
       />
 
@@ -232,16 +256,20 @@ function AssetModal({
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
+  const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
-  const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
+  const [customers, setCustomers] = useState<{ id: string; code: string; name: string }[]>([]);
+  const [customerQ, setCustomerQ] = useState('');
+  const [addingCustomer, setAddingCustomer] = useState(false);
+  const [newIndustryId, setNewIndustryId] = useState('');
+  const [industries, setIndustries] = useState<{ id: string; code: string; name: string }[]>([]);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
+  const [types, setTypes] = useState<string[]>([]);
   const [settings, setSettings] = useState<{ defaultWarrantyMonths: number } | null>(null);
 
   const [form, setForm] = useState({
     customerId: asset?.customer.id ?? '',
-    siteId: asset?.site?.id ?? '',
     jobId: asset?.job?.id ?? '',
     name: asset?.name ?? '',
     manufacturer: asset?.manufacturer ?? '',
@@ -249,6 +277,7 @@ function AssetModal({
     serialNo: asset?.serialNo ?? '',
     capacity: asset?.capacity ?? '',
     location: asset?.location ?? '',
+    address: asset?.address ?? '',
     installedAt: asset?.installedAt?.slice(0, 10) ?? '',
     warrantyEndsAt: asset?.warrantyEndsAt?.slice(0, 10) ?? '',
     status: asset?.status ?? 'ACTIVE',
@@ -256,21 +285,25 @@ function AssetModal({
   });
 
   useEffect(() => {
-    api.get<{ rows: { id: string; name: string }[] }>('/customers?pageSize=200').then((d) => setCustomers(d.rows)).catch(() => {});
     api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
+    api.get<string[]>('/installed-assets/types').then(setTypes).catch(() => {});
     api.get<{ defaultWarrantyMonths: number }>('/aftermarket/settings').then(setSettings).catch(() => {});
+    api.get<typeof industries>('/reference/industries?active=true').then(setIndustries).catch(() => {});
   }, []);
 
+  // The customer is predicted as it is typed — matched on name or code.
   useEffect(() => {
-    if (!form.customerId) {
-      setSites([]);
-      return;
-    }
-    api
-      .get<{ sites: { id: string; name: string }[] }>(`/customers/${form.customerId}`)
-      .then((c) => setSites(c.sites ?? []))
-      .catch(() => setSites([]));
-  }, [form.customerId]);
+    const t = setTimeout(() => {
+      api
+        .get<typeof customers>(`/customers/lookup${qs({ q: customerQ })}`)
+        .then(setCustomers)
+        .catch(() => {});
+    }, 220);
+    return () => clearTimeout(t);
+  }, [customerQ]);
+  // One already picked stays pickable whatever the search box says now.
+  const customerOptions =
+    asset && !customers.some((c) => c.id === asset.customer.id) ? [asset.customer, ...customers] : customers;
 
   // Show what the warranty will be set to when nobody types one.
   const derivedWarranty = (() => {
@@ -288,9 +321,18 @@ function AssetModal({
     setBusy(true);
     setError(null);
     try {
+      let customerId = form.customerId;
+      // "Add as a new customer": filed properly — name and industry — through
+      // the ordinary customer create, so it gets its code and its audit row.
+      if (addingCustomer) {
+        const made = await api.post<{ id: string }>('/customers', {
+          name: customerQ.trim(),
+          industryId: newIndustryId,
+        });
+        customerId = made.id;
+      }
       const payload = {
-        customerId: form.customerId,
-        siteId: form.siteId || null,
+        customerId,
         jobId: form.jobId || null,
         name: form.name,
         manufacturer: form.manufacturer || null,
@@ -298,6 +340,7 @@ function AssetModal({
         serialNo: form.serialNo || null,
         capacity: form.capacity || null,
         location: form.location || null,
+        address: form.address || null,
         installedAt: form.installedAt || null,
         warrantyEndsAt: form.warrantyEndsAt || null,
         status: form.status,
@@ -327,7 +370,11 @@ function AssetModal({
           <button
             className="btn btn-primary"
             onClick={save}
-            disabled={busy || !form.customerId || form.name.trim().length < 2}
+            disabled={
+              busy ||
+              (addingCustomer ? customerQ.trim().length < 2 || !newIndustryId : !form.customerId) ||
+              form.name.trim().length < 2
+            }
           >
             {busy ? 'Saving…' : asset ? 'Save' : 'Register'}
           </button>
@@ -337,37 +384,82 @@ function AssetModal({
       <ErrorBox error={error} />
 
       <div className="grid grid-2">
-        <Field label="Customer">
-          <select
-            value={form.customerId}
-            onChange={(e) => setForm({ ...form, customerId: e.target.value, siteId: '' })}
-          >
-            <option value="">— choose —</option>
-            {customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+        <Field label="Customer" hint={addingCustomer ? undefined : 'Type to find one used before'}>
+          <div className="cal-picker">
+            <input
+              type="search"
+              placeholder="Search customers…"
+              aria-label="Search customers"
+              value={customerQ}
+              onChange={(e) => {
+                setCustomerQ(e.target.value);
+                setAddingCustomer(false);
+              }}
+            />
+            {!addingCustomer && (
+              <select
+                aria-label="Customer"
+                value={form.customerId}
+                onChange={(e) => setForm({ ...form, customerId: e.target.value })}
+              >
+                <option value="">— choose —</option>
+                {customerOptions.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         </Field>
-        <Field label="Site">
-          <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
-            <option value="">— none —</option>
-            {sites.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+        <Field label="Address" hint="Where the machine is">
+          <input
+            value={form.address}
+            onChange={(e) => setForm({ ...form, address: e.target.value })}
+            placeholder="e.g. 12F PNB Makati Center, Ayala Avenue, Makati City"
+          />
         </Field>
       </div>
 
-      <Field label="What is it?">
+      {can('gops.customers.create') && customerQ.trim().length >= 2 && !asset && (
+        <div className={addingCustomer ? 'alert info' : undefined}>
+          {!addingCustomer ? (
+            <button type="button" className="btn btn-sm" onClick={() => setAddingCustomer(true)}>
+              + Add “{customerQ.trim()}” as a new customer
+            </button>
+          ) : (
+            <div className="row ib-add-customer">
+              <span>
+                “{customerQ.trim()}” will be filed as a new customer — every one is classified by industry.
+              </span>
+              <select aria-label="Industry" value={newIndustryId} onChange={(e) => setNewIndustryId(e.target.value)}>
+                <option value="">— industry —</option>
+                {industries.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.code} — {i.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn btn-sm" onClick={() => setAddingCustomer(false)}>
+                Pick an existing one instead
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <Field label="Equipment type" hint="Pick a common one, or type a new one — it is remembered">
         <input
           value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })}
-          placeholder="e.g. PSA Oxygen Generator"
+          list="ib-equipment-types"
+          onChange={(e) => setForm({ ...form, name: e.target.value.toUpperCase() })}
+          placeholder="COMPRESSOR, DRYER, FIRE PUMP…"
         />
+        <datalist id="ib-equipment-types">
+          {types.map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
       </Field>
 
       <div className="grid grid-3">
@@ -389,14 +481,15 @@ function AssetModal({
       </div>
 
       <div className="grid grid-2">
-        <Field label="Capacity / rating">
-          <input
+        <Field label="Specification" hint="Supply voltage, power, flow, pressure, application…">
+          <textarea
+            rows={3}
             value={form.capacity}
             onChange={(e) => setForm({ ...form, capacity: e.target.value })}
-            placeholder="e.g. 40 LPM at 93% purity"
+            placeholder={'e.g. 460 V · 75 kW · 40 LPM at 93% purity · medical oxygen'}
           />
         </Field>
-        <Field label="Where on site">
+        <Field label="Location">
           <input
             value={form.location}
             onChange={(e) => setForm({ ...form, location: e.target.value })}
@@ -572,8 +665,10 @@ export function AssetDetailPage() {
           <dl className="kv">
             <dt>Make and model</dt>
             <dd>{[row.manufacturer, row.model].filter(Boolean).join(' ') || '—'}</dd>
-            <dt>Capacity</dt>
-            <dd>{row.capacity ?? '—'}</dd>
+            <dt>Specification</dt>
+            <dd className="ib-spec">{row.capacity ?? '—'}</dd>
+            <dt>Address</dt>
+            <dd>{row.address ?? row.site?.name ?? '—'}</dd>
             <dt>Location</dt>
             <dd>{row.location ?? '—'}</dd>
             <dt>Installed</dt>

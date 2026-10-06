@@ -159,6 +159,8 @@ async function cleanup() {
   if (quoteTrail.length) {
     await prisma.auditLog.deleteMany({ where: { entityType: 'quotation', entityId: { in: quoteTrail } } });
   }
+  // Sales orders hold their quotation (Restrict), so they go first.
+  await prisma.salesOrder.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   // Quotations route to the seeded sales_manager role, so whoever really holds
   // it was asked about, and told of, the test quotations too.
@@ -2092,6 +2094,151 @@ async function main() {
     const theirRow = (theirSuggest.body as unknown as { title: string; unitCost?: number | null }[]).find((r) => r.title === 'Service kit');
     check('a colleague who reads every quotation is offered the price but never the cost', !!theirRow && !('unitCost' in theirRow), JSON.stringify(theirRow));
     check('two letters at least', ((await http(salesToken, 'GET', '/quotations/suggest?q=S')).body as unknown as unknown[]).length === 0);
+
+    // ── Sales orders: booking a quotation in operations ──────────────────────
+    console.log('\nSales orders (SCORO\u2019s Create invoice)');
+    const soQuote = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Booked plant`,
+      lines: [
+        { group: `${TAG} Installation`, title: 'Work order', description: 'Scope of supply', quantity: 1, unit: 'lot', unitPrice: 73_750, unitCost: 30_000 },
+        { group: `${TAG} Services`, title: 'Fabrication', description: '5 days works', quantity: 1, unit: 'lot', unitPrice: 30_000, unitCost: 20_004.58 },
+      ],
+    });
+    const soQuoteId = String(soQuote.body.id);
+    const so1 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'all' });
+    check('a sales order is created from the quotation with all details', so1.status === 201, so1.text.slice(0, 160));
+    const so1Body = so1.body as unknown as { id: string; number: string; status: string; total: number; lines: { group: string | null; unitCost: number | null }[] };
+    check(
+      'it is a DRAFT carrying the lines, their groups and their cost, and the quotation\u2019s total',
+      so1Body.status === 'DRAFT' &&
+        so1Body.lines.length === 2 &&
+        so1Body.lines[0].group === `${TAG} Installation` &&
+        so1Body.lines[0].unitCost === 30_000 &&
+        money(so1Body.total, 103_750 * 1.12),
+      JSON.stringify(so1Body).slice(0, 220),
+    );
+    check('its number has no suffix — the first booking takes the base', !so1Body.number.includes('.'), so1Body.number);
+    const so2 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'summary' });
+    const so2Body = so2.body as unknown as { number: string; total: number; lines: { title: string | null }[] };
+    check(
+      'the second order on the same quotation is .1 — progress booking, one family',
+      so2.status === 201 && so2Body.number === `${so1Body.number}.1`,
+      so2Body.number,
+    );
+    check(
+      'summarised: one line worth the whole quotation, same total',
+      so2Body.lines.length === 1 && so2Body.lines[0].title === `${TAG} Booked plant` && money(so2Body.total, 103_750 * 1.12),
+      JSON.stringify(so2Body.lines),
+    );
+    const revForPick = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: soQuoteId }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
+    const so3 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'partial', lineIds: [revForPick.items[1].id] });
+    const so3Body = so3.body as unknown as { number: string; subtotal: number; lines: unknown[] };
+    check(
+      'partial: only the chosen line is booked, numbered .2',
+      so3.status === 201 && so3Body.lines.length === 1 && money(so3Body.subtotal, 30_000) && so3Body.number === `${so1Body.number}.2`,
+      `${so3Body.number} ${so3Body.subtotal}`,
+    );
+
+    const otherEdits = await http(otherToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 60 });
+    check('someone else cannot edit the author\u2019s order', otherEdits.status === 403, String(otherEdits.status));
+    const otherReads = await http(otherToken, 'GET', `/sales-orders/${so1Body.id}`);
+    const otherLines = (otherReads.body.lines ?? []) as Record<string, unknown>[];
+    check(
+      'a reader without cost rights gets the lines with the cost keys removed',
+      otherReads.status === 200 && otherReads.body.canSeeCost === false && otherLines.every((l) => !('unitCost' in l)) && !otherReads.text.includes('20004.58'),
+      otherReads.text.slice(0, 120),
+    );
+
+    const edited = await http(salesToken, 'PUT', `/sales-orders/${so1Body.id}`, {
+      poNumber: '4500001134',
+      termsDays: 30,
+      comment: `${TAG} variation order prior to installation`,
+      lines: [
+        { group: `${TAG} Installation`, title: 'Work order', description: 'Scope of supply', quantity: 1, unit: 'lot', unitPrice: 73_750, unitCost: 30_000 },
+        { group: `${TAG} Services`, title: 'Fabrication', description: '5 days works', quantity: 1, unit: 'lot', unitPrice: 0, unitCost: 4_800 },
+        { group: `${TAG} Installation`, title: '3RD PARTY works', description: 'Chipping and restoration', quantity: 1, unit: 'lot', unitPrice: 30_000, unitCost: 20_004.58 },
+      ],
+    });
+    check(
+      'the editor saves header and lines in one PUT and the totals follow',
+      edited.status === 200 && money(Number(edited.body.total), 103_750 * 1.12),
+      `${edited.status} ${edited.body.total}`,
+    );
+
+    const soIssued = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
+    const soIssuedTwice = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
+    check('issuing books it once — a second Issue is refused', soIssued.status === 200 && soIssuedTwice.status === 400, `${soIssued.status} ${soIssuedTwice.status}`);
+    const editIssued = await http(salesToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 45 });
+    check('an issued order refuses the full save — reopen first', editIssued.status === 400, String(editIssued.status));
+    const released = await http(salesToken, 'PATCH', `/sales-orders/${so1Body.id}`, { siNumber: 'SI-4622', drNumber: 'DR-991' });
+    check('but still takes its release references', released.status === 200, String(released.status));
+
+    const soPdfOwner = pdfText(
+      Buffer.from(
+        await (
+          await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
+        ).arrayBuffer(),
+      ),
+    );
+    check(
+      'the PDF is the sample\u2019s shape: customer, PO, the lines, totals — and cost and margin for who may see them',
+      soPdfOwner.includes('SALES ORDER') === false /* house style titles print as given */
+        ? soPdfOwner.includes('Sales Order') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('Margin sum:') && soPdfOwner.includes('SI / BS No.: SI-4622')
+        : false,
+      soPdfOwner.slice(0, 200),
+    );
+    const soPdfOther = pdfText(
+      Buffer.from(
+        await (
+          await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${otherToken}` } })
+        ).arrayBuffer(),
+      ),
+    );
+    check('the same paper for a reader without cost rights carries no cost or margin', !soPdfOther.includes('Margin sum:') && !soPdfOther.includes('20,004.58'));
+
+    const cancelBare = await http(salesToken, 'POST', `/sales-orders/${so3Body.number ? so3.body.id : ''}/cancel`, {});
+    const cancelled = await http(salesToken, 'POST', `/sales-orders/${so3.body.id}/cancel`, { reason: `${TAG} booked too early` });
+    check('cancelling needs its reason, and keeps the record', cancelBare.status === 400 && cancelled.status === 200, `${cancelBare.status} ${cancelled.status}`);
+
+    // ── Pulling a revision back from the approver to edit it ─────────────────
+    console.log('\nPulling a revision back from approval');
+    const pulled = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Pulled back`,
+      lines: [editorLines[2]],
+    });
+    const pulledId = String(pulled.body.id);
+    const pulledR0 = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: pulledId } });
+    const earlyPull = await http(salesToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/withdraw`);
+    check('a draft cannot be pulled back — there is nothing with the approver', earlyPull.status === 400, String(earlyPull.status));
+    await http(salesToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/submit`);
+    const pulledRequest = await prisma.approvalRequest.findFirstOrThrow({
+      where: { documentType: 'quotation', documentId: pulledR0.id, status: 'PENDING' },
+    });
+    const strangerPull = await http(otherToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/withdraw`);
+    check('somebody else cannot pull the author’s quotation back', strangerPull.status === 403, String(strangerPull.status));
+    const pullRes = await http(salesToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/withdraw`);
+    const pulledBack = await prisma.quotationRevision.findUniqueOrThrow({ where: { id: pulledR0.id } });
+    check(
+      'the author pulls it back: the SAME revision returns to draft — no revision number burned',
+      pullRes.status === 200 && pulledBack.status === 'DRAFT' && pulledBack.revision === 0,
+      `${pullRes.status} ${pulledBack.status}`,
+    );
+    const pulledReqAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: pulledRequest.id } });
+    check('its request is withdrawn — CANCELLED, closed, kept', pulledReqAfter.status === 'CANCELLED' && !!pulledReqAfter.closedAt, pulledReqAfter.status);
+    check('and gone from the approver’s queue', !(await pendingFor(manager.id)).some((r) => r.id === pulledRequest.id));
+    let lateDecisionRefused = false;
+    try {
+      await act({ requestId: pulledRequest.id, userId: manager.id, action: 'APPROVED' });
+    } catch {
+      lateDecisionRefused = true;
+    }
+    check('a decision after the pull-back is refused — the request is no longer open', lateDecisionRefused);
+    const editable = await http(salesToken, 'PUT', `/quotations/${pulledId}/revisions/${pulledR0.id}/lines`, {
+      lines: [{ ...editorLines[2], unitPrice: 9_999 }],
+    });
+    check('and its lines can be edited again', editable.status === 200, editable.text.slice(0, 160));
 
     // ── Raising a revision while the last one waits on the approver ──────────
     console.log('\nRaising a revision while the last one waits on the approver');

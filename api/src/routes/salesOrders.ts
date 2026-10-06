@@ -1,0 +1,757 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { Prisma } from '@prisma/client';
+import { prisma } from '../prisma';
+import {
+  handler,
+  parseBody,
+  listQuery,
+  listResult,
+  orderBy,
+  notFound,
+  badRequest,
+  forbidden,
+} from '../http/kit';
+import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { can, canEditRecord } from '../permissions/resolve';
+import { audit } from '../shared/audit';
+import { nextNumber } from '../shared/numbering';
+import { manilaDate } from '../shared/day';
+import { rememberGroups } from '../shared/quotationGroups';
+import {
+  lineAmount,
+  quotationTotals,
+  stripLineCost,
+  QUOTATION_EXTRA_TAX_RATES,
+} from '../shared/quotation';
+import { valueRevision } from '../shared/pipeline';
+import {
+  formatAmount,
+  formatShortDate,
+  renderDocument,
+  type PdfSection,
+  type PdfTotal,
+} from '../shared/pdf';
+
+/**
+ * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
+ * document that books a quotation's work in Gruntech operations
+ * (2026-10-07, the owner's call; patterned on SCORO quote 8442 → invoices
+ * 4622 and 4622.1).
+ *
+ * The rules it lives by:
+ *  - Raised FROM a quotation — all of its value revision, chosen lines, or
+ *    one summarised line — never from nothing. The lead → quotation → order
+ *    chain is what makes the booking traceable.
+ *  - One quotation, one base number: the first order takes the next number
+ *    of the `sales_order` series; every later one is `<base>.1`, `<base>.2`…
+ *    (progress booking), issued inside the transaction.
+ *  - The money arithmetic is the quotation's own (`quotationTotals`), and
+ *    cost visibility is the quotation's own rule: the author, `edit_all`, or
+ *    `gops.costing.view_all` — everybody else gets the lines with the cost
+ *    keys REMOVED, server-side.
+ *  - An internal document: the PDF prints cost and margin to those who may
+ *    see cost. It never goes to the customer — the invoice is G-FIN's.
+ */
+
+export const salesOrderRoutes = Router();
+salesOrderRoutes.use(authenticate);
+
+const d = (v: number | string | Prisma.Decimal) => new Prisma.Decimal(v);
+const num = (v: Prisma.Decimal | number | null | undefined) => (v == null ? 0 : Number(v));
+
+function canSeeOrderCost(me: ReturnType<typeof currentUser>, ownerId: string): boolean {
+  return canEditRecord(me, 'gops', 'sales_orders', ownerId) || can(me, 'gops.costing.view_all');
+}
+
+const ORDER_INCLUDE = {
+  customer: { select: { id: true, code: true, name: true, tin: true, phone: true } },
+  contact: { select: { id: true, name: true, position: true } },
+  quotation: { select: { id: true, number: true, subject: true, siteId: true } },
+  owner: { select: { id: true, name: true, email: true, position: true } },
+} as const;
+
+/** Totals recomputed from the lines — the only writer of an order's money. */
+async function recalcOrder(orderId: string, tx: Prisma.TransactionClient = prisma): Promise<void> {
+  const order = await tx.salesOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    include: { lines: { orderBy: { sortOrder: 'asc' } } },
+  });
+  const totals = quotationTotals({
+    lines: order.lines,
+    discountPct: order.discountPct,
+    vatRate: order.vatRate,
+    vatInclusive: order.vatInclusive,
+  });
+  await tx.salesOrder.update({
+    where: { id: orderId },
+    data: {
+      subtotal: d(totals.subtotal),
+      discountAmount: d(totals.discountAmount),
+      vatAmount: d(totals.vatAmount),
+      total: d(totals.total),
+    },
+  });
+}
+
+/** An order as the API returns it: Decimals as numbers, cost only to those who may see it. */
+function presentOrder(order: Record<string, unknown>, showCost: boolean) {
+  const lines = (order.lines ?? null) as Record<string, unknown>[] | null;
+  const totals = lines
+    ? quotationTotals({
+        lines: lines as { amount: Prisma.Decimal }[],
+        discountPct: order.discountPct as Prisma.Decimal,
+        vatRate: order.vatRate as Prisma.Decimal,
+        vatInclusive: order.vatInclusive as boolean,
+      })
+    : null;
+  const presented: Record<string, unknown> = {
+    ...order,
+    discountPct: num(order.discountPct as Prisma.Decimal),
+    vatRate: num(order.vatRate as Prisma.Decimal),
+    subtotal: num(order.subtotal as Prisma.Decimal),
+    discountAmount: num(order.discountAmount as Prisma.Decimal),
+    vatAmount: num(order.vatAmount as Prisma.Decimal),
+    total: num(order.total as Prisma.Decimal),
+    net: totals ? totals.net : num(order.subtotal as Prisma.Decimal) - num(order.discountAmount as Prisma.Decimal),
+  };
+  if (lines) {
+    presented.lines = lines.map((l, n) => {
+      const line: Record<string, unknown> = {
+        ...l,
+        quantity: num(l.quantity as Prisma.Decimal),
+        unitPrice: num(l.unitPrice as Prisma.Decimal),
+        amount: num(l.amount as Prisma.Decimal),
+      };
+      if (!showCost) return stripLineCost(line);
+      const m = totals!.lines[n];
+      return {
+        ...line,
+        unitCost: l.unitCost == null ? null : num(l.unitCost as Prisma.Decimal),
+        costAmount: m.costAmount,
+        margin: m.margin,
+        marginPct: m.marginPct,
+      };
+    });
+    if (showCost && totals) presented.costPanel = totals.cost;
+  }
+  return presented;
+}
+
+/**
+ * The base number comes from the `sales_order` series once per quotation;
+ * every later order on the same quotation is `<base>.<n>` — SCORO's 4622,
+ * 4622.1 progress booking. Inside the caller's transaction, so a refused
+ * order burns no number and two creates cannot share a suffix.
+ */
+async function nextOrderNumber(tx: Prisma.TransactionClient, quotationId: string): Promise<string> {
+  const existing = await tx.salesOrder.findMany({
+    where: { quotationId },
+    select: { number: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!existing.length) return nextNumber('sales_order', tx);
+  const base = existing[0].number.split('.')[0];
+  const used = new Set(
+    existing.map((o) => (o.number.startsWith(`${base}.`) ? Number(o.number.slice(base.length + 1)) : 0)),
+  );
+  let n = 1;
+  while (used.has(n)) n += 1;
+  return `${base}.${n}`;
+}
+
+// ── List ─────────────────────────────────────────────────────────────────────
+
+salesOrderRoutes.get(
+  '/',
+  requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where: Prisma.SalesOrderWhereInput = {};
+
+    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all');
+    if (onlyOwn || q.scope === 'mine') where.ownerId = me.id;
+    if (q.filters.status && ['DRAFT', 'ISSUED', 'CANCELLED'].includes(q.filters.status)) {
+      where.status = q.filters.status as 'DRAFT' | 'ISSUED' | 'CANCELLED';
+    }
+    if (q.filters.customerId) where.customerId = q.filters.customerId;
+    if (q.filters.quotationId) where.quotationId = q.filters.quotationId;
+    if (q.search) {
+      where.OR = [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { poNumber: { contains: q.search, mode: 'insensitive' } },
+        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+        { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
+        { quotation: { subject: { contains: q.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      prisma.salesOrder.findMany({
+        where,
+        include: ORDER_INCLUDE,
+        orderBy: orderBy(q, ['number', 'orderDate', 'total', 'createdAt'], { createdAt: 'desc' }),
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+      }),
+      prisma.salesOrder.count({ where }),
+    ]);
+    res.json(listResult(rows.map((r) => presentOrder(r as unknown as Record<string, unknown>, false)), total, q));
+  }),
+);
+
+// ── One order ────────────────────────────────────────────────────────────────
+
+salesOrderRoutes.get(
+  '/:id',
+  requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const order = await prisma.salesOrder.findUnique({
+      where: { id: req.params.id },
+      include: {
+        ...ORDER_INCLUDE,
+        lines: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            providerSupplier: { select: { id: true, name: true } },
+            providerUser: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+    if (!order) throw notFound('Sales order not found');
+    if (!me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all') && order.ownerId !== me.id) {
+      throw forbidden('This sales order is someone else’s');
+    }
+    const showCost = canSeeOrderCost(me, order.ownerId);
+    res.json({
+      ...presentOrder(order as unknown as Record<string, unknown>, showCost),
+      canEdit: canEditRecord(me, 'gops', 'sales_orders', order.ownerId),
+      canSeeCost: showCost,
+    });
+  }),
+);
+
+// ── Create from a quotation ──────────────────────────────────────────────────
+
+const createSchema = z.object({
+  quotationId: z.string().min(1),
+  /** SCORO's choice: transfer all details, chosen lines, or one summary line. */
+  mode: z.enum(['all', 'partial', 'summary']).default('all'),
+  /** For `partial`: the quotation items to carry over, by id. */
+  lineIds: z.array(z.string()).max(500).optional(),
+});
+
+salesOrderRoutes.post(
+  '/',
+  require_('gops.sales_orders.create'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(createSchema, req.body);
+
+    const quotation = await prisma.quotation.findUnique({
+      where: { id: body.quotationId },
+      include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } },
+    });
+    if (!quotation) throw notFound('Quotation not found');
+    if (!me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all') && quotation.ownerId !== me.id) {
+      throw forbidden('That quotation is someone else’s');
+    }
+
+    // The revision the quotation is worth: approved, else latest — the one
+    // rule everything else already reads (shared/pipeline.ts).
+    const revision = valueRevision(quotation.revisions);
+    if (!revision) throw badRequest('That quotation has no revision yet');
+    const items = revision.items.filter((i) => !i.isHeading || body.mode !== 'summary');
+    if (!revision.items.some((i) => !i.isHeading)) {
+      throw badRequest('That quotation has no lines to book');
+    }
+
+    const chosen =
+      body.mode === 'partial'
+        ? revision.items.filter((i) => (body.lineIds ?? []).includes(i.id))
+        : revision.items;
+    if (body.mode === 'partial' && !chosen.some((i) => !i.isHeading)) {
+      throw badRequest('Pick at least one line to book');
+    }
+
+    const totals = quotationTotals({
+      lines: revision.items,
+      discountPct: revision.discountPct,
+      vatRate: revision.vatRate,
+      vatInclusive: revision.vatInclusive,
+    });
+
+    const order = await prisma.$transaction(async (tx) => {
+      const number = await nextOrderNumber(tx, quotation.id);
+      const created = await tx.salesOrder.create({
+        data: {
+          number,
+          quotationId: quotation.id,
+          customerId: quotation.customerId,
+          contactId: quotation.contactId,
+          ownerId: me.id,
+          orderDate: manilaDate(new Date()),
+          poNumber: revision.prNumber ?? null,
+          // A summary line already carries the discount inside its one price.
+          discountPct: body.mode === 'summary' ? d(0) : revision.discountPct,
+          vatRate: revision.vatRate,
+          vatInclusive: revision.vatInclusive,
+          lines: {
+            create:
+              body.mode === 'summary'
+                ? [
+                    {
+                      title: quotation.subject,
+                      description: `Per quotation ${quotation.number} R${revision.revision}`,
+                      quantity: d(1),
+                      unit: 'lot',
+                      unitPrice: d(totals.net),
+                      amount: d(totals.net),
+                      sortOrder: 0,
+                      unitCost: d(totals.cost.totalCost),
+                      costAmount: d(totals.cost.totalCost),
+                    },
+                  ]
+                : chosen.map((i, n) => ({
+                    group: i.group,
+                    title: i.title,
+                    description: i.description,
+                    isHeading: i.isHeading,
+                    quantity: i.quantity,
+                    unit: i.unit,
+                    unitPrice: i.unitPrice,
+                    amount: i.amount,
+                    sortOrder: n,
+                    unitCost: i.unitCost,
+                    costAmount: i.costAmount,
+                    providerSupplierId: i.providerSupplierId,
+                    providerUserId: i.providerUserId,
+                    costNote: i.costNote,
+                  })),
+          },
+        },
+      });
+      await recalcOrder(created.id, tx);
+      return tx.salesOrder.findUniqueOrThrow({
+        where: { id: created.id },
+        include: { ...ORDER_INCLUDE, lines: { orderBy: { sortOrder: 'asc' } } },
+      });
+    });
+
+    await audit(
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'CREATED',
+        summary: `Created sales order ${order.number} from quotation ${quotation.number} (${
+          body.mode === 'all' ? 'all details' : body.mode === 'partial' ? `${chosen.length} line(s)` : 'summarised'
+        })`,
+      },
+      req,
+    );
+    res.status(201).json(presentOrder(order as unknown as Record<string, unknown>, true));
+  }),
+);
+
+// ── The one save: header and lines together ──────────────────────────────────
+
+const lineFields = {
+  id: z.string().optional(),
+  group: z.string().trim().max(120).optional().nullable(),
+  isHeading: z.boolean().optional(),
+  title: z.string().trim().max(300).optional().nullable(),
+  description: z.string().optional().nullable(),
+  quantity: z.number().min(0).default(1),
+  unit: z.string().trim().min(1).default('lot'),
+  unitPrice: z.number().min(0).default(0),
+  unitCost: z.number().min(0).optional().nullable(),
+  costNote: z.string().optional().nullable(),
+};
+
+const saveSchema = z.object({
+  orderDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of issue?').optional(),
+  termsDays: z.number().int().min(0).max(365).optional(),
+  paymentMethod: z.string().trim().max(120).optional().nullable(),
+  referenceNo: z.string().trim().max(120).optional().nullable(),
+  poNumber: z.string().trim().max(120).optional().nullable(),
+  comment: z.string().optional().nullable(),
+  contactId: z.string().optional().nullable(),
+  discountPct: z.number().min(0).max(100).optional(),
+  vatRate: z.number().min(0).max(1).optional(),
+  vatInclusive: z.boolean().optional(),
+  lines: z.array(z.object(lineFields)).max(500).optional(),
+});
+
+/** Loads an order and refuses unless this caller may edit it now. */
+async function orderForEdit(req: Parameters<typeof currentUser>[0], id: string, draftOnly = true) {
+  const me = currentUser(req);
+  const order = await prisma.salesOrder.findUnique({ where: { id } });
+  if (!order) throw notFound('Sales order not found');
+  if (!canEditRecord(me, 'gops', 'sales_orders', order.ownerId)) {
+    throw forbidden('Only its author can edit this sales order');
+  }
+  if (draftOnly && order.status !== 'DRAFT') {
+    throw badRequest(`This sales order is ${order.status.toLowerCase()} — reopen it to change it`);
+  }
+  return { me, order };
+}
+
+salesOrderRoutes.put(
+  '/:id',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { me, order } = await orderForEdit(req, req.params.id);
+    const body = parseBody(saveSchema, req.body);
+
+    // The quotation's tax choices apply here too: the company rate, 8%, 6%,
+    // 0%, or the rate the order was created with.
+    if (body.vatRate !== undefined) {
+      const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+      const allowed = [d(0), company?.vatRate ?? d(0.12), ...QUOTATION_EXTRA_TAX_RATES.map((o) => d(o.rate)), order.vatRate];
+      if (!allowed.some((r) => r.equals(d(body.vatRate!)))) {
+        throw badRequest('VAT on a sales order is the company rate, 8%, 6%, or 0%');
+      }
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.salesOrder.update({
+        where: { id: order.id },
+        data: {
+          ...(body.orderDate ? { orderDate: new Date(`${body.orderDate}T00:00:00Z`) } : {}),
+          ...(body.termsDays !== undefined ? { termsDays: body.termsDays } : {}),
+          ...(body.paymentMethod !== undefined ? { paymentMethod: body.paymentMethod || null } : {}),
+          ...(body.referenceNo !== undefined ? { referenceNo: body.referenceNo || null } : {}),
+          ...(body.poNumber !== undefined ? { poNumber: body.poNumber || null } : {}),
+          ...(body.comment !== undefined ? { comment: body.comment || null } : {}),
+          ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
+          ...(body.discountPct !== undefined ? { discountPct: d(body.discountPct) } : {}),
+          ...(body.vatRate !== undefined ? { vatRate: d(body.vatRate) } : {}),
+          ...(body.vatInclusive !== undefined ? { vatInclusive: body.vatInclusive } : {}),
+        },
+      });
+      if (body.lines) {
+        for (const [i, line] of body.lines.entries()) {
+          if (line.isHeading && !(line.title ?? '').trim()) throw badRequest(`Line ${i + 1}: give the subheading its text`);
+          if (!line.isHeading && !(line.title ?? '').trim() && !(line.description ?? '').trim()) {
+            throw badRequest(`Line ${i + 1}: give the line a product title or a description`);
+          }
+        }
+        await tx.salesOrderLine.deleteMany({ where: { orderId: order.id } });
+        await tx.salesOrderLine.createMany({
+          data: body.lines.map((l, i) => {
+            if (l.isHeading) {
+              return {
+                orderId: order.id,
+                isHeading: true,
+                title: (l.title ?? '').trim(),
+                description: '',
+                quantity: d(0),
+                unit: l.unit || 'lot',
+                unitPrice: d(0),
+                amount: d(0),
+                sortOrder: i,
+              };
+            }
+            const hasCost = l.unitCost !== undefined && l.unitCost !== null;
+            return {
+              orderId: order.id,
+              isHeading: false,
+              group: l.group || null,
+              title: l.title || null,
+              description: l.description ?? '',
+              quantity: d(l.quantity),
+              unit: l.unit,
+              unitPrice: d(l.unitPrice),
+              amount: lineAmount(l.quantity, l.unitPrice),
+              sortOrder: i,
+              unitCost: hasCost ? d(l.unitCost!) : null,
+              costAmount: hasCost ? lineAmount(l.quantity, l.unitCost!) : null,
+              costNote: l.costNote || null,
+            };
+          }),
+        });
+        await rememberGroups(tx, body.lines.map((l) => l.group));
+      }
+      await recalcOrder(order.id, tx);
+    });
+
+    const fresh = await prisma.salesOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { ...ORDER_INCLUDE, lines: { orderBy: { sortOrder: 'asc' } } },
+    });
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'UPDATED', summary: `Updated sales order ${order.number}` },
+      req,
+    );
+    res.json(presentOrder(fresh as unknown as Record<string, unknown>, canSeeOrderCost(me, fresh.ownerId)));
+  }),
+);
+
+/** The release references and small corrections an ISSUED order may still take. */
+salesOrderRoutes.patch(
+  '/:id',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { order } = await orderForEdit(req, req.params.id, false);
+    if (order.status === 'CANCELLED') throw badRequest('A cancelled sales order stays as it was');
+    const body = parseBody(
+      z.object({
+        siNumber: z.string().trim().max(60).optional().nullable(),
+        drNumber: z.string().trim().max(60).optional().nullable(),
+        paymentMethod: z.string().trim().max(120).optional().nullable(),
+        referenceNo: z.string().trim().max(120).optional().nullable(),
+      }),
+      req.body,
+    );
+    const updated = await prisma.salesOrder.update({
+      where: { id: order.id },
+      data: {
+        ...(body.siNumber !== undefined ? { siNumber: body.siNumber || null } : {}),
+        ...(body.drNumber !== undefined ? { drNumber: body.drNumber || null } : {}),
+        ...(body.paymentMethod !== undefined ? { paymentMethod: body.paymentMethod || null } : {}),
+        ...(body.referenceNo !== undefined ? { referenceNo: body.referenceNo || null } : {}),
+      },
+    });
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'UPDATED', summary: `Updated sales order ${order.number}`, before: order, after: updated },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ── Status: issue, reopen, cancel ────────────────────────────────────────────
+
+salesOrderRoutes.post(
+  '/:id/issue',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { order } = await orderForEdit(req, req.params.id);
+    const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
+    if (!hasLine) throw badRequest('Add at least one line before issuing it');
+    // Claimed, never simply written: two Issue clicks book once.
+    const claimed = await prisma.salesOrder.updateMany({
+      where: { id: order.id, status: 'DRAFT' },
+      data: { status: 'ISSUED' },
+    });
+    if (!claimed.count) throw badRequest('This sales order moved a moment ago — reload to see where it stands');
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'COMPLETED', summary: `Issued sales order ${order.number} — booked at ${formatAmount(num(order.total))}` },
+      req,
+    );
+    res.json({ ok: true, status: 'ISSUED' });
+  }),
+);
+
+salesOrderRoutes.post(
+  '/:id/reopen',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { order } = await orderForEdit(req, req.params.id, false);
+    const claimed = await prisma.salesOrder.updateMany({
+      where: { id: order.id, status: 'ISSUED' },
+      data: { status: 'DRAFT' },
+    });
+    if (!claimed.count) throw badRequest('Only an issued sales order can be reopened');
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'UPDATED', summary: `Reopened sales order ${order.number}` },
+      req,
+    );
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+salesOrderRoutes.post(
+  '/:id/cancel',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { me, order } = await orderForEdit(req, req.params.id, false);
+    const { reason } = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled') }), req.body);
+    const claimed = await prisma.salesOrder.updateMany({
+      where: { id: order.id, status: { in: ['DRAFT', 'ISSUED'] } },
+      data: { status: 'CANCELLED', cancelReason: reason },
+    });
+    if (!claimed.count) throw badRequest('This sales order is already cancelled');
+    await audit(
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'CANCELLED',
+        summary: `Cancelled sales order ${order.number} — ${reason}`,
+        actorId: me.id,
+      },
+      req,
+    );
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+salesOrderRoutes.delete(
+  '/:id',
+  require_('gops.sales_orders.delete'),
+  handler(async (req, res) => {
+    const { order } = await orderForEdit(req, req.params.id);
+    await prisma.salesOrder.delete({ where: { id: order.id } });
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'DELETED', summary: `Deleted sales order ${order.number}`, before: order },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ── The paper ────────────────────────────────────────────────────────────────
+
+/**
+ * Patterned on the owner's sample (Sale Order 4622): customer details against
+ * the PO and notes, the line table, totals — and, for a caller who may see
+ * cost, the cost and margin columns the sample carries, because this is the
+ * internal booking record, not the customer's copy.
+ */
+salesOrderRoutes.get(
+  '/:id/pdf',
+  requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const order = await prisma.salesOrder.findUnique({
+      where: { id: req.params.id },
+      include: {
+        ...ORDER_INCLUDE,
+        lines: {
+          orderBy: { sortOrder: 'asc' },
+          include: { providerSupplier: { select: { name: true } }, providerUser: { select: { name: true } } },
+        },
+      },
+    });
+    if (!order) throw notFound('Sales order not found');
+    if (!me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all') && order.ownerId !== me.id) {
+      throw forbidden('This sales order is someone else’s');
+    }
+    const showCost = canSeeOrderCost(me, order.ownerId);
+
+    const site = order.quotation.siteId
+      ? await prisma.customerSite.findUnique({ where: { id: order.quotation.siteId }, select: { address: true, city: true } })
+      : null;
+    const totals = quotationTotals({
+      lines: order.lines,
+      discountPct: order.discountPct,
+      vatRate: order.vatRate,
+      vatInclusive: order.vatInclusive,
+    });
+
+    const hasGroup = order.lines.some((l) => !l.isHeading && l.group);
+    const head = [
+      ...(hasGroup ? ['Group'] : []),
+      'Product name and additional info',
+      'Qty',
+      'Unit price',
+      'Total',
+      ...(showCost ? ['Cost + supplier', 'Margin'] : []),
+    ];
+    const widths = [...(hasGroup ? [1.1] : []), 3.4, 0.8, 1.1, 1.1, ...(showCost ? [1.4, 1] : [])];
+    const align: ('left' | 'right' | 'center')[] = [
+      ...(hasGroup ? ['left' as const] : []),
+      'left',
+      'right',
+      'right',
+      'right',
+      ...(showCost ? ['right' as const, 'right' as const] : []),
+    ];
+    const rows = order.lines.map((l, n) => {
+      if (l.isHeading) return { heading: (l.title ?? '').trim() };
+      const m = totals.lines[n];
+      const qty = Number(l.quantity);
+      return [
+        ...(hasGroup ? [l.group ?? ''] : []),
+        { title: (l.title ?? '').trim() || l.description, body: (l.title ?? '').trim() ? l.description || undefined : undefined },
+        `${Number.isInteger(qty) ? qty : qty.toString()} ${l.unit}`,
+        formatAmount(num(l.unitPrice)),
+        formatAmount(num(l.amount)),
+        ...(showCost
+          ? [
+              {
+                title: l.costAmount == null ? '' : formatAmount(num(l.costAmount)),
+                body: l.providerSupplier?.name ?? l.providerUser?.name ?? undefined,
+              },
+              m.margin == null ? '' : formatAmount(m.margin),
+            ]
+          : []),
+      ];
+    });
+
+    const ratePct = `${Number(d(num(order.vatRate)).mul(100).toFixed(2))}%`;
+    const totalRows: PdfTotal[] = [{ label: 'Subtotal:', value: formatAmount(totals.subtotal) }];
+    if (totals.discountAmount > 0) {
+      totalRows.push({ label: `Discount (${num(order.discountPct).toFixed(num(order.discountPct) % 1 ? 2 : 0)}%):`, value: `-${formatAmount(totals.discountAmount)}` });
+      if (!order.vatInclusive) totalRows.push({ label: 'Sum without tax:', value: formatAmount(totals.net) });
+    }
+    totalRows.push({ label: order.vatInclusive ? `VAT included (${ratePct}):` : `Tax (${ratePct}):`, value: formatAmount(totals.vatAmount) });
+    totalRows.push({ label: 'Total (PHP):', value: formatAmount(totals.total), bold: true });
+    if (showCost) {
+      totalRows.push({ label: 'Cost (PHP):', value: formatAmount(totals.cost.totalCost) });
+      totalRows.push({ label: 'Margin sum:', value: formatAmount(totals.cost.totalMargin) });
+    }
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'parties',
+        left: {
+          label: 'CUSTOMER DETAILS',
+          name: order.customer.name,
+          lines: [
+            [site?.address, site?.city].filter(Boolean).join(', '),
+            order.contact ? `Attention: ${order.contact.name}${order.contact.position ? `, ${order.contact.position}` : ''}` : '',
+            order.customer.phone ?? '',
+            order.customer.tin ? `TIN: ${order.customer.tin}` : '',
+          ].filter(Boolean),
+        },
+        right: {
+          label: 'ORDER',
+          name: `Per quotation ${order.quotation.number}`,
+          lines: [
+            order.poNumber ? `Purchase Order No. ${order.poNumber}` : '',
+            `Payment terms: ${order.termsDays} days`,
+            order.paymentMethod ? `Payment method: ${order.paymentMethod}` : '',
+            order.referenceNo ? `Reference: ${order.referenceNo}` : '',
+            order.siNumber ? `SI / BS No.: ${order.siNumber}` : '',
+            order.drNumber ? `DR No.: ${order.drNumber}` : '',
+          ].filter(Boolean),
+        },
+      },
+      ...(order.comment ? [{ kind: 'text', title: 'Notes', body: order.comment } as PdfSection] : []),
+      { kind: 'table', head, widths, align, rows },
+      { kind: 'totals', rows: totalRows },
+      ...(order.status === 'CANCELLED' && order.cancelReason
+        ? [{ kind: 'text', title: 'Cancelled', body: order.cancelReason } as PdfSection]
+        : []),
+    ];
+
+    const pdf = await renderDocument({
+      title: 'Sales Order',
+      documentNumber: order.number,
+      date: order.orderDate,
+      reference: `${order.customer.name} · ${order.quotation.subject}`,
+      sections,
+      signatories: [
+        { role: 'Prepared by', name: order.owner.name, position: order.owner.position ?? undefined, at: order.createdAt },
+        { role: 'Noted by' },
+        { role: 'Approved by' },
+      ],
+      footerNote: order.status === 'DRAFT' ? 'DRAFT — not yet issued.' : undefined,
+    });
+
+    await audit(
+      { entityType: 'sales_order', entityId: order.id, action: 'EXPORTED', summary: `Printed sales order ${order.number}` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="SO-${order.number}.pdf"`);
+    res.send(pdf);
+  }),
+);
+
+/** Which of a quotation's revisions' lines the create panel offers — its value revision's. */
+export { valueRevision };

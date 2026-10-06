@@ -105,6 +105,8 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'customers', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
       { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
       { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
+      { key: 'sales_orders', group: 'Sales', label: 'Sales Orders', path: '/g-ops/sales-orders', actions: OWNED, phase: 9,
+        note: 'Books a quotation in operations — SCORO\'s "Create invoice"' },
       // The SCORO history, read-only. Continuing an open SCORO quote raises a live
       // quotation under the quotations permission; 'create' here is the admin import.
       { key: 'quote_archive', group: 'Sales', label: 'SCORO Archive', path: '/g-ops/quote-archive', actions: ['view_all', 'export', 'create'], phase: 3, hidden: true,

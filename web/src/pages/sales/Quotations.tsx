@@ -370,6 +370,7 @@ export function QuotationDetail() {
   const [lostReason, setLostReason] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [optionId, setOptionId] = useState<string | null>(null);
+  const [bookingOrder, setBookingOrder] = useState(false);
   const [reload, setReload] = useState(0);
   const navigate = useNavigate();
 
@@ -805,6 +806,18 @@ export function QuotationDetail() {
             <button className="btn" onClick={printPdf} disabled={!revision}>
               PDF
             </button>
+            {can('gops.sales_orders.create') && (
+              <button
+                className="btn"
+                aria-expanded={bookingOrder}
+                aria-controls="qd-create-so"
+                onClick={() => setBookingOrder((v) => !v)}
+                disabled={!quotation.revisions.some((r) => r.items.some((i) => !i.isHeading))}
+                title="Book this quotation in operations — SCORO's Create invoice"
+              >
+                Create Sales Order
+              </button>
+            )}
             {canSubmit &&
               (quotation.approvalOptions ?? []).map((o) => (
                 <Checkbox
@@ -866,6 +879,12 @@ export function QuotationDetail() {
               </div>
             );
           })()}
+        {bookingOrder && (
+          <CreateSalesOrderPanel
+            quotation={quotation}
+            onClose={() => setBookingOrder(false)}
+          />
+        )}
       </section>
 
       {revision && (
@@ -1307,3 +1326,97 @@ const initials = (name: string) =>
     .toUpperCase();
 
 
+
+/**
+ * SCORO's "Create invoice" choice, in the page (no dialog): transfer all
+ * details, pick lines for partial booking, or one summarised line. The
+ * server builds the order from the quotation's VALUE revision — approved,
+ * else latest — the same revision everything else prices it by; the picker
+ * here lists that revision's lines.
+ */
+function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDetail; onClose: () => void }) {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [mode, setMode] = useState<'all' | 'partial' | 'summary'>('all');
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  const valueRev =
+    quotation.revisions.find((r) => r.status === 'APPROVED') ??
+    quotation.revisions.reduce<QuotationDetail['revisions'][number] | null>(
+      (best, r) => (best === null || r.revision > best.revision ? r : best),
+      null,
+    );
+  const lines = (valueRev?.items ?? []).filter((i) => !i.isHeading);
+
+  async function proceed() {
+    setBusy(true);
+    setError(null);
+    try {
+      const made = await api.post<{ id: string; number: string }>('/sales-orders', {
+        quotationId: quotation.id,
+        mode,
+        ...(mode === 'partial' ? { lineIds: [...picked] } : {}),
+      });
+      toast('ok', `Sales order ${made.number} created`);
+      navigate(`/g-ops/sales-orders/${made.id}/edit`);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div id="qd-create-so" className="qd-route so-create" role="group" aria-label="Create Sales Order">
+      <ErrorBox error={error} />
+      <p className="qd-route-label">
+        Books R{valueRev?.revision} in operations{valueRev?.status === 'APPROVED' ? '' : ' (no revision is approved yet — the latest is used)'}. A
+        second order on this quotation gets a .1, .2 number.
+      </p>
+      <div className="so-create-modes">
+        <label className="checkbox">
+          <input type="radio" name="so-mode" checked={mode === 'all'} onChange={() => setMode('all')} />
+          <span>Transfer all details</span>
+        </label>
+        <label className="checkbox">
+          <input type="radio" name="so-mode" checked={mode === 'partial'} onChange={() => setMode('partial')} />
+          <span>Select lines for partial booking</span>
+        </label>
+        <label className="checkbox">
+          <input type="radio" name="so-mode" checked={mode === 'summary'} onChange={() => setMode('summary')} />
+          <span>Summarize line items</span>
+        </label>
+      </div>
+      {mode === 'partial' && (
+        <div className="so-create-lines">
+          {lines.map((i) => (
+            <label key={i.id} className="checkbox">
+              <input
+                type="checkbox"
+                checked={picked.has(i.id)}
+                onChange={(e) => {
+                  const next = new Set(picked);
+                  if (e.target.checked) next.add(i.id);
+                  else next.delete(i.id);
+                  setPicked(next);
+                }}
+              />
+              <span>
+                {(i.title ?? '').trim() || i.description} <span className="mono faint">{formatMoney(i.amount)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+      <div className="row so-create-actions">
+        <button className="btn btn-primary btn-sm" onClick={() => void proceed()} disabled={busy || (mode === 'partial' && picked.size === 0)}>
+          {busy ? 'Creating…' : 'Proceed'}
+        </button>
+        <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}

@@ -23,6 +23,7 @@ import { Suppliers, SupplierDetail } from './pages/masters/Suppliers';
 import { Employees } from './pages/masters/Employees';
 import { Items } from './pages/masters/Items';
 import { Categories, Warehouses } from './pages/masters/Reference';
+import { SalesOrders, SalesOrderDetail, SalesOrderEditor } from './pages/sales/SalesOrders';
 import { Leads, LeadDetail } from './pages/sales/Leads';
 import { Costings } from './pages/sales/Costings';
 import { CostingDetailPage } from './pages/sales/CostingDetail';
@@ -371,6 +372,30 @@ function Routed() {
           element={
             <GuardAny permissions={['gops.leads.view_all', 'gops.leads.view_own']}>
               <LeadDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/sales-orders"
+          element={
+            <GuardAny permissions={['gops.sales_orders.view_all', 'gops.sales_orders.view_own']}>
+              <SalesOrders />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/sales-orders/:id"
+          element={
+            <GuardAny permissions={['gops.sales_orders.view_all', 'gops.sales_orders.view_own']}>
+              <SalesOrderDetail />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/sales-orders/:id/edit"
+          element={
+            <GuardAny permissions={['gops.sales_orders.view_all', 'gops.sales_orders.view_own']}>
+              <SalesOrderEditor />
             </GuardAny>
           }
         />

@@ -65,6 +65,11 @@ const ROLES: RoleSeed[] = [
       'gops.quote_archive.view_all',
       ...VIEW_OWN_SELF('gops', 'costing'),
       'gops.costing.export',
+      // Books their own quotations as sales orders, and sees everyone's.
+      ...VIEW_OWN_SELF('gops', 'sales_orders'),
+      'gops.sales_orders.view_all',
+      'gops.sales_orders.export',
+      'gops.sales_orders.delete',
       'gops.dashboard.view_all',
       'gops.pipeline.view_all',
       'gops.projects.view_all',
@@ -88,6 +93,7 @@ const ROLES: RoleSeed[] = [
       ['gops', 'customers'],
       ['gops', 'calendar'],
       ['gops', 'quotations'],
+      ['gops', 'sales_orders'],
       ['gops', 'pipeline'],
       ['gops', 'costing'],
       ['gops', 'partners'],
@@ -979,6 +985,18 @@ async function main() {
   {
     const added = await seedQuotationGroups();
     if (added) console.log(`  · Added ${added} quotation group(s) from the lines that use them`);
+  }
+
+  // The register's common equipment types (the owner's list, CAPSLOCK), in
+  // this order; anything typed on a registration since sorts after them.
+  // createMany + skipDuplicates: a second run adds none, renames none.
+  {
+    const COMMON = ['COMPRESSOR', 'DRYER', 'FILTER', 'GENERATOR', 'PUMPS', 'VFD', 'INSTRUMENT', 'FIRE PUMP', 'OTHERS'];
+    const made = await prisma.equipmentType.createMany({
+      data: COMMON.map((name, i) => ({ name, key: name, sortOrder: i })),
+      skipDuplicates: true,
+    });
+    if (made.count) console.log(`  · Seeded ${made.count} equipment type(s)`);
   }
 
   // Costing.finalAt arrived after costings were already final. Their last

@@ -31,7 +31,11 @@ import {
 import {
   formatAmount,
   formatDate,
+  formatDateTime,
+  formatMoney,
   formatShortDate,
+  renderDocument,
+  type PdfSection,
   type PdfTotal,
   type Signatory,
 } from '../shared/pdf';
@@ -97,36 +101,45 @@ function presentLead(lead: Record<string, unknown>) {
   return { ...lead, estimatedValue: num(lead.estimatedValue as Prisma.Decimal) };
 }
 
+/**
+ * Which leads a list query means — one rule for the list AND its PDF export,
+ * so the paper never shows a different set from the screen it was printed off.
+ */
+function leadListWhere(me: ReturnType<typeof currentUser>, q: ReturnType<typeof listQuery>): Prisma.LeadWhereInput {
+  const where: Prisma.LeadWhereInput = {};
+
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all');
+  if (onlyOwn || q.scope === 'mine') where.assignedToId = me.id;
+
+  if (q.search) {
+    where.OR = [
+      { companyName: { contains: q.search, mode: 'insensitive' } },
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { contactPerson: { contains: q.search, mode: 'insensitive' } },
+      { description: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  if (q.filters.status) {
+    // One status, or several comma-separated — the quotation editor asks for
+    // every open one at once. An unknown value is a 400, not a Prisma 500.
+    const asked = q.filters.status.split(',').map((s) => s.trim()).filter(Boolean);
+    const unknown = asked.filter((s) => !(Object.values(LeadStatus) as string[]).includes(s));
+    if (unknown.length) throw badRequest(`Unknown lead status: ${unknown.join(', ')}`);
+    where.status = { in: asked as LeadStatus[] };
+  }
+  if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
+  if (q.filters.createdById) where.createdById = q.filters.createdById;
+  if (q.filters.source) where.source = q.filters.source;
+  return where;
+}
+
 leadRoutes.get(
   '/',
   requireAny('gops.leads.view_all', 'gops.leads.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.LeadWhereInput = {};
-
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all');
-    if (onlyOwn || q.scope === 'mine') where.assignedToId = me.id;
-
-    if (q.search) {
-      where.OR = [
-        { companyName: { contains: q.search, mode: 'insensitive' } },
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { contactPerson: { contains: q.search, mode: 'insensitive' } },
-        { description: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-    if (q.filters.status) {
-      // One status, or several comma-separated — the quotation editor asks for
-      // every open one at once. An unknown value is a 400, not a Prisma 500.
-      const asked = q.filters.status.split(',').map((s) => s.trim()).filter(Boolean);
-      const unknown = asked.filter((s) => !(Object.values(LeadStatus) as string[]).includes(s));
-      if (unknown.length) throw badRequest(`Unknown lead status: ${unknown.join(', ')}`);
-      where.status = { in: asked as LeadStatus[] };
-    }
-    if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
-    if (q.filters.createdById) where.createdById = q.filters.createdById;
-    if (q.filters.source) where.source = q.filters.source;
+    const where = leadListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.lead.findMany({
@@ -154,6 +167,223 @@ leadRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+const LEAD_STATUS_LABEL: Record<string, string> = {
+  NEW: 'New',
+  CONTACTED: 'Contacted',
+  QUALIFIED: 'Qualified',
+  SITE_VISIT: 'Site visit',
+  COSTING: 'Costing',
+  QUOTATION_CREATED: 'Quotation created',
+  QUOTATION_SUBMITTED: 'Quotation submitted',
+  NEGOTIATION: 'Negotiation',
+  WON: 'Won',
+  LOST: 'Lost',
+  ON_HOLD: 'On hold',
+};
+
+/**
+ * The leads list on paper (2026-10-07, the owner's call: "for reporting
+ * purposes"). The SAME query as the list — search, status, owner, added-by,
+ * scope — through `leadListWhere`, so the paper matches the screen it was
+ * printed off. Declared above `/:id`, or that route swallows it.
+ */
+leadRoutes.get(
+  '/pdf',
+  requireAny('gops.leads.view_all', 'gops.leads.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const rows = await prisma.lead.findMany({
+      where: leadListWhere(me, q),
+      include: {
+        assignedTo: { select: { name: true } },
+        createdBy: { select: { name: true } },
+        customer: { select: { name: true } },
+      },
+      orderBy: orderBy(q, ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt'], {
+        createdAt: 'desc',
+      }),
+      take: 1000,
+    });
+
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      q.filters.status ? `status ${q.filters.status.split(',').map((v) => LEAD_STATUS_LABEL[v] ?? v).join(', ')}` : null,
+      q.scope === 'mine' ? 'mine only' : null,
+    ].filter(Boolean);
+
+    const pdf = await renderDocument({
+      title: 'Leads',
+      date: new Date(),
+      reference: `${rows.length} lead(s)${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Company and contact', 'Status', 'Est. value', 'Prob.', 'Owner', 'Added by', 'Expected close'],
+          widths: [1.1, 2.6, 1, 1.2, 0.6, 1.3, 1.3, 1.1],
+          align: ['left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
+          rows: rows.map((l) => [
+            l.number,
+            { title: l.companyName, body: l.contactPerson ?? undefined },
+            LEAD_STATUS_LABEL[l.status] ?? l.status,
+            l.estimatedValue == null ? '' : formatAmount(num(l.estimatedValue)),
+            `${l.probability}%`,
+            l.assignedTo.name,
+            l.createdBy?.name ?? '',
+            l.expectedClosing ? formatShortDate(l.expectedClosing) : '',
+          ]),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            {
+              label: 'Estimated value, total:',
+              value: formatMoney(rows.reduce((t, l) => t + num(l.estimatedValue), 0)),
+              bold: true,
+            },
+          ],
+        },
+      ],
+      signatories: [],
+    });
+
+    await audit(
+      { entityType: 'lead', entityId: 'list', action: 'EXPORTED', summary: `Exported the leads list as PDF (${rows.length} lead(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="leads.pdf"`);
+    res.send(pdf);
+  }),
+);
+
+/** One lead, every detail, on paper — the same visibility rule as reading it. */
+leadRoutes.get(
+  '/:id/pdf',
+  requireAny('gops.leads.view_all', 'gops.leads.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const lead = await prisma.lead.findUnique({
+      where: { id: req.params.id },
+      include: {
+        assignedTo: { select: { name: true } },
+        createdBy: { select: { name: true } },
+        customer: { select: { name: true, code: true } },
+        site: { select: { name: true } },
+        quotations: {
+          select: {
+            number: true,
+            subject: true,
+            outcome: true,
+            revisions: { select: { revision: true, status: true, total: true }, orderBy: { revision: 'desc' }, take: 1 },
+          },
+        },
+        costings: {
+          select: { number: true, title: true, status: true, contractValue: true, owner: { select: { name: true } } },
+          orderBy: { createdAt: 'desc' },
+        },
+        activities: { orderBy: { startsAt: 'asc' }, include: { assignedTo: { select: { name: true } } } },
+      },
+    });
+    if (!lead) throw notFound('Lead not found');
+    if (!me.isSuperAdmin && !me.permissions.has('gops.leads.view_all') && lead.assignedToId !== me.id) {
+      throw forbidden('This lead is assigned to someone else');
+    }
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'fields',
+        columns: 2,
+        fields: [
+          { label: 'Status', value: LEAD_STATUS_LABEL[lead.status] ?? lead.status },
+          { label: 'Company', value: lead.companyName },
+          { label: 'Customer record', value: lead.customer ? `${lead.customer.code} — ${lead.customer.name}` : 'Not linked yet' },
+          { label: 'Site', value: lead.site?.name ?? '' },
+          { label: 'Contact person', value: lead.contactPerson ?? '' },
+          { label: 'Email', value: lead.contactEmail ?? '' },
+          { label: 'Phone', value: lead.contactPhone ?? '' },
+          { label: 'Address', value: lead.address ?? '' },
+          { label: 'Enquiry came via', value: lead.source ?? '' },
+          { label: 'Added by', value: `${lead.createdBy?.name ?? 'Unknown'}, ${formatDateTime(lead.createdAt)}` },
+          { label: 'Owner', value: lead.assignedTo.name },
+          { label: 'Expected close', value: lead.expectedClosing ? formatShortDate(lead.expectedClosing) : '' },
+          { label: 'Estimated value', value: lead.estimatedValue == null ? '' : formatMoney(num(lead.estimatedValue)) },
+          { label: 'Probability', value: `${lead.probability}%` },
+          {
+            label: 'Weighted',
+            value: lead.estimatedValue == null ? '' : formatMoney((num(lead.estimatedValue) * lead.probability) / 100),
+          },
+          {
+            label: 'Next action',
+            value: [lead.nextAction, lead.nextActionDate ? formatShortDate(lead.nextActionDate) : null].filter(Boolean).join(' — '),
+          },
+        ].filter((f) => f.value !== ''),
+      },
+    ];
+    if (lead.description) sections.push({ kind: 'text', title: 'Product inquiry', body: lead.description });
+    if (lead.status === 'LOST' && lead.lostReason) sections.push({ kind: 'text', title: 'Lost because', body: lead.lostReason });
+    if (lead.costings.length) {
+      sections.push({
+        kind: 'table',
+        title: 'Costings',
+        head: ['Number', 'Title', 'Contract value', 'Status', 'Prepared by'],
+        widths: [1.2, 2.6, 1.3, 1.2, 1.4],
+        align: ['left', 'left', 'right', 'left', 'left'],
+        rows: lead.costings.map((c) => [c.number, c.title, formatAmount(num(c.contractValue)), c.status.replace(/_/g, ' '), c.owner.name]),
+      });
+    }
+    if (lead.quotations.length) {
+      sections.push({
+        kind: 'table',
+        title: 'Quotations',
+        head: ['Number', 'Subject', 'Latest revision', 'Total', 'Status'],
+        widths: [1.2, 2.6, 1.2, 1.3, 1.2],
+        align: ['left', 'left', 'left', 'right', 'left'],
+        rows: lead.quotations.map((qt) => [
+          qt.number,
+          qt.subject,
+          qt.revisions[0] ? `R${qt.revisions[0].revision} ${qt.revisions[0].status.toLowerCase().replace(/_/g, ' ')}` : '',
+          qt.revisions[0] ? formatAmount(num(qt.revisions[0].total)) : '',
+          qt.outcome.toLowerCase().replace(/_/g, ' '),
+        ]),
+      });
+    }
+    if (lead.activities.length) {
+      sections.push({
+        kind: 'table',
+        title: 'Activities',
+        head: ['When', 'Type', 'What', 'Who', 'Status'],
+        widths: [1.5, 1, 2.6, 1.3, 0.9],
+        rows: lead.activities.map((a) => [
+          formatDateTime(a.startsAt),
+          a.type.toLowerCase().replace(/_/g, ' '),
+          a.subject,
+          a.assignedTo.name,
+          a.status.toLowerCase(),
+        ]),
+      });
+    }
+    if (lead.notes) sections.push({ kind: 'text', title: 'Notes', body: lead.notes });
+
+    const pdf = await renderDocument({
+      title: 'Lead',
+      documentNumber: lead.number,
+      date: lead.createdAt,
+      reference: lead.companyName,
+      sections,
+      signatories: [],
+    });
+
+    await audit(
+      { entityType: 'lead', entityId: lead.id, action: 'EXPORTED', summary: `Printed lead ${lead.number}` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${lead.number}.pdf"`);
+    res.send(pdf);
   }),
 );
 
@@ -1990,6 +2220,57 @@ quotationRoutes.post(
     }
 
     res.json({ ok: true });
+  }),
+);
+
+/**
+ * Pulling a revision back from approval (2026-10-07, the owner's call): the
+ * author noticed something while it sits with the approver, and must be able
+ * to edit it BEFORE the approver gets to it — without burning a revision
+ * number on a document the customer never saw. The claim is conditional, so a
+ * decision that lands first wins and this returns "already decided"; the open
+ * request is withdrawn through cancelOpenRequest, which tells the approvers,
+ * so nobody decides a document that is being rewritten.
+ */
+quotationRoutes.post(
+  '/:id/revisions/:revisionId/withdraw',
+  require_('gops.quotations.edit_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id } });
+    if (!quotation) throw notFound('Quotation not found');
+    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
+      throw forbidden('Only the author can edit this quotation');
+    }
+    const revision = await prisma.quotationRevision.findFirst({
+      where: { id: req.params.revisionId, quotationId: req.params.id },
+    });
+    if (!revision) throw notFound('Revision not found');
+    if (revision.status !== 'PENDING_APPROVAL') {
+      throw badRequest(`Revision ${revision.revision} is not with the approver — nothing to pull back`);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.quotationRevision.updateMany({
+        where: { id: revision.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      if (!claimed.count) {
+        throw badRequest('The approver decided it a moment ago — reload to see where it stands');
+      }
+      await cancelOpenRequest('quotation', revision.id, tx, `pulled back to draft by ${me.name}`, me.id);
+    });
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'UPDATED',
+        summary: `Pulled revision ${revision.revision} of ${quotation.number} back from approval to draft`,
+      },
+      req,
+    );
+    res.json({ ok: true, status: 'DRAFT' });
   }),
 );
 

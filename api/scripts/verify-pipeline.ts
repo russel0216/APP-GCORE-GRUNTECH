@@ -21,6 +21,7 @@
  */
 
 import bcrypt from 'bcryptjs';
+import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -501,6 +502,67 @@ async function main() {
     expected.status === 200 && afterClose?.expectedClosing?.toISOString().slice(0, 10) === '2026-10-31',
     `${expected.status}`,
   );
+
+  // ── Leads on paper ───────────────────────────────────────────────────────
+  console.log('\nLeads as PDF');
+  const pdfText = (pdf: Buffer): string => {
+    const raw = pdf.toString('latin1');
+    const out: string[] = [];
+    const stream = /stream\r?\n/g;
+    let m: RegExpExecArray | null;
+    while ((m = stream.exec(raw))) {
+      const start = m.index + m[0].length;
+      const end = raw.indexOf('endstream', start);
+      if (end < 0) continue;
+      let body: string;
+      try {
+        body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+      } catch {
+        continue;
+      }
+      for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+        let piece = '';
+        for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+          piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+        }
+        if (piece) out.push(piece);
+      }
+    }
+    return out.join('\n');
+  };
+  const fetchPdf = async (token: string, path: string) => {
+    const r = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    return { status: r.status, bytes: Buffer.from(await r.arrayBuffer()) };
+  };
+
+  const leadPdf = await fetchPdf(managerToken, `/leads/${bareLead.id}/pdf`);
+  const leadPdfText = pdfText(leadPdf.bytes);
+  check(
+    'GET /leads/:id/pdf renders the lead: number, company, who added it',
+    leadPdf.status === 200 &&
+      leadPdf.bytes.subarray(0, 5).toString() === '%PDF-' &&
+      leadPdfText.includes(bareLead.number) &&
+      leadPdfText.includes(`${TAG} Bare Lead`) &&
+      leadPdfText.includes(manager.name),
+    `${leadPdf.status}`,
+  );
+  check('its enquiry prints in full, both lines', leadPdfText.includes('Two PSA oxygen generators') && leadPdfText.includes('with manifold'));
+  const deniedPdf = await fetchPdf(sellerToken, `/leads/${bareLead.id}/pdf`);
+  check("someone else's lead is refused on paper exactly as on screen", deniedPdf.status === 403, `${deniedPdf.status}`);
+
+  const listPdf = await fetchPdf(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}`);
+  const listPdfText = pdfText(listPdf.bytes);
+  check(
+    'GET /leads/pdf prints the filtered list — every tagged lead, and the total',
+    listPdf.status === 200 && listPdfText.includes(`${TAG} Bare Lead`) && listPdfText.includes(`${TAG} Not On File`) && listPdfText.includes('Estimated value, total:'),
+    `${listPdf.status}`,
+  );
+  const narrowedPdf = pdfText((await fetchPdf(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}&status=NEW`)).bytes);
+  check('and obeys the list’s own filters', narrowedPdf.includes(`${TAG} Not On File`) && !narrowedPdf.includes(`${TAG} Bare Lead`));
+  const exportedPdf = await prisma.auditLog.findFirst({
+    where: { entityType: 'lead', entityId: 'list', action: 'EXPORTED', actorId: manager.id },
+  });
+  check('the list export left an audit row', !!exportedPdf);
 
   // ── 6. The number preview ────────────────────────────────────────────────
   console.log('\nThe next quotation number');

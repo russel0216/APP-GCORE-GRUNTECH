@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Attachments } from '../../components/Attachments';
@@ -348,11 +348,33 @@ export function Leads() {
           { key: 'createdById', label: 'Added by', options: people.map((p) => ({ value: p.id, label: p.name })) },
         ]}
         actions={
-          can('gops.leads.create') ? (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + Add lead
+          <>
+            {/* The paper matches the screen: the same q/scope/filters the list holds in the URL. */}
+            <button
+              className="btn btn-sm"
+              onClick={() =>
+                openPdf(
+                  `/api/leads/pdf${qs({
+                    search: params.get('q') ?? undefined,
+                    scope: params.get('scope') ?? undefined,
+                    status: params.get('status') ?? undefined,
+                    assignedToId: params.get('assignedToId') ?? undefined,
+                    createdById: params.get('createdById') ?? undefined,
+                    sort: params.get('sort') ?? undefined,
+                    dir: params.get('dir') ?? undefined,
+                  })}`,
+                  () => {},
+                )
+              }
+            >
+              Export PDF
             </button>
-          ) : null
+            {can('gops.leads.create') && (
+              <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+                + Add lead
+              </button>
+            )}
+          </>
         }
       />
 
@@ -498,6 +520,9 @@ export function LeadDetail() {
                 Create quotation
               </Link>
             ))}
+          <button className="btn" onClick={() => openPdf(`/api/leads/${lead.id}/pdf`, () => setError(new Error('The PDF could not be made')))}>
+            PDF
+          </button>
           {lead.canEdit && (
             <button className="btn" onClick={() => setEditing(true)}>
               Modify

@@ -105,6 +105,8 @@ async function cleanup() {
   await prisma.serviceVisit.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
   await prisma.installedAsset.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  // Equipment types the test registrations remembered.
+  await prisma.equipmentType.deleteMany({ where: { key: { startsWith: TAG } } });
   await prisma.reportTemplate.deleteMany({ where: { key: { startsWith: 'zzam-' } } });
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
@@ -1630,6 +1632,46 @@ async function main() {
       'a warranty end date is derived from the install date when nobody typed one',
       derived.status === 201 && String(derived.body.warrantyEndsAt).startsWith('2027-05-31'),
       `${derived.status} ${derived.body.warrantyEndsAt}`,
+    );
+
+    // The register's equipment types and address (2026-10-07).
+    const seededTypes = await api(engineerToken, 'GET', '/installed-assets/types');
+    check(
+      "GET /installed-assets/types offers the owner's common types, FIRE PUMP among them",
+      seededTypes.status === 200 && Array.isArray(seededTypes.body) && (seededTypes.body as string[]).includes('FIRE PUMP') && (seededTypes.body as string[]).includes('COMPRESSOR'),
+      JSON.stringify(seededTypes.body).slice(0, 160),
+    );
+    const typed = await api(engineerToken, 'POST', '/installed-assets', {
+      customerId: customer.id,
+      name: `${TAG} BOOSTER SET`,
+      address: `${TAG} 12F Makati Center, Ayala Avenue`,
+      capacity: '460 V · 75 kW',
+      location: 'Plant room',
+    });
+    check(
+      'an asset carries its address and specification',
+      typed.status === 201 && typed.body.address === `${TAG} 12F Makati Center, Ayala Avenue` && typed.body.capacity === '460 V · 75 kW',
+      `${typed.status}`,
+    );
+    const rememberedType = await prisma.equipmentType.findUnique({ where: { key: `${TAG} BOOSTER SET` } });
+    check('a type typed on a registration is remembered for the next one', !!rememberedType, String(rememberedType));
+    const foundByAddress = await api(managerToken, 'GET', `/installed-assets?search=${encodeURIComponent('Ayala Avenue')}`);
+    check(
+      'and the register searches the address too',
+      foundByAddress.status === 200 && (foundByAddress.body.rows as { id: string }[]).some((r) => r.id === typed.body.id),
+    );
+    const basePdfRes = await fetch(`${BASE}/installed-assets/pdf?search=${encodeURIComponent(TAG)}`, {
+      headers: { Authorization: `Bearer ${managerToken}` },
+    });
+    const basePdf = Buffer.from(await basePdfRes.arrayBuffer());
+    check(
+      'GET /installed-assets/pdf prints the register as the screen filters it',
+      basePdfRes.status === 200 && basePdf.subarray(0, 5).toString() === '%PDF-' && basePdf.length > 1000,
+      `${basePdfRes.status}`,
+    );
+    check(
+      'and the export left an audit row',
+      !!(await prisma.auditLog.findFirst({ where: { entityType: 'installed_asset', entityId: 'list', action: 'EXPORTED' } })),
     );
 
     const bulk = await api(engineerToken, 'POST', `/installed-assets/from-job/${project.id}`, {
