@@ -177,3 +177,14 @@ ul.svc-legend {
     grid-template-columns: 1fr;
   }
 }
+
+/* The register's inline "add as a new customer" row, and a multi-line spec. */
+.ib-add-customer {
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.ib-spec {
+  white-space: pre-wrap;
+}

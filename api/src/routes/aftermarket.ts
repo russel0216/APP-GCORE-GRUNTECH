@@ -22,6 +22,7 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import type { ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { formatShortDate, renderDocument } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
 import { registerSchedule } from './workspace';
 import { nextNumber } from '../shared/numbering';
@@ -103,47 +104,57 @@ function presentAsset(row: AssetRow, warningDays: number) {
   };
 }
 
+/**
+ * Which assets a register query means — one rule for the list AND its PDF
+ * export, so the paper matches the screen it was printed off.
+ */
+function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: number): Prisma.InstalledAssetWhereInput {
+  const where: Prisma.InstalledAssetWhereInput = {};
+
+  const status = asEnum(AssetStatus, q.filters.status);
+  if (status) where.status = status;
+  if (q.filters.customerId) where.customerId = q.filters.customerId;
+  if (q.filters.siteId) where.siteId = q.filters.siteId;
+  if (q.filters.jobId) where.jobId = q.filters.jobId;
+
+  const today = dayKey(new Date());
+  if (q.filters.warranty === 'EXPIRED') where.warrantyEndsAt = { lt: today };
+  if (q.filters.warranty === 'EXPIRING') {
+    const horizon = new Date(today);
+    horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
+    where.warrantyEndsAt = { gte: today, lte: horizon };
+  }
+  if (q.filters.warranty === 'ACTIVE') {
+    const horizon = new Date(today);
+    horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
+    where.warrantyEndsAt = { gt: horizon };
+  }
+  // The commercially interesting set: installed, out of warranty or about to
+  // be, and covered by nothing.
+  if (q.filters.uncovered === 'true') {
+    where.contracts = { none: { contract: { status: 'ACTIVE' } } };
+  }
+
+  if (q.search) {
+    where.OR = [
+      { code: { contains: q.search, mode: 'insensitive' } },
+      { name: { contains: q.search, mode: 'insensitive' } },
+      { serialNo: { contains: q.search, mode: 'insensitive' } },
+      { model: { contains: q.search, mode: 'insensitive' } },
+      { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      { address: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  return where;
+}
+
 assetRoutes.get(
   '/',
   require_('gops.installed_base.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const where: Prisma.InstalledAssetWhereInput = {};
-
-    const status = asEnum(AssetStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    if (q.filters.siteId) where.siteId = q.filters.siteId;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-
-    const today = dayKey(new Date());
-    if (q.filters.warranty === 'EXPIRED') where.warrantyEndsAt = { lt: today };
-    if (q.filters.warranty === 'EXPIRING') {
-      const horizon = new Date(today);
-      horizon.setUTCDate(horizon.getUTCDate() + settings.expiryWarningDays);
-      where.warrantyEndsAt = { gte: today, lte: horizon };
-    }
-    if (q.filters.warranty === 'ACTIVE') {
-      const horizon = new Date(today);
-      horizon.setUTCDate(horizon.getUTCDate() + settings.expiryWarningDays);
-      where.warrantyEndsAt = { gt: horizon };
-    }
-    // The commercially interesting set: installed, out of warranty or about to
-    // be, and covered by nothing.
-    if (q.filters.uncovered === 'true') {
-      where.contracts = { none: { contract: { status: 'ACTIVE' } } };
-    }
-
-    if (q.search) {
-      where.OR = [
-        { code: { contains: q.search, mode: 'insensitive' } },
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { serialNo: { contains: q.search, mode: 'insensitive' } },
-        { model: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = assetListWhere(q, settings.expiryWarningDays);
 
     const [rows, total] = await Promise.all([
       prisma.installedAsset.findMany({
@@ -161,6 +172,108 @@ assetRoutes.get(
     res.json(listResult(rows.map((r) => presentAsset(r, settings.expiryWarningDays)), total, q));
   }),
 );
+
+/** The name trimmed, single-spaced and upper-cased: one equipment type per spelling. */
+const typeKey = (name: string) => name.trim().replace(/\s+/g, ' ').toUpperCase();
+
+/**
+ * Remembers the equipment types the register was given, so the next
+ * registration can pick rather than retype — the quotation-groups pattern.
+ * Existing rows are never overwritten; the seeded common types keep their
+ * order and everything typed since sorts after them, alphabetically.
+ */
+async function rememberEquipmentTypes(names: (string | null | undefined)[]): Promise<void> {
+  const byKey = new Map<string, string>();
+  for (const raw of names) {
+    const key = typeKey(raw ?? '');
+    if (key && !byKey.has(key)) byKey.set(key, key.slice(0, 120));
+  }
+  if (!byKey.size) return;
+  await prisma.equipmentType.createMany({
+    data: [...byKey].map(([key, name]) => ({ key, name })),
+    skipDuplicates: true,
+  });
+}
+
+/** What the register's Equipment type field suggests. Above `/:id`, the route-order trap. */
+assetRoutes.get(
+  '/types',
+  require_('gops.installed_base.view_all'),
+  handler(async (_req, res) => {
+    const rows = await prisma.equipmentType.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { name: true } });
+    res.json(rows.map((r) => r.name));
+  }),
+);
+
+/**
+ * The register on paper (2026-10-07, the owner's call) — the SAME query as
+ * the list, through `assetListWhere`, so the paper matches the screen. The
+ * CSV twin is the list's own Export; this is the one you hand to somebody.
+ */
+assetRoutes.get(
+  '/pdf',
+  require_('gops.installed_base.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const settings = await aftermarketSettings();
+    const rows = await prisma.installedAsset.findMany({
+      where: assetListWhere(q, settings.expiryWarningDays),
+      include: assetInclude,
+      orderBy: orderBy(q, ['code', 'name', 'warrantyEndsAt', 'installedAt', 'createdAt'], { createdAt: 'desc' }),
+      take: 1000,
+    });
+
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      q.filters.warranty ? `warranty ${q.filters.warranty.toLowerCase()}` : null,
+      q.filters.uncovered === 'true' ? 'no active contract' : null,
+      q.filters.status ? `status ${q.filters.status.toLowerCase()}` : null,
+    ].filter(Boolean);
+
+    const pdf = await renderDocument({
+      title: 'Installed Base',
+      date: new Date(),
+      reference: `${rows.length} machine(s)${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
+          widths: [1, 2.3, 2.3, 1.3, 1, 1.3, 0.9],
+          rows: rows.map((r) => {
+            const warranty = expiryState(r.warrantyEndsAt, settings.expiryWarningDays);
+            return [
+              r.code,
+              {
+                title: r.name,
+                body: [[r.manufacturer, r.model].filter(Boolean).join(' '), r.serialNo ? `S/N ${r.serialNo}` : null]
+                  .filter(Boolean)
+                  .join(' · ') || undefined,
+              },
+              { title: r.customer.name, body: r.address ?? r.site?.name ?? undefined },
+              r.location ?? '',
+              r.installedAt ? formatShortDate(r.installedAt) : '',
+              r.warrantyEndsAt
+                ? `${formatShortDate(r.warrantyEndsAt)} (${(WARRANTY_WORD[warranty.state] ?? warranty.state).toLowerCase()})`
+                : 'not recorded',
+              r.status.toLowerCase(),
+            ];
+          }),
+        },
+      ],
+      signatories: [],
+    });
+
+    await audit(
+      { entityType: 'installed_asset', entityId: 'list', action: 'EXPORTED', summary: `Exported the installed base as PDF (${rows.length} machine(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="installed-base.pdf"`);
+    res.send(pdf);
+  }),
+);
+
+const WARRANTY_WORD: Record<string, string> = { ACTIVE: 'in warranty', EXPIRING: 'expiring', EXPIRED: 'expired', NONE: '' };
 
 assetRoutes.get(
   '/:id',
@@ -242,6 +355,7 @@ const assetSchema = z.object({
   serialNo: z.string().optional().nullable(),
   capacity: z.string().optional().nullable(),
   location: z.string().optional().nullable(),
+  address: z.string().trim().max(500).optional().nullable(),
   installedAt: z.string().optional().nullable(),
   commissionedAt: z.string().optional().nullable(),
   warrantyEndsAt: z.string().optional().nullable(),
@@ -296,6 +410,7 @@ assetRoutes.post(
           serialNo: body.serialNo || null,
           capacity: body.capacity || null,
           location: body.location || null,
+          address: body.address || null,
           installedAt,
           commissionedAt: body.commissionedAt ? asDate(body.commissionedAt, 'Commissioned on') : null,
           warrantyEndsAt,
@@ -307,6 +422,7 @@ assetRoutes.post(
       });
     });
 
+    await rememberEquipmentTypes([body.name]);
     await audit(
       {
         entityType: 'installed_asset',
@@ -342,6 +458,7 @@ assetRoutes.patch(
         ...(body.serialNo !== undefined ? { serialNo: body.serialNo || null } : {}),
         ...(body.capacity !== undefined ? { capacity: body.capacity || null } : {}),
         ...(body.location !== undefined ? { location: body.location || null } : {}),
+        ...(body.address !== undefined ? { address: body.address || null } : {}),
         ...(body.installedAt !== undefined
           ? { installedAt: body.installedAt ? asDate(body.installedAt, 'Installed on') : null }
           : {}),
@@ -357,6 +474,7 @@ assetRoutes.patch(
       include: assetInclude,
     });
 
+    if (body.name) await rememberEquipmentTypes([body.name]);
     await audit(
       {
         entityType: 'installed_asset',

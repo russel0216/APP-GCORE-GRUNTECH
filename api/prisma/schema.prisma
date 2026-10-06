@@ -3530,6 +3530,18 @@ enum AssetStatus {
 /// The register is what makes aftermarket possible at all: without it nobody
 /// can answer "what did we put in that hospital, and when does its warranty
 /// run out".
+/// The equipment types the register suggests — COMPRESSOR, DRYER, FILTER…
+/// (seeded, CAPSLOCK) plus any typed on a registration since. A list, not a
+/// reference: the asset keeps its type as text in `name`.
+model EquipmentType {
+  id        String   @id @default(cuid())
+  name      String
+  /// The name trimmed, single-spaced, upper-cased: one type per spelling.
+  key       String   @unique
+  sortOrder Int      @default(99)
+  createdAt DateTime @default(now())
+}
+
 model InstalledAsset {
   id     String      @id @default(cuid())
   code   String      @unique
@@ -3549,12 +3561,19 @@ model InstalledAsset {
   itemId String?
   item   Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
 
+  /// The equipment type — COMPRESSOR, DRYER, FIRE PUMP… — suggested from
+  /// EquipmentType and remembered there when a new one is typed.
   name         String
   manufacturer String?
   model        String?
   serialNo     String?
+  /// Specification: supply voltage, power, flow, pressure, application…
   capacity     String?
+  /// Where on the premises the machine stands ("Plant room, 2nd floor").
   location     String?
+  /// Where the machine is, as an address — the register asks for this rather
+  /// than a CustomerSite; `siteId` stays for assets registered by turnover.
+  address      String?
 
   installedAt    DateTime? @db.Date
   commissionedAt DateTime? @db.Date

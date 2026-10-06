@@ -155,10 +155,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,310 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+**2,316 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
 masters 54, sales 291, costing 120, pipeline 52, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
-evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
+evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -847,6 +847,24 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 
 ### Aftermarket: Service Schedule and job orders
 
+- **The register asks for an equipment type, an address and a specification**
+  (2026-10-07, the owner's call). "Equipment type" is still
+  `InstalledAsset.name` — text, with suggestions from `EquipmentType`
+  (seeded CAPSLOCK: COMPRESSOR, DRYER, FILTER, GENERATOR, PUMPS, VFD,
+  INSTRUMENT, FIRE PUMP, OTHERS; anything typed since is remembered through
+  `rememberEquipmentTypes`, upper-cased, `GET /installed-assets/types`).
+  `address` is where the machine is, free text — the form no longer offers
+  the CustomerSite picker, but `siteId` stays and is still written by the
+  turnover flow; screens show `site?.name ?? address`. `capacity` is now
+  labelled Specification (voltage, power, flow, pressure, application);
+  `location` is "Location". The form's Customer is predicted from
+  `/customers/lookup` as it is typed, and — for a `gops.customers.create`
+  holder — "Add as a new customer" files one properly (name + industry)
+  through the ordinary `POST /customers` before registering.
+- **The register prints**: `GET /installed-assets/pdf` (above `/:id`) is the
+  list as the screen filters it, through `assetListWhere()`, the list's own
+  where-builder; audited EXPORTED with entityId `list`. The toolbar's own
+  Export stays the Excel-ready CSV twin.
 - **`regenerateSchedule` only touches GENERATED visits** (`sequence: { not:
   null }` in both the delete and the kept count). A hand-booked call-out or a job
   order's visit has no sequence and must survive; this `where` is the one place
