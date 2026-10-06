@@ -5,6 +5,7 @@ import { useAuth } from '../../../lib/auth';
 import { DataList, type Column } from '../../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../../components/ui';
+import { NumberInput } from '../../../components/NumberInput';
 
 /**
  * Courses — the Academy's master (item 13).
@@ -465,11 +466,11 @@ function CourseModal({
           </Field>
           <div className="grid grid-2">
             <Field label="Hours" required>
-              <input type="number" min={0} step="0.5" value={form.hours} onChange={(e) => setForm({ ...form, hours: e.target.value })} />
+              <NumberInput kind="count" min={0} step="0.5" value={form.hours} onChange={(e) => setForm({ ...form, hours: e.target.value })} />
             </Field>
             <Field label="Valid for (months)" hint="Blank = never expires. Changing it applies from the next completion.">
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={1}
                 step={1}
                 value={form.validityMonths}

@@ -49,6 +49,7 @@ import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownField
 import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
 // The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
 import { resolveTemplate as editorResolve, emptyFieldsIn } from '../../web/src/lib/pdfTemplate';
+import { cleanNumberText, editNumberText, formatNumberText, isPartialNumber } from '../../web/src/lib/number';
 import {
   MAX_ROWS,
   columnName,
@@ -1457,6 +1458,35 @@ async function main() {
   check(
     'and a selector with nothing left to say is not stored as an empty rule',
     editor.rules['.empty'] === undefined,
+  );
+
+  // ── Numeric inputs (web/src/lib/number.ts) ─────────────────────────────────
+  console.log('\nNumeric inputs');
+  check(
+    'money and quantities print with commas and two decimals',
+    formatNumberText(1562.2, 'money') === '1,562.20' && formatNumberText('1250000', 'quantity') === '1,250,000.00',
+    `${formatNumberText(1562.2, 'money')} ${formatNumberText('1250000', 'quantity')}`,
+  );
+  check(
+    'a value is never rounded for display: a 3-dp quantity keeps its third decimal',
+    formatNumberText('1.125', 'quantity') === '1.125' && formatNumberText(0.5, 'percent') === '0.50',
+  );
+  check(
+    'counts print whole with commas, a year prints plain',
+    formatNumberText(12500, 'count') === '12,500' && formatNumberText(7.5, 'count') === '7.5' && formatNumberText(2026, 'plain') === '2026',
+  );
+  check(
+    'typed commas are accepted and dropped, and only a number can be typed',
+    cleanNumberText('1,250.50') === '1250.50' &&
+      isPartialNumber('12.') &&
+      isPartialNumber('-') &&
+      !isPartialNumber('-', false) &&
+      !isPartialNumber('1.2.3') &&
+      !isPartialNumber('12a'),
+  );
+  check(
+    'empty stays empty, and the edit text has no commas',
+    formatNumberText('', 'money') === '' && formatNumberText(null, 'money') === '' && editNumberText('1,000.5') === '1000.5' && editNumberText(42) === '42',
   );
 
   // ── Spreadsheet viewer (web/src/lib/spreadsheet*.ts) ───────────────────────

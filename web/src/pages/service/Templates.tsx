@@ -15,6 +15,7 @@ import {
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { KINDS, type Template, type TemplateField, type TemplateSection } from './Reports';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Report templates — "report templates are data" (model §4.5).
@@ -772,8 +773,8 @@ export function AftermarketSettings() {
               label="Warranty length (months)"
               hint="Applied from the install date when nobody types an end date"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={240}
                 value={settings.defaultWarrantyMonths}
@@ -781,8 +782,8 @@ export function AftermarketSettings() {
               />
             </Field>
             <Field label="Months between PM visits" hint="3 is quarterly — the usual for a plant">
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={1}
                 max={24}
                 value={settings.defaultFrequencyMonths}
@@ -797,8 +798,8 @@ export function AftermarketSettings() {
               label="Flag expiry this far ahead (days)"
               hint="How much notice the renewal pipeline gives you"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={1}
                 max={365}
                 value={settings.expiryWarningDays}
@@ -809,8 +810,8 @@ export function AftermarketSettings() {
               label="A visit counts as missed after (days)"
               hint="Past its due date with nobody attending"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={180}
                 value={settings.missedAfterDays}

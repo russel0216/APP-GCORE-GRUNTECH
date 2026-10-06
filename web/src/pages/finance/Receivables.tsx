@@ -16,6 +16,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { todayLocal } from '../../lib/day';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Accounts Receivable.
@@ -411,8 +412,8 @@ function RaiseInvoiceModal({
           />
         </Field>
         <Field label="Terms (days)" hint={`Due ${formatDate(dueDate)}`}>
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={0}
             max={365}
             value={terms}
@@ -994,8 +995,8 @@ export function RecordPaymentModal({
                 <td className="mono">{t.number}</td>
                 <td className="right mono">{formatMoney(t.outstanding)}</td>
                 <td className="right">
-                  <input
-                    type="number"
+                  <NumberInput
+                    kind="money"
                     step="0.01"
                     // An advance is all-or-nothing, so its only non-zero value is the whole of it.
                     min={0}

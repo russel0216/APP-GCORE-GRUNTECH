@@ -19,6 +19,7 @@ import {
   useToast,
   type Tone,
 } from '../../../components/ui';
+import { NumberInput } from '../../../components/NumberInput';
 
 /**
  * Training sessions — G-HR › Academy (item 13).
@@ -577,8 +578,8 @@ export function SessionModal({
           <input value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })} />
         </Field>
         <Field label="Capacity" hint="Blank = no limit.">
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={1}
             step={1}
             value={form.capacity}
@@ -942,9 +943,9 @@ export function SessionDetail() {
                         {s.course.requiresAssessment && (
                           <td className="right">
                             {s.canEdit ? (
-                              <input
+                              <NumberInput
+                                kind="decimal"
                                 className="academy-score"
-                                type="number"
                                 min={0}
                                 max={100}
                                 step="0.5"

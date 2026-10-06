@@ -20,6 +20,7 @@ import {
 } from '../../components/ui';
 import { RecordPaymentModal, paymentLink } from './Receivables';
 import { todayLocal } from '../../lib/day';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Expense claims — money someone spent out of their own pocket — and
@@ -467,8 +468,8 @@ export function NewClaimModal({
                     />
                   </td>
                   <td>
-                    <input
-                      type="number"
+                    <NumberInput
+                      kind="money"
                       step="0.01"
                       min={0}
                       aria-label={`Line ${i + 1} amount`}

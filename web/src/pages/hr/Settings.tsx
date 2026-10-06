@@ -6,6 +6,7 @@ import type { LeaveType } from './Leave';
 import { ProbationCard } from './settings/ProbationCard';
 import { ClearanceChecklistCard } from './settings/ClearanceChecklistCard';
 import { AcademyCard } from './settings/AcademyCard';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * HR settings — the working day, the breaks, the overtime premium, the leave
@@ -154,8 +155,8 @@ export function HrSettingsPage() {
               label="Grace period (minutes)"
               hint="Arriving within this of the start time is not counted as late"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={120}
                 value={settings.graceMinutes}
@@ -166,8 +167,8 @@ export function HrSettingsPage() {
               label="Unpaid break (minutes)"
               hint="Deducted from a full day's worked hours, not from a short visit"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={240}
                 value={settings.breakMinutes}
@@ -178,8 +179,8 @@ export function HrSettingsPage() {
               label="Hours in a normal day"
               hint="Used to turn a daily rate into an hourly one"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={1}
                 max={24}
                 step={0.5}
@@ -211,8 +212,8 @@ export function HrSettingsPage() {
               label="Break deducted (minutes)"
               hint="Only taken off overtime that actually spans the break"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={240}
                 value={settings.dinnerBreakMinutes}
@@ -223,8 +224,8 @@ export function HrSettingsPage() {
               label="Overtime premium"
               hint="Philippine law sets at least 1.25× the hourly rate for ordinary-day overtime"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="decimal"
                 min={1}
                 max={5}
                 step={0.05}
@@ -245,8 +246,8 @@ export function HrSettingsPage() {
               label="Match threshold"
               hint="Lower is stricter. 0.6 is the library default; 0.5 turns away more genuine people, 0.7 lets more strangers through."
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="decimal"
                 min={0.3}
                 max={0.9}
                 step={0.01}
@@ -406,8 +407,8 @@ function LeaveTypeModal({
           />
         </Field>
         <Field label="Days per year">
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={0}
             max={365}
             step={0.5}

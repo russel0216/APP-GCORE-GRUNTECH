@@ -129,13 +129,27 @@ four databases and four copies of "customer".
     equal). A page mounting two DataLists at once passes `urlState={false}` on
     one of them, or they share `?page=`.
 
+17. **Every numeric input is `components/NumberInput.tsx`** (2026-10-06, the
+    owner's call) — never `<input type="number">`, never a hand-rolled
+    `inputMode` text box. It takes `kind`: `money` / `quantity` / `percent`
+    (commas, at least 2 decimals), `count` (commas, whole), `decimal` (commas,
+    its own decimals) or `plain` (a year: no commas). It shows the plain number
+    while focused, accepts typed commas, refuses a keystroke that cannot be
+    part of a number, and hands `onChange` `{ target: { value } }` with the
+    commas removed — so a handler written for a number box works unchanged.
+    `min`/`max` go through `setCustomValidity`, so `checkValidity()` still
+    sees them; the arrows step by `step`. A value is never rounded for
+    display (a 3-dp quantity shows its third decimal). The rules are
+    `lib/number.ts`, DOM-free and pinned by verify-foundation. `Field` wires
+    its label to it because it carries a static `fieldControl`.
+
 ## Verification
 
 ```bash
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,275 assertions across twenty-two scripts** (counted 2026-10-06): foundation 217,
+**2,280 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
 masters 54, sales 278, costing 120, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,

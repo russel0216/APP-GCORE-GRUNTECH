@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
 //  CATEGORIES — cost categories, item categories and industries
@@ -382,8 +383,8 @@ function CostCategoryModal({
         />
       </Field>
       <Field label="Sort order">
-        <input
-          type="number"
+        <NumberInput
+          kind="count"
           value={form.sortOrder}
           onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })}
         />
@@ -487,8 +488,8 @@ function IndustryModal({
         />
       </Field>
       <Field label="Sort order">
-        <input
-          type="number"
+        <NumberInput
+          kind="count"
           value={form.sortOrder}
           onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })}
         />

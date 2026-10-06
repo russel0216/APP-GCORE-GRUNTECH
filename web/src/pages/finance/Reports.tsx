@@ -15,6 +15,7 @@ import {
 } from '../../components/ui';
 import { BarList, Donut, Meter, Panel, Stat, type Slice } from '../../components/charts';
 import { IconBadge } from '../../components/Icon';
+import { NumberInput } from '../../components/NumberInput';
 
 /** Money arrives as a float; round to centavos before it is charted. */
 const cents = (n: number) => Math.round(n * 100) / 100;
@@ -1136,8 +1137,8 @@ export function FinanceSettings() {
               label="Default payment terms (days)"
               hint="Used when nothing else is said — on invoices we raise and bills we enter"
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={365}
                 value={settings.defaultTermsDays}
@@ -1167,8 +1168,8 @@ export function FinanceSettings() {
               you should not have underpays a supplier and is awkward to unwind.
             </p>
             <Field label="Goods (%)">
-              <input
-                type="number"
+              <NumberInput
+                kind="percent"
                 step="0.001"
                 min={0}
                 max={1}
@@ -1177,8 +1178,8 @@ export function FinanceSettings() {
               />
             </Field>
             <Field label="Services / subcontract (%)">
-              <input
-                type="number"
+              <NumberInput
+                kind="percent"
                 step="0.001"
                 min={0}
                 max={1}
@@ -1209,8 +1210,8 @@ export function FinanceSettings() {
               label="Days to liquidate"
               hint="Counted from the day the cash is handed over. Set on each advance when it is released, so changing this never moves a deadline already given."
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={1}
                 max={365}
                 value={settings.advanceLiquidationDays}

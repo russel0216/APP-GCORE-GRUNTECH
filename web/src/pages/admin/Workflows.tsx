@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Field, Loading, Modal, formatMoney, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 interface Step {
   id?: string;
@@ -323,10 +324,10 @@ function WorkflowEditor({
           <input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         <Field label="Applies from (amount)" hint="Blank = no lower bound">
-          <input type="number" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} />
+          <NumberInput kind="money" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} />
         </Field>
         <Field label="Applies up to (amount)" hint="Blank = no upper bound">
-          <input type="number" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} />
+          <NumberInput kind="money" value={maxAmount} onChange={(e) => setMaxAmount(e.target.value)} />
         </Field>
         <Field
           label="Offer as an option"

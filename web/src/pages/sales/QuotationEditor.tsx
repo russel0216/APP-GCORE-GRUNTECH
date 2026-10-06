@@ -16,6 +16,7 @@ import {
   type QuotationDetail,
   type Revision,
 } from './Quotations';
+import { NumberInput } from '../../components/NumberInput';
 
 /*
   SCORO's "Modify quote details", as a page rather than a dialog.
@@ -1462,13 +1463,12 @@ export function QuotationEditor() {
                     <td>
                       {/* Quantity and unit side by side, as SCORO sets them. */}
                       <div className="qe-qty">
-                        <input
+                        <NumberInput
+                          kind="quantity"
                           id={lineField(l.key, 'quantity')}
                           className="qe-num"
-                          type="number"
                           min={0}
                           step="any"
-                          inputMode="decimal"
                           aria-label={`Line ${n} quantity`}
                           value={l.quantity}
                           aria-invalid={err('quantity') ? true : undefined}
@@ -1484,13 +1484,12 @@ export function QuotationEditor() {
                       <CellError message={err('quantity')} />
                     </td>
                     <td>
-                      <input
+                      <NumberInput
+                        kind="money"
                         id={lineField(l.key, 'unitPrice')}
                         className="qe-num"
-                        type="number"
                         min={0}
                         step="0.01"
-                        inputMode="decimal"
                         aria-label={`Line ${n} unit price`}
                         value={l.unitPrice}
                         aria-invalid={err('unitPrice') ? true : undefined}
@@ -1599,13 +1598,12 @@ export function QuotationEditor() {
                 <dt>
                   <label className="quote-discount" htmlFor="qe-discount">
                     Discount
-                    <input
+                    <NumberInput
+                      kind="percent"
                       id="qe-discount"
-                      type="number"
                       min={0}
                       max={100}
                       step="0.01"
-                      inputMode="decimal"
                       value={header.discountPct}
                       aria-invalid={errors.discountPct ? true : undefined}
                       onChange={(e) => set('discountPct', e.target.value)}
@@ -1805,13 +1803,12 @@ function CostCell({
           value={line.costNote}
           onChange={(e) => onChange({ costNote: e.target.value })}
         />
-        <input
+        <NumberInput
+          kind="money"
           id={lineField(line.key, 'unitCost')}
           className="qe-num"
-          type="number"
           min={0}
           step="0.01"
-          inputMode="decimal"
           placeholder="Unit cost"
           aria-label={`Line ${n} unit cost`}
           aria-invalid={costError ? true : undefined}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { ErrorBox, Loading, useToast } from './ui';
+import { NumberInput } from './NumberInput';
 
 /**
  * A settings card that edits a LIST — the clearance checklist, the evaluation
@@ -206,8 +207,8 @@ function Cell({
       );
     case 'number':
       return (
-        <input
-          type="number"
+        <NumberInput
+          kind="decimal"
           aria-label={column.label}
           value={value == null ? '' : String(value)}
           step={column.step}

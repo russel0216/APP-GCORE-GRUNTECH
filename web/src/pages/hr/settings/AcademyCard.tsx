@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, useToast } from '../../../components/ui';
+import { NumberInput } from '../../../components/NumberInput';
 
 /**
  * HR Settings › Gruntech Academy — the three rules the Academy keeps in
@@ -91,8 +92,8 @@ export function AcademyCard() {
               label="Expiry warning (days)"
               hint="A certificate lapsing within this many days reads Expiring, and its holder is told once."
             >
-              <input
-                type="number"
+              <NumberInput
+                kind="count"
                 min={0}
                 max={365}
                 step={1}

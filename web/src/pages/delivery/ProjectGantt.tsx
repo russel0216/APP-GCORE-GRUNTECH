@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { addDays, mondayOf, parseDay, todayLocal } from '../../lib/day';
 import { Empty, ErrorBox, Field, StatusBadge, formatDate, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * The Scope of Work as a Gantt chart (2026-10-06) — the old gasiontech
@@ -465,8 +466,8 @@ function TaskEditor({
           </select>
         </Field>
         <Field label="Percent complete">
-          <input
-            type="number"
+          <NumberInput
+            kind="percent"
             min={0}
             max={100}
             value={form.progressPct}

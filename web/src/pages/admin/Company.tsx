@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, getToken } from '../../lib/api';
 import { ErrorBox, Field, Loading, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 interface CompanyData {
   name: string;
@@ -281,16 +282,16 @@ export function Company() {
           </div>
           <div className="grid grid-2">
             <Field label="VAT rate (%)" hint="Output VAT added to every billing">
-              <input
-                type="number"
+              <NumberInput
+                kind="percent"
                 step="0.01"
                 value={(data.vatRate * 100).toFixed(2)}
                 onChange={(e) => setData({ ...data, vatRate: Number(e.target.value) / 100 })}
               />
             </Field>
             <Field label="EWT rate (%)" hint="Withheld by the customer — reduces cash, not the amount owed">
-              <input
-                type="number"
+              <NumberInput
+                kind="percent"
                 step="0.01"
                 value={(data.ewtRate * 100).toFixed(2)}
                 onChange={(e) => setData({ ...data, ewtRate: Number(e.target.value) / 100 })}

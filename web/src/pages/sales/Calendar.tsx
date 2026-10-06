@@ -11,6 +11,7 @@ import {
   useCalendarNav,
   type CalendarEvent,
 } from '../../components/MonthCalendar';
+import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
 //  SALES CALENDAR
@@ -631,8 +632,8 @@ function ActivityModal({
           />
         </Field>
         <Field label="Minutes">
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             value={form.durationMinutes}
             onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })}
           />

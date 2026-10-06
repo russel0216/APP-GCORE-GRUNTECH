@@ -18,6 +18,7 @@ import {
 import type { Asset } from './InstalledBase';
 import { monthOf, todayLocal } from '../../lib/day';
 import { VisitBadge } from './Schedule';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Service contracts.
@@ -375,8 +376,8 @@ function CoverModal({
           />
         </Field>
         <Field label="Visit every (months)" hint={settings ? `${plannedCount} visits planned` : undefined}>
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={1}
             max={24}
             value={form.frequencyMonths}

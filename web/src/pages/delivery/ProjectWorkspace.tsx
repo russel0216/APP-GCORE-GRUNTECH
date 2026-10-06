@@ -22,6 +22,7 @@ import { SCurve, type CurvePoint } from './SCurve';
 import { ProjectGantt } from './ProjectGantt';
 import { JOB_STATUSES, JobStatus, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * The project workspace (model §8.1).
@@ -2430,8 +2431,8 @@ function BudgetRequestModal({ job, onClose, onSaved }: { job: Job; onClose: () =
       )}
 
       <Field label="Additional amount">
-        <input
-          type="number"
+        <NumberInput
+          kind="money"
           step="0.01"
           value={form.amount}
           onChange={(e) => setForm({ ...form, amount: e.target.value })}
@@ -2751,8 +2752,8 @@ function TurnoverModal({
           <input type="date" value={installedAt} onChange={(e) => setInstalledAt(e.target.value)} />
         </Field>
         <Field label="Warranty (months)" hint="From the installed date. The aftermarket default is filled in">
-          <input
-            type="number"
+          <NumberInput
+            kind="count"
             min={0}
             max={240}
             value={warrantyMonths}

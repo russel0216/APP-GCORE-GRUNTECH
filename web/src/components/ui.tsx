@@ -264,7 +264,11 @@ export function Field({
   // inputs, a custom picker — is left exactly as it was, and the label simply
   // does not claim to point at it.
   const described = [hint ? hintId : null, error ? errorId : null].filter(Boolean).join(' ');
-  const wired = isValidElement(children) && typeof children.type === 'string';
+  // A component that renders one input and passes `id` through to it (the
+  // NumberInput) says so with a static `fieldControl`, and is wired the same.
+  const wired =
+    isValidElement(children) &&
+    (typeof children.type === 'string' || (children.type as { fieldControl?: boolean }).fieldControl === true);
   // A child that brings its own id keeps it, and the label points at THAT id —
   // otherwise the label would name an element that does not exist.
   const controlId = wired ? ((children as ReactElement<{ id?: string }>).props.id ?? id) : id;

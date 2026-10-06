@@ -20,6 +20,7 @@ import {
 import { RecordPaymentModal, paymentLink } from './Receivables';
 import { NewClaimModal, CLAIM_TONES } from './Expenses';
 import { todayLocal } from '../../lib/day';
+import { NumberInput } from '../../components/NumberInput';
 
 /**
  * Cash advances — money handed to a person BEFORE it is spent.
@@ -356,8 +357,8 @@ export function NewCashAdvanceModal({
 
       <div className="grid grid-2">
         <Field label="Amount" required>
-          <input
-            type="number"
+          <NumberInput
+            kind="money"
             step="0.01"
             min={0}
             className="fin-amount-input"

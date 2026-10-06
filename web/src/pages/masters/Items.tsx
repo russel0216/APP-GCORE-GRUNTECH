@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
+import { NumberInput } from '../../components/NumberInput';
 
 const ITEM_TYPES = [
   { value: 'MATERIAL', label: 'Material' },
@@ -422,8 +423,8 @@ function ItemForm({
           </select>
         </Field>
         <Field label="Standard cost" hint="Used by costing as the starting estimate">
-          <input
-            type="number"
+          <NumberInput
+            kind="money"
             step="0.01"
             value={form.standardCost}
             onChange={(e) => setForm({ ...form, standardCost: e.target.value })}
@@ -433,8 +434,8 @@ function ItemForm({
           label="List price"
           hint="The partner's published price — shown to Sales on the partner's price list. A price, not a cost."
         >
-          <input
-            type="number"
+          <NumberInput
+            kind="money"
             step="0.01"
             min="0"
             value={form.listPrice}
@@ -491,16 +492,16 @@ function ItemForm({
       {form.isStocked && (
         <div className="grid grid-2 m-stock-grid">
           <Field label="Minimum stock">
-            <input
-              type="number"
+            <NumberInput
+              kind="quantity"
               step="0.001"
               value={form.minStock}
               onChange={(e) => setForm({ ...form, minStock: e.target.value })}
             />
           </Field>
           <Field label="Reorder level" hint="Flagged for reordering at or below this">
-            <input
-              type="number"
+            <NumberInput
+              kind="quantity"
               step="0.001"
               value={form.reorderLevel}
               onChange={(e) => setForm({ ...form, reorderLevel: e.target.value })}

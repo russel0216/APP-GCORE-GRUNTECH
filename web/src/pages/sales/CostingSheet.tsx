@@ -7,6 +7,7 @@ import { costingFigures, lineAmount, lineCodes, planTasks } from '../../lib/cost
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { Checkbox, ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
 import type { CostingDetail } from './CostingDetail';
+import { NumberInput } from '../../components/NumberInput';
 
 /*
   The costing sheet — a page, never a dialog. `/g-ops/costing/new` writes a new
@@ -1023,19 +1024,19 @@ export function CostingSheet() {
                                   <input aria-label={`${label} unit`} list="cs-units" value={l.unit} maxLength={30} onChange={(e) => updateLine(l.key, { unit: e.target.value })} />
                                 </td>
                                 <td className="cs-col-qty">
-                                  <input
+                                  <NumberInput
+                                    kind="quantity"
                                     id={`cs-${l.key}-qty`}
                                     className="qe-num"
-                                    inputMode="decimal"
                                     aria-label={`${label} quantity`}
                                     value={l.quantity}
                                     onChange={(e) => updateLine(l.key, { quantity: e.target.value })}
                                   />
                                 </td>
                                 <td className="cs-col-cost">
-                                  <input
+                                  <NumberInput
+                                    kind="money"
                                     className="qe-num"
-                                    inputMode="decimal"
                                     aria-label={`${label} unit cost`}
                                     placeholder="0.00"
                                     value={l.unitCost}
@@ -1099,7 +1100,7 @@ export function CostingSheet() {
                   <div className="faint cs-note">= {(totals.grossMarginPct * 100).toFixed(2)}% gross margin on the price</div>
                 </td>
                 <td className="cs-rate">
-                  <input id="cs-markup" className="qe-num" inputMode="decimal" value={header.markupPct} onChange={(e) => setH('markupPct', e.target.value)} />
+                  <NumberInput kind="percent" id="cs-markup" className="qe-num" value={header.markupPct} onChange={(e) => setH('markupPct', e.target.value)} />
                   <span aria-hidden="true">%</span>
                 </td>
                 <td className="right mono">{formatMoney(totals.markupAmount)}</td>
@@ -1109,7 +1110,7 @@ export function CostingSheet() {
                   <label htmlFor="cs-contingency">Contingency</label>
                 </td>
                 <td className="cs-rate">
-                  <input id="cs-contingency" className="qe-num" inputMode="decimal" value={header.contingencyPct} onChange={(e) => setH('contingencyPct', e.target.value)} />
+                  <NumberInput kind="percent" id="cs-contingency" className="qe-num" value={header.contingencyPct} onChange={(e) => setH('contingencyPct', e.target.value)} />
                   <span aria-hidden="true">%</span>
                 </td>
                 <td className="right mono">{formatMoney(totals.contingencyAmount)}</td>
@@ -1119,7 +1120,7 @@ export function CostingSheet() {
                   <label htmlFor="cs-discount">Less discount</label>
                 </td>
                 <td className="cs-rate">
-                  <input id="cs-discount" className="qe-num" inputMode="decimal" value={header.discountAmount} onChange={(e) => setH('discountAmount', e.target.value)} />
+                  <NumberInput kind="money" id="cs-discount" className="qe-num" value={header.discountAmount} onChange={(e) => setH('discountAmount', e.target.value)} />
                 </td>
                 <td className="right mono">{formatMoney(-totals.discountAmount)}</td>
               </tr>
@@ -1144,8 +1145,8 @@ export function CostingSheet() {
             {rateProblem && attempted && <div className="alert error">{rateProblem}</div>}
             <Field label="Set the grand total" hint="Works out the markup (and a few centavos' discount if needed) to land on this figure exactly.">
               <div className="row cs-target">
-                <input
-                  inputMode="decimal"
+                <NumberInput
+                  kind="money"
                   placeholder="e.g. 130,000"
                   value={target}
                   onChange={(e) => setTarget(e.target.value)}
@@ -1218,9 +1219,9 @@ export function CostingSheet() {
                 </select>
                 <label className="cs-phase-value">
                   <span className="faint">Value</span>
-                  <input
+                  <NumberInput
+                    kind="money"
                     className="qe-num"
-                    inputMode="decimal"
                     aria-label={`${phaseLabel} value (schedule of values)`}
                     value={s.value}
                     disabled={spread}
@@ -1268,9 +1269,9 @@ export function CostingSheet() {
                             />
                           </td>
                           <td className="cs-col-day">
-                            <input
+                            <NumberInput
+                              kind="count"
                               className="qe-num"
-                              inputMode="numeric"
                               aria-label={`${taskLabel} start day`}
                               placeholder={String(pt.start)}
                               value={t.startDay}
@@ -1278,9 +1279,9 @@ export function CostingSheet() {
                             />
                           </td>
                           <td className="cs-col-day">
-                            <input
+                            <NumberInput
+                              kind="count"
                               className="qe-num"
-                              inputMode="numeric"
                               aria-label={`${taskLabel} duration in working days`}
                               value={t.durationDays}
                               onChange={(e) => updateTask(s.key, t.key, { durationDays: e.target.value.replace(/\D/g, '') })}

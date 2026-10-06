@@ -18,6 +18,7 @@ import {
 } from '../../components/ui';
 import { LostReasonModal } from './LostReasonModal';
 import { QUOTATION_OUTCOME_TONES } from './Quotations';
+import { NumberInput } from '../../components/NumberInput';
 
 /** Somebody a lead can be handed to, and whether selling is their job. */
 export interface Person {
@@ -1213,15 +1214,15 @@ export function LeadForm({
       {lead && (
         <div className="grid grid-2">
           <Field label="Estimated value">
-            <input
-              type="number"
+            <NumberInput
+              kind="money"
               value={form.estimatedValue}
               onChange={(e) => setForm({ ...form, estimatedValue: e.target.value })}
             />
           </Field>
           <Field label="Probability %" hint="Drives the weighted pipeline">
-            <input
-              type="number"
+            <NumberInput
+              kind="percent"
               min={0}
               max={100}
               value={form.probability}
