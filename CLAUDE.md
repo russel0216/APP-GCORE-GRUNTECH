@@ -155,8 +155,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,304 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 291, costing 120, pipeline 46, calendar 46, numbering 46,
+**2,310 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 291, costing 120, pipeline 52, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -752,6 +752,13 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **`activityWhere()` in `shared/activities.ts` is the one rule** for which sales
   activities a query means (inclusive `lte`, 14-day default). Activity writes are
   audited like every other write.
+- **Leads print** (2026-10-07): `GET /leads/:id/pdf` is the whole lead on
+  house-style paper (details, enquiry, costings, quotations, activities,
+  notes) under the lead's own visibility rule, and `GET /leads/pdf` — above
+  `/:id`, the route-order trap — is the LIST as the screen shows it, through
+  `leadListWhere()`, the same where-builder the list uses, so the paper never
+  shows a different set (its filter line says what narrowed it; capped at
+  1,000 rows). Both audit EXPORTED; the list export's entityId is `list`.
 - **A lead says who added it** (2026-10-06): `Lead.createdById`, set once on
   create and never edited, is the list's "Added by" column (with the date) and
   `?createdById=` filter, and the lead page's "Added by" row. It is not the
