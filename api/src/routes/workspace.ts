@@ -223,11 +223,18 @@ export async function scheduleFor(
  */
 registerSchedule(async (user, { from, to }) => {
   const rows = await prisma.salesActivity.findMany({
-    where: { assignedToId: user.id, status: 'PLANNED', startsAt: { gte: from, lt: to } },
+    // Booked for them, or invited to it.
+    where: {
+      OR: [{ assignedToId: user.id }, { invitees: { some: { userId: user.id } } }],
+      status: 'PLANNED',
+      startsAt: { gte: from, lt: to },
+    },
     orderBy: { startsAt: 'asc' },
     select: {
       id: true,
       type: true,
+      assignedToId: true,
+      assignedTo: { select: { name: true } },
       subject: true,
       location: true,
       startsAt: true,
@@ -249,6 +256,7 @@ registerSchedule(async (user, { from, to }) => {
       humanise(r.type),
       r.lead?.companyName ?? r.customer?.name ?? r.quotation?.number ?? null,
       r.location,
+      r.assignedToId === user.id ? null : `with ${r.assignedTo.name} (invited)`,
     ]
       .filter(Boolean)
       .join(' · '),

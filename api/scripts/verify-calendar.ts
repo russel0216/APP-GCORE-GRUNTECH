@@ -25,7 +25,10 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
-import { activityWhere } from '../src/shared/activities';
+import { activityWhere, sendDueReminders } from '../src/shared/activities';
+import { resolveUser } from '../src/permissions/resolve';
+// Imported for its side effect: it registers the sales-activity schedule provider.
+import { scheduleFor } from '../src/routes/workspace';
 import { manilaDayKey, manilaMonthKey } from '../src/shared/day';
 // Cross-package import: tsx resolves it; the file has no DOM dependency.
 import {
@@ -120,6 +123,22 @@ async function apiGet(token: string, path: string): Promise<{ status: number; bo
   return { status: res.status, body };
 }
 
+async function apiSend(token: string, method: string, path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = { raw: text };
+  }
+  return { status: res.status, body: parsed };
+}
+
 async function apiReachable(): Promise<boolean> {
   try {
     const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) });
@@ -186,7 +205,13 @@ async function main() {
 
   const win = activityWhere({ from: wk.from.toISOString(), to: wk.to.toISOString(), assignedToId: 'u1' });
   const w = win.where.startsAt as { gte: Date; lte: Date };
-  check('a window is gte/lte on the instants given, plus the assignee', w.gte.getTime() === wk.from.getTime() && w.lte.getTime() === wk.to.getTime() && win.where.assignedToId === 'u1');
+  check(
+    'a window is gte/lte on the instants given, plus the person — booked for them or invited',
+    w.gte.getTime() === wk.from.getTime() &&
+      w.lte.getTime() === wk.to.getTime() &&
+      JSON.stringify(win.where.OR) === JSON.stringify([{ assignedToId: 'u1' }, { invitees: { some: { userId: 'u1' } } }]),
+    JSON.stringify(win.where),
+  );
 
   // Fixtures on the boundary between two weeks.
   const role = await makeRole('zzcal_sales', `${TAG} sales`, ['gops.calendar.view_all']);
@@ -285,6 +310,92 @@ async function main() {
     check('GET /activities/:id is behind the same permission', oneDenied.status === 403, String(oneDenied.status));
     const missing = await apiGet(salesToken, '/activities/does-not-exist');
     check('an activity that is gone is a 404, which the page reports rather than hanging', missing.status === 404, String(missing.status));
+
+    // ══ Starts and Ends, invitees, reminders ════════════════════════════════
+    console.log('\nStarts and Ends, invitees, reminders');
+    const colleague = await makeUser(`${TAG} Colleague`, 'colleague@verifycal.local', [role.id]);
+    // Far ahead, so the reminder run below touches nothing real.
+    const startsAt = new Date('2031-03-03T01:00:00Z');
+    const endsAt = new Date('2031-03-03T02:30:00Z');
+    const created = await apiSend(salesToken, 'POST', '/activities', {
+      type: 'SITE_VISIT',
+      subject: `${TAG} plant walk-through`,
+      location: 'Cebu',
+      startsAt: startsAt.toISOString(),
+      endsAt: endsAt.toISOString(),
+      inviteeIds: [colleague.id],
+      reminderMinutes: 60,
+    });
+    const actId = String(created.body.id ?? '');
+    check(
+      'an activity is booked with Starts and Ends; the duration is derived and the end comes back',
+      created.status === 201 && created.body.durationMinutes === 90 && new Date(String(created.body.endsAt)).getTime() === endsAt.getTime(),
+      `${created.status} ${JSON.stringify(created.body).slice(0, 200)}`,
+    );
+    const backwards = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} backwards`,
+      startsAt: endsAt.toISOString(),
+      endsAt: startsAt.toISOString(),
+    });
+    const oddReminder = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} odd reminder`,
+      startsAt: startsAt.toISOString(),
+      reminderMinutes: 30,
+    });
+    const outsider = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} outsider`,
+      startsAt: startsAt.toISOString(),
+      inviteeIds: [bystander.id],
+    });
+    check(
+      'Ends before Starts, a reminder not on the list, and an invitee who cannot open the calendar are each refused',
+      backwards.status === 400 && oddReminder.status === 400 && outsider.status === 400,
+      `${backwards.status} ${oddReminder.status} ${outsider.status}`,
+    );
+    const invited = await prisma.notification.findFirst({ where: { userId: colleague.id, title: `Invited: ${TAG} plant walk-through` } });
+    check(
+      'the invitee is told on save, with a link to the activity on its day',
+      !!invited && invited.link === `/g-ops/calendar?activity=${actId}&date=2031-03-03`,
+      JSON.stringify(invited),
+    );
+    const theirs = await apiGet(salesToken, `/activities?from=2031-03-02T00:00:00Z&to=2031-03-04T00:00:00Z&assignedToId=${colleague.id}`);
+    const theirRow = (Array.isArray(theirs.body) ? (theirs.body as { id: string; invitees: { userId: string }[] }[]) : []).find((a) => a.id === actId);
+    check(
+      "it is on the invitee's calendar, naming who is invited",
+      !!theirRow && theirRow.invitees.some((i) => i.userId === colleague.id),
+      String(theirs.status),
+    );
+    const day = await scheduleFor((await resolveUser(colleague.id))!, {
+      from: new Date('2031-03-02T16:00:00Z'),
+      to: new Date('2031-03-03T16:00:00Z'),
+    });
+    const row = day.find((r) => r.id === actId);
+    check('and in their My Work for that day, saying whose it is', !!row && (row.sub ?? '').includes(`with ${sales.name}`), JSON.stringify(row));
+
+    const early = await sendDueReminders(new Date('2031-03-02T23:00:00Z'));
+    const due = await sendDueReminders(new Date('2031-03-03T00:30:00Z'));
+    const twice = await sendDueReminders(new Date('2031-03-03T00:31:00Z'));
+    const reminded = await prisma.notification.findMany({ where: { title: `Reminder: ${TAG} plant walk-through` }, select: { userId: true } });
+    check(
+      'the reminder goes once, when it is due, to the assignee and every invitee',
+      early === 0 && due >= 1 && twice === 0 && reminded.length === 2 &&
+        reminded.some((n) => n.userId === sales.id) && reminded.some((n) => n.userId === colleague.id),
+      `${early} ${due} ${twice} ${JSON.stringify(reminded)}`,
+    );
+    const moved = await apiSend(salesToken, 'PATCH', `/activities/${actId}`, {
+      startsAt: new Date('2031-03-04T01:00:00Z').toISOString(),
+      endsAt: new Date('2031-03-04T03:00:00Z').toISOString(),
+    });
+    const afterMove = await prisma.salesActivity.findUnique({ where: { id: actId } });
+    const toldMoved = await prisma.notification.findFirst({ where: { userId: colleague.id, title: `Moved: ${TAG} plant walk-through` } });
+    check(
+      'moving it re-arms the reminder and tells the invitee where it went',
+      moved.status === 200 && afterMove?.reminderSentAt === null && afterMove?.durationMinutes === 120 && !!toldMoved,
+      `${moved.status} ${afterMove?.reminderSentAt} ${afterMove?.durationMinutes}`,
+    );
+    const uninvite = await apiSend(salesToken, 'PATCH', `/activities/${actId}`, { inviteeIds: [] });
+    const left = await prisma.salesActivityInvitee.count({ where: { activityId: actId } });
+    check('an invitee can be taken off again', uninvite.status === 200 && left === 0, `${uninvite.status} ${left}`);
   }
 
   await cleanup();

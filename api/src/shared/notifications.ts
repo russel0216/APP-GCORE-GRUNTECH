@@ -35,6 +35,9 @@ export type NotificationType =
   | 'training.cancelled'
   | 'training.completed'
   | 'training.expiring'
+  | 'activity.invited'
+  | 'activity.updated'
+  | 'activity.reminder'
   | 'system';
 
 export interface NotifyInput {

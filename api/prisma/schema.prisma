@@ -72,6 +72,7 @@ model User {
   quotationsOwned   Quotation[]         @relation("QuotationOwner")
   revisionsApproved QuotationRevision[] @relation("RevisionApprover")
   activities        SalesActivity[]     @relation("ActivityAssignee")
+  activityInvites   SalesActivityInvitee[]
 
   clearancesRaised       EmployeeClearance[]  @relation("ClearanceRaiser")
   clearancesReceived     EmployeeClearance[]  @relation("ClearanceReceiver")
@@ -1481,14 +1482,42 @@ model SalesActivity {
   customer    Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   startsAt        DateTime
+  /// Stored; the form asks for Starts and Ends and the API derives this from
+  /// them (`endsAt` = startsAt + durationMinutes in every response).
   durationMinutes Int       @default(60)
   completedAt     DateTime?
+
+  /// Minutes before `startsAt` to remind the assignee and invitees: null (none),
+  /// 15, 60, 120 or 1440. Sent by the API's once-a-minute timer
+  /// (`sendDueReminders` in shared/activities.ts).
+  reminderMinutes Int?
+  /// Set when the reminder went out — claimed with a conditional update so it
+  /// is sent once. Cleared when the time or the reminder changes.
+  reminderSentAt  DateTime?
+
+  invitees SalesActivityInvitee[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([assignedToId, startsAt])
   @@index([startsAt])
+}
+
+/// Someone else asked along to a sales activity: told on save, reminded with
+/// the assignee, and shown the activity on their calendar and in My Work.
+model SalesActivityInvitee {
+  id         String        @id @default(cuid())
+  activityId String
+  activity   SalesActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// When they were told they are invited (null until the save that told them).
+  notifiedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@unique([activityId, userId])
+  @@index([userId])
 }
 
 // ════════════════════════════════════════════════════════════════════

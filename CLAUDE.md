@@ -149,8 +149,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,288 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 283, costing 120, pipeline 46, calendar 38, numbering 46,
+**2,296 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 283, costing 120, pipeline 46, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -507,8 +507,10 @@ are permission-configurable — that is deliberate, not a stub left behind.
   freely — it is written on site, often on bad signal, and a form that refuses to
   save gets filled in afterwards from memory instead.
 - **Expiry and missed visits are swept on read**, in `sweepOverdue()`, called
-  when the aftermarket screens load. G-Core has no scheduler, and a status that
-  is only correct when a cron job ran is worse than one derived on read.
+  when the aftermarket screens load. G-Core has no scheduler (its one timer
+  sends calendar reminders — see "Sales: board, calendar, costing"), and a
+  status that is only correct when a cron job ran is worse than one derived on
+  read.
 - **The renewal pipeline has two sources**: contracts ending, and warranties
   lapsing on equipment with no active contract. The second is the one nobody
   sees and usually the larger opportunity.
@@ -752,6 +754,32 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
   nothing.
+- **A sales activity has Starts and Ends, invitees and a reminder**
+  (2026-10-06). `durationMinutes` stays the stored figure: the form sends
+  `endsAt` and the API derives the duration (5 minutes to 7 days), and every
+  response carries `endsAt`. `SalesActivityInvitee` (one row per person,
+  cascade) holds the others asked along; an invitee must hold
+  `gops.calendar.view_all` (the notification links to the calendar), except
+  one invited before losing it. Invitees are told on save
+  (`activity.invited`); moving or cancelling tells everyone already on it
+  (`activity.updated`), never the person who made the change. "Whose
+  activities" and `activityWhere({ assignedToId })` match the assignee OR an
+  invitee, and the My Work provider in `routes/workspace.ts` does the same.
+  **Telling people is `tellAboutActivity()`**: a bell each, plus an email
+  each through `shared/mail.ts` when SMTP is set, sent after the save and
+  never allowed to fail it. No SMS (the owner's call).
+- **Reminders are the one thing G-CORE runs on a timer.** `reminderMinutes`
+  is null, 15, 60, 120 or 1440 (`REMINDER_MINUTES`).
+  `startActivityReminders()` (called from `index.ts` after `listen`, never
+  from a script) runs `sendDueReminders()` once a minute; each due reminder
+  is CLAIMED with a conditional `updateMany` on `reminderSentAt: null` (and
+  the start and offset it was read with) before anyone is told, so two ticks
+  or two processes never send it twice. A reminder whose moment passed while
+  the API was down still goes before the start; one for an activity already
+  started is never sent. Changing the time or the offset clears
+  `reminderSentAt`. Everything else that looks scheduled (expiry, missed
+  visits, evaluations due) is still swept on read — do not move those onto
+  the timer.
 - **"Assign costing" replaced the lead page's "Start costing"** (2026-10-06,
   the owner's call): a panel in the page, never a dialog. `POST
   /costings/assign { leadId, assigneeId, note }` needs the right to EDIT THE

@@ -11,7 +11,7 @@ import {
   useCalendarNav,
   type CalendarEvent,
 } from '../../components/MonthCalendar';
-import { NumberInput } from '../../components/NumberInput';
+import { PeoplePicker } from '../../components/PeoplePicker';
 
 // ════════════════════════════════════════════════════════════════════
 //  SALES CALENDAR
@@ -37,8 +37,12 @@ interface Activity {
   notes: string | null;
   location: string | null;
   startsAt: string;
+  /** Derived by the API: startsAt + durationMinutes. */
+  endsAt: string;
   durationMinutes: number;
+  reminderMinutes: number | null;
   assignedTo: { id: string; name: string };
+  invitees: { userId: string; user: { id: string; name: string } }[];
   lead: { id: string; number: string; companyName: string } | null;
   quotation: { id: string; number: string } | null;
   customer: { id: string; name: string } | null;
@@ -57,7 +61,9 @@ function toEvent(a: Activity): CalendarEvent {
     sortAt: at.getTime(),
     time: at.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
     label: a.subject,
-    detail: `${a.assignedTo.name}${a.lead ? ` · ${a.lead.companyName}` : a.customer ? ` · ${a.customer.name}` : ''}`,
+    detail: `${a.assignedTo.name}${a.invitees.length ? ` +${a.invitees.length}` : ''}${
+      a.lead ? ` · ${a.lead.companyName}` : a.customer ? ` · ${a.customer.name}` : ''
+    }`,
     tone: statusTone(a.status, ACTIVITY_TONES),
     done: a.status !== 'PLANNED',
   };
@@ -99,6 +105,15 @@ function visitToEvent(v: ServiceVisitChip): CalendarEvent {
     done: true,
   };
 }
+
+/** The reminder offsets the API accepts (REMINDER_MINUTES in shared/activities.ts). */
+const REMINDERS = [
+  { value: '', label: 'No reminder' },
+  { value: '15', label: '15 minutes before' },
+  { value: '60', label: '1 hour before' },
+  { value: '120', label: '2 hours before' },
+  { value: '1440', label: '1 day before' },
+];
 
 /** Local wall-clock value for a datetime-local input. */
 function toLocalInput(d: Date): string {
@@ -291,7 +306,8 @@ export function SalesCalendar() {
           <h1>Sales Calendar</h1>
           <p>
             What everyone in sales is doing this week or this month — site visits, follow-ups,
-            submissions. Scheduling something for someone else notifies them.
+            submissions. Scheduling something for someone else, or inviting them, notifies them;
+            a reminder goes to everyone on it.
           </p>
         </div>
         <button type="button" className="btn btn-primary" onClick={() => setEditing('new')}>
@@ -302,7 +318,7 @@ export function SalesCalendar() {
       <CalendarToolbar nav={nav}>
         <select
           className="cal-person"
-          aria-label="Whose activities"
+          aria-label="Whose activities (booked for them or invited)"
           value={who}
           onChange={(e) => setWho(e.target.value)}
         >
@@ -451,9 +467,21 @@ function ActivityModal({
     quotationId: activity?.quotation?.id ?? '',
     customerId: activity?.customer?.id ?? '',
     startsAt: toLocalInput(activity ? new Date(activity.startsAt) : defaultStart),
-    durationMinutes: activity?.durationMinutes?.toString() ?? '60',
+    endsAt: toLocalInput(activity ? new Date(activity.endsAt) : new Date(defaultStart.getTime() + 3600000)),
+    reminderMinutes: activity?.reminderMinutes != null ? String(activity.reminderMinutes) : '',
+    inviteeIds: activity?.invitees.map((i) => i.userId) ?? ([] as string[]),
     status: activity?.status ?? 'PLANNED',
   });
+
+  /** Moving the start keeps the length: Ends follows Starts, as a calendar's does. */
+  function setStarts(value: string) {
+    const oldStart = new Date(form.startsAt).getTime();
+    const oldEnd = new Date(form.endsAt).getTime();
+    const next = new Date(value).getTime();
+    const length = Number.isFinite(oldEnd - oldStart) && oldEnd > oldStart ? oldEnd - oldStart : 3600000;
+    setForm({ ...form, startsAt: value, endsAt: Number.isFinite(next) ? toLocalInput(new Date(next + length)) : form.endsAt });
+  }
+  const endsBeforeStart = !!form.startsAt && !!form.endsAt && new Date(form.endsAt) <= new Date(form.startsAt);
 
   // Leads, quotations and customers are searched, not listed: all three grow
   // without bound, and a plain select of the first page would hide the rest.
@@ -501,6 +529,11 @@ function ActivityModal({
     activity?.quotation && !quotations.some((q) => q.id === activity.quotation!.id)
       ? [{ id: activity.quotation.id, number: activity.quotation.number, subject: '' }, ...quotations]
       : quotations;
+  // Invited people who have since lost calendar access stay on the list.
+  const inviteOptions = [
+    ...peopleOptions,
+    ...(activity?.invitees ?? []).map((i) => i.user).filter((u) => !peopleOptions.some((p) => p.id === u.id)),
+  ];
   const customerOptions =
     activity?.customer && !customers.some((c) => c.id === activity.customer!.id)
       ? [{ id: activity.customer.id, code: '', name: activity.customer.name }, ...customers]
@@ -520,7 +553,9 @@ function ActivityModal({
         quotationId: form.quotationId || null,
         customerId: form.customerId || null,
         startsAt: new Date(form.startsAt).toISOString(),
-        durationMinutes: Number(form.durationMinutes),
+        endsAt: new Date(form.endsAt).toISOString(),
+        reminderMinutes: form.reminderMinutes ? Number(form.reminderMinutes) : null,
+        inviteeIds: form.inviteeIds.filter((id) => id !== form.assignedToId),
         status: form.status,
       };
       if (activity) await api.patch(`/activities/${activity.id}`, payload);
@@ -563,7 +598,7 @@ function ActivityModal({
             type="button"
             className="btn btn-primary"
             onClick={save}
-            disabled={busy || form.subject.length < 2}
+            disabled={busy || form.subject.length < 2 || endsBeforeStart}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
@@ -624,21 +659,37 @@ function ActivityModal({
       </Field>
 
       <div className="grid grid-2">
-        <Field label="When">
+        <Field label="Starts">
+          <input type="datetime-local" value={form.startsAt} onChange={(e) => setStarts(e.target.value)} />
+        </Field>
+        <Field label="Ends" error={endsBeforeStart ? 'Ends must be after Starts' : null}>
           <input
             type="datetime-local"
-            value={form.startsAt}
-            onChange={(e) => setForm({ ...form, startsAt: e.target.value })}
-          />
-        </Field>
-        <Field label="Minutes">
-          <NumberInput
-            kind="count"
-            value={form.durationMinutes}
-            onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })}
+            value={form.endsAt}
+            min={form.startsAt}
+            onChange={(e) => setForm({ ...form, endsAt: e.target.value })}
           />
         </Field>
       </div>
+
+      <Field label="Reminder" hint="A notification — and an email where email is set up — to everyone on it">
+        <select value={form.reminderMinutes} onChange={(e) => setForm({ ...form, reminderMinutes: e.target.value })}>
+          {REMINDERS.map((r) => (
+            <option key={r.value} value={r.value}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field label="Invite" hint="They are told when you save, and it shows on their calendar and in My Work">
+        <PeoplePicker
+          people={inviteOptions.map((p) => ({ id: p.id, name: p.name }))}
+          value={form.inviteeIds}
+          onChange={(ids) => setForm({ ...form, inviteeIds: ids })}
+          exclude={[form.assignedToId]}
+        />
+      </Field>
 
       <Field label="Lead" hint="Open leads only — a won or lost lead has nothing left to schedule.">
         <div className="cal-picker">

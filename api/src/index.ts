@@ -99,6 +99,7 @@ import {
   passportRoutes,
   academySettingsRoutes,
 } from './routes/academy';
+import { startActivityReminders } from './shared/activities';
 
 const app = express();
 
@@ -248,6 +249,10 @@ async function start() {
   // the first clock-in means nobody stands at the door thinking it is broken.
   // Deliberately not awaited — the API serves everything else meanwhile.
   void warmUpFaceModels();
+
+  // Calendar reminders: G-CORE has no scheduler, so the API checks once a
+  // minute for activities whose reminder is due (shared/activities.ts).
+  startActivityReminders();
 }
 
 start().catch((err) => {
