@@ -2052,6 +2052,17 @@ async function main() {
     const plainRequest = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: plainRev.id }, include: { workflow: { include: { steps: true } } } });
     check('unticked, a quotation over a million keeps the standard route — the CEO is an option, not a rule', plainRequest.workflow?.steps.length === 1);
 
+    // The approval panel on the document: the person the step waits on may
+    // decide there (canAct), the requester and a bystander may not.
+    const canActFor = async (token: string) =>
+      ((await http(token, 'GET', `/approvals/history/quotation/${plainRev.id}`)).body as unknown as { canAct?: boolean }[])[0]?.canAct;
+    const [mgrCan, sellerCan, otherCan] = await Promise.all([canActFor(managerToken), canActFor(salesToken), canActFor(otherToken)]);
+    check(
+      "the document's approval panel offers the decision to its approver only — not the requester, not a bystander",
+      mgrCan === true && sellerCan === false && otherCan === false,
+      `${mgrCan} ${sellerCan} ${otherCan}`,
+    );
+
     // Admin › Approval Workflows: saving the CEO route without mentioning its
     // label must not quietly make it a standard route every big quote takes.
     const admin = await makeUser('Verify Admin', 'admin@verifys.local', []);

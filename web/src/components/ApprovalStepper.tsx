@@ -14,9 +14,13 @@ import { formatDateTime } from './ui';
  * reads the real chain, with the outcome, the workflow that routed it and any
  * comment an approver left.
  *
- * Both are read-only. Approving happens in My Work, where the approver's queue
- * lives; an Approve button here would be a second approval path, and there is
- * exactly one of those (`api/src/shared/approvals.ts`).
+ * `ApprovalStepper` is read-only. `DocumentApproval` also lets the person the
+ * current step is waiting on decide right there (2026-10-06, the owner's
+ * call): the approval notification lands on the document, and the approver
+ * should not have to go back to My Work after reading it. It posts to the
+ * same `POST /approvals/:id/act` My Work uses — one approval path
+ * (`api/src/shared/approvals.ts`), two places to reach it. The API says who
+ * may (`canAct` on the history), never the page.
  */
 
 export interface Step {
@@ -116,7 +120,12 @@ interface Request {
   requester: { id: string; name: string };
   workflow: { name: string; steps: WorkflowStep[] } | null;
   actions: Action[];
+  /** The viewer may decide the step this request is at (computed by the API). */
+  canAct?: boolean;
 }
+
+type Decision = 'APPROVED' | 'RETURNED' | 'REJECTED';
+const DECISION_VERB: Record<Decision, string> = { APPROVED: 'Approve', RETURNED: 'Return', REJECTED: 'Reject' };
 
 /**
  * Reads `GET /approvals/history/:documentType/:documentId` — an endpoint that
@@ -145,6 +154,10 @@ export function DocumentApproval({
   compact?: boolean;
 }) {
   const [requests, setRequests] = useState<Request[] | null>(null);
+  const [deciding, setDeciding] = useState<Decision | null>(null);
+  const [comment, setComment] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [decideError, setDecideError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -283,6 +296,66 @@ export function DocumentApproval({
       )}
 
       <ApprovalStepper steps={steps} />
+
+      {request.status === 'PENDING' && request.canAct && (
+        <div className="approval-decide" role="group" aria-label="Your decision">
+          {deciding === null ? (
+            <>
+              <p className="panel-blurb">This step is waiting on you.</p>
+              <div className="row approval-decide-buttons">
+                <button type="button" className="btn btn-sm btn-ok" onClick={() => setDeciding('APPROVED')}>
+                  Approve
+                </button>
+                <button type="button" className="btn btn-sm" onClick={() => setDeciding('RETURNED')}>
+                  Return
+                </button>
+                <button type="button" className="btn btn-sm btn-danger" onClick={() => setDeciding('REJECTED')}>
+                  Reject
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <label className="approval-decide-label" htmlFor={`decide-${request.id}`}>
+                {DECISION_VERB[deciding]} — comment {deciding === 'APPROVED' ? '(optional)' : '(say what needs to change)'}
+              </label>
+              <textarea
+                id={`decide-${request.id}`}
+                value={comment}
+                autoFocus
+                onChange={(e) => setComment(e.target.value)}
+                placeholder={deciding === 'APPROVED' ? 'Anything the requester should know' : 'This is what the requester sees'}
+              />
+              {decideError && <div className="alert error">{decideError}</div>}
+              <div className="row approval-decide-buttons">
+                <button
+                  type="button"
+                  className={`btn btn-sm ${deciding === 'APPROVED' ? 'btn-ok' : 'btn-danger'}`}
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    setDecideError(null);
+                    try {
+                      await api.post(`/approvals/${request.id}/act`, { action: deciding, comment: comment.trim() || undefined });
+                      // The document's own status moves with the decision — read the page again.
+                      window.location.reload();
+                    } catch (err) {
+                      setDecideError(err instanceof Error ? err.message : 'The decision was not recorded');
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  {busy ? 'Working…' : `Confirm ${DECISION_VERB[deciding].toLowerCase()}`}
+                </button>
+                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setDeciding(null); setDecideError(null); }}>
+                  Cancel
+                </button>
+              </div>
+              <p className="faint">Recorded against the document permanently, with your name and the time.</p>
+            </>
+          )}
+        </div>
+      )}
 
       {/* A comment is usually why something was sent back, so it is not hidden
           behind a hover. */}

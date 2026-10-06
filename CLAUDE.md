@@ -26,7 +26,13 @@ four databases and four copies of "customer".
    same transaction, never by writing to `approvalRequest` yourself. Do not
    write per-module routing, notification or history. `act()` claims a request
    with a conditional update, so a decision is never written over a withdrawal
-   or over another approver's decision.
+   or over another approver's decision. **Two places reach that one path**
+   (2026-10-06): My Work's queue, and the Approval panel on the document
+   itself (`DocumentApproval`), where the approval notification lands — it
+   offers Approve / Return / Reject only when `GET /approvals/history/…` says
+   `canAct` (computed with `approversForStep`, never the requester), and posts
+   to the same `POST /approvals/:id/act`. Never add a module's own approve
+   route.
 3. **A requester can never approve their own document.** Enforced in `act()`,
    before the eligibility check, and for super admins too.
 4. **Cost posts only when every step has approved.** Overtime is the live
@@ -149,8 +155,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,296 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 283, costing 120, pipeline 46, calendar 46, numbering 46,
+**2,297 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 284, costing 120, pipeline 46, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering

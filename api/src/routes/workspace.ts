@@ -5,7 +5,7 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, historyFor, pendingFor } from '../shared/approvals';
+import { act, approversForStep, historyFor, pendingFor } from '../shared/approvals';
 import {
   upload,
   saveAttachment,
@@ -138,7 +138,25 @@ approvalRoutes.get(
 approvalRoutes.get(
   '/history/:documentType/:documentId',
   handler(async (req, res) => {
-    res.json(await historyFor(req.params.documentType, req.params.documentId));
+    const me = currentUser(req);
+    const rows = await historyFor(req.params.documentType, req.params.documentId);
+    // `canAct`: whether the viewer may decide the step a PENDING request is at
+    // — the rule act() applies (never the requester; an eligible approver or a
+    // super admin) — so the document's own page can offer the decision the
+    // notification sent them there for. The decision still goes through
+    // POST /approvals/:id/act, the one path.
+    res.json(
+      await Promise.all(
+        rows.map(async (r) => {
+          if (r.status !== 'PENDING' || r.requesterId === me.id) return { ...r, canAct: false };
+          const step = await prisma.approvalStep.findFirst({
+            where: { workflowId: r.workflowId ?? '', sequence: r.currentSequence },
+          });
+          const canAct = !!step && (me.isSuperAdmin || (await approversForStep(step, r.requesterId)).includes(me.id));
+          return { ...r, canAct };
+        }),
+      ),
+    );
   }),
 );
 
