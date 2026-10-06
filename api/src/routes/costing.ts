@@ -11,7 +11,9 @@ import {
   notFound,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
+import { manilaDayStart, manilaMonthKey } from '../shared/day';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -195,37 +197,51 @@ function onlyOwn(me: ReturnType<typeof currentUser>) {
 const STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'FINAL'] as const;
 type Status = (typeof STATUSES)[number];
 
+/**
+ * Which costings a list query means — one rule for the list AND the tiles
+ * above it, so a tile's count is the total of the list it links to.
+ * `?finalised=this-month` is FINAL with `finalAt` in the current Manila month.
+ */
+function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Prisma.CostingWhereInput {
+  const where: Prisma.CostingWhereInput = {};
+
+  // Someone with only view_own never sees another person's costing, whatever
+  // the scope switch says.
+  if (onlyOwn(me) || q.scope === 'mine') where.ownerId = me.id;
+
+  if (q.search) {
+    where.OR = [
+      { title: { contains: q.search, mode: 'insensitive' } },
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      { systemUnit: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  if (q.filters.status && (STATUSES as readonly string[]).includes(q.filters.status)) {
+    where.status = q.filters.status as Status;
+  }
+  if (q.filters.finalised === 'this-month') {
+    where.status = 'FINAL';
+    where.finalAt = { gte: manilaDayStart(`${manilaMonthKey(new Date())}-01`) };
+  }
+  if (q.filters.customerId) where.customerId = q.filters.customerId;
+  // Service Costing is this same screen, narrowed to the costings that back a
+  // service contract. A service costing is not a different kind of record —
+  // it is a costing whose job happens to be a contract (model §4.5) — so it
+  // would be a mistake to give it a second table to drift out of step with.
+  if (q.filters.jobType) {
+    where.jobs = { some: { type: q.filters.jobType as Prisma.EnumJobTypeFilter['equals'] } };
+  }
+  return where;
+}
+
 costingRoutes.get(
   '/',
   requireAny('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.CostingWhereInput = {};
-
-    // Someone with only view_own never sees another person's costing, whatever
-    // the scope switch says.
-    if (onlyOwn(me) || q.scope === 'mine') where.ownerId = me.id;
-
-    if (q.search) {
-      where.OR = [
-        { title: { contains: q.search, mode: 'insensitive' } },
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-        { systemUnit: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-    if (q.filters.status && (STATUSES as readonly string[]).includes(q.filters.status)) {
-      where.status = q.filters.status as Status;
-    }
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    // Service Costing is this same screen, narrowed to the costings that back a
-    // service contract. A service costing is not a different kind of record —
-    // it is a costing whose job happens to be a contract (model §4.5) — so it
-    // would be a mistake to give it a second table to drift out of step with.
-    if (q.filters.jobType) {
-      where.jobs = { some: { type: q.filters.jobType as Prisma.EnumJobTypeFilter['equals'] } };
-    }
+    const where = costingListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.costing.findMany({
@@ -253,6 +269,29 @@ costingRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The Costing page's tiles: being costed (DRAFT), awaiting approval and final
+ * this month — each the total of the list its tile opens, through the same
+ * `costingListWhere`, under the caller's scope and the page's `jobType`.
+ */
+costingRoutes.get(
+  '/summary',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const base: ListQuery = { ...q, search: '', filters: q.filters.jobType ? { jobType: q.filters.jobType } : {} };
+    const count = (filters: Record<string, string>) =>
+      prisma.costing.count({ where: costingListWhere(me, { ...base, filters: { ...base.filters, ...filters } }) });
+    const [draft, pending, finalThisMonth] = await Promise.all([
+      count({ status: 'DRAFT' }),
+      count({ status: 'PENDING_APPROVAL' }),
+      count({ finalised: 'this-month' }),
+    ]);
+    res.json({ draft, pending, finalThisMonth });
   }),
 );
 
@@ -1189,6 +1228,9 @@ costingRoutes.patch(
 
     const data = headerData(body, vatRate);
     if (body.status !== undefined) data.status = body.status;
+    // When it became final, for "Final this month"; reopening clears it.
+    if (body.status === 'FINAL' && before.status !== 'FINAL') data.finalAt = new Date();
+    if (body.status === 'DRAFT') data.finalAt = null;
     await prisma.costing.update({ where: { id: req.params.id }, data });
     await recalc(req.params.id);
 
@@ -1302,7 +1344,7 @@ costingRoutes.post(
 export async function settleCosting(documentId: string, outcome: 'APPROVED' | 'REJECTED') {
   const claimed = await prisma.costing.updateMany({
     where: { id: documentId, status: 'PENDING_APPROVAL' },
-    data: { status: outcome === 'APPROVED' ? 'FINAL' : 'DRAFT' },
+    data: outcome === 'APPROVED' ? { status: 'FINAL', finalAt: new Date() } : { status: 'DRAFT', finalAt: null },
   });
   if (!claimed.count) return;
   const costing = await prisma.costing.findUnique({ where: { id: documentId }, select: { number: true, contractValue: true } });

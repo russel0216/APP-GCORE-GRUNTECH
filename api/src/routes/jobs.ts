@@ -605,7 +605,9 @@ jobRoutes.post(
       }
 
       // A costing that has produced a job is a commercial record.
-      await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL' } });
+      if (costing.status !== 'FINAL') {
+        await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL', finalAt: new Date() } });
+      }
 
       // The renewal's coverage terms: a DRAFT, so nothing is scheduled until
       // somebody activates it — the same rule as any new contract. Same term

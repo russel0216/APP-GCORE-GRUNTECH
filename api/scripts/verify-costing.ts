@@ -348,6 +348,36 @@ async function main() {
   check('the source costing is FINAL once approved', finalised.status === 200 && finalised.body.status === 'FINAL', String(finalised.body.status));
   // 2×150,000 + 12×2,500 = 330,000 cost; ×1.2 = 396,000 contract.
   check('its contract value is cost × (1 + markup)', money(Number(finalised.body.contractValue), 396000));
+  const finalRow = await prisma.costing.findUnique({ where: { id: sourceId }, select: { finalAt: true } });
+  check('approval dates it final (finalAt)', !!finalRow?.finalAt && Date.now() - finalRow.finalAt.getTime() < 60_000);
+
+  // The Costing page's tiles: each is the total of the list it opens.
+  const tiles = await api(tEstimator, 'GET', '/costings/summary');
+  const listTotal = async (query: string) => Number((await api(tEstimator, 'GET', `/costings?${query}`)).body.total);
+  const [draftTotal, pendingTotal, finalTotal] = await Promise.all([
+    listTotal('status=DRAFT'),
+    listTotal('status=PENDING_APPROVAL'),
+    listTotal('finalised=this-month'),
+  ]);
+  check(
+    'GET /costings/summary: each tile equals the total of the list it links to',
+    tiles.status === 200 &&
+      tiles.body.draft === draftTotal &&
+      tiles.body.pending === pendingTotal &&
+      tiles.body.finalThisMonth === finalTotal,
+    `${JSON.stringify(tiles.body)} vs ${draftTotal}/${pendingTotal}/${finalTotal}`,
+  );
+  check(
+    'the approved costing is final this month, and the draft is being costed',
+    finalTotal >= 1 && draftTotal >= 1,
+    `${finalTotal} final, ${draftTotal} draft`,
+  );
+  const colleagueTiles = await api(tColleague, 'GET', '/costings/summary');
+  check(
+    "an own-scope colleague's tiles count none of the estimator's costings",
+    colleagueTiles.body.finalThisMonth === 0 && colleagueTiles.body.draft === 0,
+    JSON.stringify(colleagueTiles.body),
+  );
 
   const job = await prisma.job.create({
     data: {

@@ -77,7 +77,9 @@ export function OpsDashboard() {
     The sales funnel, in the order work actually moves through the business.
     Lead statuses are grouped into the stages somebody would name out loud:
     nobody asks "how many are in SITE_VISIT", they ask how many enquiries are
-    still being worked.
+    still being worked. Costing is not a stage here (2026-10-06): it has its
+    own tiles on the Costing page — being costed, awaiting approval, final
+    this month.
   */
   const funnel: Slice[] = sales
     ? [
@@ -86,12 +88,6 @@ export function OpsDashboard() {
           value: n(sales.leads, 'NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT'),
           tone: 'info',
           to: '/g-ops/leads',
-        },
-        {
-          label: 'Being costed',
-          value: n(sales.leads, 'COSTING') + n(sales.costings, 'DRAFT'),
-          tone: 'info',
-          to: '/g-ops/costing',
         },
         {
           label: 'Quotation out',

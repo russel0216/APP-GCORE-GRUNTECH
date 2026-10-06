@@ -1078,6 +1078,10 @@ model Costing {
   quotationRevisions QuotationRevision[]
   jobs               Job[]
 
+  /// When it last became FINAL (approval, "Mark final", or a job built on
+  /// it); cleared when reopened. The Costing page's "Final this month" tile.
+  finalAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

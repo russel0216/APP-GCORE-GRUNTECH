@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 
 /** A costing's statuses; none is in the shared lifecycle table as it stands. */
@@ -120,36 +121,89 @@ export function Costings() {
       {view === 'templates' ? (
         <CostingTemplates />
       ) : (
-        <DataList<CostingRow>
-          listKey="costings"
-          endpoint="/costings"
-          columns={columns}
-          rowKey={(c) => c.id}
-          scoped
-          searchPlaceholder="Search number, title, client, system…"
-          onRowClick={(c) => navigate(`/g-ops/costing/${c.id}`)}
-          emptyTitle="No costings yet"
-          emptyHint="A costing is the first thing you make when a job looks real."
-          filters={[
-            {
-              key: 'status',
-              label: 'Status',
-              options: [
-                { value: 'DRAFT', label: 'Draft' },
-                { value: 'PENDING_APPROVAL', label: 'Awaiting approval' },
-                { value: 'FINAL', label: 'Final' },
-              ],
-            },
-          ]}
-          actions={
-            can('gops.costing.create') ? (
-              <Link to="/g-ops/costing/new" className="btn btn-primary btn-sm">
-                + New costing
-              </Link>
-            ) : null
-          }
-        />
+        <>
+          <CostingTiles scope={params.get('scope') === 'mine' ? 'mine' : 'all'} />
+          <DataList<CostingRow>
+            listKey="costings"
+            endpoint="/costings"
+            columns={columns}
+            rowKey={(c) => c.id}
+            scoped
+            searchPlaceholder="Search number, title, client, system…"
+            onRowClick={(c) => navigate(`/g-ops/costing/${c.id}`)}
+            emptyTitle="No costings yet"
+            emptyHint="A costing is the first thing you make when a job looks real."
+            filters={[
+              {
+                key: 'status',
+                label: 'Status',
+                options: [
+                  { value: 'DRAFT', label: 'Draft' },
+                  { value: 'PENDING_APPROVAL', label: 'Awaiting approval' },
+                  { value: 'FINAL', label: 'Final' },
+                ],
+              },
+              { key: 'finalised', label: 'Finalised', options: [{ value: 'this-month', label: 'This month' }] },
+            ]}
+            actions={
+              can('gops.costing.create') ? (
+                <Link to="/g-ops/costing/new" className="btn btn-primary btn-sm">
+                  + New costing
+                </Link>
+              ) : null
+            }
+          />
+        </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Where the costing work stands — moved here off the G-OPS funnel, where
+ * "Being costed" counted leads and costings together. Each tile is the total
+ * of the list it opens (`GET /costings/summary` runs the list's own query),
+ * under the same Mine/All scope as the list.
+ */
+function CostingTiles({ scope }: { scope: 'mine' | 'all' }) {
+  const [summary, setSummary] = useState<{ draft: number; pending: number; finalThisMonth: number } | null>(null);
+  useEffect(() => {
+    api
+      .get<{ draft: number; pending: number; finalThisMonth: number }>(`/costings/summary${qs({ scope })}`)
+      .then(setSummary)
+      .catch(() => setSummary(null));
+  }, [scope]);
+  if (!summary) return null;
+  const mine = scope === 'mine' ? '&scope=mine' : '';
+  return (
+    <div className="kpi-grid">
+      <Stat
+        label="Being costed"
+        value={summary.draft}
+        sub="drafts still being priced"
+        icon="document"
+        accent={summary.draft > 0 ? 'info' : 'quiet'}
+        to={`/g-ops/costing?status=DRAFT${mine}`}
+        more="Open them"
+      />
+      <Stat
+        label="Awaiting approval"
+        value={summary.pending}
+        sub={summary.pending > 0 ? 'with the approver' : 'nothing waiting'}
+        icon="clock"
+        accent={summary.pending > 0 ? 'warn' : 'quiet'}
+        to={`/g-ops/costing?status=PENDING_APPROVAL${mine}`}
+        more="Open them"
+      />
+      <Stat
+        label="Final this month"
+        value={summary.finalThisMonth}
+        sub="approved or marked final since the 1st"
+        icon="check"
+        accent={summary.finalThisMonth > 0 ? 'ok' : 'quiet'}
+        to={`/g-ops/costing?finalised=this-month${mine}`}
+        more="Open them"
+      />
     </div>
   );
 }

@@ -918,6 +918,13 @@ async function main() {
     }
   }
 
+  // Costing.finalAt arrived after costings were already final. Their last
+  // update is the best date on file; set once, and a second run finds none.
+  {
+    const dated = await prisma.$executeRaw`UPDATE "Costing" SET "finalAt" = "updatedAt" WHERE "status" = 'FINAL' AND "finalAt" IS NULL`;
+    if (dated) console.log(`  · Dated ${dated} final costing(s) from their last update`);
+  }
+
   // ── Departments ────────────────────────────────────────────────────────────
   for (const d of [
     { code: 'MGT', name: 'Management' },

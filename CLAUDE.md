@@ -135,8 +135,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,257 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
-masters 54, sales 278, costing 105, pipeline 46, calendar 38, numbering 46,
+**2,261 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
+masters 54, sales 278, costing 109, pipeline 46, calendar 38, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1411,6 +1411,15 @@ Cost Estimate" PDF) in G-CORE's own style.
   deleted seeded workflow is recreated by the next seed; the page then offers
   "Mark final" again. Reopen (FINAL → DRAFT) stays the author's, and needs a
   fresh approval.
+- **The Costing page has three tiles** (2026-10-06): Being costed (DRAFT),
+  Awaiting approval, Final this month. `GET /costings/summary` counts them
+  through `costingListWhere()`, the list's own query, under the page's
+  Mine/All scope, so a tile equals the total of the list it opens
+  (`?status=`, `?finalised=this-month`) — verify-costing asserts it. "Final
+  this month" reads `Costing.finalAt`, set when the costing becomes FINAL
+  (approval, "Mark final", a job built on a draft) and cleared on reopen;
+  the seed dates older final costings from `updatedAt`, once. The G-OPS
+  funnel no longer has a "Being costed" stage.
 - **The PDF is "Material Cost Estimate"** (house style): details, one table with
   numbered bucket headings, name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — then the
