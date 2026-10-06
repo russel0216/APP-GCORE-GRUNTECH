@@ -148,3 +148,250 @@
   gap: var(--s-2);
   font-size: var(--fs-sm);
 }
+
+/* ── Scope of work — the Gantt chart (ProjectGantt.tsx) ──────────────────────
+   One table: the activity columns stay put on the left while the timeline
+   scrolls sideways inside .gantt-wrap. Every bar is placed with calc() on
+   --gantt-cell, so the day width is one token. */
+
+.gantt-wrap {
+  --gantt-cell: calc(var(--s-5) + var(--s-1));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.gantt {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  font-size: var(--fs-sm);
+}
+
+.gantt th,
+.gantt td {
+  padding: var(--s-1) var(--s-2);
+  border-bottom: 1px solid var(--line-soft);
+  border-right: 1px solid var(--line-soft);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+  background: var(--surface);
+}
+
+.gantt thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+/* The four activity columns, held on the left as the timeline scrolls. */
+.gantt .gantt-name,
+.gantt .gantt-date,
+.gantt .gantt-pct {
+  position: sticky;
+  z-index: 1;
+}
+
+.gantt .gantt-name {
+  left: 0;
+  min-width: 18rem;
+  max-width: 24rem;
+  white-space: normal;
+  font-weight: 500;
+}
+
+.gantt .gantt-date {
+  min-width: 6.5rem;
+  color: var(--muted);
+}
+
+.gantt .gantt-date:nth-child(2) {
+  left: 18rem;
+}
+
+.gantt .gantt-date:nth-child(3) {
+  left: 24.5rem;
+}
+
+.gantt .gantt-pct {
+  left: 31rem;
+  min-width: 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt thead .gantt-name,
+.gantt thead .gantt-date,
+.gantt thead .gantt-pct {
+  z-index: 3;
+}
+
+.gantt .gantt-time {
+  padding: 0;
+}
+
+.gantt-track {
+  position: relative;
+  display: flex;
+  height: calc(var(--s-6) + var(--s-2));
+  min-width: 100%;
+}
+
+.gantt-month {
+  flex: none;
+  padding: 0 var(--s-2);
+  line-height: calc(var(--s-6) + var(--s-2));
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-day {
+  flex: none;
+  width: var(--gantt-cell);
+  text-align: center;
+  line-height: calc(var(--s-6) + var(--s-2));
+  font-weight: 500;
+  color: var(--faint);
+  border-right: 1px solid var(--line-soft);
+}
+
+.gantt-day.is-weekend {
+  background: var(--surface-3);
+}
+
+.gantt-day.is-today {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.gantt-phase th,
+.gantt-phase td {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.gantt-task .gantt-name {
+  padding-left: var(--s-5);
+}
+
+.gantt-task .gantt-name .badge {
+  margin-left: var(--s-2);
+}
+
+.gantt-task.is-overdue .gantt-date:nth-child(3) {
+  color: var(--danger);
+}
+
+.gantt-edit {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.gantt-edit:hover {
+  color: var(--neon);
+}
+
+.gantt-today {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--gantt-cell);
+  border-left: 2px solid var(--danger);
+  background: rgb(var(--danger-rgb) / 0.06);
+  pointer-events: none;
+}
+
+.gantt-bar {
+  position: absolute;
+  top: var(--s-2);
+  height: calc(var(--s-4) - var(--s-1));
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  --bar: var(--muted);
+  --bar-rgb: var(--shade-rgb);
+  background: rgb(var(--bar-rgb) / 0.3);
+  border: 1px solid rgb(var(--bar-rgb) / 0.6);
+}
+
+.gantt-bar.tone-phase {
+  top: var(--s-1);
+  height: calc(var(--s-5) + var(--s-1));
+  --bar-rgb: var(--magenta-rgb);
+}
+
+.gantt-bar.tone-info {
+  --bar-rgb: var(--info-rgb);
+}
+
+.gantt-bar.tone-ok {
+  --bar-rgb: var(--neon-rgb);
+}
+
+.gantt-bar.tone-danger {
+  --bar-rgb: var(--danger-rgb);
+}
+
+.gantt-fill {
+  height: 100%;
+  background: rgb(var(--bar-rgb) / 0.85);
+}
+
+.gantt-legend {
+  margin-top: var(--s-3);
+}
+
+.gantt-key {
+  display: inline-block;
+  width: var(--s-6);
+  height: var(--s-2);
+  margin: 0 var(--s-1) 0 var(--s-2);
+  border-radius: var(--radius-sm);
+  vertical-align: middle;
+  --bar-rgb: var(--shade-rgb);
+  background: rgb(var(--bar-rgb) / 0.6);
+}
+
+.gantt-key.tone-info {
+  --bar-rgb: var(--info-rgb);
+}
+
+.gantt-key.tone-ok {
+  --bar-rgb: var(--neon-rgb);
+}
+
+.gantt-key.tone-danger {
+  --bar-rgb: var(--danger-rgb);
+}
+
+.gantt-editor {
+  margin-top: var(--s-4);
+  padding: var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+/* Registers across every project, one line under the Projects list's head. */
+.del-registers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+  margin: calc(var(--s-3) * -1) 0 var(--s-4);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}

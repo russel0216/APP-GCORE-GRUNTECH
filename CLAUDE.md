@@ -135,9 +135,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,243 assertions across twenty-two scripts** (counted 2026-10-05): foundation 211,
+**2,254 assertions across twenty-two scripts** (counted 2026-10-06): foundation 214,
 masters 54, sales 277, costing 105, pipeline 44, calendar 38, numbering 46,
-partners 82, delivery 78, chain 72, hr 125, plantilla 99, meetings 86,
+partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 94, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -592,7 +592,8 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   "Not built yet" is worse than none. `ComingSoon` matches on
   `useLocation().pathname`, most specific wins.
 - **`openAttachment()` in `components/Attachments.tsx` is the one way to open a
-  stored file** outside the Attachments card (bearer token → blob). The
+  stored file** outside the Attachments card (bearer token → blob; a
+  spreadsheet opens the viewer, see "Spreadsheet attachments"). The
   attachment routes check authentication only, not per-record visibility — an
   open owner decision (model §14), not something to paper over per screen.
 - **The deploy scripts seed after `prisma generate`**, not straight after
@@ -1284,6 +1285,48 @@ data builder like `quotationTemplate.ts` and `quotationPrintData()`.
   Company Settings names them (`COMPANY_SETTING_NAMES`) and linked there, and
   the selected box's "Not printing now: …". Hidden, the note stays hidden only
   until a different set of fields is empty (a per-browser convenience).
+
+## Project Management (2026-10-06)
+
+The owner's arrangement, after the old gasiontech G-CORE: the G-OPS section
+is **Project Management** and its strip is **Costing, Job Orders, Projects**
+(the registry's order carries it; verify-foundation pins it). The five
+registers that used to sit there — Approved Plans, Budget Monitoring, Purchase
+Requests, Budget Requests, Progress & Billing — are `hidden: true`: each is a
+tab inside a project, and the Projects page keeps them one click away
+(`.del-registers`). Routes, permissions and links are unchanged.
+
+- **A project's tabs are, in order**: Overview, Meetings & Records, Approved
+  Plans, Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
+  Work (Gantt), Progress & Billing — then Finance and Service, which hold the
+  invoices and the turnover register and belong nowhere else. `TAB_ALIASES`
+  in `ProjectWorkspace.tsx` keeps every old `?tab=` landing: `billing` →
+  progress, `tasks` → scope, `documents` and `activity` → meetings. A new
+  link to a tab uses the new key (the budget-request notification sends
+  `?tab=requests`).
+- **Meetings & Records** is the meetings held for the project
+  (`Meeting.jobId`, optional, SetNull; `GET /meetings?jobId=`, the usual
+  `visibleWhere`), its documents and its activity. The meeting form offers
+  "For project" to anyone who may see projects (`/jobs/lookup?includeClosed=true`)
+  and keeps a preset it cannot list; a project's "+ New meeting" opens
+  `/g-hr/meetings?new=1&job=<id>`, read once and dropped from the URL. A
+  project that does not exist is a 400.
+- **Scope of Work is a Gantt chart** (`pages/delivery/ProjectGantt.tsx`): each
+  scope line is a phase on its `plannedStart`/`plannedEnd`, its tasks under it
+  on `startDate`/`dueDate`, filled to `progressPct`; days in whole weeks from
+  the Monday before the earliest date, today marked. No second store: tasks
+  are `JobTask` rows through the same `/jobs/:id/tasks` routes (now taking
+  `startDate` and `scopeItemId`, the latter checked to be this job's), edited
+  in a panel under the chart, never a dialog. Bars are placed with `calc()` on
+  `--gantt-cell` — the one token for the day width.
+- **"Plan from costing" is `POST /jobs/:id/tasks/from-costing`**: the
+  costing's `ScopeTask`s, planned in working days (`planTasks`), written as
+  dated tasks from the project's start date through `workingDayDate()` in
+  `shared/day.ts` (Mon–Fri; a weekend start counts from the Monday after).
+  Only scope lines with NO tasks yet are planned, so a second run overwrites
+  nobody's hand work (`{ created, skipped }`); a planned line's dates become
+  its tasks' span, which the planned S-curve reads. Audited. Needs a start
+  date, and says so.
 
 ## Spreadsheet attachments (2026-10-05)
 

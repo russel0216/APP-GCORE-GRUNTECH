@@ -686,6 +686,8 @@ async function main() {
       'gops.service_contracts.view_all',
       'gops.installed_base.view_all',
       'gchain.receiving.view_all',
+      'ghr.meetings.create',
+      'ghr.meetings.view_own',
     ]);
     const narrowRole = await makeRole('narrow', ['gops.projects.view_all', 'gops.projects.create']);
     const lead = await prisma.user.create({
@@ -706,6 +708,61 @@ async function main() {
     });
     const leadToken = signToken(lead.id, lead.email);
     const narrowToken = signToken(narrow.id, narrow.email);
+
+    // (0) The Scope of Work tab: the costing's plan, in working days, becomes
+    //     the project's tasks on real dates — once, and never over a line
+    //     somebody has already planned by hand.
+    await prisma.scopeTask.createMany({
+      data: [
+        { scopeSectionId: costing.scopeSections[0].id, name: `${TAG} Mobilise`, startDay: 1, durationDays: 2, sortOrder: 0 },
+        { scopeSectionId: costing.scopeSections[0].id, name: `${TAG} Fabricate`, durationDays: 3, sortOrder: 1 },
+      ],
+    });
+    const planned = await http(leadToken, 'POST', `/jobs/${job.id}/tasks/from-costing`);
+    check('POST /jobs/:id/tasks/from-costing plans the costed tasks', planned.status === 200 && planned.body.created === 2, JSON.stringify(planned.body));
+    const plannedJob = await http(leadToken, 'GET', `/jobs/${job.id}`);
+    const plannedTasks = ((plannedJob.body.tasks ?? []) as { name: string; startDate: string; dueDate: string; scopeItemId: string }[])
+      .filter((t) => t.name.startsWith(TAG));
+    // Thursday 1 Jan 2026: days 1–2 are Thu–Fri; day 3 skips the weekend to Monday.
+    check(
+      'working days land on real dates, skipping the weekend',
+      iso(plannedTasks[0]?.startDate) === '2026-01-01' && iso(plannedTasks[0]?.dueDate) === '2026-01-02' &&
+        iso(plannedTasks[1]?.startDate) === '2026-01-05' && iso(plannedTasks[1]?.dueDate) === '2026-01-07',
+      JSON.stringify(plannedTasks.map((t) => [t.name, iso(t.startDate), iso(t.dueDate)])),
+    );
+    const fabrication = (plannedJob.body.scopeItems as { id: string; name: string; plannedStart: string; plannedEnd: string }[])
+      .find((s) => s.name === `${TAG} Fabrication`);
+    check(
+      'and the scope line takes its tasks’ span as its planned dates',
+      plannedTasks.every((t) => t.scopeItemId === fabrication?.id) && iso(fabrication!.plannedStart) === '2026-01-01' && iso(fabrication!.plannedEnd) === '2026-01-07',
+      `${fabrication?.plannedStart} → ${fabrication?.plannedEnd}`,
+    );
+    const replanned = await http(leadToken, 'POST', `/jobs/${job.id}/tasks/from-costing`);
+    check('running it again plans nothing over the line already planned', replanned.body.created === 0 && replanned.body.skipped === 1, JSON.stringify(replanned.body));
+    const moved = await http(leadToken, 'PATCH', `/jobs/${job.id}/tasks/${(plannedJob.body.tasks as { id: string; name: string }[]).find((t) => t.name === `${TAG} Fabricate`)!.id}`, {
+      startDate: '2026-01-06',
+      scopeItemId: 'not-on-this-job',
+    });
+    check('a task cannot be moved onto another project’s scope line', moved.status === 400, String(moved.status));
+
+    // (0b) A meeting held for the project lists on its Meetings & Records tab.
+    const kickoff = await http(leadToken, 'POST', '/meetings', {
+      title: `${TAG} Kick-off`,
+      startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+      endsAt: new Date(Date.now() + 90_000_000).toISOString(),
+      jobId: job.id,
+    });
+    check('a meeting can be held for a project', kickoff.status === 201 && kickoff.body.job?.number === job.number, `${kickoff.status} ${JSON.stringify(kickoff.body.job)}`);
+    const forJob = await http(leadToken, 'GET', `/meetings?jobId=${job.id}&pageSize=50`);
+    check('and the project lists it', forJob.status === 200 && (forJob.body.rows as { id: string }[]).some((m) => m.id === kickoff.body.id), String(forJob.status));
+    const noJob = await http(leadToken, 'POST', '/meetings', {
+      title: `${TAG} Nowhere`,
+      startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+      endsAt: new Date(Date.now() + 90_000_000).toISOString(),
+      jobId: 'no-such-job',
+    });
+    check('a project that does not exist is refused', noJob.status === 400, String(noJob.status));
+    await prisma.meeting.deleteMany({ where: { title: { startsWith: TAG } } });
 
     // (a) A project created from an approved quotation revision reads back
     //     its quotation — Job.quotationRevisionId was dead before fix 14.

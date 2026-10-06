@@ -77,6 +77,7 @@ interface MeetingRow {
   status: string;
   meetLink: string | null;
   organizer: { id: string; name: string };
+  job: { id: string; number: string; name: string } | null;
   inviteeCount: number;
   acceptedCount: number;
   sent: boolean;
@@ -105,6 +106,7 @@ interface Meeting {
   status: string;
   organizerId: string;
   organizer: UserRef;
+  job: { id: string; number: string; name: string } | null;
   meetLink: string | null;
   calendarEventUrl: string | null;
   icsSequence: number;
@@ -200,6 +202,25 @@ export function Meetings() {
   /** true = a new meeting at the default time; a Date = booked from a day on the grid. */
   const [creating, setCreating] = useState<Date | boolean>(false);
   const [reload, setReload] = useState(0);
+  /** `?new=1&job=<id>`: a project's Meetings & Records tab booking a meeting for it. */
+  const [presetJobId, setPresetJobId] = useState<string | undefined>(undefined);
+
+  // Read once, then dropped from the URL so a reload does not reopen the form.
+  useEffect(() => {
+    if (params.get('new') !== '1') return;
+    setPresetJobId(params.get('job') ?? undefined);
+    setCreating(true);
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('new');
+        next.delete('job');
+        return next;
+      },
+      { replace: true },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Which view is open lives in the URL like the list's own filters, so a
   // reload or a shared link lands on the month that was being looked at.
@@ -372,6 +393,7 @@ export function Meetings() {
       {creating !== false && (
         <MeetingModal
           startAt={creating instanceof Date ? creating : undefined}
+          presetJobId={presetJobId}
           onClose={() => setCreating(false)}
           onSaved={(id) => {
             setCreating(false);
@@ -476,20 +498,36 @@ function MeetingsMonth({
 function MeetingModal({
   initial,
   startAt,
+  presetJobId,
   onClose,
   onSaved,
 }: {
   initial?: Meeting;
   /** A new meeting booked from a day on the month grid starts there. */
   startAt?: Date;
+  /** A new meeting booked from a project's Meetings & Records tab is for it. */
+  presetJobId?: string;
   onClose: () => void;
   onSaved: (id: string) => void;
 }) {
-  const { me } = useAuth();
+  const { me, can } = useAuth();
   const toast = useToast();
   const people = usePeople();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [jobId, setJobId] = useState(initial?.job?.id ?? presetJobId ?? '');
+  // The project picker needs the projects right; without it the preset (or
+  // the project already on the meeting) is kept and shown, never dropped.
+  const seesProjects = can('gops.projects.view_all') || can('gops.projects.view_own');
+  const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!seesProjects) return;
+    api
+      .get<{ id: string; number: string; name: string }[]>('/jobs/lookup?includeClosed=true')
+      .then(setJobs)
+      .catch(() => {});
+  }, [seesProjects]);
+  const knownJob = initial?.job && initial.job.id === jobId ? initial.job : jobs.find((j) => j.id === jobId);
 
   const defaultStart = useMemo(() => {
     if (startAt) return startAt;
@@ -538,6 +576,7 @@ function MeetingModal({
         agenda: form.agenda.trim() || null,
         startsAt: new Date(form.startsAt).toISOString(),
         endsAt: new Date(form.endsAt).toISOString(),
+        jobId: jobId || null,
       };
       if (initial) {
         await api.patch(`/meetings/${initial.id}`, payload);
@@ -600,6 +639,30 @@ function MeetingModal({
           />
         </Field>
       </div>
+
+      {seesProjects ? (
+        <Field label="For project" hint="A kick-off, a site meeting, a turnover — it then shows on that project's Meetings & Records tab.">
+          <select value={jobId} onChange={(e) => setJobId(e.target.value)}>
+            <option value="">— none —</option>
+            {jobId && !jobs.some((j) => j.id === jobId) && knownJob && (
+              <option value={jobId}>
+                {knownJob.number} — {knownJob.name}
+              </option>
+            )}
+            {jobs.map((j) => (
+              <option key={j.id} value={j.id}>
+                {j.number} — {j.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      ) : (
+        knownJob && (
+          <p className="muted">
+            For project {knownJob.number} — {knownJob.name}
+          </p>
+        )
+      )}
 
       <Field label="Where" hint="A room, a site, or leave it blank for an online meeting.">
         <input
@@ -796,6 +859,12 @@ export function MeetingDetail() {
         <strong>{whenText(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised by{' '}
         {m.isOrganizer ? 'you' : m.organizer.name}
         {m.location ? ` · ${m.location}` : ''}
+        {m.job && (
+          <>
+            {' '}
+            · for <Link to={`/g-ops/projects/${m.job.id}?tab=meetings`}>{m.job.number}</Link> {m.job.name}
+          </>
+        )}
       </p>
 
       <ErrorBox error={error} />

@@ -197,6 +197,22 @@ export function Projects() {
         </div>
       </div>
 
+      {/* The registers across every project (2026-10-06): off the menu — each
+          is a tab inside a project — but kept one click away here. */}
+      <p className="del-registers">
+        {(can('gops.plans.view_all') || can('gops.plans.view_own')) && <Link to="/g-ops/plans">Approved plans</Link>}
+        {can('gops.budget_monitoring.view_all') && <Link to="/g-ops/budget-monitoring">Budget monitoring</Link>}
+        {(can('gops.purchase_requests.view_all') || can('gops.purchase_requests.view_own')) && (
+          <Link to="/g-ops/purchase-requests">Purchase requests</Link>
+        )}
+        {(can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own')) && (
+          <Link to="/g-ops/budget-requests">Budget requests</Link>
+        )}
+        {(can('gops.progress_billing.view_all') || can('gops.progress_billing.view_own')) && (
+          <Link to="/g-ops/progress">Progress &amp; billing</Link>
+        )}
+      </p>
+
       <DataList<JobRow>
         listKey="projects"
         endpoint="/jobs"

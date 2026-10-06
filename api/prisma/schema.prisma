@@ -1537,6 +1537,7 @@ model Job {
   billings        ProgressBilling[]
   plans           ApprovedPlan[]
   tasks           JobTask[]
+  meetings        Meeting[]
 
   purchaseRequests PurchaseRequest[]
   purchaseOrders   PurchaseOrder[]
@@ -2713,6 +2714,11 @@ model Meeting {
   status           ActivityStatus   @default(PLANNED)
   organizerId      String
   organizer        User             @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
+  /// The project it is held for — a kick-off, a site meeting, a turnover —
+  /// so the project's Meetings & Records tab lists it. Optional: most
+  /// meetings are nobody's project.
+  jobId            String?
+  job              Job?             @relation(fields: [jobId], references: [id], onDelete: SetNull)
   /// https://meet.google.com/abc-defg-hij — pasted back, never derived.
   meetLink         String?
   calendarEventUrl String?
@@ -2729,6 +2735,7 @@ model Meeting {
   @@index([startsAt])
   @@index([organizerId, startsAt])
   @@index([status, startsAt])
+  @@index([jobId, startsAt])
 }
 
 model MeetingInvitee {

@@ -81,7 +81,8 @@ export interface SubmoduleDef {
    * Kept off the sidebar, the strip and Ctrl+K's screen list, but still a
    * screen: its route, permissions and every link to it work as before. The
    * owner's call for the SCORO Archive (2026-10-04) — reached from a
-   * customer, a continued quotation or a search hit, not browsed.
+   * customer, a continued quotation or a search hit, not browsed — and for
+   * the project registers (2026-10-06), each a tab inside the project.
    */
   hidden?: boolean;
 }
@@ -109,24 +110,26 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'quote_archive', group: 'Sales', label: 'SCORO Archive', path: '/g-ops/quote-archive', actions: ['view_all', 'export', 'create'], phase: 3, hidden: true,
         note: 'Read-only SCORO quotation history. Create = run the SCORO import; continuing a quote uses the Quotations create permission.' },
       { key: 'pipeline', group: 'Sales', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
-      { key: 'projects', group: 'Project', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
-      // Plans live inside the project workspace; the menu entry opens the
-      // register across all jobs.
-      { key: 'plans', group: 'Project', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, note: 'Managed from a project’s Plans tab' },
-      { key: 'budget_monitoring', group: 'Project', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4 },
-      { key: 'purchase_requests', group: 'Project', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5 },
-      { key: 'budget_requests', group: 'Project', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4 },
-      { key: 'progress_billing', group: 'Project', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4 },
-      { key: 'costing', group: 'Sales', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
       { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
         note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, sizing apps. One supplier record, seen from Sales.' },
+      // Project Management (2026-10-06, the owner's order): Costing, Job
+      // Orders, Projects — the way the old gasiontech G-CORE arranged it. The
+      // registers that follow are hidden (rule: hidden, never deleted): each
+      // is a tab inside the project, and a link from the Projects page.
+      { key: 'costing', group: 'Project Management', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
+      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_APPROVABLE, phase: 8, note: 'A request for service work; approval schedules the visit' },
+      { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
+      { key: 'plans', group: 'Project Management', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, hidden: true, note: 'Managed from a project’s Approved Plans tab' },
+      { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
+      { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: OWNED_APPROVABLE, phase: 5, hidden: true },
+      { key: 'budget_requests', group: 'Project Management', label: 'Budget Requests', path: '/g-ops/budget-requests', actions: OWNED_APPROVABLE, phase: 4, hidden: true },
+      { key: 'progress_billing', group: 'Project Management', label: 'Progress & Billing', path: '/g-ops/progress', actions: OWNED_APPROVABLE, phase: 4, hidden: true },
       // Aftermarket (Phase 8). The installed base is what turns a finished
       // project into a renewal pipeline — without it nobody can answer "what
       // did we put in that hospital, and when does its warranty run out".
       { key: 'aftermarket', group: 'Aftermarket', label: 'Aftermarket', path: '/g-ops/aftermarket', actions: READ, phase: 8, note: 'Overview and the aftermarket rules' },
       { key: 'installed_base', group: 'Aftermarket', label: 'Installed Base', path: '/g-ops/installed-base', actions: SHARED, phase: 8 },
       { key: 'service_contracts', group: 'Aftermarket', label: 'Service Contracts', path: '/g-ops/service-contracts', actions: OWNED, phase: 8 },
-      { key: 'job_orders', group: 'Aftermarket', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_APPROVABLE, phase: 8, note: 'A request for service work; approval schedules the visit' },
       { key: 'visits', group: 'Aftermarket', label: 'Service Schedule', path: '/g-ops/visits', actions: READ, phase: 8, note: 'Every visit on one calendar; scheduling and reporting use the Preventive Maintenance permissions' },
       { key: 'renewals', group: 'Aftermarket', label: 'Renewals', path: '/g-ops/renewals', actions: READ, phase: 8 },
       { key: 'report_templates', group: 'Service reports', label: 'Report Templates', path: '/g-ops/report-templates', actions: READ, phase: 8, note: 'Editing uses the Preventive Maintenance create permission' },

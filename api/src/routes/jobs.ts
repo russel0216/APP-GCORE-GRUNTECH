@@ -1198,9 +1198,9 @@ budgetRequestRoutes.post(
       documentNumber: request.number,
       subject: `${request.job.number} — ${request.costCategory.name}: ${request.reason}`,
       amount: num(request.amount),
-      // The Budget tab lists the request with its approval chain — the approver
-      // lands where the request can actually be found.
-      link: `/g-ops/projects/${request.jobId}?tab=budget`,
+      // The Budget Requests tab lists the request with its approval chain —
+      // the approver lands where the request can actually be found.
+      link: `/g-ops/projects/${request.jobId}?tab=requests`,
       requesterId: me.id,
     });
 

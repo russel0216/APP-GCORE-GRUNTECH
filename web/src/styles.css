@@ -125,7 +125,9 @@
   --topbar-h: 54px;
   --topbar-pad: 18px;
   --sidebar-w: 232px;
-  --sidebar-sections-w: 196px;
+  /* Wide enough for "Project Management" with its count — 196px cut it to
+     "Project Mana…". */
+  --sidebar-sections-w: 236px;
   --rail-w: 60px;
   --content-pad-y: 22px;
   --content-pad-x: 26px;

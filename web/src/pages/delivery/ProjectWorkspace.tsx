@@ -19,6 +19,7 @@ import { Attachments } from '../../components/Attachments';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { recordLink } from '../../lib/links';
 import { SCurve, type CurvePoint } from './SCurve';
+import { ProjectGantt } from './ProjectGantt';
 import { JOB_STATUSES, JobStatus, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 
@@ -121,7 +122,9 @@ interface Job {
     name: string;
     status: string;
     progressPct: number;
+    startDate: string | null;
     dueDate: string | null;
+    scopeItemId: string | null;
     assignedTo: { id: string; name: string } | null;
   }[];
   budgetRequestCount: number;
@@ -150,32 +153,27 @@ interface Job {
 
 type Tab =
   | 'overview'
-  | 'budget'
-  | 'scope'
+  | 'meetings'
   | 'plans'
+  | 'budget'
   | 'procurement'
+  | 'requests'
+  | 'scope'
   | 'progress'
-  | 'billing'
   | 'finance'
-  | 'service'
-  | 'tasks'
-  | 'documents'
-  | 'activity';
+  | 'service';
 
-const TABS: Tab[] = [
-  'overview',
-  'budget',
-  'scope',
-  'plans',
-  'procurement',
-  'progress',
-  'billing',
-  'finance',
-  'service',
-  'tasks',
-  'documents',
-  'activity',
-];
+/**
+ * The owner's order (2026-10-06), after the old gasiontech G-CORE's project
+ * menu: Overview, Meetings & Records, Approved Plans, Budget Monitoring,
+ * Purchase Requisition, Budget Requests, Scope of Work (the Gantt chart),
+ * Progress & Billing. Finance and Service stay at the end: the turnover
+ * register and the project's invoices live nowhere else.
+ */
+const TABS: Tab[] = ['overview', 'meetings', 'plans', 'budget', 'procurement', 'requests', 'scope', 'progress', 'finance', 'service'];
+
+/** Where the tabs that used to exist went, so an old link or notification still lands. */
+const TAB_ALIASES: Record<string, Tab> = { billing: 'progress', tasks: 'scope', documents: 'meetings', activity: 'meetings' };
 
 /** Plan statuses the shared rules do not already colour. */
 const PLAN_TONES = { FOR_APPROVAL: 'warn', SUPERSEDED: '' } as const;
@@ -202,7 +200,8 @@ export function ProjectWorkspace() {
 
   // Which tab is open lives in the URL, so a notification, the Budget
   // Requests register or the Plans register can open the right one.
-  const requested = params.get('tab') as Tab | null;
+  const rawTab = params.get('tab');
+  const requested: Tab | null = rawTab ? (TAB_ALIASES[rawTab] ?? (rawTab as Tab)) : null;
   const tab: Tab = requested && TABS.includes(requested) ? requested : 'overview';
   function setTab(next: Tab) {
     const p = new URLSearchParams(params);
@@ -228,7 +227,7 @@ export function ProjectWorkspace() {
   }, [load]);
 
   useEffect(() => {
-    if (tab !== 'activity' || !id) return;
+    if (tab !== 'meetings' || !id) return;
     api.get<typeof activity>(`/audit/job/${id}`).then(setActivity).catch(() => setActivity([]));
   }, [tab, id]);
 
@@ -264,17 +263,15 @@ export function ProjectWorkspace() {
   ];
   const visible: Record<Tab, boolean> = {
     overview: true,
-    budget: true,
-    scope: true,
+    meetings: true,
     plans: true,
+    budget: true,
     procurement: procurementKeys.some(can),
+    requests: can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own'),
+    scope: true,
     progress: true,
-    billing: true,
     finance: financeKeys.some(can),
     service: serviceKeys.some(can),
-    tasks: true,
-    documents: true,
-    activity: true,
   };
   const current: Tab = visible[tab] ? tab : 'overview';
 
@@ -291,17 +288,15 @@ export function ProjectWorkspace() {
 
   const tabLabel: Record<Tab, string> = {
     overview: 'Overview',
-    budget: `Budget (${job.position.filter((p) => p.budgeted > 0).length})`,
-    scope: `Scope (${job.scopeItems.length})`,
-    plans: `Plans (${job.plans.length})`,
-    procurement: 'Procurement',
-    progress: `Progress (${job.progressReports.length})`,
-    billing: `Billing (${job.billings.length})`,
+    meetings: 'Meetings & Records',
+    plans: `Approved Plans (${job.plans.length})`,
+    budget: 'Budget Monitoring',
+    procurement: 'Purchase Requisition',
+    requests: `Budget Requests (${job.budgetRequestCount})`,
+    scope: 'Scope of Work (Gantt)',
+    progress: `Progress & Billing (${job.progressReports.length})`,
     finance: 'Finance',
     service: job.installedAssetCount ? `Service (${job.installedAssetCount})` : 'Service',
-    tasks: `Tasks (${job.tasks.length})`,
-    documents: 'Documents',
-    activity: 'Activity',
   };
 
   return (
@@ -521,8 +516,10 @@ export function ProjectWorkspace() {
         </div>
       )}
 
-      {current === 'budget' && (
-        <BudgetTab
+      {current === 'budget' && <BudgetTab job={job} reloadToken={reloadToken} />}
+
+      {current === 'requests' && (
+        <BudgetRequestsCard
           job={job}
           reloadToken={reloadToken}
           onRaise={can('gops.budget_requests.create') ? () => setBudgetRequest(true) : undefined}
@@ -530,6 +527,17 @@ export function ProjectWorkspace() {
       )}
 
       {current === 'scope' && (
+        <div className="stack">
+        <ProjectGantt
+          jobId={job.id}
+          jobStart={job.startDate}
+          jobEnd={job.targetEndDate}
+          scopeItems={job.scopeItems}
+          tasks={job.tasks}
+          hasCosting={!!job.costing}
+          canEdit={mayEdit}
+          onChanged={load}
+        />
         <div className="card">
           <h3 className="card-title">Schedule of values</h3>
           <p className="muted del-lede">
@@ -580,6 +588,7 @@ export function ProjectWorkspace() {
             </table>
           </div>
         </div>
+        </div>
       )}
 
       {current === 'plans' && (
@@ -593,6 +602,7 @@ export function ProjectWorkspace() {
       {current === 'procurement' && <ProcurementTab job={job} />}
 
       {current === 'progress' && (
+        <div className="stack">
         <div className="card">
           <div className="del-card-head">
             <h3 className="card-title">Progress reports</h3>
@@ -641,9 +651,6 @@ export function ProjectWorkspace() {
             </div>
           )}
         </div>
-      )}
-
-      {current === 'billing' && (
         <div className="card">
           <h3 className="card-title">Progress billings</h3>
           <p className="muted del-lede">
@@ -696,6 +703,7 @@ export function ProjectWorkspace() {
             </div>
           )}
         </div>
+        </div>
       )}
 
       {current === 'finance' && <FinanceTab job={job} />}
@@ -708,19 +716,16 @@ export function ProjectWorkspace() {
         />
       )}
 
-      {current === 'tasks' && <TasksTab job={job} onChanged={load} />}
-
-      {current === 'documents' && (
+      {current === 'meetings' && (
+        <div className="stack">
+        <ProjectMeetingsCard job={job} />
         <Attachments
           entityType="job"
           entityId={job.id}
           title="Project documents"
-          hint="Contracts, permits, as-builts, turnover papers — anything this project is answerable for."
+          hint="Contracts, permits, minutes, as-builts, turnover papers — anything this project is answerable for."
           canEdit={mayEdit || can('gops.projects.create')}
         />
-      )}
-
-      {current === 'activity' && (
         <div className="card">
           <h3 className="card-title">Activity</h3>
           {activity.length === 0 ? (
@@ -751,6 +756,7 @@ export function ProjectWorkspace() {
               </table>
             </div>
           )}
+        </div>
         </div>
       )}
 
@@ -1674,31 +1680,15 @@ interface LedgerRow {
  */
 const LEDGER_TONES = { BUDGETED: '', COMMITTED: 'info', INCURRED: 'warn', CONSUMED: '' } as const;
 
-function BudgetTab({
-  job,
-  reloadToken,
-  onRaise,
-}: {
-  job: Job;
-  reloadToken: number;
-  onRaise?: () => void;
-}) {
+function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
   const { can } = useAuth();
   const s = job.summary;
-  const seesRequests = can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own');
   const seesLedger = can('gops.budget_monitoring.view_all');
 
   return (
     <div className="stack">
       <section className="card">
-        <div className="del-card-head">
-          <h3 className="card-title">Budget monitoring</h3>
-          {onRaise && (
-            <button className="btn btn-primary btn-sm" onClick={onRaise}>
-              + Budget request
-            </button>
-          )}
-        </div>
+        <h3 className="card-title">Budget monitoring</h3>
 
         <p className="muted del-lede">
           Available = budgeted − committed − incurred. Consumed is shown but not subtracted — stock
@@ -1762,7 +1752,6 @@ function BudgetTab({
         </div>
       </section>
 
-      {seesRequests && <BudgetRequestsCard job={job} reloadToken={reloadToken} />}
       {seesLedger && <LedgerCard job={job} reloadToken={reloadToken} />}
     </div>
   );
@@ -1773,7 +1762,7 @@ function BudgetTab({
  * the finance approver a notification sends here can find the request, and the
  * PM can see who is sitting on it.
  */
-function BudgetRequestsCard({ job, reloadToken }: { job: Job; reloadToken: number }) {
+function BudgetRequestsCard({ job, reloadToken, onRaise }: { job: Job; reloadToken: number; onRaise?: () => void }) {
   const [rows, setRows] = useState<BudgetRequestRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -1787,7 +1776,14 @@ function BudgetRequestsCard({ job, reloadToken }: { job: Job; reloadToken: numbe
 
   return (
     <section className="card">
-      <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
+      <div className="del-card-head">
+        <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
+        {onRaise && (
+          <button className="btn btn-primary btn-sm" onClick={onRaise}>
+            + Budget request
+          </button>
+        )}
+      </div>
       <p className="muted del-lede">
         A budget request <strong>changes</strong> the budget; it moves the budgeted column only once
         every approver has signed.
@@ -2131,101 +2127,93 @@ function PlanRow({
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
-function TasksTab({ job, onChanged }: { job: Job; onChanged: () => Promise<void> }) {
+/** A meeting held for this project — GET /meetings?jobId=, the list's own row. */
+interface ProjectMeeting {
+  id: string;
+  number: string;
+  title: string;
+  location: string | null;
+  startsAt: string;
+  status: string;
+  organizer: { id: string; name: string };
+}
+
+/**
+ * Meetings & Records (2026-10-06): the meetings held for this project — a
+ * kick-off, site meetings, the turnover — above its documents and its
+ * activity. Shown only to someone who may read meetings at all; the list
+ * route narrows a view_own holder to the meetings they are on.
+ */
+function ProjectMeetingsCard({ job }: { job: Job }) {
   const { can } = useAuth();
-  const [name, setName] = useState('');
+  const [rows, setRows] = useState<ProjectMeeting[] | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const sees = can('ghr.meetings.view_all') || can('ghr.meetings.view_own');
 
-  async function add() {
-    if (!name) return;
-    try {
-      await api.post(`/jobs/${job.id}/tasks`, { name });
-      setName('');
-      await onChanged();
-    } catch (err) {
-      setError(err);
-    }
-  }
+  useEffect(() => {
+    if (!sees) return;
+    api
+      .get<ListResult<ProjectMeeting>>(`/meetings?jobId=${job.id}&pageSize=100`)
+      .then((r) => setRows(r.rows))
+      .catch(setError);
+  }, [job.id, sees]);
 
-  async function setStatus(taskId: string, status: string) {
-    try {
-      await api.patch(`/jobs/${job.id}/tasks/${taskId}`, { status });
-      await onChanged();
-    } catch (err) {
-      setError(err);
-    }
-  }
-
+  if (!sees) return null;
   return (
-    <div className="card">
-      <h3 className="card-title">Tasks</h3>
+    <section className="card">
+      <div className="del-card-head">
+        <h3 className="card-title">Meetings{rows && rows.length ? ` (${rows.length})` : ''}</h3>
+        {can('ghr.meetings.create') && (
+          <Link className="btn btn-primary btn-sm" to={`/g-hr/meetings?new=1&job=${job.id}`}>
+            + New meeting
+          </Link>
+        )}
+      </div>
+      <p className="muted del-lede">
+        Kick-off, site and turnover meetings held for this project. Minutes and other records go in the documents
+        below.
+      </p>
       <ErrorBox error={error} />
-      {job.tasks.length === 0 ? (
-        <Empty title="No tasks yet" />
-      ) : (
-        <div className="table-wrap del-gap-bottom">
+      {!rows && !error ? (
+        <Loading />
+      ) : rows && rows.length === 0 ? (
+        <p className="faint del-note">No meeting has been held for this project yet.</p>
+      ) : rows ? (
+        <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
-                <th>Task</th>
-                <th>Assigned</th>
-                <th>Due</th>
+                <th>Number</th>
+                <th>Meeting</th>
+                <th>When</th>
+                <th>Organiser</th>
                 <th>Status</th>
-                {can('gops.projects.edit_all') && (
-                  <th>
-                    <span className="visually-hidden">Actions</span>
-                  </th>
-                )}
               </tr>
             </thead>
             <tbody>
-              {job.tasks.map((t) => (
-                <tr key={t.id}>
-                  <td>{t.name}</td>
-                  <td>{t.assignedTo?.name ?? <span className="faint">—</span>}</td>
-                  <td>{formatDate(t.dueDate)}</td>
+              {rows.map((m) => (
+                <tr key={m.id}>
                   <td>
-                    <StatusBadge status={t.status} extra={{ DONE: 'ok', BLOCKED: 'danger', IN_PROGRESS: 'info', TODO: '' }} />
+                    <Link className="mono" to={`/g-hr/meetings/${m.id}`}>
+                      {m.number}
+                    </Link>
                   </td>
-                  {can('gops.projects.edit_all') && (
-                    <td>
-                      <div className="row">
-                        {t.status !== 'IN_PROGRESS' && t.status !== 'DONE' && (
-                          <button className="btn btn-sm" onClick={() => setStatus(t.id, 'IN_PROGRESS')}>
-                            Start
-                          </button>
-                        )}
-                        {t.status !== 'DONE' && (
-                          <button className="btn btn-sm btn-ok" onClick={() => setStatus(t.id, 'DONE')}>
-                            Done
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  )}
+                  <td>
+                    {m.title}
+                    {m.location && <div className="faint">{m.location}</div>}
+                  </td>
+                  <td>{formatDateTime(m.startsAt)}</td>
+                  <td>{m.organizer.name}</td>
+                  <td>
+                    <StatusBadge status={m.status} />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      )}
-
-      {can('gops.projects.edit_all') && (
-        <div className="row">
-          <input
-            className="del-task-input"
-            value={name}
-            placeholder="Add a task…"
-            aria-label="New task"
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && add()}
-          />
-          <button className="btn btn-sm" onClick={add} disabled={!name}>
-            Add
-          </button>
-        </div>
-      )}
-    </div>
+      ) : null}
+    </section>
   );
 }
 

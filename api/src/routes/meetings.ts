@@ -79,6 +79,7 @@ const detailSelect = {
   cancelReason: true,
   createdAt: true,
   updatedAt: true,
+  job: { select: { id: true, number: true, name: true } },
   invitees: {
     select: {
       id: true,
@@ -137,7 +138,17 @@ const meetingSchema = z.object({
   optionalIds: inviteeIds.optional(),
   /** A Meet link, a bare room code or a Calendar event link. */
   googleUrl: z.string().trim().max(2000).nullable().optional(),
+  /** The project it is held for; null or empty clears it. */
+  jobId: z.string().trim().max(64).nullable().optional(),
 });
+
+/** The project a meeting is held for, checked to exist. '' and null clear it. */
+async function jobFor(jobId: string | null | undefined): Promise<string | null> {
+  if (!jobId) return null;
+  const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+  if (!job) throw badRequest('That project does not exist');
+  return job.id;
+}
 
 /** Active users among the ids named, minus the organiser — silently. */
 async function invitableUsers(ids: string[], organizerId: string): Promise<string[]> {
@@ -213,6 +224,7 @@ meetingRoutes.get(
     if (f.role === 'organizer') and.push({ organizerId: me.id });
     if (f.role === 'invited') and.push({ invitees: { some: { userId: me.id } } });
     if (f.organizerId) and.push({ organizerId: f.organizerId });
+    if (f.jobId) and.push({ jobId: f.jobId });
     if (q.search) {
       and.push({
         OR: [
@@ -247,6 +259,7 @@ meetingRoutes.get(
           status: true,
           meetLink: true,
           organizer: { select: { id: true, name: true } },
+          job: { select: { id: true, number: true, name: true } },
           invitees: { select: { userId: true, response: true, notifiedAt: true } },
         },
       }),
@@ -323,6 +336,7 @@ meetingRoutes.post(
     const body = parseBody(meetingSchema, req.body);
     const slot = timeWindow(body.startsAt, body.endsAt);
     const link = parseGoogleLink(body.googleUrl);
+    const jobId = await jobFor(body.jobId);
 
     const required = await invitableUsers(body.inviteeIds ?? [], me.id);
     const optional = (await invitableUsers(body.optionalIds ?? [], me.id)).filter(
@@ -340,6 +354,7 @@ meetingRoutes.post(
           startsAt: slot.startsAt,
           endsAt: slot.endsAt,
           organizerId: me.id,
+          jobId,
           meetLink: link.meetLink,
           calendarEventUrl: link.calendarEventUrl,
           invitees: {
@@ -396,6 +411,10 @@ meetingRoutes.patch(
     if (body.title !== undefined) data.title = body.title;
     if (body.agenda !== undefined) data.agenda = body.agenda || null;
     if (body.location !== undefined) data.location = body.location || null;
+    if (body.jobId !== undefined) {
+      const jobId = await jobFor(body.jobId);
+      data.job = jobId ? { connect: { id: jobId } } : { disconnect: true };
+    }
 
     let timeChanged = false;
     if (body.startsAt !== undefined || body.endsAt !== undefined) {

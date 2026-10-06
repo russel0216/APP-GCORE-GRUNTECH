@@ -58,6 +58,7 @@ import {
   rowKeys,
 } from '../../web/src/lib/spreadsheet';
 import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
+import { workingDayDate } from '../src/shared/day';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 
@@ -210,7 +211,29 @@ async function main() {
   check('the SCORO Archive keeps its permissions', permissionKeys.has('gops.quote_archive.view_all') && permissionKeys.has('gops.quote_archive.create'));
   const superMenu = menuFor(superUser).flatMap((m) => m.submodules.map((s) => ({ id: `${m.key}.${s.key}`, hidden: s.hidden === true })));
   check('the SCORO Archive is in the menu payload marked hidden', superMenu.some((s) => s.id === 'gops.quote_archive' && s.hidden));
-  check('and it is the only hidden screen', superMenu.filter((s) => s.hidden).map((s) => s.id).join() === 'gops.quote_archive');
+  // The project registers are hidden too (2026-10-06): each is a tab inside
+  // the project, and Project Management's strip is Costing, Job Orders,
+  // Projects — the owner's order, which the registry's order carries.
+  check(
+    'the hidden screens are the SCORO Archive and the five project registers',
+    superMenu.filter((s) => s.hidden).map((s) => s.id).sort().join() ===
+      'gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.quote_archive',
+    superMenu.filter((s) => s.hidden).map((s) => s.id).join(),
+  );
+  const pmStrip = menuFor(superUser)
+    .find((m) => m.key === 'gops')!
+    .submodules.filter((s) => s.group === 'Project Management' && !s.hidden)
+    .map((s) => s.label);
+  check('Project Management shows Costing, Job Orders, Projects in that order', pmStrip.join() === 'Costing,Job Orders,Projects', pmStrip.join());
+  // Working days on real dates: Thursday 1 Jan 2026.
+  const jan1 = new Date('2026-01-01');
+  const onDay = (n: number) => workingDayDate(jan1, n).toISOString().slice(0, 10);
+  check(
+    'a working day counts Mon–Fri from the start, skipping weekends',
+    onDay(1) === '2026-01-01' && onDay(2) === '2026-01-02' && onDay(3) === '2026-01-05' && onDay(7) === '2026-01-09' && onDay(8) === '2026-01-12',
+    [1, 2, 3, 7, 8].map(onDay).join(' '),
+  );
+  check('a start on a weekend counts from the Monday after it', workingDayDate(new Date('2026-01-03'), 1).toISOString().slice(0, 10) === '2026-01-05');
 
   // ── 2. Document numbering ──────────────────────────────────────────────────
   console.log('\nNumbering');

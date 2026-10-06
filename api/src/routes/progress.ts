@@ -16,7 +16,8 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
-import { manilaDate } from '../shared/day';
+import { manilaDate, workingDayDate } from '../shared/day';
+import { planTasks } from '../shared/costingMath';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -1089,6 +1090,8 @@ planRoutes.patch(
         status: z.enum(['NOT_STARTED', 'IN_PROGRESS', 'BLOCKED', 'DONE']).optional(),
         progressPct: z.number().int().min(0).max(100).optional(),
         assignedToId: z.string().optional().nullable(),
+        scopeItemId: z.string().optional().nullable(),
+        startDate: z.string().optional().nullable(),
         dueDate: z.string().optional().nullable(),
       }),
       req.body,
@@ -1097,6 +1100,13 @@ planRoutes.patch(
       where: { id: req.params.taskId, jobId: req.params.jobId },
     });
     if (!task) throw notFound('Task not found');
+    if (body.scopeItemId) {
+      const item = await prisma.jobScopeItem.findFirst({
+        where: { id: body.scopeItemId, jobId: req.params.jobId },
+        select: { id: true },
+      });
+      if (!item) throw badRequest('That scope line is not on this project');
+    }
 
     res.json(
       await prisma.jobTask.update({
@@ -1114,10 +1124,99 @@ planRoutes.patch(
             ? { progressPct: body.progressPct }
             : {}),
           ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
+          ...(body.scopeItemId !== undefined ? { scopeItemId: body.scopeItemId || null } : {}),
+          ...(body.startDate !== undefined ? { startDate: asDate(body.startDate) } : {}),
           ...(body.dueDate !== undefined ? { dueDate: asDate(body.dueDate) } : {}),
         },
       }),
     );
+  }),
+);
+
+/**
+ * The costing's scope of work as this project's tasks (2026-10-06).
+ *
+ * A costing plans each phase's tasks on working days (Mon–Fri, day 1 = the
+ * first); the project's Scope of Work tab draws them as a Gantt chart on real
+ * dates. This writes them down once, from the project's start date, for every
+ * scope line that still has no task — a line somebody has already planned by
+ * hand is left alone, so running it again never overwrites that work. Each
+ * scope line's planned dates become its tasks' span, which is also what the
+ * planned S-curve reads.
+ */
+planRoutes.post(
+  '/:jobId/tasks/from-costing',
+  require_('gops.projects.edit_all'),
+  handler(async (req, res) => {
+    const job = await prisma.job.findUnique({
+      where: { id: req.params.jobId },
+      select: {
+        id: true,
+        number: true,
+        startDate: true,
+        scopeItems: {
+          orderBy: { sortOrder: 'asc' },
+          select: { id: true, sourceSectionId: true, _count: { select: { tasks: true } } },
+        },
+      },
+    });
+    if (!job) throw notFound('Job not found');
+    const start = job.startDate;
+    if (!start) throw badRequest('Give the project a start date first - the plan counts working days from it');
+
+    const sectionIds = job.scopeItems.map((s) => s.sourceSectionId).filter((id): id is string => !!id);
+    const sections = await prisma.scopeSection.findMany({
+      where: { id: { in: sectionIds } },
+      select: { id: true, durationDays: true, tasks: { orderBy: { sortOrder: 'asc' } } },
+    });
+    const plan = planTasks(sections.map((s) => ({ durationDays: s.durationDays, tasks: s.tasks })));
+    const bySection = new Map(sections.map((s, i) => [s.id, { tasks: s.tasks, planned: plan.sections[i] }]));
+
+    let created = 0;
+    let skipped = 0;
+    await prisma.$transaction(async (tx) => {
+      for (const item of job.scopeItems) {
+        const source = item.sourceSectionId ? bySection.get(item.sourceSectionId) : undefined;
+        if (!source || !source.tasks.length) continue;
+        if (item._count.tasks > 0) {
+          skipped++;
+          continue;
+        }
+        await tx.jobTask.createMany({
+          data: source.tasks.map((t, i) => ({
+            jobId: job.id,
+            scopeItemId: item.id,
+            name: t.name,
+            startDate: workingDayDate(start, source.planned.tasks[i].start),
+            dueDate: workingDayDate(start, source.planned.tasks[i].end),
+            sortOrder: i,
+          })),
+        });
+        if (source.planned.start !== null && source.planned.end !== null) {
+          await tx.jobScopeItem.update({
+            where: { id: item.id },
+            data: {
+              plannedStart: workingDayDate(start, source.planned.start),
+              plannedEnd: workingDayDate(start, source.planned.end),
+            },
+          });
+        }
+        created += source.tasks.length;
+      }
+    });
+
+    if (created) {
+      await audit(
+        {
+          entityType: 'job',
+          entityId: job.id,
+          action: 'UPDATED',
+          summary: `${job.number}: ${created} task${created === 1 ? '' : 's'} planned from the costing's scope of work`,
+        },
+        req,
+      );
+    }
+    res.json({ created, skipped });
   }),
 );
 
