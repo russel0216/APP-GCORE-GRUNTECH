@@ -155,8 +155,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,316 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 291, costing 120, pipeline 52, calendar 46, numbering 46,
+**2,331 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 306, costing 120, pipeline 52, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1351,6 +1351,41 @@ the detail.
   verify-insights asserts both. Every active group is listed, even at zero;
   "No group" is last. The pipeline CSV appends a Groups column. Verify
   scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
+
+## Sales orders (2026-10-07)
+
+SCORO's "Create invoice", under its real name: the document that books a
+quotation's work in operations (`/g-ops/sales-orders`, `gops.sales_orders.*`
+OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
+4622 / 4622.1 and the owner's sample PDF).
+
+- **Raised FROM a quotation only** — the quotation page's "Create Sales
+  Order" panel (in the page, no dialog) with SCORO's three choices: transfer
+  all details, chosen lines, or one summarised line worth the whole
+  quotation. The server builds it from the VALUE revision
+  (`valueRevision()`: approved, else latest) — the revision everything else
+  prices the quotation by.
+- **One quotation, one number family**: the first order takes the next
+  `sales_order` number; every later one is `<base>.1`, `<base>.2`…
+  (progress booking), computed inside the creating transaction
+  (`nextOrderNumber`), so a refused order burns no number and two creates
+  cannot share a suffix.
+- **The money is the quotation's own arithmetic** (`quotationTotals`), and
+  `recalcOrder()` is the only writer of its stored totals. Cost visibility
+  is the quotation's rule (author, `edit_all`, or `gops.costing.view_all`);
+  everybody else gets lines with the cost keys REMOVED server-side
+  (`stripLineCost`), on the JSON and on the paper alike.
+- **DRAFT → ISSUED (booked) → CANCELLED (reason kept)**: Issue claims DRAFT
+  with a conditional update; an issued order refuses the full save but still
+  takes its release references (`PATCH`: SI/BS No., DR No., payment method,
+  reference); Reopen goes back to DRAFT; Delete is DRAFT-only. Editing is
+  one PUT — header and lines together — and saved groups go through
+  `rememberGroups`.
+- **The PDF is the owner's sample**: customer details against the PO and
+  notes, the Group column only when a line carries one, cost + supplier and
+  margin columns ONLY for a caller who may see cost (it is the internal
+  booking record, never the customer's copy — the invoice is G-FIN's),
+  Prepared / Noted / Approved sign-offs, DRAFT watermark note until issued.
 
 ## Quotation PDF template (2026-10-02)
 

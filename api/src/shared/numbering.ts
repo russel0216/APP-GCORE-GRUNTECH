@@ -66,6 +66,9 @@ export const DOCUMENT_TYPES: DocumentTypeDef[] = [
     label: 'Quotation',
     defaults: { pattern: '{EMP}{YY}{MM}{SEQ}', padding: 3, period: 'YEAR', scope: 'OWNER' },
   },
+  // Follow-on orders for one quotation carry a decimal suffix (4622.1) the
+  // route appends; only the base number comes from this counter.
+  { type: 'sales_order', code: 'SO', label: 'Sales Order' },
   { type: 'costing', code: 'COST', label: 'Costing' },
   { type: 'project', code: 'PRJ', label: 'Project' },
   { type: 'budget_request', code: 'BR', label: 'Budget Request' },

@@ -64,14 +64,15 @@ model User {
   suppliersCreated Supplier[]        @relation("SupplierCreator")
   partnerResources PartnerResource[] @relation("PartnerResourceCreator")
 
-  leadsAssigned     Lead[]              @relation("LeadAssignee")
-  leadsCreated      Lead[]              @relation("LeadCreator")
-  costingsOwned     Costing[]           @relation("CostingOwner")
-  costingsAssigned  Costing[]           @relation("CostingAssigner")
-  costingTemplates  CostingTemplate[]   @relation("CostingTemplateAuthor")
-  quotationsOwned   Quotation[]         @relation("QuotationOwner")
-  revisionsApproved QuotationRevision[] @relation("RevisionApprover")
-  activities        SalesActivity[]     @relation("ActivityAssignee")
+  leadsAssigned     Lead[]                 @relation("LeadAssignee")
+  leadsCreated      Lead[]                 @relation("LeadCreator")
+  costingsOwned     Costing[]              @relation("CostingOwner")
+  salesOrdersOwned  SalesOrder[]           @relation("SalesOrderOwner")
+  costingsAssigned  Costing[]              @relation("CostingAssigner")
+  costingTemplates  CostingTemplate[]      @relation("CostingTemplateAuthor")
+  quotationsOwned   Quotation[]            @relation("QuotationOwner")
+  revisionsApproved QuotationRevision[]    @relation("RevisionApprover")
+  activities        SalesActivity[]        @relation("ActivityAssignee")
   activityInvites   SalesActivityInvitee[]
 
   clearancesRaised       EmployeeClearance[]  @relation("ClearanceRaiser")
@@ -125,9 +126,10 @@ model User {
   jobOrdersRequested JobOrder[]        @relation("JobOrderRequester")
   jobOrdersAssigned  JobOrder[]        @relation("JobOrderEngineer")
 
-  quoteLinesProvided   QuotationItem[] @relation("QuoteLineProvider")
-  legacyQuotesOwned    LegacyQuote[]   @relation("LegacyQuoteOwner")
-  legacyQuotesImported LegacyQuote[]   @relation("LegacyQuoteImporter")
+  quoteLinesProvided   QuotationItem[]  @relation("QuoteLineProvider")
+  soLinesProvided      SalesOrderLine[] @relation("SoLineProvider")
+  legacyQuotesOwned    LegacyQuote[]    @relation("LegacyQuoteOwner")
+  legacyQuotesImported LegacyQuote[]    @relation("LegacyQuoteImporter")
 
   accountTokens AccountToken[]
 
@@ -542,8 +544,9 @@ model Customer {
   jobOrders      JobOrder[]
   legacyQuotes   LegacyQuote[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  salesOrders SalesOrder[]
 
   @@index([isActive])
   @@index([name])
@@ -565,10 +568,11 @@ model CustomerContact {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  sites      CustomerSite[]
-  quotations Quotation[]
-  jobs       Job[]
-  jobOrders  JobOrder[]
+  sites       CustomerSite[]
+  quotations  Quotation[]
+  jobs        Job[]
+  jobOrders   JobOrder[]
+  salesOrders SalesOrder[]
 
   @@index([customerId])
 }
@@ -653,8 +657,9 @@ model Supplier {
   payments       Payment[]
   quoteLines     QuotationItem[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  salesOrderLines SalesOrderLine[]
 
   @@index([isActive])
   @@index([name])
@@ -1254,8 +1259,9 @@ model Quotation {
   /// row points here, never the other way round.
   legacyQuote LegacyQuote?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  salesOrders SalesOrder[]
 
   @@index([customerId])
   @@index([ownerId])
@@ -1315,6 +1321,99 @@ model QuotationRevision {
 
   @@unique([quotationId, revision])
   @@index([status])
+}
+
+/// SCORO's "Create invoice" under its real name here: the SALES ORDER that
+/// books a quotation's work in Gruntech operations (2026-10-07). Raised FROM
+/// a quotation — all of it, chosen lines, or one summarised line — numbered
+/// `4622`, then `4622.1`, `4622.2` for later orders on the same quotation
+/// (progress booking). An internal document: its PDF prints cost and margin
+/// to those who may see cost, and it never goes to the customer.
+model SalesOrder {
+  id     String           @id @default(cuid())
+  number String           @unique
+  status SalesOrderStatus @default(DRAFT)
+
+  quotationId String
+  quotation   Quotation        @relation(fields: [quotationId], references: [id], onDelete: Restrict)
+  customerId  String
+  customer    Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  contactId   String?
+  contact     CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  /// Record ownership — the author; "only the author can edit" as on quotations.
+  ownerId String
+  owner   User   @relation("SalesOrderOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+
+  orderDate     DateTime @db.Date
+  /// "Payment Terms : 30" on the paper.
+  termsDays     Int      @default(30)
+  paymentMethod String?
+  referenceNo   String?
+  /// The customer's PO this order books against.
+  poNumber      String?
+  /// Notes, printed on the order.
+  comment       String?
+  /// Released by: the sales invoice / billing statement and delivery receipt
+  /// numbers, filled in when the release happens.
+  siNumber      String?
+  drNumber      String?
+  /// Why a cancelled order was cancelled.
+  cancelReason  String?
+
+  /// Same arithmetic as a quotation revision (shared/quotation.ts): subtotal
+  /// pre-discount, VAT on the net, totals stored by recalc only.
+  discountPct    Decimal @default(0) @db.Decimal(7, 4)
+  vatRate        Decimal @default(0.12) @db.Decimal(6, 4)
+  vatInclusive   Boolean @default(false)
+  subtotal       Decimal @default(0) @db.Decimal(18, 2)
+  discountAmount Decimal @default(0) @db.Decimal(18, 2)
+  vatAmount      Decimal @default(0) @db.Decimal(18, 2)
+  total          Decimal @default(0) @db.Decimal(18, 2)
+
+  lines SalesOrderLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([quotationId])
+  @@index([customerId])
+  @@index([ownerId])
+  @@index([status])
+}
+
+enum SalesOrderStatus {
+  DRAFT
+  ISSUED
+  CANCELLED
+}
+
+/// A sales-order line — the same shape a quotation line has, cost and all.
+model SalesOrderLine {
+  id      String     @id @default(cuid())
+  orderId String
+  order   SalesOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  group       String?
+  title       String?
+  description String  @default("")
+  isHeading   Boolean @default(false)
+  quantity    Decimal @default(1) @db.Decimal(18, 3)
+  unit        String  @default("lot")
+  unitPrice   Decimal @default(0) @db.Decimal(18, 2)
+  amount      Decimal @default(0) @db.Decimal(18, 2)
+  sortOrder   Int     @default(0)
+
+  /// INTERNAL, stripped for callers who may not see cost — the quotation rule.
+  unitCost           Decimal?  @db.Decimal(18, 2)
+  costAmount         Decimal?  @db.Decimal(18, 2)
+  providerSupplierId String?
+  providerSupplier   Supplier? @relation(fields: [providerSupplierId], references: [id], onDelete: SetNull)
+  providerUserId     String?
+  providerUser       User?     @relation("SoLineProvider", fields: [providerUserId], references: [id], onDelete: SetNull)
+  costNote           String?
+
+  @@index([orderId])
 }
 
 model QuotationItem {
