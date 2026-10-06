@@ -413,28 +413,6 @@ export function SalesCalendar() {
   );
 }
 
-interface LeadOption {
-  id: string;
-  number: string;
-  companyName: string;
-  status: string;
-}
-
-interface QuotationOption {
-  id: string;
-  number: string;
-  subject: string;
-}
-
-interface CustomerOption {
-  id: string;
-  code: string;
-  name: string;
-}
-
-/** The stages an activity can still be scheduled against — a closed lead has nothing to do. */
-const CLOSED_LEAD = new Set(['WON', 'LOST']);
-
 function ActivityModal({
   activity,
   people,
@@ -451,12 +429,6 @@ function ActivityModal({
   const { me } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [leads, setLeads] = useState<LeadOption[]>([]);
-  const [quotations, setQuotations] = useState<QuotationOption[]>([]);
-  const [customers, setCustomers] = useState<CustomerOption[]>([]);
-  const [leadQ, setLeadQ] = useState('');
-  const [quotationQ, setQuotationQ] = useState('');
-  const [customerQ, setCustomerQ] = useState('');
   const [form, setForm] = useState({
     type: activity?.type ?? 'FOLLOW_UP',
     subject: activity?.subject ?? '',
@@ -483,61 +455,21 @@ function ActivityModal({
   }
   const endsBeforeStart = !!form.startsAt && !!form.endsAt && new Date(form.endsAt) <= new Date(form.startsAt);
 
-  // Leads, quotations and customers are searched, not listed: all three grow
-  // without bound, and a plain select of the first page would hide the rest.
-  useEffect(() => {
-    const t = setTimeout(() => {
-      api
-        .get<{ rows: LeadOption[] }>(`/leads${qs({ pageSize: 50, search: leadQ })}`)
-        .then((r) => setLeads(r.rows))
-        .catch(() => {});
-    }, 220);
-    return () => clearTimeout(t);
-  }, [leadQ]);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      api
-        .get<{ rows: QuotationOption[] }>(`/quotations${qs({ pageSize: 50, search: quotationQ })}`)
-        .then((r) => setQuotations(r.rows))
-        .catch(() => {});
-    }, 220);
-    return () => clearTimeout(t);
-  }, [quotationQ]);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      api
-        .get<CustomerOption[]>(`/customers/lookup${qs({ q: customerQ })}`)
-        .then(setCustomers)
-        .catch(() => {});
-    }, 220);
-    return () => clearTimeout(t);
-  }, [customerQ]);
-
-  // A closed lead is not offered, but one already linked stays selectable so
-  // editing the activity never silently unlinks it.
-  const openLeads = leads.filter((l) => !CLOSED_LEAD.has(l.status) || l.id === form.leadId);
-  const leadOptions =
-    activity?.lead && !openLeads.some((l) => l.id === activity.lead!.id)
-      ? [{ ...activity.lead, status: '' }, ...openLeads]
-      : openLeads;
+  /*
+    The record links (lead, quotation, customer) are no longer picked here
+    (2026-10-07, the owner's call): the calendar books time, and an activity
+    gets its links where the record lives — the lead page's activity log, or
+    a quotation's. One already linked keeps its links (the banner above says
+    so), because the form never sends a value it did not load.
+  */
   // Someone who has since lost calendar access is still who it was booked for.
   const peopleOptions =
     activity && !people.some((p) => p.id === activity.assignedTo.id) ? [activity.assignedTo, ...people] : people;
-  const quotationOptions =
-    activity?.quotation && !quotations.some((q) => q.id === activity.quotation!.id)
-      ? [{ id: activity.quotation.id, number: activity.quotation.number, subject: '' }, ...quotations]
-      : quotations;
   // Invited people who have since lost calendar access stay on the list.
   const inviteOptions = [
     ...peopleOptions,
     ...(activity?.invitees ?? []).map((i) => i.user).filter((u) => !peopleOptions.some((p) => p.id === u.id)),
   ];
-  const customerOptions =
-    activity?.customer && !customers.some((c) => c.id === activity.customer!.id)
-      ? [{ id: activity.customer.id, code: '', name: activity.customer.name }, ...customers]
-      : customers;
 
   async function save() {
     setBusy(true);
@@ -690,81 +622,6 @@ function ActivityModal({
           exclude={[form.assignedToId]}
         />
       </Field>
-
-      <Field label="Lead" hint="Open leads only — a won or lost lead has nothing left to schedule.">
-        <div className="cal-picker">
-          <input
-            type="search"
-            placeholder="Search leads…"
-            aria-label="Search leads"
-            value={leadQ}
-            onChange={(e) => setLeadQ(e.target.value)}
-          />
-          <select
-            aria-label="Lead"
-            value={form.leadId}
-            onChange={(e) => setForm({ ...form, leadId: e.target.value })}
-          >
-            <option value="">— not linked —</option>
-            {leadOptions.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.number} — {l.companyName}
-              </option>
-            ))}
-          </select>
-        </div>
-      </Field>
-
-      <div className="grid grid-2">
-        <Field label="Quotation">
-          <div className="cal-picker">
-            <input
-              type="search"
-              placeholder="Search quotations…"
-              aria-label="Search quotations"
-              value={quotationQ}
-              onChange={(e) => setQuotationQ(e.target.value)}
-            />
-            <select
-              aria-label="Quotation"
-              value={form.quotationId}
-              onChange={(e) => setForm({ ...form, quotationId: e.target.value })}
-            >
-              <option value="">— not linked —</option>
-              {quotationOptions.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.number}
-                  {q.subject ? ` — ${q.subject}` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-        </Field>
-        <Field label="Customer">
-          <div className="cal-picker">
-            <input
-              type="search"
-              placeholder="Search customers…"
-              aria-label="Search customers"
-              value={customerQ}
-              onChange={(e) => setCustomerQ(e.target.value)}
-            />
-            <select
-              aria-label="Customer"
-              value={form.customerId}
-              onChange={(e) => setForm({ ...form, customerId: e.target.value })}
-            >
-              <option value="">— not linked —</option>
-              {customerOptions.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.code ? `${c.code} — ` : ''}
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </Field>
-      </div>
 
       <Field label="Location">
         <input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} />

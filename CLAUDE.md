@@ -756,6 +756,11 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   create and never edited, is the list's "Added by" column (with the date) and
   `?createdById=` filter, and the lead page's "Added by" row. It is not the
   owner — a manager often records an enquiry and assigns it on.
+- **The calendar's activity form picks no lead, quotation or customer**
+  (2026-10-07, the owner's call): the calendar books time; an activity gets
+  its links where the record lives — `ActivityLog` on the lead, quotation and
+  customer pages still sends them. An already-linked activity keeps its links
+  (the form never sends a value it did not load) and still shows the banner.
 - **"Start costing" moves a lead forwards only** (from NEW, CONTACTED, QUALIFIED
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
