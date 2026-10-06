@@ -1994,6 +1994,57 @@ quotationRoutes.post(
 );
 
 /**
+ * Pulling a revision back from approval (2026-10-07, the owner's call): the
+ * author noticed something while it sits with the approver, and must be able
+ * to edit it BEFORE the approver gets to it — without burning a revision
+ * number on a document the customer never saw. The claim is conditional, so a
+ * decision that lands first wins and this returns "already decided"; the open
+ * request is withdrawn through cancelOpenRequest, which tells the approvers,
+ * so nobody decides a document that is being rewritten.
+ */
+quotationRoutes.post(
+  '/:id/revisions/:revisionId/withdraw',
+  require_('gops.quotations.edit_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id } });
+    if (!quotation) throw notFound('Quotation not found');
+    if (!canEditRecord(me, 'gops', 'quotations', quotation.ownerId)) {
+      throw forbidden('Only the author can edit this quotation');
+    }
+    const revision = await prisma.quotationRevision.findFirst({
+      where: { id: req.params.revisionId, quotationId: req.params.id },
+    });
+    if (!revision) throw notFound('Revision not found');
+    if (revision.status !== 'PENDING_APPROVAL') {
+      throw badRequest(`Revision ${revision.revision} is not with the approver — nothing to pull back`);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.quotationRevision.updateMany({
+        where: { id: revision.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      if (!claimed.count) {
+        throw badRequest('The approver decided it a moment ago — reload to see where it stands');
+      }
+      await cancelOpenRequest('quotation', revision.id, tx, `pulled back to draft by ${me.name}`, me.id);
+    });
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'UPDATED',
+        summary: `Pulled revision ${revision.revision} of ${quotation.number} back from approval to draft`,
+      },
+      req,
+    );
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+/**
  * When the approval engine settles a quotation, the revision follows.
  *
  * The module subscribes rather than the engine knowing about quotations — see

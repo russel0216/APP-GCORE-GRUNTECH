@@ -2366,6 +2366,27 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
     }
   }
 
+  /*
+    A revision with the approver can be pulled back to draft (the owner's
+    call): the author spotted something and must get to it before the approver
+    does. The withdrawal tells the approvers, and the page reloads straight
+    into the full editor — same revision number, nothing the customer saw.
+  */
+  const [pullingBack, setPullingBack] = useState(false);
+  async function pullBack() {
+    if (!latest) return;
+    setBusy(true);
+    try {
+      await api.post(`/quotations/${quotation.id}/revisions/${latest.id}/withdraw`);
+      toast('ok', `R${latest.revision} pulled back to draft — its lines are ready to change`);
+      onRevisionRaised();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+      setPullingBack(false);
+    }
+  }
+
   return (
     <div className="qe">
       <div className="breadcrumb">
@@ -2406,6 +2427,25 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
                 Raise a new revision to change them
               </button>
             )}
+            {latest.status === 'PENDING_APPROVAL' && !pullingBack && (
+              <button type="button" className="btn btn-sm" onClick={() => setPullingBack(true)} disabled={busy}>
+                Pull it back and edit
+              </button>
+            )}
+          </div>
+        )}
+        {latest && latest.status === 'PENDING_APPROVAL' && pullingBack && (
+          <div className="alert warn row qe-locked">
+            <span>
+              Pulling R{latest.revision} back withdraws it from the approver — they are told, and nothing can be
+              approved until you submit it again.
+            </span>
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => void pullBack()} disabled={busy}>
+              {busy ? 'Pulling back…' : `Pull R${latest.revision} back to draft`}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => setPullingBack(false)} disabled={busy}>
+              Cancel
+            </button>
           </div>
         )}
         <div className="qe-header qe-rows">

@@ -155,8 +155,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,297 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 284, costing 120, pipeline 46, calendar 46, numbering 46,
+**2,304 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 291, costing 120, pipeline 46, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 168, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1261,6 +1261,15 @@ the detail.
   none — and a draft's PDF prints the route submitting would take; the PDF
   button passes the ticked option as `?option=`, and one that no longer
   applies falls back to the standard route.
+- **A pending revision can be pulled back to draft** (2026-10-07, the
+  owner's call): the author (or `edit_all`) on the Modify page — "Pull it
+  back and edit", confirmed in the page — calls `POST
+  /quotations/:id/revisions/:revisionId/withdraw`, which claims
+  PENDING_APPROVAL → DRAFT with a conditional `updateMany` (a decision that
+  lands first wins and the route says so) and withdraws the open request
+  through `cancelOpenRequest`, telling the approvers. The SAME revision
+  returns to draft — no revision number burned on a document the customer
+  never saw; raising a new revision stays the path once anything was sent.
 - **A revision superseded while PENDING_APPROVAL takes its request with it**
   (2026-10-02). `POST /quotations/:id/revisions` calls
   `cancelOpenRequest('quotation', revisionId, tx, reason, actorId)` in the same

@@ -2093,6 +2093,45 @@ async function main() {
     check('a colleague who reads every quotation is offered the price but never the cost', !!theirRow && !('unitCost' in theirRow), JSON.stringify(theirRow));
     check('two letters at least', ((await http(salesToken, 'GET', '/quotations/suggest?q=S')).body as unknown as unknown[]).length === 0);
 
+    // ── Pulling a revision back from the approver to edit it ─────────────────
+    console.log('\nPulling a revision back from approval');
+    const pulled = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Pulled back`,
+      lines: [editorLines[2]],
+    });
+    const pulledId = String(pulled.body.id);
+    const pulledR0 = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: pulledId } });
+    const earlyPull = await http(salesToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/withdraw`);
+    check('a draft cannot be pulled back — there is nothing with the approver', earlyPull.status === 400, String(earlyPull.status));
+    await http(salesToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/submit`);
+    const pulledRequest = await prisma.approvalRequest.findFirstOrThrow({
+      where: { documentType: 'quotation', documentId: pulledR0.id, status: 'PENDING' },
+    });
+    const strangerPull = await http(otherToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/withdraw`);
+    check('somebody else cannot pull the author’s quotation back', strangerPull.status === 403, String(strangerPull.status));
+    const pullRes = await http(salesToken, 'POST', `/quotations/${pulledId}/revisions/${pulledR0.id}/withdraw`);
+    const pulledBack = await prisma.quotationRevision.findUniqueOrThrow({ where: { id: pulledR0.id } });
+    check(
+      'the author pulls it back: the SAME revision returns to draft — no revision number burned',
+      pullRes.status === 200 && pulledBack.status === 'DRAFT' && pulledBack.revision === 0,
+      `${pullRes.status} ${pulledBack.status}`,
+    );
+    const pulledReqAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: pulledRequest.id } });
+    check('its request is withdrawn — CANCELLED, closed, kept', pulledReqAfter.status === 'CANCELLED' && !!pulledReqAfter.closedAt, pulledReqAfter.status);
+    check('and gone from the approver’s queue', !(await pendingFor(manager.id)).some((r) => r.id === pulledRequest.id));
+    let lateDecisionRefused = false;
+    try {
+      await act({ requestId: pulledRequest.id, userId: manager.id, action: 'APPROVED' });
+    } catch {
+      lateDecisionRefused = true;
+    }
+    check('a decision after the pull-back is refused — the request is no longer open', lateDecisionRefused);
+    const editable = await http(salesToken, 'PUT', `/quotations/${pulledId}/revisions/${pulledR0.id}/lines`, {
+      lines: [{ ...editorLines[2], unitPrice: 9_999 }],
+    });
+    check('and its lines can be edited again', editable.status === 200, editable.text.slice(0, 160));
+
     // ── Raising a revision while the last one waits on the approver ──────────
     console.log('\nRaising a revision while the last one waits on the approver');
     const changed = await http(salesToken, 'POST', '/quotations', {
