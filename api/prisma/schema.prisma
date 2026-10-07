@@ -1384,6 +1384,7 @@ model SalesOrder {
 
 enum SalesOrderStatus {
   DRAFT
+  PENDING_APPROVAL
   ISSUED
   CANCELLED
 }

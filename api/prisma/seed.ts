@@ -590,6 +590,27 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // A sales order books a quotation's work in operations (2026-10-07, the
+    // owner's call: a fixed approver and an optional one). The salesperson's
+    // own supervisor decides, the sales managers when none is set — the
+    // quotation's rule.
+    documentType: 'sales_order',
+    name: 'Sales Order — sales manager',
+    steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' }],
+  },
+  {
+    // The OPTION: whoever submits may tick "Add the CEO as approver", and the
+    // CEO decides after the sales manager. No amount band — an administrator
+    // sets one in Admin › Approval Workflows if the CEO only wants the big ones.
+    documentType: 'sales_order',
+    name: 'Sales Order — with the CEO',
+    optionLabel: 'Add the CEO as approver',
+    steps: [
+      { sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+  },
+  {
     documentType: 'purchase_order',
     name: 'Purchase Order — project manager then finance',
     // NOT routed to procurement: procurement is who raises a purchase order,
