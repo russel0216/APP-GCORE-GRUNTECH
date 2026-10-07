@@ -25,6 +25,7 @@ import {
   QUOTATION_EXTRA_TAX_RATES,
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
+import { bookingFor, thou } from '../shared/salesOrderBooking';
 import { formatAmount, formatDate, formatShortDate, type PdfTotal, type Signatory } from '../shared/pdf';
 import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
 import { salesOrderDesign, withoutCostColumns } from '../shared/salesOrderTemplate';
@@ -67,6 +68,19 @@ const ORDER_INCLUDE = {
   quotation: { select: { id: true, number: true, subject: true, siteId: true } },
   owner: { select: { id: true, name: true, email: true, position: true } },
 } as const;
+
+/** The quotation an order is booked from, with the lines of every revision — or a refusal. */
+async function bookableQuotation(me: ReturnType<typeof currentUser>, quotationId: string) {
+  const quotation = await prisma.quotation.findUnique({
+    where: { id: quotationId },
+    include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } },
+  });
+  if (!quotation) throw notFound('Quotation not found');
+  if (!me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all') && quotation.ownerId !== me.id) {
+    throw forbidden('That quotation is someone else’s');
+  }
+  return quotation;
+}
 
 /** Totals recomputed from the lines — the only writer of an order's money. */
 async function recalcOrder(orderId: string, tx: Prisma.TransactionClient = prisma): Promise<void> {
@@ -198,6 +212,23 @@ salesOrderRoutes.get(
   }),
 );
 
+// What is left to book on a quotation — the Create Sales Order panel's
+// table (SCORO's "Create invoice"). Above /:id, which would take "booking"
+// for an order. No cost in it.
+salesOrderRoutes.get(
+  '/booking',
+  requireAny('gops.sales_orders.create', 'gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const quotationId = String(req.query.quotationId ?? '');
+    if (!quotationId) throw badRequest('Which quotation?');
+    const quotation = await bookableQuotation(me, quotationId);
+    const booking = await bookingFor(quotation);
+    if (!booking) throw badRequest('That quotation has no revision yet');
+    res.json({ quotationId: quotation.id, number: quotation.number, subject: quotation.subject, ...booking });
+  }),
+);
+
 // ── One order ────────────────────────────────────────────────────────────────
 
 salesOrderRoutes.get(
@@ -235,9 +266,15 @@ salesOrderRoutes.get(
 
 const createSchema = z.object({
   quotationId: z.string().min(1),
-  /** SCORO's choice: transfer all details, chosen lines, or one summary line. */
-  mode: z.enum(['all', 'partial', 'summary']).default('all'),
-  /** For `partial`: the quotation items to carry over, by id. */
+  /**
+   * SCORO's choices. `lines` (or the older `partial`) books the lines named,
+   * at the quantities given; `all` books what is left of every line;
+   * `summary` books the selection — or what is left — as one line worth it.
+   */
+  mode: z.enum(['all', 'partial', 'lines', 'summary']).default('all'),
+  /** The quotation lines to book, each at a quantity no more than is left of it. */
+  lines: z.array(z.object({ id: z.string().min(1), quantity: z.number().positive().max(1_000_000_000) })).max(500).optional(),
+  /** The older shape: these lines, at what is left of each. */
   lineIds: z.array(z.string()).max(500).optional(),
 });
 
@@ -247,41 +284,75 @@ salesOrderRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(createSchema, req.body);
-
-    const quotation = await prisma.quotation.findUnique({
-      where: { id: body.quotationId },
-      include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } },
-    });
-    if (!quotation) throw notFound('Quotation not found');
-    if (!me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all') && quotation.ownerId !== me.id) {
-      throw forbidden('That quotation is someone else’s');
-    }
-
-    // The revision the quotation is worth: approved, else latest — the one
-    // rule everything else already reads (shared/pipeline.ts).
+    const quotation = await bookableQuotation(me, body.quotationId);
     const revision = valueRevision(quotation.revisions);
     if (!revision) throw badRequest('That quotation has no revision yet');
-    const items = revision.items.filter((i) => !i.isHeading || body.mode !== 'summary');
-    if (!revision.items.some((i) => !i.isHeading)) {
-      throw badRequest('That quotation has no lines to book');
-    }
+    if (!revision.items.some((i) => !i.isHeading)) throw badRequest('That quotation has no lines to book');
 
-    const chosen =
-      body.mode === 'partial'
-        ? revision.items.filter((i) => (body.lineIds ?? []).includes(i.id))
-        : revision.items;
-    if (body.mode === 'partial' && !chosen.some((i) => !i.isHeading)) {
-      throw badRequest('Pick at least one line to book');
-    }
-
-    const totals = quotationTotals({
-      lines: revision.items,
-      discountPct: revision.discountPct,
-      vatRate: revision.vatRate,
-      vatInclusive: revision.vatInclusive,
-    });
-
+    // What is left of each line, read in the creating transaction so two
+    // bookings of the same line cannot both pass.
     const order = await prisma.$transaction(async (tx) => {
+      const booking = (await bookingFor(quotation, tx))!;
+      const left = new Map(booking.lines.map((l) => [l.id, l]));
+      const byId = new Map(revision.items.map((i) => [i.id, i]));
+      type Pick = { item: (typeof revision.items)[number]; quantity: number };
+      let picks: Pick[];
+      if (body.lines) {
+        picks = body.lines.map((p) => {
+          const item = byId.get(p.id);
+          const line = left.get(p.id);
+          if (!item || !line || item.isHeading) throw badRequest('That line is not on the quotation’s value revision');
+          if (p.quantity > line.available + 0.0005) {
+            throw badRequest(
+              `Only ${line.available} ${item.unit} of “${(item.title ?? '').trim() || item.description}” is left to book — ${line.booked} ${item.unit} of ${line.quantity} already booked`,
+            );
+          }
+          return { item, quantity: thou(p.quantity) };
+        });
+      } else {
+        const wanted = body.lineIds ? revision.items.filter((i) => body.lineIds!.includes(i.id)) : revision.items;
+        picks = wanted
+          .filter((i) => !i.isHeading)
+          .map((i) => ({ item: i, quantity: left.get(i.id)?.available ?? 0 }))
+          .filter((p) => p.quantity > 0);
+        if (body.lineIds && !wanted.some((i) => !i.isHeading)) throw badRequest('Pick at least one line to book');
+      }
+      picks = picks.filter((p) => p.quantity > 0);
+      if (!picks.length) throw badRequest('Nothing is left to book on this quotation — every line is already on a sales order');
+
+      // The selection's own money, through the quotation's arithmetic: its
+      // discount, its tax — a summary line is worth the selection net.
+      const pickedLines = picks.map((p) => ({
+        amount: lineAmount(p.quantity, p.item.unitPrice),
+        costAmount: p.item.unitCost == null ? null : lineAmount(p.quantity, p.item.unitCost),
+        providerUserId: p.item.providerUserId,
+        providerSupplierId: p.item.providerSupplierId,
+        isHeading: false,
+      }));
+      const selection = quotationTotals({
+        lines: pickedLines,
+        discountPct: revision.discountPct,
+        vatRate: revision.vatRate,
+        vatInclusive: revision.vatInclusive,
+      });
+
+      // The subheadings over the picked lines come along; empty sections do not.
+      const pickedIds = new Set(picks.map((p) => p.item.id));
+      const rows: { item: (typeof revision.items)[number]; quantity: number }[] = [];
+      let heading: (typeof revision.items)[number] | null = null;
+      for (const i of revision.items) {
+        if (i.isHeading) {
+          heading = i;
+          continue;
+        }
+        if (!pickedIds.has(i.id)) continue;
+        if (heading) {
+          rows.push({ item: heading, quantity: 0 });
+          heading = null;
+        }
+        rows.push(picks.find((p) => p.item.id === i.id)!);
+      }
+
       const number = await nextOrderNumber(tx, quotation.id);
       const created = await tx.salesOrder.create({
         data: {
@@ -302,54 +373,61 @@ salesOrderRoutes.post(
                 ? [
                     {
                       title: quotation.subject,
-                      description: `Per quotation ${quotation.number} R${revision.revision}`,
+                      description: `Per quotation ${quotation.number} R${revision.revision} — ${picks.length} line${picks.length === 1 ? '' : 's'}`,
                       quantity: d(1),
                       unit: 'lot',
-                      unitPrice: d(totals.net),
-                      amount: d(totals.net),
+                      unitPrice: d(selection.net),
+                      amount: d(selection.net),
                       sortOrder: 0,
-                      unitCost: d(totals.cost.totalCost),
-                      costAmount: d(totals.cost.totalCost),
+                      unitCost: d(selection.cost.totalCost),
+                      costAmount: d(selection.cost.totalCost),
+                      bookedItems: picks.map((p) => ({ quotationItemId: p.item.id, quantity: p.quantity })),
                     },
                   ]
-                : chosen.map((i, n) => ({
-                    group: i.group,
-                    title: i.title,
-                    description: i.description,
-                    isHeading: i.isHeading,
-                    quantity: i.quantity,
-                    unit: i.unit,
-                    unitPrice: i.unitPrice,
-                    amount: i.amount,
-                    sortOrder: n,
-                    unitCost: i.unitCost,
-                    costAmount: i.costAmount,
-                    providerSupplierId: i.providerSupplierId,
-                    providerUserId: i.providerUserId,
-                    costNote: i.costNote,
-                  })),
+                : rows.map(({ item: i, quantity }, n) =>
+                    i.isHeading
+                      ? { title: i.title, description: '', isHeading: true, quantity: d(0), unit: i.unit, unitPrice: d(0), amount: d(0), sortOrder: n }
+                      : {
+                          group: i.group,
+                          title: i.title,
+                          description: i.description,
+                          isHeading: false,
+                          quantity: d(quantity),
+                          unit: i.unit,
+                          unitPrice: i.unitPrice,
+                          amount: lineAmount(quantity, i.unitPrice),
+                          sortOrder: n,
+                          unitCost: i.unitCost,
+                          costAmount: i.unitCost == null ? null : lineAmount(quantity, i.unitCost),
+                          providerSupplierId: i.providerSupplierId,
+                          providerUserId: i.providerUserId,
+                          costNote: i.costNote,
+                          quotationItemId: i.id,
+                        },
+                  ),
           },
         },
       });
       await recalcOrder(created.id, tx);
-      return tx.salesOrder.findUniqueOrThrow({
+      const fresh = await tx.salesOrder.findUniqueOrThrow({
         where: { id: created.id },
         include: { ...ORDER_INCLUDE, lines: { orderBy: { sortOrder: 'asc' } } },
       });
+      return { fresh, picks: picks.length, of: booking.lines.filter((l) => !l.isHeading).length };
     });
 
     await audit(
       {
         entityType: 'sales_order',
-        entityId: order.id,
+        entityId: order.fresh.id,
         action: 'CREATED',
-        summary: `Created sales order ${order.number} from quotation ${quotation.number} (${
-          body.mode === 'all' ? 'all details' : body.mode === 'partial' ? `${chosen.length} line(s)` : 'summarised'
+        summary: `Created sales order ${order.fresh.number} from quotation ${quotation.number} (${
+          body.mode === 'summary' ? `summarised, ${order.picks} of ${order.of} lines` : `${order.picks} of ${order.of} lines`
         })`,
       },
       req,
     );
-    res.status(201).json(presentOrder(order as unknown as Record<string, unknown>, true));
+    res.status(201).json(presentOrder(order.fresh as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -436,6 +514,10 @@ salesOrderRoutes.put(
             throw badRequest(`Line ${i + 1}: give the line a product title or a description`);
           }
         }
+        // A line sent back with its id keeps what it books of the quotation.
+        const kept = new Map(
+          (await tx.salesOrderLine.findMany({ where: { orderId: order.id }, select: { id: true, quotationItemId: true, bookedItems: true } })).map((l) => [l.id, l]),
+        );
         await tx.salesOrderLine.deleteMany({ where: { orderId: order.id } });
         await tx.salesOrderLine.createMany({
           data: body.lines.map((l, i) => {
@@ -467,6 +549,8 @@ salesOrderRoutes.put(
               unitCost: hasCost ? d(l.unitCost!) : null,
               costAmount: hasCost ? lineAmount(l.quantity, l.unitCost!) : null,
               costNote: l.costNote || null,
+              quotationItemId: (l.id && kept.get(l.id)?.quotationItemId) || null,
+              bookedItems: (l.id && kept.get(l.id)?.bookedItems) || undefined,
             };
           }),
         });

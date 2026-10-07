@@ -72,16 +72,38 @@ interface Card {
   allowedTargets: string[];
   link: string;
   column: string;
+  /** Won AND booked — a sales order or project exists (SCORO's Completed). */
+  booked: boolean;
+  /** The stage (SCORO's band) the card stands in. */
+  stage: string;
+}
+
+/** A stage as Admin › Pipeline Stages has it: SCORO's status, as data. */
+interface StageDef {
+  key: string;
+  label: string;
+  probability: number | null;
+  color: string;
+  inActiveList: boolean;
+  successful: boolean;
+  fixedOdds: boolean;
+  columns: string[];
+  statuses: string[];
+  explanation: string;
 }
 
 interface Column {
   key: string;
   label: string;
-  kind: 'lead' | 'quotation' | 'terminal' | 'parked' | 'forecast';
+  kind: 'lead' | 'quotation' | 'terminal' | 'parked' | 'forecast' | 'stage';
   count: number;
   value: number;
   weighted: number;
   cards: Card[];
+  /** A stage column: its colour and the fine columns it gathers. */
+  color?: string;
+  explanation?: string;
+  columns?: string[];
 }
 
 interface Kpis {
@@ -109,6 +131,7 @@ interface Board {
   asOf: string;
   window: { decidedFrom: string; decidedWithinDays: number };
   kpis: Kpis;
+  stages: StageDef[];
   columns: Column[];
   forecast: Omit<Column, 'kind'>;
   people: BoardPerson[];
@@ -130,6 +153,8 @@ const BOARD_KEYS = [
   'ON_HOLD',
 ];
 const FORECAST = 'FORECAST';
+/** The stage keys, so a collapsed stage is remembered like a collapsed column. */
+const STAGE_KEYS = ['OPPORTUNITY', 'NEGOTIATION', 'CLOSING', 'CONFIRMED', 'COMPLETED', 'LOST', 'HOLD'];
 const LEAD_KEYS = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD'];
 const QUOTATION_KEYS = ['QUOTED', 'SUBMITTED', 'NEGOTIATION'];
 
@@ -146,16 +171,20 @@ const CARD_FIELDS = [
   { key: 'job', label: 'Project' },
 ];
 
+// SCORO's strip, in its order: Total, Average quote, Average discount, Sum,
+// Margin, Overdue — then G-CORE's own three, off by default.
 const KPI_TILES = [
-  { key: 'open', label: 'Open quotes' },
-  { key: 'quoted', label: 'Quoted value' },
-  { key: 'weighted', label: 'Weighted' },
+  { key: 'open', label: 'Total (open quotes)' },
   { key: 'average', label: 'Average quote' },
-  { key: 'margin', label: 'Expected margin' },
+  { key: 'discount', label: 'Average discount' },
+  { key: 'quoted', label: 'Sum (quoted value)' },
+  { key: 'margin', label: 'Margin' },
   { key: 'overdue', label: 'Overdue' },
+  { key: 'weighted', label: 'Weighted' },
   { key: 'won', label: 'Won this period' },
   { key: 'forecast', label: 'This month forecast' },
 ];
+const DEFAULT_KPIS = ['open', 'average', 'discount', 'quoted', 'margin', 'overdue'];
 
 const SORTS = [
   { value: 'weighted', label: 'Weighted value' },
@@ -168,6 +197,8 @@ type Sort = (typeof SORTS)[number]['value'];
 
 interface PipelineView {
   v: 1;
+  /** SCORO's stages (the default), or every one of G-CORE's own steps. */
+  stages: 'stages' | 'detailed';
   columns: string[];
   collapsed: string[];
   cardFields: string[];
@@ -180,10 +211,11 @@ interface PipelineView {
 
 const DEFAULT_VIEW: PipelineView = {
   v: 1,
+  stages: 'stages',
   columns: [...BOARD_KEYS, FORECAST],
   collapsed: ['ON_HOLD'],
   cardFields: CARD_FIELDS.map((f) => f.key),
-  kpis: KPI_TILES.map((k) => k.key),
+  kpis: DEFAULT_KPIS,
   groupBy: 'none',
   ownerId: '',
   decidedWithinDays: 90,
@@ -209,8 +241,9 @@ function sanitiseView(raw: unknown): PipelineView {
   const days = Number(r.decidedWithinDays);
   return {
     v: 1,
+    stages: r.stages === 'detailed' ? 'detailed' : 'stages',
     columns: ordered,
-    collapsed: list(r.collapsed, all) ?? DEFAULT_VIEW.collapsed,
+    collapsed: list(r.collapsed, [...all, ...STAGE_KEYS]) ?? DEFAULT_VIEW.collapsed,
     cardFields: list(r.cardFields, CARD_FIELDS.map((f) => f.key)) ?? DEFAULT_VIEW.cardFields,
     kpis: list(r.kpis, KPI_TILES.map((k) => k.key)) ?? DEFAULT_VIEW.kpis,
     groupBy: r.groupBy === 'owner' ? 'owner' : 'none',
@@ -320,6 +353,49 @@ function sortCards(cards: Card[], sort: Sort): Card[] {
 /** Σ value × probability, rounded once — the server's (and Insights') way. */
 const weightedOf = (cards: Card[]) => Math.round(cards.reduce((s, c) => s + (c.value * c.probability) / 100, 0) * 100) / 100;
 const valueOf = (cards: Card[]) => Math.round(cards.reduce((s, c) => s + c.value, 0) * 100) / 100;
+
+/**
+ * SCORO's view: one column a stage, each gathering the cards of the fine
+ * columns that stand in it (the server says which stage each card is in, so
+ * a won quotation with a sales order lands in Completed). Derived from the
+ * fine columns, so an optimistic move shows in both views at once.
+ */
+function stageColumns(board: Board): Column[] {
+  const all = board.columns.flatMap((c) => c.cards);
+  return board.stages
+    .filter((s) => s.inActiveList)
+    .map((s) => {
+      const cards = all.filter((c) => c.stage === s.key);
+      return {
+        key: s.key,
+        label: s.label,
+        kind: 'stage' as const,
+        count: cards.length,
+        value: valueOf(cards),
+        weighted: weightedOf(cards),
+        cards,
+        color: s.color,
+        explanation: s.explanation,
+        columns: s.columns,
+      };
+    });
+}
+
+/**
+ * Where a card goes when dropped on a stage: the first of the stage's own
+ * columns the server allows it to move to. Null with a reason explains why
+ * not — Completed is never a drop target, it is worked out.
+ */
+function stageTarget(card: Card, stage: StageDef): { key: string | null; reason: string | null } {
+  if (card.stage === stage.key) return { key: null, reason: null };
+  const key = stage.columns.find((k) => k !== card.column && card.allowedTargets.includes(k)) ?? null;
+  if (key) return { key, reason: null };
+  if (stage.key === 'COMPLETED') {
+    return { key: null, reason: 'Completed is a won quotation with a sales order or project — create one from the quotation' };
+  }
+  if (card.column === 'WON') return { key: null, reason: 'Already won — it shows as Completed because it has a sales order or project' };
+  return { key: null, reason: refusalFor(card, stage.columns[0]) ?? 'Not a move this card can make' };
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  THE BOARD
@@ -488,8 +564,35 @@ export function Pipeline() {
     move(card, key).catch(() => {});
   }
 
-  /** Shift+Arrow: the nearest column this card may go to, in board order. LOST needs the modal. */
+  const stageMode = view.stages !== 'detailed';
+
+  /**
+   * What a drop on `key` means for this card: in the stage view the stage's
+   * own column the server allows; in the detailed view the column itself.
+   */
+  function resolveDrop(card: Card, key: string): { key: string | null; reason: string | null } {
+    if (key === FORECAST) return { key: null, reason: refusalFor(card, FORECAST) };
+    if (stageMode) {
+      const stage = board?.stages.find((s) => s.key === key);
+      return stage ? stageTarget(card, stage) : { key: null, reason: 'Not a stage' };
+    }
+    if (key === card.column) return { key: null, reason: null };
+    return card.allowedTargets.includes(key) ? { key, reason: null } : { key: null, reason: refusalFor(card, key) };
+  }
+
+  /** Shift+Arrow: the nearest column (or stage) this card may go to, in board order. LOST needs the modal. */
   function stepTarget(card: Card, dir: -1 | 1): string | null {
+    if (stageMode) {
+      const order = (board?.stages ?? []).filter((s) => s.inActiveList).map((s) => s.key);
+      let i = order.indexOf(card.stage);
+      if (i < 0) return null;
+      for (i += dir; i >= 0 && i < order.length; i += dir) {
+        if (order[i] === 'LOST') continue;
+        const t = resolveDrop(card, order[i]);
+        if (t.key) return t.key;
+      }
+      return null;
+    }
     const order = view.columns.filter((k) => k !== FORECAST);
     let i = order.indexOf(card.column);
     if (i < 0) return null;
@@ -497,6 +600,22 @@ export function Pipeline() {
       if (order[i] !== 'LOST' && card.allowedTargets.includes(order[i])) return order[i];
     }
     return null;
+  }
+
+  /** The Move menu's choices in the stage view: each active stage, resolved for this card. */
+  function stageOptions(card: Card): { key: string; label: string; target: string | null; why: string | null }[] | null {
+    if (!stageMode || !board) return null;
+    const options = board.stages
+      .filter((s) => s.inActiveList && s.key !== card.stage)
+      .map((s) => {
+        const t = stageTarget(card, s);
+        return { key: s.key, label: s.label, target: t.key, why: t.reason };
+      })
+      .filter((o) => o.target || o.why);
+    if (!board.stages.some((s) => s.key === 'LOST' && s.inActiveList) && card.allowedTargets.includes('LOST')) {
+      options.push({ key: 'LOST', label: 'Lost', target: 'LOST', why: null });
+    }
+    return options;
   }
 
   function onCardKey(e: KeyboardEvent<HTMLDivElement>, card: Card) {
@@ -524,16 +643,16 @@ export function Pipeline() {
   // ── Drag and drop ──
   function dragOver(e: React.DragEvent, key: string) {
     if (!dragging) return;
-    if (key !== dragging.column && dragging.allowedTargets.includes(key)) {
+    const t = resolveDrop(dragging, key);
+    if (t.key) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       if (over !== key) setOver(key);
       if (refused) setRefused(null);
-    } else if (key !== dragging.column) {
-      const reason = refusalFor(dragging, key);
-      if (reason && refused?.key !== key) {
-        setRefused({ key, reason });
-        announce(reason);
+    } else if (t.reason) {
+      if (refused?.key !== key) {
+        setRefused({ key, reason: t.reason });
+        announce(t.reason);
       }
       if (over) setOver(null);
     }
@@ -545,7 +664,9 @@ export function Pipeline() {
     setDragging(null);
     setOver(null);
     setRefused(null);
-    if (card && card.allowedTargets.includes(key)) tryMove(card, key);
+    if (!card) return;
+    const t = resolveDrop(card, key);
+    if (t.key) tryMove(card, t.key);
   }
 
   function endDrag() {
@@ -610,7 +731,12 @@ export function Pipeline() {
     return map;
   }, [board]);
 
-  const ordered = view.columns.map((k) => columnsByKey.get(k)).filter((c): c is Column => !!c);
+  const forecastColumn = columnsByKey.get(FORECAST);
+  const ordered = stageMode
+    ? board
+      ? [...stageColumns(board), ...(forecastColumn ? [forecastColumn] : [])]
+      : []
+    : view.columns.map((k) => columnsByKey.get(k)).filter((c): c is Column => !!c);
   const peopleList = [...knownPeople.values()].sort((a, b) => a.name.localeCompare(b.name));
   const lanes =
     view.groupBy === 'owner'
@@ -660,6 +786,7 @@ export function Pipeline() {
         <PipeColumn
           key={col.key}
           column={col}
+          color={col.color}
           collapsed={view.collapsed.includes(col.key)}
           over={over === col.key}
           refusal={refused?.key === col.key ? refused.reason : null}
@@ -682,6 +809,7 @@ export function Pipeline() {
               inForecast={col.key === FORECAST}
               fields={view.cardFields}
               dragging={dragging?.ref === card.ref}
+              menuOptions={stageOptions(card)}
               menuOpen={menuFor === card.ref && col.key !== FORECAST}
               onOpenMenu={() => setMenuFor(card.ref)}
               onCloseMenu={() => setMenuFor(null)}
@@ -709,11 +837,12 @@ export function Pipeline() {
         <div>
           <h1>Sales Pipeline</h1>
           <p>
-            Every open lead and quotation, by stage. Drag a card to move it, or focus it and press
-            Enter for the Move menu (Shift+← / → steps it one stage) — on a phone the menu is the way
-            to move. A lead with a quotation is shown once, as its quotation. Weighted value is amount ×
-            probability, and moving a deal sets its odds the way the stage says (10% → 50% → 90% →
-            100%) — override them on the record when you know better.
+            Every open lead and quotation, in SCORO’s stages — Opportunity, Negotiation, Closing,
+            Confirmed, Completed — or, under “All steps”, in G-CORE’s own steps. Drag a card to move
+            it, or focus it and press Enter for the Move menu (Shift+← / → steps it one stage). A lead
+            with a quotation is shown once, as its quotation. Moving a deal sets its odds the way the
+            stage says (Admin › Pipeline Stages has the ladder) — override them on the record when
+            you know better.
           </p>
         </div>
         {newMenuButton}
@@ -802,6 +931,25 @@ export function Pipeline() {
             </option>
           ))}
         </select>
+
+        <div className="scope-switch" role="group" aria-label="Which columns">
+          <button
+            className={stageMode ? 'active' : ''}
+            aria-pressed={stageMode}
+            onClick={() => setView((v) => ({ ...v, stages: 'stages' }))}
+            title="SCORO’s stages: Opportunity, Negotiation, Closing, Confirmed, Completed"
+          >
+            Stages
+          </button>
+          <button
+            className={!stageMode ? 'active' : ''}
+            aria-pressed={!stageMode}
+            onClick={() => setView((v) => ({ ...v, stages: 'detailed' }))}
+            title="Every step: New, Contacted, Qualified, Site visit, Costing, Quotation drafted…"
+          >
+            All steps
+          </button>
+        </div>
 
         <div className="scope-switch" role="group" aria-label="Group by">
           <button
@@ -943,15 +1091,23 @@ function narrow(col: Column, ownerId: string): Column {
 
 function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; show: string[]; canInsights: boolean }) {
   const tiles: Record<string, ReactNode> = {
+    discount: (
+      <Stat
+        key="discount"
+        label="Average discount"
+        value={kpis.averageDiscountPct === null ? '—' : `${kpis.averageDiscountPct}%`}
+        sub={kpis.averageDiscountPct === null ? 'no discount recorded on a costing' : 'off list, from the costings behind open quotes'}
+      />
+    ),
     open: (
       <Stat
         key="open"
-        label="Open quotes"
+        label="Total"
         value={kpis.openQuotes}
         sub={`and ${kpis.leadCount} lead${kpis.leadCount === 1 ? '' : 's'} estimated at ${formatMoney(kpis.leadEstimate)}`}
       />
     ),
-    quoted: <Stat key="quoted" label="Quoted value" value={formatMoney(kpis.quotedValue)} figure sub="open quotations, approved revision else latest" />,
+    quoted: <Stat key="quoted" label="Sum" value={formatMoney(kpis.quotedValue)} figure sub="open quotations, approved revision else latest" />,
     weighted: <Stat key="weighted" label="Weighted" value={formatMoney(kpis.weightedValue)} figure tone="neon" sub="amount × probability" />,
     average: (
       <Stat
@@ -964,11 +1120,11 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
     ),
     margin:
       kpis.expectedMarginPct === null ? (
-        <Stat key="margin" label="Expected margin" value="—" sub="no costing linked to an open quote" />
+        <Stat key="margin" label="Margin" value="—" sub="expected, from costing — none linked to an open quote" />
       ) : (
         <Stat
           key="margin"
-          label="Expected margin"
+          label="Margin"
           value={`${kpis.expectedMarginPct}%`}
           figure
           accent={kpis.expectedMarginPct < 0 ? 'danger' : kpis.expectedMarginPct < 10 ? 'warn' : undefined}
@@ -1010,13 +1166,14 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
   };
   const visible = KPI_TILES.filter((t) => show.includes(t.key));
   if (visible.length === 0) return null;
-  return <div className="kpi-grid">{visible.map((t) => tiles[t.key])}</div>;
+  return <div className="kpi-grid pipe-kpis">{visible.map((t) => tiles[t.key])}</div>;
 }
 
 // ── Column ───────────────────────────────────────────────────────────────────
 
 function PipeColumn({
   column,
+  color,
   collapsed,
   over,
   refusal,
@@ -1027,6 +1184,7 @@ function PipeColumn({
   children,
 }: {
   column: Column;
+  color?: string;
   collapsed: boolean;
   over: boolean;
   refusal: string | null;
@@ -1037,16 +1195,22 @@ function PipeColumn({
   children: ReactNode;
 }) {
   const forecast = column.key === FORECAST;
-  const listLink = LEAD_KEYS.includes(column.key)
-    ? `/g-ops/leads${qs({ status: column.key })}`
-    : QUOTATION_KEYS.includes(column.key) || column.key === 'WON' || column.key === 'LOST'
-      ? `/g-ops/quotations${qs({ outcome: column.key === 'QUOTED' ? 'OPEN' : column.key })}`
-      : null;
-  const cls = `pipe-col${forecast ? ' forecast' : ''}${collapsed ? ' collapsed' : ''}${over ? ' over' : ''}${refusal ? ' refused' : ''}`;
+  // A stage column lists what its first fine column lists; Opportunity, which
+  // mixes leads and drafted quotes, opens the leads.
+  const listFor = (key: string) =>
+    LEAD_KEYS.includes(key)
+      ? `/g-ops/leads${qs({ status: key })}`
+      : QUOTATION_KEYS.includes(key) || key === 'WON' || key === 'LOST'
+        ? `/g-ops/quotations${qs({ outcome: key === 'QUOTED' ? 'OPEN' : key })}`
+        : null;
+  const listLink =
+    column.kind === 'stage' ? (column.key === 'OPPORTUNITY' ? '/g-ops/leads' : listFor(column.columns?.[0] ?? '')) : listFor(column.key);
+  const cls = `pipe-col${forecast ? ' forecast' : ''}${collapsed ? ' collapsed' : ''}${over ? ' over' : ''}${refusal ? ' refused' : ''}${color ? ' has-color' : ''}`;
   return (
     <section
       className={cls}
-      data-tone={COLUMN_TONE[column.key] || undefined}
+      style={color ? ({ '--stage-color': color } as React.CSSProperties) : undefined}
+      data-tone={color ? undefined : COLUMN_TONE[column.key] || undefined}
       role="listitem"
       aria-label={`${column.label}: ${column.count} card${column.count === 1 ? '' : 's'}, ${formatMoney(column.value)}`}
       // The forecast never calls preventDefault, so nothing can be dropped on it.
@@ -1104,6 +1268,7 @@ function PipeCard({
   inForecast,
   fields,
   dragging,
+  menuOptions,
   menuOpen,
   onOpenMenu,
   onCloseMenu,
@@ -1116,6 +1281,8 @@ function PipeCard({
   inForecast: boolean;
   fields: string[];
   dragging: boolean;
+  /** The stage view's choices; null in the detailed view, where the columns are the choices. */
+  menuOptions: { key: string; label: string; target: string | null; why: string | null }[] | null;
   menuOpen: boolean;
   onOpenMenu: () => void;
   onCloseMenu: () => void;
@@ -1231,6 +1398,7 @@ function PipeCard({
           {menuOpen && (
             <MoveMenu
               card={card}
+              options={menuOptions}
               onMove={onMove}
               onClose={() => {
                 onCloseMenu();
@@ -1245,16 +1413,39 @@ function PipeCard({
 }
 
 /** The keyboard and touch way to move a card. Arrow keys cycle, Escape closes. */
-function MoveMenu({ card, onMove, onClose }: { card: Card; onMove: (key: string) => void; onClose: () => void }) {
+function MoveMenu({
+  card,
+  options,
+  onMove,
+  onClose,
+}: {
+  card: Card;
+  options: { key: string; label: string; target: string | null; why: string | null }[] | null;
+  onMove: (key: string) => void;
+  onClose: () => void;
+}) {
   const targets = card.allowedTargets;
-  const cannotWin = card.kind === 'quotation' && !card.hasApprovedRevision && card.column !== 'WON';
+  const cannotWin = !options && card.kind === 'quotation' && !card.hasApprovedRevision && card.column !== 'WON';
   return (
     <Menu onClose={onClose} label={`Move ${card.number}`}>
-      {targets.map((key) => (
-        <button key={key} role="menuitem" onClick={() => onMove(key)}>
-          {key === 'LOST' ? 'Mark lost…' : `Move to ${LABELS[key] ?? key}`}
-        </button>
-      ))}
+      {options
+        ? options.map((o) =>
+            o.target ? (
+              <button key={o.key} role="menuitem" onClick={() => onMove(o.target!)}>
+                {o.target === 'LOST' ? 'Mark lost…' : `Move to ${o.label}`}
+              </button>
+            ) : (
+              <button key={o.key} role="menuitem" aria-disabled="true" onClick={(e) => e.preventDefault()}>
+                {o.label}
+                <span className="pipe-menu-why">{o.why}</span>
+              </button>
+            ),
+          )
+        : targets.map((key) => (
+            <button key={key} role="menuitem" onClick={() => onMove(key)}>
+              {key === 'LOST' ? 'Mark lost…' : `Move to ${LABELS[key] ?? key}`}
+            </button>
+          ))}
       {cannotWin && (
         <button role="menuitem" aria-disabled="true" onClick={(e) => e.preventDefault()}>
           Won

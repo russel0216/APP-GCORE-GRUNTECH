@@ -61,6 +61,7 @@ import {
   outcomeStages,
   type BoardResponse,
 } from '../shared/pipeline';
+import { pipelineStageOverrides, pipelineStages, stageSettingsSchema, STAGE_SETTING_KEY, DEFAULT_STAGES, mergeStages } from '../shared/pipelineStages';
 import {
   quotationTotals,
   lineAmount,
@@ -579,7 +580,7 @@ leadRoutes.patch(
     // SCORO's ladder: a stage move sets the odds — unless this same request
     // typed them, because an explicit value is somebody's judgement.
     if (body.status !== undefined && body.status !== before.status && body.probability === undefined) {
-      data.probability = probabilityAfterMove(before.status, body.status, before.probability);
+      data.probability = probabilityAfterMove(before.status, body.status, before.probability, await pipelineStages());
     }
     if (body.estimatedValue !== undefined) {
       data.estimatedValue = body.estimatedValue != null ? d(body.estimatedValue) : null;
@@ -1623,7 +1624,7 @@ quotationRoutes.patch(
       if (body.outcome === 'WON' || body.outcome === 'LOST') data.decidedAt = new Date();
       // SCORO's ladder: the stage sets the odds unless this request typed them.
       if (body.outcome !== before.outcome && body.probability === undefined) {
-        data.probability = probabilityAfterMove(before.outcome, body.outcome, before.probability);
+        data.probability = probabilityAfterMove(before.outcome, body.outcome, before.probability, await pipelineStages());
       }
     }
 
@@ -1651,7 +1652,7 @@ quotationRoutes.patch(
           data: {
             status: leadStatus,
             // The lead follows the stage's odds too, so the funnel stays coherent.
-            ...(lead ? { probability: probabilityAfterMove(lead.status, leadStatus, lead.probability) } : {}),
+            ...(lead ? { probability: probabilityAfterMove(lead.status, leadStatus, lead.probability, await pipelineStages()) } : {}),
             ...(body.outcome === 'LOST' && body.lostReason ? { lostReason: body.lostReason } : {}),
           },
         });
@@ -2940,9 +2941,11 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
           },
         },
         activities: nextPlanned,
+        _count: { select: { salesOrders: true } },
       },
     }),
   ]);
+  const stages = await pipelineStages();
 
   const matches = (...fields: (string | null | undefined)[]) =>
     !search || fields.some((f) => (f ?? '').toLowerCase().includes(search));
@@ -2951,12 +2954,75 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
     leads: leads
       .filter((l) => matches(l.number, l.companyName, l.customer?.name, l.description))
       .map((l) => ({ ...l, quotationCount: l._count.quotations })),
-    quotations: quotations.filter((q) => matches(q.number, q.subject, q.customer.name)),
+    quotations: quotations
+      .filter((q) => matches(q.number, q.subject, q.customer.name))
+      .map((q) => ({ ...q, salesOrderCount: q._count.salesOrders })),
     now,
     decidedWithinDays,
     me,
+    stages,
   });
 }
+
+// ── The stages: SCORO's statuses, as data ───────────────────────────────────
+
+/** Anyone who sees the board reads the stages; the admin page reads them too. */
+pipelineRoutes.get(
+  '/stages',
+  requireAny('gops.pipeline.view_all', 'admin.pipeline_stages.view_all'),
+  handler(async (_req, res) => {
+    res.json({ stages: await pipelineStages(), overrides: await pipelineStageOverrides(), defaults: DEFAULT_STAGES });
+  }),
+);
+
+/**
+ * Admin › Pipeline Stages saves the name, odds, colour and board listing of
+ * each stage. The fixed odds (Confirmed and Completed 100, Lost 0, On hold
+ * nothing) are kept whatever is sent — `mergeStages` ignores them — and the
+ * statuses a stage gathers are never data.
+ */
+pipelineRoutes.put(
+  '/stages',
+  require_('admin.pipeline_stages.edit_all'),
+  handler(async (req, res) => {
+    const overrides = parseBody(stageSettingsSchema, req.body);
+    const before = await prisma.setting.findUnique({ where: { key: STAGE_SETTING_KEY } });
+    await prisma.setting.upsert({
+      where: { key: STAGE_SETTING_KEY },
+      create: { key: STAGE_SETTING_KEY, value: overrides, description: 'Pipeline stages: names, odds, colours and which are on the board' },
+      update: { value: overrides },
+    });
+    const stages = mergeStages(overrides);
+    await audit(
+      {
+        entityType: 'setting',
+        entityId: STAGE_SETTING_KEY,
+        action: 'UPDATED',
+        summary: `Changed the pipeline stages (${stages.map((s) => `${s.label} ${s.probability ?? '—'}%`).join(', ')})`,
+        before: before?.value ?? null,
+        after: overrides,
+      },
+      req,
+    );
+    res.json({ stages, overrides, defaults: DEFAULT_STAGES });
+  }),
+);
+
+pipelineRoutes.delete(
+  '/stages',
+  require_('admin.pipeline_stages.edit_all'),
+  handler(async (req, res) => {
+    const before = await prisma.setting.findUnique({ where: { key: STAGE_SETTING_KEY } });
+    if (before) {
+      await prisma.setting.delete({ where: { key: STAGE_SETTING_KEY } });
+      await audit(
+        { entityType: 'setting', entityId: STAGE_SETTING_KEY, action: 'DELETED', summary: 'Put the pipeline stages back to SCORO’s defaults', before: before.value },
+        req,
+      );
+    }
+    res.json({ stages: DEFAULT_STAGES, overrides: {}, defaults: DEFAULT_STAGES });
+  }),
+);
 
 pipelineRoutes.get(
   '/',
@@ -2996,6 +3062,7 @@ pipelineRoutes.get(
       c.nextStep ? `${c.nextStep.label}${c.nextStep.at ? ` · ${c.nextStep.at.slice(0, 10)}` : ''}` : '',
       c.revision ? `R${c.revision.n} ${c.revision.status}` : '',
       c.job?.number ?? '',
+      board.stages.find((s) => s.key === c.stage)?.label ?? '',
     ]);
 
     await audit(
@@ -3027,6 +3094,7 @@ pipelineRoutes.get(
           'Next step',
           'Revision',
           'Job',
+          'Stage',
         ],
         rows,
       ),

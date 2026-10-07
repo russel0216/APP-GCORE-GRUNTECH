@@ -159,8 +159,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,348 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
-masters 54, sales 315, costing 120, pipeline 60, calendar 46, numbering 46,
+**2,363 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
+masters 54, sales 319, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -744,16 +744,42 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   pipeline stays a view over leads and quotations (no third record), the
   card appears at once, and value × probability joins the month its
   expected closing names. Hand-typed forecasts stay tellable by source.
+- **The stages are SCORO's statuses, as data** (2026-10-07, the owner's
+  pipeline and status-settings screenshots): `shared/pipelineStages.ts`
+  holds `DEFAULT_STAGES` — Opportunity (10%, cream), Negotiation (50%,
+  orange), Closing (90%, light green), Confirmed (100%, green), Completed
+  (100%, blue), Lost (0%, off the board), On hold (says nothing, off the
+  board) — each gathering the fine statuses and board columns that stand in
+  it. **Completed is derived**: a won quotation with a sales order or a
+  project (`Card.booked`; `stageOfCard()` gives the booked WON card the
+  later of the two stages sharing the column). Admin › Pipeline Stages
+  (`admin.pipeline_stages.*`, `GET/PUT/DELETE /pipeline/stages`, one
+  Setting `pipeline.stages` of overrides merged by `mergeStages()`) changes
+  what SCORO lets an administrator change — name, odds, colour, "in active
+  list" — and never which statuses a stage gathers nor the fixed odds
+  (Confirmed/Completed 100, Lost 0, On hold null: a won deal weighted at 90%
+  misstates the forecast). The board (`GET /pipeline` carries `stages`, and
+  each card its `stage`) draws SCORO's six bands by default — the "Stages"
+  view, tinted with the stage's own colour through `--stage-color` — and
+  "All steps" is G-CORE's eleven fine columns; a drop on a stage resolves to
+  the first of its columns the server allows (`stageTarget()`), so the move
+  rules stay the one `allowedTargets`. The summary strip is SCORO's six
+  tiles in its order (Total, Average quote, Average discount, Sum, Margin,
+  Overdue). The CSV twin appends a Stage column.
 - **The stage sets the odds** (2026-10-07, the owner's SCORO status
-  settings): `stageProbability()` / `probabilityAfterMove()` in
-  `shared/pipeline.ts` carry SCORO's ladder — opportunity stages (every lead
-  stage before a decision, `QUOTATION_CREATED`, a drafted quote) 10%,
-  SUBMITTED 50%, NEGOTIATION 90%, WON 100%, LOST 0%, On hold says nothing.
-  Both PATCH routes apply it on a stage move UNLESS the same request typed a
-  probability (an explicit value is somebody's judgement), a move within one
-  band keeps a typed value, and the lead that follows a quotation's outcome
-  takes the stage's odds too. The record pages still override afterwards —
-  the stage only sets the starting odds, exactly as SCORO's statuses do.
+  settings): `stageProbability()` / `probabilityAfterMove()` (in
+  `shared/pipelineStages.ts`, re-exported by `shared/pipeline.ts`) read the
+  configured stages — opportunity stages (every lead stage before a
+  decision, `QUOTATION_CREATED`, a drafted quote) 10%, SUBMITTED 50%,
+  NEGOTIATION 90%, WON 100%, LOST 0%, On hold says nothing, by default.
+  Both PATCH routes apply it on a stage move (`await pipelineStages()`)
+  UNLESS the same request typed a probability (an explicit value is
+  somebody's judgement), a move within one band keeps a typed value, and
+  the lead that follows a quotation's outcome takes the stage's odds too.
+  The record pages still override afterwards — the stage only sets the
+  starting odds, exactly as SCORO's statuses do. verify-pipeline sets an
+  administrator's `pipeline.stages` aside for the run, as verify-sales does
+  with the PDF layouts.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move
@@ -1390,11 +1416,30 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
 4622 / 4622.1 and the owner's sample PDF).
 
 - **Raised FROM a quotation only** — the quotation page's "Create Sales
-  Order" panel (in the page, no dialog) with SCORO's three choices: transfer
-  all details, chosen lines, or one summarised line worth the whole
-  quotation. The server builds it from the VALUE revision
-  (`valueRevision()`: approved, else latest) — the revision everything else
-  prices the quotation by.
+  Order" panel (in the page, no dialog), SCORO's "Create invoice"
+  (2026-10-07, the owner's screenshot): every line of the VALUE revision
+  (`valueRevision()`: approved, else latest) with what is left of it,
+  ticked by line or by group, booked at a percentage, a quantity or an
+  amount; "x% of available" and "y% of quote total"; a target value (a
+  percentage or a sum) that scales the selection; the selection's own
+  subtotal, discount, tax and total through the `quotationMath` mirror; and
+  "Summarise the selection into one line worth it". `POST /sales-orders`
+  takes `mode: lines` with `lines: [{ id, quantity }]`, `all` (what is left
+  of every line) or `summary` (the selection, or what is left, as one line
+  worth its net, with `bookedItems` saying which lines it books).
+- **Progress booking is `bookingFor()` in `shared/salesOrderBooking.ts`**
+  — SCORO's "100% of available": a quotation line is booked by the live
+  (not cancelled) orders' lines pointing at it (`SalesOrderLine.
+  quotationItemId`) or by a summarised line's `bookedItems`; what is left is
+  its quantity less that. `GET /sales-orders/booking?quotationId=` (above
+  `/:id`) is the panel's figures; the create route reads the same inside its
+  transaction and refuses more than is left ("Only 0.5 lot of … is left to
+  book"), so two bookings of one line cannot both pass. A cancelled order
+  gives its booking back; the editor's PUT carries a line's link when the
+  line comes back with its `id` (new lines book nothing). The seed runs
+  `linkLegacyBookings()` on every deploy: orders made before this link up
+  to the quotation lines they match (product, price, unit), and a lone
+  summarised line is marked as booking every line in full. Idempotent.
 - **One quotation, one number family**: the first order takes the next
   `sales_order` number; every later one is `<base>.1`, `<base>.2`…
   (progress booking), computed inside the creating transaction
@@ -1416,7 +1461,9 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary
   `/sales-orders?quotationId=` list — the same rows and visibility as the
   register, so a `view_own` holder sees only their own — with number, date,
-  status, PO, SI/DR, total and the booked sum; empty, it offers "Create
+  status, PO, SI/DR, total and who prepared it, under three figures:
+  Quotation total (the value revision's), Booked (live orders' totals) and
+  Outstanding (the difference, never below 0). Empty, it offers "Create
   Sales Order" to a `create` holder. No second query, no copy of the figures.
 - **The PDF prints through the Sales Order template** (2026-10-07): a
   designed document like the quotation, landscape, in the quotation

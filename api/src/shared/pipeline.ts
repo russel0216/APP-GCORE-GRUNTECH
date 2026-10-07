@@ -39,52 +39,11 @@ export function valueRevision<R extends { status: string; revision: number }>(re
   return approved ?? latest;
 }
 
-/**
- * SCORO's ladder (2026-10-07, the owner's status settings): each stage
- * carries the odds a deal standing in it defaults to — Opportunity 10,
- * Negotiation 50, Closing 90, Confirmed 100, Rejected/Cancelled 0 — mapped
- * by position onto G-CORE's own stages. Null means the stage says nothing
- * about odds (On hold), so a move there changes nothing.
- */
-export function stageProbability(key: string): number | null {
-  switch (key) {
-    case 'NEW':
-    case 'CONTACTED':
-    case 'QUALIFIED':
-    case 'SITE_VISIT':
-    case 'COSTING':
-    case 'QUOTATION_CREATED':
-    case 'QUOTED':
-    case 'OPEN':
-      return 10;
-    case 'QUOTATION_SUBMITTED':
-    case 'SUBMITTED':
-      return 50;
-    case 'NEGOTIATION':
-      return 90;
-    case 'WON':
-      return 100;
-    case 'LOST':
-      return 0;
-    default:
-      return null;
-  }
-}
-
-/**
- * The probability a record carries after a stage move: the target stage's
- * default where the two stages' defaults differ, otherwise whatever it had —
- * so odds typed by hand survive a move within the same band (New → Contacted
- * are both Opportunity), and On hold never touches them. The record pages can
- * still override afterwards; the stage only sets the starting odds, as
- * SCORO's statuses do.
- */
-export function probabilityAfterMove(from: string, to: string, current: number): number {
-  const was = stageProbability(from);
-  const now = stageProbability(to);
-  if (now === null || was === now) return current;
-  return now;
-}
+// The stage ladder — the odds a stage carries, and the stages themselves as
+// data an administrator may rename, recolour and reorder onto the board —
+// lives in pipelineStages.ts. The names stay importable from here.
+export { stageProbability, probabilityAfterMove, stageFor, DEFAULT_STAGES, type StageDef } from './pipelineStages';
+import { DEFAULT_STAGES as STAGE_DEFAULTS, type StageDef as Stage } from './pipelineStages';
 
 /** Where a quotation's value goes when none of its lines names a group. */
 export const NO_GROUP = 'No group';
@@ -471,6 +430,8 @@ export interface BoardQuotation {
   lead: { expectedClosing: Date | null; nextAction: string | null; nextActionDate: Date | null } | null;
   revisions: BoardRevision[];
   activities: { subject: string; startsAt: Date }[];
+  /** Orders booked from it — a won quotation with one is SCORO's Completed. */
+  salesOrderCount: number;
 }
 
 export interface Card {
@@ -498,6 +459,10 @@ export interface Card {
   allowedTargets: string[];
   link: string;
   column: string;
+  /** A quotation with a sales order or a project: won AND booked (SCORO's Completed). */
+  booked: boolean;
+  /** The stage (SCORO's band) the column stands in. */
+  stage: string;
 }
 
 export interface BoardColumnOut {
@@ -535,6 +500,8 @@ export interface BoardResponse {
   asOf: string;
   window: { decidedFrom: string; decidedWithinDays: number };
   kpis: BoardKpis;
+  /** The stages as configured — the bands the board draws its columns into. */
+  stages: Stage[];
   columns: BoardColumnOut[];
   forecast: { key: string; label: string; count: number; value: number; weighted: number; cards: Card[] };
   people: BoardPerson[];
@@ -600,6 +567,8 @@ function leadCard(lead: BoardLead, now: Date, me: ResolvedUser): Card | null {
     allowedTargets: canMove ? allowedTargets({ kind: 'lead', column }) : [],
     link: `/g-ops/leads/${lead.id}`,
     column,
+    booked: false,
+    stage: '',
   };
 }
 
@@ -658,7 +627,19 @@ function quotationCard(q: BoardQuotation, now: Date, me: ResolvedUser): Card | n
     allowedTargets: canMove ? allowedTargets({ kind: 'quotation', column, hasApprovedRevision, hasJob: !!job }) : [],
     link: `/g-ops/quotations/${q.id}`,
     column,
+    booked: !!job || q.salesOrderCount > 0,
+    stage: '',
   };
+}
+
+/**
+ * The stage a card stands in. Two stages may share a column — Confirmed and
+ * Completed both hold WON — and then the booked card takes the later one.
+ */
+export function stageOfCard(card: Pick<Card, 'column' | 'booked'>, stages: Stage[]): string {
+  const holding = stages.filter((s) => s.columns.includes(card.column));
+  if (!holding.length) return '';
+  return (card.booked ? holding[holding.length - 1] : holding[0]).key;
 }
 
 /**
@@ -676,8 +657,11 @@ export function buildBoard(input: {
   now: Date;
   decidedWithinDays: number;
   me: ResolvedUser;
+  /** The stages as configured; the defaults when a caller has not read them. */
+  stages?: Stage[];
 }): BoardResponse {
   const { now, me } = input;
+  const stages = input.stages ?? STAGE_DEFAULTS;
   const decidedFrom = new Date(now.getTime() - input.decidedWithinDays * 86_400_000);
 
   const cards: Card[] = [];
@@ -695,6 +679,8 @@ export function buildBoard(input: {
       quotationById.set(q.id, q);
     }
   }
+
+  for (const c of cards) c.stage = stageOfCard(c, stages);
 
   const columns: BoardColumnOut[] = BOARD_COLUMNS.map((col) => {
     const mine = cards.filter((c) => c.column === col.key);
@@ -767,6 +753,7 @@ export function buildBoard(input: {
       forecastCount: forecastCards.length,
       unprobabled: forecastCards.filter((c) => c.probability === 0).length,
     },
+    stages,
     columns,
     forecast: {
       key: FORECAST_KEY,

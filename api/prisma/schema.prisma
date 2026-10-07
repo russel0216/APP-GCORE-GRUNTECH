@@ -1413,7 +1413,15 @@ model SalesOrderLine {
   providerUser       User?     @relation("SoLineProvider", fields: [providerUserId], references: [id], onDelete: SetNull)
   costNote           String?
 
+  /// The quotation line this books (progress booking: what is left of a line
+  /// is its quantity less every live order's lines pointing at it).
+  quotationItemId String?
+  quotationItem   QuotationItem? @relation(fields: [quotationItemId], references: [id], onDelete: SetNull)
+  /// A summarised line books several quotation lines: [{ quotationItemId, quantity }].
+  bookedItems Json?
+
   @@index([orderId])
+  @@index([quotationItemId])
 }
 
 model QuotationItem {
@@ -1451,6 +1459,7 @@ model QuotationItem {
   @@index([revisionId])
   @@index([providerSupplierId])
   @@index([providerUserId])
+  salesOrderLines SalesOrderLine[]
 }
 
 // ── SCORO archive ────────────────────────────────────────────────────────────
