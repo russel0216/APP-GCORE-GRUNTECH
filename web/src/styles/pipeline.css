@@ -891,3 +891,176 @@
   gap: var(--s-2);
   margin-top: var(--s-2);
 }
+
+/* ── SCORO's stage view (2026-10-07): the band takes the stage's own colour ── */
+.pipe-col.has-color .pipe-band {
+  background: color-mix(in srgb, var(--stage-color) 22%, transparent);
+  border-bottom-color: var(--stage-color);
+  border-bottom-width: 3px;
+}
+
+/* SCORO's summary strip: six figures across, not two rows of four. */
+.kpi-grid.pipe-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+/* ── Admin › Pipeline Stages ── */
+.ps-actions {
+  gap: var(--s-2);
+}
+
+.ps-confirm {
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.ps-table input[type='text'],
+.ps-table input:not([type]) {
+  min-width: 10rem;
+}
+
+.ps-steps {
+  font-size: var(--fs-xs);
+  margin-top: var(--s-1);
+}
+
+.ps-odds-row {
+  gap: var(--s-1);
+  align-items: center;
+}
+
+.ps-odds-row .number-input,
+.ps-odds-row input {
+  width: 5rem;
+  min-width: 0;
+}
+
+.ps-explain {
+  font-size: var(--fs-sm);
+  max-width: 28rem;
+}
+
+.ps-color {
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.ps-hex {
+  width: 6.5rem;
+  min-width: 0;
+}
+
+/* ── The quotation's Sales orders card and the Create Sales Order panel ── */
+.so-table {
+  width: 100%;
+}
+
+.so-sum {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+  margin-bottom: var(--s-3);
+}
+
+.so-sum dl {
+  margin: 0;
+}
+
+.so-sum dt {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.so-sum dd {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.so-book-table {
+  width: 100%;
+}
+
+.so-book-table th,
+.so-book-table td {
+  vertical-align: middle;
+}
+
+.so-book-group td {
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--bg-elev, transparent);
+}
+
+/* Each booking input in its own width — the page's inputs otherwise fill their cell. */
+.so-w {
+  display: inline-block;
+}
+
+.so-w-pct {
+  width: 5.5rem;
+}
+
+.so-w-qty {
+  width: 6.5rem;
+}
+
+.so-w-amt {
+  width: 9rem;
+}
+
+.so-book-qty {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.so-book-left {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+.so-book-foot {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s-4);
+  align-items: start;
+  margin-top: var(--s-3);
+}
+
+.so-book-foot .so-book-of {
+  display: grid;
+  gap: var(--s-2);
+}
+
+.so-book-foot .so-book-target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+
+.so-book-totals {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: var(--s-1) var(--s-4);
+  text-align: right;
+}
+
+.so-book-totals .so-grand {
+  font-weight: 700;
+  font-size: var(--fs-lg);
+}
+
+@media (max-width: 720px) {
+  .so-book-foot {
+    grid-template-columns: 1fr;
+  }
+  .so-book-totals {
+    text-align: left;
+  }
+}

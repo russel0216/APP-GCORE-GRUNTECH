@@ -2110,37 +2110,68 @@ async function main() {
       ],
     });
     const soQuoteId = String(soQuote.body.id);
-    const so1 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'all' });
-    check('a sales order is created from the quotation with all details', so1.status === 201, so1.text.slice(0, 160));
-    const so1Body = so1.body as unknown as { id: string; number: string; status: string; total: number; lines: { group: string | null; unitCost: number | null }[] };
+    // SCORO's Create invoice: what is left to book, then bookings against it.
+    const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
+    const bk0 = booking0.body as unknown as { net: number; availableNet: number; lines: { id: string; available: number; booked: number; isHeading: boolean }[] };
     check(
-      'it is a DRAFT carrying the lines, their groups and their cost, and the quotation\u2019s total',
+      'what is left to book: every line in full, the whole net',
+      booking0.status === 200 && money(bk0.availableNet, 103_750) && bk0.lines.every((l) => l.available === 1 && l.booked === 0),
+      booking0.text.slice(0, 160),
+    );
+    const bkLines = bk0.lines.filter((l) => !l.isHeading);
+    const so1 = await http(salesToken, 'POST', '/sales-orders', {
+      quotationId: soQuoteId,
+      mode: 'lines',
+      lines: [
+        { id: bkLines[0].id, quantity: 0.5 },
+        { id: bkLines[1].id, quantity: 0.5 },
+      ],
+    });
+    check('a sales order books half of each line — progress booking, SCORO\u2019s 50%', so1.status === 201, so1.text.slice(0, 160));
+    const so1Body = so1.body as unknown as { id: string; number: string; status: string; total: number; lines: { group: string | null; unitCost: number | null; quantity: number; amount: number; costAmount: number | null }[] };
+    check(
+      'its lines carry the booked quantity, the amount for it, and cost scaled with it',
       so1Body.status === 'DRAFT' &&
         so1Body.lines.length === 2 &&
         so1Body.lines[0].group === `${TAG} Installation` &&
         so1Body.lines[0].unitCost === 30_000 &&
-        money(so1Body.total, 103_750 * 1.12),
-      JSON.stringify(so1Body).slice(0, 220),
+        so1Body.lines[0].quantity === 0.5 &&
+        money(so1Body.lines[0].amount, 36_875) &&
+        money(so1Body.lines[0].costAmount ?? 0, 15_000) &&
+        money(so1Body.total, 51_875 * 1.12),
+      JSON.stringify(so1Body).slice(0, 260),
     );
     check('its number has no suffix — the first booking takes the base', !so1Body.number.includes('.'), so1Body.number);
+    const booking1 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
+    const bk1 = booking1.body as unknown as { availableNet: number; bookedNet: number; lines: { available: number; booked: number }[] };
+    check(
+      'what is left halves: the booked quantity is off every line and the booked net off the quotation',
+      money(bk1.availableNet, 51_875) && money(bk1.bookedNet, 51_875) && bk1.lines.every((l) => l.available === 0.5 && l.booked === 0.5),
+      booking1.text.slice(0, 160),
+    );
+    const over = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'lines', lines: [{ id: bkLines[0].id, quantity: 0.6 }] });
+    check('booking more than is left is refused, and the refusal says what is left', over.status === 400 && over.text.includes('0.5'), over.text.slice(0, 160));
     const so2 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'summary' });
-    const so2Body = so2.body as unknown as { number: string; total: number; lines: { title: string | null }[] };
+    const so2Body = so2.body as unknown as { id: string; number: string; total: number; lines: { title: string | null }[] };
     check(
-      'the second order on the same quotation is .1 — progress booking, one family',
-      so2.status === 201 && so2Body.number === `${so1Body.number}.1`,
-      so2Body.number,
+      'the second order is .1 — one family — and summarises what is left into one line worth it',
+      so2.status === 201 && so2Body.number === `${so1Body.number}.1` && so2Body.lines.length === 1 && so2Body.lines[0].title === `${TAG} Booked plant` && money(so2Body.total, 51_875 * 1.12),
+      so2.text.slice(0, 200),
     );
+    const nothing = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'all' });
+    check('with everything booked, another order is refused', nothing.status === 400 && nothing.text.includes('Nothing is left'), nothing.text.slice(0, 160));
+
+    const cancelBare = await http(salesToken, 'POST', `/sales-orders/${so2Body.id}/cancel`, {});
+    const cancelled = await http(salesToken, 'POST', `/sales-orders/${so2Body.id}/cancel`, { reason: `${TAG} booked too early` });
+    check('cancelling needs its reason, and keeps the record', cancelBare.status === 400 && cancelled.status === 200, `${cancelBare.status} ${cancelled.status}`);
+    const booking2 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
+    const bk2 = booking2.body as unknown as { availableNet: number; lines: { available: number }[] };
+    check('a cancelled order gives its booking back', money(bk2.availableNet, 51_875) && bk2.lines.every((l) => l.available === 0.5), booking2.text.slice(0, 160));
+    const so3 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'all' });
+    const so3Body = so3.body as unknown as { id: string; number: string; subtotal: number; lines: { quantity: number }[] };
     check(
-      'summarised: one line worth the whole quotation, same total',
-      so2Body.lines.length === 1 && so2Body.lines[0].title === `${TAG} Booked plant` && money(so2Body.total, 103_750 * 1.12),
-      JSON.stringify(so2Body.lines),
-    );
-    const revForPick = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: soQuoteId }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
-    const so3 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'partial', lineIds: [revForPick.items[1].id] });
-    const so3Body = so3.body as unknown as { number: string; subtotal: number; lines: unknown[] };
-    check(
-      'partial: only the chosen line is booked, numbered .2',
-      so3.status === 201 && so3Body.lines.length === 1 && money(so3Body.subtotal, 30_000) && so3Body.number === `${so1Body.number}.2`,
+      '"all" books what is left of every line — the other half — numbered .2',
+      so3.status === 201 && so3Body.number === `${so1Body.number}.2` && so3Body.lines.length === 2 && so3Body.lines.every((l) => l.quantity === 0.5) && money(so3Body.subtotal, 51_875),
       `${so3Body.number} ${so3Body.subtotal}`,
     );
 
@@ -2214,9 +2245,6 @@ async function main() {
     );
     check('the same paper for a reader without cost rights carries no cost or margin', !soPdfOther.includes('Margin sum:') && !soPdfOther.includes('20,004.58'));
 
-    const cancelBare = await http(salesToken, 'POST', `/sales-orders/${so3Body.number ? so3.body.id : ''}/cancel`, {});
-    const cancelled = await http(salesToken, 'POST', `/sales-orders/${so3.body.id}/cancel`, { reason: `${TAG} booked too early` });
-    check('cancelling needs its reason, and keeps the record', cancelBare.status === 400 && cancelled.status === 200, `${cancelBare.status} ${cancelled.status}`);
 
     // ── Pulling a revision back from the approver to edit it ─────────────────
     console.log('\nPulling a revision back from approval');

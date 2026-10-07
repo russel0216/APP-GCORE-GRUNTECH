@@ -64,7 +64,9 @@ async function cleanup() {
       ],
     },
   });
+  await prisma.salesOrder.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
+  await putStagesBack();
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.lead.deleteMany({ where: { companyName: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -161,7 +163,43 @@ interface BoardCard {
 interface BoardBody {
   kpis: { openQuotes: number; quotedValue: number; weightedValue: number };
   window: { decidedWithinDays: number };
+  stages: { key: string; label: string; probability: number | null; inActiveList: boolean; color: string }[];
   columns: { key: string; count: number; value: number; cards: BoardCard[] }[];
+}
+
+/*
+  An administrator's stage settings (Admin › Pipeline Stages) are set aside
+  for the run and put back by cleanup(), which also runs first.
+*/
+const STAGES_KEY = 'pipeline.stages';
+const STAGES_STASH = `${STAGES_KEY}.__verify__`;
+
+async function setStagesAside() {
+  const row = await prisma.setting.findUnique({ where: { key: STAGES_KEY } });
+  if (!row) return;
+  await prisma.$transaction([
+    prisma.setting.upsert({
+      where: { key: STAGES_STASH },
+      create: { key: STAGES_STASH, value: row.value as Prisma.InputJsonValue, description: row.description },
+      update: { value: row.value as Prisma.InputJsonValue, description: row.description },
+    }),
+    prisma.setting.delete({ where: { key: STAGES_KEY } }),
+  ]);
+}
+
+async function putStagesBack() {
+  const stash = await prisma.setting.findUnique({ where: { key: STAGES_STASH } });
+  if (!stash) {
+    return;
+  }
+  await prisma.$transaction([
+    prisma.setting.upsert({
+      where: { key: STAGES_KEY },
+      create: { key: STAGES_KEY, value: stash.value as Prisma.InputJsonValue, description: stash.description },
+      update: { value: stash.value as Prisma.InputJsonValue, description: stash.description },
+    }),
+    prisma.setting.delete({ where: { key: STAGES_STASH } }),
+  ]);
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
@@ -192,13 +230,19 @@ async function main() {
     'gops.quotations.create',
     'gops.calendar.view_all',
     'insights.pipeline.view_all',
+    'gops.sales_orders.create',
+    'gops.sales_orders.view_own',
   ]);
+  const stageAdminRole = await makeRole('zzpipe_admin', 'Verify stage administrator', ['admin.pipeline_stages.view_all', 'admin.pipeline_stages.edit_all']);
+  await setStagesAside();
   const plainRole = await makeRole('zzpipe_plain', 'Verify salesperson without the board', [
     'gops.quotations.view_own',
     'gops.quotations.edit_own',
     'gops.quotations.create',
   ]);
   const manager = await makeUser('Verify Board Manager', 'board@verifyp.local', [boardRole.id]);
+  const stageAdmin = await makeUser('Verify Stage Admin', 'stages@verifyp.local', [stageAdminRole.id]);
+  const stageAdminToken = signToken(stageAdmin.id, stageAdmin.email);
   const seller = await makeUser('Verify Plain Seller', 'plain@verifyp.local', [plainRole.id]);
   await prisma.employee.create({
     data: { employeeNo: `${TAG}-EMP-2026-0007`, firstName: 'Verify', lastName: `${TAG} Manager`, userId: manager.id },
@@ -644,6 +688,72 @@ async function main() {
     followed.status === 'QUOTATION_SUBMITTED' && followed.probability === 50,
     `${followed.status} ${followed.probability}`,
   );
+
+  // ── SCORO's statuses as data: the stages, their odds, the board's bands ──
+  console.log('\nStages (SCORO\u2019s statuses as data)');
+  const withStages = (await http(managerToken, 'GET', `/pipeline?search=${encodeURIComponent(TAG)}`)).body as unknown as BoardBody;
+  const activeKeys = (withStages.stages ?? []).filter((st) => st.inActiveList).map((st) => st.key);
+  check(
+    'the board carries the stages: SCORO\u2019s five on the active board, Lost and On hold off it',
+    withStages.stages?.length === 7 && activeKeys.join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,COMPLETED',
+    JSON.stringify(activeKeys),
+  );
+  const stageQuote = await newQuotation('Stage quote', 'OPEN', [{ revision: 0, status: 'APPROVED', total: 100_000 }], { probability: 25 });
+  const stageRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: stageQuote.id } });
+  await prisma.quotationItem.create({
+    data: { revisionId: stageRev.id, title: `${TAG} Stage line`, description: 'One lot', quantity: 1, unit: 'lot', unitPrice: 100_000, amount: 100_000, sortOrder: 0 },
+  });
+  await http(managerToken, 'PATCH', `/quotations/${stageQuote.id}`, { outcome: 'WON' });
+  const cardStage = async () =>
+    ((await http(managerToken, 'GET', `/pipeline?search=${encodeURIComponent(`${TAG} Stage quote`)}`)).body as unknown as BoardBody).columns
+      .flatMap((c) => c.cards)
+      .find((c) => c.id === stageQuote.id) as (BoardCard & { stage?: string; booked?: boolean }) | undefined;
+  const confirmed = await cardStage();
+  check('a won quotation with no sales order stands in Confirmed', confirmed?.stage === 'CONFIRMED' && confirmed?.booked === false, JSON.stringify(confirmed?.stage));
+  const booked = await http(managerToken, 'POST', '/sales-orders', { quotationId: stageQuote.id, mode: 'all' });
+  const completed = await cardStage();
+  check(
+    'and once a sales order is created from it, in Completed — worked out, never set by hand',
+    booked.status === 201 && completed?.stage === 'COMPLETED' && completed?.booked === true,
+    `${booked.status} ${completed?.stage}`,
+  );
+
+  check('a salesperson without the board cannot read the stages', (await http(sellerToken, 'GET', '/pipeline/stages')).status === 403);
+  check('the board manager reads them but cannot change them', (await http(managerToken, 'GET', '/pipeline/stages')).status === 200 && (await http(managerToken, 'PUT', '/pipeline/stages', {})).status === 403);
+  const renamed = await http(stageAdminToken, 'PUT', '/pipeline/stages', {
+    NEGOTIATION: { label: 'Proposal sent', probability: 40, color: '#123456' },
+    CONFIRMED: { probability: 55 },
+    LOST: { inActiveList: true },
+  });
+  const renamedStages = (renamed.body.stages ?? []) as BoardBody['stages'];
+  const neg = renamedStages.find((st) => st.key === 'NEGOTIATION');
+  const conf = renamedStages.find((st) => st.key === 'CONFIRMED');
+  check(
+    'an administrator renames a stage, sets its odds and colour, and lists Lost on the board — Confirmed stays 100',
+    renamed.status === 200 && neg?.label === 'Proposal sent' && neg?.probability === 40 && neg?.color === '#123456' && conf?.probability === 100 && renamedStages.find((st) => st.key === 'LOST')?.inActiveList === true,
+    renamed.text.slice(0, 200),
+  );
+  const oddsQuote = await newQuotation('Odds quote', 'OPEN', [{ revision: 0, status: 'APPROVED', total: 50_000 }], { probability: 25 });
+  await http(managerToken, 'PATCH', `/quotations/${oddsQuote.id}`, { outcome: 'SUBMITTED' });
+  const atForty = await prisma.quotation.findUniqueOrThrow({ where: { id: oddsQuote.id } });
+  check('a move now takes the odds the setting gives the stage', atForty.probability === 40, String(atForty.probability));
+  const boardRenamed = (await http(managerToken, 'GET', '/pipeline')).body as unknown as BoardBody;
+  check(
+    'the board carries the renamed stage, and Lost joins the active board',
+    boardRenamed.stages.find((st) => st.key === 'NEGOTIATION')?.label === 'Proposal sent' && boardRenamed.stages.find((st) => st.key === 'LOST')?.inActiveList === true,
+  );
+  check(
+    'the change is audited',
+    (await prisma.auditLog.count({ where: { entityType: 'setting', entityId: STAGES_KEY, actorId: stageAdmin.id, action: 'UPDATED' } })) === 1,
+  );
+  const restored = await http(stageAdminToken, 'DELETE', '/pipeline/stages');
+  const oddsQuote2 = await newQuotation('Odds quote two', 'OPEN', [{ revision: 0, status: 'APPROVED', total: 50_000 }], { probability: 25 });
+  await http(managerToken, 'PATCH', `/quotations/${oddsQuote2.id}`, { outcome: 'SUBMITTED' });
+  const atFifty = await prisma.quotation.findUniqueOrThrow({ where: { id: oddsQuote2.id } });
+  check('"SCORO\u2019s defaults" puts the ladder back: Negotiation is 50 again', restored.status === 200 && atFifty.probability === 50, String(atFifty.probability));
+  const csvRes = await fetch(`${BASE}/pipeline/board.csv`, { headers: { Authorization: `Bearer ${managerToken}` } });
+  const csvHead = (await csvRes.text()).split('\n')[0];
+  check('the CSV twin appends a Stage column', csvRes.status === 200 && csvHead.trim().endsWith('Stage'), csvHead);
 
   // ── 6. The number preview ────────────────────────────────────────────────
   console.log('\nThe next quotation number');

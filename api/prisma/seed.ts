@@ -4,6 +4,7 @@ import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { backfillPositions } from '../src/shared/plantilla';
 import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
+import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { seedQuotationGroups } from '../src/shared/quotationGroups';
 import { prisma as sharedPrisma } from '../src/prisma';
 
@@ -973,6 +974,9 @@ async function main() {
   // definition, shared with the API; a second run withdraws nothing.
   {
     const withdrawn = await withdrawStaleQuotationApprovals();
+    // Orders made before progress booking link up to the quotation lines they book.
+    const legacy = await linkLegacyBookings();
+    if (legacy.linked || legacy.summarised) console.log(`Linked ${legacy.linked} sales order line(s) and ${legacy.summarised} summarised line(s) to their quotation lines`);
     if (withdrawn.length) {
       console.log(
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,

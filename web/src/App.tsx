@@ -17,6 +17,7 @@ import { Numbering } from './pages/admin/Numbering';
 import { Workflows } from './pages/admin/Workflows';
 import { Audit } from './pages/admin/Audit';
 import { PdfTemplates } from './pages/admin/PdfTemplates';
+import { PipelineStages } from './pages/admin/PipelineStages';
 import { Customers } from './pages/masters/Customers';
 import { Customer360Page } from './pages/masters/Customer360';
 import { Suppliers, SupplierDetail } from './pages/masters/Suppliers';
@@ -264,6 +265,14 @@ function Routed() {
           element={
             <Guard permission="admin.pdf_templates.view_all">
               <PdfTemplates />
+            </Guard>
+          }
+        />
+        <Route
+          path="/admin/pipeline-stages"
+          element={
+            <Guard permission="admin.pipeline_stages.view_all">
+              <PipelineStages />
             </Guard>
           }
         />
