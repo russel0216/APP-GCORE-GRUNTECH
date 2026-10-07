@@ -724,6 +724,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **A lead with a quotation is never a board card**, and every quotation value
   is `quotationValue()` — Insights, the board, Customer 360 and job orders call
   it rather than a fourth lambda.
+- **The board wears SCORO's dress** (2026-10-07, the owner's pipeline
+  screenshots): each column is a tinted band — stage, "N deals", "value
+  (Total sum)" — mapped by POSITION onto SCORO's ladder (`COLUMN_TONE`:
+  lead stages and drafted quotes = Opportunity cream, SUBMITTED =
+  Negotiation orange, NEGOTIATION = Closing light green, WON = Confirmed
+  green, forecast yellow), tinted with the tone tokens' rgb values; a card
+  is the deal's name in bold, the company under it, the owner's face
+  top-right (name in the tooltip and aria), and a footer of age against
+  amount. The field toggles still shape it.
+- **"Forecast deal" on the board is manual forecast input** (the owner's
+  call): "+ New → Forecast deal" asks company, value, probability and
+  expected closing and files a LEAD with `source: "Forecast"` — the
+  pipeline stays a view over leads and quotations (no third record), the
+  card appears at once, and value × probability joins the month its
+  expected closing names. Hand-typed forecasts stay tellable by source.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move

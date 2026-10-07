@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, api, downloadBlob, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Stat } from '../../components/charts';
+import { NumberInput } from '../../components/NumberInput';
 import {
   Avatar,
   Checkbox,
@@ -283,6 +284,28 @@ function payloadFor(card: Card, key: string, lostReason?: string) {
   return { outcome: key === 'QUOTED' ? 'OPEN' : key, ...(lostReason ? { lostReason } : {}) };
 }
 
+/**
+ * SCORO's column tints (the owner's pipeline screenshot): opportunity cream,
+ * negotiation orange, closing light green, confirmed green, forecast yellow.
+ * Mapped onto G-CORE's own stages; the colours come from the tone tokens.
+ */
+const COLUMN_TONE: Record<string, string> = {
+  NEW: 'opportunity',
+  CONTACTED: 'opportunity',
+  QUALIFIED: 'opportunity',
+  SITE_VISIT: 'opportunity',
+  COSTING: 'opportunity',
+  QUOTED: 'opportunity',
+  // By position on SCORO's ladder (Opportunity → Negotiation → Closing →
+  // Confirmed): a submitted quote is their Negotiation, negotiating is Closing.
+  SUBMITTED: 'negotiation',
+  NEGOTIATION: 'closing',
+  WON: 'won',
+  LOST: 'lost',
+  ON_HOLD: '',
+  [FORECAST]: 'forecast',
+};
+
 const byClosing = (c: Card) => (c.expectedClosing ? c.expectedClosing : '9999-12-31');
 
 function sortCards(cards: Card[], sort: Sort): Card[] {
@@ -328,7 +351,7 @@ export function Pipeline() {
   const [savingView, setSavingView] = useState(false);
   const [customising, setCustomising] = useState(false);
   const [newMenu, setNewMenu] = useState(false);
-  const [creating, setCreating] = useState<'lead' | null>(null);
+  const [creating, setCreating] = useState<'lead' | 'forecast' | null>(null);
   const navigate = useNavigate();
   const [people, setPeople] = useState<Person[]>([]);
 
@@ -566,7 +589,7 @@ export function Pipeline() {
     }
   }
 
-  async function openCreate(kind: 'lead' | 'quotation') {
+  async function openCreate(kind: 'lead' | 'quotation' | 'forecast') {
     setNewMenu(false);
     // A quotation is written on its own full page (the SCORO editor), not a dialog.
     if (kind === 'quotation') {
@@ -612,6 +635,11 @@ export function Pipeline() {
           {canCreateLead && (
             <button role="menuitem" onClick={() => void openCreate('lead')}>
               Lead
+            </button>
+          )}
+          {canCreateLead && (
+            <button role="menuitem" onClick={() => void openCreate('forecast')}>
+              Forecast deal
             </button>
           )}
           {canCreateQuote && (
@@ -888,6 +916,18 @@ export function Pipeline() {
           }}
         />
       )}
+      {creating === 'forecast' && (
+        <ForecastDealForm
+          people={people}
+          me={me?.user.id ?? ''}
+          onClose={() => setCreating(null)}
+          onSaved={(closingThisMonth) => {
+            setCreating(null);
+            toast('ok', closingThisMonth ? 'On the board and in this month\u2019s forecast' : 'On the board \u2014 it joins the forecast in its closing month');
+            void load();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1005,6 +1045,7 @@ function PipeColumn({
   return (
     <section
       className={cls}
+      data-tone={COLUMN_TONE[column.key] || undefined}
       role="listitem"
       aria-label={`${column.label}: ${column.count} card${column.count === 1 ? '' : 's'}, ${formatMoney(column.value)}`}
       // The forecast never calls preventDefault, so nothing can be dropped on it.
@@ -1012,25 +1053,32 @@ function PipeColumn({
       onDragLeave={onDragLeave}
       onDrop={forecast ? undefined : onDrop}
     >
-      <div className="pipe-head">
-        <strong>{column.label}</strong>
-        <span className="pipe-head-tools">
-          <span className="badge">{column.count}</span>
-          <button
-            className="pipe-collapse"
-            onClick={onToggle}
-            aria-expanded={!collapsed}
-            aria-label={collapsed ? `Expand ${column.label}` : `Collapse ${column.label}`}
-            title={collapsed ? 'Expand' : 'Collapse'}
-          >
-            {collapsed ? '▸' : '▾'}
-          </button>
-        </span>
+      {/* SCORO's column band: the stage, "N deals", and the total sum on a tint. */}
+      <div className="pipe-band">
+        <div className="pipe-head">
+          <strong>{column.label}</strong>
+          <span className="pipe-head-tools">
+            <button
+              className="pipe-collapse"
+              onClick={onToggle}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? `Expand ${column.label}` : `Collapse ${column.label}`}
+              title={collapsed ? 'Expand' : 'Collapse'}
+            >
+              {collapsed ? '▸' : '▾'}
+            </button>
+          </span>
+        </div>
+        <div className="pipe-count">
+          {column.count} deal{column.count === 1 ? '' : 's'}
+        </div>
+        <div className="pipe-total mono">
+          {formatMoney(column.value)} <span className="faint">(Total sum)</span>
+        </div>
+        {column.weighted !== column.value && (
+          <div className="pipe-total weighted faint mono">{formatMoney(column.weighted)} weighted</div>
+        )}
       </div>
-      <div className="pipe-total mono">{formatMoney(column.value)}</div>
-      {column.weighted !== column.value && (
-        <div className="pipe-total weighted faint mono">{formatMoney(column.weighted)} weighted</div>
-      )}
       {forecast && !collapsed && <div className="pipe-note">Worked out from expected closing — not a drop target.</div>}
       {refusal && <div className="pipe-refusal">{refusal}</div>}
       {!collapsed && (
@@ -1097,41 +1145,43 @@ function PipeCard({
       onDragStart={movable ? onDragStart : undefined}
       onDragEnd={movable ? onDragEnd : undefined}
     >
+      {/*
+        SCORO's card (the owner's pipeline screenshot): the deal's name in
+        bold, the company under it, the owner's face top-right, and a footer
+        of age on the left against the amount on the right.
+      */}
       <div className="pipe-card-row">
         <Link to={card.link} className="pipe-card-title" draggable={false}>
-          {show('customer') ? card.title : card.number}
+          {(show('subject') && card.subject) || (show('customer') ? card.title : card.number)}
         </Link>
-        <span className="tag">{card.kind === 'quotation' ? 'QT' : 'LEAD'}</span>
+        {show('owner') && (
+          <span className="pipe-card-face" title={card.owner.name}>
+            <Avatar name={card.owner.name} photoId={card.owner.photoPath} size={22} />
+          </span>
+        )}
       </div>
+      {show('customer') && show('subject') && card.subject && <div className="pipe-card-sub">{card.title}</div>}
       {show('subject') && (
         <div className="pipe-card-sub">
-          <span className="mono">{card.number}</span>
-          {card.subject ? ` · ${card.subject}` : ''}
+          <span className="mono">{card.number}</span> <span className="tag">{card.kind === 'quotation' ? 'QT' : 'LEAD'}</span>
         </div>
       )}
-      {(show('value') || show('probability')) && (
-        <div className="pipe-card-row">
-          {show('value') && <span className="pipe-card-amount mono">{formatMoney(card.value)}</span>}
-          {show('probability') && <span className="section-label">{card.probability}%</span>}
+      {(show('probability') || (show('weighted') && card.weighted !== card.value)) && (
+        <div className="pipe-card-sub mono">
+          {show('probability') ? `${card.probability}%` : ''}
+          {show('weighted') && card.weighted !== card.value
+            ? `${show('probability') ? ' · ' : ''}${formatMoney(card.weighted)} weighted`
+            : ''}
         </div>
-      )}
-      {show('weighted') && card.weighted !== card.value && (
-        <div className="pipe-card-sub mono">{formatMoney(card.weighted)} weighted</div>
       )}
       {show('revision') && card.revision && (
         <div className="pipe-card-sub">
           R{card.revision.n} <StatusBadge status={card.revision.status} extra={{ SUPERSEDED: '' }} />
         </div>
       )}
-      {(show('owner') || show('age')) && (
-        <div className="pipe-card-row pipe-card-owner">
-          {show('owner') && (
-            <span className="row pipe-card-person">
-              <Avatar name={card.owner.name} photoId={card.owner.photoPath} size={20} />
-              {card.owner.name}
-            </span>
-          )}
-          {show('age') && (
+      {(show('age') || show('value')) && (
+        <div className="pipe-card-row pipe-card-foot">
+          {show('age') ? (
             <span
               id={ageId}
               className={`pipe-age${card.overdue ? ' stale' : ''}`}
@@ -1139,7 +1189,10 @@ function PipeCard({
             >
               {card.ageDays}d{card.overdue ? ' · overdue' : ''}
             </span>
+          ) : (
+            <span />
           )}
+          {show('value') && <span className="pipe-card-amount mono">{formatMoney(card.value)}</span>}
         </div>
       )}
       {show('next') && next && (
@@ -1428,6 +1481,134 @@ function SaveViewModal({
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Checkbox checked={shared} onChange={setShared} label="Share with the team — everyone with the board can pick it" />
+    </Modal>
+  );
+}
+
+/**
+ * Manual forecast input (2026-10-07, the owner's call): a deal typed straight
+ * onto the board, quotation or not. It is filed as a LEAD — the pipeline
+ * stays a view over leads and quotations (Phase 3: no third record) — so it
+ * is a card at once, and its value × probability joins the weighted forecast
+ * the moment its expected closing is set. Source says "Forecast", so
+ * hand-typed deals stay tellable from enquiries that rang in.
+ */
+function ForecastDealForm({
+  people,
+  me,
+  onClose,
+  onSaved,
+}: {
+  people: Person[];
+  me: string;
+  onClose: () => void;
+  onSaved: (closingThisMonth: boolean) => void;
+}) {
+  const [form, setForm] = useState({
+    companyName: '',
+    description: '',
+    estimatedValue: '',
+    probability: '50',
+    expectedClosing: '',
+    assignedToId: me,
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post('/leads', {
+        companyName: form.companyName.trim(),
+        description: form.description.trim() || null,
+        estimatedValue: Number(form.estimatedValue) || 0,
+        probability: Math.round(Number(form.probability) || 0),
+        expectedClosing: form.expectedClosing,
+        assignedToId: form.assignedToId || undefined,
+        source: 'Forecast',
+      });
+      const month = new Date().toISOString().slice(0, 7);
+      onSaved(form.expectedClosing.startsWith(month));
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const valid =
+    form.companyName.trim().length >= 2 && Number(form.estimatedValue) > 0 && !!form.expectedClosing;
+
+  return (
+    <Modal
+      title="Forecast deal"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={() => void save()} disabled={busy || !valid}>
+            {busy ? 'Adding\u2026' : 'Add to forecast'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      <p className="muted">
+        A deal you know is coming, before any quotation exists. It lands on the board as a lead and
+        counts in the weighted forecast from its expected closing \u2014 value \u00d7 probability.
+      </p>
+      <Field label="Company" required>
+        <input
+          value={form.companyName}
+          autoFocus
+          onChange={(e) => setForm({ ...form, companyName: e.target.value })}
+          placeholder="Who the deal is with"
+        />
+      </Field>
+      <Field label="What is it">
+        <input
+          value={form.description}
+          onChange={(e) => setForm({ ...form, description: e.target.value })}
+          placeholder="e.g. PSA oxygen generator, Phase 2"
+        />
+      </Field>
+      <div className="grid grid-3">
+        <Field label="Estimated value" required>
+          <NumberInput
+            kind="money"
+            min={0}
+            value={form.estimatedValue}
+            onChange={(e) => setForm({ ...form, estimatedValue: e.target.value })}
+          />
+        </Field>
+        <Field label="Probability %">
+          <NumberInput
+            kind="percent"
+            min={0}
+            max={100}
+            value={form.probability}
+            onChange={(e) => setForm({ ...form, probability: e.target.value })}
+          />
+        </Field>
+        <Field label="Expected closing" required hint="The month it forecasts into">
+          <input
+            type="date"
+            value={form.expectedClosing}
+            onChange={(e) => setForm({ ...form, expectedClosing: e.target.value })}
+          />
+        </Field>
+      </div>
+      <Field label="Salesperson" hint="They are notified when it is not you">
+        <select value={form.assignedToId} onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}>
+          {people.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.id === me ? `${p.name} (me)` : p.name}
+            </option>
+          ))}
+        </select>
+      </Field>
     </Modal>
   );
 }
