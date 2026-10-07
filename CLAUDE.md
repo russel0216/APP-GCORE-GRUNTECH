@@ -159,10 +159,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,372 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
+**2,429 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
 masters 54, sales 328, costing 120, pipeline 71, calendar 46, numbering 46,
-partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
-evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
+partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
+evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -205,7 +205,10 @@ were found one at a time by documents refusing to submit — run this instead.
 `verify-sales.ts` checks the STANDARD designed layouts' wording, so it sets an
 administrator's saved quotation AND sales order layouts aside for the run
 (`pdfTemplate.<type>.__verify__`, Settings of their own) and `cleanup()` —
-which also runs first — puts them back.
+which also runs first — puts them back. `verify-finance.ts` does the same
+with the finance rules (`finance.rules.__verify__`): it changes the
+liquidation days to prove which rule a deadline read, and a run that dies
+leaves the stash for the next run's `cleanup()` to restore.
 
 `verify-sales.ts` imports `src/routes/sales` purely for its side effect, because
 that import is what registers the quotation's `onApprovalSettled` subscriber. If
@@ -637,8 +640,8 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   holds `hr` — the HR-typed version of the single-holder fault.
 - **Cancelling a document withdraws its request through `cancelOpenRequest`**
   (2026-10-02): leave, overtime (whichever of `overtime_prior` and
-  `overtime_request` is open), clearance, evaluation, expense claim and cash
-  advance, each passing `cancelled by <name>[: <reason typed>]` and the
+  `overtime_request` is open), clearance, evaluation, expense claim, cash
+  advance, budget request and sales order, each passing `cancelled by <name>[: <reason typed>]` and the
   canceller's id. The routes used to set the request CANCELLED by hand, which
   told nobody and audited nothing on it. Now the open step's approvers are
   told, and the requester too when somebody else cancelled (a clearance's
@@ -947,6 +950,73 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   permission, because a salesperson holds no Installed Base permission.
 - **Section photos** are attachments on `service_report` with entityId
   `<reportId>~<sectionKey>`; `GET /service-reports/:id` returns them by prefix.
+
+### Budget requests: project cash (2026-10-07)
+
+- **A budget request is PROJECT CASH, never a budget change** (the owner's
+  definition: cash so the team can buy what it needs without a purchase
+  requisition). `BudgetRequest` keeps its own table and its own name — it
+  is NOT a cash advance, which is the company's term for a personal loan —
+  but runs the advance's arithmetic on the project's money: DRAFT →
+  PENDING_APPROVAL → APPROVED → RELEASED → LIQUIDATED (or REFUND_DUE while
+  unspent cash is still out), plus REJECTED and CANCELLED. `routes/
+  budgetRequests.ts`; `refreshBudgetRequest(tx, id)` in `shared/finance.ts`
+  is the only thing that decides its figures and status, re-derived from
+  the payment allocations (`PaymentAllocation.budgetRequestId`) and the
+  approved liquidation. **Approval and release post nothing to the job**;
+  the liquidation posts INCURRED at what was spent, through the ordinary
+  expense-claim settle. Never write a BUDGETED row from a budget request
+  again: the seed's `closeLegacyBudgetIncreases()` closes the ones approved
+  under the old rule (released, spent and liquidated at their own amount on
+  the day they were approved, a note saying so; their ledger rows stay) so
+  they do not sit in finance's "to release" queue for ever.
+- **The route is the project's manager, then finance** — the seeded
+  "Budget Request — project manager then finance". Step 1 is the engine's
+  new **`PROJECT_MANAGER` approver type**: the manager the document's job
+  names (`ApprovalRequest.jobId`, set by `submitForApproval({ jobId })`,
+  read by `approversForStep(step, requesterId, tx, { jobId })` everywhere —
+  submit, queue, act, history, slots, withdrawal), falling back to the
+  step's role — **Executive** unless the step names another — when the
+  project has no manager or the manager raised it themself (the owner's
+  call: a PM's own request goes up, never to nobody). `audit-workflows.ts`
+  checks the fallback is held and counts active projects with no manager;
+  Admin › Approval Workflows offers "No project manager, or their own
+  request: <role>". A test that settles a budget request passes the
+  request's `jobId` to `approversForStep`, or the PM step resolves to the
+  fallback and `act()` refuses the person it picked.
+- **Finance releases it in one voucher**: `POST /payments` with
+  `kind: 'budget_request'` (DISBURSEMENT, exactly the outstanding, the
+  advance's one-voucher rule) and `budget_request_refund` (RECEIPT, unspent
+  cash back, never a collection). The liquidation deadline is snapshotted
+  at release from **`finance.rules.budgetRequestLiquidationDays`** — its
+  OWN rule, beside the advance's (the owner's call), on the Finance
+  Settings page. G-FIN › Money out › **Budget Requests**
+  (`gfin.budget_requests`, READ; the finance role holds it) is finance's
+  window on every project's requests — the same `budgetRequestListWhere()`
+  the project tab reads, so the two cannot list different sets
+  (verify-delivery asserts it); releasing is the A/P create right.
+  `financePosition()` carries `budgetRequestsToRelease` and
+  `budgetRequestsInHand` and subtracts the first from the working position,
+  as it does the advances; the dashboard, the cash forecast and Insights'
+  formula follow.
+- **The liquidation is an expense claim naming the request**
+  (`ExpenseClaim.budgetRequestId` — one of `advanceId` /
+  `budgetRequestId`, never both, a 400). Only the person who raised the
+  request files it, only once it is RELEASED, one live liquidation at a
+  time, on the project and budget line the request was approved for.
+  `claimPayable()` / `liquidatedReleased()` read whichever source the claim
+  names; `LIQUIDATION_SOURCES` is the include every reader of a claim's
+  payable needs. `NewClaimModal` takes `budgetRequest` beside `advance`; the
+  Expenses register's "Liquidation" kind covers both.
+- **The project's Budget Requests tab** (`ProjectBudgetRequestsCard` in
+  `pages/delivery/BudgetRequests.tsx`, which also holds the register — one
+  component in G-OPS's and G-FIN's dress — the request page and the form)
+  shows requested, released, spent, out with the team, each request's
+  liquidation and its approval chain. A request's own page is
+  `/g-ops/budget-requests/:id` — the approval notification lands there —
+  where the PM/finance decide, finance releases, the requester liquidates
+  and refunds are recorded. The old "budget increase" is gone from the UI;
+  `project_engineer` holds `budget_requests` own-scope so the team can ask.
 
 ### Finance: cash advances and liquidation
 

@@ -123,6 +123,19 @@ export async function approvalOptions(documentType: string, amount?: number | nu
 // ── Resolving who may act on a step ──────────────────────────────────────────
 
 /**
+ * What a document tells the engine about itself beyond who raised it. A
+ * PROJECT_MANAGER step needs the project; everything else needs nothing. Kept
+ * on the request (`ApprovalRequest.jobId`) so a step is resolved the same way
+ * at submission, in the queue, on the page and on the PDF.
+ */
+export interface ApprovalContext {
+  jobId?: string | null;
+}
+
+/** The role a PROJECT_MANAGER step falls back to when it names none. */
+export const PROJECT_MANAGER_FALLBACK_ROLE = 'executive';
+
+/**
  * The set of user ids allowed to act on one step.
  *
  * SUPERVISOR falls back to HR when the requester has no supervisor set —
@@ -132,13 +145,36 @@ export async function approvalOptions(documentType: string, amount?: number | nu
  * falls back to that role instead: a quotation from a salesperson with no
  * "Reports to" goes to the sales managers, not to HR. HR stays the fallback
  * for every step that names none (leave, overtime, claims…).
+ *
+ * PROJECT_MANAGER is the manager of the project the document names (a budget
+ * request's), and falls back to the step's role — Executive unless the step
+ * names another — when the project has no manager, the document names no
+ * project, or the manager IS the requester (2026-10-07, the owner's call: a
+ * PM's own request goes up to management, never to nobody).
  */
 export async function approversForStep(
   step: ApprovalStep,
   requesterId: string,
   tx: Prisma.TransactionClient = prisma,
+  ctx: ApprovalContext = {},
 ): Promise<string[]> {
   switch (step.approverType) {
+    case 'PROJECT_MANAGER': {
+      const job = ctx.jobId
+        ? await tx.job.findUnique({ where: { id: ctx.jobId }, select: { projectManager: { select: { id: true, isActive: true } } } })
+        : null;
+      const manager = job?.projectManager;
+      if (manager && manager.isActive && manager.id !== requesterId) return [manager.id];
+      if (step.roleId) {
+        const rows = await tx.userRole.findMany({
+          where: { roleId: step.roleId, user: { isActive: true } },
+          select: { userId: true },
+        });
+        return rows.map((r) => r.userId);
+      }
+      return usersInRole(PROJECT_MANAGER_FALLBACK_ROLE, tx);
+    }
+
     case 'USER':
       return step.userId ? [step.userId] : [];
 
@@ -194,8 +230,9 @@ export async function namedApprovers(
   step: ApprovalStep,
   requesterId: string,
   tx: Prisma.TransactionClient = prisma,
+  ctx: ApprovalContext = {},
 ): Promise<StepPerson[]> {
-  const ids = [...new Set(await approversForStep(step, requesterId, tx))].filter((id) => id !== requesterId);
+  const ids = [...new Set(await approversForStep(step, requesterId, tx, ctx))].filter((id) => id !== requesterId);
   if (!ids.length) return [];
   const users = await tx.user.findMany({
     where: { id: { in: ids }, isActive: true },
@@ -216,6 +253,7 @@ export async function routePreview(
   amount: number | null,
   requesterId: string,
   optionId?: string | null,
+  ctx: ApprovalContext = {},
 ): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; approvers: StepPerson[] }[] } | null> {
   const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null });
   if (!workflow) return null;
@@ -223,7 +261,7 @@ export async function routePreview(
     workflowId: workflow.id,
     name: workflow.name,
     steps: await Promise.all(
-      workflow.steps.map(async (st) => ({ sequence: st.sequence, name: st.name, approvers: await namedApprovers(st, requesterId) })),
+      workflow.steps.map(async (st) => ({ sequence: st.sequence, name: st.name, approvers: await namedApprovers(st, requesterId, prisma, ctx) })),
     ),
   };
 }
@@ -252,6 +290,8 @@ export interface SubmitInput {
   requesterId: string;
   /** An optional route the submitter chose (see `approvalOptions`); the standard pick otherwise. */
   optionId?: string | null;
+  /** The project the document is about, for a PROJECT_MANAGER step. */
+  jobId?: string | null;
 }
 
 export async function submitForApproval(input: SubmitInput): Promise<ApprovalRequest> {
@@ -281,7 +321,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   // person who raised it. Caught here, at submission, while it can still be
   // fixed by changing the workflow rather than by wondering why nothing moved.
   const firstStep = workflow.steps[0];
-  const firstApprovers = await approversForStep(firstStep, input.requesterId);
+  const firstApprovers = await approversForStep(firstStep, input.requesterId, prisma, { jobId: input.jobId });
   if (firstApprovers.length && firstApprovers.every((id) => id === input.requesterId)) {
     throw badRequest(
       `"${workflow.name}" routes step 1 ("${firstStep.name}") only to you, and nobody may approve a document they raised. ` +
@@ -304,6 +344,7 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
       amount: input.amount != null ? new Prisma.Decimal(input.amount) : null,
       link: input.link ?? null,
       requesterId: input.requesterId,
+      jobId: input.jobId ?? null,
       workflowId: workflow.id,
       currentSequence: workflow.steps[0].sequence,
       status: 'PENDING',
@@ -329,7 +370,7 @@ async function notifyCurrentStep(request: ApprovalRequest): Promise<void> {
   });
   if (!step) return;
 
-  const approverIds = await approversForStep(step, request.requesterId);
+  const approverIds = await approversForStep(step, request.requesterId, prisma, { jobId: request.jobId });
   if (!approverIds.length) {
     console.warn(
       `Approval request ${request.id} reached step "${step.name}" with no eligible approver.`,
@@ -382,7 +423,7 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     throw forbidden('You cannot approve a document you raised yourself');
   }
 
-  const eligible = await approversForStep(step, request.requesterId);
+  const eligible = await approversForStep(step, request.requesterId, prisma, { jobId: request.jobId });
   const actor = await prisma.user.findUnique({
     where: { id: input.userId },
     select: { isSuperAdmin: true, name: true },
@@ -510,7 +551,10 @@ export async function cancelOpenRequest(
 
     // Whoever it was waiting on, and whoever raised it — never the person who
     // withdrew it, who knows.
-    const told = new Set([...(step ? await approversForStep(step, request.requesterId, tx) : []), request.requesterId]);
+    const told = new Set([
+      ...(step ? await approversForStep(step, request.requesterId, tx, { jobId: request.jobId }) : []),
+      request.requesterId,
+    ]);
     if (actorId) told.delete(actorId);
     await notify(
       [...told].map((userId) => ({
@@ -548,7 +592,7 @@ export async function pendingFor(
     if (request.requesterId === userId) continue; // never your own
     const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
     if (!step) continue;
-    const eligible = await approversForStep(step, request.requesterId);
+    const eligible = await approversForStep(step, request.requesterId, prisma, { jobId: request.jobId });
     if (eligible.includes(userId)) mine.push(request);
   }
   return mine;
@@ -581,7 +625,7 @@ export async function historyFor(documentType: string, documentId: string) {
         r.workflow.steps.map(async (st) =>
           taken.has(st.sequence)
             ? st
-            : { ...st, approvers: (await namedApprovers(st, r.requesterId)).map((p) => ({ id: p.id, name: p.name })) },
+            : { ...st, approvers: (await namedApprovers(st, r.requesterId, prisma, { jobId: r.jobId })).map((p) => ({ id: p.id, name: p.name })) },
         ),
       );
       return { ...r, workflow: { ...r.workflow, steps } };
@@ -651,7 +695,7 @@ export interface ApprovalSlot {
 export async function approvalSlots(
   documentType: string,
   documentId: string,
-  draft?: { amount: number | null; requesterId: string; optionId?: string | null },
+  draft?: { amount: number | null; requesterId: string; optionId?: string | null; jobId?: string | null },
 ): Promise<ApprovalSlot[]> {
   const request = await prisma.approvalRequest.findFirst({
     where: { documentType, documentId },
@@ -669,9 +713,10 @@ export async function approvalSlots(
   if (!request) {
     if (!draft) return [];
     // An option the document no longer qualifies for falls back to the standard route.
+    const ctx = { jobId: draft.jobId };
     const route =
-      (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId) : null) ??
-      (await routePreview(documentType, draft.amount, draft.requesterId));
+      (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId, ctx) : null) ??
+      (await routePreview(documentType, draft.amount, draft.requesterId, null, ctx));
     return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
   }
   const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
@@ -690,7 +735,7 @@ export async function approvalSlots(
           at: a.actedAt,
         };
       }
-      return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId) } : { step: st.name };
+      return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, { jobId: request.jobId }) } : { step: st.name };
     }),
   );
 }

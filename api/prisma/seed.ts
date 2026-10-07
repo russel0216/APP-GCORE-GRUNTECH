@@ -5,6 +5,7 @@ import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { backfillPositions } from '../src/shared/plantilla';
 import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
+import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
 import { seedQuotationGroups } from '../src/shared/quotationGroups';
 import { prisma as sharedPrisma } from '../src/prisma';
 
@@ -169,6 +170,9 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('gops', 'progress_billing'),
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
       ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
+      // Project cash: the team asks for it, so an engineer raises a budget
+      // request on their project and sees their own.
+      ...VIEW_OWN_SELF('gops', 'budget_requests'),
       'gops.budget_monitoring.view_all',
       'gops.customers.view_all',
       'gchain.inventory.view_all',
@@ -313,6 +317,8 @@ const ROLES: RoleSeed[] = [
       ['gfin', 'settings'],
       ['gfin', 'payments'],
       ['gfin', 'cash_advances'],
+      // Project cash: every project's budget requests, to release and to chase.
+      ['gfin', 'budget_requests'],
     ],
     only: [
       'insights.dashboard.view_all',
@@ -493,8 +499,12 @@ interface WorkflowSeed {
 interface SeedStep {
   sequence: number;
   name: string;
-  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR';
-  /** The role a ROLE step routes to; on a SUPERVISOR step, who decides when the requester has no supervisor. */
+  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR' | 'PROJECT_MANAGER';
+  /**
+   * The role a ROLE step routes to; on a SUPERVISOR step, who decides when the
+   * requester has no supervisor; on a PROJECT_MANAGER step, who decides when
+   * the project has no manager or the manager raised the document.
+   */
   roleKey?: string;
 }
 
@@ -539,15 +549,18 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
+    // A budget request is project cash (2026-10-07, the owner's call): the
+    // project's own manager allows the spend, then finance approves and
+    // releases the cash. The PM step resolves to the project's manager — not
+    // to the project_manager ROLE, which is what the requester usually holds
+    // — and falls back to Executive when the project has no manager or the
+    // manager raised it themself, so a PM's own request goes up, never to
+    // nobody.
     documentType: 'budget_request',
-    name: 'Budget Request — finance then management',
-    // Deliberately NOT routed to project managers. A PM is normally the person
-    // raising a budget request — routing step 1 back to their own role means
-    // the only eligible approver is the requester, and the request stalls
-    // forever. A budget increase is a money decision anyway.
+    name: 'Budget Request — project manager then finance',
     steps: [
-      { sequence: 1, name: 'Finance review', approverType: 'ROLE', roleKey: 'finance' },
-      { sequence: 2, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'executive' },
+      { sequence: 2, name: 'Finance approval', approverType: 'ROLE', roleKey: 'finance' },
     ],
   },
   {
@@ -896,6 +909,9 @@ async function main() {
   // routed through them stays readable. Deleting them would orphan that.
   const RETIRED = [
     'Budget Request — management',
+    // A budget request stopped changing the budget and became project cash
+    // (2026-10-07); its route now opens with the project's manager.
+    'Budget Request — finance then management',
     'Purchase Order — procurement then finance',
   ];
   for (const name of RETIRED) {
@@ -998,6 +1014,10 @@ async function main() {
     // Orders made before progress booking link up to the quotation lines they book.
     const legacy = await linkLegacyBookings();
     if (legacy.linked || legacy.summarised) console.log(`Linked ${legacy.linked} sales order line(s) and ${legacy.summarised} summarised line(s) to their quotation lines`);
+    // Budget requests approved as budget INCREASES (the rule before
+    // 2026-10-07) are closed, so they do not read as cash finance still owes.
+    const closedIncreases = await closeLegacyBudgetIncreases();
+    if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
     if (withdrawn.length) {
       console.log(
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
@@ -1236,7 +1256,7 @@ async function main() {
     where: { key: 'finance.rules' },
     create: {
       key: 'finance.rules',
-      description: 'Payment terms, supplier withholding rates and aging buckets',
+      description: 'Payment terms, supplier withholding rates, aging buckets, cash-advance and budget-request rules',
       value: {
         defaultTermsDays: 30,
         supplierEwtGoods: 0.01,

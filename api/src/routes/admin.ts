@@ -381,7 +381,7 @@ workflowRoutes.get(
 const stepSchema = z.object({
   sequence: z.number().int().min(1),
   name: z.string().min(2),
-  approverType: z.enum(['ROLE', 'USER', 'SUPERVISOR', 'HR']),
+  approverType: z.enum(['ROLE', 'USER', 'SUPERVISOR', 'HR', 'PROJECT_MANAGER']),
   roleId: z.string().optional().nullable(),
   userId: z.string().optional().nullable(),
 });
@@ -432,7 +432,7 @@ workflowRoutes.post(
             name: s.name,
             approverType: s.approverType,
             // On a SUPERVISOR step the role is its fallback when the requester has no supervisor.
-            roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' ? (s.roleId ?? null) : null,
+            roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' || s.approverType === 'PROJECT_MANAGER' ? (s.roleId ?? null) : null,
             userId: s.approverType === 'USER' ? s.userId : null,
           })),
         },
@@ -486,7 +486,7 @@ workflowRoutes.put(
               name: s.name,
               approverType: s.approverType,
               // On a SUPERVISOR step the role is its fallback when the requester has no supervisor.
-              roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' ? (s.roleId ?? null) : null,
+              roleId: s.approverType === 'ROLE' || s.approverType === 'SUPERVISOR' || s.approverType === 'PROJECT_MANAGER' ? (s.roleId ?? null) : null,
               userId: s.approverType === 'USER' ? s.userId : null,
             })),
           },

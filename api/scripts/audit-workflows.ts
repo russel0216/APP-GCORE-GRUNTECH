@@ -21,7 +21,8 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   leave_request: ['employee', 'supervisor', 'project_engineer', 'service_engineer'],
   overtime_request: ['employee', 'project_engineer', 'service_engineer'],
   purchase_request: ['project_engineer', 'project_manager', 'service_engineer', 'procurement'],
-  budget_request: ['project_manager'],
+  // Project cash: the team asks, so engineers raise them as often as the PM.
+  budget_request: ['project_manager', 'project_engineer'],
   quotation: ['sales', 'sales_manager'],
   sales_order: ['sales', 'sales_manager'],
   costing: ['sales', 'sales_manager', 'project_manager'],
@@ -62,6 +63,10 @@ async function main() {
   // a supervisor files into a void.
   const hrHolders = (roleMembers.get('hr') ?? []).length;
   const unsupervised = await prisma.user.count({ where: { isActive: true, supervisorId: null } });
+  // A PROJECT_MANAGER step needs the project to name one.
+  const unmanagedJobs = await prisma.job.count({
+    where: { projectManagerId: null, status: { in: ['PLANNING', 'IN_PROGRESS'] } },
+  });
 
   let problems = 0;
   console.log('\nApproval workflow routing audit\n');
@@ -131,6 +136,24 @@ async function main() {
           `step ${step.sequence} "${step.name}" routes to each requester's supervisor, but ${unsupervised} active user(s) have none — and the HR fallback is unheld, so their documents route to nobody`,
         );
       }
+      // A PROJECT_MANAGER step resolves to the project's own manager and falls
+      // back to its role (Executive unless another is named) when the project
+      // has none or the manager raised the document. The fallback has to be
+      // held: a PM's own request, or one on an unmanaged project, goes there.
+      if (step.approverType === 'PROJECT_MANAGER') {
+        const fallbackKey = step.role?.key ?? 'executive';
+        const fallback = roleMembers.get(fallbackKey) ?? [];
+        if (fallback.length === 0) {
+          issues.push(
+            `step ${step.sequence} "${step.name}" routes to the project's manager and falls back to ${step.role?.name ?? 'Executive / Management'}, which nobody holds — a project manager's own request, or one on a project with no manager, routes to nobody`,
+          );
+        }
+        if (unmanagedJobs > 0) {
+          issues.push(
+            `step ${step.sequence} "${step.name}" routes to the project's manager, but ${unmanagedJobs} active project(s) have none set — their requests go to the ${step.role?.name ?? 'Executive / Management'} fallback`,
+          );
+        }
+      }
     }
 
     if (wf.steps.length === 0) {
@@ -141,7 +164,9 @@ async function main() {
       .map((s) =>
         s.approverType === 'SUPERVISOR'
           ? `${s.sequence}. supervisor, else ${s.role?.key ?? 'hr'}`
-          : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,
+          : s.approverType === 'PROJECT_MANAGER'
+            ? `${s.sequence}. the project's manager, else ${s.role?.key ?? 'executive'}`
+            : `${s.sequence}. ${s.role?.key ?? s.user?.name ?? s.approverType.toLowerCase()}`,
       )
       .join(' → ');
 

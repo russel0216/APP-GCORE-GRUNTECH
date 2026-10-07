@@ -16,13 +16,13 @@ import {
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
-import { DocumentApproval } from '../../components/ApprovalStepper';
 import { recordLink } from '../../lib/links';
 import { SCurve, type CurvePoint } from './SCurve';
 import { ProjectGantt } from './ProjectGantt';
 import { JOB_STATUSES, JobStatus, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
+import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
 
 /**
  * The project workspace (model §8.1).
@@ -520,7 +520,7 @@ export function ProjectWorkspace() {
       {current === 'budget' && <BudgetTab job={job} reloadToken={reloadToken} />}
 
       {current === 'requests' && (
-        <BudgetRequestsCard
+        <ProjectBudgetRequestsCard
           job={job}
           reloadToken={reloadToken}
           onRaise={can('gops.budget_requests.create') ? () => setBudgetRequest(true) : undefined}
@@ -1651,17 +1651,6 @@ function ServiceTab({
 
 // ── Budget ───────────────────────────────────────────────────────────────────
 
-interface BudgetRequestRow {
-  id: string;
-  number: string;
-  status: string;
-  amount: number;
-  reason: string;
-  createdAt: string;
-  costCategory: Named;
-  requestedBy: Named;
-}
-
 interface LedgerRow {
   id: string;
   state: string;
@@ -1755,124 +1744,6 @@ function BudgetTab({ job, reloadToken }: { job: Job; reloadToken: number }) {
 
       {seesLedger && <LedgerCard job={job} reloadToken={reloadToken} />}
     </div>
-  );
-}
-
-/**
- * The project's budget requests, each with its approval chain on demand — so
- * the finance approver a notification sends here can find the request, and the
- * PM can see who is sitting on it.
- */
-function BudgetRequestsCard({ job, reloadToken, onRaise }: { job: Job; reloadToken: number; onRaise?: () => void }) {
-  const [rows, setRows] = useState<BudgetRequestRow[] | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [open, setOpen] = useState<string | null>(null);
-
-  useEffect(() => {
-    api
-      .get<ListResult<BudgetRequestRow>>(`/budget-requests?jobId=${job.id}&pageSize=100`)
-      .then((r) => setRows(r.rows))
-      .catch(setError);
-  }, [job.id, reloadToken]);
-
-  return (
-    <section className="card">
-      <div className="del-card-head">
-        <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
-        {onRaise && (
-          <button className="btn btn-primary btn-sm" onClick={onRaise}>
-            + Budget request
-          </button>
-        )}
-      </div>
-      <p className="muted del-lede">
-        A budget request <strong>changes</strong> the budget; it moves the budgeted column only once
-        every approver has signed.
-      </p>
-      <ErrorBox error={error} />
-      {!rows && !error ? (
-        <Loading />
-      ) : rows && rows.length === 0 ? (
-        <p className="faint del-note">No budget requests raised on this project.</p>
-      ) : rows ? (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>Number</th>
-                <th>Budget line</th>
-                <th>Reason</th>
-                <th>Raised by</th>
-                <th className="right">Amount</th>
-                <th>Status</th>
-                <th>
-                  <span className="visually-hidden">Approval</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <BudgetRequestRowView
-                  key={r.id}
-                  row={r}
-                  open={open === r.id}
-                  onToggle={() => setOpen(open === r.id ? null : r.id)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function BudgetRequestRowView({
-  row,
-  open,
-  onToggle,
-}: {
-  row: BudgetRequestRow;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const chained = row.status !== 'DRAFT';
-  return (
-    <>
-      <tr>
-        <td className="mono">{row.number}</td>
-        <td>{row.costCategory.name}</td>
-        <td>{row.reason}</td>
-        <td>
-          {row.requestedBy.name}
-          <div className="faint">{formatDate(row.createdAt)}</div>
-        </td>
-        <td className="right mono">{formatMoney(row.amount)}</td>
-        <td>
-          <StatusBadge status={row.status} />
-        </td>
-        <td>
-          {chained && (
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost"
-              aria-expanded={open}
-              aria-controls={`br-approval-${row.id}`}
-              onClick={onToggle}
-            >
-              {open ? 'Hide approval' : 'Approval'}
-            </button>
-          )}
-        </td>
-      </tr>
-      {open && (
-        <tr className="del-expand-row">
-          <td colSpan={7} id={`br-approval-${row.id}`}>
-            <DocumentApproval documentType="budget_request" documentId={row.id} compact />
-          </td>
-        </tr>
-      )}
-    </>
   );
 }
 
@@ -2345,101 +2216,6 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
       </div>
       <Field label="Notes">
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-      </Field>
-    </Modal>
-  );
-}
-
-function BudgetRequestModal({ job, onClose, onSaved }: { job: Job; onClose: () => void; onSaved: () => void }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [form, setForm] = useState({ costCategoryId: '', amount: '', reason: '' });
-
-  const category = job.position.find((p) => p.costCategoryId === form.costCategoryId);
-
-  async function submit() {
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await api.post<{ id: string }>('/budget-requests', {
-        jobId: job.id,
-        costCategoryId: form.costCategoryId,
-        amount: Number(form.amount),
-        reason: form.reason,
-      });
-      await api.post(`/budget-requests/${created.id}/submit`);
-      toast('ok', 'Budget request submitted for approval');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="Raise a budget request"
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={submit}
-            disabled={busy || !form.costCategoryId || !form.amount || form.reason.length < 5}
-          >
-            {busy ? 'Submitting…' : 'Submit for approval'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted del-lede">
-        A budget request <strong>changes</strong> the budget. A purchase request{' '}
-        <strong>spends</strong> it. Approving this raises the budgeted column — it does not order
-        anything.
-      </p>
-
-      <Field label="Budget line">
-        <select
-          value={form.costCategoryId}
-          onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
-        >
-          <option value="">— choose —</option>
-          {job.position.map((p) => (
-            <option key={p.costCategoryId} value={p.costCategoryId}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      {category && (
-        <div className="alert info">
-          {category.name} today: {formatMoney(category.budgeted)} budgeted,{' '}
-          {formatMoney(category.available)} available.
-          {form.amount && (
-            <>
-              {' '}
-              After approval: <strong>{formatMoney(category.budgeted + Number(form.amount))}</strong>.
-            </>
-          )}
-        </div>
-      )}
-
-      <Field label="Additional amount">
-        <NumberInput
-          kind="money"
-          step="0.01"
-          value={form.amount}
-          onChange={(e) => setForm({ ...form, amount: e.target.value })}
-        />
-      </Field>
-      <Field label="Reason" hint="What changed? The approver sees this and nothing else.">
-        <textarea value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} />
       </Field>
     </Modal>
   );

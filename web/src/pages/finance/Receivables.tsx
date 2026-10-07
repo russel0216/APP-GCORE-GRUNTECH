@@ -778,22 +778,30 @@ function CertificateModal({
  *
  * `advance` is the release of a cash advance (money out, all of it in one
  * voucher); `advance_refund` is unspent advance money coming back (money in —
- * but never a customer collection).
+ * but never a customer collection). `budget_request` and
+ * `budget_request_refund` are the same two movements on project cash.
  */
 export interface PayTarget {
-  kind: 'invoice' | 'bill' | 'claim' | 'advance' | 'advance_refund';
+  kind: 'invoice' | 'bill' | 'claim' | 'advance' | 'advance_refund' | 'budget_request' | 'budget_request_refund';
   id: string;
   number: string;
   outstanding: number;
 }
+
+/** Cash handed to a person, all of it in one voucher. */
+const RELEASE_KINDS: PayTarget['kind'][] = ['advance', 'budget_request'];
+/** Unspent cash coming back from a person — money in, never a collection. */
+const REFUND_KINDS: PayTarget['kind'][] = ['advance_refund', 'budget_request_refund'];
+/** The counterparty is a person, not a customer or a supplier. */
+const PERSON_KINDS: PayTarget['kind'][] = ['claim', ...RELEASE_KINDS, ...REFUND_KINDS];
 
 /** Who the counterparty is, by what is being settled. */
 function partyFields(kind: PayTarget['kind'], partyId: string | undefined) {
   return {
     customerId: kind === 'invoice' ? partyId ?? null : null,
     supplierId: kind === 'bill' ? partyId ?? null : null,
-    // A person: a reimbursement, an advance handed over, or unspent cash back.
-    payeeUserId: kind === 'claim' || kind === 'advance' || kind === 'advance_refund' ? partyId ?? null : null,
+    // A person: a reimbursement, cash handed over, or unspent cash back.
+    payeeUserId: PERSON_KINDS.includes(kind) ? partyId ?? null : null,
   };
 }
 
@@ -823,10 +831,13 @@ export function RecordPaymentModal({
   const [allocations, setAllocations] = useState<Record<string, number>>({
     [target.id]: target.outstanding,
   });
-  const person = target.kind === 'claim' || target.kind === 'advance' || target.kind === 'advance_refund';
+  const person = PERSON_KINDS.includes(target.kind);
+  const release = RELEASE_KINDS.includes(target.kind);
+  const refund = REFUND_KINDS.includes(target.kind);
+  const cashWord = target.kind.startsWith('budget_request') ? 'budget request' : 'advance';
   const [form, setForm] = useState({
-    // Advances and refunds are usually cash across a desk; everything else a transfer.
-    method: target.kind === 'advance' || target.kind === 'advance_refund' ? 'CASH' : 'BANK_TRANSFER',
+    // Releases and refunds are usually cash across a desk; everything else a transfer.
+    method: release || refund ? 'CASH' : 'BANK_TRANSFER',
     paymentDate: todayLocal(),
     reference: '',
     bank: '',
@@ -851,9 +862,9 @@ export function RecordPaymentModal({
   const rows = [target, ...others];
   const total = Object.values(allocations).reduce((s, v) => s + (v || 0), 0);
   const overApplied = rows.some((t) => (allocations[t.id] ?? 0) > t.outstanding + 0.005);
-  // An advance goes out in one voucher: all of it, or none of it.
+  // An advance or a budget request goes out in one voucher: all of it, or none of it.
   const partialRelease =
-    target.kind === 'advance' &&
+    release &&
     rows.some((t) => {
       const v = allocations[t.id] ?? 0;
       return v > 0 && Math.abs(v - t.outstanding) > 0.005;
@@ -877,9 +888,9 @@ export function RecordPaymentModal({
       });
       toast(
         'ok',
-        target.kind === 'advance'
+        release
           ? 'Released — the liquidation clock has started'
-          : target.kind === 'advance_refund'
+          : refund
             ? 'Refund recorded'
             : kind === 'RECEIPT'
               ? 'Collection recorded'
@@ -892,14 +903,13 @@ export function RecordPaymentModal({
     }
   }
 
-  const title =
-    target.kind === 'advance'
-      ? 'Release a cash advance'
-      : target.kind === 'advance_refund'
-        ? 'Record unspent cash returned'
-        : kind === 'RECEIPT'
-          ? 'Record a collection'
-          : 'Record a payment';
+  const title = release
+    ? `Release a ${cashWord === 'advance' ? 'cash advance' : 'budget request'}`
+    : refund
+      ? 'Record unspent cash returned'
+      : kind === 'RECEIPT'
+        ? 'Record a collection'
+        : 'Record a payment';
 
   return (
     <Modal
@@ -928,15 +938,16 @@ export function RecordPaymentModal({
           {kind === 'RECEIPT' ? 'From' : 'To'} <strong>{party.name}</strong>
         </p>
       )}
-      {target.kind === 'advance' && (
+      {release && (
         <div className="alert info">
-          An advance is released in one voucher, for the whole amount. The person then has a set
-          number of days from this payment date to file the receipts as a liquidation.
+          {cashWord === 'advance' ? 'An advance' : 'A budget request'} is released in one voucher, for the whole amount. The
+          person then has a set number of days from this payment date to file the receipts as a
+          liquidation.
         </div>
       )}
-      {target.kind === 'advance_refund' && (
+      {refund && (
         <div className="alert info">
-          Unspent advance money coming back. It is cash in, but it is not a collection — it never
+          Unspent {cashWord} money coming back. It is cash in, but it is not a collection — it never
           counts towards what customers have paid.
         </div>
       )}
@@ -1030,7 +1041,8 @@ export function RecordPaymentModal({
       )}
       {partialRelease && (
         <div className="alert error fin-gap-top fin-flush">
-          An advance is released in one voucher — release the whole amount or leave it at zero.
+          {cashWord === 'advance' ? 'An advance' : 'A budget request'} is released in one voucher — release the whole amount
+          or leave it at zero.
         </div>
       )}
       {rows.length === 1 && (
@@ -1051,6 +1063,7 @@ interface Allocation {
   bill: { id: string; number: string } | null;
   claim: { id: string; number: string } | null;
   advance: { id: string; number: string } | null;
+  budgetRequest: { id: string; number: string } | null;
 }
 
 interface PaymentRow {
@@ -1081,6 +1094,13 @@ function allocationTarget(a: Allocation, paymentKind: string): { to: string; num
       to: `/g-fin/cash-advances/${a.advance.id}`,
       number: a.advance.number,
       what: paymentKind === 'RECEIPT' ? 'Advance refund' : 'Advance release',
+    };
+  }
+  if (a.budgetRequest) {
+    return {
+      to: `/g-ops/budget-requests/${a.budgetRequest.id}`,
+      number: a.budgetRequest.number,
+      what: paymentKind === 'RECEIPT' ? 'Budget request refund' : 'Budget request release',
     };
   }
   return null;

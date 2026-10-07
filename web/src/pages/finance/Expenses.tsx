@@ -53,9 +53,10 @@ export const CLAIM_TONES: Record<string, Tone> = { APPROVED: 'info' };
 
 const KINDS = [
   { value: 'reimbursement', label: 'Reimbursement' },
-  { value: 'liquidation', label: 'Liquidation of an advance' },
+  { value: 'liquidation', label: 'Liquidation (advance or budget request)' },
 ];
 
+/** The advance, or the budget request, a liquidation accounts for. */
 interface ClaimAdvance {
   id: string;
   number: string;
@@ -63,6 +64,15 @@ interface ClaimAdvance {
   status: string;
   jobId: string | null;
   costCategoryId: string | null;
+}
+
+/** Where the cash a liquidation accounts for came from, and where its page is. */
+function liquidationSource(row: { advance: ClaimAdvance | null; budgetRequest: ClaimAdvance | null }) {
+  if (row.advance) return { ...row.advance, what: 'Advance', list: 'Cash Advances', listTo: '/g-fin/cash-advances', to: `/g-fin/cash-advances/${row.advance.id}` };
+  if (row.budgetRequest) {
+    return { ...row.budgetRequest, what: 'Budget request', list: 'Budget Requests', listTo: '/g-fin/budget-requests', to: `/g-ops/budget-requests/${row.budgetRequest.id}` };
+  }
+  return null;
 }
 
 interface Claim {
@@ -86,6 +96,7 @@ interface Claim {
   job: { id: string; number: string; name: string } | null;
   costCategory: { id: string; name: string } | null;
   advance: ClaimAdvance | null;
+  budgetRequest: ClaimAdvance | null;
   lines: {
     id: string;
     spentOn: string;
@@ -127,14 +138,16 @@ export function Expenses() {
     {
       key: 'kind',
       label: 'Kind',
-      render: (r) =>
-        r.advance ? (
+      render: (r) => {
+        const source = liquidationSource(r);
+        return source ? (
           <span>
-            Liquidation <span className="faint mono">{r.advance.number}</span>
+            Liquidation <span className="faint mono">{source.number}</span>
           </span>
         ) : (
           <span className="faint">Reimbursement</span>
-        ),
+        );
+      },
     },
     {
       key: 'claimDate',
@@ -206,7 +219,7 @@ export function Expenses() {
         rowKey={(r) => r.id}
         scoped
         reloadToken={reload}
-        searchPlaceholder="Search number, purpose, person, advance…"
+        searchPlaceholder="Search number, purpose, person, advance, budget request…"
         emptyTitle="No claims yet"
         onRowClick={(r) => navigate(`/g-fin/expenses/${r.id}`)}
         filters={[
@@ -247,17 +260,20 @@ export interface LiquidatingAdvance {
 }
 
 /**
- * Filing a claim, or — with `advance` — liquidating a cash advance.
+ * Filing a claim, or — with `advance` or `budgetRequest` — liquidating a cash
+ * advance or a budget request (project cash).
  *
- * A liquidation takes its project and budget line from the advance and cannot
- * change them: the cost lands where it was approved to land.
+ * A liquidation takes its project and budget line from what it accounts for
+ * and cannot change them: the cost lands where it was approved to land.
  */
 export function NewClaimModal({
-  advance,
+  advance: advanceProp,
+  budgetRequest,
   onClose,
   onCreated,
 }: {
   advance?: LiquidatingAdvance;
+  budgetRequest?: LiquidatingAdvance;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -266,6 +282,9 @@ export function NewClaimModal({
   const [error, setError] = useState<unknown>(null);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  // What the receipts account for, whichever it is; the form reads one thing.
+  const advance = advanceProp ?? budgetRequest;
+  const cashWord = advanceProp ? 'advance' : 'budget request';
 
   const today = todayLocal();
   const [form, setForm] = useState({
@@ -302,7 +321,8 @@ export function NewClaimModal({
       const created = await api.post<{ id: string }>('/expense-claims', {
         claimDate: form.claimDate,
         purpose: form.purpose,
-        advanceId: advance?.id ?? null,
+        advanceId: advanceProp?.id ?? null,
+        budgetRequestId: budgetRequest?.id ?? null,
         jobId: advance ? advance.job?.id ?? null : form.jobId || null,
         costCategoryId: advance ? advance.costCategory?.id ?? null : form.jobId ? form.costCategoryId || null : null,
         lines: lines
@@ -363,7 +383,7 @@ export function NewClaimModal({
           ) : (
             'overheads'
           )}{' '}
-          — the project the advance was approved for.
+          — the project the {cashWord} was approved for.
         </div>
       )}
 
@@ -516,10 +536,10 @@ export function NewClaimModal({
       {advance && total > 0 && (
         <p className="fin-note">
           {difference > 0.005
-            ? `You spent ${formatMoney(difference)} more than the advance — once approved, finance reimburses the excess.`
+            ? `You spent ${formatMoney(difference)} more than the ${cashWord} — once approved, finance reimburses the excess.`
             : difference < -0.005
-              ? `${formatMoney(-difference)} of the advance was not spent — once approved, return it to finance.`
-              : 'The receipts match the advance exactly — nothing will be owed either way.'}
+              ? `${formatMoney(-difference)} of the ${cashWord} was not spent — once approved, return it to finance.`
+              : `The receipts match the ${cashWord} exactly — nothing will be owed either way.`}
         </p>
       )}
 
@@ -563,7 +583,8 @@ export function ExpenseClaimDetail() {
   const own = row.claimedBy.id === me?.user.id;
   // The server lets a super admin act on anybody's draft; the buttons agree.
   const mine = own || !!me?.user.isSuperAdmin;
-  const liquidation = row.kind === 'liquidation' && !!row.advance;
+  const source = liquidationSource(row);
+  const liquidation = row.kind === 'liquidation' && !!source;
 
   async function submit() {
     try {
@@ -598,12 +619,12 @@ export function ExpenseClaimDetail() {
             <span className="sep">›</span>
           </>
         )}
-        {liquidation ? (
+        {liquidation && source ? (
           <>
-            <Link to="/g-fin/cash-advances">Cash Advances</Link>
+            <Link to={source.listTo}>{source.list}</Link>
             <span className="sep">›</span>
-            <Link to={`/g-fin/cash-advances/${row.advance!.id}`} className="mono">
-              {row.advance!.number}
+            <Link to={source.to} className="mono">
+              {source.number}
             </Link>
           </>
         ) : (
@@ -676,18 +697,18 @@ export function ExpenseClaimDetail() {
       {row.status === 'APPROVED' && (
         <div className="alert ok">
           Approved. {formatMoney(row.outstanding)} is owed back to {row.claimedBy.name}
-          {liquidation && <> — the receipts came to more than the advance</>}
+          {liquidation && <> — the receipts came to more than the cash released</>}
           {row.postedToJob && row.job && <>, and {formatMoney(row.total)} was charged to {row.job.number}</>}.
         </div>
       )}
       {row.status === 'SETTLED' && (
         <div className="alert ok">
-          Settled by the advance — nobody is owed anything on this liquidation
-          {row.refundDue > 0 && (
+          Settled by the cash released — nobody is owed anything on this liquidation
+          {row.refundDue > 0 && source && (
             <>
               . {formatMoney(row.refundDue)} of unspent cash is owed back on{' '}
-              <Link to={`/g-fin/cash-advances/${row.advance!.id}`} className="mono">
-                {row.advance!.number}
+              <Link to={source.to} className="mono">
+                {source.number}
               </Link>
             </>
           )}
@@ -736,16 +757,16 @@ export function ExpenseClaimDetail() {
         <div className="card">
           <h3 className="card-title">Settlement</h3>
           <dl className="kv fin-settlement">
-            {liquidation ? (
+            {liquidation && source ? (
               <>
-                <dt>Advance</dt>
+                <dt>{source.what}</dt>
                 <dd>
-                  <Link to={`/g-fin/cash-advances/${row.advance!.id}`} className="mono">
-                    {row.advance!.number}
+                  <Link to={source.to} className="mono">
+                    {source.number}
                   </Link>
                 </dd>
                 <dt>Released to {row.claimedBy.name}</dt>
-                <dd className="mono">{formatMoney(row.advance!.amountReleased)}</dd>
+                <dd className="mono">{formatMoney(source.amountReleased)}</dd>
                 <dt>Receipts</dt>
                 <dd className="mono">{formatMoney(row.total)}</dd>
                 {row.payable > 0 ? (

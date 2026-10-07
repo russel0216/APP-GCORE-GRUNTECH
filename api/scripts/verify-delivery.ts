@@ -13,12 +13,13 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, routePreview } from '../src/shared/approvals';
+import { financeSettings, refreshSettlement, settleable, addDays, dayKey } from '../src/shared/finance';
 import { renderDocument } from '../src/shared/pdf';
 import { signToken } from '../src/auth/middleware';
 import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
 // Side-effect import: registers the budget_request approval subscriber.
-import '../src/routes/jobs';
+import '../src/routes/budgetRequests';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -54,6 +55,18 @@ async function cleanup() {
   // customer, quotations hold the customer and their owner, installed assets
   // hold the customer.
   await prisma.invoice.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
+  // The budget request's cash: its payments, its liquidation (a claim holding
+  // the job with Restrict), then the request itself.
+  const requests = await prisma.budgetRequest.findMany({ where: { reason: { startsWith: TAG } }, select: { id: true } });
+  const claims = await prisma.expenseClaim.findMany({ where: { purpose: { startsWith: TAG } }, select: { id: true } });
+  const allocations = await prisma.paymentAllocation.findMany({
+    where: { OR: [{ budgetRequestId: { in: requests.map((r) => r.id) } }, { claimId: { in: claims.map((c) => c.id) } }] },
+    select: { paymentId: true },
+  });
+  await prisma.payment.deleteMany({ where: { id: { in: [...new Set(allocations.map((a) => a.paymentId))] } } });
+  await prisma.expenseClaim.deleteMany({ where: { id: { in: claims.map((c) => c.id) } } });
+  await prisma.auditLog.deleteMany({ where: { entityType: 'budget_request', entityId: { in: requests.map((r) => r.id) } } });
+  await prisma.budgetRequest.deleteMany({ where: { id: { in: requests.map((r) => r.id) } } });
   await prisma.serviceContract.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
   await prisma.installedAsset.deleteMany({ where: { customer: { name: { startsWith: TAG } } } });
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -172,8 +185,10 @@ async function main() {
   const pm = await makeUser('Verify PM', 'pm@verifyd.local', ['project_manager']);
   const exec = await makeUser('Verify Exec', 'exec@verifyd.local', ['executive']);
   const engineer = await makeUser('Verify Engineer', 'eng@verifyd.local', ['project_engineer']);
-  // Budget requests route Finance → Management, so somebody has to hold it.
+  // Budget requests route to the project's manager, then Finance; the
+  // liquidation (an expense claim) to the filer's supervisor, then Finance.
   const finance = await makeUser('Verify Finance', 'fin@verifyd.local', ['finance']);
+  await prisma.user.update({ where: { id: engineer.id }, data: { supervisorId: pm.id } });
 
   const customer = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital` },
@@ -352,17 +367,19 @@ async function main() {
     `available moved to ${mat().available}`,
   );
 
-  // ── 3. Budget requests change the budget ───────────────────────────────────
-  console.log('\nBudget requests');
+  // ── 3. Budget requests are project cash, never a budget change ────────────
+  console.log('\nBudget requests — project cash');
 
+  const settings = await financeSettings();
+  const brLedger = () => prisma.jobCostEntry.count({ where: { jobId: job.id, sourceType: 'budget_request' } });
   const br = await prisma.budgetRequest.create({
     data: {
       number: await nextNumber('budget_request'),
       jobId: job.id,
       costCategoryId: materials.id,
       amount: d(50_000),
-      reason: `${TAG} price increase on stainless`,
-      requestedById: pm.id,
+      reason: `${TAG} consumables for the tie-in`,
+      requestedById: engineer.id,
     },
   });
   await prisma.budgetRequest.update({ where: { id: br.id }, data: { status: 'PENDING_APPROVAL' } });
@@ -373,31 +390,125 @@ async function main() {
     documentNumber: br.number,
     subject: `${TAG} budget request`,
     amount: 50_000,
-    requesterId: pm.id,
+    requesterId: engineer.id,
+    jobId: job.id,
   });
 
+  // Step 1 is the PROJECT'S manager — whoever the job names, not whoever
+  // holds the project_manager role.
+  const brWorkflow = await prisma.approvalWorkflow.findUniqueOrThrow({
+    where: { id: request.workflowId! },
+    include: { steps: { orderBy: { sequence: 'asc' } } },
+  });
+  const step1 = await approversForStep(brWorkflow.steps[0], engineer.id, prisma, { jobId: job.id });
+  check('step 1 is the project’s own manager', step1.length === 1 && step1[0] === pm.id, step1.join(','));
+  check('the request remembers its project', request.jobId === job.id);
   position = await budgetPosition(job.id);
   check('a pending request does not change the budget', money(mat().budgeted, 400_000));
 
-  // Two steps: finance, then management. The budget must not move until both.
+  await act({ requestId: request.id, userId: pm.id, action: 'APPROVED' });
+  const step2 = await approversForStep(brWorkflow.steps[1], engineer.id, prisma, { jobId: job.id });
+  check('then finance decides', step2.includes(finance.id) && !step2.includes(pm.id));
+  position = await budgetPosition(job.id);
+  check('the budget does not move after the manager’s approval', money(mat().budgeted, 400_000), String(mat().budgeted));
+
   await act({ requestId: request.id, userId: finance.id, action: 'APPROVED' });
   position = await budgetPosition(job.id);
-  check(
-    'the budget does not move after only the first approval',
-    money(mat().budgeted, 400_000),
-    String(mat().budgeted),
-  );
+  check('approval changes NO budget — it is cash, not a budget increase', money(mat().budgeted, 400_000), String(mat().budgeted));
+  check('and writes no ledger row', (await brLedger()) === 0);
+  const brApproved = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br.id } });
+  check('the request is APPROVED and owes a release', brApproved.status === 'APPROVED' && !!brApproved.approvedAt, brApproved.status);
+  check('what finance owes is the whole amount', money((await settleable('budget_request', br.id))!.outstanding, 50_000));
 
-  await act({ requestId: request.id, userId: exec.id, action: 'APPROVED' });
-  position = await budgetPosition(job.id);
-  check('approving it raises the budget', money(mat().budgeted, 450_000), String(mat().budgeted));
-  check('and available follows', money(mat().available, 200_000), String(mat().available));
+  // The manager's own request cannot wait on them: it goes up to Executive.
+  const ownStep = await approversForStep(brWorkflow.steps[0], pm.id, prisma, { jobId: job.id });
+  check('the manager’s own request goes to Executive instead', ownStep.includes(exec.id) && !ownStep.includes(pm.id), ownStep.join(','));
+  const unmanaged = await approversForStep(brWorkflow.steps[0], engineer.id, prisma, { jobId: null });
+  check('and so does one on a project with no manager', unmanaged.includes(exec.id) && !unmanaged.includes(pm.id));
+  const ownPreview = await routePreview('budget_request', 50_000, pm.id, null, { jobId: job.id });
+  check('the page names Executive before the manager presses Submit', !!ownPreview?.steps[0].approvers.some((p) => p.id === exec.id));
 
-  const ledgerRow = await prisma.jobCostEntry.findFirst({
-    where: { jobId: job.id, sourceType: 'budget_request', sourceId: br.id },
+  // Released in one voucher, on its own deadline — the budget request's days,
+  // not the cash advance's.
+  const releaseDate = new Date('2026-03-02');
+  await prisma.payment.create({
+    data: {
+      number: await nextNumber('disbursement'),
+      kind: 'DISBURSEMENT',
+      method: 'CASH',
+      paymentDate: releaseDate,
+      payeeUserId: engineer.id,
+      amount: d(50_000),
+      clearedAt: releaseDate,
+      recordedById: finance.id,
+      allocations: { create: [{ budgetRequestId: br.id, amount: d(50_000) }] },
+    },
   });
-  check('the increase is a ledger row, not an edited total', ledgerRow !== null);
-  check('and it names the document it came from', ledgerRow?.sourceNumber === br.number);
+  await prisma.$transaction((tx) => refreshSettlement(tx, 'budget_request', br.id));
+  const brReleased = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br.id } });
+  check('the release moves it to RELEASED', brReleased.status === 'RELEASED' && money(num(brReleased.amountReleased), 50_000), brReleased.status);
+  check(
+    `the liquidation deadline is ${settings.budgetRequestLiquidationDays} days after the release — the request’s own rule`,
+    brReleased.liquidationDueDate?.getTime() === addDays(releaseDate, settings.budgetRequestLiquidationDays).getTime(),
+    String(brReleased.liquidationDueDate),
+  );
+  check('still no ledger row — cash in hand is not cost', (await brLedger()) === 0);
+
+  // The team spends 42,000 of it and files the receipts in Expenses: the
+  // liquidation posts INCURRED at what was spent, and the change is owed back.
+  const incurredBefore = mat().incurred;
+  const liquidation = await prisma.expenseClaim.create({
+    data: {
+      number: await nextNumber('expense'),
+      claimedById: engineer.id,
+      budgetRequestId: br.id,
+      jobId: job.id,
+      costCategoryId: materials.id,
+      claimDate: dayKey(new Date()),
+      purpose: `${TAG} liquidation of ${br.number}`,
+      total: d(42_000),
+      status: 'PENDING_APPROVAL',
+      lines: { create: [{ sortOrder: 0, spentOn: dayKey(new Date()), description: 'Fittings', receiptNo: 'OR-1', amount: d(42_000) }] },
+    },
+  });
+  const liqRequest = await submitForApproval({
+    documentType: 'expense',
+    documentId: liquidation.id,
+    documentNumber: liquidation.number,
+    subject: `${TAG} liquidation`,
+    amount: 42_000,
+    requesterId: engineer.id,
+  });
+  await act({ requestId: liqRequest.id, userId: pm.id, action: 'APPROVED' });
+  await act({ requestId: liqRequest.id, userId: finance.id, action: 'APPROVED' });
+  position = await budgetPosition(job.id);
+  check('the approved liquidation charges the project what was spent, as incurred', money(mat().incurred, incurredBefore + 42_000), String(mat().incurred));
+  check('and the budget is still what the costing set', money(mat().budgeted, 400_000));
+  const brLiquidated = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br.id } });
+  check(
+    'the request reads REFUND_DUE for the 8,000 not spent',
+    brLiquidated.status === 'REFUND_DUE' && money(num(brLiquidated.amountSpent), 42_000),
+    `${brLiquidated.status} spent ${brLiquidated.amountSpent}`,
+  );
+  const liqClaim = await prisma.expenseClaim.findUniqueOrThrow({ where: { id: liquidation.id } });
+  check('the liquidation itself is SETTLED — the cash covered it', liqClaim.status === 'SETTLED', liqClaim.status);
+  check('the refund owed is the difference', money((await settleable('budget_request_refund', br.id))!.outstanding, 8_000));
+  await prisma.payment.create({
+    data: {
+      number: await nextNumber('payment'),
+      kind: 'RECEIPT',
+      method: 'CASH',
+      paymentDate: dayKey(new Date()),
+      payeeUserId: engineer.id,
+      amount: d(8_000),
+      clearedAt: dayKey(new Date()),
+      recordedById: finance.id,
+      allocations: { create: [{ budgetRequestId: br.id, amount: d(8_000) }] },
+    },
+  });
+  await prisma.$transaction((tx) => refreshSettlement(tx, 'budget_request_refund', br.id));
+  const brClosed = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: br.id } });
+  check('returning the change liquidates the request', brClosed.status === 'LIQUIDATED' && money(num(brClosed.amountRefunded), 8_000), brClosed.status);
 
   // ── 4. Progress reports chain ──────────────────────────────────────────────
   console.log('\nProgress reports');
@@ -859,17 +970,39 @@ async function main() {
       JSON.stringify(after.body.invoice),
     );
 
-    // (e) The ledger the Budget tab lists names the document behind each row.
+    // (e) The ledger the Budget tab lists names the document behind each row —
+    //     here the liquidation, which is where a budget request's cash
+    //     reaches the project. Approval itself wrote nothing.
     const ledger = await http(leadToken, 'GET', `/jobs/${job.id}/ledger?pageSize=100`);
-    const brRow = (ledger.body.rows ?? []).find((r: { sourceType: string }) => r.sourceType === 'budget_request');
+    const liqRow = (ledger.body.rows ?? []).find((r: { sourceType: string; sourceId: string }) => r.sourceType === 'expense_claim' && r.sourceId === liquidation.id);
     check(
-      "the ledger row for an approved budget request names the request",
-      brRow?.sourceId === br.id && brRow?.sourceNumber === br.number,
-      JSON.stringify(brRow ?? null).slice(0, 160),
+      'the ledger row for the liquidation names the claim, and no row names the budget request',
+      liqRow?.sourceNumber === liquidation.number &&
+        !(ledger.body.rows ?? []).some((r: { sourceType: string }) => r.sourceType === 'budget_request'),
+      JSON.stringify(liqRow ?? null).slice(0, 160),
     );
     const brList = await http(leadToken, 'GET', `/budget-requests?jobId=${job.id}`);
     // The lead does not hold budget_requests — the tab hides the card for them.
     check('budget requests stay behind their own permission', brList.status === 403, String(brList.status));
+    // The project tab and finance's screen read one query: the same rows.
+    const financeToken = signToken(finance.id, finance.email);
+    const tabRows = await http(signToken(pm.id, pm.email), 'GET', `/budget-requests?jobId=${job.id}&pageSize=100`);
+    const finRows = await http(financeToken, 'GET', `/budget-requests?jobId=${job.id}&pageSize=100`);
+    check(
+      'the project tab and G-FIN’s Budget Requests list the same requests',
+      tabRows.status === 200 &&
+        finRows.status === 200 &&
+        JSON.stringify((tabRows.body.rows ?? []).map((r: { id: string }) => r.id).sort()) ===
+          JSON.stringify((finRows.body.rows ?? []).map((r: { id: string }) => r.id).sort()) &&
+        (finRows.body.rows ?? []).some((r: { id: string }) => r.id === br.id),
+      `${tabRows.status}/${finRows.status}`,
+    );
+    const brPage = await http(financeToken, 'GET', `/budget-requests/${br.id}`);
+    check(
+      'finance opens a request and reads its figures',
+      brPage.status === 200 && brPage.body.status === 'LIQUIDATED' && brPage.body.amountSpent === 42_000 && brPage.body.amountRefunded === 8_000,
+      `${brPage.status} ${brPage.body.status}`,
+    );
 
     // (f) The receiving register narrows to the job (PROC's jobId filter):
     //     every row it returns must belong to the job asked about.

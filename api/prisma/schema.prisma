@@ -338,6 +338,10 @@ enum ApproverType {
   USER
   SUPERVISOR
   HR
+  /// The manager of the project the document names (ApprovalRequest.jobId);
+  /// the step's role — Executive by default — when the project has none or
+  /// the requester is that manager.
+  PROJECT_MANAGER
 }
 
 enum ApprovalStatus {
@@ -410,6 +414,11 @@ model ApprovalRequest {
 
   requesterId String
   requester   User   @relation("Requester", fields: [requesterId], references: [id], onDelete: Cascade)
+
+  /// The project the document is about, when it is about one — what a
+  /// PROJECT_MANAGER step resolves against. Set at submission; never a
+  /// relation, because the engine knows no document.
+  jobId String?
 
   workflowId String?
   workflow   ApprovalWorkflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
@@ -1806,12 +1815,26 @@ model JobCostEntry {
 enum RequestStatus {
   DRAFT
   PENDING_APPROVAL
+  /// Approved; finance has not yet handed the cash over.
   APPROVED
+  /// Cash handed over; waiting for the liquidation.
+  RELEASED
+  /// Liquidation approved and the team still holds unspent cash.
+  REFUND_DUE
+  /// Liquidation approved and nothing is owed either way.
+  LIQUIDATED
   REJECTED
+  CANCELLED
 }
 
-/// A Budget Request CHANGES the budget; a Purchase Request SPENDS it (§5.2).
-/// Approving one writes a BUDGETED row into the ledger.
+/// A Budget Request asks for PROJECT CASH (§5.2, 2026-10-07): a sum against a
+/// project and budget line, allowed by the project manager, approved and
+/// released by finance, spent by the team and accounted for with receipts in
+/// an ExpenseClaim that names it. Nothing reaches the project's ledger on
+/// approval or release — the liquidation posts INCURRED at what was spent.
+/// It no longer changes the budget. Every figure below is re-derived by
+/// refreshBudgetRequest() from the payment allocations and the approved
+/// liquidation; nothing increments them.
 model BudgetRequest {
   id     String        @id @default(cuid())
   number String        @unique
@@ -1824,16 +1847,38 @@ model BudgetRequest {
   costCategory   CostCategory @relation(fields: [costCategoryId], references: [id], onDelete: Restrict)
 
   amount Decimal @db.Decimal(18, 2)
+  /// What the cash is for.
   reason String
+  notes  String?
 
   requestedById String
   requestedBy   User   @relation("BudgetRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  neededBy DateTime? @db.Date
+
+  /// Re-derived: Σ DISBURSEMENT allocations. 0 or amount — released in one voucher.
+  amountReleased Decimal @default(0) @db.Decimal(18, 2)
+  /// Re-derived: the approved liquidation's total, else 0.
+  amountSpent    Decimal @default(0) @db.Decimal(18, 2)
+  /// Re-derived: Σ RECEIPT allocations (unspent cash returned).
+  amountRefunded Decimal @default(0) @db.Decimal(18, 2)
+
+  /// releasedAt + finance.rules.budgetRequestLiquidationDays, snapshotted at release.
+  liquidationDueDate DateTime? @db.Date
+  releasedAt         DateTime? @db.Date
+  liquidatedAt       DateTime?
+  cancelReason       String?
+
+  liquidations ExpenseClaim[]
+  allocations  PaymentAllocation[]
 
   approvedAt DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
   @@index([jobId, status])
+  @@index([requestedById, status])
+  @@index([status])
 }
 
 enum ProgressStatus {
@@ -3404,6 +3449,11 @@ model ExpenseClaim {
   advanceId String?
   advance   CashAdvance? @relation(fields: [advanceId], references: [id], onDelete: Restrict)
 
+  /// Set when this claim LIQUIDATES a budget request — project cash, the
+  /// same arithmetic as an advance's liquidation. One or the other, never both.
+  budgetRequestId String?
+  budgetRequest   BudgetRequest? @relation(fields: [budgetRequestId], references: [id], onDelete: Restrict)
+
   claimDate DateTime @db.Date
   purpose   String
 
@@ -3598,6 +3648,12 @@ model PaymentAllocation {
   advanceId String?
   advance   CashAdvance? @relation(fields: [advanceId], references: [id], onDelete: Cascade)
 
+  /// A DISBURSEMENT allocation to a budget request is the release of project
+  /// cash; a RECEIPT allocation is unspent cash coming back. Same rule as the
+  /// advance: direction comes from Payment.kind.
+  budgetRequestId String?
+  budgetRequest   BudgetRequest? @relation(fields: [budgetRequestId], references: [id], onDelete: Cascade)
+
   amount Decimal @db.Decimal(18, 2)
 
   createdAt DateTime @default(now())
@@ -3607,6 +3663,7 @@ model PaymentAllocation {
   @@index([billId])
   @@index([claimId])
   @@index([advanceId])
+  @@index([budgetRequestId])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -44,7 +44,8 @@ import {
   activityRoutes,
   pipelineRoutes,
 } from './routes/sales';
-import { jobRoutes, budgetRequestRoutes } from './routes/jobs';
+import { jobRoutes } from './routes/jobs';
+import { budgetRequestRoutes } from './routes/budgetRequests';
 import { progressRoutes, billingRoutes, planRoutes } from './routes/progress';
 import {
   purchaseRequestRoutes,

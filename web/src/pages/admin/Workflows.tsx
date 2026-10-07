@@ -8,7 +8,7 @@ interface Step {
   id?: string;
   sequence: number;
   name: string;
-  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR';
+  approverType: 'ROLE' | 'USER' | 'SUPERVISOR' | 'HR' | 'PROJECT_MANAGER';
   roleId: string | null;
   userId: string | null;
   role?: { id: string; name: string } | null;
@@ -38,6 +38,7 @@ interface DocType {
 
 const APPROVER_LABELS: Record<Step['approverType'], string> = {
   SUPERVISOR: 'The requester’s supervisor',
+  PROJECT_MANAGER: 'The project’s manager',
   HR: 'HR',
   ROLE: 'Anyone with a role',
   USER: 'One specific person',
@@ -148,7 +149,9 @@ export function Workflows() {
                         →{' '}
                         {s.approverType === 'SUPERVISOR'
                           ? `${APPROVER_LABELS.SUPERVISOR}, else ${s.role?.name ?? 'HR'}`
-                          : (s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType])}
+                          : s.approverType === 'PROJECT_MANAGER'
+                            ? `${APPROVER_LABELS.PROJECT_MANAGER}, else ${s.role?.name ?? 'Executive / Management'}`
+                            : (s.role?.name ?? s.user?.name ?? APPROVER_LABELS[s.approverType])}
                       </span>
                       {s.approverCount === 0 && (
                         <span className="badge danger" title="Documents reaching this step would stall">
@@ -403,6 +406,20 @@ function WorkflowEditor({
               {roles.map((r) => (
                 <option key={r.id} value={r.id}>
                   No supervisor set: {r.name}
+                </option>
+              ))}
+            </select>
+          ) : step.approverType === 'PROJECT_MANAGER' ? (
+            /* The project's manager decides; when the project has none, or the manager raised it, this role does. */
+            <select
+              value={step.roleId ?? ''}
+              aria-label="When the project has no manager, or the manager raised it"
+              onChange={(e) => update(i, { roleId: e.target.value || null })}
+            >
+              <option value="">No project manager, or their own request: Executive / Management</option>
+              {roles.map((r) => (
+                <option key={r.id} value={r.id}>
+                  No project manager, or their own request: {r.name}
                 </option>
               ))}
             </select>
