@@ -146,6 +146,7 @@ const text = (spec: Pick<TextBlock, 'id' | 'anchor' | 'x' | 'y' | 'w' | 'h' | 't
  */
 export const STANDARD_QUOTATION_DESIGN: PdfDesign = {
   version: 1,
+  orientation: 'portrait',
   flowTop: 50,
   flowBottom: 760.89,
   blocks: [

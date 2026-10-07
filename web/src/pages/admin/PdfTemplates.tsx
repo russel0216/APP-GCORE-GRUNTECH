@@ -10,7 +10,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, ApiError, getToken, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf } from '../../lib/day';
@@ -30,6 +30,7 @@ import {
   pt,
   resolveInline,
   resolveTemplate,
+  pageSizeOf,
   tableBottom,
   unknownFieldsIn,
   type Align,
@@ -40,6 +41,7 @@ import {
   type FieldDef,
   type ItemsBlock,
   type Layout,
+  type Orientation,
   type PdfCell,
   type Run,
   type Sample,
@@ -50,7 +52,10 @@ import {
 import { NumberInput } from '../../components/NumberInput';
 
 /**
- * Admin › PDF Templates — the quotation's PDF, laid out by hand.
+ * Admin › PDF Templates — the designed documents' PDFs, laid out by hand:
+ * the quotation (portrait, the customer's paper) and the sales order
+ * (landscape, the internal booking record, the one whose line table may
+ * place the cost columns).
  *
  * The page is A4 at scale, each box where it prints. Drag a box to move it and
  * a handle to size it; it snaps to the margins and to other boxes' edges, and
@@ -62,6 +67,12 @@ import { NumberInput } from '../../components/NumberInput';
  * stands, saved or not, to the server, which prints it with the engine every
  * real quotation goes through — against the sample, or a quotation you pick.
  */
+
+const DOCS = [
+  { type: 'quotation', label: 'Quotation', plural: 'Quotations' },
+  { type: 'sales_order', label: 'Sales Order', plural: 'Sales orders' },
+] as const;
+type DocType = (typeof DOCS)[number]['type'];
 
 interface Loaded {
   type: string;
@@ -148,6 +159,7 @@ function history(s: History | null, a: HistoryAction): History | null {
  * such box may start above the table's foot.
  */
 function follow(prev: Layout, next: Layout): Layout {
+  const page = pageSizeOf(next);
   const delta = tableBottom(next) - tableBottom(prev);
   const floor = tableBottom(next);
   return {
@@ -158,7 +170,7 @@ function follow(prev: Layout, next: Layout): Layout {
       let y = b.y;
       if (delta && before && before.y === b.y) y += delta;
       y = Math.max(y, floor);
-      return y === b.y ? b : clampToPage({ ...b, y });
+      return y === b.y ? b : clampToPage({ ...b, y }, page);
     }),
   };
 }
@@ -167,7 +179,9 @@ function follow(prev: Layout, next: Layout): Layout {
 function changed(layout: Layout, id: string, change: BlockChange): Layout {
   const next: Layout = {
     ...layout,
-    blocks: layout.blocks.map((b) => (b.id === id ? clampToPage({ ...b, ...(typeof change === 'function' ? change(b) : change) } as Block) : b)),
+    blocks: layout.blocks.map((b) =>
+      b.id === id ? clampToPage({ ...b, ...(typeof change === 'function' ? change(b) : change) } as Block, pageSizeOf(layout)) : b,
+    ),
   };
   return follow(layout, next);
 }
@@ -199,11 +213,12 @@ function dragTo(
   tol: number,
   view: View,
 ): { layout: Layout; guides: { x?: number; y?: number } } {
+  const page = pageSizeOf(before);
   if (mode === 'flowTop' || mode === 'flowBottom') {
     const value =
       mode === 'flowTop'
         ? Math.min(Math.max(before.flowTop + dy, 0), Math.min(400, before.flowBottom - 200))
-        : Math.max(Math.min(before.flowBottom + dy, PAGE_HEIGHT), Math.max(300, before.flowTop + 200));
+        : Math.max(Math.min(before.flowBottom + dy, page.h), Math.max(200, before.flowTop + 200));
     return { layout: { ...before, [mode]: pt(value) }, guides: { y: pt(value) } };
   }
   const b = before.blocks.find((x) => x.id === id);
@@ -232,7 +247,7 @@ function dragTo(
   const guides: { x?: number; y?: number } = {};
   if (tol > 0) {
     const others = before.blocks.filter((o) => o.id !== b.id && shown(o, view));
-    const xs = [36, PAGE_WIDTH - 36, PAGE_WIDTH / 2, ...others.flatMap((o) => [o.x, o.x + o.w])];
+    const xs = [36, page.w - 36, page.w / 2, ...others.flatMap((o) => [o.x, o.x + o.w])];
     const ys = [before.flowTop, before.flowBottom, ...others.flatMap((o) => [o.y, o.y + o.h])];
     if (mode === 'move') {
       const sx = snapTo([x, x + w, x + w / 2], xs, tol);
@@ -279,7 +294,10 @@ function dragTo(
     }
   }
 
-  const moved = clampToPage({ ...b, x: Math.round(x * 2) / 2, y: Math.round(y * 2) / 2, w: Math.round(w * 2) / 2, h: b.type === 'line' ? b.h : Math.round(h * 2) / 2 });
+  const moved = clampToPage(
+    { ...b, x: Math.round(x * 2) / 2, y: Math.round(y * 2) / 2, w: Math.round(w * 2) / 2, h: b.type === 'line' ? b.h : Math.round(h * 2) / 2 },
+    page,
+  );
   const next: Layout = { ...before, blocks: before.blocks.map((o) => (o.id === b.id ? moved : o)) };
   return { layout: follow(before, next), guides };
 }
@@ -320,6 +338,10 @@ export function PdfTemplates() {
   const { can } = useAuth();
   const canEdit = can('admin.pdf_templates.edit_all');
   const canCompany = can('admin.company.view_all');
+  const [params, setParams] = useSearchParams();
+  const docType: DocType = params.get('doc') === 'sales_order' ? 'sales_order' : 'quotation';
+  const doc = DOCS.find((x) => x.type === docType)!;
+  const [pendingDoc, setPendingDoc] = useState<DocType | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [hist, dispatch] = useReducer(history, null);
   const [savedJson, setSavedJson] = useState('');
@@ -329,10 +351,10 @@ export function PdfTemplates() {
   const [tab, setTab] = useState<'box' | 'boxes'>('boxes');
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<'reset' | 'discard' | null>(null);
+  const [confirm, setConfirm] = useState<'reset' | 'discard' | 'switch' | null>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
-  const [previewWith, setPreviewWith] = useState<'short' | 'long' | 'quotation'>('short');
-  const [previewQuote, setPreviewQuote] = useState<{ id: string; number: string; label: string } | null>(null);
+  const [previewWith, setPreviewWith] = useState<'short' | 'long' | 'real'>('short');
+  const [previewDoc, setPreviewDoc] = useState<{ id: string; number: string; label: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [hiddenNote, setHiddenNote] = useState<string | null>(() => {
     try {
@@ -349,8 +371,16 @@ export function PdfTemplates() {
   useEffect(() => {
     let alive = true;
     let url: string | null = null;
+    setLoaded(null);
+    setSelectedId(null);
+    setView('first');
+    setTab('boxes');
+    setConfirm(null);
+    setError(null);
+    setPreviewWith('short');
+    setPreviewDoc(null);
     api
-      .get<Loaded>('/pdf-templates/quotation')
+      .get<Loaded>(`/pdf-templates/${docType}`)
       .then(async (data) => {
         if (!alive) return;
         setLoaded(data);
@@ -373,7 +403,18 @@ export function PdfTemplates() {
       alive = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, []);
+  }, [docType]);
+
+  /** The other document's editor, guarded: unsaved work asks first. */
+  function switchDoc(next: DocType) {
+    if (next === docType) return;
+    if (dirty) {
+      setPendingDoc(next);
+      setConfirm('switch');
+      return;
+    }
+    setParams(next === 'quotation' ? {} : { doc: next }, { replace: true });
+  }
 
   // Leaving with unsaved work asks first — the browser's own prompt.
   useEffect(() => {
@@ -432,7 +473,7 @@ export function PdfTemplates() {
         };
         break;
       case 'line':
-        block = { id, name: 'Line', type, anchor, x: 36, y, w: PAGE_WIDTH - 72, h: 0.75, color: '#D9D9D9' };
+        block = { id, name: 'Line', type, anchor, x: 36, y, w: pageSizeOf(layout).w - 72, h: 0.75, color: '#D9D9D9' };
         break;
       case 'box':
         block = { id, name: 'Box', type, anchor, x: 200, y, w: 200, h: 60, color: '#F2F2F2' };
@@ -447,7 +488,7 @@ export function PdfTemplates() {
         block = { ...std, id };
       }
     }
-    block = clampToPage(block);
+    block = clampToPage(block, pageSizeOf(layout));
     // A box goes behind everything, so a band never covers the text over it.
     const blocks = type === 'box' ? [block, ...layout.blocks] : [...layout.blocks, block];
     edit(follow(layout, { ...layout, blocks }));
@@ -459,7 +500,7 @@ export function PdfTemplates() {
     if (!layout) return;
     const b = layout.blocks.find((x) => x.id === id);
     if (!b || b.type === 'items' || b.type === 'totals' || b.type === 'signoffs') return;
-    const copy = clampToPage({ ...b, id: newId(b.type), name: b.name ? `${b.name} (copy)` : undefined, x: b.x + 10, y: b.y + 10 } as Block);
+    const copy = clampToPage({ ...b, id: newId(b.type), name: b.name ? `${b.name} (copy)` : undefined, x: b.x + 10, y: b.y + 10 } as Block, pageSizeOf(layout));
     const at = layout.blocks.indexOf(b) + 1;
     edit({ ...layout, blocks: [...layout.blocks.slice(0, at), copy, ...layout.blocks.slice(at)] });
     setSelectedId(copy.id);
@@ -480,12 +521,12 @@ export function PdfTemplates() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.put<{ layout: Layout; saved: boolean }>('/pdf-templates/quotation', layout);
+      const res = await api.put<{ layout: Layout; saved: boolean }>(`/pdf-templates/${docType}`, layout);
       // What came back is what was sent, tidied: no step to undo.
       dispatch({ type: 'live', layout: res.layout });
       setSavedJson(JSON.stringify(res.layout));
       setSaved(true);
-      toast('ok', 'Saved — quotations now print with this layout');
+      toast('ok', `Saved — ${doc.plural.toLowerCase()} now print with this layout`);
     } catch (err) {
       setError(err);
     } finally {
@@ -498,7 +539,7 @@ export function PdfTemplates() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.del<{ layout: Layout }>('/pdf-templates/quotation');
+      const res = await api.del<{ layout: Layout }>(`/pdf-templates/${docType}`);
       edit(res.layout);
       setSavedJson(JSON.stringify(res.layout));
       setSaved(false);
@@ -518,12 +559,12 @@ export function PdfTemplates() {
    */
   function exportLayout() {
     if (!layout) return;
-    const body = JSON.stringify({ type: 'quotation', exportedAt: new Date().toISOString(), layout }, null, 2);
+    const body = JSON.stringify({ type: docType, exportedAt: new Date().toISOString(), layout }, null, 2);
     const url = URL.createObjectURL(new Blob([body], { type: 'application/json' }));
     try {
       const a = document.createElement('a');
       a.href = url;
-      a.download = `quotation-layout-${dayKeyOf(new Date())}.json`;
+      a.download = `${docType.replace('_', '-')}-layout-${dayKeyOf(new Date())}.json`;
       a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
@@ -549,10 +590,10 @@ export function PdfTemplates() {
         throw new Error('That file is not a layout — it does not read as one.');
       }
       const wrapped = parsed && typeof parsed === 'object' && 'layout' in parsed ? (parsed as { type?: unknown; layout: unknown }) : null;
-      if (wrapped && wrapped.type !== undefined && wrapped.type !== 'quotation') {
-        throw new Error(`That file is a layout for ${String(wrapped.type)}, not the quotation.`);
+      if (wrapped && wrapped.type !== undefined && wrapped.type !== docType) {
+        throw new Error(`That file is a layout for ${String(wrapped.type)}, not the ${doc.label.toLowerCase()}.`);
       }
-      const res = await api.post<{ layout: Layout }>('/pdf-templates/quotation/check', wrapped ? wrapped.layout : parsed);
+      const res = await api.post<{ layout: Layout }>(`/pdf-templates/${docType}/check`, wrapped ? wrapped.layout : parsed);
       edit(res.layout);
       setSelectedId(null);
       setTab('boxes');
@@ -575,19 +616,19 @@ export function PdfTemplates() {
 
   async function preview() {
     if (!layout) return;
-    if (previewWith === 'quotation' && !previewQuote) {
-      setError(new Error('Choose the quotation to preview with first'));
+    if (previewWith === 'real' && !previewDoc) {
+      setError(new Error(`Choose the ${doc.label.toLowerCase()} to preview with first`));
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch('/api/pdf-templates/quotation/preview', {
+      const res = await fetch(`/api/pdf-templates/${docType}/preview`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           layout,
-          ...(previewWith === 'quotation' && previewQuote ? { quotationId: previewQuote.id } : { sample: previewWith }),
+          ...(previewWith === 'real' && previewDoc ? { documentId: previewDoc.id } : { sample: previewWith }),
         }),
       });
       if (!res.ok) {
@@ -654,9 +695,22 @@ export function PdfTemplates() {
         <div>
           <h1>PDF Templates</h1>
           <p>
-            Lay out the quotation as it prints: move and size the boxes, and choose what each one shows. Fields such as
-            the customer or the quote number fill in from each quotation.
+            Lay out the {doc.label.toLowerCase()} as it prints: move and size the boxes, and choose what each one shows. Fields
+            such as the customer or the document number fill in from each {doc.label.toLowerCase()}.
           </p>
+          <div className="pt-doc-switch" role="group" aria-label="Which document">
+            {DOCS.map((o) => (
+              <button
+                key={o.type}
+                type="button"
+                className={`btn btn-sm${o.type === docType ? ' btn-active' : ''}`}
+                aria-pressed={o.type === docType}
+                onClick={() => switchDoc(o.type)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="pt-actions">
           <button type="button" className="btn btn-sm" onClick={() => dispatch({ type: 'undo' })} disabled={!hist.past.length || !canEdit} title="Undo (Ctrl+Z)">
@@ -739,18 +793,34 @@ export function PdfTemplates() {
       })()}
       {loaded.unreadable && (
         <div className="alert warn">
-          The saved layout could not be read, so quotations print with the standard one. Saving puts a layout that reads in its place.
+          The saved layout could not be read, so {doc.plural.toLowerCase()} print with the standard one. Saving puts a layout that reads in its place.
         </div>
       )}
       {confirm && (
         <div className="alert warn row pt-confirm" role="alert">
           <span>
             {confirm === 'reset'
-              ? 'Put the standard layout back? Your saved layout is deleted, and quotations print the standard way.'
-              : 'Throw away the changes since you last saved?'}
+              ? `Put the standard layout back? Your saved layout is deleted, and ${doc.plural.toLowerCase()} print the standard way.`
+              : confirm === 'switch'
+                ? 'Throw away the changes since you last saved, and open the other document?'
+                : 'Throw away the changes since you last saved?'}
           </span>
-          <button type="button" className="btn btn-sm btn-danger" onClick={confirm === 'reset' ? reset : discard}>
-            {confirm === 'reset' ? 'Put it back' : 'Discard'}
+          <button
+            type="button"
+            className="btn btn-sm btn-danger"
+            onClick={
+              confirm === 'reset'
+                ? reset
+                : confirm === 'switch'
+                  ? () => {
+                      setConfirm(null);
+                      if (pendingDoc) setParams(pendingDoc === 'quotation' ? {} : { doc: pendingDoc }, { replace: true });
+                      setPendingDoc(null);
+                    }
+                  : discard
+            }
+          >
+            {confirm === 'reset' ? 'Put it back' : confirm === 'switch' ? 'Discard and switch' : 'Discard'}
           </button>
           <button type="button" className="btn btn-sm" autoFocus onClick={() => setConfirm(null)}>
             Keep it
@@ -761,13 +831,19 @@ export function PdfTemplates() {
 
       <div className="pt-status">
         <span className={`pt-state${dirty ? ' is-dirty' : ''}`}>
-          {dirty ? 'Changes not saved yet' : saved ? 'Quotations print with this layout' : 'The standard layout — quotations print with it'}
+          {dirty
+            ? 'Changes not saved yet'
+            : saved
+              ? `${doc.plural} print with this layout`
+              : `The standard layout — ${doc.plural.toLowerCase()} print with it`}
         </span>
         <PreviewControl
+          docType={docType}
+          label={doc.label}
           value={previewWith}
           onValue={setPreviewWith}
-          quote={previewQuote}
-          onQuote={setPreviewQuote}
+          picked={previewDoc}
+          onPicked={setPreviewDoc}
           busy={busy}
           onPreview={preview}
         />
@@ -784,7 +860,7 @@ export function PdfTemplates() {
             </button>
             <span className="faint pt-viewnote">
               {view === 'first'
-                ? 'A one-page quotation: the lines, then what follows them, then the last page’s sign-offs.'
+                ? `A one-page ${doc.label.toLowerCase()}: the lines, then what follows them, then the last page’s sign-offs.`
                 : 'The lines run on from the top guide; the running header and the footer repeat.'}
             </span>
           </div>
@@ -921,17 +997,18 @@ function Canvas({
   const [scale, setScale] = useState(1);
   const drag = useRef<{ mode: DragMode; id: string | null; x0: number; y0: number; before: Layout } | null>(null);
   const [guides, setGuides] = useState<{ x?: number; y?: number } | null>(null);
+  const page = pageSizeOf(layout);
 
   // The page fills the width it is given, between half size and a third over.
   useLayoutEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const fit = () => setScale(Math.min(1.35, Math.max(0.45, (el.clientWidth - 2) / PAGE_WIDTH)));
+    const fit = () => setScale(Math.min(1.35, Math.max(0.45, (el.clientWidth - 2) / page.w)));
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [page.w]);
 
   const s = scale;
   const label = (key: string) => fields.find((f) => f.key === key)?.label ?? key;
@@ -993,7 +1070,7 @@ function Canvas({
   }
 
   const items = layout.blocks.find((b): b is ItemsBlock => b.type === 'items');
-  const pageStyle = { width: PAGE_WIDTH * s, height: PAGE_HEIGHT * s, '--pt': s } as CSSProperties;
+  const pageStyle = { width: page.w * s, height: page.h * s, '--pt': s } as CSSProperties;
   const box = (x: number, y: number, w: number, h: number): CSSProperties => ({ left: x * s, top: y * s, width: w * s, height: h * s });
 
   return (
@@ -1394,10 +1471,32 @@ function AlignChoice({ value, onChange, disabled }: { value: Align; onChange: (v
 }
 
 function PageSettings({ layout, canEdit, onChange }: { layout: Layout; canEdit: boolean; onChange: (patch: Partial<Layout>, key: string) => void }) {
+  const page = pageSizeOf(layout);
+  /** Turning the page keeps every box on the paper and the guides inside it. */
+  function turn(orientation: Orientation) {
+    if ((layout.orientation ?? 'portrait') === orientation) return;
+    const next = orientation === 'landscape' ? { w: PAGE_HEIGHT, h: PAGE_WIDTH } : { w: PAGE_WIDTH, h: PAGE_HEIGHT };
+    const flowTop = Math.min(layout.flowTop, next.h - 200);
+    const flowBottom = Math.max(Math.min(layout.flowBottom, next.h), flowTop + 200);
+    onChange(
+      { orientation, flowTop, flowBottom, blocks: layout.blocks.map((b) => clampToPage(b, next)) },
+      'orientation',
+    );
+  }
   return (
     <div className="pt-inspector">
       <p className="pt-intro">Choose a box on the page, or one under “All boxes”, to change it.</p>
       <h3 className="pt-section">The page</h3>
+      <Field label="The paper" hint="Turning the page pulls in any box that would fall off it.">
+        <select
+          value={layout.orientation ?? 'portrait'}
+          disabled={!canEdit}
+          onChange={(e) => turn(e.target.value as Orientation)}
+        >
+          <option value="portrait">A4 upright (portrait)</option>
+          <option value="landscape">A4 on its side (landscape)</option>
+        </select>
+      </Field>
       <NumberField
         label="On pages 2 onward the lines start at (pt from the top)"
         value={layout.flowTop}
@@ -1409,8 +1508,8 @@ function PageSettings({ layout, canEdit, onChange }: { layout: Layout; canEdit: 
       <NumberField
         label="On every page the content stops at (pt from the top)"
         value={layout.flowBottom}
-        min={300}
-        max={PAGE_HEIGHT}
+        min={200}
+        max={page.h}
         hint="The footer sits under this line. Both are the dashed guides on the page."
         disabled={!canEdit}
         onChange={(v) => onChange({ flowBottom: Math.max(v, layout.flowTop + 200) }, 'flowBottom')}
@@ -1420,7 +1519,7 @@ function PageSettings({ layout, canEdit, onChange }: { layout: Layout; canEdit: 
         <li>Drag a box to move it, or a handle to size it. It snaps to the margins and to other boxes; hold Alt to place it freely.</li>
         <li>From the keyboard: Tab to a box, then the arrow keys move it (Shift for 10pt) and Ctrl with the arrows sizes it.</li>
         <li>Every box has a place: the first page, every page, pages 2 onward, after the lines, or the last page.</li>
-        <li>Preview PDF prints the layout as it stands, saved or not. Save makes quotations print with it.</li>
+        <li>Preview PDF prints the layout as it stands, saved or not. Save makes the document print with it.</li>
         <li>
           To use a layout from another G-CORE — the laptop’s on the live server — Export layout there and Import layout here, then
           preview it and Save. A push carries code, never a layout.
@@ -1474,7 +1573,7 @@ function Inspector({
       )}
       {unknown.length > 0 && (
         <div className="alert warn">
-          Not a field of the quotation: {unknown.map((k) => `{{${k}}}`).join(', ')}. Saving is refused until it is fixed.
+          Not a field of this document: {unknown.map((k) => `{{${k}}}`).join(', ')}. Saving is refused until it is fixed.
         </div>
       )}
 
@@ -1529,7 +1628,7 @@ function Inspector({
           <ColorField label="Figures" value={block.textColor} disabled={ro} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
           <ColorField label="The total, and its rule" value={block.accentColor} disabled={ro} onChange={(v) => onPatch({ accentColor: v }, 'accentColor')} />
           <ColorField label="Rules" value={block.ruleColor} disabled={ro} onChange={(v) => onPatch({ ruleColor: v }, 'ruleColor')} />
-          <p className="hint">When a salesperson ticks “Hide total”, this box prints nothing and what follows closes up.</p>
+          <p className="hint">With nothing to print — a quotation whose salesperson ticked “Hide total” — this box prints nothing and what follows closes up.</p>
         </>
       )}
       {block.type === 'signoffs' && (
@@ -1635,7 +1734,7 @@ function TextSettings({
       )}
       {fromQuotation.length > 0 && (
         <p className="pt-left-out">
-          Not printing with the sample: {listOf(fromQuotation.map(labelOf))} — a quotation that has {fromQuotation.length > 1 ? 'them' : 'it'} prints {fromQuotation.length > 1 ? 'them' : 'it'}.
+          Not printing with the sample: {listOf(fromQuotation.map(labelOf))} — a document that has {fromQuotation.length > 1 ? 'them' : 'it'} prints {fromQuotation.length > 1 ? 'them' : 'it'}.
         </p>
       )}
       <details className="pt-rules">
@@ -1676,7 +1775,7 @@ function TextSettings({
       </Field>
       <ColorField label="Colour" value={block.color} disabled={disabled} onChange={(v) => onPatch({ color: v }, 'color')} />
       <Checkbox checked={block.fit} onChange={(v) => !disabled && onPatch({ fit: v })} label="Shrink the type to keep each line on one line" />
-      <Checkbox checked={block.multiPageOnly} onChange={(v) => !disabled && onPatch({ multiPageOnly: v })} label="Print only when the quotation runs to more than one page" />
+      <Checkbox checked={block.multiPageOnly} onChange={(v) => !disabled && onPatch({ multiPageOnly: v })} label="Print only when the document runs to more than one page" />
     </>
   );
 }
@@ -1788,67 +1887,97 @@ interface QuoteRow {
   customer?: { name: string } | null;
 }
 
+interface OrderRow {
+  id: string;
+  number: string;
+  customer?: { name: string } | null;
+  quotation?: { subject: string } | null;
+}
+
 function PreviewControl({
+  docType,
+  label,
   value,
   onValue,
-  quote,
-  onQuote,
+  picked,
+  onPicked,
   busy,
   onPreview,
 }: {
-  value: 'short' | 'long' | 'quotation';
-  onValue: (v: 'short' | 'long' | 'quotation') => void;
-  quote: { id: string; number: string; label: string } | null;
-  onQuote: (q: { id: string; number: string; label: string } | null) => void;
+  docType: DocType;
+  label: string;
+  value: 'short' | 'long' | 'real';
+  onValue: (v: 'short' | 'long' | 'real') => void;
+  picked: { id: string; number: string; label: string } | null;
+  onPicked: (q: { id: string; number: string; label: string } | null) => void;
   busy: boolean;
   onPreview: () => void;
 }) {
   const [search, setSearch] = useState('');
-  const [rows, setRows] = useState<QuoteRow[]>([]);
+  const [rows, setRows] = useState<{ id: string; number: string; name: string; sub: string }[]>([]);
   const [problem, setProblem] = useState('');
+  const lower = label.toLowerCase();
 
   useEffect(() => {
-    if (value !== 'quotation' || quote) return;
+    if (value !== 'real' || picked) return;
     const t = setTimeout(() => {
-      api
-        .get<{ rows: QuoteRow[] }>(`/quotations${qs({ search, pageSize: 6 })}`)
-        .then((r) => {
-          setRows(r.rows);
+      const load =
+        docType === 'quotation'
+          ? api
+              .get<{ rows: QuoteRow[] }>(`/quotations${qs({ search, pageSize: 6 })}`)
+              .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.subject })))
+          : api
+              .get<{ rows: OrderRow[] }>(`/sales-orders${qs({ search, pageSize: 6 })}`)
+              .then((r) => r.rows.map((x) => ({ id: x.id, number: x.number, name: x.customer?.name ?? '', sub: x.quotation?.subject ?? '' })));
+      load
+        .then((list) => {
+          setRows(list);
           setProblem('');
         })
-        .catch((err) => setProblem(err instanceof ApiError && err.status === 403 ? 'Choosing a real quotation needs access to quotations.' : 'Could not search the quotations.'));
+        .catch((err) =>
+          setProblem(
+            err instanceof ApiError && err.status === 403
+              ? `Choosing a real ${lower} needs access to ${lower}s.`
+              : `Could not search the ${lower}s.`,
+          ),
+        );
     }, 250);
     return () => clearTimeout(t);
-  }, [search, value, quote]);
+  }, [search, value, picked, docType, lower]);
 
   return (
     <div className="pt-preview">
       <label className="pt-preview-label" htmlFor="pt-preview-with">
         Preview with
       </label>
-      <select id="pt-preview-with" value={value} onChange={(e) => onValue(e.target.value as 'short' | 'long' | 'quotation')}>
+      <select id="pt-preview-with" value={value} onChange={(e) => onValue(e.target.value as 'short' | 'long' | 'real')}>
         <option value="short">the sample, one page</option>
-        <option value="long">the sample, three pages</option>
-        <option value="quotation">a quotation…</option>
+        <option value="long">the sample, several pages</option>
+        <option value="real">a {lower}…</option>
       </select>
-      {value === 'quotation' &&
-        (quote ? (
+      {value === 'real' &&
+        (picked ? (
           <span className="pt-picked">
-            <span className="mono">{quote.number}</span> {quote.label}
-            <button type="button" className="btn btn-sm btn-ghost" onClick={() => onQuote(null)}>
+            <span className="mono">{picked.number}</span> {picked.label}
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => onPicked(null)}>
               Change
             </button>
           </span>
         ) : (
           <div className="pt-picker">
-            <input value={search} placeholder="Number, client or name" aria-label="Find the quotation to preview with" onChange={(e) => setSearch(e.target.value)} />
+            <input
+              value={search}
+              placeholder="Number, client or name"
+              aria-label={`Find the ${lower} to preview with`}
+              onChange={(e) => setSearch(e.target.value)}
+            />
             {(rows.length > 0 || problem) && (
               <ul className="pt-picker-list">
                 {problem && <li className="faint">{problem}</li>}
                 {rows.map((r) => (
                   <li key={r.id}>
-                    <button type="button" onClick={() => onQuote({ id: r.id, number: r.number, label: r.customer?.name ?? r.subject })}>
-                      <span className="mono">{r.number}</span> {r.customer?.name ?? ''} <span className="faint">{r.subject}</span>
+                    <button type="button" onClick={() => onPicked({ id: r.id, number: r.number, label: r.name || r.sub })}>
+                      <span className="mono">{r.number}</span> {r.name} <span className="faint">{r.sub}</span>
                     </button>
                   </li>
                 ))}

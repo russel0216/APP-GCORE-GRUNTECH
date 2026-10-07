@@ -60,13 +60,17 @@ four databases and four copies of "customer".
    **Money is `formatMoney`, which prints `PHP 1,562.20`** — the currency code,
    not `₱`. U+20B1 is outside WinAnsiEncoding, so a standard PDF font draws it
    as `±`. Never put a non-Latin-1 character in a PDF without embedding a font.
-   **The quotation is the one exception: a designed document.** Its layout is
-   DATA — boxes on an A4 page that an administrator places in Admin › PDF
-   Templates — and it prints through `renderDesigned(design, data)` in
-   `shared/pdfDesign.ts`, the same engine's other door. The module still
-   draws nothing: `quotationPrintData()` supplies fields, rows, totals and
-   signatories; the engine places every box, keeps the dated sign-offs, and
-   puts every string through `pdfSafe`. The standard layout
+   **The quotation and the sales order are the exceptions: designed
+   documents.** Each layout is DATA — boxes on an A4 page that an
+   administrator places in Admin › PDF Templates — and prints through
+   `renderDesigned(design, data)` in `shared/pdfDesign.ts`, the same
+   engine's other door. The module still draws nothing:
+   `quotationPrintData()` / `salesOrderPrintData()` supply fields, rows,
+   totals and signatories; the engine places every box, keeps the dated
+   sign-offs, and puts every string through `pdfSafe`. A layout carries its
+   `orientation`: the sales order's standard is LANDSCAPE, in the
+   quotation template's dress, because the cost and margin columns do not
+   fit portrait. The standard layout
    (`STANDARD_QUOTATION_DESIGN`) is the owner's Quotation_Template (36pt
    margins, purple #5B2A8C heads, green #2E9A4B number and subheadings, light
    #D9D9D9 rules, totals flush right, sign-offs side by side, the strapline on
@@ -155,8 +159,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,339 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 306, costing 120, pipeline 60, calendar 46, numbering 46,
+**2,347 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
+masters 54, sales 314, costing 120, pipeline 60, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -198,9 +202,10 @@ any workflow step routed to a role nobody holds, or to the role that normally
 raises that document. Two seeded workflows shipped with that second fault and
 were found one at a time by documents refusing to submit — run this instead.
 
-`verify-sales.ts` checks the STANDARD quotation layout's wording, so it sets an
-administrator's saved layout aside for the run (`pdfTemplate.quotation.__verify__`,
-a Setting of its own) and `cleanup()` — which also runs first — puts it back.
+`verify-sales.ts` checks the STANDARD designed layouts' wording, so it sets an
+administrator's saved quotation AND sales order layouts aside for the run
+(`pdfTemplate.<type>.__verify__`, Settings of their own) and `cleanup()` —
+which also runs first — puts them back.
 
 `verify-sales.ts` imports `src/routes/sales` purely for its side effect, because
 that import is what registers the quotation's `onApprovalSettled` subscriber. If
@@ -1406,19 +1411,40 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   reference); Reopen goes back to DRAFT; Delete is DRAFT-only. Editing is
   one PUT — header and lines together — and saved groups go through
   `rememberGroups`.
-- **The PDF is the owner's sample**: customer details against the PO and
-  notes, the Group column only when a line carries one, cost + supplier and
-  margin columns ONLY for a caller who may see cost (it is the internal
-  booking record, never the customer's copy — the invoice is G-FIN's),
-  Prepared / Noted / Approved sign-offs, DRAFT watermark note until issued.
+- **The PDF prints through the Sales Order template** (2026-10-07): a
+  designed document like the quotation, landscape, in the quotation
+  template's dress, edited under Admin › PDF Templates. The standard layout
+  is the owner's sample: customer details against the PO, Group, cost +
+  supplier and margin columns, Prepared / Noted / Approved sign-offs, a
+  DRAFT note until issued. Cost reaches the paper ONLY for a caller who may
+  see it — `withoutCostColumns()` strips the cost columns from the layout
+  and `salesOrderPrintData(order, showCost)` sends no cost cell or cost
+  total — because it is the internal booking record, never the customer's
+  copy (the invoice is G-FIN's).
 
 ## Quotation PDF template (2026-10-02)
 
 Admin › PDF Templates (`/admin/pdf-templates`, `admin.pdf_templates.*`,
-`PdfTemplates.tsx`) lays out the quotation's PDF: boxes on an A4 page, each
-printing fixed text and `{{fields}}`. Only the quotation is designed; adding
-another document means a field catalogue, a sample, a standard layout and a
-data builder like `quotationTemplate.ts` and `quotationPrintData()`.
+`PdfTemplates.tsx`) lays out a designed document's PDF: boxes on an A4 page,
+each printing fixed text and `{{fields}}`. Two documents are designed — the
+quotation and, since 2026-10-07, the sales order (`?doc=sales_order`, the
+page's switcher) — and both go through the same editor, routes and engine.
+Adding another means a field catalogue, a sample, a standard layout and a
+data builder like `quotationTemplate.ts` / `salesOrderTemplate.ts` and
+`quotationPrintData()` / `salesOrderPrintData()`, plus one entry in the
+`DOCS` registry of `routes/pdfTemplates.ts` — the routes are generic over
+it (`/api/pdf-templates/:type`), and an export file names its type so an
+import for the wrong document is refused.
+
+- **A layout carries its page**: `orientation` on the design (portrait the
+  default; the sales order's standard is landscape), checked edge by edge on
+  save, drawn at the right size by the editor, and applied by PDFKit's
+  `layout`. Turning the page in the editor pulls every box back onto the
+  paper.
+- **The cost columns (`cost`, `margin`) exist only for internal paper.**
+  The registry entry says which columns a document's line table may place;
+  the quotation's refuses them on save (`verify-sales` proves it), and the
+  sales order strips them server-side for a caller without cost rights.
 
 - **The layout is one `Setting` row, `pdfTemplate.quotation`**, read by
   `quotationDesign()`; none (or one that no longer parses — it is logged and

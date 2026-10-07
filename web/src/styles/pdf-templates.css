@@ -13,6 +13,13 @@
   gap: var(--s-2);
 }
 
+/* Which document is being laid out: Quotation or Sales Order. */
+.pt-doc-switch {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
 .pt-confirm {
   gap: var(--s-2);
   align-items: center;

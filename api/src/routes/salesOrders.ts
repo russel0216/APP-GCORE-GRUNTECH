@@ -25,13 +25,10 @@ import {
   QUOTATION_EXTRA_TAX_RATES,
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
-import {
-  formatAmount,
-  formatShortDate,
-  renderDocument,
-  type PdfSection,
-  type PdfTotal,
-} from '../shared/pdf';
+import { formatAmount, formatDate, formatShortDate, type PdfTotal, type Signatory } from '../shared/pdf';
+import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
+import { salesOrderDesign, withoutCostColumns } from '../shared/salesOrderTemplate';
+import { contactPhone } from '../shared/approvals';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
@@ -60,7 +57,7 @@ salesOrderRoutes.use(authenticate);
 const d = (v: number | string | Prisma.Decimal) => new Prisma.Decimal(v);
 const num = (v: Prisma.Decimal | number | null | undefined) => (v == null ? 0 : Number(v));
 
-function canSeeOrderCost(me: ReturnType<typeof currentUser>, ownerId: string): boolean {
+export function canSeeOrderCost(me: ReturnType<typeof currentUser>, ownerId: string): boolean {
   return canEditRecord(me, 'gops', 'sales_orders', ownerId) || can(me, 'gops.costing.view_all');
 }
 
@@ -605,143 +602,177 @@ salesOrderRoutes.delete(
 
 // ── The paper ────────────────────────────────────────────────────────────────
 
+const PRINT_INCLUDE = {
+  ...ORDER_INCLUDE,
+  lines: {
+    orderBy: { sortOrder: 'asc' },
+    include: { providerSupplier: { select: { name: true } }, providerUser: { select: { name: true } } },
+  },
+} as const;
+
+export type PrintableSalesOrder = Prisma.SalesOrderGetPayload<{ include: typeof PRINT_INCLUDE }>;
+
+/** The order, for printing: whoever prints it must be able to open it. */
+export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id: string): Promise<PrintableSalesOrder> {
+  const order = await prisma.salesOrder.findUnique({ where: { id }, include: PRINT_INCLUDE });
+  if (!order) throw notFound('Sales order not found');
+  if (!me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all') && order.ownerId !== me.id) {
+    throw forbidden('This sales order is someone else\u2019s');
+  }
+  return order;
+}
+
+const STATUS_LABEL: Record<string, string> = { DRAFT: 'Draft', ISSUED: 'Issued', CANCELLED: 'Cancelled' };
+
 /**
- * Patterned on the owner's sample (Sale Order 4622): customer details against
- * the PO and notes, the line table, totals — and, for a caller who may see
- * cost, the cost and margin columns the sample carries, because this is the
- * internal booking record, not the customer's copy.
+ * What a sales order prints — its fields, its lines, its totals and who
+ * signs it — for the layout in Admin › PDF Templates to place (the owner's
+ * sample, Sale Order 4622, in the quotation template's dress). It is the
+ * internal booking record: `showCost` is the quotation's own cost rule, and
+ * without it no cost cell, cost total or margin is in the data at all — a
+ * layout that places the cost columns prints them empty.
+ */
+export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: boolean): Promise<DesignData> {
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } });
+  const currency = company?.currency ?? 'PHP';
+  const site = order.quotation.siteId
+    ? await prisma.customerSite.findUnique({ where: { id: order.quotation.siteId }, select: { address: true, city: true } })
+    : null;
+  const totals = quotationTotals({
+    lines: order.lines,
+    discountPct: order.discountPct,
+    vatRate: order.vatRate,
+    vatInclusive: order.vatInclusive,
+  });
+  const amount = (v: number) => formatAmount(v);
+  const ratePct = `${Number(d(num(order.vatRate)).mul(100).toFixed(2))}%`;
+  const contact = order.contact;
+
+  const fields: Record<string, string> = {
+    'order.number': order.number,
+    'order.date': formatShortDate(order.orderDate),
+    'order.dateLong': formatDate(order.orderDate),
+    'order.status': STATUS_LABEL[order.status] ?? order.status,
+    'order.subject': order.quotation.subject,
+    'order.poNumber': order.poNumber ?? '',
+    'order.paymentTerms': `${order.termsDays} days`,
+    'order.paymentMethod': order.paymentMethod ?? '',
+    'order.referenceNo': order.referenceNo ?? '',
+    'order.siNumber': order.siNumber ?? '',
+    'order.drNumber': order.drNumber ?? '',
+    'order.comment': order.comment ?? '',
+    'order.draftNote': order.status === 'DRAFT' ? 'DRAFT — not yet issued.' : '',
+    'order.cancelReason': order.status === 'CANCELLED' ? (order.cancelReason ?? '') : '',
+    'order.currency': currency,
+    'order.vatRate': ratePct,
+    'order.subtotal': amount(totals.subtotal),
+    'order.discount': totals.discountAmount > 0 ? amount(totals.discountAmount) : '',
+    'order.net': amount(totals.net),
+    'order.vat': amount(totals.vatAmount),
+    'order.total': amount(totals.total),
+    'quotation.number': order.quotation.number,
+    'quotation.subject': order.quotation.subject,
+    'customer.name': order.customer.name,
+    'customer.code': order.customer.code,
+    'customer.address': [site?.address, site?.city].filter(Boolean).join(', '),
+    'customer.phone': order.customer.phone ?? '',
+    'customer.tin': order.customer.tin ?? '',
+    'contact.name': contact?.name ?? '',
+    'contact.position': contact?.position ?? '',
+    'contact.nameAndPosition': contact ? `${contact.name}${contact.position ? `, ${contact.position}` : ''}` : '',
+    'owner.name': order.owner.name,
+    'owner.position': order.owner.position ?? '',
+    'owner.email': order.owner.email ?? '',
+    'owner.phone': '',
+  };
+  const author = await prisma.user.findUnique({
+    where: { id: order.ownerId },
+    select: { phone: true, employee: { select: { mobile: true } } },
+  });
+  if (author) fields['owner.phone'] = contactPhone(author) ?? '';
+
+  const rows: DesignRow[] = [];
+  let n = 0;
+  order.lines.forEach((l, i) => {
+    if (l.isHeading) {
+      rows.push({ heading: (l.title ?? '').trim() });
+      return;
+    }
+    const m = totals.lines[i];
+    const qty = Number(l.quantity);
+    const qtyText = Number.isInteger(qty) ? String(qty) : qty.toString();
+    const title = (l.title ?? '').trim();
+    const description = (l.description ?? '').trim();
+    rows.push({
+      cells: {
+        no: String(++n),
+        product: title ? (description ? { title, body: description } : { title }) : description,
+        qtyUnit: `${qtyText} ${l.unit}`,
+        qty: qtyText,
+        unit: l.unit,
+        unitPrice: amount(num(l.unitPrice)),
+        amount: amount(num(l.amount)),
+        group: l.group ?? '',
+        ...(showCost
+          ? {
+              cost: {
+                title: l.costAmount == null ? '' : amount(num(l.costAmount)),
+                body: l.providerSupplier?.name ?? l.providerUser?.name ?? undefined,
+              },
+              margin: m.margin == null ? '' : amount(m.margin),
+            }
+          : {}),
+      },
+    });
+  });
+
+  const totalRows: PdfTotal[] = [{ label: 'Subtotal:', value: amount(totals.subtotal) }];
+  if (totals.discountAmount > 0) {
+    totalRows.push({
+      label: `Discount (${num(order.discountPct).toFixed(num(order.discountPct) % 1 ? 2 : 0)}%):`,
+      value: `-${amount(totals.discountAmount)}`,
+    });
+    if (!order.vatInclusive) totalRows.push({ label: 'Sum without tax:', value: amount(totals.net) });
+  }
+  totalRows.push({ label: order.vatInclusive ? `VAT included (${ratePct}):` : `Tax (${ratePct}):`, value: amount(totals.vatAmount) });
+  totalRows.push({ label: `Total (${currency}):`, value: amount(totals.total), bold: true });
+  if (showCost) {
+    totalRows.push({ label: `Cost (${currency}):`, value: amount(totals.cost.totalCost) });
+    totalRows.push({ label: 'Margin sum:', value: amount(totals.cost.totalMargin) });
+  }
+
+  const signatories: Signatory[] = [
+    {
+      role: 'Prepared by',
+      name: order.owner.name,
+      position: order.owner.position ?? undefined,
+      phone: fields['owner.phone'] || undefined,
+      email: order.owner.email ?? undefined,
+      at: order.createdAt,
+    },
+    { role: 'Noted by' },
+    { role: 'Approved by' },
+  ];
+
+  return { title: `${order.number} — Sales Order`, fields, rows, totals: totalRows, signatories };
+}
+
+/**
+ * The paper prints through the layout in Admin › PDF Templates (the standard
+ * one is landscape, in the quotation template's dress). A caller who may not
+ * see cost prints a layout with the cost columns taken out, and data that
+ * never carried a cost.
  */
 salesOrderRoutes.get(
   '/:id/pdf',
   requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const order = await prisma.salesOrder.findUnique({
-      where: { id: req.params.id },
-      include: {
-        ...ORDER_INCLUDE,
-        lines: {
-          orderBy: { sortOrder: 'asc' },
-          include: { providerSupplier: { select: { name: true } }, providerUser: { select: { name: true } } },
-        },
-      },
-    });
-    if (!order) throw notFound('Sales order not found');
-    if (!me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all') && order.ownerId !== me.id) {
-      throw forbidden('This sales order is someone else’s');
-    }
+    const order = await printableSalesOrder(me, req.params.id);
     const showCost = canSeeOrderCost(me, order.ownerId);
-
-    const site = order.quotation.siteId
-      ? await prisma.customerSite.findUnique({ where: { id: order.quotation.siteId }, select: { address: true, city: true } })
-      : null;
-    const totals = quotationTotals({
-      lines: order.lines,
-      discountPct: order.discountPct,
-      vatRate: order.vatRate,
-      vatInclusive: order.vatInclusive,
-    });
-
-    const hasGroup = order.lines.some((l) => !l.isHeading && l.group);
-    const head = [
-      ...(hasGroup ? ['Group'] : []),
-      'Product name and additional info',
-      'Qty',
-      'Unit price',
-      'Total',
-      ...(showCost ? ['Cost + supplier', 'Margin'] : []),
-    ];
-    const widths = [...(hasGroup ? [1.1] : []), 3.4, 0.8, 1.1, 1.1, ...(showCost ? [1.4, 1] : [])];
-    const align: ('left' | 'right' | 'center')[] = [
-      ...(hasGroup ? ['left' as const] : []),
-      'left',
-      'right',
-      'right',
-      'right',
-      ...(showCost ? ['right' as const, 'right' as const] : []),
-    ];
-    const rows = order.lines.map((l, n) => {
-      if (l.isHeading) return { heading: (l.title ?? '').trim() };
-      const m = totals.lines[n];
-      const qty = Number(l.quantity);
-      return [
-        ...(hasGroup ? [l.group ?? ''] : []),
-        { title: (l.title ?? '').trim() || l.description, body: (l.title ?? '').trim() ? l.description || undefined : undefined },
-        `${Number.isInteger(qty) ? qty : qty.toString()} ${l.unit}`,
-        formatAmount(num(l.unitPrice)),
-        formatAmount(num(l.amount)),
-        ...(showCost
-          ? [
-              {
-                title: l.costAmount == null ? '' : formatAmount(num(l.costAmount)),
-                body: l.providerSupplier?.name ?? l.providerUser?.name ?? undefined,
-              },
-              m.margin == null ? '' : formatAmount(m.margin),
-            ]
-          : []),
-      ];
-    });
-
-    const ratePct = `${Number(d(num(order.vatRate)).mul(100).toFixed(2))}%`;
-    const totalRows: PdfTotal[] = [{ label: 'Subtotal:', value: formatAmount(totals.subtotal) }];
-    if (totals.discountAmount > 0) {
-      totalRows.push({ label: `Discount (${num(order.discountPct).toFixed(num(order.discountPct) % 1 ? 2 : 0)}%):`, value: `-${formatAmount(totals.discountAmount)}` });
-      if (!order.vatInclusive) totalRows.push({ label: 'Sum without tax:', value: formatAmount(totals.net) });
-    }
-    totalRows.push({ label: order.vatInclusive ? `VAT included (${ratePct}):` : `Tax (${ratePct}):`, value: formatAmount(totals.vatAmount) });
-    totalRows.push({ label: 'Total (PHP):', value: formatAmount(totals.total), bold: true });
-    if (showCost) {
-      totalRows.push({ label: 'Cost (PHP):', value: formatAmount(totals.cost.totalCost) });
-      totalRows.push({ label: 'Margin sum:', value: formatAmount(totals.cost.totalMargin) });
-    }
-
-    const sections: PdfSection[] = [
-      {
-        kind: 'parties',
-        left: {
-          label: 'CUSTOMER DETAILS',
-          name: order.customer.name,
-          lines: [
-            [site?.address, site?.city].filter(Boolean).join(', '),
-            order.contact ? `Attention: ${order.contact.name}${order.contact.position ? `, ${order.contact.position}` : ''}` : '',
-            order.customer.phone ?? '',
-            order.customer.tin ? `TIN: ${order.customer.tin}` : '',
-          ].filter(Boolean),
-        },
-        right: {
-          label: 'ORDER',
-          name: `Per quotation ${order.quotation.number}`,
-          lines: [
-            order.poNumber ? `Purchase Order No. ${order.poNumber}` : '',
-            `Payment terms: ${order.termsDays} days`,
-            order.paymentMethod ? `Payment method: ${order.paymentMethod}` : '',
-            order.referenceNo ? `Reference: ${order.referenceNo}` : '',
-            order.siNumber ? `SI / BS No.: ${order.siNumber}` : '',
-            order.drNumber ? `DR No.: ${order.drNumber}` : '',
-          ].filter(Boolean),
-        },
-      },
-      ...(order.comment ? [{ kind: 'text', title: 'Notes', body: order.comment } as PdfSection] : []),
-      { kind: 'table', head, widths, align, rows },
-      { kind: 'totals', rows: totalRows },
-      ...(order.status === 'CANCELLED' && order.cancelReason
-        ? [{ kind: 'text', title: 'Cancelled', body: order.cancelReason } as PdfSection]
-        : []),
-    ];
-
-    const pdf = await renderDocument({
-      title: 'Sales Order',
-      documentNumber: order.number,
-      date: order.orderDate,
-      reference: `${order.customer.name} · ${order.quotation.subject}`,
-      sections,
-      signatories: [
-        { role: 'Prepared by', name: order.owner.name, position: order.owner.position ?? undefined, at: order.createdAt },
-        { role: 'Noted by' },
-        { role: 'Approved by' },
-      ],
-      footerNote: order.status === 'DRAFT' ? 'DRAFT — not yet issued.' : undefined,
-    });
+    const { design } = await salesOrderDesign();
+    const data = await salesOrderPrintData(order, showCost);
+    const pdf = await renderDesigned(showCost ? design : withoutCostColumns(design), data);
 
     await audit(
       { entityType: 'sales_order', entityId: order.id, action: 'EXPORTED', summary: `Printed sales order ${order.number}` },
