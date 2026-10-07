@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { DataList, type Column } from '../../components/DataList';
 import { NumberInput } from '../../components/NumberInput';
 import {
@@ -74,10 +75,20 @@ export interface SalesOrderRow {
   createdAt: string;
 }
 
+interface ApprovalRoute {
+  name: string;
+  steps: { name: string; approvers: { id: string; name: string }[] }[];
+}
+
 interface SalesOrderDetailRow extends SalesOrderRow {
   lines: SoLine[];
   canEdit: boolean;
   canSeeCost: boolean;
+  /** A route is active for sales orders: the order is submitted, not issued. */
+  needsApproval?: boolean;
+  /** Optional routes the submitter may tick — "Add the CEO as approver". */
+  approvalOptions?: { id: string; label: string }[];
+  approvalRoutes?: { standard: ApprovalRoute | null; options: { id: string; route: ApprovalRoute | null }[] } | null;
   costPanel?: { totalCost: number; inHouseCost: number; outsourcedCost: number; totalMargin: number };
 }
 
@@ -164,12 +175,15 @@ export function SalesOrderDetail() {
   const [cancelReason, setCancelReason] = useState('');
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [optionId, setOptionId] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
       setOrder(await api.get<SalesOrderDetailRow>(`/sales-orders/${id}`));
       setError(null);
+      setReload((r) => r + 1);
     } catch (err) {
       setError(err);
     }
@@ -196,6 +210,9 @@ export function SalesOrderDetail() {
 
   const showCost = order.canSeeCost;
   const draft = order.status === 'DRAFT';
+  const pending = order.status === 'PENDING_APPROVAL';
+  const chosenOption = optionId && (order.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null;
+  const route = (chosenOption ? order.approvalRoutes?.options.find((o) => o.id === chosenOption)?.route : null) ?? order.approvalRoutes?.standard ?? null;
 
   return (
     <div>
@@ -230,9 +247,31 @@ export function SalesOrderDetail() {
               Modify
             </Link>
           )}
-          {order.canEdit && draft && (
+          {order.canEdit && draft && !order.needsApproval && (
             <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.post(`/sales-orders/${order.id}/issue`), 'Issued — the sale is booked')}>
               Issue
+            </button>
+          )}
+          {order.canEdit && draft && order.needsApproval && (
+            <>
+              {(order.approvalOptions ?? []).map((o) => (
+                <label key={o.id} className="checkbox">
+                  <input type="checkbox" checked={optionId === o.id} onChange={(e) => setOptionId(e.target.checked ? o.id : null)} />
+                  <span>{o.label}</span>
+                </label>
+              ))}
+              <button
+                className="btn btn-primary"
+                disabled={busy}
+                onClick={() => act(() => api.post(`/sales-orders/${order.id}/submit`, { optionId: chosenOption }), 'Sent for approval')}
+              >
+                Submit for approval
+              </button>
+            </>
+          )}
+          {order.canEdit && pending && (
+            <button className="btn" disabled={busy} onClick={() => act(() => api.post(`/sales-orders/${order.id}/withdraw`), 'Pulled back to draft')}>
+              Pull back and edit
             </button>
           )}
           {order.canEdit && order.status === 'ISSUED' && (
@@ -245,7 +284,7 @@ export function SalesOrderDetail() {
               Cancel order
             </button>
           )}
-          {order.canEdit && draft && can('gops.sales_orders.delete') && (
+          {order.canEdit && (draft || order.status === 'CANCELLED') && can('gops.sales_orders.delete') && (
             <button className="btn btn-danger" onClick={() => setRemoving((v) => !v)}>
               Delete
             </button>
@@ -254,6 +293,22 @@ export function SalesOrderDetail() {
       </div>
 
       <ErrorBox error={error} />
+      {order.canEdit && draft && order.needsApproval && !!route?.steps.length && (
+        // The route the submit would take — the CEO's when it is ticked —
+        // with who decides each step, named before anybody presses Submit,
+        // exactly as the quotation page shows it.
+        <div className="qd-route">
+          <span className="qd-route-label">Submit for approval sends it to</span>
+          <ApprovalStepper
+            steps={route.steps.map((st) => ({
+              label: st.name,
+              approver: st.approvers.length ? st.approvers.map((p) => p.name).join(' or ') : 'Nobody — no one else holds this role',
+              status: 'WAITING',
+            }))}
+          />
+        </div>
+      )}
+      {(pending || order.status === 'ISSUED') && <DocumentApproval documentType="sales_order" documentId={order.id} reloadToken={reload} />}
 
       {cancelling && (
         <div className="alert warn row so-confirm">
@@ -275,7 +330,7 @@ export function SalesOrderDetail() {
       )}
       {removing && (
         <div className="alert warn row so-confirm">
-          <span>Delete this draft for good? Its number is not reused.</span>
+          <span>Delete this {order.status === 'CANCELLED' ? 'cancelled order' : 'draft'} for good? Its number is not reused.</span>
           <button
             className="btn btn-sm btn-danger"
             disabled={busy}

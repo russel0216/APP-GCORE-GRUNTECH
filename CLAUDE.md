@@ -159,8 +159,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,363 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
-masters 54, sales 319, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,372 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
+masters 54, sales 328, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1416,17 +1416,18 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
 4622 / 4622.1 and the owner's sample PDF).
 
 - **Raised FROM a quotation only** — the quotation page's "Create Sales
-  Order" panel (in the page, no dialog), SCORO's "Create invoice"
-  (2026-10-07, the owner's screenshot): every line of the VALUE revision
-  (`valueRevision()`: approved, else latest) with what is left of it,
-  ticked by line or by group, booked at a percentage, a quantity or an
-  amount; "x% of available" and "y% of quote total"; a target value (a
-  percentage or a sum) that scales the selection; the selection's own
-  subtotal, discount, tax and total through the `quotationMath` mirror; and
-  "Summarise the selection into one line worth it". `POST /sales-orders`
-  takes `mode: lines` with `lines: [{ id, quantity }]`, `all` (what is left
-  of every line) or `summary` (the selection, or what is left, as one line
-  worth its net, with `bookedItems` saying which lines it books).
+  Order" panel (in the page, no dialog). **The panel offers one thing:
+  "Transfer all details"** (2026-10-07, the owner's call, after a day with
+  SCORO's line-by-line table): the order books what is left of every line
+  of the VALUE revision (`valueRevision()`: approved, else latest), and the
+  panel says how many lines and how much. A line booked in part is adjusted
+  on the order itself, in the editor, and a later order books what is left.
+  `POST /sales-orders` still takes `mode: lines` with `lines: [{ id,
+  quantity }]`, `all` (what is left of every line) or `summary` (the
+  selection, or what is left, as one line worth its net, with `bookedItems`
+  saying which lines it books) — scripts and a future screen may use them.
+  The quotation's Sales orders card has no button of its own: the action
+  bar's is the one way.
 - **Progress booking is `bookingFor()` in `shared/salesOrderBooking.ts`**
   — SCORO's "100% of available": a quotation line is booked by the live
   (not cancelled) orders' lines pointing at it (`SalesOrderLine.
@@ -1450,12 +1451,33 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   is the quotation's rule (author, `edit_all`, or `gops.costing.view_all`);
   everybody else gets lines with the cost keys REMOVED server-side
   (`stripLineCost`), on the JSON and on the paper alike.
-- **DRAFT → ISSUED (booked) → CANCELLED (reason kept)**: Issue claims DRAFT
-  with a conditional update; an issued order refuses the full save but still
-  takes its release references (`PATCH`: SI/BS No., DR No., payment method,
-  reference); Reopen goes back to DRAFT; Delete is DRAFT-only. Editing is
-  one PUT — header and lines together — and saved groups go through
-  `rememberGroups`.
+- **DRAFT → PENDING_APPROVAL → ISSUED (booked) → CANCELLED (reason
+  kept)**. **Approval is the one engine** (2026-10-07, the owner's call: "a
+  fixed approver and an optional approver"): two seeded `sales_order`
+  workflows — "Sales Order — sales manager" (a SUPERVISOR step falling back
+  to `sales_manager`, the quotation's rule) and "Sales Order — with the
+  CEO", an OPTION (`optionLabel: 'Add the CEO as approver'`, no amount band;
+  Admin › Approval Workflows sets one). `POST /:id/submit { optionId? }`
+  claims DRAFT → PENDING_APPROVAL and calls `submitForApproval`; a refusal
+  puts it back to DRAFT. `settleSalesOrder()` (exported, idempotent) claims
+  PENDING_APPROVAL → ISSUED on approval, → DRAFT on rejection, and writes "…
+  not applied" when a decision lands after a cancel. `POST /:id/withdraw`
+  pulls it back to draft through `cancelOpenRequest`, as a quotation's
+  revision is; cancelling a pending order withdraws its request in the same
+  transaction. **Issue is refused while a route is active** (`pickWorkflow`)
+  — deactivate the seeded workflow to issue without approval, as with the
+  costing. `GET /:id` carries `needsApproval`, `approvalOptions` and
+  `approvalRoutes` (names only), so the page shows "Submit for approval
+  sends it to …", the CEO tick, and the Approval panel (`DocumentApproval`,
+  type `sales_order`). The PDF's sign-offs come from `approvalSlots` —
+  Prepared by, then each step (Pending until it acts); Noted/Approved stay
+  open only where no route exists. An issued order refuses the full save
+  but still takes its release references (`PATCH`: SI/BS No., DR No.,
+  payment method, reference); Reopen goes back to DRAFT; **Delete takes a
+  draft or a cancelled order** (2026-10-07), never an issued or pending one.
+  Editing is one PUT — header and lines together — and saved groups go
+  through `rememberGroups`. `audit-workflows.ts` knows sales and sales
+  managers raise sales orders.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary
@@ -1463,8 +1485,8 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   register, so a `view_own` holder sees only their own — with number, date,
   status, PO, SI/DR, total and who prepared it, under three figures:
   Quotation total (the value revision's), Booked (live orders' totals) and
-  Outstanding (the difference, never below 0). Empty, it offers "Create
-  Sales Order" to a `create` holder. No second query, no copy of the figures.
+  Outstanding (the difference, never below 0). No button of its own. No
+  second query, no copy of the figures.
 - **The PDF prints through the Sales Order template** (2026-10-07): a
   designed document like the quotation, landscape, in the quotation
   template's dress, edited under Admin › PDF Templates. The standard layout

@@ -7,7 +7,6 @@ import { DataList, type Column } from '../../components/DataList';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
-import { quotationTotals as quotationMath } from '../../lib/quotationMath';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -1046,7 +1045,6 @@ export function QuotationDetail() {
                   ))?.total ?? 0,
               )}
               reloadToken={reload}
-              onBook={() => setBookingOrder(true)}
             />
           )}
 
@@ -1066,18 +1064,7 @@ export function QuotationDetail() {
  * ordinary `/sales-orders?quotationId=` query, so it shows exactly what the
  * reader may open there — a `view_own` holder sees only their own.
  */
-function QuotationSalesOrders({
-  quotationId,
-  quotationTotal,
-  reloadToken,
-  onBook,
-}: {
-  quotationId: string;
-  quotationTotal: number;
-  reloadToken: number;
-  onBook: () => void;
-}) {
-  const { can } = useAuth();
+function QuotationSalesOrders({ quotationId, quotationTotal, reloadToken }: { quotationId: string; quotationTotal: number; reloadToken: number }) {
   const [rows, setRows] = useState<SalesOrderRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
 
@@ -1100,11 +1087,6 @@ function QuotationSalesOrders({
     <div className="card sales-card-gap">
       <div className="row sales-card-head">
         <h2 className="card-title">Sales orders</h2>
-        {rows && rows.length > 0 && can('gops.sales_orders.create') && outstanding > 0 && (
-          <button type="button" className="btn btn-sm" onClick={onBook}>
-            Create Sales Order
-          </button>
-        )}
       </div>
       {rows && rows.length > 0 && (
         <div className="so-sum" aria-label="Booking against the quotation">
@@ -1126,17 +1108,7 @@ function QuotationSalesOrders({
       {rows === null && !error ? (
         <Loading />
       ) : !rows?.length ? (
-        <Empty
-          title="No sales order yet"
-          hint="Nothing has been booked from this quotation."
-          action={
-            can('gops.sales_orders.create') ? (
-              <button type="button" className="btn btn-sm" onClick={onBook}>
-                Create Sales Order
-              </button>
-            ) : undefined
-          }
-        />
+        <Empty title="No sales order yet" hint="Nothing has been booked from this quotation — Create Sales Order, above, books it." />
       ) : (
         <div className="table-wrap">
           <table className="table so-table">
@@ -1494,30 +1466,19 @@ interface BookingData {
   lines: BookingLineRow[];
 }
 
-type BookPick = { on: boolean; qty: number };
-
-const round3 = (n: number) => Math.round(n * 1000) / 1000;
-const round2 = (n: number) => Math.round(n * 100) / 100;
-const round1 = (n: number) => Math.round(n * 10) / 10;
-
 /**
- * SCORO's "Create invoice", in the page (no dialog): every line of the
- * quotation's VALUE revision with what is left of it, ticked and booked at a
- * percentage, a quantity or an amount; "100% of available" and "x% of quote
- * total" under the table; a target value (a percentage or a sum) that
- * scales the whole selection; and the selection's own subtotal, discount,
- * tax and total. What is left is the server's figure (`/sales-orders/
- * booking`) — the create route refuses more than is left, so two bookings
- * of the same line cannot both pass.
+ * "Create Sales Order", in the page (no dialog): one choice, SCORO's
+ * "Transfer all details" (2026-10-07, the owner's call) — the order books
+ * what is left of every line of the quotation's VALUE revision, and a second
+ * order later books what is left after that. What is left is the server's
+ * figure (`/sales-orders/booking`); a line booked in part is adjusted on the
+ * order itself, in the editor, and the create route refuses to book what is
+ * not there.
  */
 function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDetail; onClose: () => void }) {
   const navigate = useNavigate();
   const toast = useToast();
   const [booking, setBooking] = useState<BookingData | null>(null);
-  const [picks, setPicks] = useState<Record<string, BookPick>>({});
-  const [summarise, setSummarise] = useState(false);
-  const [targetPct, setTargetPct] = useState('');
-  const [targetSum, setTargetSum] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -1525,81 +1486,18 @@ function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDet
     let alive = true;
     api
       .get<BookingData>(`/sales-orders/booking${qs({ quotationId: quotation.id })}`)
-      .then((b) => {
-        if (!alive) return;
-        setBooking(b);
-        // SCORO opens with everything that is left ticked, in full.
-        setPicks(Object.fromEntries(b.lines.filter((l) => !l.isHeading).map((l) => [l.id, { on: l.available > 0, qty: l.available }])));
-      })
+      .then((b) => alive && setBooking(b))
       .catch((err) => alive && setError(err));
     return () => {
       alive = false;
     };
   }, [quotation.id]);
 
-  if (!booking) {
-    return (
-      <div id="qd-create-so" className="qd-route so-create" role="group" aria-label="Create Sales Order">
-        <ErrorBox error={error} />
-        {!error && <Loading />}
-        {!!error && (
-          <button className="btn btn-sm" onClick={onClose}>
-            Close
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  const lines = booking.lines.filter((l) => !l.isHeading);
-  const amountOf = (l: BookingLineRow, qty: number) => round2(qty * l.unitPrice);
-  const pctOf = (l: BookingLineRow, qty: number) => (l.available > 0 ? round1((qty / l.available) * 100) : 0);
-  const selected = lines.filter((l) => picks[l.id]?.on && picks[l.id].qty > 0);
-  const selection = quotationMath({
-    lines: selected.map((l) => ({ amount: amountOf(l, picks[l.id].qty), isHeading: false })),
-    discountPct: booking.discountPct,
-    vatRate: booking.vatRate,
-    vatInclusive: booking.vatInclusive,
-  });
-  const availableGrossOfSelected = selected.reduce((n, l) => n + amountOf(l, l.available), 0);
-  const pctOfAvailable = booking.availableNet > 0 ? round1((selection.net / booking.availableNet) * 100) : 0;
-  const pctOfQuote = booking.net > 0 ? round1((selection.net / booking.net) * 100) : 0;
-  const nothingLeft = booking.availableNet <= 0 && lines.every((l) => l.available <= 0);
-
-  const setQty = (l: BookingLineRow, qty: number) =>
-    setPicks((p) => ({ ...p, [l.id]: { on: true, qty: round3(Math.min(l.available, Math.max(0, qty))) } }));
-  const setOn = (l: BookingLineRow, on: boolean) =>
-    setPicks((p) => ({ ...p, [l.id]: { on, qty: on && !(p[l.id]?.qty > 0) ? l.available : (p[l.id]?.qty ?? 0) } }));
-  const applyTargetPct = (pct: number) => {
-    const share = Math.min(100, Math.max(0, pct)) / 100;
-    setPicks((p) => {
-      const next = { ...p };
-      for (const l of lines) if (next[l.id]?.on) next[l.id] = { on: true, qty: round3(l.available * share) };
-      return next;
-    });
-  };
-
-  // The groups, in the order the lines come — SCORO's EQUIPMENT row with a
-  // tick that takes its whole section.
-  const groups: { name: string; lines: BookingLineRow[] }[] = [];
-  for (const l of lines) {
-    const name = (l.group ?? '').trim() || 'Ungrouped';
-    const g = groups.find((x) => x.name === name);
-    if (g) g.lines.push(l);
-    else groups.push({ name, lines: [l] });
-  }
-  const allOn = lines.filter((l) => l.available > 0).every((l) => picks[l.id]?.on);
-
   async function proceed() {
-    if (!booking) return;
     setBusy(true);
     setError(null);
     try {
-      const made = await api.post<{ id: string; number: string }>('/sales-orders', {
-        quotationId: quotation.id,
-        mode: summarise ? 'summary' : 'lines',
-        lines: selected.map((l) => ({ id: l.id, quantity: picks[l.id].qty })),
-      });
+      const made = await api.post<{ id: string; number: string }>('/sales-orders', { quotationId: quotation.id, mode: 'all' });
       toast('ok', `Sales order ${made.number} created`);
       navigate(`/g-ops/sales-orders/${made.id}/edit`);
     } catch (err) {
@@ -1608,233 +1506,67 @@ function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDet
     }
   }
 
+  const lines = booking?.lines.filter((l) => !l.isHeading) ?? [];
+  const left = lines.filter((l) => l.available > 0);
+  const nothingLeft = !!booking && left.length === 0;
+  const partial = lines.some((l) => l.booked > 0 && l.available > 0);
+  const net = booking?.availableNet ?? 0;
+  const total = booking ? (booking.vatInclusive ? net : Math.round(net * (1 + booking.vatRate) * 100) / 100) : 0;
+
   return (
     <div id="qd-create-so" className="qd-route so-create" role="group" aria-label="Create Sales Order">
       <ErrorBox error={error} />
-      <p className="qd-route-label">
-        Books R{booking.revision} in operations{booking.revisionStatus === 'APPROVED' ? '' : ' (no revision is approved yet — the latest is used)'}.
-        {booking.bookedNet > 0 ? ` ${formatMoney(booking.bookedNet)} of ${formatMoney(booking.net)} is already on a sales order;` : ''}{' '}
-        a second order on this quotation gets a .1, .2 number.
-      </p>
-      {nothingLeft ? (
+      {!booking && !error && <Loading />}
+      {booking && (
         <>
-          <p>Everything on this quotation is already on a sales order. Cancel an order to give its lines back.</p>
-          <div className="row so-create-actions">
-            <button className="btn btn-sm" onClick={onClose}>
-              Close
-            </button>
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="table-wrap">
-            <table className="table so-book-table">
-              <thead>
-                <tr>
-                  <th>
-                    <Checkbox
-                      checked={allOn}
-                      onChange={(v) =>
-                        setPicks((p) => {
-                          const next = { ...p };
-                          for (const l of lines) if (l.available > 0) next[l.id] = { on: v, qty: v ? l.available : (p[l.id]?.qty ?? 0) };
-                          return next;
-                        })
-                      }
-                      label=""
-                    />
-                  </th>
-                  <th>%</th>
-                  <th>Product group</th>
-                  <th>Product name</th>
-                  <th>Quantity</th>
-                  <th>Unit</th>
-                  <th className="num">Unit price</th>
-                  <th className="num">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {groups.map((g) => {
-                  const live = g.lines.filter((l) => l.available > 0);
-                  const groupOn = live.length > 0 && live.every((l) => picks[l.id]?.on);
-                  return [
-                    <tr key={`g-${g.name}`} className="so-book-group">
-                      <td>
-                        <Checkbox
-                          checked={groupOn}
-                          onChange={(v) =>
-                            setPicks((p) => {
-                              const next = { ...p };
-                              for (const l of live) next[l.id] = { on: v, qty: v ? l.available : (p[l.id]?.qty ?? 0) };
-                              return next;
-                            })
-                          }
-                          label=""
-                        />
-                      </td>
-                      <td colSpan={7}>{g.name}</td>
-                    </tr>,
-                    ...g.lines.map((l) => {
-                      const pick = picks[l.id] ?? { on: false, qty: 0 };
-                      const gone = l.available <= 0;
-                      return (
-                        <tr key={l.id} className={gone ? 'faint' : undefined}>
-                          <td>
-                            <Checkbox checked={pick.on && !gone} onChange={(v) => !gone && setOn(l, v)} label="" />
-                          </td>
-                          <td>
-                            {gone ? (
-                              <span className="mono">booked</span>
-                            ) : (
-                              <span className="so-w so-w-pct">
-                              <NumberInput
-                                kind="decimal"
-                                min={0}
-                                max={100}
-                                step={5}
-                                value={pctOf(l, pick.qty)}
-                                aria-label={`${(l.title ?? '').trim() || l.description}: percent of what is left`}
-                                onChange={(e) => {
-                                  const n = Number(e.target.value);
-                                  if (Number.isFinite(n)) setQty(l, (l.available * Math.min(100, Math.max(0, n))) / 100);
-                                }}
-                              />
-                              </span>
-                            )}
-                          </td>
-                          <td>{l.group ?? ''}</td>
-                          <td>
-                            <div>{(l.title ?? '').trim() || l.description}</div>
-                            {(l.title ?? '').trim() && l.description && <div className="faint">{l.description}</div>}
-                          </td>
-                          <td>
-                            <span className="row so-book-qty">
-                              {gone ? (
-                                <span className="mono">0</span>
-                              ) : (
-                                <span className="so-w so-w-qty">
-                                <NumberInput
-                                  kind="quantity"
-                                  min={0}
-                                  max={l.available}
-                                  step={1}
-                                  value={pick.qty}
-                                  aria-label={`${(l.title ?? '').trim() || l.description}: quantity to book`}
-                                  onChange={(e) => {
-                                    const n = Number(e.target.value);
-                                    if (Number.isFinite(n)) setQty(l, n);
-                                  }}
-                                />
-                                </span>
-                              )}
-                              <span className="so-book-left" title={`${l.booked} of ${l.quantity} already booked`}>
-                                / {l.available}
-                              </span>
-                            </span>
-                          </td>
-                          <td>{l.unit}</td>
-                          <td className="num mono">{formatMoney(l.unitPrice)}</td>
-                          <td className="num so-book-amount">
-                            {gone ? (
-                              <span className="mono">—</span>
-                            ) : (
-                              <span className="so-w so-w-amt">
-                              <NumberInput
-                                kind="money"
-                                min={0}
-                                max={amountOf(l, l.available)}
-                                step={1000}
-                                value={amountOf(l, pick.qty)}
-                                aria-label={`${(l.title ?? '').trim() || l.description}: amount to book`}
-                                onChange={(e) => {
-                                  const n = Number(e.target.value);
-                                  if (Number.isFinite(n) && l.unitPrice > 0) setQty(l, n / l.unitPrice);
-                                }}
-                              />
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    }),
-                  ];
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="so-book-foot">
-            <div className="so-book-of">
+          <p className="qd-route-label">
+            Transfer all details: books R{booking.revision}
+            {booking.revisionStatus === 'APPROVED' ? '' : ' (no revision is approved yet — the latest is used)'} in operations. A second
+            order on this quotation gets a .1, .2 number.
+          </p>
+          {nothingLeft ? (
+            <p>Everything on this quotation is already on a sales order. Cancel an order to give its lines back.</p>
+          ) : (
+            <dl className="so-sum">
               <div>
-                <strong>{pctOfAvailable}%</strong> of available
+                <dt>Lines</dt>
+                <dd>
+                  {left.length} of {lines.length}
+                  {partial ? ' (some in part)' : ''}
+                </dd>
               </div>
               <div>
-                <strong>{pctOfQuote}%</strong> of quote total
+                <dt>Sum without tax</dt>
+                <dd className="mono">{formatMoney(net)}</dd>
               </div>
-              <div className="so-book-target">
-                <strong>Target order value:</strong>
-                <span className="so-w so-w-pct">
-                <NumberInput
-                  kind="decimal"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={targetPct}
-                  placeholder="%"
-                  aria-label="Target order value, as a percentage of what is left"
-                  onChange={(e) => {
-                    setTargetPct(e.target.value);
-                    const n = Number(e.target.value);
-                    if (e.target.value.trim() !== '' && Number.isFinite(n)) {
-                      applyTargetPct(n);
-                      setTargetSum('');
-                    }
-                  }}
-                />
-                </span>
-                <span>or</span>
-                <span className="so-w so-w-amt">
-                <NumberInput
-                  kind="money"
-                  min={0}
-                  step={1000}
-                  value={targetSum}
-                  placeholder="Total sum"
-                  aria-label="Target order value, as a sum before tax"
-                  onChange={(e) => {
-                    setTargetSum(e.target.value);
-                    const n = Number(e.target.value);
-                    if (e.target.value.trim() !== '' && Number.isFinite(n) && availableGrossOfSelected > 0) {
-                      applyTargetPct((n / availableGrossOfSelected) * 100);
-                      setTargetPct('');
-                    }
-                  }}
-                />
-                </span>
+              <div>
+                <dt>Total ({booking.vatInclusive ? 'VAT included' : 'with VAT'})</dt>
+                <dd className="mono">{formatMoney(total)}</dd>
               </div>
-            </div>
-            <div className="so-book-totals">
-              <span>Subtotal of selected lines ({selected.length})</span>
-              <span className="mono">{formatMoney(selection.subtotal)}</span>
-              <span>Discount</span>
-              <span className="mono">{formatMoney(selection.discountAmount)}</span>
-              <span>{booking.vatInclusive ? 'VAT included' : 'Tax'}</span>
-              <span className="mono">{formatMoney(selection.vatAmount)}</span>
-              <span className="so-grand">Total (PHP)</span>
-              <span className="so-grand mono">{formatMoney(selection.total)}</span>
-            </div>
-          </div>
-
-          <Checkbox checked={summarise} onChange={setSummarise} label="Summarise the selection into one line worth it" />
+              {booking.bookedNet > 0 && (
+                <div>
+                  <dt>Already booked</dt>
+                  <dd className="mono">{formatMoney(booking.bookedNet)}</dd>
+                </div>
+              )}
+            </dl>
+          )}
           <div className="row so-create-actions">
-            <button className="btn btn-primary btn-sm" onClick={() => void proceed()} disabled={busy || selected.length === 0}>
-              {busy ? 'Creating…' : 'Proceed'}
-            </button>
+            {!nothingLeft && (
+              <button className="btn btn-primary btn-sm" onClick={() => void proceed()} disabled={busy}>
+                {busy ? 'Creating…' : 'Proceed'}
+              </button>
+            )}
             <button className="btn btn-sm" onClick={onClose} disabled={busy}>
-              Cancel
+              {nothingLeft ? 'Close' : 'Cancel'}
             </button>
           </div>
         </>
+      )}
+      {!!error && !booking && (
+        <button className="btn btn-sm" onClick={onClose}>
+          Close
+        </button>
       )}
     </div>
   );

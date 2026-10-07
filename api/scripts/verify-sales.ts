@@ -53,6 +53,9 @@ import {
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
+// The same for the sales order's subscriber — act() below settles in this
+// process, and without it an approval would settle into the void.
+import '../src/routes/salesOrders';
 import { groupKey, rememberGroups } from '../src/shared/quotationGroups';
 
 if (env.isProduction) {
@@ -2180,11 +2183,25 @@ async function main() {
     const underQuote = await http(salesToken, 'GET', `/sales-orders?quotationId=${soQuoteId}&sort=number&dir=asc`);
     const underRows = (underQuote.body.rows ?? []) as { number: string }[];
     check(
-      'the quotation lists the orders booked from it, in number order',
+      'the quotation lists the orders booked from it, in number order \u2014 the cancelled one among them',
       underQuote.status === 200 &&
         underRows.length === 3 &&
         underRows.map((r) => r.number).join(',') === `${so1Body.number},${so1Body.number}.1,${so1Body.number}.2`,
       underRows.map((r) => r.number).join(','),
+    );
+
+    const delCancelled = await http(salesToken, 'DELETE', `/sales-orders/${so2Body.id}`);
+    check(
+      'a cancelled order can be deleted (2026-10-07, the owner\u2019s call)',
+      delCancelled.status === 200 && (await prisma.salesOrder.findUnique({ where: { id: so2Body.id } })) === null,
+      delCancelled.text.slice(0, 120),
+    );
+    const underQuoteAfter = await http(salesToken, 'GET', `/sales-orders?quotationId=${soQuoteId}&sort=number&dir=asc`);
+    const underRowsAfter = (underQuoteAfter.body.rows ?? []) as { number: string }[];
+    check(
+      'and it leaves the quotation\u2019s list',
+      underRowsAfter.map((r) => r.number).join(',') === `${so1Body.number},${so1Body.number}.2`,
+      underRowsAfter.map((r) => r.number).join(','),
     );
 
     const otherEdits = await http(otherToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 60 });
@@ -2213,9 +2230,40 @@ async function main() {
       `${edited.status} ${edited.body.total}`,
     );
 
-    const soIssued = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
-    const soIssuedTwice = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
-    check('issuing books it once — a second Issue is refused', soIssued.status === 200 && soIssuedTwice.status === 400, `${soIssued.status} ${soIssuedTwice.status}`);
+    // ── Approval: a fixed approver and an optional one, through the one engine ──
+    const issueRefused = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
+    check('with a route active, Issue is refused — the order is submitted instead', issueRefused.status === 400 && issueRefused.text.includes('approval'), issueRefused.text.slice(0, 120));
+    const soRoute = await http(salesToken, 'GET', `/sales-orders/${so1Body.id}`);
+    const soRouteBody = soRoute.body as unknown as {
+      needsApproval: boolean;
+      approvalOptions: { id: string; label: string }[];
+      approvalRoutes: { standard: { steps: { approvers: { id: string }[] }[] } | null } | null;
+    };
+    check(
+      'the order names its route — the sales manager — and offers the CEO as an option',
+      soRouteBody.needsApproval === true &&
+        soRouteBody.approvalOptions.some((o) => o.label === 'Add the CEO as approver') &&
+        !!soRouteBody.approvalRoutes?.standard?.steps[0]?.approvers.some((p) => p.id === manager.id),
+      soRoute.text.slice(0, 200),
+    );
+    const submitted = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/submit`, {});
+    check('submitting puts it with the sales manager', submitted.status === 200 && submitted.body.status === 'PENDING_APPROVAL', submitted.text.slice(0, 120));
+    check('a pending order refuses edits', (await http(salesToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 45 })).status === 400);
+    const soPulled = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/withdraw`);
+    const soPulledReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so1Body.id }, orderBy: { createdAt: 'desc' } });
+    check('the author pulls it back to draft, and the request is withdrawn', soPulled.status === 200 && soPulledReq?.status === 'CANCELLED', `${soPulled.status} ${soPulledReq?.status}`);
+    const submittedAgain = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/submit`, {});
+    const openReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so1Body.id, status: 'PENDING' } });
+    await act({ requestId: openReq!.id, userId: manager.id, action: 'REJECTED' });
+    const afterReject = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id } });
+    check('rejected, it returns to draft', submittedAgain.status === 200 && afterReject.status === 'DRAFT', afterReject.status);
+    const submittedThird = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/submit`, {});
+    const openReq2 = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so1Body.id, status: 'PENDING' } });
+    await act({ requestId: openReq2!.id, userId: manager.id, action: 'APPROVED' });
+    const afterApprove = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id } });
+    check('approved, it is issued — the sale is booked', submittedThird.status === 200 && afterApprove.status === 'ISSUED', afterApprove.status);
+    const delIssued = await http(salesToken, 'DELETE', `/sales-orders/${so1Body.id}`);
+    check('an issued order cannot be deleted', delIssued.status === 400, String(delIssued.status));
     const editIssued = await http(salesToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 45 });
     check('an issued order refuses the full save — reopen first', editIssued.status === 400, String(editIssued.status));
     const released = await http(salesToken, 'PATCH', `/sales-orders/${so1Body.id}`, { siNumber: 'SI-4622', drNumber: 'DR-991' });

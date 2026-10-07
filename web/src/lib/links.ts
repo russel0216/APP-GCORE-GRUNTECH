@@ -23,6 +23,7 @@ const DETAIL: Record<string, string> = {
   // Sales
   lead: '/g-ops/leads',
   quotation: '/g-ops/quotations',
+  sales_order: '/g-ops/sales-orders',
   costing: '/g-ops/costing',
   // Delivery
   job: '/g-ops/projects',

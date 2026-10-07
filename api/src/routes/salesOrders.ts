@@ -29,7 +29,16 @@ import { bookingFor, thou } from '../shared/salesOrderBooking';
 import { formatAmount, formatDate, formatShortDate, type PdfTotal, type Signatory } from '../shared/pdf';
 import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
 import { salesOrderDesign, withoutCostColumns } from '../shared/salesOrderTemplate';
-import { contactPhone } from '../shared/approvals';
+import {
+  approvalOptions,
+  approvalSlots,
+  cancelOpenRequest,
+  contactPhone,
+  onApprovalSettled,
+  pickWorkflow,
+  routePreview,
+  submitForApproval,
+} from '../shared/approvals';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
@@ -254,10 +263,31 @@ salesOrderRoutes.get(
       throw forbidden('This sales order is someone else’s');
     }
     const showCost = canSeeOrderCost(me, order.ownerId);
+    // Approval (2026-10-07, the owner's call): a fixed approver and an
+    // optional one, both data in Admin › Approval Workflows. With a route
+    // active the order is submitted, not issued; the page names who decides.
+    const total = num(order.total);
+    const workflow = await pickWorkflow('sales_order', total);
+    const options = order.status === 'DRAFT' && workflow ? await approvalOptions('sales_order', total) : [];
+    const brief = (route: Awaited<ReturnType<typeof routePreview>>) =>
+      route && {
+        name: route.name,
+        steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
+      };
+    const approvalRoutes =
+      order.status === 'DRAFT' && workflow
+        ? {
+            standard: brief(await routePreview('sales_order', total, me.id)),
+            options: await Promise.all(options.map(async (o) => ({ id: o.id, route: brief(await routePreview('sales_order', total, me.id, o.id)) }))),
+          }
+        : null;
     res.json({
       ...presentOrder(order as unknown as Record<string, unknown>, showCost),
       canEdit: canEditRecord(me, 'gops', 'sales_orders', order.ownerId),
       canSeeCost: showCost,
+      needsApproval: !!workflow,
+      approvalOptions: options,
+      approvalRoutes,
     });
   }),
 );
@@ -613,6 +643,9 @@ salesOrderRoutes.post(
     const { order } = await orderForEdit(req, req.params.id);
     const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
     if (!hasLine) throw badRequest('Add at least one line before issuing it');
+    if (await pickWorkflow('sales_order', num(order.total))) {
+      throw badRequest('This sales order goes through approval — submit it for approval instead');
+    }
     // Claimed, never simply written: two Issue clicks book once.
     const claimed = await prisma.salesOrder.updateMany({
       where: { id: order.id, status: 'DRAFT' },
@@ -626,6 +659,103 @@ salesOrderRoutes.post(
     res.json({ ok: true, status: 'ISSUED' });
   }),
 );
+
+// ── Approval: the one engine, a fixed approver and an optional one ──────────
+
+salesOrderRoutes.post(
+  '/:id/submit',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { me, order } = await orderForEdit(req, req.params.id);
+    // An optional route the submitter ticked — "Add the CEO as approver".
+    const { optionId } = parseBody(z.object({ optionId: z.string().optional().nullable() }), req.body ?? {});
+    const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
+    if (!hasLine) throw badRequest('Add at least one line before submitting it');
+    const full = await prisma.salesOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { customer: { select: { name: true } }, quotation: { select: { subject: true } } },
+    });
+    const claimed = await prisma.salesOrder.updateMany({ where: { id: order.id, status: 'DRAFT' }, data: { status: 'PENDING_APPROVAL' } });
+    if (!claimed.count) throw badRequest('This sales order moved a moment ago — reload to see where it stands');
+    try {
+      await submitForApproval({
+        documentType: 'sales_order',
+        documentId: order.id,
+        documentNumber: order.number,
+        subject: `${full.customer.name} — ${full.quotation.subject}`,
+        amount: num(order.total),
+        link: `/g-ops/sales-orders/${order.id}`,
+        requesterId: me.id,
+        optionId: optionId || null,
+      });
+    } catch (err) {
+      // Refused (no route, nobody to approve, an option that does not apply):
+      // back to a draft, never pending with no approval behind it.
+      await prisma.salesOrder.updateMany({ where: { id: order.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      throw err;
+    }
+    await audit({ entityType: 'sales_order', entityId: order.id, action: 'SUBMITTED', summary: `Sales order ${order.number} sent for approval` }, req);
+    res.json({ ok: true, status: 'PENDING_APPROVAL' });
+  }),
+);
+
+/**
+ * Pulling an order back from the approver to edit it, as a quotation's
+ * revision can be: the claim is conditional, so a decision that lands first
+ * wins, and the open request is withdrawn through the engine, which tells
+ * the approvers.
+ */
+salesOrderRoutes.post(
+  '/:id/withdraw',
+  require_('gops.sales_orders.edit_own'),
+  handler(async (req, res) => {
+    const { me, order } = await orderForEdit(req, req.params.id, false);
+    if (order.status !== 'PENDING_APPROVAL') throw badRequest('This sales order is not with the approver — nothing to pull back');
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.salesOrder.updateMany({ where: { id: order.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      await cancelOpenRequest('sales_order', order.id, tx, `pulled back to draft by ${me.name}`, me.id);
+    });
+    await audit({ entityType: 'sales_order', entityId: order.id, action: 'UPDATED', summary: `Pulled sales order ${order.number} back to draft` }, req);
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+/**
+ * An approved order is ISSUED — booked — and a rejected one goes back to
+ * draft. Claimed on PENDING_APPROVAL, so a decision that lands after a cancel
+ * or a pull-back changes nothing and the trail says so.
+ */
+export async function settleSalesOrder(documentId: string, outcome: 'APPROVED' | 'REJECTED') {
+  const claimed = await prisma.salesOrder.updateMany({
+    where: { id: documentId, status: 'PENDING_APPROVAL' },
+    data: { status: outcome === 'APPROVED' ? 'ISSUED' : 'DRAFT' },
+  });
+  const order = await prisma.salesOrder.findUnique({ where: { id: documentId }, select: { number: true, total: true, status: true } });
+  if (!order) return;
+  if (!claimed.count) {
+    await audit({
+      entityType: 'sales_order',
+      entityId: documentId,
+      action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+      summary: `Sales order ${order.number} ${outcome.toLowerCase()} after it was ${order.status.toLowerCase()} — not applied`,
+    });
+    return;
+  }
+  await audit({
+    entityType: 'sales_order',
+    entityId: documentId,
+    action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+    summary:
+      outcome === 'APPROVED'
+        ? `Sales order ${order.number} approved and issued — booked at ${formatAmount(num(order.total))}`
+        : `Sales order ${order.number} returned to draft`,
+  });
+}
+
+onApprovalSettled('sales_order', async (request, outcome) => {
+  await settleSalesOrder(request.documentId, outcome);
+});
 
 salesOrderRoutes.post(
   '/:id/reopen',
@@ -651,11 +781,17 @@ salesOrderRoutes.post(
   handler(async (req, res) => {
     const { me, order } = await orderForEdit(req, req.params.id, false);
     const { reason } = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled') }), req.body);
-    const claimed = await prisma.salesOrder.updateMany({
-      where: { id: order.id, status: { in: ['DRAFT', 'ISSUED'] } },
-      data: { status: 'CANCELLED', cancelReason: reason },
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.salesOrder.updateMany({
+        where: { id: order.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'ISSUED'] } },
+        data: { status: 'CANCELLED', cancelReason: reason },
+      });
+      if (!claimed.count) throw badRequest('This sales order is already cancelled');
+      // One with the approver takes its request with it, and the approvers are told.
+      if (order.status === 'PENDING_APPROVAL') {
+        await cancelOpenRequest('sales_order', order.id, tx, `cancelled by ${me.name}: ${reason}`, me.id);
+      }
     });
-    if (!claimed.count) throw badRequest('This sales order is already cancelled');
     await audit(
       {
         entityType: 'sales_order',
@@ -674,7 +810,10 @@ salesOrderRoutes.delete(
   '/:id',
   require_('gops.sales_orders.delete'),
   handler(async (req, res) => {
-    const { order } = await orderForEdit(req, req.params.id);
+    const { order } = await orderForEdit(req, req.params.id, false);
+    if (order.status !== 'DRAFT' && order.status !== 'CANCELLED') {
+      throw badRequest('Only a draft or a cancelled sales order can be deleted — cancel it first');
+    }
     await prisma.salesOrder.delete({ where: { id: order.id } });
     await audit(
       { entityType: 'sales_order', entityId: order.id, action: 'DELETED', summary: `Deleted sales order ${order.number}`, before: order },
@@ -825,6 +964,14 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     totalRows.push({ label: 'Margin sum:', value: amount(totals.cost.totalMargin) });
   }
 
+  // Prepared by the author; then every step of the approval route, dated
+  // once it has approved and "Pending" until then — a draft shows the route
+  // submitting would take. Without a route, Noted and Approved stay open.
+  const slots = await approvalSlots(
+    'sales_order',
+    order.id,
+    order.status === 'DRAFT' ? { amount: num(order.total), requesterId: order.ownerId } : undefined,
+  );
   const signatories: Signatory[] = [
     {
       role: 'Prepared by',
@@ -834,8 +981,15 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
       email: order.owner.email ?? undefined,
       at: order.createdAt,
     },
-    { role: 'Noted by' },
-    { role: 'Approved by' },
+    ...(slots.length
+      ? slots.map((sl): Signatory => {
+          const role = slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by';
+          if (sl.name) return { role, name: sl.name, position: sl.position, phone: sl.phone, email: sl.email, at: sl.at };
+          const who = sl.assigned ?? [];
+          if (who.length === 1) return { role, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
+          return who.length > 1 ? { role, name: who.map((p) => p.name).join(' or ') } : { role };
+        })
+      : [{ role: 'Noted by' }, { role: 'Approved by' }]),
   ];
 
   return { title: `${order.number} — Sales Order`, fields, rows, totals: totalRows, signatories };
