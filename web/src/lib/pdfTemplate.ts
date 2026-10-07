@@ -12,9 +12,16 @@
 export const PAGE_WIDTH = 595.28;
 export const PAGE_HEIGHT = 841.89;
 
+export type Orientation = 'portrait' | 'landscape';
+
+/** The page a layout draws on: A4 upright, or on its side (the sales order). */
+export function pageSizeOf(layout: { orientation?: Orientation }): { w: number; h: number } {
+  return layout.orientation === 'landscape' ? { w: PAGE_HEIGHT, h: PAGE_WIDTH } : { w: PAGE_WIDTH, h: PAGE_HEIGHT };
+}
+
 export type Anchor = 'first' | 'every' | 'later' | 'after' | 'last';
 export type Align = 'left' | 'center' | 'right';
-export type ColumnKey = 'no' | 'product' | 'qtyUnit' | 'qty' | 'unit' | 'unitPrice' | 'amount' | 'group';
+export type ColumnKey = 'no' | 'product' | 'qtyUnit' | 'qty' | 'unit' | 'unitPrice' | 'amount' | 'group' | 'cost' | 'margin';
 
 interface Base {
   id: string;
@@ -102,6 +109,7 @@ export type BlockType = Block['type'];
 
 export interface Layout {
   version: 1;
+  orientation?: Orientation;
   flowTop: number;
   flowBottom: number;
   blocks: Block[];
@@ -266,15 +274,15 @@ export function resolveInline(text: string, values: Record<string, string | unde
 /** A point value as the editor keeps it: to a hundredth, so a nudge never accumulates float dust. */
 export const pt = (v: number) => Math.round(v * 100) / 100;
 
-export function clampToPage<B extends Block>(b: B): B {
-  const w = Math.min(Math.max(b.w, 1), PAGE_WIDTH);
-  const h = Math.min(Math.max(b.h, 0.25), PAGE_HEIGHT);
+export function clampToPage<B extends Block>(b: B, page: { w: number; h: number } = { w: PAGE_WIDTH, h: PAGE_HEIGHT }): B {
+  const w = Math.min(Math.max(b.w, 1), page.w);
+  const h = Math.min(Math.max(b.h, 0.25), page.h);
   return {
     ...b,
     w: pt(w),
     h: pt(h),
-    x: pt(Math.min(Math.max(b.x, 0), PAGE_WIDTH - w)),
-    y: pt(Math.min(Math.max(b.y, 0), PAGE_HEIGHT - h)),
+    x: pt(Math.min(Math.max(b.x, 0), page.w - w)),
+    y: pt(Math.min(Math.max(b.y, 0), page.h - h)),
   };
 }
 

@@ -106,33 +106,37 @@ async function editorTokenIsSpare(): Promise<boolean> {
   — kept in a Setting of its own, not in memory — and put back by cleanup(),
   which also runs first: a run that died half way returns it next time.
 */
-const LAYOUT_KEY = 'pdfTemplate.quotation';
-const STASH_KEY = `${LAYOUT_KEY}.__verify__`;
+const LAYOUT_KEYS = ['pdfTemplate.quotation', 'pdfTemplate.sales_order'];
+const stashKeyOf = (key: string) => `${key}.__verify__`;
 
 async function setSavedLayoutAside() {
-  const row = await prisma.setting.findUnique({ where: { key: LAYOUT_KEY } });
-  if (!row) return;
-  await prisma.$transaction([
-    prisma.setting.upsert({
-      where: { key: STASH_KEY },
-      create: { key: STASH_KEY, value: row.value as Prisma.InputJsonValue, description: row.description },
-      update: { value: row.value as Prisma.InputJsonValue, description: row.description },
-    }),
-    prisma.setting.delete({ where: { key: LAYOUT_KEY } }),
-  ]);
+  for (const key of LAYOUT_KEYS) {
+    const row = await prisma.setting.findUnique({ where: { key } });
+    if (!row) continue;
+    await prisma.$transaction([
+      prisma.setting.upsert({
+        where: { key: stashKeyOf(key) },
+        create: { key: stashKeyOf(key), value: row.value as Prisma.InputJsonValue, description: row.description },
+        update: { value: row.value as Prisma.InputJsonValue, description: row.description },
+      }),
+      prisma.setting.delete({ where: { key } }),
+    ]);
+  }
 }
 
 async function putSavedLayoutBack() {
-  const stash = await prisma.setting.findUnique({ where: { key: STASH_KEY } });
-  if (!stash) return;
-  await prisma.$transaction([
-    prisma.setting.upsert({
-      where: { key: LAYOUT_KEY },
-      create: { key: LAYOUT_KEY, value: stash.value as Prisma.InputJsonValue, description: stash.description },
-      update: { value: stash.value as Prisma.InputJsonValue, description: stash.description },
-    }),
-    prisma.setting.delete({ where: { key: STASH_KEY } }),
-  ]);
+  for (const key of LAYOUT_KEYS) {
+    const stash = await prisma.setting.findUnique({ where: { key: stashKeyOf(key) } });
+    if (!stash) continue;
+    await prisma.$transaction([
+      prisma.setting.upsert({
+        where: { key },
+        create: { key, value: stash.value as Prisma.InputJsonValue, description: stash.description },
+        update: { value: stash.value as Prisma.InputJsonValue, description: stash.description },
+      }),
+      prisma.setting.delete({ where: { key: stashKeyOf(key) } }),
+    ]);
+  }
 }
 
 async function cleanup() {
@@ -2174,19 +2178,20 @@ async function main() {
     const released = await http(salesToken, 'PATCH', `/sales-orders/${so1Body.id}`, { siNumber: 'SI-4622', drNumber: 'DR-991' });
     check('but still takes its release references', released.status === 200, String(released.status));
 
-    const soPdfOwner = pdfText(
-      Buffer.from(
-        await (
-          await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
-        ).arrayBuffer(),
-      ),
+    const soPdfBytes = Buffer.from(
+      await (
+        await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
+      ).arrayBuffer(),
+    );
+    const soPdfOwner = pdfText(soPdfBytes);
+    check(
+      'the PDF prints through the Sales Order template: customer, PO, totals — and cost and margin for who may see them',
+      soPdfOwner.includes('SALES ORDER') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('Margin sum:') && soPdfOwner.includes('SI / BS No.: SI-4622'),
+      soPdfOwner.slice(0, 200),
     );
     check(
-      'the PDF is the sample\u2019s shape: customer, PO, the lines, totals — and cost and margin for who may see them',
-      soPdfOwner.includes('SALES ORDER') === false /* house style titles print as given */
-        ? soPdfOwner.includes('Sales Order') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('Margin sum:') && soPdfOwner.includes('SI / BS No.: SI-4622')
-        : false,
-      soPdfOwner.slice(0, 200),
+      'and the paper is A4 on its side — the cost columns are why it is landscape',
+      soPdfBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]'),
     );
     const soPdfOther = pdfText(
       Buffer.from(
@@ -2459,6 +2464,93 @@ async function main() {
       } else {
         await prisma.setting.deleteMany({ where: { key: 'pdfTemplate.quotation' } });
       }
+    }
+
+    // ── Admin › PDF Templates: the Sales Order template ───────────────────────
+    console.log('\nThe Sales Order PDF template (Admin › PDF Templates)');
+    try {
+      const soTpl = await http(adminToken, 'GET', '/pdf-templates/sales_order');
+      const soStandard = soTpl.body.standard as { orientation?: string; blocks: Record<string, unknown>[] };
+      check(
+        'the editor loads the Sales Order template: landscape standard, the order fields, the cost columns on offer',
+        soTpl.status === 200 &&
+          soStandard.orientation === 'landscape' &&
+          (soTpl.body.layout as { orientation?: string }).orientation === 'landscape' &&
+          (soTpl.body.fields as { key: string }[]).some((f) => f.key === 'order.number') &&
+          (soTpl.body.columns as { key: string }[]).some((c) => c.key === 'cost') &&
+          (soTpl.body.columns as { key: string }[]).some((c) => c.key === 'margin'),
+        soTpl.text.slice(0, 200),
+      );
+
+      const soMine = {
+        ...soStandard,
+        blocks: [
+          ...soStandard.blocks,
+          {
+            id: 'verify-so-box', name: 'Verify', type: 'text', anchor: 'first', x: 40, y: 500, w: 420, h: 12,
+            text: `${TAG} SOLAYOUT # {{order.number}}`, size: 9,
+          },
+        ],
+      };
+      const soSaved = await http(adminToken, 'PUT', '/pdf-templates/sales_order', soMine);
+      check('an administrator saves a Sales Order layout', soSaved.status === 200 && soSaved.body.saved === true, soSaved.text.slice(0, 200));
+      const soPrinted = pdfText(
+        Buffer.from(
+          await (
+            await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
+          ).arrayBuffer(),
+        ),
+      );
+      check(
+        'and the sales order prints with it — the new box, filled with the order number',
+        soPrinted.includes(`${TAG} SOLAYOUT # ${so1Body.number}`),
+        soPrinted.slice(0, 200),
+      );
+
+      // The quotation is the customer's paper: its table may never place cost.
+      const qStd = (await http(adminToken, 'GET', '/pdf-templates/quotation')).body.standard as {
+        blocks: { type: string; columns?: object[] }[];
+      };
+      const refusedCost = await http(adminToken, 'PUT', '/pdf-templates/quotation', {
+        ...qStd,
+        blocks: qStd.blocks.map((b) =>
+          b.type === 'items' ? { ...b, columns: [...(b.columns ?? []), { key: 'cost', label: 'Cost', width: 60, align: 'right' }] } : b,
+        ),
+      });
+      check(
+        'the quotation\u2019s line table can never place a cost column',
+        refusedCost.status === 400 && refusedCost.text.toLowerCase().includes('cost'),
+        refusedCost.text.slice(0, 160),
+      );
+
+      const soPreview = await fetch(`${BASE}/pdf-templates/sales_order/preview`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ layout: soMine, documentId: so1Body.id }),
+      });
+      const soPreviewText = pdfText(Buffer.from(await soPreview.arrayBuffer()));
+      check(
+        'a preview prints the layout against a real sales order',
+        soPreview.status === 200 && soPreviewText.includes('4500001134') && soPreviewText.includes(`${TAG} SOLAYOUT # ${so1Body.number}`),
+      );
+      const soSample = await fetch(`${BASE}/pdf-templates/sales_order/preview`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ layout: soMine, sample: 'short' }),
+      });
+      const soSampleBytes = Buffer.from(await soSample.arrayBuffer());
+      check(
+        'or against the sample, on the same landscape paper',
+        soSample.status === 200 && soSampleBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]'),
+      );
+
+      const soReset = await http(adminToken, 'DELETE', '/pdf-templates/sales_order');
+      check(
+        '"Standard layout" puts the landscape standard back',
+        soReset.status === 200 && soReset.body.saved === false && (soReset.body.layout as { orientation?: string }).orientation === 'landscape',
+      );
+    } finally {
+      await prisma.setting.deleteMany({ where: { key: 'pdfTemplate.sales_order' } });
     }
   }
 

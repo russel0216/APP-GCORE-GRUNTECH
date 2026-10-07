@@ -42,14 +42,29 @@ import { formatDateTime, pdfSafe, websiteForPrint, type PdfCell, type PdfTotal, 
 export const PAGE_WIDTH = 595.28;
 export const PAGE_HEIGHT = 841.89;
 
+export const ORIENTATIONS = ['portrait', 'landscape'] as const;
+export type DesignOrientation = (typeof ORIENTATIONS)[number];
+
+/** The page a layout draws on: A4 upright, or on its side (the sales order). */
+export function pageSizeOf(design: { orientation?: DesignOrientation }): { w: number; h: number } {
+  return design.orientation === 'landscape' ? { w: PAGE_HEIGHT, h: PAGE_WIDTH } : { w: PAGE_WIDTH, h: PAGE_HEIGHT };
+}
+
 export const ANCHORS = ['first', 'every', 'later', 'after', 'last'] as const;
 export type DesignAnchor = (typeof ANCHORS)[number];
 export const ALIGNS = ['left', 'center', 'right'] as const;
 export type DesignAlign = (typeof ALIGNS)[number];
 
 /** What a column of the line table can print. */
-export const ITEM_COLUMNS = ['no', 'product', 'qtyUnit', 'qty', 'unit', 'unitPrice', 'amount', 'group'] as const;
+export const ITEM_COLUMNS = ['no', 'product', 'qtyUnit', 'qty', 'unit', 'unitPrice', 'amount', 'group', 'cost', 'margin'] as const;
 export type ItemColumnKey = (typeof ITEM_COLUMNS)[number];
+
+/**
+ * The cost columns exist for internal paper (the sales order). A document a
+ * customer receives never offers them — its template registry entry leaves
+ * them off its column list, and a save naming one is refused there.
+ */
+export const COST_COLUMNS: readonly ItemColumnKey[] = ['cost', 'margin'];
 
 export const ITEM_COLUMN_LABELS: Record<ItemColumnKey, string> = {
   no: 'Line number',
@@ -60,6 +75,8 @@ export const ITEM_COLUMN_LABELS: Record<ItemColumnKey, string> = {
   unitPrice: 'Unit price',
   amount: 'Amount',
   group: 'Group',
+  cost: 'Cost, with its provider under it',
+  margin: 'Margin',
 };
 
 // ── The layout, as stored ─────────────────────────────────────────────────────
@@ -68,12 +85,14 @@ const HEX = /^#[0-9a-fA-F]{6}$/;
 const color = (fallback: string) => z.string().regex(HEX, 'A colour is written #RRGGBB').default(fallback);
 const num = (min: number, max: number) => z.number().finite().min(min).max(max);
 
+// Bounds here take the page's long side either way round; which way the page
+// actually stands is the layout's `orientation`, checked edge by edge below.
 const base = {
   id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/, 'A box id is letters, digits, - and _'),
   name: z.string().trim().max(60).optional(),
-  x: num(0, PAGE_WIDTH),
+  x: num(0, PAGE_HEIGHT),
   y: num(0, PAGE_HEIGHT),
-  w: num(1, PAGE_WIDTH),
+  w: num(1, PAGE_HEIGHT),
   h: num(0.25, PAGE_HEIGHT),
   /** Printed only when this field has a value — "Notes:" only when there are notes. */
   showIf: z.string().max(60).nullable().optional(),
@@ -120,7 +139,7 @@ const itemsBlock = z.object({
         key: z.enum(ITEM_COLUMNS),
         /** May carry fields: "Unit price ({{quotation.currency}})". */
         label: z.string().max(80),
-        width: num(1, PAGE_WIDTH),
+        width: num(1, PAGE_HEIGHT),
         align: z.enum(ALIGNS).default('left'),
       }),
     )
@@ -141,7 +160,7 @@ const totalsBlock = z.object({
   type: z.literal('totals'),
   anchor: z.enum(['after', 'last']).default('after'),
   size: num(6, 14).default(9),
-  labelWidth: num(20, PAGE_WIDTH).default(129.6),
+  labelWidth: num(20, PAGE_HEIGHT).default(129.6),
   textColor: color('#222222'),
   /** The total itself, and the heavier rule under it. */
   accentColor: color('#5B2A8C'),
@@ -154,7 +173,7 @@ const signoffsBlock = z.object({
   anchor: z.enum(['after', 'last']).default('last'),
   size: num(6, 14).default(8),
   /** Each person's column; the first starts at the left edge, the last ends at the right. */
-  colWidth: num(40, PAGE_WIDTH).default(133),
+  colWidth: num(40, PAGE_HEIGHT).default(133),
   headColor: color('#5B2A8C'),
   textColor: color('#222222'),
   /** The name, in bold, at this size — larger than the lines under it. */
@@ -179,15 +198,19 @@ export const designBlockSchema = z.discriminatedUnion('type', [
 export const designSchema = z
   .object({
     version: z.literal(1).default(1),
+    /** A4 upright, or on its side. A layout keeps the way it was drawn. */
+    orientation: z.enum(ORIENTATIONS).default('portrait'),
     /** Where the content resumes on every page after the first. */
     flowTop: num(0, 400),
     /** Where the content stops on every page, above the footer. */
-    flowBottom: num(300, PAGE_HEIGHT),
+    flowBottom: num(200, PAGE_HEIGHT),
     blocks: z.array(designBlockSchema).min(1).max(150, 'A template takes 150 boxes at most'),
   })
   .superRefine((design, ctx) => {
     const issue = (path: (string | number)[], message: string) =>
       ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+    const page = pageSizeOf(design);
+    if (design.flowBottom > page.h) issue(['flowBottom'], 'The content cannot stop below the page');
     if (design.flowBottom - design.flowTop < 200) {
       issue(['flowBottom'], 'Leave at least 200pt between where the content starts and where it stops');
     }
@@ -195,8 +218,8 @@ export const designSchema = z
     design.blocks.forEach((b, i) => {
       if (ids.has(b.id)) issue(['blocks', i, 'id'], `Two boxes share the id "${b.id}"`);
       ids.add(b.id);
-      if (b.x + b.w > PAGE_WIDTH + 1) issue(['blocks', i, 'w'], `${label(b)} runs off the right edge of the page`);
-      if (b.y + b.h > PAGE_HEIGHT + 1) issue(['blocks', i, 'h'], `${label(b)} runs off the bottom of the page`);
+      if (b.x + b.w > page.w + 1) issue(['blocks', i, 'w'], `${label(b)} runs off the right edge of the page`);
+      if (b.y + b.h > page.h + 1) issue(['blocks', i, 'h'], `${label(b)} runs off the bottom of the page`);
     });
     const count = (type: DesignBlock['type']) => design.blocks.filter((b) => b.type === type).length;
     if (count('items') !== 1) issue(['blocks'], 'A template has exactly one line table');
@@ -591,6 +614,7 @@ class Renderer {
   ) {
     this.doc = new PDFDocument({
       size: 'A4',
+      layout: design.orientation === 'landscape' ? 'landscape' : 'portrait',
       // Nothing here relies on PDFKit's own wrapping, so no margin can make it
       // start a page of its own accord: every page break is the layout's.
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
