@@ -159,8 +159,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,347 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
-masters 54, sales 314, costing 120, pipeline 60, calendar 46, numbering 46,
+**2,348 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
+masters 54, sales 315, costing 120, pipeline 60, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1411,6 +1411,13 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   reference); Reopen goes back to DRAFT; Delete is DRAFT-only. Editing is
   one PUT — header and lines together — and saved groups go through
   `rememberGroups`.
+- **The quotation page lists the orders booked from it** (2026-10-07, the
+  owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
+  `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary
+  `/sales-orders?quotationId=` list — the same rows and visibility as the
+  register, so a `view_own` holder sees only their own — with number, date,
+  status, PO, SI/DR, total and the booked sum; empty, it offers "Create
+  Sales Order" to a `create` holder. No second query, no copy of the figures.
 - **The PDF prints through the Sales Order template** (2026-10-07): a
   designed document like the quotation, landscape, in the quotation
   template's dress, edited under Admin › PDF Templates. The standard layout

@@ -2144,6 +2144,18 @@ async function main() {
       `${so3Body.number} ${so3Body.subtotal}`,
     );
 
+    // The quotation page lists its orders under it, SCORO-style, through the
+    // ordinary list query — the same rows, the same visibility.
+    const underQuote = await http(salesToken, 'GET', `/sales-orders?quotationId=${soQuoteId}&sort=number&dir=asc`);
+    const underRows = (underQuote.body.rows ?? []) as { number: string }[];
+    check(
+      'the quotation lists the orders booked from it, in number order',
+      underQuote.status === 200 &&
+        underRows.length === 3 &&
+        underRows.map((r) => r.number).join(',') === `${so1Body.number},${so1Body.number}.1,${so1Body.number}.2`,
+      underRows.map((r) => r.number).join(','),
+    );
+
     const otherEdits = await http(otherToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 60 });
     check('someone else cannot edit the author\u2019s order', otherEdits.status === 403, String(otherEdits.status));
     const otherReads = await http(otherToken, 'GET', `/sales-orders/${so1Body.id}`);
