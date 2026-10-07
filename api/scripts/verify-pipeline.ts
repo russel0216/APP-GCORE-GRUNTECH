@@ -27,6 +27,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber, previewNext } from '../src/shared/numbering';
+import { probabilityAfterMove, stageProbability } from '../src/shared/pipeline';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -563,6 +564,86 @@ async function main() {
     where: { entityType: 'lead', entityId: 'list', action: 'EXPORTED', actorId: manager.id },
   });
   check('the list export left an audit row', !!exportedPdf);
+
+  // ── SCORO's ladder: the stage sets the odds ──────────────────────────────
+  console.log('\nStage odds (SCORO\u2019s ladder)');
+  check(
+    "the ladder: opportunity stages 10, submitted 50, negotiation 90, won 100, lost 0, on hold says nothing",
+    stageProbability('NEW') === 10 &&
+      stageProbability('COSTING') === 10 &&
+      stageProbability('OPEN') === 10 &&
+      stageProbability('SUBMITTED') === 50 &&
+      stageProbability('NEGOTIATION') === 90 &&
+      stageProbability('WON') === 100 &&
+      stageProbability('LOST') === 0 &&
+      stageProbability('ON_HOLD') === null,
+  );
+  check(
+    'typed odds survive a move within the same band, and On hold never touches them',
+    probabilityAfterMove('NEW', 'CONTACTED', 35) === 35 &&
+      probabilityAfterMove('CONTACTED', 'ON_HOLD', 35) === 35 &&
+      probabilityAfterMove('SUBMITTED', 'NEGOTIATION', 65) === 90,
+  );
+
+  const laddered = await prisma.quotation.create({
+    data: {
+      number: await nextNumber('quotation', prisma, { ownerId: manager.id }),
+      customerId: customer.id,
+      ownerId: manager.id,
+      subject: `${TAG} Ladder quote`,
+      outcome: 'OPEN',
+      probability: 25,
+      revisions: { create: [{ revision: 0, status: 'APPROVED', vatRate: D(0.12), subtotal: D(500_000), total: D(560_000) }] },
+    },
+  });
+  await http(managerToken, 'PATCH', `/quotations/${laddered.id}`, { outcome: 'SUBMITTED' });
+  const atSubmitted = await prisma.quotation.findUniqueOrThrow({ where: { id: laddered.id } });
+  check('moving a quotation to Submitted sets its odds to 50', atSubmitted.probability === 50, String(atSubmitted.probability));
+  await http(managerToken, 'PATCH', `/quotations/${laddered.id}`, { outcome: 'NEGOTIATION', probability: 65 });
+  const typedWins = await prisma.quotation.findUniqueOrThrow({ where: { id: laddered.id } });
+  check('a probability typed in the same move wins over the stage', typedWins.probability === 65, String(typedWins.probability));
+  await http(managerToken, 'PATCH', `/quotations/${laddered.id}`, { outcome: 'WON' });
+  const atWon = await prisma.quotation.findUniqueOrThrow({ where: { id: laddered.id } });
+  check('won is 100', atWon.probability === 100, String(atWon.probability));
+
+  const ladderLead = await prisma.lead.create({
+    data: {
+      number: await nextNumber('lead'),
+      companyName: `${TAG} Ladder lead`,
+      status: 'NEW',
+      assignedToId: manager.id,
+      createdById: manager.id,
+      probability: 20,
+    },
+  });
+  await http(managerToken, 'PATCH', `/leads/${ladderLead.id}`, { status: 'CONTACTED' });
+  const sameBand = await prisma.lead.findUniqueOrThrow({ where: { id: ladderLead.id } });
+  check('a lead moved within the opportunity band keeps its typed odds', sameBand.probability === 20, String(sameBand.probability));
+  await http(managerToken, 'PATCH', `/leads/${ladderLead.id}`, { status: 'LOST', lostReason: `${TAG} ladder` });
+  const atLost = await prisma.lead.findUniqueOrThrow({ where: { id: ladderLead.id } });
+  check('lost zeroes it', atLost.probability === 0, String(atLost.probability));
+
+  const followLead = await prisma.lead.create({
+    data: {
+      number: await nextNumber('lead'),
+      companyName: `${TAG} Follow lead`,
+      status: 'QUOTATION_CREATED',
+      assignedToId: manager.id,
+      createdById: manager.id,
+      probability: 30,
+    },
+  });
+  const followQuote = await newQuotation('Follows the ladder', 'OPEN', [{ revision: 0, status: 'APPROVED', total: 100_000 }], {
+    leadId: followLead.id,
+    probability: 30,
+  });
+  await http(managerToken, 'PATCH', `/quotations/${followQuote.id}`, { outcome: 'SUBMITTED' });
+  const followed = await prisma.lead.findUniqueOrThrow({ where: { id: followLead.id } });
+  check(
+    'the lead that follows a submitted quotation takes the stage and its odds',
+    followed.status === 'QUOTATION_SUBMITTED' && followed.probability === 50,
+    `${followed.status} ${followed.probability}`,
+  );
 
   // ── 6. The number preview ────────────────────────────────────────────────
   console.log('\nThe next quotation number');

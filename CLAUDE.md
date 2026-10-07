@@ -155,8 +155,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,331 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
-masters 54, sales 306, costing 120, pipeline 52, calendar 46, numbering 46,
+**2,339 assertions across twenty-two scripts** (counted 2026-10-06): foundation 222,
+masters 54, sales 306, costing 120, pipeline 60, calendar 46, numbering 46,
 partners 82, delivery 86, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 149, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -724,6 +724,31 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **A lead with a quotation is never a board card**, and every quotation value
   is `quotationValue()` — Insights, the board, Customer 360 and job orders call
   it rather than a fourth lambda.
+- **The board wears SCORO's dress** (2026-10-07, the owner's pipeline
+  screenshots): each column is a tinted band — stage, "N deals", "value
+  (Total sum)" — mapped by POSITION onto SCORO's ladder (`COLUMN_TONE`:
+  lead stages and drafted quotes = Opportunity cream, SUBMITTED =
+  Negotiation orange, NEGOTIATION = Closing light green, WON = Confirmed
+  green, forecast yellow), tinted with the tone tokens' rgb values; a card
+  is the deal's name in bold, the company under it, the owner's face
+  top-right (name in the tooltip and aria), and a footer of age against
+  amount. The field toggles still shape it.
+- **"Forecast deal" on the board is manual forecast input** (the owner's
+  call): "+ New → Forecast deal" asks company, value, probability and
+  expected closing and files a LEAD with `source: "Forecast"` — the
+  pipeline stays a view over leads and quotations (no third record), the
+  card appears at once, and value × probability joins the month its
+  expected closing names. Hand-typed forecasts stay tellable by source.
+- **The stage sets the odds** (2026-10-07, the owner's SCORO status
+  settings): `stageProbability()` / `probabilityAfterMove()` in
+  `shared/pipeline.ts` carry SCORO's ladder — opportunity stages (every lead
+  stage before a decision, `QUOTATION_CREATED`, a drafted quote) 10%,
+  SUBMITTED 50%, NEGOTIATION 90%, WON 100%, LOST 0%, On hold says nothing.
+  Both PATCH routes apply it on a stage move UNLESS the same request typed a
+  probability (an explicit value is somebody's judgement), a move within one
+  band keeps a typed value, and the lead that follows a quotation's outcome
+  takes the stage's odds too. The record pages still override afterwards —
+  the stage only sets the starting odds, exactly as SCORO's statuses do.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move

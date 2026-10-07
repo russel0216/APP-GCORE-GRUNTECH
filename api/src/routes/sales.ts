@@ -52,6 +52,7 @@ import {
 } from '../shared/activities';
 import { toCsv } from '../shared/insights';
 import {
+  probabilityAfterMove,
   assertLeadStatusChange,
   assertOutcomeChange,
   buildBoard,
@@ -575,6 +576,11 @@ leadRoutes.patch(
     }
     if (body.probability !== undefined) data.probability = body.probability;
     if (body.status !== undefined) data.status = body.status;
+    // SCORO's ladder: a stage move sets the odds — unless this same request
+    // typed them, because an explicit value is somebody's judgement.
+    if (body.status !== undefined && body.status !== before.status && body.probability === undefined) {
+      data.probability = probabilityAfterMove(before.status, body.status, before.probability);
+    }
     if (body.estimatedValue !== undefined) {
       data.estimatedValue = body.estimatedValue != null ? d(body.estimatedValue) : null;
     }
@@ -1615,6 +1621,10 @@ quotationRoutes.patch(
       data.outcome = body.outcome;
       if (body.outcome === 'SUBMITTED') data.submittedAt = new Date();
       if (body.outcome === 'WON' || body.outcome === 'LOST') data.decidedAt = new Date();
+      // SCORO's ladder: the stage sets the odds unless this request typed them.
+      if (body.outcome !== before.outcome && body.probability === undefined) {
+        data.probability = probabilityAfterMove(before.outcome, body.outcome, before.probability);
+      }
     }
 
     const quotation = await prisma.quotation.update({ where: { id: req.params.id }, data });
@@ -1635,10 +1645,13 @@ quotationRoutes.patch(
                   ? 'QUOTATION_CREATED' // pulled back to a draft
                   : null;
       if (leadStatus) {
+        const lead = await prisma.lead.findUnique({ where: { id: before.leadId }, select: { status: true, probability: true } });
         await prisma.lead.update({
           where: { id: before.leadId },
           data: {
             status: leadStatus,
+            // The lead follows the stage's odds too, so the funnel stays coherent.
+            ...(lead ? { probability: probabilityAfterMove(lead.status, leadStatus, lead.probability) } : {}),
             ...(body.outcome === 'LOST' && body.lostReason ? { lostReason: body.lostReason } : {}),
           },
         });
