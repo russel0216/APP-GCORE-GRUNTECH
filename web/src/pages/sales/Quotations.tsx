@@ -6,6 +6,7 @@ import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type Column } from '../../components/DataList';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
+import { SO_TONES, type SalesOrderRow } from './SalesOrders';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -1033,12 +1034,107 @@ export function QuotationDetail() {
             </div>
           </div>
 
+          {(can('gops.sales_orders.view_all') || can('gops.sales_orders.view_own')) && (
+            <QuotationSalesOrders quotationId={quotation.id} reloadToken={reload} onBook={() => setBookingOrder(true)} />
+          )}
+
           <div className="sales-card-gap">
             <ActivityLog quotationId={quotation.id} canEdit={quotation.canEdit} />
           </div>
         </>
       )}
 
+    </div>
+  );
+}
+
+/**
+ * The sales orders booked from this quotation, listed under it the way SCORO
+ * lists a quote's invoices (2026-10-07, the owner's call). The list is the
+ * ordinary `/sales-orders?quotationId=` query, so it shows exactly what the
+ * reader may open there — a `view_own` holder sees only their own.
+ */
+function QuotationSalesOrders({ quotationId, reloadToken, onBook }: { quotationId: string; reloadToken: number; onBook: () => void }) {
+  const { can } = useAuth();
+  const [rows, setRows] = useState<SalesOrderRow[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .get<{ rows: SalesOrderRow[] }>(`/sales-orders${qs({ quotationId, pageSize: 100, sort: 'number', dir: 'asc' })}`)
+      .then((r) => alive && setRows(r.rows))
+      .catch((err) => alive && setError(err));
+    return () => {
+      alive = false;
+    };
+  }, [quotationId, reloadToken]);
+
+  const booked = (rows ?? []).filter((r) => r.status !== 'CANCELLED').reduce((n, r) => n + r.total, 0);
+
+  return (
+    <div className="card sales-card-gap">
+      <div className="row sales-card-head">
+        <h2 className="card-title">Sales orders</h2>
+        {rows && rows.length > 0 && (
+          <span className="faint">
+            {rows.length} order{rows.length === 1 ? '' : 's'} · booked {formatMoney(booked)}
+          </span>
+        )}
+      </div>
+      <ErrorBox error={error} />
+      {rows === null && !error ? (
+        <Loading />
+      ) : !rows?.length ? (
+        <Empty
+          title="No sales order yet"
+          hint="Nothing has been booked from this quotation."
+          action={
+            can('gops.sales_orders.create') ? (
+              <button type="button" className="btn btn-sm" onClick={onBook}>
+                Create Sales Order
+              </button>
+            ) : undefined
+          }
+        />
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Number</th>
+                <th>Date</th>
+                <th>Status</th>
+                <th>Customer PO</th>
+                <th>SI / BS No.</th>
+                <th>DR No.</th>
+                <th className="num">Total</th>
+                <th>Prepared by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <Link className="mono" to={`/g-ops/sales-orders/${r.id}`}>
+                      {r.number}
+                    </Link>
+                  </td>
+                  <td>{formatDate(r.orderDate)}</td>
+                  <td>
+                    <StatusBadge status={r.status} extra={SO_TONES} />
+                  </td>
+                  <td>{r.poNumber ?? <span className="faint">—</span>}</td>
+                  <td>{r.siNumber ?? <span className="faint">—</span>}</td>
+                  <td>{r.drNumber ?? <span className="faint">—</span>}</td>
+                  <td className="num mono">{formatMoney(r.total)}</td>
+                  <td>{r.owner.name}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
