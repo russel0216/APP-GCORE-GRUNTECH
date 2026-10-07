@@ -1064,3 +1064,136 @@
     text-align: left;
   }
 }
+
+/* ── One-line toolbar; Customise is a panel under it (2026-10-07, the owner's call) ── */
+.pipe-toolbar {
+  flex-wrap: nowrap;
+}
+
+.pipe-toolbar > * {
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.pipe-toolbar .pipe-select {
+  max-width: 13rem;
+}
+
+.pipe-toolbar .pipe-search {
+  flex: 1 1 8rem;
+}
+
+@media (max-width: 760px) {
+  .pipe-toolbar {
+    flex-wrap: wrap;
+  }
+}
+
+/* The Customise panel sits in the page, so it can never open off-screen. */
+.pipe-customise {
+  margin-bottom: var(--s-4);
+}
+
+.pipe-customise fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+.pipe-customise legend {
+  padding: 0;
+  margin-bottom: var(--s-2);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.pipe-customise-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+/* ── The stage view fits the width: no sideways scroll, squeezed data ── */
+.pipeline.fit {
+  overflow-x: visible;
+}
+
+.pipeline.fit > .pipe-col {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: var(--s-2);
+}
+
+.pipeline.fit > .pipe-col.collapsed {
+  flex: 0 0 auto;
+}
+
+.pipeline.fit .pipe-band {
+  margin: calc(-1 * var(--s-2)) calc(-1 * var(--s-2)) 0;
+  padding: var(--s-2);
+}
+
+.pipeline.fit .pipe-head {
+  font-size: var(--fs-sm);
+}
+
+.pipeline.fit .pipe-head strong {
+  overflow-wrap: anywhere;
+}
+
+.pipeline.fit .pipe-total {
+  font-size: var(--fs-xs);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.pipeline.fit .pipe-card {
+  padding: var(--s-2);
+  gap: 0;
+}
+
+.pipeline.fit .pipe-card .pipe-card-title {
+  font-size: var(--fs-sm);
+  line-height: 1.25;
+}
+
+.pipeline.fit .pipe-card .pipe-card-amount {
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.pipeline.fit .pipe-card-actions {
+  margin-top: var(--s-1);
+}
+
+.pipeline.fit .pipe-body {
+  gap: var(--s-2);
+}
+
+/* SCORO's summary strip, squeezed: label and figure, no caption. */
+.kpi-grid.pipe-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.pipe-kpis .kpi-card {
+  min-height: 0;
+  gap: var(--s-1);
+  padding: var(--s-2) var(--s-3);
+}
+
+.pipe-kpis .kpi-value {
+  font-size: var(--fs-lg);
+  overflow-wrap: anywhere;
+}
+
+.pipe-kpis .kpi-subtext {
+  display: none;
+}
