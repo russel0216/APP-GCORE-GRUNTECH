@@ -39,6 +39,53 @@ export function valueRevision<R extends { status: string; revision: number }>(re
   return approved ?? latest;
 }
 
+/**
+ * SCORO's ladder (2026-10-07, the owner's status settings): each stage
+ * carries the odds a deal standing in it defaults to — Opportunity 10,
+ * Negotiation 50, Closing 90, Confirmed 100, Rejected/Cancelled 0 — mapped
+ * by position onto G-CORE's own stages. Null means the stage says nothing
+ * about odds (On hold), so a move there changes nothing.
+ */
+export function stageProbability(key: string): number | null {
+  switch (key) {
+    case 'NEW':
+    case 'CONTACTED':
+    case 'QUALIFIED':
+    case 'SITE_VISIT':
+    case 'COSTING':
+    case 'QUOTATION_CREATED':
+    case 'QUOTED':
+    case 'OPEN':
+      return 10;
+    case 'QUOTATION_SUBMITTED':
+    case 'SUBMITTED':
+      return 50;
+    case 'NEGOTIATION':
+      return 90;
+    case 'WON':
+      return 100;
+    case 'LOST':
+      return 0;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The probability a record carries after a stage move: the target stage's
+ * default where the two stages' defaults differ, otherwise whatever it had —
+ * so odds typed by hand survive a move within the same band (New → Contacted
+ * are both Opportunity), and On hold never touches them. The record pages can
+ * still override afterwards; the stage only sets the starting odds, as
+ * SCORO's statuses do.
+ */
+export function probabilityAfterMove(from: string, to: string, current: number): number {
+  const was = stageProbability(from);
+  const now = stageProbability(to);
+  if (now === null || was === now) return current;
+  return now;
+}
+
 /** Where a quotation's value goes when none of its lines names a group. */
 export const NO_GROUP = 'No group';
 

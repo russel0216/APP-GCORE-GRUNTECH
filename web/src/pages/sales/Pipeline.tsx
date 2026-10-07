@@ -712,7 +712,8 @@ export function Pipeline() {
             Every open lead and quotation, by stage. Drag a card to move it, or focus it and press
             Enter for the Move menu (Shift+← / → steps it one stage) — on a phone the menu is the way
             to move. A lead with a quotation is shown once, as its quotation. Weighted value is amount ×
-            probability.
+            probability, and moving a deal sets its odds the way the stage says (10% → 50% → 90% →
+            100%) — override them on the record when you know better.
           </p>
         </div>
         {newMenuButton}
