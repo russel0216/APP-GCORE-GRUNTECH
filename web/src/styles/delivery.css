@@ -395,3 +395,21 @@
   font-size: var(--fs-sm);
   color: var(--muted);
 }
+
+/* The project's Budget Requests tab: the four figures over the table. */
+.del-br-sum {
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  gap: var(--s-1) var(--s-5);
+  justify-content: start;
+  margin: 0 0 var(--s-4);
+}
+.del-br-sum dt {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.del-br-sum dd {
+  margin: 0;
+  font-size: var(--fs-md);
+  grid-row: 2;
+}

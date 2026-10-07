@@ -50,6 +50,8 @@ import zlib from 'node:zlib';
 // one twice and prove the second call does nothing.
 import { settleExpense } from '../src/routes/finance';
 import { settleAdvance } from '../src/routes/advances';
+// Side-effect import: registers the budget_request approval subscriber.
+import '../src/routes/budgetRequests';
 import '../src/routes/procurement';
 
 if (env.isProduction) {
@@ -86,9 +88,24 @@ const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v)
 const cents = (n: number) => Math.round(n * 100) / 100;
 
 const TAG = 'ZZFIN';
+/** Where the finance rules wait while the run changes them. */
+const RULES_STASH = 'finance.rules.__verify__';
+
+async function restoreRules() {
+  const stash = await prisma.setting.findUnique({ where: { key: RULES_STASH } });
+  if (!stash) return;
+  const rules = stash.value as { advanceLiquidationDays: number; budgetRequestLiquidationDays: number; blockAdvanceWhileUnliquidated: boolean };
+  await saveFinanceSettings({
+    advanceLiquidationDays: rules.advanceLiquidationDays,
+    budgetRequestLiquidationDays: rules.budgetRequestLiquidationDays,
+    blockAdvanceWhileUnliquidated: rules.blockAdvanceWhileUnliquidated,
+  });
+  await prisma.setting.delete({ where: { key: RULES_STASH } });
+}
 const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
+  await restoreRules();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -110,11 +127,14 @@ async function cleanup() {
     where: { purpose: { startsWith: TAG } },
     select: { id: true },
   });
+  // Budget requests (project cash) the same way: payments, liquidations, then the request.
+  const requests = await prisma.budgetRequest.findMany({ where: { reason: { startsWith: TAG } }, select: { id: true } });
   const ids = [
     ...invoices.map((i) => i.id),
     ...bills.map((b) => b.id),
     ...claims.map((c) => c.id),
     ...advances.map((a) => a.id),
+    ...requests.map((r) => r.id),
   ];
   if (ids.length) {
     const allocations = await prisma.paymentAllocation.findMany({
@@ -124,6 +144,7 @@ async function cleanup() {
           { billId: { in: bills.map((b) => b.id) } },
           { claimId: { in: claims.map((c) => c.id) } },
           { advanceId: { in: advances.map((a) => a.id) } },
+          { budgetRequestId: { in: requests.map((r) => r.id) } },
         ],
       },
       select: { paymentId: true },
@@ -139,10 +160,13 @@ async function cleanup() {
   await prisma.expenseClaim.deleteMany({ where: { id: { in: claims.map((c) => c.id) } } });
   // Any liquidation filed over HTTP against a fixture advance carries the tag too.
   await prisma.expenseClaim.deleteMany({ where: { advanceId: { in: advances.map((a) => a.id) } } });
+  await prisma.expenseClaim.deleteMany({ where: { budgetRequestId: { in: requests.map((r) => r.id) } } });
   await prisma.auditLog.deleteMany({
     where: { entityType: 'cash_advance', entityId: { in: advances.map((a) => a.id) } },
   });
   await prisma.cashAdvance.deleteMany({ where: { id: { in: advances.map((a) => a.id) } } });
+  await prisma.auditLog.deleteMany({ where: { entityType: 'budget_request', entityId: { in: requests.map((r) => r.id) } } });
+  await prisma.budgetRequest.deleteMany({ where: { id: { in: requests.map((r) => r.id) } } });
 
   await prisma.progressBilling.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
   await prisma.progressReport.deleteMany({ where: { job: { name: { startsWith: TAG } } } });
@@ -194,7 +218,8 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
     const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
     if (!step) throw new Error(`No step ${request.currentSequence} on that workflow`);
 
-    const eligible = (await approversForStep(step, request.requesterId)).filter(
+    // With the request's project: a PROJECT_MANAGER step resolves against it.
+    const eligible = (await approversForStep(step, request.requesterId, prisma, { jobId: request.jobId })).filter(
       (id) => id !== request.requesterId,
     );
     if (!eligible.length) {
@@ -1240,12 +1265,186 @@ async function main() {
     `${position.advancesToRelease} vs ${cents(toReleaseDirect)}`,
   );
   check(
-    'and the working position is receivable less everything owed, advances included',
+    'and the working position is receivable less everything owed, advances and project cash included',
     money(
       position.workingPosition,
-      cents(position.receivable - position.payable - position.reimbursable - position.advancesToRelease),
+      cents(position.receivable - position.payable - position.reimbursable - position.advancesToRelease - position.budgetRequestsToRelease),
     ),
   );
+
+  // ══ Budget requests — project cash, on the request's own rules ═══════════
+  console.log('\nBudget requests — project cash, liquidated in Expenses');
+
+  // Its own liquidation days, set apart from the advance's so the deadline
+  // proves which rule it read.
+  // The rules are set aside under a key of their own, as verify-sales does
+  // with the PDF layouts, so a run that dies puts them back on the next one.
+  const originalRules = await financeSettings();
+  await prisma.setting.upsert({
+    where: { key: RULES_STASH },
+    create: { key: RULES_STASH, value: originalRules as unknown as Prisma.InputJsonValue, description: 'verify-finance: the finance rules before the run' },
+    update: { value: originalRules as unknown as Prisma.InputJsonValue },
+  });
+  await saveFinanceSettings({ budgetRequestLiquidationDays: 45, advanceLiquidationDays: 30 });
+  const newRequest = async (who: { id: string }, amount: number, reason: string) =>
+    prisma.budgetRequest.create({
+      data: {
+        number: await nextNumber('budget_request'),
+        requestedById: who.id,
+        jobId: job.id,
+        costCategoryId: subcontract.id,
+        reason: `${TAG} ${reason}`,
+        amount: D(amount),
+      },
+    });
+  const submitRequest = async (r: { id: string; number: string; amount: Prisma.Decimal; requestedById: string }) => {
+    await prisma.budgetRequest.update({ where: { id: r.id }, data: { status: 'PENDING_APPROVAL' } });
+    return submitForApproval({
+      documentType: 'budget_request',
+      documentId: r.id,
+      documentNumber: r.number,
+      subject: `${TAG} budget request`,
+      amount: num(r.amount),
+      requesterId: r.requestedById,
+      jobId: job.id,
+    });
+  };
+  const releaseRequest = async (id: string, amount: number, paymentDate: Date) => {
+    await prisma.payment.create({
+      data: {
+        number: await nextNumber('disbursement'),
+        kind: 'DISBURSEMENT',
+        method: 'CASH',
+        paymentDate,
+        payeeUserId: engineer.id,
+        amount: D(amount),
+        clearedAt: paymentDate,
+        recordedById: finance.id,
+        allocations: { create: [{ budgetRequestId: id, amount: D(amount) }] },
+      },
+    });
+    await prisma.$transaction((tx) => refreshSettlement(tx, 'budget_request', id));
+  };
+  const liquidateRequest = async (r: { id: string; number: string }, spent: number[]) => {
+    const total = cents(spent.reduce((s, v) => s + v, 0));
+    const claim = await prisma.expenseClaim.create({
+      data: {
+        number: await nextNumber('expense'),
+        claimedById: engineer.id,
+        budgetRequestId: r.id,
+        jobId: job.id,
+        costCategoryId: subcontract.id,
+        claimDate: dayKey(new Date()),
+        purpose: `${TAG} liquidation of ${r.number}`,
+        total: D(total),
+        status: 'PENDING_APPROVAL',
+        lines: {
+          create: spent.map((amount, i) => ({ sortOrder: i, spentOn: dayKey(new Date()), description: `Receipt ${i + 1}`, receiptNo: `OR-B${i + 1}`, amount: D(amount) })),
+        },
+      },
+    });
+    const request = await submitForApproval({ documentType: 'expense', documentId: claim.id, documentNumber: claim.number, subject: `${TAG} liquidation`, amount: total, requesterId: engineer.id });
+    return { claim, request };
+  };
+
+  // (1) The project's manager, then finance; nothing on the ledger either way.
+  const b1 = await newRequest(engineer, 20_000, 'fittings for the tie-in');
+  check('a budget request takes a BR number', /^GT-BR-\d{4}-\d{4}$/.test(b1.number), b1.number);
+  const ledgerBeforeRequest = await ledgerCount();
+  const b1Request = await submitRequest(b1);
+  const b1Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b1Request.workflowId!, sequence: b1Request.currentSequence } });
+  const b1Approvers = await approversForStep(b1Step, engineer.id, prisma, { jobId: job.id });
+  check('step 1 is the project’s manager — the person the job names', b1Approvers.length === 1 && b1Approvers[0] === pm.id, b1Approvers.join(','));
+  await act({ requestId: b1Request.id, userId: pm.id, action: 'APPROVED' });
+  check('the manager alone does not approve it — finance is the second step', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).status === 'PENDING_APPROVAL');
+  await settle(b1Request.id);
+  const b1Approved = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } });
+  check('approved, it owes a release and nothing else', b1Approved.status === 'APPROVED' && !!b1Approved.approvedAt, b1Approved.status);
+  check('approval moves no money and raises no budget — the ledger is untouched', (await ledgerCount()) === ledgerBeforeRequest);
+  check('the whole amount is owed to the team', money((await settleable('budget_request', b1.id))!.outstanding, 20_000));
+
+  // (2) The manager's own request goes up to Executive, never to themself.
+  const b2 = await newRequest(pm, 5_000, 'the manager’s own');
+  const b2Request = await submitRequest(b2);
+  const b2Step = await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: b2Request.workflowId!, sequence: b2Request.currentSequence } });
+  const b2Approvers = await approversForStep(b2Step, pm.id, prisma, { jobId: job.id });
+  const executives = await prisma.userRole.findMany({ where: { role: { key: 'executive' }, user: { isActive: true } }, select: { userId: true } });
+  check(
+    'the manager’s own request routes to Executive, not to the manager',
+    !b2Approvers.includes(pm.id) && b2Approvers.length > 0 && b2Approvers.every((id) => executives.some((e) => e.userId === id)),
+    b2Approvers.join(','),
+  );
+  await settle(b2Request.id, 'REJECTED');
+  check('rejected, it is REJECTED and owes nothing', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b2.id } })).status === 'REJECTED');
+
+  // (3) Released in one voucher, on the request's own deadline.
+  const b1ReleaseDate = dayKey(new Date('2026-04-01'));
+  await releaseRequest(b1.id, 20_000, b1ReleaseDate);
+  const b1Released = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } });
+  check('the release moves it to RELEASED', b1Released.status === 'RELEASED' && money(num(b1Released.amountReleased), 20_000), b1Released.status);
+  check(
+    'the deadline is 45 days after the release — the budget request’s own days, not the advance’s 30',
+    b1Released.liquidationDueDate?.getTime() === addDays(b1ReleaseDate, 45).getTime(),
+    String(b1Released.liquidationDueDate),
+  );
+  await saveFinanceSettings({ budgetRequestLiquidationDays: 10 });
+  await prisma.$transaction((tx) => refreshSettlement(tx, 'budget_request', b1.id));
+  check(
+    'changing the days never moves a deadline already given',
+    (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).liquidationDueDate?.getTime() === addDays(b1ReleaseDate, 45).getTime(),
+  );
+  check('and still nothing is charged to the project', (await ledgerCount()) === ledgerBeforeRequest);
+
+  // (4) Under-spend: 17,500 of receipts against 20,000 — the claim settles,
+  //     the project is charged 17,500, and 2,500 comes back.
+  const { claim: b1Claim, request: b1LiqRequest } = await liquidateRequest(b1, [10_000, 7_500]);
+  await settle(b1LiqRequest.id);
+  const b1Liquidated = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } });
+  const b1ClaimAfter = await prisma.expenseClaim.findUniqueOrThrow({ where: { id: b1Claim.id } });
+  check('the liquidation the cash covered is SETTLED', b1ClaimAfter.status === 'SETTLED', b1ClaimAfter.status);
+  check('the request reads REFUND_DUE', b1Liquidated.status === 'REFUND_DUE' && money(num(b1Liquidated.amountSpent), 17_500), `${b1Liquidated.status} ${b1Liquidated.amountSpent}`);
+  check('the project is charged what was spent — the first and only time the cash is cost', (await ledgerCount()) === ledgerBeforeRequest + 1);
+  const b1LedgerRow = await prisma.jobCostEntry.findFirst({ where: { sourceType: 'expense_claim', sourceId: b1Claim.id } });
+  check('as INCURRED, at the receipts total', b1LedgerRow?.state === 'INCURRED' && money(num(b1LedgerRow.amount), 17_500));
+  check('2,500 is owed back', money((await settleable('budget_request_refund', b1.id))!.outstanding, 2_500));
+  await prisma.payment.create({
+    data: {
+      number: await nextNumber('payment'),
+      kind: 'RECEIPT',
+      method: 'CASH',
+      paymentDate: dayKey(new Date()),
+      payeeUserId: engineer.id,
+      amount: D(2_500),
+      clearedAt: dayKey(new Date()),
+      recordedById: finance.id,
+      allocations: { create: [{ budgetRequestId: b1.id, amount: D(2_500) }] },
+    },
+  });
+  await prisma.$transaction((tx) => refreshSettlement(tx, 'budget_request_refund', b1.id));
+  check('returning it liquidates the request', (await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b1.id } })).status === 'LIQUIDATED');
+
+  // (5) Over-spend: 9,000 against 8,000 — the excess is owed on the claim.
+  const b3 = await newRequest(engineer, 8_000, 'emergency gaskets');
+  await settle((await submitRequest(b3)).id);
+  await releaseRequest(b3.id, 8_000, dayKey(new Date()));
+  const { claim: b3Claim, request: b3LiqRequest } = await liquidateRequest(b3, [9_000]);
+  await settle(b3LiqRequest.id);
+  const b3After = await prisma.budgetRequest.findUniqueOrThrow({ where: { id: b3.id } });
+  const b3ClaimAfter = await settleable('claim', b3Claim.id);
+  check('spending over the release leaves the claim APPROVED for the excess only', money(b3ClaimAfter!.outstanding, 1_000), String(b3ClaimAfter?.outstanding));
+  check('and the request is LIQUIDATED — nothing comes back', b3After.status === 'LIQUIDATED', b3After.status);
+
+  // (6) The position counts an approved request against itself, as an advance.
+  const b4 = await newRequest(engineer, 3_000, 'approved not released');
+  await settle((await submitRequest(b4)).id);
+  const positionWithRequest = await financePosition(dayKey(new Date()));
+  const requestsToReleaseDirect = (await prisma.budgetRequest.findMany({ where: { status: 'APPROVED' } })).reduce((s, r) => s + num(r.amount) - num(r.amountReleased), 0);
+  check('project cash to release is read straight off the approved requests', money(positionWithRequest.budgetRequestsToRelease, cents(requestsToReleaseDirect)), `${positionWithRequest.budgetRequestsToRelease} vs ${cents(requestsToReleaseDirect)}`);
+  check(
+    'and counts against the working position before the voucher exists',
+    money(positionWithRequest.workingPosition, cents(positionWithRequest.receivable - positionWithRequest.payable - positionWithRequest.reimbursable - positionWithRequest.advancesToRelease - positionWithRequest.budgetRequestsToRelease)),
+  );
+  await restoreRules();
 
   // Fixtures for the route cases below: one released and not liquidated, and
   // one that belongs to somebody else.
@@ -1438,6 +1637,73 @@ async function main() {
     const eng = as(engineer);
     const fin = as(finance);
     const receipt1 = [{ spentOn: todayIso, description: 'Fuel', receiptNo: 'OR-9', amount: 2_500 }];
+
+    // ── Budget requests over HTTP: raise, route, release, liquidate ──────────
+    console.log('\nBudget requests — the routes');
+    const manager = as(pm);
+    const raised = await eng('POST', '/budget-requests', { jobId: job.id, costCategoryId: subcontract.id, amount: 6_000, reason: `${TAG} scaffold hire`, neededBy: todayIso });
+    check('an engineer raises a budget request on the project', raised.status === 201 && raised.body.status === 'DRAFT', `${raised.status} ${JSON.stringify(raised.body).slice(0, 120)}`);
+    const raisedId = String(raised.body.id);
+    const draftPage = await eng('GET', `/budget-requests/${raisedId}`);
+    check(
+      'the draft names its route — the project’s manager, then finance — before it is submitted',
+      draftPage.status === 200 &&
+        draftPage.body.approvalRoute?.steps?.[0]?.approvers?.some((p: { id: string }) => p.id === pm.id) &&
+        draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === finance.id),
+      String(JSON.stringify(draftPage.body.approvalRoute ?? draftPage.body)).slice(0, 200),
+    );
+    const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
+    check('a claim cannot liquidate an advance and a budget request at once', bothKinds.status === 400, String(bothKinds.status));
+    const tooEarly = await eng('POST', '/expense-claims', { purpose: `${TAG} too early`, budgetRequestId: raisedId, lines: receipt1 });
+    check('nothing can be liquidated before the cash is released', tooEarly.status === 400, String(tooEarly.status));
+    const submitted = await eng('POST', `/budget-requests/${raisedId}/submit`);
+    check('submitting sends it to the manager', submitted.status === 200 && submitted.body.status === 'PENDING_APPROVAL', String(submitted.status));
+    const managerQueue = await pendingFor(pm.id);
+    check('and it sits in the manager’s queue', managerQueue.some((r) => r.documentId === raisedId));
+    const strangerRead = await as(stranger)('GET', `/budget-requests/${raisedId}`);
+    check('a stranger cannot open it', strangerRead.status === 403, String(strangerRead.status));
+    const managerRead = await manager('GET', `/budget-requests/${raisedId}`);
+    check('the manager can — they are asked to decide it', managerRead.status === 200, String(managerRead.status));
+    const openReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'budget_request', documentId: raisedId, status: 'PENDING' } });
+    await act({ requestId: openReq.id, userId: pm.id, action: 'APPROVED' });
+    await act({ requestId: openReq.id, userId: finance.id, action: 'APPROVED' });
+    const half = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: raisedId, amount: 3_000 }] });
+    check('half of it cannot be released — one voucher', half.status === 400 && String(half.body.error).includes('one voucher'), `${half.status} ${JSON.stringify(half.body).slice(0, 120)}`);
+    const whole = await fin('POST', '/payments', { kind: 'DISBURSEMENT', method: 'CASH', payeeUserId: engineer.id, allocations: [{ kind: 'budget_request', id: raisedId, amount: 6_000 }] });
+    const afterRelease = await eng('GET', `/budget-requests/${raisedId}`);
+    check(
+      'finance releases the whole amount and the request reads RELEASED with its deadline',
+      whole.status === 201 && afterRelease.body.status === 'RELEASED' && !!afterRelease.body.liquidationDueDate && afterRelease.body.allocations?.length === 1,
+      `${whole.status} ${afterRelease.body.status}`,
+    );
+    const told = await prisma.notification.findFirst({ where: { userId: engineer.id, title: { contains: 'released' }, link: `/g-ops/budget-requests/${raisedId}` } });
+    check('the team is told the cash is out and when the receipts are due', !!told);
+    const strangerLiq = await as(stranger)('POST', '/expense-claims', { purpose: `${TAG} not mine`, budgetRequestId: raisedId, lines: receipt1 });
+    check('only the person who raised it can liquidate it', strangerLiq.status === 403 || strangerLiq.status === 400, String(strangerLiq.status));
+    const liq = await eng('POST', '/expense-claims', { purpose: `${TAG} scaffold receipts`, budgetRequestId: raisedId, lines: [{ spentOn: todayIso, description: 'Scaffold', receiptNo: 'OR-S1', amount: 6_000 }] });
+    check(
+      'the liquidation is filed in Expenses against the request, on the project and budget line it was approved for',
+      liq.status === 201 && liq.body.kind === 'liquidation' && liq.body.budgetRequest?.id === raisedId && liq.body.job?.id === job.id && liq.body.costCategory?.id === subcontract.id,
+      `${liq.status} ${JSON.stringify(liq.body).slice(0, 160)}`,
+    );
+    const second = await eng('POST', '/expense-claims', { purpose: `${TAG} twice`, budgetRequestId: raisedId, lines: receipt1 });
+    check('a second liquidation of the same request is refused', second.status === 400, String(second.status));
+    const finList = await fin('GET', `/budget-requests?jobId=${job.id}&status=RELEASED&pageSize=100`);
+    check('finance’s Budget Requests lists it as released', finList.status === 200 && finList.body.rows.some((r: { id: string }) => r.id === raisedId), String(finList.status));
+    const liqList = await fin('GET', `/expense-claims?kind=liquidation&budgetRequestId=${raisedId}`);
+    check('the Expenses register filters liquidations by budget request', liqList.status === 200 && liqList.body.rows.length === 1 && liqList.body.rows[0].id === liq.body.id, String(liqList.status));
+    const brPdf = await fin('GET', `/budget-requests/${raisedId}/pdf`);
+    const brText = brPdf.bytes ? pdfText(brPdf.bytes) : '';
+    check(
+      'the request prints with its sign-offs and who received the cash',
+      brPdf.status === 200 &&
+        brText.includes('Budget Request') &&
+        brText.toUpperCase().includes('PROJECT MANAGER') &&
+        brText.toUpperCase().includes('RECEIVED BY'),
+      `${brPdf.status} ${brText.replace(/\n/g, ' | ').slice(0, 400)}`,
+    );
+    const reversal = await fin('DELETE', `/payments/${whole.body.id}`);
+    check('the release cannot be reversed while a liquidation accounts for it', reversal.status === 400, String(reversal.status));
 
     // (8) One advance at a time, unless finance switches the rule off.
     const blocked = await eng('POST', '/cash-advances', { purpose: `${TAG} second trip`, amount: 500 });
@@ -1688,12 +1954,17 @@ async function main() {
       `${before.body.collectedThisMonth} → ${after.body.collectedThisMonth}`,
     );
     check(
-      'the dashboard reports advances to release and in hand',
+      'the dashboard reports advances and project cash to release and in hand',
       typeof after.body.advancesToRelease === 'number' &&
         typeof after.body.advancesInHand === 'number' &&
+        typeof after.body.budgetRequestsToRelease === 'number' &&
+        typeof after.body.budgetRequestsInHand === 'number' &&
         typeof after.body.queue.advancesAwaitingRelease === 'number' &&
         typeof after.body.queue.liquidationsOverdue === 'number' &&
-        typeof after.body.queue.refundsAwaitingReceipt === 'number',
+        typeof after.body.queue.refundsAwaitingReceipt === 'number' &&
+        typeof after.body.queue.budgetRequestsAwaitingRelease === 'number' &&
+        typeof after.body.queue.budgetLiquidationsOverdue === 'number' &&
+        typeof after.body.queue.budgetRefundsAwaitingReceipt === 'number',
     );
     const found = await fin('GET', `/payments?search=${encodeURIComponent(engineer.name)}&pageSize=100`);
     check(

@@ -96,6 +96,9 @@ interface Dashboard {
   advancesToRelease: number;
   /** Released and not yet accounted for by a liquidation. */
   advancesInHand: number;
+  /** The same two figures for project cash — budget requests. */
+  budgetRequestsToRelease: number;
+  budgetRequestsInHand: number;
   workingPosition: number;
   collectedThisMonth: number;
   collectedThisYear: number;
@@ -107,6 +110,9 @@ interface Dashboard {
     advancesAwaitingRelease: number;
     liquidationsOverdue: number;
     refundsAwaitingReceipt: number;
+    budgetRequestsAwaitingRelease: number;
+    budgetLiquidationsOverdue: number;
+    budgetRefundsAwaitingReceipt: number;
   };
   activeJobs: number;
 }
@@ -285,6 +291,22 @@ export function FinanceDashboard() {
               accent={data.queue.liquidationsOverdue > 0 ? 'danger' : 'info'}
               to="/g-fin/cash-advances?status=RELEASED"
             />
+            <Stat
+              label="Project cash to release"
+              value={formatMoney(data.budgetRequestsToRelease)}
+              sub={`${data.queue.budgetRequestsAwaitingRelease} budget request${data.queue.budgetRequestsAwaitingRelease === 1 ? '' : 's'} approved, waiting on finance`}
+              figure
+              accent={data.budgetRequestsToRelease > 0 ? 'warn' : 'quiet'}
+              to="/g-fin/budget-requests?status=APPROVED"
+            />
+            <Stat
+              label="Project cash with the teams"
+              value={formatMoney(data.budgetRequestsInHand)}
+              sub="released, not yet accounted for"
+              figure
+              accent={data.queue.budgetLiquidationsOverdue > 0 ? 'danger' : 'info'}
+              to="/g-fin/budget-requests?status=RELEASED"
+            />
           </div>
         </Panel>
 
@@ -401,6 +423,36 @@ export function FinanceDashboard() {
                   <span className="icon-row-sub">Liquidated, and the change is still with the person</span>
                 </span>
                 <span className="icon-row-value">{data.queue.refundsAwaitingReceipt}</span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/g-fin/budget-requests?status=APPROVED" className="icon-row">
+                <IconBadge name="money-out" accent={data.queue.budgetRequestsAwaitingRelease > 0 ? 'warn' : 'quiet'} size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Budget requests approved, not yet released</span>
+                  <span className="icon-row-sub">A project team is waiting on finance for the cash</span>
+                </span>
+                <span className="icon-row-value">{data.queue.budgetRequestsAwaitingRelease}</span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/g-fin/budget-requests?overdue=true" className="icon-row">
+                <IconBadge name="people" accent={data.queue.budgetLiquidationsOverdue > 0 ? 'danger' : 'quiet'} size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Budget request liquidations overdue</span>
+                  <span className="icon-row-sub">Project cash released and past its deadline with no receipts</span>
+                </span>
+                <span className="icon-row-value">{data.queue.budgetLiquidationsOverdue}</span>
+              </Link>
+            </li>
+            <li>
+              <Link to="/g-fin/budget-requests?status=REFUND_DUE" className="icon-row">
+                <IconBadge name="money-in" accent={data.queue.budgetRefundsAwaitingReceipt > 0 ? 'warn' : 'quiet'} size={32} />
+                <span className="icon-row-body">
+                  <span className="icon-row-title">Unspent project cash not yet returned</span>
+                  <span className="icon-row-sub">Liquidated, and the change is still with the team</span>
+                </span>
+                <span className="icon-row-value">{data.queue.budgetRefundsAwaitingReceipt}</span>
               </Link>
             </li>
             <li>
@@ -769,6 +821,8 @@ interface CashFlow {
   unclearedIn: number;
   /** Approved advances in the forecast's "out", and unspent cash due back in its "in". */
   advancesToRelease?: number;
+  /** Approved budget requests (project cash) in the forecast's "out". */
+  budgetRequestsToRelease?: number;
   refundsDue?: number;
   unclearedOut: number;
   netMovement: number;
@@ -887,10 +941,11 @@ export function CashFlow() {
               </tbody>
             </table>
           </div>
-          {((data.advancesToRelease ?? 0) > 0 || (data.refundsDue ?? 0) > 0) && (
+          {((data.advancesToRelease ?? 0) > 0 || (data.budgetRequestsToRelease ?? 0) > 0 || (data.refundsDue ?? 0) > 0) && (
             <p className="fin-note">
-              Includes {formatMoney(data.advancesToRelease ?? 0)} of approved cash advances going out
-              and {formatMoney(data.refundsDue ?? 0)} of unspent advance money due back.
+              Includes {formatMoney(data.advancesToRelease ?? 0)} of approved cash advances and{' '}
+              {formatMoney(data.budgetRequestsToRelease ?? 0)} of approved budget requests going out, and{' '}
+              {formatMoney(data.refundsDue ?? 0)} of unspent cash due back.
             </p>
           )}
         </div>
@@ -1068,6 +1123,7 @@ interface FinSettings {
   agingBuckets: number[];
   advanceLiquidationDays: number;
   blockAdvanceWhileUnliquidated: boolean;
+  budgetRequestLiquidationDays: number;
   vatRate: number;
   ewtRate: number;
 }
@@ -1099,6 +1155,7 @@ export function FinanceSettings() {
         agingBuckets: settings.agingBuckets,
         advanceLiquidationDays: settings.advanceLiquidationDays,
         blockAdvanceWhileUnliquidated: settings.blockAdvanceWhileUnliquidated,
+        budgetRequestLiquidationDays: settings.budgetRequestLiquidationDays,
       });
       setSettings({ ...settings, ...saved });
       toast('ok', 'Finance rules saved');
@@ -1119,7 +1176,7 @@ export function FinanceSettings() {
           <h1>Finance Settings</h1>
           <p>
             Payment terms, what Gruntech withholds from its own suppliers, how the aging report is
-            bucketed, and the rules for cash advances.
+            bucketed, and the rules for cash advances and budget requests.
           </p>
         </div>
         {editable && (
@@ -1229,6 +1286,22 @@ export function FinanceSettings() {
                 <option value="yes">Yes — liquidate first</option>
                 <option value="no">No — allow several</option>
               </select>
+            </Field>
+          </div>
+
+          <div className="card">
+            <h3 className="card-title">Budget requests</h3>
+            <Field
+              label="Days to liquidate"
+              hint="Project cash, its own rule — a budget request is the project's money, not a personal loan. Counted from the day the cash is released and set on each request then, so changing this never moves a deadline already given."
+            >
+              <NumberInput
+                kind="count"
+                min={1}
+                max={365}
+                value={settings.budgetRequestLiquidationDays}
+                onChange={(e) => set('budgetRequestLiquidationDays', Number(e.target.value))}
+              />
             </Field>
           </div>
         </div>

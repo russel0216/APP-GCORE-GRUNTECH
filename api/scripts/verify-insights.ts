@@ -891,7 +891,7 @@ async function main() {
       'the working position is receivable less everything owed — suppliers, staff and approved advances',
       money(
         d.finance.workingPosition,
-        cents(d.finance.receivable - d.finance.payable - d.finance.reimbursable - d.finance.advancesToRelease),
+        cents(d.finance.receivable - d.finance.payable - d.finance.reimbursable - d.finance.advancesToRelease - (d.finance.budgetRequestsToRelease ?? 0)),
       ),
       `${d.finance.workingPosition}`,
     );

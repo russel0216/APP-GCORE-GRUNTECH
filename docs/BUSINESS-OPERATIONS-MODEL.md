@@ -559,7 +559,7 @@ Cost categories (fixed set, extensible in Settings):
 
 | State | Created by | Meaning |
 |---|---|---|
-| **Budgeted** | Approved Costing + approved Budget Requests | What we are allowed to spend |
+| **Budgeted** | Approved Costing (budget requests raised it before 2026-10-07; since then they are project cash, §5.2) | What we are allowed to spend |
 | **Committed** | Approved PR (soft) → issued PO (firm) | What we have promised to spend |
 | **Incurred** | Receiving (direct), OT/timesheet posting, supplier bill with no receiving (subcontractor certificate, service call), approved expense claim or liquidation | What we now owe |
 | **Consumed** | Stock issuance to the job, installed or used | What is actually in the work |
@@ -579,13 +579,26 @@ its Finance tab, so money in a person's hands is visible before it becomes cost.
 
 ### 5.2 Budget Request vs Purchase Request — they are not the same thing
 
-- A **Budget Request** *changes the budget*. It adds or reallocates budget on a job
-  (a variation, a cost overrun, a scope addition). Approving it raises Budgeted.
-- A **Purchase Request** *spends the budget*. Approving it raises Committed.
+- A **Budget Request** is *project cash* (2026-10-07, the owner's definition:
+  "it is not about changing the total budget allocated for the project; it is
+  about requesting cash so that the project team can purchase something
+  without the need for the purchase requisition"). The team asks for a sum
+  against a job and a budget line; the job's **project manager** allows it,
+  then **finance** approves and releases it in one voucher; the team spends
+  it and accounts for it with receipts — a liquidation filed in Expenses that
+  names the request. Approval and release move nothing on the job; the
+  approved liquidation posts INCURRED at what was actually spent, and unspent
+  cash comes back. It does **not** change the budget. It is not a cash
+  advance either — that is the company's term for a personal loan to a
+  person, with its own rules and its own liquidation days.
+- A **Purchase Request** *spends the budget* through procurement. Approving it
+  raises Committed.
 
-A PR that would push Available below zero is blocked, or requires a Budget Request
-first — configurable per job in Settings. This is the control that makes budget
-monitoring mean something.
+A PR that would push Available below zero is blocked, or needs the budget
+reopened on the costing — configurable per job in Settings. This is the
+control that makes budget monitoring mean something. (Before 2026-10-07 a
+budget request raised Budgeted; those already approved keep the ledger rows
+they wrote and are closed.)
 
 ### 5.3 Revenue side — the Schedule of Values is the backbone
 
@@ -779,8 +792,8 @@ overdue; the calendar is where you plan, My Work is what is due.
    tabs: *Overview · Budget · Scope · Plans · Procurement · Progress · Billing ·
    Finance · Service · Tasks · Documents · Activity*. Same pattern for Customer,
    Quotation and Service Contract. The tab lives in the link, so an approval
-   notification for a budget request lands on the Budget tab where the request
-   can actually be found. A card from another module is **hidden, not empty**,
+   notification for a budget request lands on the request's own page, one
+   click from the project's Budget Requests tab. A card from another module is **hidden, not empty**,
    for someone without that module's view right: an empty "Purchase orders" card
    reads as "nothing was bought", which is a different claim from "you may not
    see this". Customer 360 and Supplier 360 follow the same rule — a window onto

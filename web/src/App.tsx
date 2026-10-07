@@ -41,7 +41,6 @@ import {
   ProgressReports,
   ProgressReportDetail,
   BillingDetailPage,
-  BudgetRequests,
   BudgetMonitoring,
   PlansRegister,
 } from './pages/delivery/Progress';
@@ -83,6 +82,7 @@ import { Receivables, InvoiceDetail, Payments } from './pages/finance/Receivable
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
+import { BudgetRequests, BudgetRequestDetail, FinanceBudgetRequests } from './pages/delivery/BudgetRequests';
 import {
   FinanceDashboard,
   FinanceReports,
@@ -589,6 +589,15 @@ function Routed() {
             </GuardAny>
           }
         />
+        {/* One request: the project side's page, where finance releases and the team liquidates. */}
+        <Route
+          path="/g-ops/budget-requests/:id"
+          element={
+            <GuardAny permissions={['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all']}>
+              <BudgetRequestDetail />
+            </GuardAny>
+          }
+        />
         <Route
           path="/g-ops/budget-monitoring"
           element={
@@ -1053,6 +1062,15 @@ function Routed() {
             <GuardAny permissions={['gfin.cash_advances.view_all', 'gfin.cash_advances.view_own']}>
               <CashAdvanceDetail />
             </GuardAny>
+          }
+        />
+        {/* Project cash: finance's window on every project's budget requests. */}
+        <Route
+          path="/g-fin/budget-requests"
+          element={
+            <Guard permission="gfin.budget_requests.view_all">
+              <FinanceBudgetRequests />
+            </Guard>
           }
         />
         <Route

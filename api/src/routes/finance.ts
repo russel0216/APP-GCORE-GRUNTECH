@@ -46,7 +46,9 @@ import {
   settleable,
   refreshSettlement,
   refreshAdvance,
+  refreshBudgetRequest,
   claimPayable,
+  liquidatedReleased,
   financePosition,
   bucketFor,
   summarise,
@@ -1034,6 +1036,10 @@ export const claimInclude = {
   advance: {
     select: { id: true, number: true, amountReleased: true, status: true, jobId: true, costCategoryId: true },
   },
+  // Project cash liquidated the same way — a claim names one or the other.
+  budgetRequest: {
+    select: { id: true, number: true, amountReleased: true, status: true, jobId: true, costCategoryId: true },
+  },
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.ExpenseClaimInclude;
 
@@ -1051,16 +1057,18 @@ export function presentClaim(row: ClaimRow) {
   const total = num(row.total);
   const paid = num(row.amountPaid);
   const payable = claimPayable(row);
-  const released = row.advance ? num(row.advance.amountReleased) : 0;
+  const released = liquidatedReleased(row);
+  const liquidates = !!(row.advance || row.budgetRequest);
   return {
     ...row,
     total,
     amountPaid: paid,
     payable,
     outstanding: cents(payable - paid),
-    refundDue: row.advance ? cents(Math.max(0, released - total)) : 0,
-    kind: row.advance ? ('liquidation' as const) : ('reimbursement' as const),
-    advance: row.advance ? { ...row.advance, amountReleased: released } : null,
+    refundDue: liquidates ? cents(Math.max(0, released - total)) : 0,
+    kind: liquidates ? ('liquidation' as const) : ('reimbursement' as const),
+    advance: row.advance ? { ...row.advance, amountReleased: num(row.advance.amountReleased) } : null,
+    budgetRequest: row.budgetRequest ? { ...row.budgetRequest, amountReleased: num(row.budgetRequest.amountReleased) } : null,
     lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
   };
 }
@@ -1109,17 +1117,29 @@ expenseRoutes.get(
     if (status) where.status = status;
     if (q.filters.jobId) where.jobId = q.filters.jobId;
     if (q.filters.advanceId) where.advanceId = q.filters.advanceId;
-    // A liquidation is a claim that names an advance; a reimbursement is one
-    // that does not. Same table, one column apart.
-    if (q.filters.kind === 'liquidation') where.advanceId = { not: null };
-    if (q.filters.kind === 'reimbursement') where.advanceId = null;
+    if (q.filters.budgetRequestId) where.budgetRequestId = q.filters.budgetRequestId;
+    // A liquidation is a claim that names an advance or a budget request; a
+    // reimbursement is one that names neither. Same table, a column apart.
+    if (q.filters.kind === 'liquidation') where.OR = [{ advanceId: { not: null } }, { budgetRequestId: { not: null } }];
+    if (q.filters.kind === 'reimbursement') {
+      where.advanceId = null;
+      where.budgetRequestId = null;
+    }
     if (q.search) {
-      where.OR = [
+      const terms: Prisma.ExpenseClaimWhereInput[] = [
         { number: { contains: q.search, mode: 'insensitive' } },
         { purpose: { contains: q.search, mode: 'insensitive' } },
         { claimedBy: { name: { contains: q.search, mode: 'insensitive' } } },
         { advance: { number: { contains: q.search, mode: 'insensitive' } } },
+        { budgetRequest: { number: { contains: q.search, mode: 'insensitive' } } },
       ];
+      // The kind filter already uses OR: the two conditions AND together.
+      if (where.OR) {
+        where.AND = [{ OR: where.OR }, { OR: terms }];
+        delete where.OR;
+      } else {
+        where.OR = terms;
+      }
     }
 
     const [rows, total] = await Promise.all([
@@ -1173,6 +1193,8 @@ const claimSchema = z.object({
   costCategoryId: z.string().optional().nullable(),
   /** Set when this claim liquidates a cash advance. */
   advanceId: z.string().optional().nullable(),
+  /** Set when this claim liquidates a budget request (project cash). Never both. */
+  budgetRequestId: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   lines: z
     .array(
@@ -1232,6 +1254,43 @@ expenseRoutes.post(
       costCategoryId = advance.costCategoryId;
       advanceNumber = advance.number;
     }
+    if (body.advanceId && body.budgetRequestId) {
+      throw badRequest('A liquidation accounts for one thing — a cash advance or a budget request, not both');
+    }
+    // Project cash: the same rules, on the request. Whoever raised the request
+    // files the receipts, against the project and budget line it was
+    // approved for.
+    if (body.budgetRequestId) {
+      const request = await prisma.budgetRequest.findUnique({
+        where: { id: body.budgetRequestId },
+        include: {
+          liquidations: {
+            where: { status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'SETTLED', 'REIMBURSED'] } },
+            select: { number: true },
+          },
+        },
+      });
+      if (!request) throw notFound('Budget request not found');
+      if (request.requestedById !== me.id && !me.isSuperAdmin) {
+        throw forbidden('Only the person who raised the budget request can liquidate it');
+      }
+      if (request.status !== 'RELEASED') {
+        throw badRequest(
+          request.status === 'APPROVED'
+            ? `${request.number} has not been released yet — there is no cash to account for`
+            : `${request.number} is ${request.status.toLowerCase().replace(/_/g, ' ')} and cannot be liquidated`,
+        );
+      }
+      if (request.liquidations.length) {
+        throw badRequest(`${request.number} is already being liquidated by ${request.liquidations[0].number}`);
+      }
+      if (jobId && jobId !== request.jobId) {
+        throw badRequest(`${request.number} was approved against a different project — the liquidation charges that one`);
+      }
+      jobId = request.jobId;
+      costCategoryId = request.costCategoryId;
+      advanceNumber = request.number;
+    }
 
     const total = cents(body.lines.reduce((s, l) => s + l.amount, 0));
     const claim = await prisma.$transaction(async (tx) => {
@@ -1243,6 +1302,7 @@ expenseRoutes.post(
           jobId,
           costCategoryId,
           advanceId: body.advanceId || null,
+          budgetRequestId: body.budgetRequestId || null,
           claimDate: body.claimDate ? asDate(body.claimDate, 'Claim date') : dayKey(new Date()),
           purpose: body.purpose,
           total: D(total),
@@ -1339,10 +1399,12 @@ expenseRoutes.post(
 export const settleExpense = async (approval: ApprovalRequest, outcome: ApprovalOutcome) => {
   const claim = await prisma.expenseClaim.findUnique({
     where: { id: approval.documentId },
-    include: { claimedBy: true, job: true, advance: true },
+    include: { claimedBy: true, job: true, advance: true, budgetRequest: true },
   });
   if (!claim) return;
   if (claim.status !== 'PENDING_APPROVAL') return;
+  // What this liquidation accounts for, if anything: the advance or the request.
+  const source = claim.advance ?? claim.budgetRequest;
 
   if (outcome !== 'APPROVED') {
     await prisma.expenseClaim.update({ where: { id: claim.id }, data: { status: 'REJECTED' } });
@@ -1358,16 +1420,16 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
   const total = num(claim.total);
   const postable = claim.jobId && claim.costCategoryId && total > 0;
   const payable = claimPayable(claim);
-  const released = claim.advance ? num(claim.advance.amountReleased) : 0;
-  const refundDue = claim.advance ? cents(Math.max(0, released - total)) : 0;
+  const released = source ? num(source.amountReleased) : 0;
+  const refundDue = source ? cents(Math.max(0, released - total)) : 0;
 
   await prisma.$transaction(async (tx) => {
     await tx.expenseClaim.update({
       where: { id: claim.id },
       data: {
-        // A liquidation the advance fully covered owes the person nothing;
-        // it is settled the moment it is approved.
-        status: claim.advance && payable <= 0 ? 'SETTLED' : 'APPROVED',
+        // A liquidation the cash fully covered owes the person nothing; it
+        // is settled the moment it is approved.
+        status: source && payable <= 0 ? 'SETTLED' : 'APPROVED',
         approvedAt: new Date(),
         postedToJob: !!postable,
         postedAt: postable ? new Date() : null,
@@ -1382,21 +1444,23 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
         sourceType: 'expense_claim',
         sourceId: claim.id,
         sourceNumber: claim.number,
-        description: claim.advance
-          ? `${claim.claimedBy.name} — ${claim.purpose} (liquidation of ${claim.advance.number})`
+        description: source
+          ? `${claim.claimedBy.name} — ${claim.purpose} (liquidation of ${source.number})`
           : `${claim.claimedBy.name} — ${claim.purpose}`,
       });
     }
     if (claim.advanceId) await refreshAdvance(tx, claim.advanceId);
+    if (claim.budgetRequestId) await refreshBudgetRequest(tx, claim.budgetRequestId);
   });
 
-  const body = !claim.advance
+  const what = claim.advance ? 'advanced' : 'released';
+  const body = !source
     ? `${total} is due back to you. Finance will reimburse it.`
     : payable > 0
-      ? `You spent ${payable} more than the ${released} advanced. Finance will reimburse the excess.`
+      ? `You spent ${payable} more than the ${released} ${what}. Finance will reimburse the excess.`
       : refundDue > 0
-        ? `${refundDue} of the ${released} advanced was not spent. Return it to finance.`
-        : `The advance covered it exactly. Nothing is owed either way.`;
+        ? `${refundDue} of the ${released} ${what} was not spent. Return it to finance.`
+        : `The cash covered it exactly. Nothing is owed either way.`;
   await notify({
     userId: claim.claimedById,
     type: 'approval.approved',
@@ -1409,8 +1473,8 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
     entityType: 'expense_claim',
     entityId: claim.id,
     action: 'APPROVED',
-    summary: claim.advance
-      ? `${claim.number} approved — ${total} spent against ${claim.advance.number}${postable ? `, charged to ${claim.job?.number}` : ''}; ${payable > 0 ? `${payable} owed to ${claim.claimedBy.name}` : refundDue > 0 ? `${refundDue} owed back` : 'settled exactly'}`
+    summary: source
+      ? `${claim.number} approved — ${total} spent against ${source.number}${postable ? `, charged to ${claim.job?.number}` : ''}; ${payable > 0 ? `${payable} owed to ${claim.claimedBy.name}` : refundDue > 0 ? `${refundDue} owed back` : 'settled exactly'}`
       : postable
         ? `${claim.number} approved — ${total} charged to ${claim.job?.number} and owed to ${claim.claimedBy.name}`
         : `${claim.number} approved — ${total} owed to ${claim.claimedBy.name}, no project charged`,
@@ -1488,6 +1552,7 @@ expenseRoutes.get(
           { label: 'Project', value: claim.job ? `${claim.job.number} — ${claim.job.name}` : 'Overheads' },
           { label: 'Budget line', value: claim.costCategory?.name ?? '—' },
           ...(claim.advance ? [{ label: 'Liquidates', value: claim.advance.number }] : []),
+          ...(claim.budgetRequest ? [{ label: 'Liquidates', value: `Budget request ${claim.budgetRequest.number}` }] : []),
           { label: 'Status', value: claim.status.replace(/_/g, ' ') },
         ],
       },
@@ -1512,9 +1577,9 @@ expenseRoutes.get(
         kind: 'fields',
         title: 'Settlement',
         columns: 3,
-        fields: claim.advance
+        fields: view.kind === 'liquidation'
           ? [
-              { label: 'Advance released', value: formatMoney(view.advance!.amountReleased) },
+              { label: claim.advance ? 'Advance released' : 'Cash released', value: formatMoney(liquidatedReleased(claim)) },
               { label: 'Spent', value: formatMoney(view.total) },
               { label: view.payable > 0 ? 'Excess owed to claimant' : 'Unspent — owed back', value: formatMoney(view.payable > 0 ? view.payable : view.refundDue) },
             ]
@@ -1528,11 +1593,12 @@ expenseRoutes.get(
     if (claim.notes) sections.push({ kind: 'text', title: 'Notes', body: claim.notes });
 
     const signoffs = await approvalSignoffs('expense', claim.id);
+    const liquidated = claim.advance ?? claim.budgetRequest;
     const pdf = await renderDocument({
-      title: claim.advance ? 'Liquidation Report' : 'Expense Claim',
+      title: liquidated ? 'Liquidation Report' : 'Expense Claim',
       documentNumber: claim.number,
       date: claim.claimDate,
-      reference: claim.advance ? `Liquidation of ${claim.advance.number}` : claim.purpose,
+      reference: liquidated ? `Liquidation of ${liquidated.number}` : claim.purpose,
       sections,
       signatories: [
         { role: 'Prepared by', name: claim.claimedBy.name, position: claim.claimedBy.position ?? undefined, at: claim.createdAt },
@@ -1569,6 +1635,7 @@ const paymentInclude = {
       bill: { select: { id: true, number: true, netPayable: true } },
       claim: { select: { id: true, number: true, total: true } },
       advance: { select: { id: true, number: true, amount: true } },
+      budgetRequest: { select: { id: true, number: true, amount: true } },
     },
   },
 } satisfies Prisma.PaymentInclude;
@@ -1586,22 +1653,25 @@ function presentPayment(row: PaymentRow) {
       bill: a.bill ? { ...a.bill, netPayable: num(a.bill.netPayable) } : null,
       claim: a.claim ? { ...a.claim, total: num(a.claim.total) } : null,
       advance: a.advance ? { ...a.advance, amount: num(a.advance.amount) } : null,
+      budgetRequest: a.budgetRequest ? { ...a.budgetRequest, amount: num(a.budgetRequest.amount) } : null,
     })),
   };
 }
 
-/** Which settleable an allocation row points at. Exactly one of the four is set. */
+/** Which settleable an allocation row points at. Exactly one of the five is set. */
 function allocationKind(a: {
   invoiceId: string | null;
   billId: string | null;
   claimId: string | null;
   advanceId: string | null;
+  budgetRequestId: string | null;
 }, paymentKind: PaymentKind): SettleableKind {
   if (a.invoiceId) return 'invoice';
   if (a.billId) return 'bill';
   if (a.claimId) return 'claim';
-  // Direction decides what an advance allocation IS: money out is the
-  // release, money in is unspent cash coming back.
+  // Direction decides what an advance or budget request allocation IS: money
+  // out is the release, money in is unspent cash coming back.
+  if (a.budgetRequestId) return paymentKind === 'RECEIPT' ? 'budget_request_refund' : 'budget_request';
   return paymentKind === 'RECEIPT' ? 'advance_refund' : 'advance';
 }
 
@@ -1676,7 +1746,7 @@ const paymentSchema = z.object({
   allocations: z
     .array(
       z.object({
-        kind: z.enum(['invoice', 'bill', 'claim', 'advance', 'advance_refund']),
+        kind: z.enum(['invoice', 'bill', 'claim', 'advance', 'advance_refund', 'budget_request', 'budget_request_refund']),
         id: z.string().min(1),
         amount: z.number().positive('An allocation must be more than zero'),
       }),
@@ -1707,11 +1777,12 @@ paymentRoutes.post(
     // Money in settles what is owed TO us: a customer's invoice, or a person's
     // unspent advance coming back. Money out settles what we owe: a bill, a
     // claim, or the advance itself.
-    if (body.kind === 'RECEIPT' && body.allocations.some((a) => a.kind !== 'invoice' && a.kind !== 'advance_refund')) {
-      throw badRequest('A receipt settles customer invoices or returns an advance. Record money going out as a disbursement.');
+    const MONEY_IN = ['invoice', 'advance_refund', 'budget_request_refund'];
+    if (body.kind === 'RECEIPT' && body.allocations.some((a) => !MONEY_IN.includes(a.kind))) {
+      throw badRequest('A receipt settles customer invoices or returns unspent cash. Record money going out as a disbursement.');
     }
-    if (body.kind === 'DISBURSEMENT' && body.allocations.some((a) => a.kind === 'invoice' || a.kind === 'advance_refund')) {
-      throw badRequest('A disbursement settles supplier bills, expense claims or cash advances, not money coming in.');
+    if (body.kind === 'DISBURSEMENT' && body.allocations.some((a) => MONEY_IN.includes(a.kind))) {
+      throw badRequest('A disbursement settles supplier bills, expense claims, cash advances or budget requests, not money coming in.');
     }
 
     const amount = cents(body.allocations.reduce((s, a) => s + a.amount, 0));
@@ -1721,6 +1792,7 @@ paymentRoutes.post(
     // anything is written. Over-applying is how a document ends up "more than
     // paid" and an aging report goes negative.
     const advances: { id: string; number: string }[] = [];
+    const requests: { id: string; number: string }[] = [];
     for (const allocation of body.allocations) {
       const target = await settleable(allocation.kind as SettleableKind, allocation.id);
       if (!target) throw notFound(`That ${allocation.kind.replace(/_/g, ' ')} does not exist`);
@@ -1729,16 +1801,16 @@ paymentRoutes.post(
           `${target.number} has only ${target.outstanding} outstanding, but ${allocation.amount} is being applied to it.`,
         );
       }
-      // An advance is released in one voucher. Half an advance is a second
-      // document with its own liquidation, and the paper form has no such thing.
-      if (allocation.kind === 'advance') {
+      // An advance — and a budget request — is released in one voucher. Half
+      // of one is a second document with its own liquidation, and the paper
+      // form has no such thing.
+      if (allocation.kind === 'advance' || allocation.kind === 'budget_request') {
+        const what = allocation.kind === 'advance' ? 'An advance' : 'A budget request';
         if (target.outstanding <= 0.005) throw badRequest(`${target.number} is not waiting to be released`);
         if (Math.abs(allocation.amount - target.outstanding) > 0.005) {
-          throw badRequest(
-            `An advance is released in one voucher — release PHP ${target.outstanding} or cancel it`,
-          );
+          throw badRequest(`${what} is released in one voucher — release PHP ${target.outstanding} or cancel it`);
         }
-        advances.push({ id: target.id, number: target.number });
+        (allocation.kind === 'advance' ? advances : requests).push({ id: target.id, number: target.number });
       }
     }
 
@@ -1772,6 +1844,7 @@ paymentRoutes.post(
               billId: a.kind === 'bill' ? a.id : null,
               claimId: a.kind === 'claim' ? a.id : null,
               advanceId: a.kind === 'advance' || a.kind === 'advance_refund' ? a.id : null,
+              budgetRequestId: a.kind === 'budget_request' || a.kind === 'budget_request_refund' ? a.id : null,
               amount: D(a.amount),
             })),
           },
@@ -1806,6 +1879,31 @@ paymentRoutes.post(
           entityId: adv.id,
           action: 'UPDATED',
           summary: `${adv.number} released on ${payment.number} — liquidate by ${due}`,
+        },
+        req,
+      );
+    }
+    // The team now holds the project's cash; its liquidation clock has started.
+    for (const br of requests) {
+      const released = await prisma.budgetRequest.findUnique({
+        where: { id: br.id },
+        select: { requestedById: true, liquidationDueDate: true, amountReleased: true, job: { select: { number: true } } },
+      });
+      if (!released) continue;
+      const due = released.liquidationDueDate ? formatDate(released.liquidationDueDate) : 'the due date';
+      await notify({
+        userId: released.requestedById,
+        type: 'system',
+        title: `${br.number} released — liquidate by ${due}`,
+        body: `${num(released.amountReleased)} has been released for ${released.job.number}. File the receipts as a liquidation in Expenses before ${due}.`,
+        link: `/g-ops/budget-requests/${br.id}`,
+      });
+      await audit(
+        {
+          entityType: 'budget_request',
+          entityId: br.id,
+          action: 'UPDATED',
+          summary: `${br.number} released on ${payment.number} — liquidate by ${due}`,
         },
         req,
       );
@@ -1866,19 +1964,22 @@ paymentRoutes.delete(
 
     const touched = payment.allocations.map((a) => ({
       kind: allocationKind(a, payment.kind),
-      id: (a.invoiceId ?? a.billId ?? a.claimId ?? a.advanceId)!,
+      id: (a.invoiceId ?? a.billId ?? a.claimId ?? a.advanceId ?? a.budgetRequestId)!,
     }));
 
     // Reversing a release while somebody is accounting for that cash would
-    // leave a liquidation pointing at an advance that was never handed over.
+    // leave a liquidation pointing at cash that was never handed over.
     for (const t of touched) {
-      if (t.kind !== 'advance') continue;
+      if (t.kind !== 'advance' && t.kind !== 'budget_request') continue;
       const live = await prisma.expenseClaim.findFirst({
-        where: { advanceId: t.id, status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'SETTLED', 'REIMBURSED'] } },
+        where: {
+          ...(t.kind === 'advance' ? { advanceId: t.id } : { budgetRequestId: t.id }),
+          status: { in: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'SETTLED', 'REIMBURSED'] },
+        },
         select: { number: true },
       });
       if (live) {
-        throw badRequest(`${live.number} is liquidating this advance. Cancel the liquidation first.`);
+        throw badRequest(`${live.number} is liquidating this ${t.kind === 'advance' ? 'advance' : 'budget request'}. Cancel the liquidation first.`);
       }
     }
 
@@ -1972,7 +2073,38 @@ paymentRoutes.get(
       );
       return;
     }
-    throw badRequest('Ask for invoice, bill, claim, advance or advance_refund');
+    if (kind === 'budget_request' || kind === 'budget_request_refund') {
+      const rows = await prisma.budgetRequest.findMany({
+        where: {
+          status: kind === 'budget_request' ? 'APPROVED' : 'REFUND_DUE',
+          ...(partyId ? { requestedById: partyId } : {}),
+        },
+        include: { requestedBy: { select: { id: true, name: true } }, job: { select: { number: true } } },
+        orderBy: { createdAt: 'asc' },
+      });
+      res.json(
+        rows
+          .map((r) => {
+            const released = num(r.amountReleased);
+            const outstanding =
+              kind === 'budget_request'
+                ? cents(num(r.amount) - released)
+                : cents(Math.max(0, released - num(r.amountSpent)) - num(r.amountRefunded));
+            return {
+              id: r.id,
+              number: r.number,
+              purpose: `${r.job.number} — ${r.reason}`,
+              status: r.status,
+              requestedBy: r.requestedBy,
+              amount: num(r.amount),
+              outstanding,
+            };
+          })
+          .filter((r) => r.outstanding > 0.005),
+      );
+      return;
+    }
+    throw badRequest('Ask for invoice, bill, claim, advance, advance_refund, budget_request or budget_request_refund');
   }),
 );
 
@@ -2197,7 +2329,7 @@ financeReportRoutes.get(
     const actual = [...buckets.values()].map((b) => ({ ...b, net: cents(b.in - b.out) }));
 
     // Forecast: everything still owed, in or out, by when it falls due.
-    const [openInvoices, openBills, openClaims, openAdvances, uncleared] = await Promise.all([
+    const [openInvoices, openBills, openClaims, openAdvances, openRequests, uncleared] = await Promise.all([
       prisma.invoice.findMany({
         where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
         select: { dueDate: true, netCollectible: true, amountCollected: true },
@@ -2208,7 +2340,13 @@ financeReportRoutes.get(
       }),
       prisma.expenseClaim.findMany({
         where: { status: 'APPROVED' },
-        select: { claimDate: true, total: true, amountPaid: true, advance: { select: { amountReleased: true } } },
+        select: {
+          claimDate: true,
+          total: true,
+          amountPaid: true,
+          advance: { select: { amountReleased: true } },
+          budgetRequest: { select: { amountReleased: true } },
+        },
       }),
       prisma.cashAdvance.findMany({
         where: { status: { in: ['APPROVED', 'REFUND_DUE'] } },
@@ -2219,6 +2357,20 @@ financeReportRoutes.get(
           amountSpent: true,
           amountRefunded: true,
           requestDate: true,
+          neededBy: true,
+          liquidationDueDate: true,
+        },
+      }),
+      // Project cash: the same two movements, on the budget request.
+      prisma.budgetRequest.findMany({
+        where: { status: { in: ['APPROVED', 'REFUND_DUE'] } },
+        select: {
+          status: true,
+          amount: true,
+          amountReleased: true,
+          amountSpent: true,
+          amountRefunded: true,
+          createdAt: true,
           neededBy: true,
           liquidationDueDate: true,
         },
@@ -2269,12 +2421,25 @@ financeReportRoutes.get(
         place(adv.liquidationDueDate ?? to, back, 'in');
       }
     }
+    let budgetRequestsToRelease = 0;
+    for (const br of openRequests) {
+      if (br.status === 'APPROVED') {
+        const out = cents(num(br.amount) - num(br.amountReleased));
+        budgetRequestsToRelease = cents(budgetRequestsToRelease + out);
+        place(br.neededBy ?? dayKey(br.createdAt), out, 'out');
+      } else {
+        const back = cents(Math.max(0, num(br.amountReleased) - num(br.amountSpent)) - num(br.amountRefunded));
+        refundsDue = cents(refundsDue + back);
+        place(br.liquidationDueDate ?? to, back, 'in');
+      }
+    }
     for (const f of forecast) f.net = cents(f.in - f.out);
 
     res.json({
       months: actual,
       forecast,
       advancesToRelease,
+      budgetRequestsToRelease,
       refundsDue,
       // Cheques written or received that have not cleared. Neither in the
       // actuals nor in the forecast, and worth seeing for exactly that reason.
@@ -2421,6 +2586,9 @@ financeReportRoutes.get(
       liquidationsOverdue,
       refundsAwaitingReceipt,
       activeJobs,
+      budgetRequestsAwaitingRelease,
+      budgetLiquidationsOverdue,
+      budgetRefundsAwaitingReceipt,
     ] = await Promise.all([
       financePosition(today),
       // Customer receipts only. A person returning unspent advance money is
@@ -2443,6 +2611,9 @@ financeReportRoutes.get(
       prisma.cashAdvance.count({ where: { status: 'RELEASED', liquidationDueDate: { lt: today } } }),
       prisma.cashAdvance.count({ where: { status: 'REFUND_DUE' } }),
       prisma.job.count({ where: { status: { in: ['PLANNING', 'IN_PROGRESS'] } } }),
+      prisma.budgetRequest.count({ where: { status: 'APPROVED' } }),
+      prisma.budgetRequest.count({ where: { status: 'RELEASED', liquidationDueDate: { lt: today } } }),
+      prisma.budgetRequest.count({ where: { status: 'REFUND_DUE' } }),
     ]);
 
     res.json({
@@ -2454,6 +2625,8 @@ financeReportRoutes.get(
       reimbursable: position.reimbursable,
       advancesInHand: position.advancesInHand,
       advancesToRelease: position.advancesToRelease,
+      budgetRequestsInHand: position.budgetRequestsInHand,
+      budgetRequestsToRelease: position.budgetRequestsToRelease,
       workingPosition: position.workingPosition,
       collectedThisMonth: cents(num(receiptsThisMonth._sum.amount)),
       collectedThisYear: cents(num(receiptsThisYear._sum.amount)),
@@ -2465,6 +2638,9 @@ financeReportRoutes.get(
         advancesAwaitingRelease,
         liquidationsOverdue,
         refundsAwaitingReceipt,
+        budgetRequestsAwaitingRelease,
+        budgetLiquidationsOverdue,
+        budgetRefundsAwaitingReceipt,
       },
       activeJobs,
     });
@@ -2497,6 +2673,7 @@ financeSettingsRoutes.put(
         agingBuckets: z.array(z.number().int().positive()).min(1).max(6).optional(),
         advanceLiquidationDays: z.number().int().min(1).max(365).optional(),
         blockAdvanceWhileUnliquidated: z.boolean().optional(),
+        budgetRequestLiquidationDays: z.number().int().min(1).max(365).optional(),
       }),
       req.body,
     );

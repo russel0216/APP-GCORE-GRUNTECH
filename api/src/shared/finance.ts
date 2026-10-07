@@ -98,6 +98,13 @@ export interface FinanceSettings {
    * on two trips in one week will be refused until finance turns this off.
    */
   blockAdvanceWhileUnliquidated: boolean;
+  /**
+   * Days a project team has to liquidate a budget request (project cash),
+   * counted from the day the cash was released. Its own rule, not the
+   * advance's (2026-10-07, the owner's call): an advance is a personal loan
+   * and a budget request is the project's money. Snapshotted at release.
+   */
+  budgetRequestLiquidationDays: number;
 }
 
 const DEFAULTS: FinanceSettings = {
@@ -107,6 +114,7 @@ const DEFAULTS: FinanceSettings = {
   agingBuckets: [30, 60, 90],
   advanceLiquidationDays: 30,
   blockAdvanceWhileUnliquidated: true,
+  budgetRequestLiquidationDays: 30,
 };
 
 export async function financeSettings(): Promise<FinanceSettings> {
@@ -163,17 +171,36 @@ export function daysBetween(from: Date, to: Date): number {
  * the excess, if any, is what is still owed to them. Unspent cash goes the
  * other way and is carried on the advance, never here. For a plain claim this
  * is exactly `total`, so nothing that existed before this function moved.
+ *
+ * A liquidation of a budget request (project cash) is the same arithmetic
+ * against what the request released; a claim names one or the other.
  */
 export function claimPayable(row: {
   total: Prisma.Decimal | number;
   advance?: { amountReleased: Prisma.Decimal | number } | null;
+  budgetRequest?: { amountReleased: Prisma.Decimal | number } | null;
 }): number {
   const total = Number(row.total);
-  const released = row.advance ? Number(row.advance.amountReleased) : 0;
+  const released = liquidatedReleased(row);
   return cents(Math.max(0, total - released));
 }
 
-export type SettleableKind = 'invoice' | 'bill' | 'claim' | 'advance' | 'advance_refund';
+/** What a liquidation accounts for: the advance's or the budget request's release, else 0. */
+export function liquidatedReleased(row: {
+  advance?: { amountReleased: Prisma.Decimal | number } | null;
+  budgetRequest?: { amountReleased: Prisma.Decimal | number } | null;
+}): number {
+  const source = row.advance ?? row.budgetRequest;
+  return source ? Number(source.amountReleased) : 0;
+}
+
+/** The include every reader of a claim's payable needs. */
+export const LIQUIDATION_SOURCES = {
+  advance: { select: { id: true, number: true, amountReleased: true } },
+  budgetRequest: { select: { id: true, number: true, amountReleased: true } },
+} as const;
+
+export type SettleableKind = 'invoice' | 'bill' | 'claim' | 'advance' | 'advance_refund' | 'budget_request' | 'budget_request_refund';
 
 export interface Settleable {
   kind: SettleableKind;
@@ -241,11 +268,98 @@ export async function settleable(
       outstanding: row.status === 'REFUND_DUE' ? cents(payable - paid) : 0,
     };
   }
-  const row = await tx.expenseClaim.findUnique({ where: { id }, include: { advance: true } });
+  if (kind === 'budget_request') {
+    const row = await tx.budgetRequest.findUnique({ where: { id } });
+    if (!row) return null;
+    const payable = num(row.amount);
+    const paid = num(row.amountReleased);
+    return { kind, id, number: row.number, payable, paid, outstanding: row.status === 'APPROVED' ? cents(payable - paid) : 0 };
+  }
+  if (kind === 'budget_request_refund') {
+    const row = await tx.budgetRequest.findUnique({ where: { id } });
+    if (!row) return null;
+    const payable = row.liquidatedAt ? cents(Math.max(0, num(row.amountReleased) - num(row.amountSpent))) : 0;
+    const paid = num(row.amountRefunded);
+    return { kind, id, number: row.number, payable, paid, outstanding: row.status === 'REFUND_DUE' ? cents(payable - paid) : 0 };
+  }
+  const row = await tx.expenseClaim.findUnique({ where: { id }, include: LIQUIDATION_SOURCES });
   if (!row) return null;
   const payable = claimPayable(row);
   const paid = num(row.amountPaid);
   return { kind, id, number: row.number, payable, paid, outstanding: cents(payable - paid) };
+}
+
+/**
+ * The ONE function that decides a budget request's figures and its status —
+ * the advance's rule (below) on the project's own cash: released is the sum
+ * of DISBURSEMENT allocations, refunded the sum of RECEIPT allocations, spent
+ * the approved liquidation's total; the deadline is snapshotted at release
+ * from `budgetRequestLiquidationDays`, the request's own rule. DRAFT,
+ * PENDING_APPROVAL, REJECTED and CANCELLED are decisions, left alone.
+ */
+export async function refreshBudgetRequest(
+  tx: Tx,
+  id: string,
+): Promise<{ paid: number; outstanding: number; status: string }> {
+  const row = await tx.budgetRequest.findUnique({ where: { id } });
+  if (!row) throw badRequest('Budget request not found');
+
+  const allocations = await tx.paymentAllocation.findMany({
+    where: { budgetRequestId: id },
+    select: { amount: true, payment: { select: { kind: true, paymentDate: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  const releases = allocations.filter((a) => a.payment.kind === 'DISBURSEMENT');
+  const released = cents(releases.reduce((s, a) => s + num(a.amount), 0));
+  const refunded = cents(allocations.filter((a) => a.payment.kind === 'RECEIPT').reduce((s, a) => s + num(a.amount), 0));
+
+  const liquidation = await tx.expenseClaim.findFirst({
+    where: { budgetRequestId: id, status: { in: ['APPROVED', 'SETTLED', 'REIMBURSED'] } },
+    orderBy: { approvedAt: 'desc' },
+    select: { total: true, approvedAt: true },
+  });
+  const spent = liquidation ? num(liquidation.total) : 0;
+  const liquidatedAt = liquidation ? liquidation.approvedAt : null;
+  const amount = num(row.amount);
+
+  const frozen = ['DRAFT', 'PENDING_APPROVAL', 'REJECTED', 'CANCELLED'].includes(row.status);
+  let status: string = row.status;
+  if (!frozen) {
+    if (!liquidation) {
+      status = released + 0.005 >= amount ? 'RELEASED' : 'APPROVED';
+    } else {
+      const refundDue = cents(Math.max(0, released - spent));
+      status = refundDue - refunded > 0.005 ? 'REFUND_DUE' : 'LIQUIDATED';
+    }
+  }
+
+  const isReleased = !frozen && status !== 'APPROVED';
+  const releasedAt = isReleased ? (row.releasedAt ?? releases[0]?.payment.paymentDate ?? dayKey(new Date())) : null;
+  let liquidationDueDate: Date | null = null;
+  if (releasedAt) {
+    if (row.liquidationDueDate) liquidationDueDate = row.liquidationDueDate;
+    else {
+      const settings = await financeSettings();
+      liquidationDueDate = addDays(releasedAt, settings.budgetRequestLiquidationDays);
+    }
+  }
+
+  await tx.budgetRequest.update({
+    where: { id },
+    data: {
+      amountReleased: D(released),
+      amountRefunded: D(refunded),
+      amountSpent: D(spent),
+      liquidatedAt,
+      releasedAt,
+      liquidationDueDate,
+      status: status as never,
+    },
+  });
+
+  const payable = status === 'REFUND_DUE' ? cents(Math.max(0, released - spent)) : amount;
+  const paid = status === 'REFUND_DUE' ? refunded : released;
+  return { paid, outstanding: cents(payable - paid), status };
 }
 
 /**
@@ -340,6 +454,7 @@ export async function refreshSettlement(
   id: string,
 ): Promise<{ paid: number; outstanding: number; status: string }> {
   if (kind === 'advance' || kind === 'advance_refund') return refreshAdvance(tx, id);
+  if (kind === 'budget_request' || kind === 'budget_request_refund') return refreshBudgetRequest(tx, id);
 
   const where =
     kind === 'invoice' ? { invoiceId: id } : kind === 'bill' ? { billId: id } : { claimId: id };
@@ -388,7 +503,7 @@ export async function refreshSettlement(
     return { paid, outstanding: cents(payable - paid), status };
   }
 
-  const row = await tx.expenseClaim.findUnique({ where: { id }, include: { advance: true } });
+  const row = await tx.expenseClaim.findUnique({ where: { id }, include: LIQUIDATION_SOURCES });
   if (!row) throw badRequest('Expense claim not found');
   const payable = claimPayable(row);
   // SETTLED is terminal: the advance covered every receipt, so there is
@@ -424,6 +539,10 @@ export interface FinancePosition {
   advancesToRelease: number;
   /** Cash out with people, waiting on a liquidation. */
   advancesInHand: number;
+  /** Approved budget requests (project cash) finance has not yet released. */
+  budgetRequestsToRelease: number;
+  /** Project cash out with the teams, waiting on a liquidation. */
+  budgetRequestsInHand: number;
   /** Receivable less everything owed — suppliers, staff, and cash promised. */
   workingPosition: number;
 }
@@ -437,7 +556,7 @@ export interface FinancePosition {
  * dashboard's own, moved here unchanged.
  */
 export async function financePosition(today: Date): Promise<FinancePosition> {
-  const [openInvoices, openBills, openClaims, openAdvances] = await Promise.all([
+  const [openInvoices, openBills, openClaims, openAdvances, openRequests] = await Promise.all([
     prisma.invoice.findMany({
       where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
       select: { dueDate: true, netCollectible: true, amountCollected: true, ewtAmount: true, ewtCertificateNo: true },
@@ -448,9 +567,13 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
     }),
     prisma.expenseClaim.findMany({
       where: { status: 'APPROVED' },
-      select: { total: true, amountPaid: true, advance: { select: { amountReleased: true } } },
+      select: { total: true, amountPaid: true, ...LIQUIDATION_SOURCES },
     }),
     prisma.cashAdvance.findMany({
+      where: { status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE'] } },
+      select: { status: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
+    }),
+    prisma.budgetRequest.findMany({
       where: { status: { in: ['APPROVED', 'RELEASED', 'REFUND_DUE'] } },
       select: { status: true, amount: true, amountReleased: true, amountSpent: true, amountRefunded: true },
     }),
@@ -491,6 +614,26 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
       ),
   );
 
+  // The same two figures for project cash — a budget request is the project's
+  // money promised and then held by its team, the advance's arithmetic over.
+  const budgetRequestsToRelease = cents(
+    openRequests
+      .filter((r) => r.status === 'APPROVED')
+      .reduce((s, r) => s + Math.max(0, num(r.amount) - num(r.amountReleased)), 0),
+  );
+  const budgetRequestsInHand = cents(
+    openRequests
+      .filter((r) => r.status !== 'APPROVED')
+      .reduce(
+        (s, r) =>
+          s +
+          (r.status === 'RELEASED'
+            ? num(r.amountReleased)
+            : Math.max(0, num(r.amountReleased) - num(r.amountSpent) - num(r.amountRefunded))),
+        0,
+      ),
+  );
+
   return {
     receivable,
     receivableOverdue,
@@ -502,11 +645,13 @@ export async function financePosition(today: Date): Promise<FinancePosition> {
     ),
     advancesToRelease,
     advancesInHand,
+    budgetRequestsToRelease,
+    budgetRequestsInHand,
     // Receivable minus everything owed. Not a bank balance — G-Core does not
     // hold one — but the number that says whether collections are keeping up.
-    // An approved advance is cash promised, so it counts against the position
-    // before the voucher exists.
-    workingPosition: cents(receivable - payable - reimbursable - advancesToRelease),
+    // An approved advance or budget request is cash promised, so it counts
+    // against the position before the voucher exists.
+    workingPosition: cents(receivable - payable - reimbursable - advancesToRelease - budgetRequestsToRelease),
   };
 }
 
