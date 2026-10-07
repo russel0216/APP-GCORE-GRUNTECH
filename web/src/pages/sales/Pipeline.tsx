@@ -781,7 +781,7 @@ export function Pipeline() {
   if (loading && !board) return <Loading />;
 
   const drawColumns = (cols: Column[], laneKey = '') => (
-    <div className="pipeline" role="list" aria-label={laneKey ? `Pipeline for ${laneKey}` : 'Pipeline'}>
+    <div className={`pipeline${stageMode ? ' fit' : ''}`} role="list" aria-label={laneKey ? `Pipeline for ${laneKey}` : 'Pipeline'}>
       {cols.map((col) => (
         <PipeColumn
           key={col.key}
@@ -837,12 +837,8 @@ export function Pipeline() {
         <div>
           <h1>Sales Pipeline</h1>
           <p>
-            Every open lead and quotation, in SCORO’s stages — Opportunity, Negotiation, Closing,
-            Confirmed, Completed — or, under “All steps”, in G-CORE’s own steps. Drag a card to move
-            it, or focus it and press Enter for the Move menu (Shift+← / → steps it one stage). A lead
-            with a quotation is shown once, as its quotation. Moving a deal sets its odds the way the
-            stage says (Admin › Pipeline Stages has the ladder) — override them on the record when
-            you know better.
+            Every open lead and quotation in SCORO’s stages. Drag a card to move it, or press Enter on it
+            for the Move menu; a move sets the deal’s odds the way the stage says.
           </p>
         </div>
         {newMenuButton}
@@ -858,6 +854,7 @@ export function Pipeline() {
           id="pipe-view"
           className="pipe-select"
           value={activeViewId}
+          title="Saved views — save or change one under Customise"
           onChange={(e) => {
             const id = e.target.value;
             setActiveViewId(id);
@@ -873,19 +870,6 @@ export function Pipeline() {
             </option>
           ))}
         </select>
-        <button className="btn btn-sm" onClick={() => setSavingView(true)}>
-          Save view…
-        </button>
-        {ownsActive && (
-          <>
-            <button className="btn btn-sm" onClick={() => void updateView()}>
-              Update view
-            </button>
-            <button className="btn btn-sm btn-danger-ghost" onClick={() => void deleteView()}>
-              Delete view
-            </button>
-          </>
-        )}
 
         <label className="visually-hidden" htmlFor="pipe-owner">
           Salesperson
@@ -916,22 +900,6 @@ export function Pipeline() {
           onChange={(e) => setSearch(e.target.value)}
         />
 
-        <label className="visually-hidden" htmlFor="pipe-window">
-          Won and lost decided within
-        </label>
-        <select
-          id="pipe-window"
-          className="pipe-select"
-          value={view.decidedWithinDays}
-          onChange={(e) => setView((v) => ({ ...v, decidedWithinDays: Number(e.target.value) }))}
-        >
-          {[30, 90, 180, 365].map((d) => (
-            <option key={d} value={d}>
-              Won/lost: last {d} days
-            </option>
-          ))}
-        </select>
-
         <div className="scope-switch" role="group" aria-label="Which columns">
           <button
             className={stageMode ? 'active' : ''}
@@ -951,41 +919,30 @@ export function Pipeline() {
           </button>
         </div>
 
-        <div className="scope-switch" role="group" aria-label="Group by">
-          <button
-            className={view.groupBy === 'none' ? 'active' : ''}
-            aria-pressed={view.groupBy === 'none'}
-            onClick={() => setView((v) => ({ ...v, groupBy: 'none' }))}
-          >
-            One board
-          </button>
-          <button
-            className={view.groupBy === 'owner' ? 'active' : ''}
-            aria-pressed={view.groupBy === 'owner'}
-            onClick={() => setView((v) => ({ ...v, groupBy: 'owner' }))}
-          >
-            By salesperson
-          </button>
-        </div>
-
-        <div className="pipe-menu-wrap">
-          <button
-            className="btn btn-sm"
-            aria-haspopup="dialog"
-            aria-expanded={customising}
-            onClick={() => setCustomising((o) => !o)}
-          >
-            Customise ▾
-          </button>
-          {customising && <Customise view={view} setView={setView} onClose={() => setCustomising(false)} />}
-        </div>
-
-        {can('gops.pipeline.export') && (
-          <button className="btn btn-sm" onClick={() => void exportCsv()}>
-            Export
-          </button>
-        )}
+        <button
+          className={`btn btn-sm${customising ? ' btn-active' : ''}`}
+          aria-expanded={customising}
+          aria-controls="pipe-customise"
+          onClick={() => setCustomising((o) => !o)}
+        >
+          Customise ▾
+        </button>
       </div>
+
+      {customising && (
+        <Customise
+          view={view}
+          setView={setView}
+          onClose={() => setCustomising(false)}
+          activeViewName={activeView?.name ?? null}
+          ownsActive={ownsActive}
+          onSaveView={() => setSavingView(true)}
+          onUpdateView={() => void updateView()}
+          onDeleteView={() => void deleteView()}
+          canExport={can('gops.pipeline.export')}
+          onExport={() => void exportCsv()}
+        />
+      )}
 
       {board && <KpiRow kpis={board.kpis} board={board} show={view.kpis} canInsights={can('insights.pipeline.view_all')} />}
 
@@ -1514,21 +1471,29 @@ function Customise({
   view,
   setView,
   onClose,
+  activeViewName,
+  ownsActive,
+  onSaveView,
+  onUpdateView,
+  onDeleteView,
+  canExport,
+  onExport,
 }: {
   view: PipelineView;
   setView: (fn: (v: PipelineView) => PipelineView) => void;
   onClose: () => void;
+  activeViewName: string | null;
+  ownsActive: boolean;
+  onSaveView: () => void;
+  onUpdateView: () => void;
+  onDeleteView: () => void;
+  canExport: boolean;
+  onExport: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLElement>(null);
 
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('input, button, select')?.focus();
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.parentElement?.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggle = (list: 'collapsed' | 'cardFields' | 'kpis', key: string, on: boolean) =>
@@ -1545,10 +1510,10 @@ function Customise({
     });
 
   return (
-    <div
+    <section
       ref={ref}
-      className="pipe-popover"
-      role="dialog"
+      id="pipe-customise"
+      className="card pipe-customise"
       aria-label="Customise the board"
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
@@ -1559,7 +1524,87 @@ function Customise({
     >
       <div className="pipe-popover-grid">
         <fieldset>
-          <legend>Columns</legend>
+          <legend>This view</legend>
+          <p className="pipe-note">{activeViewName ? `“${activeViewName}”` : 'The working view — remembered in this browser.'}</p>
+          <div className="pipe-customise-actions">
+            <button className="btn btn-sm" onClick={onSaveView}>
+              Save as…
+            </button>
+            {ownsActive && (
+              <>
+                <button className="btn btn-sm" onClick={onUpdateView}>
+                  Update view
+                </button>
+                <button className="btn btn-sm btn-danger-ghost" onClick={onDeleteView}>
+                  Delete view
+                </button>
+              </>
+            )}
+            {canExport && (
+              <button className="btn btn-sm" onClick={onExport}>
+                Export CSV
+              </button>
+            )}
+            <button className="btn btn-sm" onClick={() => setView(() => DEFAULT_VIEW)}>
+              Standard board
+            </button>
+          </div>
+          <Field label="Group">
+            <div className="scope-switch" role="group" aria-label="Group by">
+              <button
+                className={view.groupBy === 'none' ? 'active' : ''}
+                aria-pressed={view.groupBy === 'none'}
+                onClick={() => setView((v) => ({ ...v, groupBy: 'none' }))}
+              >
+                One board
+              </button>
+              <button
+                className={view.groupBy === 'owner' ? 'active' : ''}
+                aria-pressed={view.groupBy === 'owner'}
+                onClick={() => setView((v) => ({ ...v, groupBy: 'owner' }))}
+              >
+                By salesperson
+              </button>
+            </div>
+          </Field>
+          <Field label="Won and lost shown for">
+            <select value={view.decidedWithinDays} onChange={(e) => setView((v) => ({ ...v, decidedWithinDays: Number(e.target.value) }))}>
+              {[30, 90, 180, 365].map((d) => (
+                <option key={d} value={d}>
+                  the last {d} days
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Sort each column by">
+            <select value={view.sort} onChange={(e) => setView((v) => ({ ...v, sort: e.target.value as Sort }))}>
+              {SORTS.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </fieldset>
+        <fieldset>
+          <legend>Figures across the top</legend>
+          {KPI_TILES.map((t) => (
+            <Checkbox key={t.key} checked={view.kpis.includes(t.key)} onChange={(on) => toggle('kpis', t.key, on)} label={t.label} />
+          ))}
+        </fieldset>
+        <fieldset>
+          <legend>On each card</legend>
+          {CARD_FIELDS.map((f) => (
+            <Checkbox
+              key={f.key}
+              checked={view.cardFields.includes(f.key)}
+              onChange={(on) => toggle('cardFields', f.key, on)}
+              label={f.label}
+            />
+          ))}
+        </fieldset>
+        <fieldset>
+          <legend>Columns of the “All steps” view</legend>
           <p className="pipe-note">Unticked columns collapse to a strip — still a drop target.</p>
           <ol className="pipe-order">
             {view.columns.map((key, i) => (
@@ -1591,42 +1636,13 @@ function Customise({
             ))}
           </ol>
         </fieldset>
-        <fieldset>
-          <legend>On each card</legend>
-          {CARD_FIELDS.map((f) => (
-            <Checkbox
-              key={f.key}
-              checked={view.cardFields.includes(f.key)}
-              onChange={(on) => toggle('cardFields', f.key, on)}
-              label={f.label}
-            />
-          ))}
-        </fieldset>
-        <fieldset>
-          <legend>Figures across the top</legend>
-          {KPI_TILES.map((t) => (
-            <Checkbox key={t.key} checked={view.kpis.includes(t.key)} onChange={(on) => toggle('kpis', t.key, on)} label={t.label} />
-          ))}
-          <Field label="Sort each column by">
-            <select value={view.sort} onChange={(e) => setView((v) => ({ ...v, sort: e.target.value as Sort }))}>
-              {SORTS.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <button className="btn btn-sm" onClick={() => setView(() => DEFAULT_VIEW)}>
-            Reset to the standard board
-          </button>
-        </fieldset>
       </div>
       <div className="pipe-popover-foot">
         <button className="btn btn-sm btn-primary" onClick={onClose}>
           Done
         </button>
       </div>
-    </div>
+    </section>
   );
 }
 
