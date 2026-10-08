@@ -157,6 +157,7 @@ interface BoardCard {
   kind: string;
   id: string;
   column: string;
+  stage: string;
   canMove: boolean;
   allowedTargets: string[];
 }
@@ -534,11 +535,47 @@ async function main() {
   const moved = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'SUBMITTED' });
   check("the manager may move a salesperson's quotation", moved.status === 200, `${moved.status}`);
   const told = await prisma.notification.findFirst({
-    where: { userId: seller.id, title: { contains: 'moved to Submitted' } },
+    where: { userId: seller.id, title: { contains: 'moved to Negotiation (submitted)' } },
   });
-  check('and the salesperson is told who moved it', !!told && told.title.includes(manager.name), told?.title);
+  check('and the salesperson is told who moved it, by the stage the board shows, with the step after it', !!told && told.title.includes(manager.name), told?.title);
   const notMine = await http(sellerToken, 'PATCH', `/quotations/${draftOnly.id}`, { outcome: 'NEGOTIATION' });
   check("a salesperson cannot move someone else's quotation", notMine.status === 403, `${notMine.status}`);
+
+  // ── 4b. The board, the list and the quotation page say the same word ─────
+  // (2026-10-08, the owner's call: "if dragged to another column, the
+  // quotation also changes the status" — it always did, but the page printed
+  // the fine step, Submitted, where the board printed its stage, Negotiation.)
+  console.log('\nThe stage, on every screen');
+  const pageAfterMove = await http(managerToken, 'GET', `/quotations/${sellersOwn.id}`);
+  const pageBody = pageAfterMove.body as unknown as {
+    outcome: string;
+    stage: string;
+    stageLabel: string;
+    quotationStages: { key: string; label: string; outcomes: string[] }[];
+  };
+  check(
+    'moved to Submitted on the board, the quotation page says Negotiation — the stage, as the board does',
+    pageBody.outcome === 'SUBMITTED' && pageBody.stage === 'NEGOTIATION' && pageBody.stageLabel === 'Negotiation',
+    JSON.stringify({ outcome: pageBody.outcome, stage: pageBody.stage, label: pageBody.stageLabel }),
+  );
+  const stagesSeen = pageBody.quotationStages?.map((s) => `${s.key}:${s.outcomes.join('+')}`).join();
+  check(
+    'and it names every stage a quotation can stand in, with the outcome each gathers',
+    stagesSeen === 'OPPORTUNITY:OPEN,NEGOTIATION:SUBMITTED,CLOSING:NEGOTIATION,CONFIRMED:WON,COMPLETED:,LOST:LOST',
+    stagesSeen,
+  );
+  // A drop on Closing is a PATCH to NEGOTIATION — the board's own move.
+  const dropped = await http(managerToken, 'PATCH', `/quotations/${sellersOwn.id}`, { outcome: 'NEGOTIATION' });
+  const boardNow = await http(managerToken, 'GET', `/pipeline?search=${encodeURIComponent(TAG)}`);
+  const cardNow = (boardNow.body as unknown as BoardBody).columns.flatMap((c) => c.cards).find((c) => c.ref === `quotation:${sellersOwn.id}`);
+  const listNow = await http(managerToken, 'GET', `/quotations?search=${encodeURIComponent(`${TAG} Seller owned`)}&scope=all`);
+  const rowNow = ((listNow.body.rows ?? []) as { id: string; stage: string }[]).find((r) => r.id === sellersOwn.id);
+  const pageNow = (await http(managerToken, 'GET', `/quotations/${sellersOwn.id}`)).body as unknown as { stage: string; outcome: string };
+  check(
+    'dropped on Closing: the board card, the list row and the quotation page all say CLOSING',
+    dropped.status === 200 && cardNow?.stage === 'CLOSING' && rowNow?.stage === 'CLOSING' && pageNow.stage === 'CLOSING' && pageNow.outcome === 'NEGOTIATION',
+    `${dropped.status} card ${cardNow?.stage} row ${rowNow?.stage} page ${pageNow.stage}`,
+  );
 
   // ── 5. Lead → quotation hand-off ─────────────────────────────────────────
   console.log('\nLead to quotation');

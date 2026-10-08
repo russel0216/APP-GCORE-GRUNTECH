@@ -9,8 +9,9 @@ import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDate
 import {
   CostPanelBlock,
   NEXT_OUTCOMES,
-  OUTCOMES,
-  QUOTATION_OUTCOME_TONES,
+  STAGE_TONES,
+  stageKeyFor,
+  stageLabelFor,
   type Item,
   type QuotationDetail,
   type Revision,
@@ -927,7 +928,9 @@ export function QuotationEditor() {
 
   // SCORO's Status on the Modify page: where the quotation may go from here,
   // by the same rules as the quotation page and the board. Won needs an
-  // approved revision; one that became a project stays won.
+  // approved revision; one that became a project stays won. Named by STAGE
+  // (2026-10-08) — the word the board and the list use — while the value
+  // stays the fine outcome the PATCH takes.
   const jobs = quotation ? quotation.revisions.flatMap((r) => r.jobs ?? []) : [];
   const hasApproved = !!quotation?.revisions.some((r) => r.status === 'APPROVED');
   const current = quotation?.outcome ?? 'OPEN';
@@ -936,7 +939,7 @@ export function QuotationEditor() {
     ...(current === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[current] ?? [])),
   ].map((value) => ({
     value,
-    label: `${OUTCOMES.find((o) => o.value === value)?.label ?? value}${value === 'WON' && value !== current && !hasApproved ? ' (needs an approved revision)' : ''}`,
+    label: `${value === current && quotation?.stageLabel ? quotation.stageLabel : stageLabelFor(value, quotation?.quotationStages)}${value === 'WON' && value !== current && !hasApproved ? ' (needs an approved revision)' : ''}`,
     disabled: value === 'WON' && value !== current && !hasApproved,
   }));
   const wonMove = quotation?.statusHistory ? [...quotation.statusHistory].reverse().find((c) => c.to === 'WON') : undefined;
@@ -1157,7 +1160,7 @@ export function QuotationEditor() {
               </Field>
             ) : (
               <Static label="Status">
-                <StatusBadge status="OPEN" extra={QUOTATION_OUTCOME_TONES} />{' '}
+                <StatusBadge status={stageKeyFor('OPEN')} extra={STAGE_TONES} label={stageLabelFor('OPEN')} />{' '}
                 <span className="faint">— it moves once the quotation is saved</span>
               </Static>
             )}
@@ -1874,9 +1877,10 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
   const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
   const hasApproved = quotation.revisions.some((r) => r.status === 'APPROVED');
   const current = quotation.outcome;
+  // Named by stage (2026-10-08), the value the fine outcome the PATCH takes.
   const statusOptions = [current, ...(current === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[current] ?? []))].map((value) => ({
     value,
-    label: `${OUTCOMES.find((o) => o.value === value)?.label ?? value}${value === 'WON' && value !== current && !hasApproved ? ' (needs an approved revision)' : ''}`,
+    label: `${value === current && quotation.stageLabel ? quotation.stageLabel : stageLabelFor(value, quotation.quotationStages)}${value === 'WON' && value !== current && !hasApproved ? ' (needs an approved revision)' : ''}`,
     disabled: value === 'WON' && value !== current && !hasApproved,
   }));
 

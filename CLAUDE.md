@@ -207,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,584 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 422, costing 120, pipeline 83, calendar 46, numbering 46,
+**2,587 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 422, costing 120, pipeline 86, calendar 46, numbering 46,
 partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -944,6 +944,24 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   starting odds, exactly as SCORO's statuses do. verify-pipeline sets an
   administrator's `pipeline.stages` aside for the run, as verify-sales does
   with the PDF layouts.
+- **The quotation page prints the STAGE as its status** (2026-10-08, the
+  owner's call: "if dragged to another column, the quotation also changes
+  its status" — it always did, but the page printed the fine step,
+  Submitted, where the board printed its stage, Negotiation, and "Closing"
+  on the board read "Negotiation" on the page). `GET /quotations/:id`
+  carries `stage` and `stageLabel` (`quotationStage()`, booked-aware, so a
+  won quotation with an order reads Completed) and `quotationStages` — each
+  stage a quotation can stand in, as Admin › Pipeline Stages names it, with
+  the fine outcomes it gathers — so the page needs no pipeline right. The
+  pill, Previous status, the days-in-status line, the Change status menu,
+  the Modify page's Status and the list's mass action all speak stage names
+  (`OUTCOME_STAGE` / `stageLabelFor()` / `stageKeyFor()` in
+  `Quotations.tsx`), while every VALUE stays the fine outcome the PATCH
+  takes; the fine step is named under the pill ("Step: Submitted"). After a
+  drop in the board's Stages view the toast names the stage dropped on, and
+  the owner's bell says "moved to Closing (negotiation)" — the stage first,
+  the step after it where the words differ. verify-pipeline asserts the
+  board card, the list row and the page agree after a drop.
 - **The move rules are `assertLeadStatusChange` / `assertOutcomeChange`** in
   `shared/pipeline.ts`, called from the PATCH routes; the board's drop targets
   come from `allowedTargets()` on the same rules. Do not add a board-only move

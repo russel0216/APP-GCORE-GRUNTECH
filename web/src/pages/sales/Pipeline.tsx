@@ -547,7 +547,12 @@ export function Pipeline() {
     pendingFocus.current = card.ref;
     try {
       await api.patch(card.kind === 'lead' ? `/leads/${card.id}` : `/quotations/${card.id}`, payloadFor(card, key, lostReason));
-      const text = `Moved ${card.number} to ${LABELS[key] ?? key}`;
+      // In the stage view the person dropped the card on a STAGE, so the
+      // toast names the stage — the status the quotation page prints too
+      // (2026-10-08) — not the fine column the drop resolved to.
+      const stageLabel = view.stages !== 'detailed' ? board?.stages.find((s) => s.columns.includes(key))?.label : undefined;
+      const where = stageLabel ?? LABELS[key] ?? key;
+      const text = `Moved ${card.number} to ${where}${card.kind === 'quotation' ? ` — the quotation's status now reads ${where}` : ''}`;
       toast('ok', text);
       announce(text);
       await load();

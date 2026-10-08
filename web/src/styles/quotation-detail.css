@@ -203,6 +203,12 @@
   margin-top: var(--s-1);
 }
 
+/* The fine step under the stage pill: "Step: Submitted" under Negotiation. */
+.qd-step {
+  margin-top: var(--s-1);
+  font-size: var(--fs-sm);
+}
+
 /* "Lost" asks why in the page. */
 .qd-lost {
   margin-top: var(--s-2);

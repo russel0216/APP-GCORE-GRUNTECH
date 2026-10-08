@@ -104,6 +104,42 @@ const STAGE_TABS = [
   { value: 'LOST', label: 'Lost' },
 ];
 
+/**
+ * The stage each fine outcome stands in — the board's band and the list's
+ * tab, which the quotation page prints as its status too (2026-10-08, the
+ * owner's call: a drag on the board and the quotation must say the same
+ * word). Fixed: an administrator renames and recolours stages, never which
+ * statuses they gather (`quotationStage` in api/src/shared/pipeline.ts). The
+ * names come from the server where it sends them (`quotationStages`), so a
+ * renamed stage is renamed here; SCORO's defaults otherwise.
+ */
+export const OUTCOME_STAGE: Record<string, string> = {
+  OPEN: 'OPPORTUNITY',
+  SUBMITTED: 'NEGOTIATION',
+  NEGOTIATION: 'CLOSING',
+  WON: 'CONFIRMED',
+  LOST: 'LOST',
+};
+
+/** A stage as `GET /quotations/:id` sends it: named by Admin › Pipeline Stages, with the outcomes it gathers. */
+export interface StageOption {
+  key: string;
+  label: string;
+  color?: string;
+  outcomes?: string[];
+}
+
+/** The stage key an outcome stands in (unbooked — a won quotation with an order is Completed, which the server says). */
+export function stageKeyFor(outcome: string, stages?: StageOption[] | null): string {
+  return stages?.find((s) => s.outcomes?.includes(outcome))?.key ?? OUTCOME_STAGE[outcome] ?? outcome;
+}
+
+/** The stage's name for an outcome — "Closing" for NEGOTIATION — as the server names it, else SCORO's default. */
+export function stageLabelFor(outcome: string, stages?: StageOption[] | null): string {
+  const key = stageKeyFor(outcome, stages);
+  return stages?.find((s) => s.key === key)?.label ?? STAGE_TABS.find((t) => t.value === key)?.label ?? outcomeLabel(outcome);
+}
+
 interface QuotationSummary {
   count?: number;
   value?: number;
@@ -370,11 +406,11 @@ export function planMove(
   const go: QuotationRow[] = [];
   const stay: { row: QuotationRow; why: string }[] = [];
   for (const r of rows) {
-    if (r.outcome === target) stay.push({ row: r, why: `already ${outcomeLabel(target).toLowerCase()}` });
+    if (r.outcome === target) stay.push({ row: r, why: `already in ${stageLabelFor(target)}` });
     else if (!r.canEdit) stay.push({ row: r, why: 'only its author can move it' });
     else if (r.outcome === 'WON' && r.hasJob) stay.push({ row: r, why: 'a project was built from it' });
     else if (!(NEXT_OUTCOMES[r.outcome] ?? []).includes(target)) {
-      stay.push({ row: r, why: `${outcomeLabel(r.outcome)} cannot go to ${outcomeLabel(target)}` });
+      stay.push({ row: r, why: `${r.stageLabel ?? stageLabelFor(r.outcome)} cannot go to ${stageLabelFor(target)}` });
     } else if (target === 'WON' && !r.hasApprovedRevision) stay.push({ row: r, why: 'needs an approved revision first' });
     else go.push(r);
   }
@@ -416,7 +452,7 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
     const left = [...plan.stay, ...failed];
     toast(
       moved > 0 ? 'ok' : 'error',
-      `${moved} quotation${moved === 1 ? '' : 's'} moved to ${outcomeLabel(target).toLowerCase()}` +
+      `${moved} quotation${moved === 1 ? '' : 's'} moved to ${stageLabelFor(target)}` +
         (left.length ? `; ${left.length} did not move` : ''),
     );
     setRefused(left.map((l) => ({ number: l.row.number, why: l.why })));
@@ -441,7 +477,7 @@ function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
         <option value="">Change status…</option>
         {BULK_TARGETS.map((o) => (
           <option key={o} value={o}>
-            {outcomeLabel(o)}
+            {stageLabelFor(o)}
             {o === 'LOST' ? '…' : ''}
           </option>
         ))}
@@ -655,6 +691,11 @@ export interface QuotationDetail {
   stages?: OutcomeStage[];
   /** Issue to decision, once the quotation is won or lost. */
   closedInDays?: number | null;
+  /** The pipeline stage it stands in — the word the board and the list use — and its name. Booked-aware (Completed). */
+  stage?: string;
+  stageLabel?: string | null;
+  /** The stages a quotation can stand in, as Admin › Pipeline Stages names them, each with the outcomes it gathers. */
+  quotationStages?: StageOption[];
   /** The company's VAT rate. */
   companyVatRate?: number;
   /** What the Tax dropdown offers: the company rate, 8%, 6% (Government), 0%. */
@@ -784,9 +825,12 @@ export function QuotationDetail() {
     );
   }
 
+  // The page speaks in STAGES (2026-10-08) — the board's and the list's
+  // words — while every value stays the fine outcome the PATCH takes.
+  const stageLabelOf = (o: string) => stageLabelFor(o, quotation!.quotationStages);
   // A quotation that became a project stays won — no moves at all.
   const moves = (quotation.outcome === 'WON' && jobs.length > 0 ? [] : (NEXT_OUTCOMES[quotation.outcome] ?? [])).map(
-    (o) => ({ value: o, label: outcomeLabel(o) }),
+    (o) => ({ value: o, label: stageLabelOf(o) }),
   );
   const reopening = quotation.outcome === 'WON' || quotation.outcome === 'LOST';
 
@@ -819,7 +863,7 @@ export function QuotationDetail() {
     }
     void act(
       () => api.patch(`/quotations/${quotation!.id}`, { outcome: next }),
-      reopening ? 'Reopened' : `Marked ${outcomeLabel(next).toLowerCase()}`,
+      reopening ? 'Reopened' : `Moved to ${stageLabelOf(next)}`,
     );
   }
 
@@ -1019,18 +1063,26 @@ export function QuotationDetail() {
 
             <dl className="qd-group">
               <Detail label="Previous status">
-                {lastMove ? <StatusBadge status={lastMove.from} extra={QUOTATION_OUTCOME_TONES} /> : null}
+                {lastMove ? (
+                  <StatusBadge status={stageKeyFor(lastMove.from, quotation.quotationStages)} extra={STAGE_TONES} label={stageLabelOf(lastMove.from)} />
+                ) : null}
               </Detail>
               <Detail label="Status">
                 <span className="qd-status">
-                  <StatusBadge status={quotation.outcome} extra={QUOTATION_OUTCOME_TONES} />
+                  {/* The STAGE — the word the board and the list use — with the fine step under it. */}
+                  <StatusBadge
+                    status={quotation.stage || stageKeyFor(quotation.outcome, quotation.quotationStages)}
+                    extra={STAGE_TONES}
+                    label={quotation.stageLabel ?? stageLabelOf(quotation.outcome)}
+                  />
                   <Stamp at={lastMove?.at ?? quotation.createdAt} by={lastMove?.by} />
                 </span>
+                <div className="qd-sub qd-step">Step: {outcomeLabel(quotation.outcome)}</div>
                 {/* SCORO's days-in-status, as one quiet line rather than a row of tiles. */}
                 {((quotation.stages?.length ?? 0) > 0 || quotation.closedInDays != null) && (
                   <div className="qd-sub qd-days">
                     {(quotation.stages ?? [])
-                      .map((st) => `${outcomeLabel(st.outcome)} ${dayCount(st.days)}${st.current ? ' so far' : ''}`)
+                      .map((st) => `${stageLabelOf(st.outcome)} ${dayCount(st.days)}${st.current ? ' so far' : ''}`)
                       .join(' · ')}
                     {quotation.closedInDays != null ? ` · ${quotation.outcome === 'WON' ? 'won' : 'lost'} in ${dayCount(quotation.closedInDays)}` : ''}
                   </div>

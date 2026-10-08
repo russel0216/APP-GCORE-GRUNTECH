@@ -1788,11 +1788,29 @@ quotationRoutes.get(
         }
       : null;
 
+    // The pipeline stage the quotation stands in — the board's band and the
+    // list's tab, worked out the same way (2026-10-08: the page prints the
+    // STAGE as its status, so a drag on the board and the page agree) — and
+    // the stages a quotation can stand in with the fine outcomes each
+    // gathers, as Admin › Pipeline Stages names them, so the status menu can
+    // offer stages without a pipeline right.
+    const pipeline = await pipelineStages();
+    const booked = (await prisma.salesOrder.count({ where: { quotationId: quotation.id } })) > 0 || quotation.revisions.some((r) => r.jobs.length > 0);
+    const stageKey = quotationStage(quotation.outcome, booked, pipeline);
+
     res.json({
       ...rest,
       statusHistory,
       stages,
       closedInDays,
+      stage: stageKey,
+      stageLabel: pipeline.find((s) => s.key === stageKey)?.label ?? null,
+      quotationStages: quotationStages(pipeline).map((st) => ({
+        key: st.key,
+        label: st.label,
+        color: st.color,
+        outcomes: QUOTATION_OUTCOME_KEYS.filter((o) => quotationStage(o, false, pipeline) === st.key),
+      })),
       companyVatRate: companyRate,
       taxOptions: quotationTaxOptions(companyRate),
       approvalOptions: options,
@@ -2244,13 +2262,19 @@ quotationRoutes.patch(
       }
     }
 
-    // A manager moving somebody else's quotation on the board tells them.
+    // A manager moving somebody else's quotation on the board tells them —
+    // naming the STAGE the board, the list and the quotation page print, with
+    // the fine step after it where the two names differ.
     if (body.outcome && body.outcome !== before.outcome && quotation.ownerId !== me.id) {
       const column = body.outcome === 'OPEN' ? 'QUOTED' : body.outcome;
+      const step = columnByKey(column)?.label ?? body.outcome.toLowerCase();
+      const pipeline = await pipelineStages();
+      const stageLabel = pipeline.find((s) => s.key === quotationStage(body.outcome!, false, pipeline))?.label;
+      const where = stageLabel && stageLabel !== step ? `${stageLabel} (${step.toLowerCase()})` : (stageLabel ?? step);
       await notify({
         userId: quotation.ownerId,
         type: 'system',
-        title: `${quotation.number} moved to ${columnByKey(column)?.label ?? body.outcome.toLowerCase()} by ${me.name}`,
+        title: `${quotation.number} moved to ${where} by ${me.name}`,
         body: quotation.subject,
         link: `/g-ops/quotations/${quotation.id}`,
       });
