@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
-import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
@@ -66,6 +66,10 @@ interface QuotationRow {
   salesOrderCount: number;
   /** Only for a viewer who may see this quotation's cost; null otherwise or when no line is costed. */
   margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null;
+  /** What Change status plans with; the PATCH still decides. */
+  canEdit: boolean;
+  hasApprovedRevision: boolean;
+  hasJob: boolean;
 }
 
 /** The SCORO quote a live quotation carries on, under the same number. */
@@ -294,6 +298,9 @@ export function Quotations() {
         tabs={{ key: 'stage', label: 'Stages', allLabel: 'All quotes', options: STAGE_TABS }}
         filters={filters}
         printPath="/api/quotations/pdf"
+        selectable
+        rowLabel={(q) => `${q.number} ${q.subject}`}
+        bulkActions={(ctx) => <QuotationBulkStatus ctx={ctx} />}
         summaryLine={(raw, total) => {
           const s = raw as QuotationSummary;
           return (
@@ -316,6 +323,151 @@ export function Quotations() {
         }
       />
     </div>
+  );
+}
+
+// ── Mass actions: Change status ──────────────────────────────────────────────
+
+/** The statuses a quotation can be moved to — the detail page's Change status, for many. */
+const BULK_TARGETS = ['SUBMITTED', 'NEGOTIATION', 'WON', 'LOST'];
+
+/**
+ * Which ticked quotations a move would take, and why the rest stay — the same
+ * rules as the detail page's menu (NEXT_OUTCOMES, Won needs an approved
+ * revision, a quotation built into a project stays won), so the button says
+ * what will happen before anything is sent. The PATCH still decides each one.
+ */
+export function planMove(
+  rows: QuotationRow[],
+  target: string,
+): { go: QuotationRow[]; stay: { row: QuotationRow; why: string }[] } {
+  const go: QuotationRow[] = [];
+  const stay: { row: QuotationRow; why: string }[] = [];
+  for (const r of rows) {
+    if (r.outcome === target) stay.push({ row: r, why: `already ${outcomeLabel(target).toLowerCase()}` });
+    else if (!r.canEdit) stay.push({ row: r, why: 'only its author can move it' });
+    else if (r.outcome === 'WON' && r.hasJob) stay.push({ row: r, why: 'a project was built from it' });
+    else if (!(NEXT_OUTCOMES[r.outcome] ?? []).includes(target)) {
+      stay.push({ row: r, why: `${outcomeLabel(r.outcome)} cannot go to ${outcomeLabel(target)}` });
+    } else if (target === 'WON' && !r.hasApprovedRevision) stay.push({ row: r, why: 'needs an approved revision first' });
+    else go.push(r);
+  }
+  return { go, stay };
+}
+
+/**
+ * Change status on the ticked quotations, one ordinary PATCH each — the move
+ * rules, the lead that follows, the stage's odds and the audit row are the
+ * PATCH's, exactly as when one quotation is moved from its page. Lost asks
+ * its reason once, in the bar. Whatever did not move stays ticked, with why.
+ */
+function QuotationBulkStatus({ ctx }: { ctx: BulkContext<QuotationRow> }) {
+  const toast = useToast();
+  const [target, setTarget] = useState('');
+  const [reason, setReason] = useState('');
+  const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
+  const [refused, setRefused] = useState<{ number: string; why: string }[]>([]);
+
+  const plan = target ? planMove(ctx.rows, target) : null;
+  const needsReason = target === 'LOST';
+
+  async function apply() {
+    if (!plan || !plan.go.length || (needsReason && !reason.trim())) return;
+    const failed: { row: QuotationRow; why: string }[] = [];
+    let moved = 0;
+    setRefused([]);
+    for (let i = 0; i < plan.go.length; i++) {
+      setProgress({ done: i, of: plan.go.length });
+      const row = plan.go[i];
+      try {
+        await api.patch(`/quotations/${row.id}`, needsReason ? { outcome: target, lostReason: reason.trim() } : { outcome: target });
+        moved++;
+      } catch (err) {
+        failed.push({ row, why: err instanceof ApiError ? err.message : 'could not be moved' });
+      }
+    }
+    setProgress(null);
+    const left = [...plan.stay, ...failed];
+    toast(
+      moved > 0 ? 'ok' : 'error',
+      `${moved} quotation${moved === 1 ? '' : 's'} moved to ${outcomeLabel(target).toLowerCase()}` +
+        (left.length ? `; ${left.length} did not move` : ''),
+    );
+    setRefused(left.map((l) => ({ number: l.row.number, why: l.why })));
+    setTarget('');
+    setReason('');
+    ctx.reload();
+    if (left.length) ctx.keep(left.map((l) => l.row.id));
+    else ctx.clear();
+  }
+
+  return (
+    <>
+      <select
+        aria-label="Change status of the selected quotations"
+        value={target}
+        disabled={!!progress}
+        onChange={(e) => {
+          setTarget(e.target.value);
+          setRefused([]);
+        }}
+      >
+        <option value="">Change status…</option>
+        {BULK_TARGETS.map((o) => (
+          <option key={o} value={o}>
+            {outcomeLabel(o)}
+            {o === 'LOST' ? '…' : ''}
+          </option>
+        ))}
+      </select>
+      {needsReason && (
+        <input
+          type="text"
+          className="list-bulk-reason"
+          aria-label="Why were they lost? One reason for all of them"
+          placeholder="Why were they lost? (one reason for all)"
+          value={reason}
+          disabled={!!progress}
+          onChange={(e) => setReason(e.target.value)}
+        />
+      )}
+      {plan && (
+        <button
+          type="button"
+          className={`btn btn-sm ${target === 'LOST' ? 'btn-danger' : 'btn-primary'}`}
+          disabled={!plan.go.length || !!progress || (needsReason && !reason.trim())}
+          onClick={() => void apply()}
+        >
+          {progress
+            ? `Moving ${progress.done + 1} of ${progress.of}…`
+            : plan.go.length
+              ? `Move ${plan.go.length} to ${outcomeLabel(target)}`
+              : 'None can move there'}
+        </button>
+      )}
+      {plan && plan.stay.length > 0 && !progress && (
+        <p className="list-bulk-result">
+          {plan.stay.length} will stay as they are:{' '}
+          {plan.stay
+            .slice(0, 6)
+            .map((st) => `${st.row.number} (${st.why})`)
+            .join(', ')}
+          {plan.stay.length > 6 ? `, and ${plan.stay.length - 6} more` : ''}.
+        </p>
+      )}
+      {!plan && refused.length > 0 && (
+        <div className="list-bulk-result" role="status">
+          Still selected — these did not move:
+          <ul>
+            {refused.map((r) => (
+              <li key={r.number}>
+                <span className="mono">{r.number}</span>: {r.why}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
   );
 }
 

@@ -90,6 +90,23 @@ export function listResult<T>(rows: T[], total: number, q: ListQuery): ListResul
   };
 }
 
+/** The most rows one selection may name — a page holds at most 100, so five pages' worth. */
+export const MAX_SELECTED_IDS = 500;
+
+/**
+ * A list's `?ids=` — the rows a person ticked (mass actions, 2026-10-08) —
+ * as ids, or null when absent. Comma-separated, trimmed, de-duplicated; more
+ * than MAX_SELECTED_IDS is a 400 rather than a silently shorter paper. Always
+ * ANDed with the list's own visibility rule, so naming an id never shows a
+ * row the caller could not see in the list.
+ */
+export function idsFilter(value: string | undefined): string[] | null {
+  if (!value) return null;
+  const ids = [...new Set(value.split(',').map((v) => v.trim()).filter(Boolean))];
+  if (ids.length > MAX_SELECTED_IDS) throw badRequest(`Select at most ${MAX_SELECTED_IDS} rows at a time`);
+  return ids;
+}
+
 /**
  * Builds a Prisma orderBy from the list query, falling back to a default when
  * the requested column is not sortable. Only whitelisted columns are accepted —

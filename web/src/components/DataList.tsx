@@ -3,8 +3,11 @@ import { useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs, type ListResult, type ListSummary } from '../lib/api';
 import { parseDay, todayLocal } from '../lib/day';
 import {
+  MAX_SELECTED,
   countActiveFilters,
   filterKeysOf,
+  pageSelection,
+  togglePage,
   readListUrl,
   readView,
   saveView,
@@ -22,6 +25,18 @@ import { Menu } from './Menu';
 import { Empty, ErrorBox, Loading, formatDate } from './ui';
 
 export type { FilterDef, TabsDef, ListOption } from '../lib/listUrl';
+
+/** What a screen's own mass actions are handed: the ticked rows, and ways to finish. */
+export interface BulkContext<T> {
+  /** Every ticked row, across pages, in the order they were ticked. */
+  rows: T[];
+  /** Untick everything. */
+  clear: () => void;
+  /** Keep only these rows ticked — the ones an action could not finish, say. */
+  keep: (keys: string[]) => void;
+  /** Fetch the list again. */
+  reload: () => void;
+}
 
 /**
  * The shared list pattern (model §8.4).
@@ -97,9 +112,22 @@ interface Props<T> {
   /**
    * The printed list, a full path such as `/api/quotations/pdf`. It is sent
    * the list's own query — search, scope, sort and every filter — so the
-   * paper is the screen. Offered as Print in the "..." menu.
+   * paper is the screen. Offered as Print in the "..." menu, and — with the
+   * ticked rows' keys as `?ids=` — as Print selected, so the endpoint must
+   * honour `ids` (`idsFilter()` in api/src/http/kit.ts) and `rowKey` must be
+   * the record id.
    */
   printPath?: string;
+  /**
+   * Tick boxes on the rows and a bar of mass actions over the table (SCORO's
+   * mass actions): Export selected, Print selected where there is a
+   * `printPath`, and the screen's own `bulkActions`. Never a bulk delete — a
+   * record is deleted from its own page, with its own refusals.
+   */
+  selectable?: boolean;
+  bulkActions?: (ctx: BulkContext<T>) => ReactNode;
+  /** How a row is named to a screen reader on its tick box ("Select 0062602018"). */
+  rowLabel?: (row: T) => string;
   /** The totals line under the table, from the endpoint's `summary` and the filtered total. */
   summaryLine?: (summary: ListSummary, total: number) => ReactNode;
   rowKey: (row: T) => string;
@@ -123,6 +151,9 @@ export function DataList<T>({
   reloadToken = 0,
   urlState = true,
   printPath,
+  selectable = false,
+  bulkActions,
+  rowLabel,
   summaryLine,
   rowKey,
 }: Props<T>) {
@@ -204,6 +235,21 @@ export function DataList<T>({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced, scope, page, active, urlState, filterKeysKey]);
 
+  /*
+    The ticked rows, by key, kept with the row itself so a selection that
+    spans pages can still be exported and acted on. It outlives a page
+    change, never a change of search, scope or filters: acting on rows the
+    list no longer shows is acting on things off screen.
+  */
+  const [selected, setSelected] = useState<Map<string, T>>(() => new Map());
+  const selectionScope = JSON.stringify([debounced, scope, active]);
+  const lastSelectionScope = useRef(selectionScope);
+  useEffect(() => {
+    if (lastSelectionScope.current === selectionScope) return;
+    lastSelectionScope.current = selectionScope;
+    setSelected(new Map());
+  }, [selectionScope]);
+
   const [panel, setPanel] = useState<'filters' | 'columns' | 'save' | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
@@ -283,6 +329,26 @@ export function DataList<T>({
     void load();
   }, [load, reloadToken]);
 
+  // A ticked row on the page just fetched is replaced by its fresh copy, so a
+  // mass action never plans from a status the row no longer has.
+  useEffect(() => {
+    if (!data) return;
+    setSelected((cur) => {
+      if (!cur.size) return cur;
+      let changed = false;
+      const next = new Map(cur);
+      for (const row of data.rows) {
+        const key = rowKey(row);
+        if (next.has(key) && next.get(key) !== row) {
+          next.set(key, row);
+          changed = true;
+        }
+      }
+      return changed ? next : cur;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
   const visible = columns.filter((c) => !hidden.has(c.key));
   const anyActive = Object.values(active).some(Boolean);
   const filterCount = countActiveFilters(active, filters);
@@ -329,6 +395,68 @@ export function DataList<T>({
   function print() {
     if (!printPath) return;
     openPdf(`${printPath}${qs(filterQuery)}`, () => setError(new Error('The printed list could not be opened')));
+  }
+
+  const selectedRows = [...selected.values()];
+  const pageKeys = (data?.rows ?? []).map(rowKey);
+  const headState = pageSelection(pageKeys, new Set(selected.keys()));
+
+  function toggleRow(row: T) {
+    const key = rowKey(row);
+    setSelected((cur) => {
+      const next = new Map(cur);
+      if (next.has(key)) next.delete(key);
+      else if (next.size < MAX_SELECTED) next.set(key, row);
+      return next;
+    });
+  }
+
+  function toggleHead() {
+    const rows = data?.rows ?? [];
+    setSelected((cur) => {
+      const keys = togglePage(pageKeys, new Set(cur.keys()));
+      const next = new Map<string, T>();
+      for (const [k, v] of cur) if (keys.has(k)) next.set(k, v);
+      for (const r of rows) if (keys.has(rowKey(r)) && !next.has(rowKey(r))) next.set(rowKey(r), r);
+      return next;
+    });
+  }
+
+  const bulk: BulkContext<T> = {
+    rows: selectedRows,
+    clear: () => setSelected(new Map()),
+    keep: (keys) =>
+      setSelected((cur) => {
+        const next = new Map<string, T>();
+        for (const k of keys) {
+          const row = cur.get(k);
+          if (row) next.set(k, row);
+        }
+        return next;
+      }),
+    reload: () => void load(),
+  };
+
+  function exportSelected() {
+    const header = visible.map((c) => c.label);
+    const lines = selectedRows.map((row) => visible.map((c) => csvCell(extractText(c.render(row)))).join(','));
+    const csv = [header.map(csvCell).join(','), ...lines].join('\r\n');
+    const blob = new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${listKey}-selected-${todayLocal()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function printSelected() {
+    if (!printPath || !selected.size) return;
+    // Exactly the ticked rows, in the list's order; the server still applies
+    // its visibility rule, so a key never prints what the caller cannot see.
+    openPdf(`${printPath}${qs({ ids: [...selected.keys()].join(','), sort, dir, scope: 'all' })}`, () =>
+      setError(new Error('The printed selection could not be opened')),
+    );
   }
 
   const currentView = viewQuery({ q: debounced, scope, active }, filterKeys);
@@ -725,6 +853,27 @@ export function DataList<T>({
         </div>
       )}
 
+      {selectable && selected.size > 0 && (
+        <div className="list-bulk" role="region" aria-label="Mass actions">
+          <span className="list-bulk-count">
+            <strong>{selected.size}</strong> selected
+            {selected.size >= MAX_SELECTED ? ` (the most at once)` : ''}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={bulk.clear}>
+            Clear selection
+          </button>
+          <button type="button" className="btn btn-sm" onClick={exportSelected}>
+            Export selected
+          </button>
+          {printPath && (
+            <button type="button" className="btn btn-sm" onClick={printSelected}>
+              Print selected
+            </button>
+          )}
+          {bulkActions?.(bulk)}
+        </div>
+      )}
+
       <ErrorBox error={error} />
 
       {/*
@@ -760,6 +909,19 @@ export function DataList<T>({
           <table className="data">
             <thead>
               <tr>
+                {selectable && (
+                  <th scope="col" className="list-select">
+                    <input
+                      type="checkbox"
+                      aria-label={headState === 'all' ? 'Untick every row on this page' : 'Tick every row on this page'}
+                      checked={headState === 'all'}
+                      ref={(el) => {
+                        if (el) el.indeterminate = headState === 'some';
+                      }}
+                      onChange={toggleHead}
+                    />
+                  </th>
+                )}
                 {visible.map((c) => {
                   const sorted = c.sortKey && sort === c.sortKey;
                   return (
@@ -800,7 +962,7 @@ export function DataList<T>({
               {data.rows.map((row) => (
                 <tr
                   key={rowKey(row)}
-                  className={onRowClick ? 'clickable' : ''}
+                  className={`${onRowClick ? 'clickable' : ''}${selected.has(rowKey(row)) ? ' selected' : ''}`}
                   onClick={() => onRowClick?.(row)}
                   // A row that opens a record is the primary action on most of
                   // these screens, and it was mouse-only.
@@ -812,6 +974,22 @@ export function DataList<T>({
                     }
                   }}
                 >
+                  {selectable && (
+                    <td
+                      className="list-select"
+                      // The box is its own control: ticking it never opens the record.
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${rowLabel ? rowLabel(row) : 'this row'}`}
+                        checked={selected.has(rowKey(row))}
+                        disabled={!selected.has(rowKey(row)) && selected.size >= MAX_SELECTED}
+                        onChange={() => toggleRow(row)}
+                      />
+                    </td>
+                  )}
                   {visible.map((c) => (
                     <td
                       key={c.key}

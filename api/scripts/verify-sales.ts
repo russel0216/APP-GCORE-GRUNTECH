@@ -2534,6 +2534,64 @@ async function main() {
         where: { entityType: 'quotation', entityId: 'list', action: 'EXPORTED', actorId: sales.id },
       });
       check('and printing it is audited as an export', exported >= 1);
+
+      // Mass actions: the ticked rows travel as ?ids=, always ANDed with the
+      // list's own rules; a status change is the ordinary PATCH, one by one.
+      const picked = await prisma.quotation.findMany({
+        where: { subject: { in: [`${LISTQ} open`, `${LISTQ} lost`] } },
+        select: { id: true, subject: true },
+      });
+      const byIds = await http(salesToken, 'GET', `/quotations?scope=all&ids=${picked.map((p) => p.id).join(',')}`);
+      const byIdsRows = (byIds.body.rows ?? []) as { id: string; canEdit: boolean; owner: { id: string } }[];
+      check(
+        '?ids= lists exactly the ticked quotations',
+        byIds.status === 200 && byIdsRows.length === 2 && byIdsRows.every((r) => picked.some((p) => p.id === r.id)),
+        byIds.text.slice(0, 160),
+      );
+      const colleaguesRow = await http(salesToken, 'GET', `/quotations?scope=all&search=${encodeURIComponent(`${LISTQ} completed`)}`);
+      check(
+        'a row says whether the reader may move it: their own yes, a colleague’s no',
+        byIdsRows.every((r) => r.canEdit === true) &&
+          ((colleaguesRow.body.rows ?? []) as { canEdit: boolean }[])[0]?.canEdit === false,
+      );
+      const tooMany = await http(salesToken, 'GET', `/quotations?ids=${Array.from({ length: 501 }, (_, i) => `x${i}`).join(',')}`);
+      check('more than 500 ticked rows is a 400, never a shorter list', tooMany.status === 400, tooMany.text.slice(0, 120));
+      const printedPick = await fetch(`${BASE}/quotations/pdf?scope=all&ids=${picked.map((p) => p.id).join(',')}`, {
+        headers: { Authorization: `Bearer ${salesToken}` },
+      });
+      const printedPickLine = pdfText(Buffer.from(await printedPick.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'Print selected prints the ticked quotations and no other, and says it is a selection',
+        printedPick.status === 200 &&
+          printedPickLine.includes(`${LISTQ} open`) &&
+          printedPickLine.includes(`${LISTQ} lost`) &&
+          !printedPickLine.includes(`${LISTQ} completed`) &&
+          printedPickLine.includes('the rows selected'),
+        printedPickLine.slice(0, 300),
+      );
+      const leadA = await prisma.lead.create({
+        data: { number: `${TAG}-LA`, companyName: `${TAG} Print A`, assignedToId: sales.id, createdById: sales.id },
+      });
+      await prisma.lead.create({
+        data: { number: `${TAG}-LB`, companyName: `${TAG} Print B`, assignedToId: sales.id, createdById: sales.id },
+      });
+      const leadPdf = await fetch(`${BASE}/leads/pdf?scope=all&ids=${leadA.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
+      const leadLine = pdfText(Buffer.from(await leadPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'the leads list prints a selection the same way',
+        leadPdf.status === 200 && leadLine.includes(`${TAG} Print A`) && !leadLine.includes(`${TAG} Print B`),
+        leadLine.slice(0, 200),
+      );
+      // A mass move is the PATCH per row: a legal move goes; Won without an
+      // approved revision is refused with the reason the bar then shows.
+      const openId = picked.find((p) => p.subject.endsWith('open'))!.id;
+      const movedOpen = await http(salesToken, 'PATCH', `/quotations/${openId}`, { outcome: 'SUBMITTED' });
+      const wonRefused = await http(salesToken, 'PATCH', `/quotations/${openId}`, { outcome: 'WON' });
+      check(
+        'a mass move is the ordinary PATCH per row: a legal move goes, a refused one says why',
+        movedOpen.status === 200 && wonRefused.status === 400 && String(wonRefused.body.error ?? '').includes('approved revision'),
+        `${movedOpen.status} ${wonRefused.status} ${wonRefused.text.slice(0, 120)}`,
+      );
     }
 
     console.log('\nPulling a revision back from approval');

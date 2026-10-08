@@ -53,6 +53,9 @@ import { cleanNumberText, editNumberText, formatNumberText, isPartialNumber } fr
 import {
   countActiveFilters,
   filterKeysOf,
+  MAX_SELECTED,
+  pageSelection,
+  togglePage,
   readListUrl,
   readView,
   saveView,
@@ -1562,6 +1565,21 @@ async function main() {
       views.length === 1 && views[0].name === 'MY OPEN DEALS' && views[0].query === 'scope=mine',
       JSON.stringify(views),
     );
+    const page = ['a', 'b', 'c'];
+    check(
+      'the header box reads none, some or all of the page',
+      pageSelection(page, new Set()) === 'none' && pageSelection(page, new Set(['b', 'z'])) === 'some' &&
+        pageSelection(page, new Set(['a', 'b', 'c', 'z'])) === 'all',
+    );
+    const ticked = togglePage(page, new Set(['b', 'z']));
+    const unticked = togglePage(page, ticked);
+    check(
+      'clicking it ticks the whole page, then clears it — rows on other pages are kept both times',
+      [...ticked].sort().join(',') === 'a,b,c,z' && [...unticked].join(',') === 'z',
+      `${[...ticked]} / ${[...unticked]}`,
+    );
+    const full = new Set(Array.from({ length: MAX_SELECTED - 1 }, (_, i) => `k${i}`));
+    check('a selection stops at the most the server will take', togglePage(page, full).size === MAX_SELECTED);
     check(
       'the Filters badge counts filters — a date range once, the tab strip never',
       countActiveFilters({ stage: 'LOST', createdTo: '2026-03-31', createdFrom: '2026-03-01', ownerId: 'u1' }, defs) === 2,

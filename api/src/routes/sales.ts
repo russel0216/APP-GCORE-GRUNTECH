@@ -12,6 +12,7 @@ import {
   badRequest,
   forbidden,
   conflict,
+  idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
@@ -141,6 +142,9 @@ function leadListWhere(me: ReturnType<typeof currentUser>, q: ReturnType<typeof 
   if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
   if (q.filters.createdById) where.createdById = q.filters.createdById;
   if (q.filters.source) where.source = q.filters.source;
+  // The rows a person ticked (Print selected); the rules above still apply.
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
   return where;
 }
 
@@ -224,6 +228,7 @@ leadRoutes.get(
       q.search ? `search "${q.search}"` : null,
       q.filters.status ? `status ${q.filters.status.split(',').map((v) => LEAD_STATUS_LABEL[v] ?? v).join(', ')}` : null,
       q.scope === 'mine' ? 'mine only' : null,
+      q.filters.ids ? 'the rows selected' : null,
     ].filter(Boolean);
 
     const pdf = await renderDocument({
@@ -911,6 +916,10 @@ export function quotationListWhere(
   }
   if (f.customerId) and.push({ customerId: f.customerId });
   if (f.ownerId) and.push({ ownerId: f.ownerId });
+  // The rows a person ticked (mass actions); ANDed with everything else, so an
+  // id never shows a quotation the caller could not see in the list.
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
 
   // Raised: a timestamp, so Manila's midnight to Manila's last instant.
   const createdFrom = dayFilter(f.createdFrom, 'Raised from');
@@ -1084,6 +1093,11 @@ quotationRoutes.get(
               : null,
             salesOrderCount: r._count.salesOrders,
             margin,
+            // What the bulk status change needs to plan a move the way the
+            // PATCH will judge it (assertOutcomeChange); the PATCH still decides.
+            canEdit: canEditRecord(me, 'gops', 'quotations', r.ownerId),
+            hasApprovedRevision: r.revisions.some((v) => v.status === 'APPROVED'),
+            hasJob: r.revisions.some((v) => v.jobs.length > 0),
           };
         }),
         total,
@@ -1143,6 +1157,7 @@ quotationRoutes.get(
       q.filters.revision ? `with a ${q.filters.revision.toLowerCase().replace(/_/g, ' ')} revision` : null,
       q.filters.salesOrder === 'yes' ? 'with a sales order' : q.filters.salesOrder === 'no' ? 'without a sales order' : null,
       q.scope === 'mine' ? 'mine only' : null,
+      q.filters.ids ? 'the rows selected' : null,
     ].filter(Boolean);
 
     const pdf = await renderDocument({

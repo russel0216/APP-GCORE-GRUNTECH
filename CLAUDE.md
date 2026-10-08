@@ -96,7 +96,16 @@ four databases and four copies of "customer".
    `summaryLine` prints the endpoint's totals for the whole filtered set;
    `defaultScope` is where Mine/All starts when the URL says nothing. Saved
    views are per viewer in localStorage (`gcore_views_<listKey>`), like column
-   choices. **Every chart uses
+   choices. **Mass actions** (`selectable`): tick boxes and a bar over the
+   table with Export selected, Print selected (`printPath` with the ticked
+   keys as `?ids=` — so a `printPath` endpoint must honour `ids` through
+   `idsFilter()` in `api/src/http/kit.ts`, ANDed with its visibility rule,
+   at most 500, and `rowKey` must be the record id) and the screen's own
+   `bulkActions(ctx)`. A selection outlives a page change, never a change of
+   search, scope or filters; the rules are `pageSelection` / `togglePage` in
+   `lib/listUrl.ts`. A ticked row's box never opens the record. **Never a
+   bulk delete** — a record is deleted from its own page, with its own
+   refusals. **Every chart uses
    `web/src/components/charts.tsx`** — `Stat`, `BarList`, `Funnel`, `Donut`,
    `Meter`, `MiniBar`, `Panel`. There were three hand-rolled bars before that
    file and none of them looked alike. Two rules they hold to: a chart is
@@ -175,8 +184,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,459 assertions across twenty-two scripts** (counted 2026-10-08): foundation 230,
-masters 54, sales 350, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,468 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+masters 54, sales 356, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1651,6 +1660,18 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   Raised; Probability and Modified are under Columns.
 - **The leads and installed-base lists print through `printPath` too**; their
   hand-built "Export PDF" buttons, which re-read the URL themselves, are gone.
+  All three honour `?ids=` for Print selected.
+- **Change status on many** (the quotation list's mass action) is the detail
+  page's "Change status" for the ticked rows: the same targets (Submitted,
+  Negotiation, Won, Lost), planned by `planMove()` with the page's
+  `NEXT_OUTCOMES`, a won quotation built into a project staying won, and Won
+  needing an approved revision — rows carry `canEdit`, `hasApprovedRevision`
+  and `hasJob` for it. The bar says how many will move and why the rest stay
+  before anything is sent; Lost asks one reason for all. It then sends the
+  ordinary `PATCH /quotations/:id` one row at a time — the move rules, the
+  lead that follows, the stage's odds and the audit row are the PATCH's, and
+  the server still decides each one. What did not move stays ticked, with
+  the reason. There is no bulk endpoint, deliberately.
 
 ## Quotation PDF template (2026-10-02)
 

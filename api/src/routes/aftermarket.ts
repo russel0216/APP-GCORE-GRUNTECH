@@ -18,6 +18,7 @@ import {
   notFound,
   badRequest,
   forbidden,
+  idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import type { ResolvedUser } from '../permissions/resolve';
@@ -116,6 +117,9 @@ function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: numb
   if (q.filters.customerId) where.customerId = q.filters.customerId;
   if (q.filters.siteId) where.siteId = q.filters.siteId;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
+  // The rows a person ticked (Print selected); the filters still apply.
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
 
   const today = dayKey(new Date());
   if (q.filters.warranty === 'EXPIRED') where.warrantyEndsAt = { lt: today };

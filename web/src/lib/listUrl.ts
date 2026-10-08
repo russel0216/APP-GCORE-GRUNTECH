@@ -158,3 +158,36 @@ export function saveView(views: SavedView[], name: string, query: string): Saved
 export function countActiveFilters(active: Record<string, string>, filters: FilterDef[]): number {
   return filters.filter((f) => !!active[f.key] || (f.type === 'dateRange' && !!active[f.toKey])).length;
 }
+
+// ── Selection (mass actions, 2026-10-08) ─────────────────────────────────────
+// A person ticks rows, page by page; the selection is a set of row keys and
+// outlives a page change, but not a change of search, scope or filters — a
+// selection of rows the list no longer shows would act on things off screen.
+
+/** The most rows one selection may hold — the server's `ids` cap. */
+export const MAX_SELECTED = 500;
+
+/** The header box: none, some (indeterminate) or all of this page's rows ticked. */
+export function pageSelection(pageKeys: string[], selected: ReadonlySet<string>): 'none' | 'some' | 'all' {
+  const on = pageKeys.filter((k) => selected.has(k)).length;
+  if (on === 0) return 'none';
+  return on === pageKeys.length ? 'all' : 'some';
+}
+
+/**
+ * The header box clicked: a page that is all ticked is cleared; otherwise
+ * every row on it is ticked, up to MAX_SELECTED in all. Rows on other pages
+ * are kept either way.
+ */
+export function togglePage(pageKeys: string[], selected: ReadonlySet<string>): Set<string> {
+  const next = new Set(selected);
+  if (pageSelection(pageKeys, selected) === 'all') {
+    for (const k of pageKeys) next.delete(k);
+    return next;
+  }
+  for (const k of pageKeys) {
+    if (next.size >= MAX_SELECTED) break;
+    next.add(k);
+  }
+  return next;
+}

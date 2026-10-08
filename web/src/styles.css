@@ -1370,6 +1370,59 @@ a.card:hover {
   max-width: 20rem;
 }
 
+/*
+  Mass actions: a bar over the table while rows are ticked. Export and Print
+  act on the ticked rows; a screen adds its own (the quotation list's Change
+  status). Never a bulk delete.
+*/
+.list-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--neon-dim);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+}
+
+.list-bulk select {
+  width: auto;
+}
+
+.list-bulk-reason {
+  flex: 1;
+  min-width: 14rem;
+  max-width: 28rem;
+}
+
+.list-bulk-count strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.list-bulk-result {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+}
+
+.list-bulk-result ul {
+  margin: var(--s-1) 0 0;
+  padding-left: var(--s-5);
+}
+
+table.data th.list-select,
+table.data td.list-select {
+  width: 2.5rem;
+  text-align: center;
+}
+
+table.data tr.selected td {
+  background: rgb(var(--magenta-rgb) / 0.08);
+}
+
 /* The totals line: what the whole filtered set adds up to, not the page. */
 .list-totals {
   display: flex;

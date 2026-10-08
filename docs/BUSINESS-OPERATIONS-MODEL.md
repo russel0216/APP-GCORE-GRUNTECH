@@ -821,6 +821,9 @@ overdue; the calendar is where you plan, My Work is what is due.
    carry a strip of tabs over one filter, each with its count (the quotation
    list's pipeline stages), and a totals line for the whole filtered set.
    Saved views keep a person's own search, scope and filters in their browser.
+   Rows can be ticked for mass actions — export or print the selection, and on
+   quotations change the status of many at once through the same rules as
+   one; never a bulk delete.
    Learn it once, use it in every module. A list's search, scope, page and
    declared filters live in the link, so a dashboard figure can open the list
    filtered to exactly what it counted, and Back returns to the same view.
