@@ -154,29 +154,43 @@ async function main() {
     missingCol instanceof Error ? missingCol.message : 'no error',
   );
 
-  // ── 3. Industries — the fixed list customers are filed under ───────────────
-  console.log('\nIndustries');
+  // ── 3. Teams and sub-industries — the two fixed lists ─────────────────────
+  console.log('\nTeams and sub-industries');
 
-  const industries = await prisma.industry.findMany({
-    where: { code: { in: ['HI', 'BI', 'UI', 'GI', 'SI'] } },
+  const teams = await prisma.industry.findMany({
+    where: { code: { in: ['KAT', 'HIT', 'UIT', 'GIB', 'SIT'] } },
   });
-  check('the five standard industries are seeded', industries.length === 5, `${industries.length} found`);
-  check('all five are system rows', industries.every((i) => i.isSystem));
-  const hi = industries.find((i) => i.code === 'HI');
-  const gi = industries.find((i) => i.code === 'GI');
+  check('the five teams are seeded', teams.length === 5, `${teams.length} found`);
+  check('all five are active system rows', teams.every((i) => i.isSystem && i.isActive));
+  const firstFive = await prisma.industry.findMany({ where: { code: { in: ['HI', 'BI', 'UI', 'GI', 'SI'] } } });
+  check(
+    'the first five industries are switched off, never deleted',
+    firstFive.every((i) => !i.isActive),
+    firstFive.map((i) => `${i.code}:${i.isActive}`).join(','),
+  );
+  const subIndustries = await prisma.subIndustry.findMany({ orderBy: { sortOrder: 'asc' } });
+  check(
+    'the eleven sub-industries are seeded as system rows, in the owner’s order',
+    subIndustries.filter((s) => s.isSystem).map((s) => s.name).join('|') ===
+      'Enterprise|Hospital|Pharmaceutical|Power and Water|Laguna & Batangas Hubs|Cavite Hubs|Manufacturing|Building|EPC|Infrastructure|Government',
+    subIndustries.map((s) => s.name).join('|'),
+  );
+  const hospital = subIndustries.find((s) => s.name === 'Hospital');
+  const manufacturing = subIndustries.find((s) => s.name === 'Manufacturing');
 
   // ── 4. Real customer import, end to end ────────────────────────────────────
   console.log('\nCustomer import');
 
-  const industryColumn = customerSpec.columns.find((c) => c.header === 'Industry');
-  check('the Industry column is required', industryColumn?.required === true);
-  check('the template example is a code', industryColumn?.example === 'HI', industryColumn?.example);
+  const subIndustryColumn = customerSpec.columns.find((c) => c.header === 'Sub-industry');
+  check('the Sub-industry column is optional', !!subIndustryColumn && !subIndustryColumn.required);
+  check('and there is no Industry column any more', !customerSpec.columns.some((c) => c.header === 'Industry'));
+  check('the template example is a name', subIndustryColumn?.example === 'Hospital', subIndustryColumn?.example);
 
-  // A — a code, and a full name in the wrong case: both resolve, both commit.
+  // A — a name, and a name in the wrong case: both resolve, both commit.
   const csv = [
-    'Name,Code,Industry,Contact Name,Contact Position,Site Name,Site City,Active',
-    `${TAG} Hospital,,HI,Maria Santos,Purchasing,Main Plant,Cagayan de Oro,Yes`,
-    `${TAG} Foods,,general industry,Juan Cruz,Engineering,Plant 2,Davao,Yes`,
+    'Name,Code,Sub-industry,Contact Name,Contact Position,Site Name,Site City,Active',
+    `${TAG} Hospital,,Hospital,Maria Santos,Purchasing,Main Plant,Cagayan de Oro,Yes`,
+    `${TAG} Foods,,manufacturing,Juan Cruz,Engineering,Plant 2,Davao,Yes`,
   ].join('\n');
 
   const report = await runImport(csv, customerSpec, true, customerWrite);
@@ -184,38 +198,33 @@ async function main() {
 
   const foods = await prisma.customer.findFirst({ where: { name: `${TAG} Foods` } });
   check(
-    'a full industry name, any case, files the customer under its code',
-    foods?.industryId === gi?.id,
-    `industryId ${foods?.industryId}`,
+    'a sub-industry name, any case, files the customer under it',
+    foods?.subIndustryId === manufacturing?.id,
+    `subIndustryId ${foods?.subIndustryId}`,
   );
 
-  // B — free text and a blank: neither is an industry, and the file does not land.
-  const bad = [
-    'Name,Code,Industry,Active',
-    `${TAG} Cannery,,Food processing,Yes`,
-    `${TAG} Nameless Industry,,,Yes`,
-  ].join('\n');
+  // B — free text is not a sub-industry, and the file does not land.
+  const bad = ['Name,Code,Sub-industry,Active', `${TAG} Cannery,,Food processing,Yes`].join('\n');
   const refused = await runImport(bad, customerSpec, true, customerWrite);
-  check('an unknown and a blank industry are both refused', refused.errors === 2, `${refused.errors} errors`);
+  check('an unknown sub-industry is refused', refused.errors === 1, `${refused.errors} errors`);
   check('and nothing from that file was written', !refused.committed);
   check(
-    'the refusal lists the codes to use',
-    (refused.rows[0].message ?? '').includes('HI') && (refused.rows[0].message ?? '').includes('SI'),
+    'the refusal lists the names to use',
+    (refused.rows[0].message ?? '').includes('Hospital') && (refused.rows[0].message ?? '').includes('Government'),
     refused.rows[0].message,
-  );
-  check(
-    'a blank industry is reported as required',
-    (refused.rows[1].message ?? '').toLowerCase().includes('required'),
-    refused.rows[1].message,
   );
   const cannery = await prisma.customer.count({ where: { name: `${TAG} Cannery` } });
   check('the refused customer does not exist', cannery === 0);
+  // C — a blank is none: the sub-industry is typed in later (the owner's call).
+  const blank = await runImport(['Name,Code,Sub-industry,Active', `${TAG} Nameless Industry,,,Yes`].join('\n'), customerSpec, true, customerWrite);
+  const nameless = await prisma.customer.findFirst({ where: { name: `${TAG} Nameless Industry` } });
+  check('a blank sub-industry imports as none', blank.committed && nameless !== null && nameless.subIndustryId === null, JSON.stringify(blank.rows));
 
   const imported = await prisma.customer.findFirst({
     where: { name: `${TAG} Hospital` },
     include: { contacts: true, sites: true },
   });
-  check('it is filed under HI', imported?.industryId === hi?.id);
+  check('it is filed under Hospital', imported?.subIndustryId === hospital?.id);
   check('the customer landed', imported !== null);
   check('its contact came with it', imported?.contacts.length === 1, `${imported?.contacts.length ?? 0} contacts`);
   check('the contact is marked primary', imported?.contacts[0]?.isPrimary === true);
@@ -289,7 +298,7 @@ async function main() {
       prisma.$transaction(async (tx) => {
         const code = await nextNumber('customer', tx);
         return tx.customer.create({
-          data: { code, name: `${TAG} Concurrent ${i}`, industry: { connect: { id: gi!.id } } },
+          data: { code, name: `${TAG} Concurrent ${i}` },
         });
       }),
     ),
@@ -345,7 +354,7 @@ async function main() {
 
   const hit = byName.find((h) => h.kind === 'customer');
   check('the hit deep-links to the record', /^\/g-ops\/customers\/.+/.test(hit?.link ?? ''), hit?.link);
-  check('the hit names its industry code', (hit?.subtitle ?? '').includes('HI'), hit?.subtitle ?? '');
+  check('the hit names its sub-industry', (hit?.subtitle ?? '').includes('Hospital'), hit?.subtitle ?? '');
 
   // A project manager has no supplier permission, so suppliers must not leak.
   const pmSearch = await globalSearch(TAG, pm);
@@ -356,17 +365,16 @@ async function main() {
   );
 
   // ── The customer list (the quotation list's layout, 2026-10-08) ─────────────
-  console.log('\nThe customer list: industry tabs, filters, counts');
+  console.log('\nThe customer list: sub-industry choices, filters, counts');
   {
     const LISTC = `${TAG} LISTC`;
     const custQ = (query: Record<string, string>) =>
       listQuery({ query: { search: LISTC, ...query } } as unknown as Parameters<typeof listQuery>[0]);
-    const hiRow = await prisma.industry.findUniqueOrThrow({ where: { code: 'HI' } });
-    const biRow = await prisma.industry.findUniqueOrThrow({ where: { code: 'BI' } });
+    const building = await prisma.subIndustry.findFirstOrThrow({ where: { name: 'Building' } });
     const cHi = await prisma.customer.create({
-      data: { code: `${TAG}-LC1`, name: `${LISTC} Hospital`, industryId: hiRow.id, createdById: admin!.id, createdAt: new Date('2026-03-01T00:30:00+08:00') },
+      data: { code: `${TAG}-LC1`, name: `${LISTC} Hospital`, subIndustryId: hospital!.id, createdById: admin!.id, createdAt: new Date('2026-03-01T00:30:00+08:00') },
     });
-    await prisma.customer.create({ data: { code: `${TAG}-LC2`, name: `${LISTC} Builder`, industryId: biRow.id, isActive: false } });
+    await prisma.customer.create({ data: { code: `${TAG}-LC2`, name: `${LISTC} Builder`, subIndustryId: building.id, isActive: false } });
     await prisma.customer.create({ data: { code: `${TAG}-LC3`, name: `${LISTC} Nobody filed` } });
     await prisma.quotation.create({
       data: { number: `${TAG}-LCQ1`, customerId: cHi.id, ownerId: admin!.id, subject: `${TAG} list quote`, outcome: 'SUBMITTED' },
@@ -375,21 +383,21 @@ async function main() {
     const all = customerListWhere(superUser, custQ({}));
     const sum = await customerListSummary(all.base, all.where);
     check(
-      'the industry tabs count each industry and Unclassified, and add up to All',
-      sum.tabCounts[''] === 3 && sum.tabCounts.HI === 1 && sum.tabCounts.BI === 1 && sum.tabCounts.none === 1 &&
+      'the sub-industry counts count each one and "Not stated", and add up to All',
+      sum.tabCounts[''] === 3 && sum.tabCounts[hospital!.id] === 1 && sum.tabCounts[building.id] === 1 && sum.tabCounts.none === 1 &&
         Object.entries(sum.tabCounts).filter(([k]) => k !== '').reduce((t, [, n]) => t + n, 0) === 3,
       JSON.stringify(sum.tabCounts),
     );
     check(
-      'the tabs are the industries by name, Unclassified last and only while somebody is',
-      sum.tabs[sum.tabs.length - 1]?.value === 'none' && sum.tabs.some((t) => t.value === 'HI' && t.label === hiRow.name),
+      'the choices are the sub-industries by name, Not stated last and only while somebody is',
+      sum.tabs[sum.tabs.length - 1]?.value === 'none' && sum.tabs.some((t) => t.value === hospital!.id && t.label === 'Hospital'),
       JSON.stringify(sum.tabs),
     );
     check('the summary counts the inactive', sum.count === 3 && sum.inactive === 1, JSON.stringify(sum));
     const count = (query: Record<string, string>) => prisma.customer.count({ where: customerListWhere(superUser, custQ(query)).where });
     check(
-      'an industry tab, the Unclassified tab and the status filter select what they say',
-      (await count({ industry: 'HI' })) === 1 && (await count({ industry: 'none' })) === 1 && (await count({ isActive: 'false' })) === 1,
+      'a sub-industry, "Not stated" and the status filter select what they say',
+      (await count({ subIndustry: hospital!.id })) === 1 && (await count({ subIndustry: 'none' })) === 1 && (await count({ isActive: 'false' })) === 1,
     );
     check(
       '"Open quotation" reads quotations still in play',

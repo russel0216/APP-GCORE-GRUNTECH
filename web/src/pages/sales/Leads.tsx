@@ -1145,21 +1145,6 @@ export function LeadForm({
 
   const [matches, setMatches] = useState<{ id: string; name: string }[]>([]);
   const [picking, setPicking] = useState(false);
-  /*
-    A customer is filed under an industry (HI, BI, UI, GI, SI) and the server
-    refuses one without it, so the quick-add asks for it right beside the
-    button. null = not loaded yet; [] = none set up, which is said plainly
-    rather than offering a button that can only fail.
-  */
-  const [industries, setIndustries] = useState<{ id: string; code: string; name: string }[] | null>(null);
-  const [industryId, setIndustryId] = useState('');
-
-  useEffect(() => {
-    api
-      .get<{ id: string; code: string; name: string }[]>('/reference/industries?active=true')
-      .then(setIndustries)
-      .catch(() => setIndustries([]));
-  }, []);
   const [form, setForm] = useState({
     companyName: lead?.companyName ?? '',
     customerId: lead?.customer?.id ?? '',
@@ -1241,13 +1226,17 @@ export function LeadForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lead, presetCustomerId]);
 
-  /** No match: the enquiry is from somebody not on file yet. */
+  /**
+   * No match: the enquiry is from somebody not on file yet. Filed by name
+   * through the ordinary customer create; the sub-industry is typed in
+   * later, on the customer (2026-10-08, the owner's call).
+   */
   async function createCustomer() {
     const name = form.companyName.trim();
-    if (name.length < 2 || !industryId) return;
+    if (name.length < 2) return;
     setBusy(true);
     try {
-      const created = await api.post<{ id: string; name: string }>('/customers', { name, industryId });
+      const created = await api.post<{ id: string; name: string }>('/customers', { name });
       toast('ok', `${name} added as a customer`);
       setForm((f) => ({ ...f, customerId: created.id, companyName: created.name }));
       setPicking(false);
@@ -1355,36 +1344,12 @@ export function LeadForm({
               ))}
               {!matches.some((m) => m.name === form.companyName.trim()) && (
                 <li className="lookup-new">
-                  {industries !== null && industries.length === 0 ? (
-                    <span className="lookup-note">
-                      A new customer needs an industry, and none are set up yet. Ask an administrator
-                      to add them under Admin › Categories.
-                    </span>
-                  ) : (
-                    <div className="lookup-new-row">
-                      <select
-                        aria-label="Industry of the new customer"
-                        value={industryId}
-                        onChange={(e) => setIndustryId(e.target.value)}
-                      >
-                        <option value="">Industry…</option>
-                        {(industries ?? []).map((i) => (
-                          <option key={i.id} value={i.id}>
-                            {i.code} — {i.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={createCustomer}
-                        disabled={busy || !industryId}
-                        title={industryId ? undefined : 'Pick the industry first'}
-                      >
-                        {matches.length ? 'Not one of these — ' : ''}add “{form.companyName.trim()}” as a
-                        new customer
-                      </button>
-                    </div>
-                  )}
+                  <div className="lookup-new-row">
+                    <button type="button" onClick={createCustomer} disabled={busy}>
+                      {matches.length ? 'Not one of these — ' : ''}add “{form.companyName.trim()}” as a
+                      new customer
+                    </button>
+                  </div>
                 </li>
               )}
             </ul>

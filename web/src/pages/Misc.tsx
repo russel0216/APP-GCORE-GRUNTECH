@@ -186,7 +186,7 @@ function ContactDetails() {
       <ErrorBox error={error} />
       {facts && (
         <div className="grid grid-3">
-          <HrFact label="Team (industry)" value={facts.team} />
+          <HrFact label="Team" value={facts.team} />
           <HrFact label="Position" value={facts.position} />
           <HrFact label="Employee number" value={facts.employeeNo} mono />
         </div>

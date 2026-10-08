@@ -1049,11 +1049,12 @@ referenceRoutes.delete(
   }),
 );
 
-// ── Industries ───────────────────────────────────────────────────────────────
-// The owner's five customer classifications (HI, BI, UI, GI, SI). Same shape
-// as cost categories: seeded, system rows undeletable, labels editable. Any
-// authenticated user may read them — the customer form and the list filter
-// need the list under gops.customers.* alone.
+// ── Industries: the sales TEAMS ──────────────────────────────────────────────
+// The owner's five teams (2026-10-08: KAT, HIT, UIT, GIB, SIT) — a person's
+// team is the Industry row on their employee record (shared/team.ts). Same
+// shape as cost categories: seeded, system rows undeletable, labels editable.
+// Any authenticated user may read them — the employee form and the quotation
+// list's "Quotes by team" need the list under their own permissions alone.
 
 referenceRoutes.get(
   '/industries',
@@ -1112,7 +1113,7 @@ referenceRoutes.patch(
     // Reports group by the code and the owner may put it in customer codes one
     // day; the label is free to change, the code of a standard row is not.
     if (before.isSystem && body.code && body.code !== before.code) {
-      throw badRequest('A standard industry keeps its code — you can rename it instead');
+      throw badRequest('A standard team keeps its code — you can rename it instead');
     }
     if (body.code && body.code !== before.code) {
       if (await prisma.industry.findUnique({ where: { code: body.code } })) {
@@ -1145,13 +1146,13 @@ referenceRoutes.delete(
     });
     if (!industry) throw notFound('Industry not found');
     if (industry.isSystem) {
-      throw badRequest('The five standard industries cannot be deleted — deactivate one instead');
+      throw badRequest('The standard teams cannot be deleted — deactivate one instead');
     }
     if (industry._count.customers > 0) {
       throw badRequest(`${industry._count.customers} customer(s) still carry this industry`);
     }
     if (industry._count.employees > 0) {
-      throw badRequest(`${industry._count.employees} employee(s) are on this industry's team — move them first, or deactivate it`);
+      throw badRequest(`${industry._count.employees} employee(s) are on this team — move them first, or deactivate it`);
     }
     await prisma.industry.delete({ where: { id: industry.id } });
     await audit(
@@ -1162,6 +1163,102 @@ referenceRoutes.delete(
         summary: `Deleted industry ${industry.code} — ${industry.name}`,
         before: industry,
       },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ── Sub-industries ───────────────────────────────────────────────────────────
+// Where a customer sits in the market (2026-10-08, the owner's eleven), typed
+// in by hand on the customer and optional. Same contract as the teams: seeded
+// system rows undeletable, names editable, and anyone signed in may read them
+// — the customer form needs the list under gops.customers.* alone.
+
+referenceRoutes.get(
+  '/sub-industries',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    res.json(
+      await prisma.subIndustry.findMany({
+        where: activeOnly ? { isActive: true } : {},
+        include: { _count: { select: { customers: true } } },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }),
+    );
+  }),
+);
+
+const subIndustrySchema = z.object({
+  name: z.string().trim().min(2, 'Give it a name'),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+/** One sub-industry per spelling, case-blind — "hospital" and "Hospital" are one. */
+async function subIndustryNameTaken(name: string, exceptId?: string): Promise<boolean> {
+  const clash = await prisma.subIndustry.findFirst({
+    where: { name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+  return !!clash;
+}
+
+referenceRoutes.post(
+  '/sub-industries',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(subIndustrySchema, req.body);
+    if (await subIndustryNameTaken(body.name)) throw conflict(`Sub-industry "${body.name}" already exists`);
+    const created = await prisma.subIndustry.create({ data: body });
+    await audit(
+      { entityType: 'sub_industry', entityId: created.id, action: 'CREATED', summary: `Created sub-industry ${created.name}` },
+      req,
+    );
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/sub-industries/:id',
+  require_('admin.categories.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(subIndustrySchema.partial(), req.body);
+    const before = await prisma.subIndustry.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Sub-industry not found');
+    if (body.name && body.name !== before.name && (await subIndustryNameTaken(body.name, before.id))) {
+      throw conflict(`Sub-industry "${body.name}" already exists`);
+    }
+    const updated = await prisma.subIndustry.update({ where: { id: before.id }, data: body });
+    await audit(
+      {
+        entityType: 'sub_industry',
+        entityId: updated.id,
+        action: 'UPDATED',
+        summary: `Updated sub-industry ${updated.name}`,
+        before,
+        after: updated,
+      },
+      req,
+    );
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/sub-industries/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const row = await prisma.subIndustry.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { customers: true } } },
+    });
+    if (!row) throw notFound('Sub-industry not found');
+    if (row.isSystem) throw badRequest('The standard sub-industries cannot be deleted — deactivate one instead');
+    if (row._count.customers > 0) throw badRequest(`${row._count.customers} customer(s) still carry this sub-industry`);
+    await prisma.subIndustry.delete({ where: { id: row.id } });
+    await audit(
+      { entityType: 'sub_industry', entityId: row.id, action: 'DELETED', summary: `Deleted sub-industry ${row.name}`, before: row },
       req,
     );
     res.json({ ok: true });

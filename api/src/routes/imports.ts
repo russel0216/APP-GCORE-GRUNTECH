@@ -41,28 +41,22 @@ const upload = multer({
 // ── Specs ────────────────────────────────────────────────────────────────────
 
 /**
- * Resolves an Industry cell — the code or the full name, either case — against
- * the active list. The error names every code, because the person fixing the
+ * Resolves a Sub-industry cell — the name, any case — against the active
+ * list; blank is none (the owner's call, 2026-10-08: typed in by hand,
+ * later). The error names every sub-industry, because the person fixing the
  * spreadsheet should not have to open the app to learn them.
  */
-async function resolveIndustry(row: Record<string, string>): Promise<string> {
-  const v = required(row, 'Industry');
-  const industry = await prisma.industry.findFirst({
-    where: {
-      isActive: true,
-      OR: [
-        { code: { equals: v, mode: 'insensitive' } },
-        { name: { equals: v, mode: 'insensitive' } },
-      ],
-    },
+async function resolveSubIndustry(row: Record<string, string>): Promise<string | null> {
+  const v = optional(row, 'Sub-industry') ?? optional(row, 'Sub Industry');
+  if (!v) return null;
+  const found = await prisma.subIndustry.findFirst({
+    where: { isActive: true, name: { equals: v, mode: 'insensitive' } },
   });
-  if (!industry) {
-    const all = await prisma.industry.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } });
-    throw new Error(
-      `Industry "${v}" must be one of: ${all.map((i) => `${i.code} (${i.name})`).join(', ')}`,
-    );
+  if (!found) {
+    const all = await prisma.subIndustry.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } });
+    throw new Error(`Sub-industry "${v}" must be one of: ${all.map((s) => s.name).join(', ')}`);
   }
-  return industry.id;
+  return found.id;
 }
 
 export const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
@@ -74,10 +68,9 @@ export const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
     { header: 'Legal Name', example: 'Sample Hospital Incorporated' },
     { header: 'TIN', example: '000-123-456-000' },
     {
-      header: 'Industry',
-      required: true,
-      example: 'HI',
-      hint: 'HI, BI, UI, GI or SI — the code or the full name',
+      header: 'Sub-industry',
+      example: 'Hospital',
+      hint: 'Enterprise, Hospital, Pharmaceutical, Power and Water, Laguna & Batangas Hubs, Cavite Hubs, Manufacturing, Building, EPC, Infrastructure or Government — or blank',
     },
     { header: 'Payment Terms', example: '30 days' },
     { header: 'Credit Limit', example: '500000' },
@@ -113,7 +106,7 @@ export const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
     name: required(row, 'Name'),
     legalName: optional(row, 'Legal Name'),
     tin: optional(row, 'TIN'),
-    industry: { connect: { id: await resolveIndustry(row) } },
+    ...(await resolveSubIndustry(row).then((id) => (id ? { subIndustry: { connect: { id } } } : {}))),
     paymentTerms: optional(row, 'Payment Terms'),
     creditLimit: decimal(row, 'Credit Limit'),
     phone: optional(row, 'Phone'),

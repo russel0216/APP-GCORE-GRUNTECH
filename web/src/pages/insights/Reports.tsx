@@ -44,9 +44,9 @@ interface Pipeline {
     winRatePct: number;
     medianDaysToDecide: number | null;
   }[];
-  /** One row per industry — every active one, then any retired one still in use, Unclassified last. */
-  industries: {
-    code: string;
+  /** One row per sub-industry — every active one, then any retired one still in use, Unclassified last. */
+  subIndustries: {
+    id: string;
     name: string;
     leads: number;
     quotations: number;
@@ -274,26 +274,26 @@ export function SalesAnalytics() {
       </div>
 
       <div className="card">
-        <h3 className="card-title">By industry</h3>
+        <h3 className="card-title">By sub-industry</h3>
         <p className="muted">
-          A quotation belongs to its customer's industry, and so does a lead once it names a
-          customer. A lead with no customer yet, or a customer nobody has classified, reports as
-          Unclassified — which is the truth about it.
+          A quotation belongs to its customer's sub-industry, and so does a lead once it names a
+          customer. A lead with no customer yet, or a customer whose sub-industry is not stated,
+          reports as Unclassified — which is the truth about it.
         </p>
         <BarList
-          caption="Won in range, by the customer's industry"
-          slices={data.industries.map((i) => ({
-            label: i.code === 'UNCLASSIFIED' ? i.name : `${i.code} · ${i.name}`,
+          caption="Won in range, by the customer's sub-industry"
+          slices={data.subIndustries.map((i) => ({
+            label: i.name,
             value: i.wonValue,
             display: formatMoney(i.wonValue),
-            tone: i.code === 'UNCLASSIFIED' ? 'muted' : 'neon',
+            tone: i.id === 'UNCLASSIFIED' ? 'muted' : 'neon',
           }))}
         />
         <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
-                <th>Industry</th>
+                <th>Sub-industry</th>
                 <th className="right">Leads</th>
                 <th className="right">Quoted</th>
                 <th className="right">Won</th>
@@ -304,17 +304,9 @@ export function SalesAnalytics() {
               </tr>
             </thead>
             <tbody>
-              {data.industries.map((i) => (
-                <tr key={i.code}>
-                  <td>
-                    {i.code === 'UNCLASSIFIED' ? (
-                      <span className="faint">{i.name}</span>
-                    ) : (
-                      <>
-                        <span className="mono">{i.code}</span> {i.name}
-                      </>
-                    )}
-                  </td>
+              {data.subIndustries.map((i) => (
+                <tr key={i.id}>
+                  <td>{i.id === 'UNCLASSIFIED' ? <span className="faint">{i.name}</span> : i.name}</td>
                   <td className="right mono">{i.leads}</td>
                   <td className="right mono">{i.quotations}</td>
                   <td className="right mono">{i.won}</td>

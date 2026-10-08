@@ -398,14 +398,14 @@ async function main() {
       where: { name: { equals: 'ABOITIZ LAND, INC.', mode: 'insensitive' } },
     });
     if (!customer) {
-      const industry = await tx.industry.findUnique({ where: { code: 'BI' } });
-      if (!industry) throw new Error('Industry BI is not seeded — run npm run seed first');
+      // Building, when the sub-industries are seeded; a blank is fine too.
+      const building = await tx.subIndustry.findFirst({ where: { name: 'Building' } });
       customer = await tx.customer.create({
         data: {
           code: await nextNumber('customer', tx, { ownerId: owner.id }),
           name: 'ABOITIZ LAND, INC.',
           legalName: 'Aboitiz Land, Inc.',
-          industryId: industry.id,
+          subIndustryId: building?.id ?? null,
           paymentTerms: '20% DOWNPAYMENT 70% PROGRESS BILLING',
           createdById: owner.id,
         },

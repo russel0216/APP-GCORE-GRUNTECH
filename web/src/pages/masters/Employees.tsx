@@ -852,7 +852,7 @@ function EmployeeForm({
                 ))}
               </select>
             </Field>
-            <Field label="Team (industry)" hint="The industry team they work in — shown to them on their invitation and My Account">
+            <Field label="Team" hint="The sales team they are on — KAT, HIT, UIT, GIB or SIT — shown to them on their invitation and My Account">
               <select value={form.industryId} onChange={(e) => setForm({ ...form, industryId: e.target.value })}>
                 <option value="">— no team yet —</option>
                 {teams

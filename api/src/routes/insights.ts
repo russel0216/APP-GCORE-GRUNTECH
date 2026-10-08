@@ -426,11 +426,12 @@ insightRoutes.get(
 //  SALES ANALYTICS
 // ════════════════════════════════════════════════════════════════════
 
-/** The bucket a customer with no industry, or a lead with no customer, reports under. */
-const UNCLASSIFIED = { code: 'UNCLASSIFIED', name: 'Unclassified' };
+/** The bucket a customer with no sub-industry, or a lead with no customer, reports under. */
+const UNCLASSIFIED = { id: 'UNCLASSIFIED', name: 'Unclassified' };
 
-interface IndustryRow {
-  code: string;
+/** One row of "By sub-industry" (2026-10-08; "By industry" until the customer's industry went). */
+interface SubIndustryRow {
+  id: string;
   name: string;
   leads: number;
   quotations: number;
@@ -458,8 +459,8 @@ insightRoutes.get(
   handler(async (req, res) => {
     const range = parseRange(req.query.from as string, req.query.to as string);
 
-    const industrySelect = { select: { code: true, name: true } } as const;
-    const [leads, quotations, activeIndustries, groupMaster] = await Promise.all([
+    const subIndustrySelect = { select: { id: true, name: true } } as const;
+    const [leads, quotations, activeSubIndustries, groupMaster] = await Promise.all([
       prisma.lead.findMany({
         where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
         select: {
@@ -470,9 +471,9 @@ insightRoutes.get(
           probability: true,
           createdAt: true,
           assignedTo: { select: { id: true, name: true } },
-          // A lead's industry is its customer's. A lead with no customer yet
-          // reports as Unclassified — which is the truth about it.
-          customer: { select: { industry: industrySelect } },
+          // A lead's sub-industry is its customer's. A lead with no customer
+          // yet reports as Unclassified — which is the truth about it.
+          customer: { select: { subIndustry: subIndustrySelect } },
         },
       }),
       prisma.quotation.findMany({
@@ -486,7 +487,7 @@ insightRoutes.get(
           decidedAt: true,
           lostReason: true,
           createdAt: true,
-          customer: { select: { id: true, name: true, industry: industrySelect } },
+          customer: { select: { id: true, name: true, subIndustry: subIndustrySelect } },
           owner: { select: { id: true, name: true } },
           revisions: {
             select: {
@@ -499,10 +500,10 @@ insightRoutes.get(
           },
         },
       }),
-      prisma.industry.findMany({
+      prisma.subIndustry.findMany({
         where: { isActive: true },
-        select: { code: true, name: true },
-        orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+        select: { id: true, name: true },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       }),
       prisma.quotationGroup.findMany({
         select: { key: true, name: true, isActive: true },
@@ -557,18 +558,18 @@ insightRoutes.get(
       return people.get(id)!;
     };
 
-    // Per industry. Every active industry is listed, even at zero — a blank
-    // row is information ("nothing from utilities this year"). An inactive
-    // one appears only when a record still carries it, and Unclassified is
-    // always last. The sums of this table ARE the totals below; the
-    // verify script holds it to that.
-    const industries = new Map<string, IndustryRow>();
-    const industryRow = (industry: { code: string; name: string } | null | undefined) => {
+    // Per sub-industry. Every active one is listed, even at zero — a blank
+    // row is information ("nothing from the hospitals this year"). An
+    // inactive one appears only when a record still carries it, and
+    // Unclassified is always last. The sums of this table ARE the totals
+    // below; the verify script holds it to that.
+    const industries = new Map<string, SubIndustryRow>();
+    const industryRow = (industry: { id: string; name: string } | null | undefined) => {
       const key = industry ?? UNCLASSIFIED;
-      let row = industries.get(key.code);
+      let row = industries.get(key.id);
       if (!row) {
         row = {
-          code: key.code,
+          id: key.id,
           name: key.name,
           leads: 0,
           quotations: 0,
@@ -580,20 +581,20 @@ insightRoutes.get(
           openValue: 0,
           weightedValue: 0,
         };
-        industries.set(key.code, row);
+        industries.set(key.id, row);
       }
       return row;
     };
-    for (const industry of activeIndustries) industryRow(industry);
+    for (const industry of activeSubIndustries) industryRow(industry);
 
     for (const lead of leads) {
       touch(lead.assignedTo.id, lead.assignedTo.name).leads++;
-      industryRow(lead.customer?.industry).leads++;
+      industryRow(lead.customer?.subIndustry).leads++;
     }
 
     for (const q of quotations) {
       const person = touch(q.owner.id, q.owner.name);
-      const industry = industryRow(q.customer.industry);
+      const industry = industryRow(q.customer.subIndustry);
       const value = valueOf(q);
       const inRange = q.createdAt >= range.fromAt && q.createdAt <= range.toAt;
       if (inRange) {
@@ -629,8 +630,8 @@ insightRoutes.get(
       person.medianDaysToDecide = median(decideDays.get(person.id) ?? []);
     }
     for (const row of industries.values()) row.winRatePct = pct(row.won, row.won + row.lost);
-    const unclassified = industries.get(UNCLASSIFIED.code) ?? industryRow(UNCLASSIFIED);
-    industries.delete(UNCLASSIFIED.code);
+    const unclassified = industries.get(UNCLASSIFIED.id) ?? industryRow(UNCLASSIFIED);
+    industries.delete(UNCLASSIFIED.id);
 
     // By group (2026-10-06): what was quoted and won per quotation group.
     // Each quotation's value is split across its value revision's groups in
@@ -713,7 +714,7 @@ insightRoutes.get(
         ),
       },
       people: [...people.values()].sort((a, b) => b.wonValue - a.wonValue),
-      industries: [...industries.values(), unclassified],
+      subIndustries: [...industries.values(), unclassified],
       byGroup,
       sources: [...bySource.values()].sort((a, b) => b.leads - a.leads),
       lostReasons: [...lostReasons.entries()]
@@ -746,7 +747,7 @@ insightRoutes.get(
     const quotations = await prisma.quotation.findMany({
       where: { createdAt: { gte: range.fromAt, lte: range.toAt } },
       include: {
-        customer: { select: { name: true, industry: { select: { code: true, name: true } } } },
+        customer: { select: { name: true, subIndustry: { select: { name: true } } } },
         owner: { select: { name: true } },
         revisions: { select: { total: true, status: true, revision: true, items: { select: { group: true } } } },
       },
@@ -757,9 +758,10 @@ insightRoutes.get(
       req,
       res,
       'sales-pipeline',
-      // Industry is APPENDED, not slotted in beside Customer: a sheet somebody
-      // already built on this export keeps its columns where they were.
-      ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason', 'Industry', 'Groups'],
+      // Sub-industry is APPENDED, not slotted in beside Customer: a sheet
+      // somebody already built on this export keeps its columns where they
+      // were (it held the customer's industry until 2026-10-08).
+      ['Quotation', 'Subject', 'Customer', 'Salesperson', 'Outcome', 'Probability %', 'Value', 'Weighted', 'Raised', 'Submitted', 'Decided', 'Lost reason', 'Sub-industry', 'Groups'],
       quotations.map((q) => {
         const value = quotationValue(q.revisions);
         return [
@@ -775,7 +777,7 @@ insightRoutes.get(
           day(q.submittedAt),
           day(q.decidedAt),
           q.lostReason ?? '',
-          q.customer.industry ? `${q.customer.industry.code} ${q.customer.industry.name}` : UNCLASSIFIED.name,
+          q.customer.subIndustry?.name ?? UNCLASSIFIED.name,
           // The value revision's groups, as "By group" splits it.
           [...new Set((valueRevision(q.revisions)?.items ?? []).map((i) => i.group?.trim()).filter(Boolean))].join('; '),
         ];

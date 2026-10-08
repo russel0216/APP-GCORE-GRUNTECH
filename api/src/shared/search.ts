@@ -141,13 +141,13 @@ registerSearch({
         ],
       },
       take: limit,
-      select: { id: true, code: true, name: true, industry: { select: { code: true } }, isActive: true },
+      select: { id: true, code: true, name: true, subIndustry: { select: { name: true } }, isActive: true },
     });
     return rows.map((r) => ({
       kind: 'customer',
       id: r.id,
       title: r.name,
-      subtitle: [r.code, r.industry?.code, r.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
+      subtitle: [r.code, r.subIndustry?.name, r.isActive ? null : 'inactive'].filter(Boolean).join(' · '),
       link: `/g-ops/customers/${r.id}`,
     }));
   },

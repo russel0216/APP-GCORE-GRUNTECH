@@ -244,8 +244,6 @@ function AssetModal({
   const [customers, setCustomers] = useState<{ id: string; code: string; name: string }[]>([]);
   const [customerQ, setCustomerQ] = useState('');
   const [addingCustomer, setAddingCustomer] = useState(false);
-  const [newIndustryId, setNewIndustryId] = useState('');
-  const [industries, setIndustries] = useState<{ id: string; code: string; name: string }[]>([]);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [types, setTypes] = useState<string[]>([]);
   const [settings, setSettings] = useState<{ defaultWarrantyMonths: number } | null>(null);
@@ -270,7 +268,6 @@ function AssetModal({
     api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
     api.get<string[]>('/installed-assets/types').then(setTypes).catch(() => {});
     api.get<{ defaultWarrantyMonths: number }>('/aftermarket/settings').then(setSettings).catch(() => {});
-    api.get<typeof industries>('/reference/industries?active=true').then(setIndustries).catch(() => {});
   }, []);
 
   // The customer is predicted as it is typed — matched on name or code.
@@ -304,13 +301,11 @@ function AssetModal({
     setError(null);
     try {
       let customerId = form.customerId;
-      // "Add as a new customer": filed properly — name and industry — through
-      // the ordinary customer create, so it gets its code and its audit row.
+      // "Add as a new customer": filed properly, by name, through the
+      // ordinary customer create, so it gets its code and its audit row (the
+      // sub-industry is typed in later, on the customer).
       if (addingCustomer) {
-        const made = await api.post<{ id: string }>('/customers', {
-          name: customerQ.trim(),
-          industryId: newIndustryId,
-        });
+        const made = await api.post<{ id: string }>('/customers', { name: customerQ.trim() });
         customerId = made.id;
       }
       const payload = {
@@ -354,7 +349,7 @@ function AssetModal({
             onClick={save}
             disabled={
               busy ||
-              (addingCustomer ? customerQ.trim().length < 2 || !newIndustryId : !form.customerId) ||
+              (addingCustomer ? customerQ.trim().length < 2 : !form.customerId) ||
               form.name.trim().length < 2
             }
           >
@@ -411,17 +406,7 @@ function AssetModal({
             </button>
           ) : (
             <div className="row ib-add-customer">
-              <span>
-                “{customerQ.trim()}” will be filed as a new customer — every one is classified by industry.
-              </span>
-              <select aria-label="Industry" value={newIndustryId} onChange={(e) => setNewIndustryId(e.target.value)}>
-                <option value="">— industry —</option>
-                {industries.map((i) => (
-                  <option key={i.id} value={i.id}>
-                    {i.code} — {i.name}
-                  </option>
-                ))}
-              </select>
+              <span>“{customerQ.trim()}” will be filed as a new customer when you register.</span>
               <button type="button" className="btn btn-sm" onClick={() => setAddingCustomer(false)}>
                 Pick an existing one instead
               </button>

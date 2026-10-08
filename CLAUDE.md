@@ -212,9 +212,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,636 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 423, costing 120, pipeline 86, calendar 84, numbering 46,
-partners 111, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
+**2,645 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 74, sales 423, costing 120, pipeline 86, calendar 84, numbering 46,
+partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -777,13 +777,40 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 
 ### Masters and partners
 
-- **Industry is a reference row, like `CostCategory`.** The five seeded rows are
-  `isSystem`: undeletable and never recoded, because reports group by the code.
-  Required on every new customer and deliberately not `.nullable()` on PATCH, so
-  a classified customer can never be unclassified. Reclassifying never
-  regenerates the customer code — identifiers do not move under the quotations
-  and invoices that print them. A lead's industry is its customer's; do not add
-  `industryId` to Lead, it would be a second copy that drifts.
+- **Industry is the TEAM master, a reference row like `CostCategory`**
+  (2026-10-08, the owner's call: "there will be KAT, HIT, UIT, GIB and
+  SIT"). `TEAMS` in `shared/team.ts` seeds the five as `isSystem` rows —
+  Key Account Team, Healthcare Industry Team, Utility Industry Team,
+  General Industry & Building Team, Special Industry Team — undeletable and
+  never recoded, because the quotation list's "Quotes by team" and the Team
+  view key on them. The first five industries (HI, BI, UI, GI, SI) were the
+  teams' first names: `retireFirstIndustries()` moves their people (and the
+  customers still carrying one) to the successor — HI→HIT, UI→UIT, GI and
+  BI→GIB, SI→SIT — and switches the old rows off, never deleting them;
+  once, marked in the `seed.teamsMigrated` setting so a row an
+  administrator turns back on stays on. Admin › Categories calls the card
+  **Teams** (people, not customers, in its count); the routes stay
+  `/reference/industries`, the audit type `industry`.
+- **A customer carries no industry any more — a SUB-INDUSTRY, optional**
+  (2026-10-08, the owner's call: "remove the customer industry; later they
+  manually input which sub-industry the customer falls on"). `SubIndustry`
+  (`shared/subIndustries.ts`: `SUB_INDUSTRIES`, the owner's eleven —
+  Enterprise, Hospital, Pharmaceutical, Power and Water, Laguna & Batangas
+  Hubs, Cavite Hubs, Manufacturing, Building, EPC, Infrastructure,
+  Government — seeded as `isSystem` rows, case-blind one per spelling;
+  `/reference/sub-industries`, `admin.categories.*` to change, anyone
+  signed in to read) is `Customer.subIndustryId`, nullable: the form offers
+  "— not stated —", a blank import cell is none, the quick-adds (the lead
+  form, `CustomerPicker`, the installed-base register) file a customer by
+  name alone, and `POST /customers` takes no `industryId`. `Customer.
+  industryId` stays on the rows that carried one and is never written
+  again. Reclassifying never regenerates the customer code — identifiers do
+  not move under the quotations and invoices that print them. A lead's
+  sub-industry is its customer's; do not add one to Lead, it would be a
+  second copy that drifts. Sales Analytics' "By industry" is **"By
+  sub-industry"** (`subIndustries` rows keyed by id, Unclassified last; the
+  CSV's appended column is `Sub-industry`), the customer search hit names
+  it, the printed customer list prints it.
 - **A partner IS a supplier with `isPartner`**, set and cleared only through
   `/api/partners` so "who made this a partner" is audited in one place.
   Removing a partner keeps the supplier and its resources; `DELETE
@@ -801,20 +828,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   it comes from, and arrives as `[]` otherwise. Add a collection the same way —
   never unconditionally.
 - **The customer list is the quotation list's layout** (2026-10-08): the
-  industry as a filter (`?industry=`, a code or `none`; the counts and names
-  still come as `summary.tabs` / `tabCounts` — every active industry, an
-  inactive one still holding a customer, and Unclassified only while
+  sub-industry as a filter (`?subIndustry=`, an id or `none`; the counts and
+  names come as `summary.tabs` / `tabCounts` — every active sub-industry,
+  an inactive one still holding a customer, and "Not stated" only while
   somebody is — from `customerListSummary()`), summary cards (customers,
   inactive). Filters:
   status, added by, Added (Manila days), Open quotation (one OPEN /
-  SUBMITTED / NEGOTIATION) and Project; Code, Open quotes and Projects
-  columns; the printed list `GET /customers/pdf` (above `/:id`, audited, no
-  credit limits); `customerListWhere()` feeds rows, summary and paper. The
-  master is shared, so the list opens on **All for everyone** — Mine is
-  "customers I added". Mass actions (for `gops.customers.edit_all`): Set
-  industry and Active / Inactive, each the ordinary `PATCH /customers/:id`
-  per row — the code never moves with the industry, and an inactive
-  industry is refused by the PATCH. Import moved into the ⋯ menu.
+  SUBMITTED / NEGOTIATION) and Project; Code, Sub-industry, Open quotes and
+  Projects columns; the printed list `GET /customers/pdf` (above `/:id`,
+  audited, no credit limits); `customerListWhere()` feeds rows, summary and
+  paper. The master is shared, so the list opens on **All for everyone** —
+  Mine is "customers I added". Mass actions (for `gops.customers.edit_all`):
+  Set sub-industry and Active / Inactive, each the ordinary
+  `PATCH /customers/:id` per row — the code never moves with the
+  sub-industry, and an inactive sub-industry is refused by the PATCH.
+  Import moved into the ⋯ menu.
 - **The partner list is the quotation list's layout** (2026-10-08): "What
   they supply" as a filter (`?category=`) whose choices are every category
   on file under the other filters, matched **trimmed and case-blind**
@@ -1476,8 +1504,9 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   quotation raised and won at 00:30.
 - **CSV columns are appended, never reordered**, so a sheet built on an export
   keeps working.
-- **Industry reporting puts UNCLASSIFIED last**, and the industry table sums to
-  the report's own totals — asserted.
+- **Sub-industry reporting puts UNCLASSIFIED last**, and the sub-industry
+  table sums to the report's own totals — asserted. (It grouped by the
+  customer's industry until 2026-10-08, when the industry became the team.)
 
 ## Accounts and sign-in
 
@@ -1511,10 +1540,11 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **A person keeps their own contact details** through `/auth/profile`:
   mobile, address, birthday and emergency contact on their linked employee —
   never the employment, pay or statutory fields.
-- **A person's team is `Employee.industryId`** — an Industry row, the same
-  list customers are classified by; HR sets it on the employee form (or the
-  import's `Team` column, by code or name, blank keeps what is on file). An
-  industry with people on its team is deactivated, not deleted. **Team,
+- **A person's team is `Employee.industryId`** — an Industry row (KAT, HIT,
+  UIT, GIB, SIT since 2026-10-08; customers are no longer classified by
+  that list); HR sets it on the employee form (or the import's `Team`
+  column, by code or name, blank keeps what is on file). A team with people
+  on it is deactivated, not deleted. **Team,
   position and employee number are SHOWN, never edited, on the invitation and
   My Account** (`hrFacts()` in `routes/auth.ts`, `components/HrFacts.tsx`): the
   employee number is the `{EMP}` in their quotation numbers and the position

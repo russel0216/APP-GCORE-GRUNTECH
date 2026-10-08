@@ -17,7 +17,7 @@ import {
   humanise,
   useToast,
 } from '../../components/ui';
-import { CustomerForm, IndustryLabel, type CustomerRow } from './Customers';
+import { CustomerForm, SubIndustryLabel, type CustomerRow } from './Customers';
 import { ScoroStatus } from '../sales/QuoteArchive';
 
 /**
@@ -299,7 +299,7 @@ export function Customer360Page() {
         <div>
           <h1>{customer.name}</h1>
           <p>
-            <IndustryLabel industry={customer.industry} />
+            <SubIndustryLabel subIndustry={customer.subIndustry} />
             {subtitle && <span className="muted"> · {subtitle}</span>}
             {!customer.isActive && (
               <span className="m-inline">
@@ -337,7 +337,7 @@ export function Customer360Page() {
               <Detail label="Code" value={<span className="mono">{customer.code}</span>} />
               <Detail label="Registered name" value={customer.legalName} />
               <Detail label="TIN" value={customer.tin} />
-              <Detail label="Industry" value={<IndustryLabel industry={customer.industry} />} />
+              <Detail label="Sub-industry" value={<SubIndustryLabel subIndustry={customer.subIndustry} />} />
               <Detail label="Phone" value={customer.phone} />
               <Detail label="Email" value={customer.email} />
               <Detail label="Website" value={customer.website} />

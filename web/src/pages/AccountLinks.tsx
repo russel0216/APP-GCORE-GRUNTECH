@@ -449,7 +449,7 @@ export function Welcome() {
                 Your team, position and employee number are on your HR record — if one is wrong, tell HR.
                 {personal ? ' Check your birthday.' : ''}
               </p>
-              <HrFact label="Team (industry)" value={info.facts?.team ?? null} />
+              <HrFact label="Team" value={info.facts?.team ?? null} />
               <HrFact label="Position" value={info.facts?.position ?? null} />
               {personal && (
                 <Field label="Birthday">

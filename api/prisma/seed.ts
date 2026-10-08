@@ -8,6 +8,8 @@ import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
+import { TEAMS, retireFirstIndustries } from '../src/shared/team';
+import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -1178,23 +1180,30 @@ async function main() {
   }
   console.log('  ✓ Item categories (9)');
 
-  // ── Industries ─────────────────────────────────────────────────────────────
-  // The owner's five customer classifications. Same contract as the cost
-  // categories: system rows cannot be deleted, the labels stay editable.
-  for (const [i, ind] of [
-    { code: 'HI', name: 'Healthcare Industry' },
-    { code: 'BI', name: 'Building Industry' },
-    { code: 'UI', name: 'Utility Industry' },
-    { code: 'GI', name: 'General Industry' },
-    { code: 'SI', name: 'Special Industry' },
-  ].entries()) {
+  // ── Teams (the Industry master) ────────────────────────────────────────────
+  // The owner's five sales teams (2026-10-08): a person's team is the Industry
+  // row on their employee record (shared/team.ts). Same contract as the cost
+  // categories: system rows cannot be deleted, the labels stay editable. The
+  // five industries seeded before them retire once, their people moving to
+  // the team that took them over (`retireFirstIndustries`).
+  for (const [i, team] of TEAMS.entries()) {
     await prisma.industry.upsert({
-      where: { code: ind.code },
-      create: { ...ind, sortOrder: i, isSystem: true },
+      where: { code: team.code },
+      create: { ...team, sortOrder: i, isSystem: true },
       update: { isSystem: true },
     });
   }
-  console.log('  ✓ Industries (5)');
+  console.log(`  ✓ Teams (${TEAMS.length})`);
+  const retiredIndustries = await retireFirstIndustries();
+  if (retiredIndustries) {
+    console.log(`  ✓ Retired the first industries (${retiredIndustries.retired} switched off, ${retiredIndustries.moved} record(s) moved to their teams)`);
+  }
+
+  // ── Sub-industries ─────────────────────────────────────────────────────────
+  // Where a customer sits in the market — the owner's eleven, typed in by
+  // hand on the customer and optional. System rows: undeletable, renamable.
+  const subIndustriesAdded = await seedSubIndustries();
+  console.log(`  ✓ Sub-industries (${SUB_INDUSTRIES.length}${subIndustriesAdded ? `, ${subIndustriesAdded} added` : ''})`);
 
   // ── Warehouse ──────────────────────────────────────────────────────────────
   await prisma.warehouse.upsert({

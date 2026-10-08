@@ -189,26 +189,27 @@ async function create() {
 
   // ── Customers and sites ────────────────────────────────────────────────
   const customers = [
-    { code: 'SBX-C001', name: 'St. Luke’s Medical Center — Quezon City', terms: '30 days', site: 'Main Hospital', city: 'Quezon City', industry: 'HI' },
-    { code: 'SBX-C002', name: 'Davao Doctors Hospital', terms: '45 days', site: 'Annex Building', city: 'Davao City', industry: 'HI' },
-    { code: 'SBX-C003', name: 'Cebu Industrial Gases Inc.', terms: '15 days', site: 'Mandaue Plant', city: 'Mandaue', industry: 'GI' },
+    { code: 'SBX-C001', name: 'St. Luke’s Medical Center — Quezon City', terms: '30 days', site: 'Main Hospital', city: 'Quezon City', subIndustry: 'Hospital' },
+    { code: 'SBX-C002', name: 'Davao Doctors Hospital', terms: '45 days', site: 'Annex Building', city: 'Davao City', subIndustry: 'Hospital' },
+    { code: 'SBX-C003', name: 'Cebu Industrial Gases Inc.', terms: '15 days', site: 'Mandaue Plant', city: 'Mandaue', subIndustry: 'Manufacturing' },
   ];
-  // Every customer is filed under an industry (the seed creates the five);
-  // a sandbox customer without one would only ever show as "Unclassified".
-  const industryIds = new Map(
-    (await prisma.industry.findMany({ select: { id: true, code: true } })).map((i) => [i.code, i.id]),
+  // A sandbox customer carries a sub-industry (the seed creates the eleven)
+  // so Sales Analytics has something to group by; one left blank would only
+  // ever show as "Unclassified".
+  const subIndustryIds = new Map(
+    (await prisma.subIndustry.findMany({ select: { id: true, name: true } })).map((s) => [s.name, s.id]),
   );
   for (const c of customers) {
-    const industryId = industryIds.get(c.industry) ?? null;
+    const subIndustryId = subIndustryIds.get(c.subIndustry) ?? null;
     const customer = await prisma.customer.upsert({
       where: { code: c.code },
-      create: { code: c.code, name: c.name, paymentTerms: c.terms, creditLimit: D(2_000_000), industryId },
-      // Fills an unclassified sandbox customer from before industries existed;
-      // leaves one somebody has reclassified by hand alone.
+      create: { code: c.code, name: c.name, paymentTerms: c.terms, creditLimit: D(2_000_000), subIndustryId },
+      // Fills a sandbox customer from before sub-industries existed; leaves
+      // one somebody has filed by hand alone.
       update: {},
     });
-    if (!customer.industryId && industryId) {
-      await prisma.customer.update({ where: { id: customer.id }, data: { industryId } });
+    if (!customer.subIndustryId && subIndustryId) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { subIndustryId } });
     }
     const site = await prisma.customerSite.findFirst({
       where: { customerId: customer.id, name: c.site },

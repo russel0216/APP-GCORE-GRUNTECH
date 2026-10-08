@@ -303,8 +303,9 @@ async function main() {
   const manager = await makeUser('Verify Sales Manager', 'mgr@verifys.local', ['sales_manager']);
   const other = await makeUser('Verify Other', 'other@verifys.local', ['sales']);
   // A team (2026-10-08) is the Industry on the employee record: Sales and
-  // Other are on Healthcare, the manager has an employee record on no team.
-  const teamHI = await prisma.industry.findUniqueOrThrow({ where: { code: 'HI' } });
+  // Other are on the Healthcare Industry Team, the manager has an employee
+  // record on no team.
+  const teamHI = await prisma.industry.findUniqueOrThrow({ where: { code: 'HIT' } });
   // Sales' employee number carries the EDITOR_TOKEN digits: Employee.employeeNo
   // wins over User.employeeNo for {EMP}, and the numbering checks expect them.
   for (const [u, n, team] of [[sales, EDITOR_TOKEN, teamHI.id], [other, 'E2', teamHI.id], [manager, 'E3', null]] as const) {
@@ -1159,10 +1160,10 @@ async function main() {
     // Mine · Team · All (2026-10-08): Team is the owners on the viewer's team.
     const myTeam = await teamOf(sales.id);
     const teamOnly = await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ scope: 'team' }), stages, myTeam!.id).where });
-    const otherTeam = await prisma.industry.findFirstOrThrow({ where: { code: { not: 'HI' } } });
+    const otherTeam = await prisma.industry.findFirstOrThrow({ where: { code: { not: 'HIT' }, isActive: true } });
     check(
       'the Team view lists the quotations of everyone on the team, and nobody else’s',
-      myTeam?.code === 'HI' && teamOnly === 6 &&
+      myTeam?.code === 'HIT' && teamOnly === 6 &&
         (await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ scope: 'team' }), stages, otherTeam.id).where })) === 0 &&
         (await teamOf(manager.id)) === null,
       `${myTeam?.code} ${teamOnly}`,
@@ -3098,7 +3099,7 @@ async function main() {
       const custListed = await http(salesToken, 'GET', `/customers?search=${encodeURIComponent(`${TAG} Hospital`)}`);
       const custSum = custListed.body.summary as { tabCounts: Record<string, number>; count: number } | undefined;
       check(
-        'GET /customers carries its industry tabs’ counts and each row its open quotations',
+        'GET /customers carries its sub-industry counts and each row its open quotations',
         custListed.status === 200 && !!custSum && custSum.count === (custListed.body.rows as unknown[]).length &&
           ((custListed.body.rows ?? []) as { openQuoteCount?: number }[]).every((r) => typeof r.openQuoteCount === 'number'),
         custListed.text.slice(0, 200),

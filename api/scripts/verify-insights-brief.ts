@@ -252,11 +252,11 @@ async function main() {
   const ownQuotesUser = await makeUser('ZZINB Seller', `seller${MAIL}`, { roleIds: [ownQuotesRole.id] });
   const noFinExportUser = await makeUser('ZZINB Analyst', `analyst${MAIL}`, { roleIds: [noFinExportRole.id] });
 
-  const healthcare = await prisma.industry.findUnique({ where: { code: 'HI' } });
-  if (!healthcare) throw new Error('The seeded HI industry is missing — run npm run seed');
+  const healthcare = await prisma.subIndustry.findFirst({ where: { name: 'Hospital' } });
+  if (!healthcare) throw new Error('The seeded Hospital sub-industry is missing — run npm run seed');
 
   const hospital = await prisma.customer.create({
-    data: { code: `${TAG}-C1`, name: `${TAG} Hospital`, industryId: healthcare.id },
+    data: { code: `${TAG}-C1`, name: `${TAG} Hospital`, subIndustryId: healthcare.id },
   });
 
   const now = new Date();
@@ -756,10 +756,10 @@ async function main() {
       `${post.status} ${post.text.slice(0, 100)}`,
     );
 
-    // ── Sales Analytics by industry ────────────────────────────────────────
-    console.log('\nSales analytics by industry');
+    // ── Sales Analytics by sub-industry ─────────────────────────────────────
+    console.log('\nSales analytics by sub-industry');
     type IndustryRow = {
-      code: string;
+      id: string;
       name: string;
       leads: number;
       won: number;
@@ -770,12 +770,12 @@ async function main() {
     };
     const pl = await api<{
       totals: { leads: number; won: number; wonValue: number; lost: number; openValue: number; weightedValue: number };
-      industries: IndustryRow[];
+      subIndustries: IndustryRow[];
     }>('GET', `/insights/pipeline?${window}`);
-    const inds = pl.body.industries ?? [];
-    const sum = (k: keyof Omit<IndustryRow, 'code' | 'name'>) => cents(inds.reduce((s, x) => s + x[k], 0));
+    const inds = pl.body.subIndustries ?? [];
+    const sum = (k: keyof Omit<IndustryRow, 'id' | 'name'>) => cents(inds.reduce((s, x) => s + x[k], 0));
     check(
-      'the industry table sums to the report\'s own totals',
+      'the sub-industry table sums to the report\'s own totals',
       pl.status === 200 &&
         sum('leads') === pl.body.totals.leads &&
         sum('won') === pl.body.totals.won &&
@@ -789,33 +789,33 @@ async function main() {
         open: [sum('openValue'), pl.body.totals.openValue],
       }),
     );
-    const activeCodes = (await prisma.industry.findMany({ where: { isActive: true }, select: { code: true } })).map((x) => x.code);
+    const activeIds = (await prisma.subIndustry.findMany({ where: { isActive: true }, select: { id: true } })).map((x) => x.id);
     check(
-      'every active industry is listed, even at zero, and Unclassified comes last',
-      activeCodes.every((code) => inds.some((x) => x.code === code)) && inds[inds.length - 1]?.code === 'UNCLASSIFIED',
-      inds.map((x) => x.code).join(', '),
+      'every active sub-industry is listed, even at zero, and Unclassified comes last',
+      activeIds.every((id) => inds.some((x) => x.id === id)) && inds[inds.length - 1]?.id === 'UNCLASSIFIED',
+      inds.map((x) => x.name).join(', '),
     );
-    const hi = inds.find((x) => x.code === 'HI');
+    const hi = inds.find((x) => x.name === 'Hospital');
     const openHi = await prisma.quotation.findMany({
-      where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] }, customer: { industry: { code: 'HI' } } },
+      where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] }, customer: { subIndustry: { name: 'Hospital' } } },
       select: { revisions: { select: { total: true, status: true, revision: true } } },
     });
     const hiLeads = await prisma.lead.count({
-      where: { createdAt: { gte: range.from, lte: range.to }, customer: { industry: { code: 'HI' } } },
+      where: { createdAt: { gte: range.from, lte: range.to }, customer: { subIndustry: { name: 'Hospital' } } },
     });
     check(
-      'the healthcare row equals the records read directly',
+      'the Hospital row equals the records read directly',
       !!hi &&
         hi.leads === hiLeads &&
         money(hi.openValue, cents(openHi.reduce((s, q) => s + quotationValue(q.revisions), 0))) &&
         hi.won >= 1,
       `${JSON.stringify(hi)} vs leads ${hiLeads}, ${openHi.length} open`,
     );
-    const unclassified = inds.find((x) => x.code === 'UNCLASSIFIED');
+    const unclassified = inds.find((x) => x.id === 'UNCLASSIFIED');
     const unlinkedLeads = await prisma.lead.count({
       where: {
         createdAt: { gte: range.from, lte: range.to },
-        OR: [{ customerId: null }, { customer: { industryId: null } }],
+        OR: [{ customerId: null }, { customer: { subIndustryId: null } }],
       },
     });
     check(
@@ -826,8 +826,8 @@ async function main() {
     const plCsv = await api('GET', `/insights/pipeline.csv?${window}`);
     const plHeader = plCsv.text.replace(/^﻿/, '').split('\r\n')[0];
     check(
-      'the pipeline CSV appends an Industry column, then Groups — columns are appended, never reordered',
-      plCsv.status === 200 && plHeader.endsWith(',Lost reason,Industry,Groups') && plCsv.text.includes('HI '),
+      'the pipeline CSV appends a Sub-industry column, then Groups — columns are appended, never reordered',
+      plCsv.status === 200 && plHeader.endsWith(',Lost reason,Sub-industry,Groups') && plCsv.text.includes('Hospital'),
       plHeader,
     );
   }

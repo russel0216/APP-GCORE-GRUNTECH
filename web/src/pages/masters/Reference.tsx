@@ -5,7 +5,8 @@ import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, StatusBadge, useToast
 import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
-//  CATEGORIES — cost categories, item categories, industries, quotation groups
+//  CATEGORIES — cost categories, item categories, teams, sub-industries,
+//  quotation groups, activity types
 // ════════════════════════════════════════════════════════════════════
 
 interface CostCategory {
@@ -18,12 +19,27 @@ interface CostCategory {
 }
 
 /**
- * A customer industry (HI, BI, UI, GI, SI). Exported: the customer form and
- * the customer list filter read the same shape from GET /reference/industries.
+ * A sales team (KAT, HIT, UIT, GIB, SIT — the Industry master, 2026-10-08):
+ * a person's team is this row on their employee record. Exported: the
+ * employee form reads the same shape from GET /reference/industries.
  */
 export interface Industry {
   id: string;
   code: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  _count?: { customers: number; employees: number };
+}
+
+/**
+ * A customer's sub-industry (the owner's eleven — Enterprise, Hospital,
+ * Pharmaceutical…; 2026-10-08). Exported: the customer form and the customer
+ * list filter read the same shape from GET /reference/sub-industries.
+ */
+export interface SubIndustry {
+  id: string;
   name: string;
   sortOrder: number;
   isSystem: boolean;
@@ -76,6 +92,8 @@ export function Categories() {
   const [editingItem, setEditingItem] = useState<ItemCategory | 'new' | null>(null);
   const [industries, setIndustries] = useState<Industry[]>([]);
   const [editingIndustry, setEditingIndustry] = useState<Industry | 'new' | null>(null);
+  const [subIndustries, setSubIndustries] = useState<SubIndustry[]>([]);
+  const [editingSubIndustry, setEditingSubIndustry] = useState<SubIndustry | 'new' | null>(null);
   const [groups, setGroups] = useState<QuotationGroup[]>([]);
   const [editingGroup, setEditingGroup] = useState<QuotationGroup | 'new' | null>(null);
   const [activityTypes, setActivityTypes] = useState<ActivityTypeDef[]>([]);
@@ -84,16 +102,18 @@ export function Categories() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, i, ind, g, at] = await Promise.all([
+      const [c, i, ind, sub, g, at] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
+        api.get<SubIndustry[]>('/reference/sub-industries'),
         api.get<QuotationGroup[]>('/reference/quotation-groups'),
         api.get<ActivityTypeDef[]>('/reference/activity-types'),
       ]);
       setCost(c);
       setItems(i);
       setIndustries(ind);
+      setSubIndustries(sub);
       setGroups(g);
       setActivityTypes(at);
       setError(null);
@@ -120,9 +140,10 @@ export function Categories() {
           <p>
             Cost categories are the five buckets every costing, budget and cost-ledger row is
             grouped by. Item categories are how you organise the item master for browsing — they
-            have no effect on money. Industries classify customers — HI, BI, UI, GI, SI — so sales
-            can be counted by the market they come from. Quotation groups are what a quotation
-            line is filed under, and how Sales Analytics counts what was quoted and won.
+            have no effect on money. Teams — KAT, HIT, UIT, GIB, SIT — are the sales teams people
+            are on; sub-industries are where a customer sits in the market, so sales can be
+            counted by it. Quotation groups are what a quotation line is filed under, and how
+            Sales Analytics counts what was quoted and won.
           </p>
         </div>
       </div>
@@ -231,13 +252,13 @@ export function Categories() {
       </div>
 
       {/*
-        Industries: a five-row reference card, NOT a DataList. It is a short,
+        Teams: a five-row reference card, NOT a DataList. It is a short,
         fixed list an administrator reads whole — paging, scope and export
         would be furniture. Rule 9 governs list screens; this is a setting.
       */}
       <div className="card m-industries">
         <div className="m-card-head">
-          <h3 className="card-title">Industries</h3>
+          <h3 className="card-title">Teams</h3>
           {can('admin.categories.create') && (
             <button className="btn btn-sm" onClick={() => setEditingIndustry('new')}>
               + Add
@@ -247,8 +268,8 @@ export function Categories() {
 
         {industries.length === 0 ? (
           <Empty
-            title="No industries yet"
-            hint="Run the seed to create the five standard ones — HI, BI, UI, GI and SI."
+            title="No teams yet"
+            hint="Run the seed to create the five — KAT, HIT, UIT, GIB and SIT."
           />
         ) : (
           <div className="table-wrap">
@@ -257,7 +278,7 @@ export function Categories() {
                 <tr>
                   <th className="m-col-code">Code</th>
                   <th>Name</th>
-                  <th className="right">Customers</th>
+                  <th className="right">People</th>
                   <th>Status</th>
                   {mayEdit && <th className="m-col-action" />}
                 </tr>
@@ -270,7 +291,7 @@ export function Categories() {
                       {ind.name}
                       {ind.isSystem && <span className="badge m-inline">standard</span>}
                     </td>
-                    <td className="right">{ind._count?.customers ?? 0}</td>
+                    <td className="right">{ind._count?.employees ?? 0}</td>
                     <td>
                       <StatusBadge status={ind.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                     </td>
@@ -289,8 +310,70 @@ export function Categories() {
         )}
 
         <p className="m-footnote">
-          Every new customer is filed under one of these. The five standard industries cannot be
-          deleted or recoded — reports group by the code — but you can rename them or add your own.
+          HR puts each person on a team on the employee record; the quotation list counts quotes
+          by it and the Team view lists a team's work. The standard teams cannot be deleted or
+          recoded — but you can rename them or add your own. The five industries that came before
+          them are switched off, never deleted.
+        </p>
+      </div>
+
+      {/*
+        Sub-industries: where a customer sits in the market — the owner's
+        eleven, typed in by hand on the customer and optional. The same short
+        reference card as the teams.
+      */}
+      <div className="card m-industries">
+        <div className="m-card-head">
+          <h3 className="card-title">Sub-industries</h3>
+          {can('admin.categories.create') && (
+            <button className="btn btn-sm" onClick={() => setEditingSubIndustry('new')}>
+              + Add
+            </button>
+          )}
+        </div>
+
+        {subIndustries.length === 0 ? (
+          <Empty title="No sub-industries yet" hint="Run the seed to create the eleven — Enterprise, Hospital, Pharmaceutical…" />
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th className="right">Customers</th>
+                  <th>Status</th>
+                  {mayEdit && <th className="m-col-action" />}
+                </tr>
+              </thead>
+              <tbody>
+                {subIndustries.map((s) => (
+                  <tr key={s.id}>
+                    <td>
+                      {s.name}
+                      {s.isSystem && <span className="badge m-inline">standard</span>}
+                    </td>
+                    <td className="right">{s._count?.customers ?? 0}</td>
+                    <td>
+                      <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
+                    </td>
+                    {mayEdit && (
+                      <td className="m-col-action">
+                        <button className="btn btn-sm" onClick={() => setEditingSubIndustry(s)}>
+                          Modify
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p className="m-footnote">
+          A customer may carry one of these — picked on the customer, later, by whoever knows.
+          Sales Analytics counts what was quoted and won by it. The standard ones cannot be
+          deleted — switch one off instead — but you can rename them or add your own.
         </p>
       </div>
 
@@ -443,6 +526,18 @@ export function Categories() {
           onClose={() => setEditingGroup(null)}
           onSaved={() => {
             setEditingGroup(null);
+            void load();
+            toast('ok', 'Saved');
+          }}
+        />
+      )}
+
+      {editingSubIndustry && (
+        <SubIndustryModal
+          subIndustry={editingSubIndustry === 'new' ? null : editingSubIndustry}
+          onClose={() => setEditingSubIndustry(null)}
+          onSaved={() => {
+            setEditingSubIndustry(null);
             void load();
             toast('ok', 'Saved');
           }}
@@ -823,12 +918,12 @@ function IndustryModal({
     }
   }
 
-  const inUse = industry?._count?.customers ?? 0;
+  const inUse = (industry?._count?.customers ?? 0) + (industry?._count?.employees ?? 0);
   const valid = form.name.trim().length >= 2 && /^[A-Z]{2,4}$/.test(form.code);
 
   return (
     <Modal
-      title={industry ? `Modify ${industry.name}` : 'Add industry'}
+      title={industry ? `Modify ${industry.name}` : 'Add team'}
       onClose={onClose}
       footer={
         <>
@@ -850,17 +945,17 @@ function IndustryModal({
       <ErrorBox error={error} />
       {industry?.isSystem && (
         <div className="alert info">
-          One of the five standard industries. Rename it freely; its code is fixed because reports
-          group customers by it.
+          A standard team. Rename it freely; its code is fixed because the quotation list and the
+          Team view key on it.
         </div>
       )}
       {industry && !industry.isSystem && inUse > 0 && (
         <div className="alert info">
-          {inUse === 1 ? 'One customer carries' : `${inUse} customers carry`} this industry, so it
-          cannot be deleted — untick Active to stop it being offered for new customers.
+          {inUse === 1 ? 'One record carries' : `${inUse} records carry`} this team, so it cannot
+          be deleted — untick Active to stop it being offered.
         </div>
       )}
-      <Field label="Name" hint="e.g. Healthcare Industry">
+      <Field label="Name" hint="e.g. Healthcare Industry Team">
         <input value={form.name} autoFocus onChange={(e) => setForm({ ...form, name: e.target.value })} />
       </Field>
       <Field label="Code" hint="Two to four letters">
@@ -882,7 +977,99 @@ function IndustryModal({
       <Checkbox
         checked={form.isActive}
         onChange={(v) => setForm({ ...form, isActive: v })}
-        label="Active — an inactive industry stays on its customers but is not offered for new ones"
+        label="Active — an inactive team stays on its people but is not offered for new ones"
+      />
+    </Modal>
+  );
+}
+
+/** Add or modify a sub-industry: a name, its order, and whether it is offered. */
+function SubIndustryModal({
+  subIndustry,
+  onClose,
+  onSaved,
+}: {
+  subIndustry: SubIndustry | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    name: subIndustry?.name ?? '',
+    sortOrder: subIndustry?.sortOrder ?? 99,
+    isActive: subIndustry?.isActive ?? true,
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (subIndustry) await api.patch(`/reference/sub-industries/${subIndustry.id}`, form);
+      else await api.post('/reference/sub-industries', form);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!subIndustry) return;
+    setBusy(true);
+    try {
+      await api.del(`/reference/sub-industries/${subIndustry.id}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const inUse = subIndustry?._count?.customers ?? 0;
+
+  return (
+    <Modal
+      title={subIndustry ? `Modify ${subIndustry.name}` : 'Add sub-industry'}
+      onClose={onClose}
+      footer={
+        <>
+          {subIndustry && !subIndustry.isSystem && inUse === 0 && can('admin.categories.delete') && (
+            <button className="btn btn-danger" onClick={remove} disabled={busy}>
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={busy || form.name.trim().length < 2}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      {subIndustry?.isSystem && (
+        <div className="alert info">One of the standard sub-industries. Rename it freely; it cannot be deleted.</div>
+      )}
+      {subIndustry && !subIndustry.isSystem && inUse > 0 && (
+        <div className="alert info">
+          {inUse === 1 ? 'One customer carries' : `${inUse} customers carry`} this sub-industry, so it
+          cannot be deleted — untick Active to stop it being offered.
+        </div>
+      )}
+      <Field label="Name" hint="e.g. Hospital">
+        <input value={form.name} autoFocus onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Sort order">
+        <NumberInput kind="count" value={form.sortOrder} onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })} />
+      </Field>
+      <Checkbox
+        checked={form.isActive}
+        onChange={(v) => setForm({ ...form, isActive: v })}
+        label="Active — an inactive sub-industry stays on its customers but is not offered for new ones"
       />
     </Modal>
   );

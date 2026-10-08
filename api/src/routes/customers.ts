@@ -44,9 +44,9 @@ function yesNo(value: string | undefined, label: string): boolean | null {
 
 /**
  * Which customers a list query means — ONE rule for the list, its summary
- * (the industry tabs' counts) and its PDF (the quotation list's pattern,
- * 2026-10-08). `base` is everything but the industry tab, whose key stays
- * `industry` (a code, or `none` for the unclassified) so older links work.
+ * (the sub-industry counts) and its PDF (the quotation list's pattern,
+ * 2026-10-08). `base` is everything but the sub-industry filter
+ * (`subIndustry`: an id, or `none` for the customers nobody has filed).
  */
 export function customerListWhere(
   me: ReturnType<typeof currentUser>,
@@ -86,38 +86,39 @@ export function customerListWhere(
   if (ids) and.push({ id: { in: ids } });
 
   const base: Prisma.CustomerWhereInput = and.length ? { AND: and } : {};
-  // Industry is a reference row; the tab takes its code, or 'none' for the
-  // customers nobody has classified yet — that tab is how those get found.
-  if (!f.industry) return { base, where: base };
-  const industry: Prisma.CustomerWhereInput =
-    f.industry === 'none' ? { industryId: null } : { industry: { code: String(f.industry).toUpperCase() } };
-  return { base, where: { AND: [...and, industry] } };
+  // The sub-industry is a reference row; the filter takes its id, or 'none'
+  // for the customers nobody has filed yet — which is how those get found.
+  if (!f.subIndustry) return { base, where: base };
+  const subIndustry: Prisma.CustomerWhereInput =
+    f.subIndustry === 'none' ? { subIndustryId: null } : { subIndustryId: String(f.subIndustry) };
+  return { base, where: { AND: [...and, subIndustry] } };
 }
 
 /**
- * The industry tabs — every active industry, any inactive one still holding
- * a customer here, and Unclassified when somebody is — with their counts
- * under `base` ('' is All), and the count and inactive count under `where`.
+ * The sub-industry choices — every active one, any inactive one still
+ * holding a customer here, and "Not stated" when somebody is — with their
+ * counts under `base` ('' is All), and the count and inactive count under
+ * `where`. Sent as `tabs` / `tabCounts`: the filter's choices, with counts.
  */
 export async function customerListSummary(base: Prisma.CustomerWhereInput, where: Prisma.CustomerWhereInput) {
-  const [perIndustry, industries, count, inactive] = await Promise.all([
-    prisma.customer.groupBy({ by: ['industryId'], where: base, _count: { _all: true } }),
-    prisma.industry.findMany({ orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true, code: true, name: true, isActive: true } }),
+  const [perSubIndustry, subIndustries, count, inactive] = await Promise.all([
+    prisma.customer.groupBy({ by: ['subIndustryId'], where: base, _count: { _all: true } }),
+    prisma.subIndustry.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, isActive: true } }),
     prisma.customer.count({ where }),
     prisma.customer.count({ where: { AND: [where, { isActive: false }] } }),
   ]);
-  const byId = new Map(perIndustry.map((r) => [r.industryId, r._count._all]));
-  const tabCounts: Record<string, number> = { '': perIndustry.reduce((t, r) => t + r._count._all, 0) };
+  const byId = new Map(perSubIndustry.map((r) => [r.subIndustryId, r._count._all]));
+  const tabCounts: Record<string, number> = { '': perSubIndustry.reduce((t, r) => t + r._count._all, 0) };
   const tabs: { value: string; label: string }[] = [];
-  for (const i of industries) {
+  for (const i of subIndustries) {
     const n = byId.get(i.id) ?? 0;
     if (!i.isActive && n === 0) continue;
-    tabs.push({ value: i.code, label: i.name });
-    tabCounts[i.code] = n;
+    tabs.push({ value: i.id, label: i.name });
+    tabCounts[i.id] = n;
   }
   const unclassified = byId.get(null) ?? 0;
   if (unclassified > 0) {
-    tabs.push({ value: 'none', label: 'Unclassified' });
+    tabs.push({ value: 'none', label: 'Not stated' });
     tabCounts.none = unclassified;
   }
   return { tabs, tabCounts, count, inactive };
@@ -138,7 +139,7 @@ customerRoutes.get(
         where,
         include: {
           createdBy: { select: { id: true, name: true } },
-          industry: { select: { id: true, code: true, name: true } },
+          subIndustry: { select: { id: true, name: true } },
           _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
@@ -184,7 +185,7 @@ customerRoutes.get(
       prisma.customer.findMany({
         where,
         include: {
-          industry: { select: { code: true } },
+          subIndustry: { select: { name: true } },
           createdBy: { select: { name: true } },
           _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
         },
@@ -194,10 +195,10 @@ customerRoutes.get(
       customerListSummary(base, where),
     ]);
     const f = q.filters;
-    const industryName = f.industry === 'none' ? 'Unclassified' : summary.tabs.find((t) => t.value === String(f.industry ?? '').toUpperCase())?.label;
+    const subIndustryName = f.subIndustry === 'none' ? 'not stated' : summary.tabs.find((t) => t.value === f.subIndustry)?.label;
     const filters = [
       q.search ? `search "${q.search}"` : null,
-      f.industry ? `industry ${industryName ?? f.industry}` : null,
+      f.subIndustry ? `sub-industry ${subIndustryName ?? f.subIndustry}` : null,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
       f.createdById ? 'added by one person' : null,
       f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
@@ -214,13 +215,13 @@ customerRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Customer', 'Industry', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'],
-          widths: [1.6, 3, 0.9, 0.9, 0.7, 1, 0.9, 1.2, 1],
+          head: ['Code', 'Customer', 'Sub-industry', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'],
+          widths: [1.6, 2.6, 1.3, 0.9, 0.7, 1, 0.9, 1.2, 1],
           align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
           rows: rows.map((c) => [
             c.code,
             { title: c.name, body: c.legalName && c.legalName !== c.name ? c.legalName : undefined },
-            c.industry?.code ?? '—',
+            c.subIndustry?.name ?? '—',
             String(c._count.contacts),
             String(c._count.sites),
             String(c._count.quotations),
@@ -261,7 +262,7 @@ customerRoutes.get(
               }
             : {}),
         },
-        select: { id: true, code: true, name: true, industry: { select: { code: true } } },
+        select: { id: true, code: true, name: true, subIndustry: { select: { name: true } } },
         orderBy: { name: 'asc' },
         take: 25,
       }),
@@ -302,7 +303,7 @@ customerRoutes.get(
       where: { id: req.params.id },
       include: {
         createdBy: { select: { id: true, name: true } },
-        industry: { select: { id: true, code: true, name: true } },
+        subIndustry: { select: { id: true, name: true } },
         contacts: { orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] },
         sites: {
           orderBy: { name: 'asc' },
@@ -557,11 +558,11 @@ customerRoutes.get(
   }),
 );
 
-/** The industry a customer is filed under must exist and be in use. */
-async function activeIndustry(tx: Prisma.TransactionClient, industryId: string) {
-  const industry = await tx.industry.findUnique({ where: { id: industryId } });
-  if (!industry || !industry.isActive) throw badRequest('Choose an active industry');
-  return industry;
+/** The sub-industry a customer is filed under, when one is, must exist and be in use. */
+async function activeSubIndustry(tx: Prisma.TransactionClient, subIndustryId: string) {
+  const row = await tx.subIndustry.findUnique({ where: { id: subIndustryId } });
+  if (!row || !row.isActive) throw badRequest('Choose an active sub-industry');
+  return row;
 }
 
 // ── Create / update / delete ─────────────────────────────────────────────────
@@ -571,9 +572,10 @@ const customerSchema = z.object({
   name: z.string().trim().min(2, 'Company name is required'),
   legalName: z.string().trim().optional().nullable(),
   tin: z.string().trim().optional().nullable(),
-  // Required on create; `.partial()` makes it optional on PATCH, and it is
-  // deliberately not nullable, so a customer can never be unclassified again.
-  industryId: z.string().min(1, 'Choose an industry'),
+  // Optional, and clearable (2026-10-08, the owner's call): the sub-industry
+  // is typed in by hand, later. The customer's industry — the sales team's
+  // list — is no longer taken here at all.
+  subIndustryId: z.string().optional().nullable(),
   paymentTerms: z.string().trim().optional().nullable(),
   creditLimit: z.number().nonnegative().optional().nullable(),
   phone: z.string().trim().optional().nullable(),
@@ -590,8 +592,8 @@ customerRoutes.post(
     const me = currentUser(req);
     const body = parseBody(customerSchema, req.body);
 
-    const { customer, industry } = await prisma.$transaction(async (tx) => {
-      const industry = await activeIndustry(tx, body.industryId);
+    const { customer, subIndustry } = await prisma.$transaction(async (tx) => {
+      const subIndustry = body.subIndustryId ? await activeSubIndustry(tx, body.subIndustryId) : null;
       // Only consume a number when none was supplied — an operator pasting
       // their own code should not silently burn a sequence value.
       const code = body.code || (await nextNumber('customer', tx, { ownerId: me.id }));
@@ -604,7 +606,7 @@ customerRoutes.post(
           name: body.name,
           legalName: body.legalName || null,
           tin: body.tin || null,
-          industryId: industry.id,
+          subIndustryId: subIndustry?.id ?? null,
           paymentTerms: body.paymentTerms || null,
           creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null,
           phone: body.phone || null,
@@ -615,7 +617,7 @@ customerRoutes.post(
           createdById: me.id,
         },
       });
-      return { customer, industry };
+      return { customer, subIndustry };
     });
 
     await audit(
@@ -623,7 +625,7 @@ customerRoutes.post(
         entityType: 'customer',
         entityId: customer.id,
         action: 'CREATED',
-        summary: `Created customer ${customer.code} — ${customer.name} (${industry.code})`,
+        summary: `Created customer ${customer.code} — ${customer.name}${subIndustry ? ` (${subIndustry.name})` : ''}`,
       },
       req,
     );
@@ -645,7 +647,7 @@ customerRoutes.patch(
     }
     // Reclassifying never regenerates the code — identifiers do not move under
     // the quotations and invoices that carry them. The audit row records it.
-    if (body.industryId !== undefined) await activeIndustry(prisma, body.industryId);
+    if (body.subIndustryId) await activeSubIndustry(prisma, body.subIndustryId);
 
     const customer = await prisma.customer.update({
       where: { id: req.params.id },
@@ -654,7 +656,7 @@ customerRoutes.patch(
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.legalName !== undefined ? { legalName: body.legalName || null } : {}),
         ...(body.tin !== undefined ? { tin: body.tin || null } : {}),
-        ...(body.industryId !== undefined ? { industryId: body.industryId } : {}),
+        ...(body.subIndustryId !== undefined ? { subIndustryId: body.subIndustryId || null } : {}),
         ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
         ...(body.creditLimit !== undefined
           ? { creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null }

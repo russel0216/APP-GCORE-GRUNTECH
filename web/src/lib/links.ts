@@ -78,6 +78,7 @@ const SCREEN: Record<string, string> = {
   warehouse: '/g-chain/warehouses',
   cost_category: '/admin/categories',
   industry: '/admin/categories',
+  sub_industry: '/admin/categories',
   position: '/g-hr/plantilla',
   // A record or certificate lives on its holder's passport; the id here is
   // the record's, not the employee's, so the register is as close as it gets.

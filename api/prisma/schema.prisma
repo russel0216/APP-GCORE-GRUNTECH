@@ -521,8 +521,14 @@ model Customer {
   name         String
   legalName    String?
   tin          String?
+  /// The sales team's list (Industry) — no longer set on a customer since
+  /// 2026-10-08; kept on the rows that carried one.
   industryId   String?
   industry     Industry? @relation(fields: [industryId], references: [id], onDelete: Restrict)
+  /// Where in the market the customer sits (2026-10-08, the owner's eleven:
+  /// Enterprise, Hospital, Pharmaceutical …) — typed in by hand, optional.
+  subIndustryId String?
+  subIndustry   SubIndustry? @relation(fields: [subIndustryId], references: [id], onDelete: SetNull)
   /// Free text, e.g. "30 days", "50% down, balance on turnover".
   paymentTerms String?
   creditLimit  Decimal?  @db.Decimal(18, 2)
@@ -560,6 +566,7 @@ model Customer {
   @@index([isActive])
   @@index([name])
   @@index([industryId])
+  @@index([subIndustryId])
 }
 
 /// "Sometimes they have multiple contact in a single customer."
@@ -615,18 +622,38 @@ model CustomerSite {
   @@index([customerId])
 }
 
-/// Customer industry classification — the owner's five codes. Same shape as
-/// CostCategory: seeded, system rows undeletable, labels editable.
+/// The sales TEAMS (2026-10-08, the owner's five: KAT, HIT, UIT, GIB, SIT) —
+/// a person's team is this row on their employee record (shared/team.ts).
+/// Same shape as CostCategory: seeded, system rows undeletable, labels
+/// editable. The first five rows (HI, BI, UI, GI, SI) classified customers
+/// until the teams took them over; a customer is now classified by
+/// SubIndustry, and `customers` only names the rows that still carry one.
 model Industry {
   id        String     @id @default(cuid())
-  code      String     @unique // HI, BI, UI, GI, SI — 2–4 uppercase letters
+  code      String     @unique // KAT, HIT, UIT, GIB, SIT — 2–4 uppercase letters
   name      String
   sortOrder Int        @default(0)
   isSystem  Boolean    @default(false)
   isActive  Boolean    @default(true)
   customers Customer[]
-  /// The people on this industry's team (Employee.industryId).
+  /// The people on this team (Employee.industryId).
   employees Employee[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+/// A customer's sub-industry (2026-10-08, the owner's eleven): Enterprise,
+/// Hospital, Pharmaceutical, Power and Water, Laguna & Batangas Hubs, Cavite
+/// Hubs, Manufacturing, Building, EPC, Infrastructure, Government. Same
+/// contract as the cost categories — seeded system rows undeletable, names
+/// editable — and OPTIONAL on the customer: typed in by hand, later.
+model SubIndustry {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  sortOrder Int        @default(0)
+  isSystem  Boolean    @default(false)
+  isActive  Boolean    @default(true)
+  customers Customer[]
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 }

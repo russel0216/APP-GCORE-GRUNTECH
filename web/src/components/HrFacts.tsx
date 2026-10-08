@@ -6,7 +6,7 @@
  */
 
 export interface HrFacts {
-  /** The industry team (an Industry row's name). */
+  /** The sales team (an Industry row's name — KAT, HIT, UIT, GIB, SIT). */
   team: string | null;
   position: string | null;
   employeeNo: string | null;

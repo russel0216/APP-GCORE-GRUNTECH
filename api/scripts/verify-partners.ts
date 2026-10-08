@@ -98,6 +98,7 @@ async function cleanup() {
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.industry.deleteMany({ where: { code: INDUSTRY_CODE } });
+  await prisma.subIndustry.deleteMany({ where: { name: { startsWith: TAG } } });
 
   const users = await prisma.user.findMany({ where: { email: { endsWith: MAIL } }, select: { id: true } });
   const ids = users.map((u) => u.id);
@@ -580,18 +581,17 @@ async function httpCases(ctx: {
   check('removing it from partners keeps the supplier', unflag.status === 200 && !!(await prisma.supplier.findUnique({ where: { id: newId } })));
   check('after which it no longer opens as a partner', (await http(viewerT, 'GET', `/partners/${newId}`)).status === 404);
 
-  // ── Industries ────────────────────────────────────────────────────────────
+  // ── Teams (the Industry master) ───────────────────────────────────────────
   const industries = await http(outsiderT, 'GET', '/reference/industries?active=true');
   const industryRows = (industries.body as unknown as { id: string; code: string; isSystem: boolean }[]) ?? [];
   check(
-    'any signed-in user reads the industry list',
-    industries.status === 200 && Array.isArray(industries.body) && industryRows.some((i) => i.code === 'HI'),
+    'any signed-in user reads the team list',
+    industries.status === 200 && Array.isArray(industries.body) && industryRows.some((i) => i.code === 'HIT'),
     industries.text.slice(0, 120),
   );
-  const hi = industryRows.find((i) => i.code === 'HI')!;
-  const gi = industryRows.find((i) => i.code === 'GI')!;
+  const hi = industryRows.find((i) => i.code === 'HIT')!;
   check(
-    'a standard industry cannot be deleted',
+    'a standard team cannot be deleted',
     (await http(adminT, 'DELETE', `/reference/industries/${hi.id}`)).status === 400,
   );
   check(
@@ -600,11 +600,33 @@ async function httpCases(ctx: {
   );
   check(
     'and only an administrator may add one',
-    (await http(viewerT, 'POST', '/reference/industries', { code: INDUSTRY_CODE, name: 'Verify industry' })).status === 403,
+    (await http(viewerT, 'POST', '/reference/industries', { code: INDUSTRY_CODE, name: 'Verify team' })).status === 403,
   );
-  const extra = await http(adminT, 'POST', '/reference/industries', { code: INDUSTRY_CODE.toLowerCase(), name: 'Verify industry' });
+  const extra = await http(adminT, 'POST', '/reference/industries', { code: INDUSTRY_CODE.toLowerCase(), name: 'Verify team' });
   check('an administrator adds one (code upper-cased)', extra.status === 201 && extra.body.code === INDUSTRY_CODE, extra.text.slice(0, 120));
-  const extraId = String(extra.body.id ?? '');
+
+  // ── Sub-industries ────────────────────────────────────────────────────────
+  const subs = await http(outsiderT, 'GET', '/reference/sub-industries?active=true');
+  const subRows = (subs.body as unknown as { id: string; name: string; isSystem: boolean }[]) ?? [];
+  const hospitalSub = subRows.find((s) => s.name === 'Hospital')!;
+  const manufacturingSub = subRows.find((s) => s.name === 'Manufacturing')!;
+  check(
+    'any signed-in user reads the sub-industry list, the owner’s eleven among them',
+    subs.status === 200 && !!hospitalSub && !!manufacturingSub && subRows.filter((s) => s.isSystem).length >= 11,
+    subs.text.slice(0, 120),
+  );
+  check('a standard sub-industry cannot be deleted', (await http(adminT, 'DELETE', `/reference/sub-industries/${hospitalSub.id}`)).status === 400);
+  check(
+    'only an administrator may add one',
+    (await http(viewerT, 'POST', '/reference/sub-industries', { name: `${TAG} Verify sub-industry` })).status === 403,
+  );
+  const extraSub = await http(adminT, 'POST', '/reference/sub-industries', { name: `${TAG} Verify sub-industry` });
+  check('an administrator adds one', extraSub.status === 201, extraSub.text.slice(0, 120));
+  const extraSubId = String(extraSub.body.id ?? '');
+  check(
+    'and one per spelling, case-blind',
+    (await http(adminT, 'POST', '/reference/sub-industries', { name: `${TAG} verify SUB-INDUSTRY` })).status === 409,
+  );
 
   // ── Customers ─────────────────────────────────────────────────────────────
   const custRole = await makeRole(`${ROLE}cust`, 'Verify customer editor', [
@@ -616,13 +638,19 @@ async function httpCases(ctx: {
   const clerk = await makeUser('Verify Customer Clerk', 'clerk', [custRole.id]);
   const clerkT = signToken(clerk.id, clerk.email);
 
+  // The owner's call (2026-10-08): a customer needs no industry and no
+  // sub-industry — the sub-industry is typed in by hand, later.
   const noIndustry = await http(clerkT, 'POST', '/customers', { name: `${TAG} No Industry Co` });
-  check('a customer without an industry is refused', noIndustry.status === 400, noIndustry.text.slice(0, 160));
+  check(
+    'a customer is filed by name alone — no industry, no sub-industry yet',
+    noIndustry.status === 201 && noIndustry.body.subIndustryId === null && noIndustry.body.industryId === null,
+    noIndustry.text.slice(0, 160),
+  );
 
-  await prisma.industry.update({ where: { id: extraId }, data: { isActive: false } });
-  const inactive = await http(clerkT, 'POST', '/customers', { name: `${TAG} Inactive Co`, industryId: extraId });
-  check('an inactive industry is refused', inactive.status === 400, inactive.text.slice(0, 160));
-  await prisma.industry.update({ where: { id: extraId }, data: { isActive: true } });
+  await prisma.subIndustry.update({ where: { id: extraSubId }, data: { isActive: false } });
+  const inactive = await http(clerkT, 'POST', '/customers', { name: `${TAG} Inactive Co`, subIndustryId: extraSubId });
+  check('an inactive sub-industry is refused', inactive.status === 400, inactive.text.slice(0, 160));
+  await prisma.subIndustry.update({ where: { id: extraSubId }, data: { isActive: true } });
 
   const expectCode = (await previewNext('customer')).number;
   const nextCode = await http(clerkT, 'GET', '/customers/next-code');
@@ -632,37 +660,37 @@ async function httpCases(ctx: {
     `${nextCode.body.code} vs ${expectCode}`,
   );
 
-  const hospital = await http(clerkT, 'POST', '/customers', { name: `${TAG} Hospital`, industryId: hi.id });
-  check('a customer is created with its industry', hospital.status === 201, hospital.text.slice(0, 160));
+  const hospital = await http(clerkT, 'POST', '/customers', { name: `${TAG} Hospital`, subIndustryId: hospitalSub.id });
+  check('a customer is created with its sub-industry', hospital.status === 201 && hospital.body.subIndustryId === hospitalSub.id, hospital.text.slice(0, 160));
   const hospitalId = String(hospital.body.id ?? '');
   const createdAudit = await prisma.auditLog.findFirst({ where: { entityType: 'customer', entityId: hospitalId, action: 'CREATED' } });
-  check('the audit line names the industry code', (createdAudit?.summary ?? '').includes('(HI)'), createdAudit?.summary ?? '');
+  check('the audit line names the sub-industry', (createdAudit?.summary ?? '').includes('(Hospital)'), createdAudit?.summary ?? '');
 
-  check(
-    'reclassifying to null is refused',
-    (await http(clerkT, 'PATCH', `/customers/${hospitalId}`, { industryId: null })).status === 400,
-  );
+  const cleared = await http(clerkT, 'PATCH', `/customers/${hospitalId}`, { subIndustryId: null });
+  check('a sub-industry can be cleared again', cleared.status === 200 && cleared.body.subIndustryId === null, cleared.text.slice(0, 120));
+  const reset = await http(clerkT, 'PATCH', `/customers/${hospitalId}`, { subIndustryId: hospitalSub.id });
+  check('and set back', reset.status === 200 && reset.body.subIndustryId === hospitalSub.id);
 
   const plant = await prisma.customer.create({
-    data: { code: `${TAG}-C2`, name: `${TAG} Plant`, industryId: gi.id },
+    data: { code: `${TAG}-C2`, name: `${TAG} Plant`, subIndustryId: manufacturingSub.id },
   });
   const legacy = await prisma.customer.create({ data: { code: `${TAG}-C3`, name: `${TAG} Legacy` } });
-  // The in-use guard on a non-system industry.
-  await prisma.customer.update({ where: { id: plant.id }, data: { industryId: extraId } });
+  // The in-use guard on a non-system sub-industry.
+  await prisma.customer.update({ where: { id: plant.id }, data: { subIndustryId: extraSubId } });
   check(
-    'an industry customers carry cannot be deleted',
-    (await http(adminT, 'DELETE', `/reference/industries/${extraId}`)).status === 400,
+    'a sub-industry customers carry cannot be deleted',
+    (await http(adminT, 'DELETE', `/reference/sub-industries/${extraSubId}`)).status === 400,
   );
-  await prisma.customer.update({ where: { id: plant.id }, data: { industryId: gi.id } });
+  await prisma.customer.update({ where: { id: plant.id }, data: { subIndustryId: manufacturingSub.id } });
 
   const names = async (q: string) =>
     ((await http(clerkT, 'GET', `/customers?search=${TAG}&${q}`)).body.rows as { name: string }[] | undefined)?.map(
       (r) => r.name,
     ) ?? [];
-  const hiRows = await names('industry=hi');
-  check('the list filters by industry code, any case', hiRows.includes(`${TAG} Hospital`) && !hiRows.includes(`${TAG} Plant`), hiRows.join(','));
-  const noneRows = await names('industry=none');
-  check('"Unclassified" finds the customer nobody has filed', noneRows.includes(`${TAG} Legacy`) && !noneRows.includes(`${TAG} Hospital`), noneRows.join(','));
+  const hiRows = await names(`subIndustry=${hospitalSub.id}`);
+  check('the list filters by sub-industry', hiRows.includes(`${TAG} Hospital`) && !hiRows.includes(`${TAG} Plant`), hiRows.join(','));
+  const noneRows = await names('subIndustry=none');
+  check('"Not stated" finds the customer nobody has filed', noneRows.includes(`${TAG} Legacy`) && !noneRows.includes(`${TAG} Hospital`), noneRows.join(','));
   void legacy;
 
   // ── Customer 360 is a window, never a way around ──────────────────────────
@@ -691,8 +719,8 @@ async function httpCases(ctx: {
     String(((asAdmin.body.leads as unknown[]) ?? []).length),
   );
   check(
-    'and the industry rides on the record',
-    (asAdmin.body.industry as { code?: string } | null)?.code === 'HI',
+    'and the sub-industry rides on the record',
+    (asAdmin.body.subIndustry as { name?: string } | null)?.name === 'Hospital',
   );
 
   // ── Supplier 360, same rule ───────────────────────────────────────────────
