@@ -20,6 +20,7 @@ import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
 import { createLogin, defaultRoleIds, deliverLink } from '../shared/accounts';
+import { celebrationsBetween } from '../shared/celebrations';
 
 // ════════════════════════════════════════════════════════════════════
 //  EMPLOYEES
@@ -114,6 +115,28 @@ employeeRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * Birthdays and work anniversaries in a window of days (2026-10-08): the
+ * sales calendar's People layer and My Work read it. For anyone signed in —
+ * the owner's call: a colleague's birthday, age and years with the company
+ * are the office's to know — names, days and years only, nothing else off
+ * the record. Above `/:id`, like `/lookup`.
+ */
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+employeeRoutes.get(
+  '/celebrations',
+  handler(async (req, res) => {
+    const from = String(req.query.from ?? '');
+    const to = String(req.query.to ?? from);
+    const isDay = (v: string) => DAY_KEY.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v);
+    if (!isDay(from) || !isDay(to)) throw badRequest('from and to are days written YYYY-MM-DD');
+    if (to < from) throw badRequest('from is after to');
+    const span = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
+    if (span > 366) throw badRequest('At most a year at a time');
+    res.json({ from, to, celebrations: await celebrationsBetween(from, to) });
   }),
 );
 

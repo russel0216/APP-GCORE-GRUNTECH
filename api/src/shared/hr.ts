@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 
@@ -42,7 +43,41 @@ export interface HrSettings {
   /** Ratings run 1..ratingScale; one label per point. */
   ratingScale: number;
   ratingLabels: string[];
+  /** Birthday and work-anniversary greetings (2026-10-08) — see shared/celebrations.ts. */
+  greetings: GreetingSettings;
 }
+
+/**
+ * The automatic greetings. Each template may name `{first}`, `{name}`,
+ * `{company}`, `{years}` ("5 years" / "1 year" — the age on a birthday) and
+ * `{n}` (the bare number). The celebrant gets a bell and an email (where
+ * email is set up); everyone else a bell, when `tellEveryone` is on.
+ */
+export interface GreetingSettings {
+  enabled: boolean;
+  /** The Manila hour the day's greetings go out from (0–23). */
+  hour: number;
+  tellEveryone: boolean;
+  birthdayTitle: string;
+  birthdayMessage: string;
+  anniversaryTitle: string;
+  anniversaryMessage: string;
+  /** The bell everyone else gets. */
+  everyoneBirthday: string;
+  everyoneAnniversary: string;
+}
+
+export const GREETING_DEFAULTS: GreetingSettings = {
+  enabled: true,
+  hour: 7,
+  tellEveryone: true,
+  birthdayTitle: 'Happy birthday, {first}!',
+  birthdayMessage: 'Everyone at {company} wishes you a wonderful year ahead. Enjoy your day!',
+  anniversaryTitle: 'Happy work anniversary, {first} — {years} with {company}!',
+  anniversaryMessage: 'Thank you for {years} with {company}. Here is to the next one.',
+  everyoneBirthday: "It's {name}'s birthday today — {first} turns {n}",
+  everyoneAnniversary: '{name} marks {years} with {company} today',
+};
 
 const DEFAULTS: HrSettings = {
   workStart: '08:00',
@@ -60,24 +95,30 @@ const DEFAULTS: HrSettings = {
   evaluationNoticeDays: 14,
   ratingScale: 5,
   ratingLabels: ['Unsatisfactory', 'Needs improvement', 'Meets expectations', 'Exceeds expectations', 'Outstanding'],
+  greetings: GREETING_DEFAULTS,
 };
 
 export async function hrSettings(): Promise<HrSettings> {
   const row = await prisma.setting.findUnique({ where: { key: 'hr.rules' } });
   if (!row) return DEFAULTS;
-  return { ...DEFAULTS, ...(row.value as Partial<HrSettings>) };
+  const stored = row.value as Partial<HrSettings>;
+  // The greetings are an object: a stored one from before a new template was
+  // added still gets that template's default.
+  return { ...DEFAULTS, ...stored, greetings: { ...GREETING_DEFAULTS, ...(stored.greetings ?? {}) } };
 }
 
 export async function saveHrSettings(value: Partial<HrSettings>): Promise<HrSettings> {
   const merged = { ...(await hrSettings()), ...value };
+  // Prisma's JSON input type wants a plain object; the settings are one.
+  const json = JSON.parse(JSON.stringify(merged)) as Prisma.InputJsonObject;
   await prisma.setting.upsert({
     where: { key: 'hr.rules' },
     create: {
       key: 'hr.rules',
-      value: merged,
+      value: json,
       description: 'Working day, breaks, overtime premium and face-match threshold',
     },
-    update: { value: merged },
+    update: { value: json },
   });
   return merged;
 }

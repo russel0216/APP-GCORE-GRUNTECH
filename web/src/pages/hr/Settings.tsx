@@ -6,6 +6,7 @@ import type { LeaveType } from './Leave';
 import { ProbationCard } from './settings/ProbationCard';
 import { ClearanceChecklistCard } from './settings/ClearanceChecklistCard';
 import { AcademyCard } from './settings/AcademyCard';
+import { GreetingsCard } from './settings/GreetingsCard';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
@@ -326,6 +327,8 @@ export function HrSettingsPage() {
         <ClearanceChecklistCard />
         <AcademyCard />
       </div>
+
+      <GreetingsCard />
 
       {editingType && (
         <LeaveTypeModal

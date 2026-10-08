@@ -17,6 +17,8 @@ import { renderDocument, formatDate } from '../shared/pdf';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/aftermarket';
 import { activityTypeNames } from '../shared/activityTypes';
+import { celebrationsBetween, yearsText } from '../shared/celebrations';
+import { manilaDayKey } from '../shared/day';
 
 // ════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -286,6 +288,28 @@ registerSchedule(async (user, { from, to }) => {
     ]
       .filter(Boolean)
       .join(' · '),
+  }));
+});
+
+/**
+ * Today's birthdays and work anniversaries (2026-10-08), as all-day rows in
+ * My Work's Today — the day's, not the viewer's own: the office is told who
+ * to greet. The window is a timestamp pair; its days are Manila's.
+ */
+registerSchedule(async (user, { from, to }) => {
+  const fromKey = manilaDayKey(from);
+  const toKey = manilaDayKey(new Date(to.getTime() - 1));
+  const rows = await celebrationsBetween(fromKey, toKey);
+  const calendar = can(user, 'gops.calendar.view_all');
+  return rows.map((c) => ({
+    kind: 'celebration',
+    id: `${c.kind}:${c.employeeId}:${c.day}`,
+    title: c.kind === 'BIRTHDAY' ? `${c.name} turns ${c.years}` : `${c.name} — ${yearsText(c.years)} with the company`,
+    startsAt: from,
+    endsAt: from,
+    link: calendar ? `/g-ops/calendar?view=day&day=${c.day}` : '/my-work',
+    meetLink: null,
+    sub: c.kind === 'BIRTHDAY' ? 'Birthday' : 'Work anniversary',
   }));
 });
 

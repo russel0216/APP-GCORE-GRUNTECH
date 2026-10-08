@@ -5,6 +5,7 @@ import { mailConfig, sendMail } from './mail';
 import { notify, type NotificationType } from './notifications';
 import { formatDateTime } from './pdf';
 import { manilaDayKey } from './day';
+import { sendDueGreetings } from './celebrations';
 
 /**
  * The one place that decides which sales activities a query means.
@@ -182,7 +183,12 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
 
 let reminderTimer: NodeJS.Timeout | null = null;
 
-/** Runs `sendDueReminders` once a minute in the API process. Idempotent. */
+/**
+ * Runs `sendDueReminders` once a minute in the API process — and, on the
+ * same tick, the day's birthday and work-anniversary greetings
+ * (shared/celebrations.ts), which claim their own rows so a minute's tick
+ * is as safe as a day's. Idempotent.
+ */
 export function startActivityReminders(): void {
   if (reminderTimer) return;
   let running = false;
@@ -193,6 +199,11 @@ export function startActivityReminders(): void {
       await sendDueReminders();
     } catch (err) {
       console.error('Activity reminders failed:', err);
+    }
+    try {
+      await sendDueGreetings();
+    } catch (err) {
+      console.error('Greetings failed:', err);
     } finally {
       running = false;
     }

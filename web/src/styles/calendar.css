@@ -132,6 +132,16 @@ button.cal-head[aria-pressed='true'] {
   font-variant-numeric: tabular-nums;
 }
 
+/* A birthday or anniversary chip: warm, and never dimmed like a done activity. */
+.cal-item.people {
+  border-left-color: var(--warn);
+  background: rgb(var(--warn-rgb) / 0.08);
+}
+
+.mcal-event.people {
+  border-left-color: var(--warn);
+}
+
 /* Dim while a window loads rather than unmounting the grid under the cursor. */
 .calendar-week[aria-busy='true'],
 .tg[aria-busy='true'],

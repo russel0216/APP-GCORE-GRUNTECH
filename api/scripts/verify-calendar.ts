@@ -27,6 +27,8 @@ import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { activityEmailText, activityWhere, sendDueReminders } from '../src/shared/activities';
 import { seedActivityTypes } from '../src/shared/activityTypes';
+import { annualDayIn, fillGreeting, occurrencesBetween, sendDueGreetings } from '../src/shared/celebrations';
+import { GREETING_DEFAULTS } from '../src/shared/hr';
 import { resolveUser } from '../src/permissions/resolve';
 import { blockSpan, minutesLabel, placeInLanes, slotAt } from '../../web/src/lib/timeGrid';
 // Imported for its side effect: it registers the sales-activity schedule provider.
@@ -76,6 +78,10 @@ async function cleanup() {
   await prisma.salesActivity.deleteMany({ where: { subject: { startsWith: TAG } } });
   // After the activities: a type in use refuses to go.
   await prisma.salesActivityType.deleteMany({ where: { key: { startsWith: TAG } } });
+  // The greetings told real people too (the office bell): every title carries the TAG.
+  await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
+  await prisma.greeting.deleteMany({ where: { employee: { employeeNo: { startsWith: TAG } } } });
+  await prisma.employee.deleteMany({ where: { employeeNo: { startsWith: TAG } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verifycal.local' } },
     select: { id: true },
@@ -225,6 +231,25 @@ async function main() {
   );
   check('a click lands on the half hour, inside the day', slotAt(589) === 570 && slotAt(-5) === 0 && slotAt(1439) === 1410);
   check('the gutter reads as a clock', minutesLabel(0) === '12:00 AM' && minutesLabel(570) === '9:30 AM' && minutesLabel(13 * 60) === '1:00 PM');
+
+  // ══ Birthdays and work anniversaries (shared/celebrations.ts) ═════════════
+  console.log('\nBirthdays and work anniversaries');
+  const feb29 = new Date('1992-02-29T00:00:00Z');
+  check(
+    'an annual date falls on its day each year; 29 February keeps to 28 February in a common year',
+    annualDayIn(feb29, 2026) === '2026-02-28' && annualDayIn(feb29, 2028) === '2028-02-29' && annualDayIn(new Date('1990-10-08T00:00:00Z'), 2026) === '2026-10-08',
+  );
+  check(
+    'occurrences in a window carry the years since; a window across New Year finds the next year’s; the date itself is no occasion',
+    JSON.stringify(occurrencesBetween(new Date('1990-12-30T00:00:00Z'), '2026-12-20', '2027-01-05')) === '[{"day":"2026-12-30","years":36}]' &&
+      JSON.stringify(occurrencesBetween(new Date('2026-01-02T00:00:00Z'), '2026-12-20', '2027-01-05')) === '[{"day":"2027-01-02","years":1}]' &&
+      occurrencesBetween(new Date('2026-12-25T00:00:00Z'), '2026-12-20', '2026-12-31').length === 0,
+  );
+  check(
+    'a greeting template fills in the person, the company and the years',
+    fillGreeting('Happy work anniversary, {first} — {years} with {company}! ({n})', { name: 'Maria Santos', firstName: 'Maria', years: 1 }, 'Gruntech') ===
+      'Happy work anniversary, Maria — 1 year with Gruntech! (1)',
+  );
 
   // ══ activityWhere ══════════════════════════════════════════════════════════
   console.log('\nactivityWhere (api/src/shared/activities.ts)');
@@ -461,7 +486,13 @@ async function main() {
     );
     const typeDenied = await apiSend(salesToken, 'POST', '/reference/activity-types', { name: `${TAG} demo walk` });
     check('adding one needs admin.categories.create (403)', typeDenied.status === 403, String(typeDenied.status));
-    const adminRole = await makeRole('zzcal_admin', `${TAG} admin`, ['admin.categories.create', 'admin.categories.edit_all', 'admin.categories.delete']);
+    const adminRole = await makeRole('zzcal_admin', `${TAG} admin`, [
+      'admin.categories.create',
+      'admin.categories.edit_all',
+      'admin.categories.delete',
+      'ghr.settings.view_all',
+      'ghr.settings.edit_all',
+    ]);
     const admin = await makeUser(`${TAG} Admin`, 'admin@verifycal.local', [adminRole.id]);
     const adminToken = signToken(admin.id, admin.email);
     const madeType = await apiSend(adminToken, 'POST', '/reference/activity-types', { name: `${TAG} Demo walk`, color: '#2E9A4B' });
@@ -502,6 +533,77 @@ async function main() {
       seeded.created === 0 && seeded.backfilled >= 1 && backfilled?.typeKey === 'CALL',
       JSON.stringify(seeded),
     );
+
+    // ══ Birthdays, anniversaries and the greetings, over HTTP ═══════════════
+    console.log('\nCelebrations and greetings');
+    const todayKey = manilaDayKey(new Date());
+    const mmdd = todayKey.slice(5);
+    const birthYear = mmdd === '02-29' ? 1992 : 1990;
+    const hireYear = mmdd === '02-29' ? 2020 : 2021;
+    const thisYear = Number(todayKey.slice(0, 4));
+    const celebrant = await prisma.employee.create({
+      data: {
+        employeeNo: `${TAG}-E1`,
+        firstName: TAG,
+        lastName: 'Celebrant',
+        userId: colleague.id,
+        birthDate: new Date(`${birthYear}-${mmdd}T00:00:00Z`),
+        dateHired: new Date(`${hireYear}-${mmdd}T00:00:00Z`),
+      },
+    });
+    const feed = await apiGet(salesToken, `/employees/celebrations?from=${todayKey}&to=${todayKey}`);
+    const feedRows = ((feed.body as { celebrations?: { kind: string; employeeId: string; years: number; name: string }[] }).celebrations ?? []).filter(
+      (c) => c.employeeId === celebrant.id,
+    );
+    check(
+      'GET /employees/celebrations lists today’s birthday and anniversary with the age and the years, for anyone signed in',
+      feed.status === 200 &&
+        feedRows.some((c) => c.kind === 'BIRTHDAY' && c.years === thisYear - birthYear) &&
+        feedRows.some((c) => c.kind === 'ANNIVERSARY' && c.years === thisYear - hireYear) &&
+        feedRows[0]?.name === `${TAG} Celebrant`,
+      `${feed.status} ${JSON.stringify(feedRows)}`,
+    );
+    check(
+      'the window is checked',
+      (await apiGet(salesToken, '/employees/celebrations?from=2026-13-01')).status === 400 &&
+        (await apiGet(salesToken, '/employees/celebrations?from=2026-01-01&to=2027-06-01')).status === 400,
+    );
+    const myDay = await scheduleFor((await resolveUser(sales.id))!, {
+      from: new Date(`${todayKey}T00:00:00+08:00`),
+      to: new Date(`${todayKey}T23:59:59.999+08:00`),
+    });
+    const myCelebrations = myDay.filter((r) => r.kind === 'celebration' && r.id.endsWith(`:${celebrant.id}:${todayKey}`));
+    check('and My Work’s Today lists them as all-day rows', myCelebrations.length === 2 && myCelebrations.every((r) => r.startsAt.getTime() === r.endsAt.getTime()), JSON.stringify(myCelebrations));
+
+    // The greetings: from the configured hour, once per person per year, never twice.
+    const beforeRules = (await apiGet(adminToken, '/hr-settings')).body as { greetings: Record<string, unknown> };
+    const put = await apiSend(adminToken, 'PUT', '/hr-settings', { greetings: { birthdayTitle: `${TAG} Maligayang kaarawan, {first}!` } });
+    const afterRules = (await apiGet(adminToken, '/hr-settings')).body as { greetings: { birthdayTitle: string; hour: number; everyoneAnniversary: string } };
+    check(
+      'HR Settings takes one greeting template at a time and keeps the rest',
+      put.status === 200 &&
+        afterRules.greetings.birthdayTitle === `${TAG} Maligayang kaarawan, {first}!` &&
+        afterRules.greetings.hour === beforeRules.greetings.hour &&
+        afterRules.greetings.everyoneAnniversary === beforeRules.greetings.everyoneAnniversary,
+      JSON.stringify(afterRules.greetings),
+    );
+    // The run below reads the defaults, whatever an administrator has set here.
+    await apiSend(adminToken, 'PUT', '/hr-settings', { greetings: { ...GREETING_DEFAULTS } });
+    await prisma.greeting.deleteMany({ where: { employeeId: celebrant.id } });
+    const tooEarly = await sendDueGreetings(new Date(`${todayKey}T05:30:00+08:00`));
+    const went = await sendDueGreetings(new Date(`${todayKey}T09:00:00+08:00`));
+    const again = await sendDueGreetings(new Date(`${todayKey}T09:01:00+08:00`));
+    const mine = await prisma.notification.findMany({ where: { userId: colleague.id, type: 'greeting' }, select: { title: true, body: true } });
+    // The default line: "It's ZZCAL Celebrant's birthday today — ZZCAL turns 36".
+    const office = await prisma.notification.findFirst({ where: { userId: sales.id, type: 'greeting', title: { contains: `${TAG} turns` } } });
+    check('greetings wait for the hour, go once, and never twice', tooEarly === 0 && went >= 2 && again === 0, `${tooEarly} ${went} ${again}`);
+    check(
+      'the celebrant gets a happy birthday and a work anniversary by name',
+      mine.some((n) => n.title === `Happy birthday, ${TAG}!`) && mine.some((n) => n.title.startsWith('Happy work anniversary') && n.title.includes(`${thisYear - hireYear} years`)),
+      JSON.stringify(mine),
+    );
+    check('and everyone else is told who to greet, with the age', !!office && office.title.includes(`turns ${thisYear - birthYear}`), office?.title);
+    await apiSend(adminToken, 'PUT', '/hr-settings', { greetings: beforeRules.greetings });
 
     const early = await sendDueReminders(new Date('2031-03-02T23:00:00Z'));
     const due = await sendDueReminders(new Date('2031-03-03T00:30:00Z'));

@@ -1819,6 +1819,22 @@ hrSettingsRoutes.put(
         evaluationNoticeDays: z.number().int().min(0).max(90).optional(),
         ratingScale: z.number().int().min(2).max(10).optional(),
         ratingLabels: z.array(z.string().trim().min(1)).max(10).optional(),
+        // The greetings card sends only this key; a partial object merges over
+        // what is stored, so one template can change without the others.
+        greetings: z
+          .object({
+            enabled: z.boolean(),
+            hour: z.number().int().min(0).max(23),
+            tellEveryone: z.boolean(),
+            birthdayTitle: z.string().trim().min(1).max(120),
+            birthdayMessage: z.string().trim().max(500),
+            anniversaryTitle: z.string().trim().min(1).max(120),
+            anniversaryMessage: z.string().trim().max(500),
+            everyoneBirthday: z.string().trim().min(1).max(160),
+            everyoneAnniversary: z.string().trim().min(1).max(160),
+          })
+          .partial()
+          .optional(),
       }),
       req.body,
     );
@@ -1851,9 +1867,13 @@ hrSettingsRoutes.put(
       }
     }
 
-    const saved = await saveHrSettings(body);
+    const { greetings: greetingsPatch, ...rest } = body;
+    const saved = await saveHrSettings({
+      ...rest,
+      ...(greetingsPatch ? { greetings: { ...current.greetings, ...greetingsPatch } } : {}),
+    });
     await audit(
-      { entityType: 'setting', entityId: 'hr.rules', action: 'UPDATED', summary: 'Updated HR rules' },
+      { entityType: 'setting', entityId: 'hr.rules', action: 'UPDATED', summary: body.greetings && Object.keys(body).length === 1 ? 'Updated the greetings' : 'Updated HR rules' },
       req,
     );
     res.json(saved);

@@ -40,6 +40,8 @@ export type NotificationType =
   | 'activity.reminder'
   /** An invitee answered Going / Maybe / Not going — told to whoever booked it. */
   | 'activity.responded'
+  /** A birthday or work-anniversary greeting (shared/celebrations.ts). */
+  | 'greeting'
   | 'system';
 
 export interface NotifyInput {

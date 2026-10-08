@@ -207,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,615 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 422, costing 120, pipeline 86, calendar 74, numbering 46,
+**2,625 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 422, costing 120, pipeline 86, calendar 84, numbering 46,
 partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1076,6 +1076,30 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   otherwise); the type an activity has may stay on it after it was
   deactivated. The six built-ins are never deleted and OTHER never
   deactivated; a custom type in use is deactivated, not deleted.
+- **Birthdays and work anniversaries are derived, never stored** (2026-10-08,
+  the owner's call): `shared/celebrations.ts` reads each active employee's
+  `birthDate` and `dateHired` on the fly (`annualDayIn` — a 29 February keeps
+  to 28 February in a common year; `occurrencesBetween` — the date itself is
+  no occasion). `GET /employees/celebrations?from=&to=` (above `/:id`, anyone
+  signed in, at most a year) feeds the sales calendar's **People layer** —
+  on by default, `?people=0` hides it, all-day chips "🎂 Maria Santos turns
+  34" / "🎉 Juan dela Cruz · 5 years with us", the age and the years shown
+  to everyone as the owner asked, a chip opening the employee record only
+  for `ghr.employees.view_all` — and a `registerSchedule` provider puts the
+  day's into My Work's Today as all-day rows (`startsAt === endsAt`, kind
+  `celebration`). **The greetings are the one thing here that writes**:
+  `sendDueGreetings(now)` runs on the activity reminders' minute tick, from
+  the Manila hour HR sets, and CLAIMS a `Greeting` row (unique on employee,
+  kind, year) before anyone is told — the celebrant gets a bell
+  (`greeting`) and an email where SMTP is set, everyone else a one-line
+  bell when "Tell everyone" is on. The templates are `hr.rules.greetings`
+  (`GreetingSettings`, `GREETING_DEFAULTS` in `shared/hr.ts`; `{first}`,
+  `{name}`, `{company}`, `{years}`, `{n}`), edited on HR Settings'
+  Greetings card, which PUTs only `{ greetings }` — the route merges a
+  partial over what is stored. verify-calendar pins the leap-day rule, the
+  feed, the My Work rows, the hour gate, the once-only claim and the
+  settings merge; its celebrant's names carry the TAG so cleanup can take
+  the office's bells back.
 - **Invitees answer Going / Maybe / Not going** (2026-10-08, SCORO's visual
   confirmation): `SalesActivityInvitee.response` (`InviteeResponse`, the
   meeting's enum — PENDING is "No reply") and `respondedAt`. `POST

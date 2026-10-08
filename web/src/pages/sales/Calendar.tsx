@@ -122,6 +122,31 @@ interface ServiceVisitChip {
 /** Visit chips share the grid with activities; the prefix keeps their ids apart. */
 const VISIT_PREFIX = 'visit:';
 
+/** A birthday or work anniversary (2026-10-08): derived from the employee record, never a table. */
+interface Celebration {
+  kind: 'BIRTHDAY' | 'ANNIVERSARY';
+  employeeId: string;
+  name: string;
+  day: string;
+  /** The age, or the years with the company. */
+  years: number;
+}
+
+const PERSON_PREFIX = 'person:';
+
+/** An all-day chip on the People layer: the name with the age or the years of tenure, as the owner asked. */
+function celebrationToEvent(c: Celebration): CalendarEvent {
+  const birthday = c.kind === 'BIRTHDAY';
+  return {
+    id: `${PERSON_PREFIX}${c.kind}:${c.employeeId}:${c.day}`,
+    date: c.day,
+    time: null,
+    label: birthday ? `🎂 ${c.name} turns ${c.years}` : `🎉 ${c.name} · ${c.years} year${c.years === 1 ? '' : 's'} with us`,
+    detail: birthday ? 'Birthday' : 'Work anniversary',
+    tone: '',
+  };
+}
+
 /*
   A service visit is context here, not sales work: somebody selling to a
   customer wants to know an engineer is on their site on Thursday, but it is
@@ -268,9 +293,55 @@ export function SalesCalendar() {
     );
   }
 
+  /*
+    The People layer: birthdays and work anniversaries, on by default for
+    everyone (the owner's call — the office knows who to greet), hidden with
+    `?people=0` like the visits. Read from the employee records on the fly;
+    nothing is stored.
+  */
+  const showPeople = params.get('people') !== '0';
+  const [celebrations, setCelebrations] = useState<Celebration[]>([]);
+  useEffect(() => {
+    if (!showPeople) {
+      setCelebrations([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<{ celebrations: Celebration[] }>(`/employees/celebrations${qs({ from: dayKeyOf(from), to: dayKeyOf(to) })}`)
+      .then((feed) => {
+        if (!cancelled) setCelebrations(feed.celebrations);
+      })
+      .catch(() => {
+        if (!cancelled) setCelebrations([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowKey, showPeople]);
+
+  function togglePeople(on: boolean) {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (on) next.delete('people');
+        else next.set('people', '0');
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
   function openEvent(id: string) {
     if (id.startsWith(VISIT_PREFIX)) {
       navigate(`/g-ops/visits${qs({ visit: id.slice(VISIT_PREFIX.length) })}`);
+      return;
+    }
+    if (id.startsWith(PERSON_PREFIX)) {
+      // The person's record, for whoever may open the register; otherwise the chip just says.
+      const employeeId = id.split(':')[2];
+      if (employeeId && can('ghr.employees.view_all')) navigate(`/g-hr/employees/${employeeId}`);
       return;
     }
     const a = byId.get(id);
@@ -376,8 +447,8 @@ export function SalesCalendar() {
   }
 
   const events = useMemo(
-    () => [...activities.map((a) => toEvent(a, typeColors)), ...visits.map(visitToEvent)],
-    [activities, visits, typeColors],
+    () => [...activities.map((a) => toEvent(a, typeColors)), ...visits.map(visitToEvent), ...celebrations.map(celebrationToEvent)],
+    [activities, visits, celebrations, typeColors],
   );
   const byId = useMemo(() => new Map(activities.map((a) => [a.id, a])), [activities]);
   const today = todayLocal();
@@ -427,6 +498,7 @@ export function SalesCalendar() {
         {canVisits && (
           <Checkbox checked={showVisits} onChange={toggleVisits} label="Show service visits" />
         )}
+        <Checkbox checked={showPeople} onChange={togglePeople} label="Birthdays & anniversaries" />
       </CalendarToolbar>
 
       <ErrorBox error={error} />
@@ -593,7 +665,9 @@ function TimeGrid({
               <button
                 key={e.id}
                 type="button"
-                className={`cal-item${e.done ? ' done' : ''}${e.id.startsWith(VISIT_PREFIX) ? ' service' : ''}`}
+                className={`cal-item${e.done ? ' done' : ''}${e.id.startsWith(VISIT_PREFIX) ? ' service' : ''}${
+                  e.id.startsWith(PERSON_PREFIX) ? ' people' : ''
+                }`}
                 onClick={() => onEventClick(e.id)}
               >
                 <span>{e.label}</span>

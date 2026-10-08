@@ -89,6 +89,7 @@ export function kindLabel(kind: string): string {
     leave_request: 'Leave',
     meeting: 'Meeting',
     training: 'Training',
+    celebration: 'Today',
   };
   return KIND[kind] ?? humanise(kind);
 }
@@ -264,8 +265,15 @@ export function MyWork() {
             {schedule.map((s) => (
               <li key={`${s.kind}:${s.id}`} className="today-row">
                 <span className="mono today-time">
-                  {clockTime(s.startsAt)}
-                  <span className="faint"> – {clockTime(s.endsAt)}</span>
+                  {/* A birthday or anniversary is the day's, not an hour's. */}
+                  {s.startsAt === s.endsAt ? (
+                    <span className="faint">all day</span>
+                  ) : (
+                    <>
+                      {clockTime(s.startsAt)}
+                      <span className="faint"> – {clockTime(s.endsAt)}</span>
+                    </>
+                  )}
                 </span>
                 <span className="today-what">
                   <Link to={s.link} className="work-title">

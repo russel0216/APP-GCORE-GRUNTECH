@@ -798,6 +798,7 @@ model Employee {
   updatedAt DateTime @updatedAt
 
   faces         FaceEnrollment[]
+  greetings     Greeting[]
   attendance    Attendance[]
   leaveBalances LeaveBalance[]
   leaveRequests LeaveRequest[]
@@ -1597,6 +1598,22 @@ enum ActivityStatus {
 }
 
 /// "One look at what all the sales personnel are going to do by day."
+/// A greeting sent (2026-10-08): the claim that makes a birthday or work
+/// anniversary greeting go once per person per year — the API's minute timer
+/// creates the row before anyone is told, and a second process loses the race
+/// on the unique key. Never a list anybody reads; `shared/celebrations.ts`.
+model Greeting {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  /// BIRTHDAY or ANNIVERSARY.
+  kind       String
+  year       Int
+  sentAt     DateTime @default(now())
+
+  @@unique([employeeId, kind, year])
+}
+
 /// An activity type as data (2026-10-08, SCORO's customisable activity types):
 /// Admin › Categories › Activity types. The six built-ins are seeded with the
 /// enum's own keys, so every activity written before this maps 1:1.
