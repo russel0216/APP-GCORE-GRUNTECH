@@ -186,9 +186,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,508 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
-masters 62, sales 379, costing 120, pipeline 71, calendar 46, numbering 46,
-partners 91, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
+**2,525 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+masters 71, sales 379, costing 120, pipeline 71, calendar 46, numbering 46,
+partners 99, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -779,7 +779,9 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   spelling naming it, and "Not stated" while any partner has none
   (`partnerListSummary()` sends `summary.tabs`). Inner spaces are NOT
   folded: the filter cannot fold them, and a tab must show exactly what its
-  count says (verify-partners asserts it for every tab). Filters: status,
+  count says (verify-partners asserts it for every tab). The rule is
+  `categoryTabs()` / `categoryTabWhere()` in `shared/supplierCategories.ts`,
+  shared with the supplier list — partners and suppliers are one record. Filters: status,
   Publishes (a catalogue / price list / sizing app), Priced items, Partner
   since (a DATE); the totals line counts partners, those publishing a price
   list and priced items; `GET /partners/pdf` (above `/:id`, counts only —
@@ -788,6 +790,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   what they supply — the ordinary `PATCH /partners/:id` per row, the box
   suggesting the categories on file; clearing one is done on the partner's
   own page, never in bulk. Import moved into the ⋯ menu.
+- **The supplier list is the same layout** (2026-10-08): the same "What
+  they supply" tabs (`categoryTabs()`), Filters (status, Partner, added by,
+  Added — Manila days — and Purchase orders: awaiting delivery / ordered
+  from / never), Orders and Awaiting columns, a totals line (suppliers,
+  Sales partners, inactive, with an order awaiting delivery), `GET
+  /suppliers/pdf` (above `/:id`, no TIN, audited, `?ids=`) and mass actions
+  for `gchain.suppliers.edit_all` — Set what they supply and Active /
+  Inactive, each the ordinary `PATCH /suppliers/:id`. `supplierListWhere(me,
+  q, mayOrders)` in `routes/masters.ts` feeds rows, summary and paper.
+  "Ordered from" counts orders actually placed (ISSUED, PARTIALLY_RECEIVED,
+  RECEIVED — never a draft); "awaiting" is the PO list's `?awaiting=true`.
+  **Order figures are Supplier 360's window**: only for a caller holding
+  `gchain.purchase_orders.view_all` — otherwise the row counts are null, the
+  totals line leaves "awaiting" out (never 0), the paper drops the columns
+  and the filter is a 403. The master is shared, so All for everyone.
 - **An import that matches on a non-unique name refuses rather than guesses** —
   the items import's Preferred Supplier matching two suppliers (a principal and
   its distributor sharing a brand) is an error, not a silent pick.

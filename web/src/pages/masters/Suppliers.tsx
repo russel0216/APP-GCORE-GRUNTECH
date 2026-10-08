@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import {
   Checkbox,
@@ -40,6 +40,12 @@ interface SupplierRow {
   isPartner: boolean;
   brand: string | null;
   partnerSince: string | null;
+  createdAt: string;
+  createdBy: { id: string; name: string } | null;
+  /** Placed purchase orders — null for a caller who may not open purchase orders. */
+  orderCount: number | null;
+  /** Orders awaiting delivery — null likewise. */
+  awaitingCount: number | null;
 }
 
 /*
@@ -89,9 +95,9 @@ interface PaymentLine {
   clearedAt: string | null;
 }
 
-type SupplierDetailData = SupplierRow & {
+type SupplierDetailData = Omit<SupplierRow, 'orderCount' | 'awaitingCount' | 'createdBy'> & {
   contacts: SupplierContact[];
-  createdAt: string;
+  createdBy: { id: string; name: string } | null;
   purchaseOrders?: PoLine[];
   receivings?: ReceivingLine[];
   bills?: BillLine[];
@@ -114,12 +120,192 @@ interface SupplierContact {
   notes: string | null;
 }
 
+interface SupplierSummary {
+  count?: number;
+  partners?: number;
+  inactive?: number;
+  /** Only for a caller who may open purchase orders. */
+  awaiting?: number;
+  tabs?: { value: string; label: string }[];
+}
+
+// ── Mass actions: what they supply, or status ────────────────────────────────
+
+/**
+ * File the ticked suppliers under one category ("what they supply"), or mark
+ * them active or inactive — each the ordinary PATCH /suppliers/:id, so the
+ * audit row is the PATCH's. The category box offers the categories already
+ * on file, so a new spelling is a choice rather than an accident; clearing
+ * one is done on the supplier's own page, never in bulk. What did not change
+ * stays ticked, with why.
+ */
+function SupplierBulkActions({ ctx, known }: { ctx: BulkContext<SupplierRow>; known: string[] }) {
+  const toast = useToast();
+  const [action, setAction] = useState('');
+  const [category, setCategory] = useState('');
+  const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
+  const [refused, setRefused] = useState<{ code: string; why: string }[]>([]);
+
+  const clean = category.trim().replace(/\s+/g, ' ');
+  const active = action === 'active' ? true : action === 'inactive' ? false : null;
+  const sameCategory = (s: SupplierRow) => (s.category ?? '').trim().toLowerCase() === clean.toLowerCase();
+  const plan =
+    action === 'category'
+      ? clean
+        ? {
+            go: ctx.rows.filter((s) => !sameCategory(s)),
+            stay: ctx.rows.filter(sameCategory).map((row) => ({ row, why: `already ${clean}` })),
+          }
+        : null
+      : active !== null
+        ? {
+            go: ctx.rows.filter((s) => s.isActive !== active),
+            stay: ctx.rows
+              .filter((s) => s.isActive === active)
+              .map((row) => ({ row, why: `already ${active ? 'active' : 'inactive'}` })),
+          }
+        : null;
+  const what = action === 'category' ? `filed under ${clean}` : active ? 'marked active' : 'marked inactive';
+
+  async function apply() {
+    if (!plan || !plan.go.length) return;
+    const failed: { row: SupplierRow; why: string }[] = [];
+    let done = 0;
+    setRefused([]);
+    for (let i = 0; i < plan.go.length; i++) {
+      setProgress({ done: i, of: plan.go.length });
+      const row = plan.go[i];
+      try {
+        await api.patch(`/suppliers/${row.id}`, action === 'category' ? { category: clean } : { isActive: active });
+        done++;
+      } catch (err) {
+        failed.push({ row, why: err instanceof ApiError ? err.message : 'could not be changed' });
+      }
+    }
+    setProgress(null);
+    const left = [...plan.stay, ...failed];
+    toast(done > 0 ? 'ok' : 'error', `${done} supplier${done === 1 ? '' : 's'} ${what}${left.length ? `; ${left.length} unchanged` : ''}`);
+    setRefused(left.map((l) => ({ code: l.row.code, why: l.why })));
+    setAction('');
+    setCategory('');
+    ctx.reload();
+    if (left.length) ctx.keep(left.map((l) => l.row.id));
+    else ctx.clear();
+  }
+
+  return (
+    <>
+      <select
+        aria-label="Set what the selected suppliers supply, or mark them active or inactive"
+        value={action}
+        disabled={!!progress}
+        onChange={(e) => {
+          setAction(e.target.value);
+          setRefused([]);
+        }}
+      >
+        <option value="">Set what they supply or status…</option>
+        <option value="category">Set what they supply…</option>
+        <optgroup label="Status">
+          <option value="active">Active</option>
+          <option value="inactive">Inactive</option>
+        </optgroup>
+      </select>
+      {action === 'category' && (
+        <>
+          <input
+            type="text"
+            className="list-bulk-reason"
+            list="supplier-bulk-categories"
+            autoFocus
+            aria-label="What the selected suppliers supply"
+            placeholder="What they supply, e.g. Valves"
+            value={category}
+            disabled={!!progress}
+            onChange={(e) => setCategory(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setAction('');
+            }}
+          />
+          <datalist id="supplier-bulk-categories">
+            {known.map((k) => (
+              <option key={k} value={k} />
+            ))}
+          </datalist>
+        </>
+      )}
+      {action && (
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={!plan || !plan.go.length || !!progress}
+          onClick={() => void apply()}
+        >
+          {progress
+            ? `Working ${progress.done + 1} of ${progress.of}…`
+            : !plan
+              ? 'Type what they supply'
+              : !plan.go.length
+                ? 'Nothing to change'
+                : action === 'category'
+                  ? `File ${plan.go.length} under ${clean}`
+                  : `Mark ${plan.go.length} ${active ? 'active' : 'inactive'}`}
+        </button>
+      )}
+      {plan && plan.stay.length > 0 && !progress && (
+        <p className="list-bulk-result">
+          {plan.stay.length} will stay as they are:{' '}
+          {plan.stay
+            .slice(0, 6)
+            .map((st) => `${st.row.code} (${st.why})`)
+            .join(', ')}
+          {plan.stay.length > 6 ? `, and ${plan.stay.length - 6} more` : ''}.
+        </p>
+      )}
+      {!action && refused.length > 0 && (
+        <div className="list-bulk-result" role="status">
+          Still selected — these did not change:
+          <ul>
+            {refused.map((r) => (
+              <li key={r.code}>
+                <span className="mono">{r.code}</span>: {r.why}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The supplier list, in the quotation list's layout (2026-10-08): what they
+ * supply as tabs with their counts (and "Not stated" while anybody is), one
+ * Filters panel, the printed list and mass actions. The supplier master is
+ * shared, so the list opens on All for everyone; Mine is the suppliers you
+ * added. Order counts — a column, a filter and the totals line — are
+ * Supplier 360's window: only for a caller who may open purchase orders.
+ */
 export function Suppliers() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
+  const [people, setPeople] = useState<{ value: string; label: string }[]>([]);
+  // The categories on file, for the bulk box's suggestions — learnt from the
+  // tabs the list's summary sends, so there is no second query for them.
+  const [knownCategories, setKnownCategories] = useState<string[]>([]);
+  const mayOrders = can('gchain.purchase_orders.view_all');
+
+  useEffect(() => {
+    api
+      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gchain.suppliers.create' })}`)
+      .then((rows) => setPeople(rows.map((p) => ({ value: p.id, label: p.name }))))
+      .catch(() => setPeople([]));
+  }, []);
+
+  const count = (n: number | null) => (n ? n : <span className="faint">—</span>);
 
   const columns: Column<SupplierRow>[] = [
     { key: 'code', label: 'Code', sortKey: 'code', render: (s) => <span className="mono">{s.code}</span> },
@@ -150,15 +336,73 @@ export function Suppliers() {
       align: 'right',
       render: (s) => (s.contactCount === 0 ? <span className="faint">none</span> : s.contactCount),
     },
+    ...(mayOrders
+      ? ([
+          { key: 'orders', label: 'Orders', align: 'right', render: (s) => count(s.orderCount) },
+          { key: 'awaiting', label: 'Awaiting', align: 'right', render: (s) => count(s.awaitingCount) },
+        ] as Column<SupplierRow>[])
+      : []),
     { key: 'phone', label: 'Phone', render: (s) => s.phone ?? '—', optional: true },
     { key: 'email', label: 'Email', render: (s) => <span className="mono">{s.email ?? '—'}</span>, optional: true },
     { key: 'tin', label: 'TIN', render: (s) => <span className="mono">{s.tin ?? '—'}</span>, optional: true },
+    {
+      key: 'createdBy',
+      label: 'Added by',
+      sortKey: 'createdAt',
+      optional: true,
+      render: (s) => (
+        <div>
+          <div>{s.createdBy?.name ?? '—'}</div>
+          {s.createdAt && <div className="faint">{formatDate(s.createdAt)}</div>}
+        </div>
+      ),
+    },
     {
       key: 'isActive',
       label: 'Status',
       render: (s) => <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
     },
   ];
+
+  const filters: FilterDef[] = [
+    {
+      key: 'isActive',
+      label: 'Status',
+      options: [
+        { value: 'true', label: 'Active' },
+        { value: 'false', label: 'Inactive' },
+      ],
+    },
+    {
+      key: 'partner',
+      label: 'Partner',
+      options: [
+        { value: 'yes', label: 'A Sales partner' },
+        { value: 'no', label: 'Not a partner' },
+      ],
+    },
+    { key: 'createdById', label: 'Added by', options: people },
+    { key: 'createdFrom', toKey: 'createdTo', label: 'Added', type: 'dateRange' },
+    ...(mayOrders
+      ? [
+          {
+            key: 'orders',
+            label: 'Purchase orders',
+            options: [
+              { value: 'awaiting', label: 'An order awaiting delivery' },
+              { value: 'placed', label: 'Ordered from' },
+              { value: 'never', label: 'Never ordered from' },
+            ],
+          },
+        ]
+      : []),
+  ];
+
+  const addButton = can('gchain.suppliers.create') && (
+    <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+      + Add supplier
+    </button>
+  );
 
   return (
     <div>
@@ -179,41 +423,56 @@ export function Suppliers() {
         columns={columns}
         rowKey={(s) => s.id}
         scoped
-        searchPlaceholder="Search name, code, what they supply, or a contact…"
+        searchPlaceholder="Search name, code, brand, what they supply, TIN, or a contact…"
         reloadToken={reload}
         onRowClick={(s) => navigate(`/g-chain/suppliers/${s.id}`)}
         emptyTitle="No suppliers yet"
         emptyHint="Add the first one, or import a list you already have."
-        filters={[
-          {
-            key: 'isActive',
-            label: 'Status',
-            options: [
-              { value: 'true', label: 'Active' },
-              { value: 'false', label: 'Inactive' },
-            ],
-          },
-        ]}
-        actions={
-          <>
-            {can('gchain.suppliers.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-                + Add supplier
-              </button>
-            )}
-            {can('gchain.suppliers.create') && (
-              <button
-                className="btn btn-sm"
-                onClick={async () => {
-                  const spec = await loadImportSpec('suppliers');
-                  if (spec) setImporting(spec as { label: string; columns: never[] });
-                }}
-              >
-                Import
-              </button>
-            )}
-          </>
+        emptyAction={addButton || undefined}
+        tabs={{ key: 'category', label: 'What they supply', allLabel: 'All suppliers', options: [] }}
+        filters={filters}
+        printPath="/api/suppliers/pdf"
+        selectable
+        rowLabel={(s) => `${s.code} ${s.name}`}
+        bulkActions={
+          can('gchain.suppliers.edit_all') ? (ctx) => <SupplierBulkActions ctx={ctx} known={knownCategories} /> : undefined
         }
+        menuItems={
+          can('gchain.suppliers.create')
+            ? [
+                {
+                  label: 'Import suppliers…',
+                  hint: 'From a spreadsheet, checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('suppliers').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
+        }
+        summaryLine={(raw, total) => {
+          const sum = raw as SupplierSummary;
+          return (
+            <>
+              <span>
+                <strong>{total}</strong> supplier{total === 1 ? '' : 's'}
+              </span>
+              {!!sum.partners && <span>{sum.partners} Sales partner{sum.partners === 1 ? '' : 's'}</span>}
+              {!!sum.inactive && <span>{sum.inactive} inactive</span>}
+              {sum.awaiting !== undefined && (
+                <span>
+                  <strong>{sum.awaiting}</strong> with an order awaiting delivery
+                </span>
+              )}
+            </>
+          );
+        }}
+        onSummary={(raw) =>
+          setKnownCategories(((raw as SupplierSummary).tabs ?? []).filter((t) => t.value !== 'none').map((t) => t.label))
+        }
+        actions={addButton || null}
       />
 
       {creating && (
@@ -550,7 +809,7 @@ function SupplierForm({
   onClose,
   onSaved,
 }: {
-  supplier?: SupplierRow;
+  supplier?: SupplierDetailData;
   onClose: () => void;
   onSaved: (id: string) => void;
 }) {

@@ -6,6 +6,7 @@ import { handler, parseBody, listQuery, listResult, orderBy, notFound, badReques
 import { formatShortDate, renderDocument } from '../shared/pdf';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
+import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
 import { upload } from '../shared/attachments';
 import {
   PARTNER_RESOURCE_ENTITY,
@@ -46,17 +47,9 @@ function partnerDay(value: string | undefined, label: string): string | null {
 }
 
 /**
- * A category as one tab: trimmed and case-blind — exactly what the tab's
- * filter (`equals`, insensitive) can match, so a tab's count is always what
- * clicking it shows. Inner spaces are not folded: the database cannot.
- */
-const categoryKey = (c: string) => c.trim().toLowerCase();
-
-/**
  * Which partners a list query means — ONE rule for the list, its summary
  * (the "What they supply" tabs) and its PDF. `base` is everything but the
- * category tab. A category is free text on the supplier, so the tab matches
- * it case-blind, and `none` is the partners with nothing stated.
+ * category tab, which is `categoryTabWhere()` — the supplier list's own rule.
  */
 export function partnerListWhere(
   me: ReturnType<typeof currentUser>,
@@ -102,46 +95,21 @@ export function partnerListWhere(
 
   const base: Prisma.SupplierWhereInput = { AND: and };
   if (!f.category) return { base, where: base };
-  const category: Prisma.SupplierWhereInput =
-    f.category === 'none'
-      ? { OR: [{ category: null }, { category: '' }] }
-      : { category: { equals: f.category.trim(), mode: 'insensitive' } };
-  return { base, where: { AND: [...and, category] } };
+  return { base, where: { AND: [...and, categoryTabWhere(f.category)] } };
 }
 
 /**
- * The tabs — every category on file under `base`, case-blind, the first
- * spelling naming it, and "Not stated" while any partner has none — with
- * their counts ('' is All), and the count, how many publish a price list and
- * how many priced items there are under `where`.
+ * The tabs — `categoryTabs()`, the supplier list's own rule — and the count,
+ * how many publish a price list and how many priced items there are under
+ * `where`.
  */
 export async function partnerListSummary(base: Prisma.SupplierWhereInput, where: Prisma.SupplierWhereInput) {
-  const [perCategory, count, withPriceList, pricedItems] = await Promise.all([
-    prisma.supplier.groupBy({ by: ['category'], where: base, _count: { _all: true }, orderBy: { category: 'asc' } }),
+  const [{ tabs, tabCounts }, count, withPriceList, pricedItems] = await Promise.all([
+    categoryTabs(base),
     prisma.supplier.count({ where }),
     prisma.supplier.count({ where: { AND: [where, { resources: { some: { kind: 'PRICE_LIST', isActive: true } } }] } }),
     prisma.item.count({ where: { ...PRICED_ITEM, preferredSupplier: where } }),
   ]);
-  const tabCounts: Record<string, number> = { '': 0 };
-  const byKey = new Map<string, { value: string; label: string }>();
-  let none = 0;
-  for (const r of perCategory) {
-    tabCounts[''] += r._count._all;
-    const name = (r.category ?? '').trim();
-    if (!name) {
-      none += r._count._all;
-      continue;
-    }
-    const key = categoryKey(name);
-    if (!byKey.has(key)) byKey.set(key, { value: name, label: name });
-    const tab = byKey.get(key)!;
-    tabCounts[tab.value] = (tabCounts[tab.value] ?? 0) + r._count._all;
-  }
-  const tabs = [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
-  if (none > 0) {
-    tabs.push({ value: 'none', label: 'Not stated' });
-    tabCounts.none = none;
-  }
   return { tabs, tabCounts, count, withPriceList, pricedItems };
 }
 

@@ -750,6 +750,61 @@ async function httpCases(ctx: {
   check('printing is refused without the key', (await fetch(`${BASE}/partners/pdf`, { headers: { Authorization: `Bearer ${outsiderT}` } })).status === 403);
   const recat = await http(mgrT, 'PATCH', `/partners/${pB.id}`, { category: 'Verify Compressors' });
   check('"Set what they supply" is the ordinary PATCH', recat.status === 200);
+
+  // ── The supplier list, in the same layout (2026-10-08) ─────────────────────
+  console.log('\nThe supplier list over HTTP: order counts behind their right, print');
+  const LISTS = `${TAG} LISTS`;
+  const sA = await prisma.supplier.create({ data: { code: `${TAG}-LS-A`, name: `${LISTS} A`, category: 'Verify Fittings' } });
+  const sB = await prisma.supplier.create({ data: { code: `${TAG}-LS-B`, name: `${LISTS} B`, category: 'verify fittings' } });
+  await prisma.purchaseOrder.create({ data: { number: `${TAG}-LS-PO`, supplierId: sA.id, createdById: ctx.admin.id, status: 'ISSUED' } });
+  const supRole = await makeRole(`${ROLE}sup`, 'Verify supplier reader', ['gchain.suppliers.view_all']);
+  const reader = await makeUser('Verify Supplier Reader', 'supreader', [supRole.id]);
+  const readerT = signToken(reader.id, reader.email);
+
+  type SupplierList = { rows: { id: string; orderCount: number | null; awaitingCount: number | null }[]; summary: Record<string, unknown> };
+  const asBuyer = await http(buyerT, 'GET', `/suppliers?search=${encodeURIComponent(LISTS)}`);
+  const bBody = asBuyer.body as unknown as SupplierList;
+  const rowA = bBody.rows?.find((r) => r.id === sA.id);
+  check(
+    'a buyer sees each supplier’s placed and awaiting orders, and the awaiting total',
+    asBuyer.status === 200 && rowA?.orderCount === 1 && rowA?.awaitingCount === 1 && bBody.summary?.awaiting === 1 &&
+      (bBody.summary?.tabCounts as Record<string, number>)?.[''] === 2,
+    asBuyer.text.slice(0, 200),
+  );
+  const asReader = await http(readerT, 'GET', `/suppliers?search=${encodeURIComponent(LISTS)}`);
+  const rBody = asReader.body as unknown as SupplierList;
+  check(
+    'a reader without purchase orders gets the list with no order figure in it',
+    asReader.status === 200 && rBody.rows?.length === 2 && rBody.rows.every((r) => r.orderCount === null && r.awaitingCount === null) &&
+      !('awaiting' in (rBody.summary ?? {})),
+    asReader.text.slice(0, 200),
+  );
+  check(
+    'and cannot filter by them either',
+    (await http(readerT, 'GET', `/suppliers?search=${encodeURIComponent(LISTS)}&orders=placed`)).status === 403,
+  );
+  const supPaper = await fetch(`${BASE}/suppliers/pdf?ids=${sB.id}`, { headers: { Authorization: `Bearer ${buyerT}` } });
+  const supText = pdfLine(Buffer.from(await supPaper.arrayBuffer()));
+  check(
+    'the printed supplier list prints the ticked supplier alone, with its orders for a buyer',
+    supPaper.status === 200 && supText.replace(/ /g, '').includes(`${TAG}-LS-B`) && !supText.replace(/ /g, '').includes(`${TAG}-LS-A`) &&
+      supText.includes('the rows selected') && supText.replace(/ /g, '').toUpperCase().includes('AWAITING'),
+    supText.slice(0, 200),
+  );
+  const readerPaper = await fetch(`${BASE}/suppliers/pdf?search=${encodeURIComponent(LISTS)}`, { headers: { Authorization: `Bearer ${readerT}` } });
+  const readerText = pdfLine(Buffer.from(await readerPaper.arrayBuffer()));
+  check(
+    'and without the order columns for a reader who may not open purchase orders',
+    readerPaper.status === 200 && readerText.replace(/ /g, '').includes(`${TAG}-LS-A`) && !readerText.replace(/ /g, '').toUpperCase().includes('AWAITING'),
+    readerText.slice(0, 200),
+  );
+  check(
+    'the printout is audited as an export',
+    (await prisma.auditLog.count({ where: { entityType: 'supplier', entityId: 'list', action: 'EXPORTED', actorId: buyer.id } })) === 1,
+  );
+  check('printing is refused without the key', (await fetch(`${BASE}/suppliers/pdf`, { headers: { Authorization: `Bearer ${outsiderT}` } })).status === 403);
+  const supRecat = await http(adminT, 'PATCH', `/suppliers/${sB.id}`, { category: 'Verify Fittings' });
+  check('"Set what they supply" on suppliers is the ordinary PATCH', supRecat.status === 200 && supRecat.body.category === 'Verify Fittings');
 }
 
 /** A PDF's text runs, joined and with runs of whitespace collapsed. */

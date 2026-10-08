@@ -11,12 +11,17 @@ import {
   notFound,
   conflict,
   badRequest,
+  forbidden,
+  idsFilter,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { groupKey } from '../shared/quotationGroups';
 import { nextNumber } from '../shared/numbering';
+import { manilaDayEnd, manilaDayStart } from '../shared/day';
+import { formatShortDate, renderDocument } from '../shared/pdf';
+import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
 
 // The employee routes live in ./employees; re-exported here so the mount in
 // index.ts keeps resolving until it imports them from their own module.
@@ -29,41 +34,226 @@ export { employeeRoutes } from './employees';
 export const supplierRoutes = Router();
 supplierRoutes.use(authenticate);
 
+// ── List (the quotation list's layout, 2026-10-08) ───────────────────────────
+
+const SUPPLIER_SORTS = ['code', 'name', 'createdAt'];
+const SUPPLIER_DAY = /^\d{4}-\d{2}-\d{2}$/;
+/** An order actually placed with the supplier — "Ordered from" and the Orders column. */
+const PLACED_PO: Prisma.PurchaseOrderWhereInput = { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'] } };
+/** Placed and not yet delivered in full — the purchase order list's `?awaiting=true`. */
+const AWAITING_PO: Prisma.PurchaseOrderWhereInput = { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } };
+const ORDER_FILTERS = ['awaiting', 'placed', 'never'] as const;
+
+function supplierDay(value: string | undefined, label: string): string | null {
+  if (!value) return null;
+  if (!SUPPLIER_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
+  return value;
+}
+
+/**
+ * Which suppliers a list query means — ONE rule for the list, its summary
+ * (the "What they supply" tabs) and its PDF. `base` is everything but the
+ * category tab, which is `categoryTabWhere()`, the partner list's rule too.
+ * The purchase-order filter is Supplier 360's window: only for a caller who
+ * may open purchase orders (`mayOrders`), a 403 otherwise.
+ */
+export function supplierListWhere(
+  me: ReturnType<typeof currentUser>,
+  q: ReturnType<typeof listQuery>,
+  mayOrders: boolean,
+): { base: Prisma.SupplierWhereInput; where: Prisma.SupplierWhereInput } {
+  const and: Prisma.SupplierWhereInput[] = [];
+  if (q.search) {
+    and.push({
+      OR: [
+        { name: { contains: q.search, mode: 'insensitive' } },
+        { code: { contains: q.search, mode: 'insensitive' } },
+        { legalName: { contains: q.search, mode: 'insensitive' } },
+        { brand: { contains: q.search, mode: 'insensitive' } },
+        { category: { contains: q.search, mode: 'insensitive' } },
+        { tin: { contains: q.search, mode: 'insensitive' } },
+        { contacts: { some: { name: { contains: q.search, mode: 'insensitive' } } } },
+      ],
+    });
+  }
+  const f = q.filters;
+  if (f.isActive) {
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    and.push({ isActive: f.isActive === 'true' });
+  }
+  if (f.partner) {
+    if (f.partner !== 'yes' && f.partner !== 'no') throw badRequest('Partner is yes or no');
+    and.push({ isPartner: f.partner === 'yes' });
+  }
+  if (q.scope === 'mine') and.push({ createdById: me.id });
+  if (f.createdById) and.push({ createdById: f.createdById });
+  const from = supplierDay(f.createdFrom, 'Added from');
+  const to = supplierDay(f.createdTo, 'Added to');
+  if (from || to) {
+    and.push({ createdAt: { ...(from ? { gte: manilaDayStart(from) } : {}), ...(to ? { lte: manilaDayEnd(to) } : {}) } });
+  }
+  if (f.orders) {
+    if (!(ORDER_FILTERS as readonly string[]).includes(f.orders)) throw badRequest('Purchase orders is awaiting, placed or never');
+    if (!mayOrders) throw forbidden('Filtering by purchase orders needs the right to open purchase orders');
+    and.push(
+      f.orders === 'awaiting'
+        ? { purchaseOrders: { some: AWAITING_PO } }
+        : f.orders === 'placed'
+          ? { purchaseOrders: { some: PLACED_PO } }
+          : { purchaseOrders: { none: PLACED_PO } },
+    );
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+
+  const base: Prisma.SupplierWhereInput = and.length ? { AND: and } : {};
+  if (!f.category) return { base, where: base };
+  return { base, where: { AND: [...and, categoryTabWhere(f.category)] } };
+}
+
+/**
+ * The "What they supply" tabs with their counts under `base`, and the count,
+ * partners and inactive under `where` — plus, for a caller who may open
+ * purchase orders, how many have an order awaiting delivery (left out, never
+ * sent as 0, for anybody else).
+ */
+export async function supplierListSummary(
+  base: Prisma.SupplierWhereInput,
+  where: Prisma.SupplierWhereInput,
+  mayOrders: boolean,
+) {
+  const [{ tabs, tabCounts }, count, partners, inactive, awaiting] = await Promise.all([
+    categoryTabs(base),
+    prisma.supplier.count({ where }),
+    prisma.supplier.count({ where: { AND: [where, { isPartner: true }] } }),
+    prisma.supplier.count({ where: { AND: [where, { isActive: false }] } }),
+    mayOrders ? prisma.supplier.count({ where: { AND: [where, { purchaseOrders: { some: AWAITING_PO } }] } }) : null,
+  ]);
+  return { tabs, tabCounts, count, partners, inactive, ...(awaiting === null ? {} : { awaiting }) };
+}
+
+/** The counts a list row carries — the order counts only where they may be seen. */
+function supplierCounts(mayOrders: boolean) {
+  return {
+    _count: {
+      select: {
+        contacts: true,
+        ...(mayOrders ? { purchaseOrders: { where: PLACED_PO } } : {}),
+      },
+    },
+    ...(mayOrders ? { purchaseOrders: { where: AWAITING_PO, select: { id: true } } } : {}),
+  } satisfies Prisma.SupplierInclude;
+}
+
 supplierRoutes.get(
   '/',
   require_('gchain.suppliers.view_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.SupplierWhereInput = {};
+    const mayOrders = can(me, 'gchain.purchase_orders.view_all');
+    const { base, where } = supplierListWhere(me, q, mayOrders);
 
-    if (q.search) {
-      where.OR = [
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { code: { contains: q.search, mode: 'insensitive' } },
-        { category: { contains: q.search, mode: 'insensitive' } },
-        { tin: { contains: q.search, mode: 'insensitive' } },
-        { contacts: { some: { name: { contains: q.search, mode: 'insensitive' } } } },
-      ];
-    }
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.filters.category) where.category = q.filters.category;
-    if (q.scope === 'mine') where.createdById = me.id;
-
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.supplier.findMany({
         where,
-        include: { _count: { select: { contacts: true } } },
-        orderBy: orderBy(q, ['code', 'name', 'createdAt'], { name: 'asc' }),
+        include: { createdBy: { select: { id: true, name: true } }, ...supplierCounts(mayOrders) },
+        orderBy: orderBy(q, SUPPLIER_SORTS, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.supplier.count({ where }),
+      supplierListSummary(base, where, mayOrders),
     ]);
 
-    res.json(
-      listResult(rows.map((r) => ({ ...r, contactCount: r._count.contacts })), total, q),
+    res.json({
+      ...listResult(
+        rows.map(({ _count, purchaseOrders, ...r }) => ({
+          ...r,
+          contactCount: _count.contacts,
+          orderCount: mayOrders ? (_count as { purchaseOrders?: number }).purchaseOrders ?? 0 : null,
+          awaitingCount: mayOrders ? (purchaseOrders ?? []).length : null,
+        })),
+        total,
+        q,
+      ),
+      summary,
+    });
+  }),
+);
+
+/**
+ * The supplier list on paper — the list as filtered (or the rows ticked,
+ * `?ids=`), through `supplierListWhere`, so the paper is the screen. Above
+ * `/:id`; audited as an export; capped at 1,000 rows. No TIN: a list leaves
+ * the building more easily than a supplier record does. Order counts print
+ * only for a caller who may open purchase orders.
+ */
+supplierRoutes.get(
+  '/pdf',
+  require_('gchain.suppliers.view_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const mayOrders = can(me, 'gchain.purchase_orders.view_all');
+    const { base, where } = supplierListWhere(me, q, mayOrders);
+    const [rows, summary] = await Promise.all([
+      prisma.supplier.findMany({
+        where,
+        include: supplierCounts(mayOrders),
+        orderBy: orderBy(q, SUPPLIER_SORTS, { name: 'asc' }),
+        take: 1000,
+      }),
+      supplierListSummary(base, where, mayOrders),
+    ]);
+    const f = q.filters;
+    const tabName = f.category === 'none' ? 'not stated' : summary.tabs.find((t) => t.value.toLowerCase() === String(f.category ?? '').trim().toLowerCase())?.label;
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      f.category ? `supplies ${tabName ?? f.category}` : null,
+      f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
+      f.partner === 'yes' ? 'partners' : f.partner === 'no' ? 'not partners' : null,
+      f.createdById ? 'added by one person' : null,
+      f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
+      f.orders === 'awaiting' ? 'with an order awaiting delivery' : f.orders === 'placed' ? 'ordered from' : f.orders === 'never' ? 'never ordered from' : null,
+      q.scope === 'mine' ? 'added by me' : null,
+      f.ids ? 'the rows selected' : null,
+    ].filter(Boolean);
+    const placed = (r: (typeof rows)[number]) => String((r._count as { purchaseOrders?: number }).purchaseOrders ?? 0);
+    const awaiting = (r: (typeof rows)[number]) => String(((r as { purchaseOrders?: unknown[] }).purchaseOrders ?? []).length);
+
+    const pdf = await renderDocument({
+      title: 'Suppliers',
+      date: new Date(),
+      reference: `${summary.count} supplier(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Supplier', 'Supplies', 'City', 'Terms', 'Contacts', ...(mayOrders ? ['Orders', 'Awaiting'] : []), 'Added', 'Status'],
+          widths: [1.4, 2.8, 1.6, 1.1, 1, 0.9, ...(mayOrders ? [0.8, 0.9] : []), 1.1, 0.9],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', ...(mayOrders ? (['right', 'right'] as const) : []), 'left', 'left'],
+          rows: rows.map((s) => [
+            s.code,
+            { title: s.name, body: s.legalName && s.legalName !== s.name ? s.legalName : undefined },
+            s.category ?? '',
+            s.city ?? '',
+            s.paymentTerms ?? '',
+            String(s._count.contacts),
+            ...(mayOrders ? [placed(s), awaiting(s)] : []),
+            formatShortDate(s.createdAt),
+            s.isActive ? 'Active' : 'Inactive',
+          ]),
+        },
+      ],
+      signatories: [],
+    });
+    await audit(
+      { entityType: 'supplier', entityId: 'list', action: 'EXPORTED', summary: `Exported the supplier list as PDF (${rows.length} supplier(s))` },
+      req,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="suppliers.pdf"');
+    res.send(pdf);
   }),
 );
 

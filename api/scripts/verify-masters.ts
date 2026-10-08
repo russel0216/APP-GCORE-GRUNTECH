@@ -19,6 +19,7 @@ import { parseCsv, runImport, templateFor, type ImportSpec } from '../src/shared
 import { customerSpec, customerWrite } from '../src/routes/imports';
 import { globalSearch } from '../src/shared/search';
 import { customerListSummary, customerListWhere } from '../src/routes/customers';
+import { supplierListSummary, supplierListWhere } from '../src/routes/masters';
 import { listQuery } from '../src/http/kit';
 import bcrypt from 'bcryptjs';
 
@@ -46,6 +47,8 @@ async function cleanup() {
   // The list section's quotation holds its customer (Restrict); it goes first.
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
+  // The supplier list section's orders hold their suppliers (Restrict).
+  await prisma.purchaseOrder.deleteMany({ where: { number: { startsWith: TAG } } });
   await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.item.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.employee.deleteMany({ where: { lastName: { startsWith: TAG } } });
@@ -408,6 +411,77 @@ async function main() {
       }
     }
     check('a malformed filter is a 400, never an empty list', refusedC === 3, `${refusedC} of 3`);
+  }
+
+  // ── The supplier list (the quotation list's layout, 2026-10-08) ─────────────
+  console.log('\nThe supplier list: what-they-supply tabs, filters, order counts');
+  {
+    const LISTS = `${TAG} LISTS`;
+    const supQ = (query: Record<string, string>) =>
+      listQuery({ query: { search: LISTS, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+    const sValve = await prisma.supplier.create({
+      data: { code: `${TAG}-LS1`, name: `${LISTS} Valve House`, category: 'Verify Valves', createdById: admin!.id, createdAt: new Date('2026-03-01T00:30:00+08:00') },
+    });
+    const sValve2 = await prisma.supplier.create({ data: { code: `${TAG}-LS2`, name: `${LISTS} Valve Depot`, category: 'VERIFY valves' } });
+    await prisma.supplier.create({ data: { code: `${TAG}-LS3`, name: `${LISTS} Nobody said`, isActive: false } });
+    const sPartner = await prisma.supplier.create({
+      data: { code: `${TAG}-LS4`, name: `${LISTS} Principal`, category: 'Verify Electrical', isPartner: true },
+    });
+    // Issued (awaiting delivery), received (placed, delivered) and a draft
+    // (never placed) — "Ordered from" counts only orders actually placed.
+    await prisma.purchaseOrder.create({ data: { number: `${TAG}-LSPO1`, supplierId: sValve.id, createdById: admin!.id, status: 'ISSUED' } });
+    await prisma.purchaseOrder.create({ data: { number: `${TAG}-LSPO2`, supplierId: sValve2.id, createdById: admin!.id, status: 'RECEIVED' } });
+    await prisma.purchaseOrder.create({ data: { number: `${TAG}-LSPO3`, supplierId: sPartner.id, createdById: admin!.id, status: 'DRAFT' } });
+
+    const all = supplierListWhere(superUser, supQ({}), true);
+    const sum = await supplierListSummary(all.base, all.where, true);
+    const valveTabs = sum.tabs.filter((t) => t.value.toLowerCase() === 'verify valves');
+    check(
+      'one tab per category, case-blind, the first spelling naming it, and "Not stated" last',
+      sum.tabCounts[''] === 4 && valveTabs.length === 1 && sum.tabCounts[valveTabs[0].value] === 2 &&
+        sum.tabCounts.none === 1 && sum.tabs[sum.tabs.length - 1]?.value === 'none',
+      JSON.stringify(sum.tabs),
+    );
+    const count = (query: Record<string, string>, mayOrders = true) =>
+      prisma.supplier.count({ where: supplierListWhere(superUser, supQ(query), mayOrders).where });
+    let tabsHold = true;
+    for (const t of sum.tabs) if ((await count({ category: t.value })) !== sum.tabCounts[t.value]) tabsHold = false;
+    check('every tab lists exactly what its count says', tabsHold && (await count({ category: 'verify VALVES' })) === 2);
+    check(
+      'the totals count partners, the inactive and those with an order awaiting delivery',
+      sum.count === 4 && sum.partners === 1 && sum.inactive === 1 && sum.awaiting === 1,
+      JSON.stringify(sum),
+    );
+    const blind = await supplierListSummary(all.base, all.where, false);
+    check('without the right to open purchase orders the awaiting figure is left out, never 0', !('awaiting' in blind));
+    check(
+      '"Purchase orders" reads orders actually placed — a draft orders nothing',
+      (await count({ orders: 'awaiting' })) === 1 && (await count({ orders: 'placed' })) === 2 && (await count({ orders: 'never' })) === 2,
+    );
+    let refusedOrders = 0;
+    try {
+      supplierListWhere(superUser, supQ({ orders: 'placed' }), false);
+    } catch (err) {
+      if ((err as { status?: number }).status === 403) refusedOrders++;
+    }
+    check('and filtering by them without that right is a 403', refusedOrders === 1);
+    check(
+      '"Partner", the status filter, "Added" on Manila’s days and Mine select what they say',
+      (await count({ partner: 'yes' })) === 1 && (await count({ partner: 'no' })) === 3 && (await count({ isActive: 'false' })) === 1 &&
+        (await count({ createdFrom: '2026-03-01', createdTo: '2026-03-01' })) === 1 &&
+        (await count({ createdFrom: '2026-02-28', createdTo: '2026-02-28' })) === 0 &&
+        (await count({ scope: 'mine' })) === 1,
+    );
+    check('?ids= selects the rows ticked', (await count({ ids: `${sValve.id},${sPartner.id}` })) === 2);
+    let refusedS = 0;
+    for (const bad of [{ isActive: 'maybe' }, { partner: 'perhaps' }, { orders: 'soon' }, { createdTo: '1 March' }] as Record<string, string>[]) {
+      try {
+        supplierListWhere(superUser, supQ(bad), true);
+      } catch (err) {
+        if ((err as { status?: number }).status === 400) refusedS++;
+      }
+    }
+    check('a malformed filter is a 400, never an empty list', refusedS === 4, `${refusedS} of 4`);
   }
 
   await cleanup();
