@@ -93,7 +93,7 @@ async function bookableQuotation(me: ReturnType<typeof currentUser>, quotationId
 }
 
 /** Totals recomputed from the lines — the only writer of an order's money. */
-async function recalcOrder(orderId: string, tx: Prisma.TransactionClient = prisma): Promise<void> {
+export async function recalcOrder(orderId: string, tx: Prisma.TransactionClient = prisma) {
   const order = await tx.salesOrder.findUniqueOrThrow({
     where: { id: orderId },
     include: { lines: { orderBy: { sortOrder: 'asc' } } },
@@ -113,6 +113,7 @@ async function recalcOrder(orderId: string, tx: Prisma.TransactionClient = prism
       total: d(totals.total),
     },
   });
+  return totals;
 }
 
 /** An order as the API returns it: Decimals as numbers, cost only to those who may see it. */

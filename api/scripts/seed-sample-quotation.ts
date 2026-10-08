@@ -23,6 +23,7 @@ import { nextNumber } from '../src/shared/numbering';
 import { recalcQuotationRevision } from '../src/shared/quotation';
 import { rememberGroups } from '../src/shared/quotationGroups';
 import { audit } from '../src/shared/audit';
+import { recalcOrder } from '../src/routes/salesOrders';
 
 const NUMBER = '0062602018.2';
 const SUBJECT = 'AJOYA PAMPANGA';
@@ -135,19 +136,135 @@ async function pickOwner() {
   return admin;
 }
 
+/**
+ * SCORO's two invoices on this quote, as sales orders: 4720 booked 20% of
+ * every line as the downpayment, 4897 another 70% at completion. Each line
+ * points at the quotation line it books, so the quotation's "Booked" and
+ * "Outstanding" (10% left) come out of the ordinary booking arithmetic.
+ */
+const ORDERS = [
+  {
+    number: '4720',
+    orderDate: '2026-05-30',
+    share: 0.2,
+    comment: '20% dp\nProject name: CP-51 Pumping system takeover',
+  },
+  {
+    number: '4897',
+    orderDate: '2026-09-30',
+    share: 0.7,
+    comment: '70% booking\n90% completion\nProject name: CP-51 Pumping system takeover',
+  },
+];
+const PO_NUMBER = 'NTP ONLY ALI-PCM-001-F019';
+/** SCORO's description on the booked line, where it differs from the quotation's. */
+const ORDER_DESCRIPTIONS: Record<string, string> = {
+  MATERIALS: 'WORK ORDER',
+  'SUPPLY AND INSTALLATION': 'GAS ION JOB ORDER',
+};
+
+async function seedOrders(quotationId: string, actor: { actorId: string; actorName: string }) {
+  const quotation = await prisma.quotation.findUniqueOrThrow({
+    where: { id: quotationId },
+    include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } }, orderBy: { revision: 'desc' } } },
+  });
+  const revision = quotation.revisions[0];
+  for (const spec of ORDERS) {
+    const taken = await prisma.salesOrder.findUnique({ where: { number: spec.number }, select: { id: true, quotationId: true } });
+    if (taken) {
+      console.log(
+        taken.quotationId === quotationId
+          ? `Sales order ${spec.number} already filed (/g-ops/sales-orders/${taken.id})`
+          : `Sales order ${spec.number} exists on another quotation — skipped`,
+      );
+      continue;
+    }
+    const order = await prisma.$transaction(async (tx) => {
+      const created = await tx.salesOrder.create({
+        data: {
+          number: spec.number,
+          status: 'DRAFT',
+          quotationId,
+          customerId: quotation.customerId,
+          contactId: quotation.contactId,
+          ownerId: quotation.ownerId,
+          orderDate: new Date(spec.orderDate),
+          termsDays: 30,
+          paymentMethod: 'Bank transfer',
+          poNumber: PO_NUMBER,
+          comment: spec.comment,
+          vatRate: revision.vatRate,
+          vatInclusive: revision.vatInclusive,
+          createdAt: new Date(`${spec.orderDate}T00:00:00+08:00`),
+        },
+      });
+      let sortOrder = 0;
+      for (const item of revision.items) {
+        sortOrder += 1;
+        if (item.isHeading) {
+          await tx.salesOrderLine.create({
+            data: { orderId: created.id, isHeading: true, title: item.title, description: '', quantity: d(0), unit: item.unit, unitPrice: d(0), amount: d(0), sortOrder },
+          });
+          continue;
+        }
+        const quantity = d(item.quantity).mul(spec.share).toDecimalPlaces(3);
+        const amount = quantity.mul(item.unitPrice).toDecimalPlaces(2);
+        const costAmount = item.unitCost == null ? null : quantity.mul(item.unitCost).toDecimalPlaces(2);
+        await tx.salesOrderLine.create({
+          data: {
+            orderId: created.id,
+            group: item.group,
+            title: item.title,
+            description: (item.title && ORDER_DESCRIPTIONS[item.title]) ?? item.description,
+            quantity,
+            unit: item.unit,
+            unitPrice: item.unitPrice,
+            amount,
+            sortOrder,
+            unitCost: item.unitCost,
+            costAmount,
+            providerSupplierId: item.providerSupplierId,
+            providerUserId: item.providerUserId,
+            costNote: item.costNote,
+            quotationItemId: item.id,
+          },
+        });
+      }
+      await rememberGroups(tx, revision.items.map((i) => i.group));
+      const totals = await recalcOrder(created.id, tx);
+      await audit(
+        {
+          entityType: 'sales_order',
+          entityId: created.id,
+          action: 'CREATED',
+          summary: `Sales order ${spec.number} filed from SCORO invoice ${spec.number} on ${quotation.number} (sample seed)`,
+          ...actor,
+        },
+        undefined,
+        tx,
+      );
+      return { id: created.id, totals };
+    });
+    console.log(
+      `Sales order ${spec.number} — ${Math.round(spec.share * 100)}% of every line: subtotal ${Number(order.totals.subtotal).toLocaleString()}  total ${Number(order.totals.total).toLocaleString()}  /g-ops/sales-orders/${order.id}`,
+    );
+  }
+}
+
 async function main() {
+  const owner = await pickOwner();
+  const actor = { actorId: owner.id, actorName: owner.name };
+  console.log(`Owner: ${owner.name} <${owner.email}>`);
+
   const existing = await prisma.quotation.findFirst({
     where: { number: { equals: NUMBER, mode: 'insensitive' } },
     select: { id: true },
   });
   if (existing) {
-    console.log(`${NUMBER} is already filed (/g-ops/quotations/${existing.id}). Nothing to do.`);
+    console.log(`${NUMBER} is already filed (/g-ops/quotations/${existing.id})`);
+    await seedOrders(existing.id, actor);
     return;
   }
-
-  const owner = await pickOwner();
-  const actor = { actorId: owner.id, actorName: owner.name };
-  console.log(`Owner: ${owner.name} <${owner.email}>`);
 
   const result = await prisma.$transaction(async (tx) => {
     // Customer, contact, site.
@@ -317,6 +434,7 @@ async function main() {
   console.log(`Quotation ${result.number} — ${SUBJECT}`);
   console.log(`  subtotal ${Number(t?.subtotal ?? 0).toLocaleString()}  VAT ${Number(t?.vatAmount ?? 0).toLocaleString()}  total ${Number(t?.total ?? 0).toLocaleString()}`);
   console.log(`  open it at /g-ops/quotations/${result.quotation.id}`);
+  await seedOrders(result.quotation.id, actor);
 }
 
 main()
