@@ -22,11 +22,20 @@ step() { echo; echo "==> $1"; }
 
 [ -d "$ROOT" ] || { echo "$ROOT does not exist. Is this the right machine?" >&2; exit 1; }
 
+# The order below is deliberate: everything that can FAIL — the pull, the
+# installs, the Prisma client, both builds — happens while the old API is still
+# running. Only once the new code has built does the script touch the running
+# site, so a commit that does not compile leaves the live site on the previous
+# version and this script red, rather than leaving the site down.
+
 # ── 1. Pull ──────────────────────────────────────────────────────────────────
+# Non-interactive: GIT_ASK_YESNO=false answers "no" to "Unlink of file ...
+# Should I try again?" (a file the running API holds; the pull still succeeds),
+# and --ff-only refuses rather than opening an editor for a merge.
 step "git pull"
 cd "$ROOT"
 if [ -d "$ROOT/.git" ]; then
-  git pull
+  GIT_ASK_YESNO=false GIT_TERMINAL_PROMPT=0 git pull --ff-only origin master
 else
   echo "    No git repository here — building what is on disk."
 fi
@@ -37,8 +46,35 @@ step "install api dependencies"
 cd "$ROOT/api"
 npm install --no-audit --no-fund
 
-# ── 3. Schema before the code that needs it ──────────────────────────────────
+# ── 3. Prisma client, then the builds — with the old API still up ────────────
+# The running API holds node_modules/.prisma/query_engine-windows.dll.node
+# open, so generate's LAST step — swapping in the engine binary — fails with
+# EPERM while it runs. The generated TypeScript client is written before that
+# step, and that is what the build needs; the binary is swapped in step 6,
+# once the API is stopped. The api build is the real gate on the client.
+step "generate prisma client (types)"
+rm -f node_modules/.prisma/client/*.tmp* 2>/dev/null || true
+npx prisma generate \
+  || echo "    NOTE: prisma generate could not swap the engine binary while the API runs — expected; done again after the stop."
+
+step "build api"
+npm run build
+
+step "install web dependencies"
+cd "$ROOT/web"
+npm install --no-audit --no-fund
+
+step "build web"
+npm run build
+# In production the API serves web/dist, so there is one origin, one port and
+# one tunnel. Without it the app runs as an API with no front end, which looks
+# like a broken deployment.
+[ -f "$ROOT/web/dist/index.html" ] || { echo "web/dist/index.html was not produced. The web build failed." >&2; exit 1; }
+
+# ── 4. Schema before the code that needs it ──────────────────────────────────
+# After the builds, so a commit that does not compile changes nothing at all.
 step "apply database schema"
+cd "$ROOT/api"
 if [ -d "$ROOT/api/prisma/migrations" ]; then
   npx prisma migrate deploy
 else
@@ -46,11 +82,7 @@ else
   npx prisma db push
 fi
 
-# ── 4. Stop OURS, and only ours ──────────────────────────────────────────────
-# Stopping before generating is not optional: the running API holds
-# node_modules/.prisma/query_engine-windows.dll.node open, and Windows refuses
-# to replace a file that is in use. Skipping this produces
-# "EPERM: operation not permitted, rename query_engine-windows.dll.node".
+# ── 5. Stop OURS, and only ours ──────────────────────────────────────────────
 step "stop ONLY $TASK"
 schtasks //End //TN "$TASK" >/dev/null 2>&1 || true
 sleep 3
@@ -85,16 +117,14 @@ EOF
   fi
 fi
 
-# ── 5. Prisma client ─────────────────────────────────────────────────────────
-step "regenerate prisma client"
-# The engine DLL sometimes stays locked even after the API stops (antivirus, the
-# search indexer, a lingering handle), so the final rename fails with EPERM.
-# That step only swaps in a byte-identical binary for the same Prisma version —
-# the generated TypeScript client is written before it, and that is what the
-# build needs. The api build below is the real gate.
+# ── 6. The engine binary, and the seed ───────────────────────────────────────
+# The DLL sometimes stays locked even after the API stops (antivirus, the search
+# indexer, a lingering handle). That last step only swaps in a byte-identical
+# binary for the same Prisma version, so a refusal here is noted, not fatal.
+step "regenerate prisma client (engine)"
 rm -f node_modules/.prisma/client/*.tmp* 2>/dev/null || true
 npx prisma generate \
-  || echo "    NOTE: prisma generate hit EPERM on the engine binary — continuing; the api build verifies the client is current."
+  || echo "    NOTE: prisma generate hit EPERM on the engine binary — continuing; the api build above verified the client."
 
 # Seeding is idempotent by design: permissions are refreshed from the registry,
 # a role/permission pair is granted only if the seed has never offered it, and
@@ -103,21 +133,6 @@ npx prisma generate \
 # never reaches the server.
 step "seed (idempotent)"
 npm run seed
-
-# ── 6. Build ─────────────────────────────────────────────────────────────────
-step "build api"
-npm run build
-
-step "install web dependencies"
-cd "$ROOT/web"
-npm install --no-audit --no-fund
-
-step "build web"
-npm run build
-# In production the API serves web/dist, so there is one origin, one port and
-# one tunnel. Without it the app runs as an API with no front end, which looks
-# like a broken deployment.
-[ -f "$ROOT/web/dist/index.html" ] || { echo "web/dist/index.html was not produced. The web build failed." >&2; exit 1; }
 
 # ── 7. Start and prove it answers ────────────────────────────────────────────
 # Windows stops a task created by schtasks after 3 days, and on battery power.

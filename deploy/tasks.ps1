@@ -17,19 +17,21 @@
 #   -Ensure tunnel  removes them from GCoreGruntechTunnel, starts it if it is
 #                   not running (restarts it once if it was running under the
 #                   old limit), then proves the public address answers.
+#   -Ensure deploy  removes the battery stop from GCoreGruntechDeploy, the
+#                   every-five-minutes auto-deploy (autodeploy.ps1 -Register).
 #
-# It touches ONLY those two tasks - the names are checked below. Never the
+# It touches ONLY those three tasks - the names are checked below. Never the
 # `Cloudflared` service (gasiontech's tunnel), never PM2, never a process by
 # image name. On a machine with no tunnel task (a laptop) it says so and stops.
 
 param(
-    [ValidateSet('api', 'tunnel')]
+    [ValidateSet('api', 'tunnel', 'deploy')]
     [string]$Ensure = 'tunnel'
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$ours = @{ api = 'GCoreGruntechApi'; tunnel = 'GCoreGruntechTunnel' }
+$ours = @{ api = 'GCoreGruntechApi'; tunnel = 'GCoreGruntechTunnel'; deploy = 'GCoreGruntechDeploy' }
 $name = $ours[$Ensure]
 
 # 'missing', 'changed' or 'ok'. Only ever called with one of $ours.
@@ -54,12 +56,13 @@ switch ($state) {
             Write-Host "    No $name task on this machine - nothing to keep running (expected on a laptop)." -ForegroundColor DarkGray
             exit 0
         }
+        if ($Ensure -eq 'deploy') { throw "The $name task does not exist. Run deploy\autodeploy.ps1 -Register first." }
         throw "The $name task does not exist. Run deploy\install.ps1 first."
     }
     'changed' { Write-Host "    $name no longer stops after 3 days or on battery power." -ForegroundColor Green }
     'ok'      { Write-Host "    $name has no time limit." -ForegroundColor DarkGray }
 }
-if ($Ensure -eq 'api') { exit 0 }
+if ($Ensure -ne 'tunnel') { exit 0 }
 
 # -- The tunnel: running, then answering --------------------------------------
 $running = (Get-ScheduledTask -TaskName $name).State -eq 'Running'

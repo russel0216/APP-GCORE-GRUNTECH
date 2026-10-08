@@ -278,7 +278,16 @@ In production the API serves `web/dist`, so there is one origin and one tunnel.
 
 **The scripts are in `deploy/`.** `preflight.ps1` is read-only and reports what
 would collide; `install.ps1` runs once and refuses if the preflight fails;
-`rebuild.ps1` / `rebuild.sh` are every deploy after that. G-Core owns
+`rebuild.ps1` / `rebuild.sh` are every deploy after that — and since
+2026-10-08 the server runs them itself: `autodeploy.ps1 -Register` makes the
+`GCoreGruntechDeploy` task, which every five minutes fetches `origin/master`
+and rebuilds when it moved (`data/logs/deploy.log`, outcome in
+`deploy-last.txt`), so **a push to master is a deploy**. The rebuild builds
+the new code BEFORE it stops the running site (a commit that does not build
+leaves the site as it was), asks no questions (`--ff-only`,
+`GIT_ASK_YESNO=false`), and holds `data/rebuild.lock` so two cannot run at
+once. The task runs as the administrator who registered it, because the pull
+needs their saved GitHub login. G-Core owns
 `C:\G-CORE-GRUNTECH`, port **5100**, the **`GCoreGruntechApi`** scheduled task,
 the **`gcore-gruntech-db`** container on **5435**, and the **`gcore-gruntech`**
 tunnel — nothing else on that machine.
@@ -287,8 +296,8 @@ tunnel — nothing else on that machine.
 `ExecutionTimeLimit` PT72H, plus "stop on battery power", which a UPS on USB
 trips), and schtasks has no switch for either. The tunnel task, which no
 deploy restarts, died that way twice (Error 1033, 30 Sep and 4 Oct 2026).
-`deploy/tasks.ps1 -Ensure api|tunnel` lifts both from G-Core's own two tasks
-(it refuses any other name); install and both rebuilds call it, and the
+`deploy/tasks.ps1 -Ensure api|tunnel|deploy` lifts both from G-Core's own
+three tasks (it refuses any other name); install and both rebuilds call it, and the
 rebuilds then start the tunnel if it stopped and prove `APP_URL` answers from
 outside. Any new G-Core task goes through it too.
 

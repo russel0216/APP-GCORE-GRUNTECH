@@ -181,6 +181,32 @@ against the same Docker daemon at once is asking for a timeout.
 
 ## Every time after that
 
+**Let the server deploy itself.** Once, on the server:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\autodeploy.ps1 -Register
+```
+
+That creates G-Core's own `GCoreGruntechDeploy` task, which every five minutes
+fetches `origin/master` and, when it has moved, runs `rebuild.ps1` and writes
+what it printed to `data\logs\deploy.log` (the outcome in
+`data\logs\deploy-last.txt`). From then on **a push to master is live within
+about five minutes plus the build** — nothing to run on the server. It asks
+for your Windows password once: the task runs as you, because the pull needs
+your saved GitHub login. Register again if that password changes;
+`-Unregister` removes the task.
+
+```powershell
+Get-Content C:\G-CORE-GRUNTECH\data\logs\deploy.log -Tail 40 -Wait   # watch a deploy
+Get-Content C:\G-CORE-GRUNTECH\data\logs\deploy-last.txt             # OK or FAILED, which commit, when
+```
+
+A push that does not build leaves the site on the previous version and the log
+red; a pull the server refuses (its checkout was changed by hand) is tried once
+and then left until the next push. Fix, push again, or rebuild by hand.
+
+**Or by hand**, which is the same script the task runs:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\rebuild.ps1
 ```
@@ -189,18 +215,28 @@ powershell -ExecutionPolicy Bypass -File C:\G-CORE-GRUNTECH\deploy\rebuild.ps1
 /c/G-CORE-GRUNTECH/deploy/rebuild.sh     # Git Bash
 ```
 
-Both do the same thing in the same order, and the order matters:
+Both do the same thing in the same order, and the order matters: everything
+that can fail happens **while the old site is still running**, so a commit
+that does not build never takes the site down.
 
-1. **pull** — new code and any new migrations
+1. **pull** — `--ff-only`, and it never asks a question (`GIT_ASK_YESNO=false`
+   answers the "Unlink of file … try again?" prompt the running API used to
+   cause)
 2. **install** — quick when nothing changed, essential when a commit added a dependency
-3. **migrate** — schema before the code that needs it
-4. **stop ours** — frees the Prisma query-engine DLL, which the running process holds open. Skipping this is what causes `EPERM: operation not permitted, rename query_engine-windows.dll.node`
-5. **generate** — the typed client, or `tsc` fails
-6. **build** — api, then web
+3. **generate and build** — the Prisma client's types, then the api and the
+   web, with the old API still up. A failure here stops the script and
+   changes nothing on the running site.
+4. **migrate** — schema before the code that needs it
+5. **stop ours** — frees the Prisma query-engine DLL, which the running process holds open
+6. **engine and seed** — the engine binary the running API was holding (a
+   byte-identical swap; a refusal is noted, not fatal), then the idempotent seed
 7. **start and health-check** — lift the API task's 3-day limit, start it, and prove it answers
 8. **tunnel** — lift the tunnel task's limit, start it if it stopped, and prove
    `https://gruntech.gcore.tech` answers. A rebuild that ends in red here has
    deployed the code; it is the public address that is down.
+
+One rebuild at a time: `data\rebuild.lock` refuses a second one for up to two
+hours, so the task and a person cannot pull and build the same folder at once.
 
 If the rebuild stops with *"port 5100 is held by a process that is not ours"*,
 it has done the right thing. Look at what it printed and deal with that process

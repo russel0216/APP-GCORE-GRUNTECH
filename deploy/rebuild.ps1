@@ -9,6 +9,10 @@
 #
 # The one place this is stricter than its predecessor: before freeing port 5100
 # it CHECKS the listener is ours, and stops rather than killing a stranger.
+#
+# It builds the new code BEFORE it stops the running site, so a commit that
+# does not build leaves the site on the previous version. It asks no questions,
+# so deploy\autodeploy.ps1 can run it unattended on every push to master.
 
 $ErrorActionPreference = 'Stop'
 
@@ -42,11 +46,41 @@ function Test-OurProcess([int]$processId, [string]$root) {
 
 if (-not (Test-Path $root)) { throw "$root does not exist. Is this the right machine?" }
 
+# One rebuild at a time. The auto-deploy task (deploy\autodeploy.ps1) runs this
+# script too, and two of them pulling and building in the same folder at once
+# would leave half of each on disk. A lock older than two hours is a crash's
+# leftover and is ignored.
+$lock = "$root\data\rebuild.lock"
+if (Test-Path $lock) {
+    $age = (Get-Date) - (Get-Item $lock).LastWriteTime
+    if ($age.TotalHours -lt 2) {
+        throw "Another rebuild started $([int]$age.TotalMinutes) minutes ago (lock: $lock). Wait for it, or delete the lock if it crashed."
+    }
+}
+New-Item -ItemType Directory -Force -Path "$root\data" | Out-Null
+"$PID $(Get-Date -Format s)" | Set-Content $lock
+
+try {
+
+# The order below is deliberate: everything that can FAIL - the pull, the
+# installs, the Prisma client, both builds - happens while the old API is still
+# running. Only once the new code has built does the script touch the running
+# site, so a commit that does not compile leaves the live site on the previous
+# version and this script red, rather than leaving the site down.
+
 # -- 1. Pull ------------------------------------------------------------------
+# Non-interactive, because the auto-deploy task has nobody to answer git:
+#   GIT_ASK_YESNO=false answers "no" to "Unlink of file ... Should I try again?"
+#   (a file the running API holds; the pull still succeeds, as it did when a
+#   person typed n), --ff-only refuses rather than opening an editor for a
+#   merge, and safe.directory lets a task user pull a folder another user owns.
 Step 'git pull'
 Set-Location $root
 if (Test-Path "$root\.git") {
-    git pull
+    $env:GIT_ASK_YESNO = 'false'
+    $env:GIT_TERMINAL_PROMPT = '0'
+    git -c "safe.directory=$($root -replace '\\', '/')" pull --ff-only origin master
+    if ($LASTEXITCODE -ne 0) { throw 'git pull failed - see above. Nothing was changed on the running site.' }
 } else {
     Write-Host "    No git repository here - skipping the pull and building what is on disk." -ForegroundColor Yellow
 }
@@ -57,9 +91,44 @@ if (Test-Path "$root\.git") {
 Step 'install api dependencies'
 Set-Location "$root\api"
 npm install --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw 'npm install (api) failed' }
 
-# -- 3. Schema before the code that needs it ----------------------------------
+# -- 3. Prisma client, then the builds - with the old API still up -----------
+# The running API holds node_modules\.prisma\query_engine-windows.dll.node
+# open, so generate's LAST step - swapping in the engine binary - fails with
+# EPERM while it runs. The generated TypeScript client is written before that
+# step, and that is what the build needs; the binary is swapped in step 6,
+# once the API is stopped. The api build is the real gate on the client.
+Step 'generate prisma client (types)'
+Remove-Item "$root\api\node_modules\.prisma\client\*.tmp*" -Force -ErrorAction SilentlyContinue
+$ErrorActionPreference = 'Continue'
+npx prisma generate
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "    NOTE: prisma generate could not swap the engine binary while the API runs - expected; done again after the stop." -ForegroundColor DarkGray
+}
+$ErrorActionPreference = 'Stop'
+
+Step 'build api'
+npm run build
+if ($LASTEXITCODE -ne 0) { throw 'The api build failed. The running site was not touched.' }
+
+Step 'install web dependencies'
+Set-Location "$root\web"
+npm install --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw 'npm install (web) failed' }
+
+Step 'build web'
+npm run build
+if ($LASTEXITCODE -ne 0) { throw 'The web build failed. The running site was not touched.' }
+# In production the API serves web\dist, so there is one origin, one port and
+# one tunnel. If this folder is missing the app still runs - as an API with no
+# front end, which looks like a broken deployment.
+if (-not (Test-Path "$root\web\dist\index.html")) { throw 'web\dist\index.html was not produced. The web build failed.' }
+
+# -- 4. Schema before the code that needs it ----------------------------------
+# After the builds, so a commit that does not compile changes nothing at all.
 Step 'apply database migrations'
+Set-Location "$root\api"
 if (Test-Path "$root\api\prisma\migrations") {
     npx prisma migrate deploy
 } else {
@@ -70,12 +139,9 @@ if (Test-Path "$root\api\prisma\migrations") {
     Write-Host "    No migrations folder - using 'prisma db push' instead." -ForegroundColor Yellow
     npx prisma db push
 }
+if ($LASTEXITCODE -ne 0) { throw 'Applying the schema failed' }
 
-# -- 4. Stop OURS, and only ours ----------------------------------------------
-# Stopping before generating is not optional: the running API holds
-# node_modules\.prisma\query_engine-windows.dll.node open, and Windows refuses
-# to replace a file that is in use. Skipping this is what produces
-# "EPERM: operation not permitted, rename query_engine-windows.dll.node".
+# -- 5. Stop OURS, and only ours ----------------------------------------------
 Step "stop ONLY $task"
 schtasks /End /TN $task 2>$null | Out-Null
 Start-Sleep -Seconds 3
@@ -108,18 +174,16 @@ different port, change PORT in api\.env and the tunnel config to match.
     }
 }
 
-# -- 5. Prisma client ---------------------------------------------------------
-Step 'regenerate prisma client'
-# The engine DLL sometimes stays locked even after the API stops (antivirus, the
-# search indexer, a lingering handle), so the final rename fails with EPERM.
-# That last step only swaps in a byte-identical binary for the same Prisma
-# version - the generated TypeScript client is written before it, and that is
-# the part the build needs. The api build below is the real gate.
+# -- 6. The engine binary, and the seed ---------------------------------------
+# The DLL sometimes stays locked even after the API stops (antivirus, the search
+# indexer, a lingering handle). That last step only swaps in a byte-identical
+# binary for the same Prisma version, so a refusal here is noted, not fatal.
+Step 'regenerate prisma client (engine)'
 Remove-Item "$root\api\node_modules\.prisma\client\*.tmp*" -Force -ErrorAction SilentlyContinue
 $ErrorActionPreference = 'Continue'
 npx prisma generate
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "    NOTE: prisma generate hit EPERM on the engine binary - continuing; the api build verifies the client is current." -ForegroundColor Yellow
+    Write-Host "    NOTE: prisma generate hit EPERM on the engine binary - continuing; the api build above verified the client." -ForegroundColor Yellow
 }
 $ErrorActionPreference = 'Stop'
 
@@ -131,21 +195,6 @@ $ErrorActionPreference = 'Stop'
 Step 'seed (idempotent)'
 npm run seed
 if ($LASTEXITCODE -ne 0) { throw 'npm run seed failed' }
-
-# -- 6. Build -----------------------------------------------------------------
-Step 'build api'
-npm run build
-
-Step 'install web dependencies'
-Set-Location "$root\web"
-npm install --no-audit --no-fund
-
-Step 'build web'
-npm run build
-# In production the API serves web\dist, so there is one origin, one port and
-# one tunnel. If this folder is missing the app still runs - as an API with no
-# front end, which looks like a broken deployment.
-if (-not (Test-Path "$root\web\dist\index.html")) { throw 'web\dist\index.html was not produced. The web build failed.' }
 
 # -- 7. Start and prove it answers --------------------------------------------
 # Windows stops a task created by schtasks after 3 days, and on battery power.
@@ -207,3 +256,7 @@ if (-not $publicOk) {
     exit 1
 }
 Write-Host "`nG-CORE Gruntech is up on http://localhost:$apiPort - https://gruntech.gcore.tech`n" -ForegroundColor Green
+
+} finally {
+    Remove-Item $lock -Force -ErrorAction SilentlyContinue
+}
