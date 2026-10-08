@@ -184,8 +184,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,468 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
-masters 54, sales 356, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,478 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+masters 54, sales 366, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1595,6 +1595,21 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   line (one or the other, checked to exist). Add a shared cell to
   `editorParts.tsx`, never to one editor. `audit-workflows.ts` knows sales and sales
   managers raise sales orders.
+- **The list is the quotation list's layout** (2026-10-08): the statuses as
+  tabs with counts (All orders, Draft, Pending approval, Issued, Cancelled —
+  the old status filter ignored Pending approval), Filters (booked by,
+  client, order date range — a DATE, UTC-midnight edges — and Released: an
+  SI or DR number filled in), Client / PO / SI-DR / Margin columns (margin
+  only where `canSeeOrderCost`), the printed list `GET /sales-orders/pdf`
+  (above `/:id`, value never cost, audited, `?ids=` for Print selected) and
+  tick boxes with Export / Print selected. `salesOrderListWhere()` is the one
+  query for the rows, `salesOrderListSummary()` and the paper. **The totals
+  line is the BOOKED value** — orders still standing; a cancelled one is
+  counted apart ("N cancelled, not counted"), never summed, as the
+  quotation page's Booked figure. Mine for `edit_own`/`edit_all` holders,
+  All for a reader (finance). No bulk status change: submitting, issuing and
+  cancelling an order each have consequences of their own, and stay on the
+  order's page.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary

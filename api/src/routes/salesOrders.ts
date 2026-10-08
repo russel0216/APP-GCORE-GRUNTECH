@@ -11,6 +11,7 @@ import {
   notFound,
   badRequest,
   forbidden,
+  idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
@@ -27,7 +28,15 @@ import {
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
-import { formatAmount, formatDate, formatShortDate, type PdfTotal, type Signatory } from '../shared/pdf';
+import {
+  formatAmount,
+  formatDate,
+  formatMoney,
+  formatShortDate,
+  renderDocument,
+  type PdfTotal,
+  type Signatory,
+} from '../shared/pdf';
 import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
 import { salesOrderDesign, withoutCostColumns } from '../shared/salesOrderTemplate';
 import {
@@ -184,42 +193,243 @@ async function nextOrderNumber(tx: Prisma.TransactionClient, quotationId: string
 
 // ── List ─────────────────────────────────────────────────────────────────────
 
+export const SALES_ORDER_STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'ISSUED', 'CANCELLED'] as const;
+type SoStatus = (typeof SALES_ORDER_STATUSES)[number];
+const SO_STATUS_LABEL: Record<SoStatus, string> = {
+  DRAFT: 'Draft',
+  PENDING_APPROVAL: 'Pending approval',
+  ISSUED: 'Issued',
+  CANCELLED: 'Cancelled',
+};
+const SO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function soDay(value: string | undefined, label: string): string | null {
+  if (!value) return null;
+  if (!SO_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
+  return value;
+}
+
+/**
+ * Which sales orders a list query means — ONE rule for the list, its summary
+ * (the status tabs' counts and the totals line) and its PDF (the quotation
+ * list's pattern, 2026-10-08). `base` is everything but the status; the tabs
+ * count under it, so each says what clicking it would show with the other
+ * filters kept. The quotation page's Sales orders card reads the same list
+ * with `?quotationId=`.
+ */
+export function salesOrderListWhere(
+  me: ReturnType<typeof currentUser>,
+  q: ReturnType<typeof listQuery>,
+): { base: Prisma.SalesOrderWhereInput; where: Prisma.SalesOrderWhereInput } {
+  const and: Prisma.SalesOrderWhereInput[] = [];
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all');
+  if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+  const f = q.filters;
+  if (f.customerId) and.push({ customerId: f.customerId });
+  if (f.quotationId) and.push({ quotationId: f.quotationId });
+  if (f.ownerId) and.push({ ownerId: f.ownerId });
+  // The order date is a DATE: UTC-midnight edges of the days named.
+  const from = soDay(f.dateFrom, 'Date from');
+  const to = soDay(f.dateTo, 'Date to');
+  if (from || to) {
+    and.push({
+      orderDate: {
+        ...(from ? { gte: new Date(`${from}T00:00:00.000Z`) } : {}),
+        ...(to ? { lte: new Date(`${to}T23:59:59.999Z`) } : {}),
+      },
+    });
+  }
+  // Released: the SI/BS or DR number is filled in — what finance chases.
+  const RELEASED: Prisma.SalesOrderWhereInput = { OR: [{ siNumber: { not: null } }, { drNumber: { not: null } }] };
+  if (f.released === 'yes') and.push(RELEASED);
+  else if (f.released === 'no') and.push({ NOT: RELEASED });
+  else if (f.released) throw badRequest('Released is yes or no');
+  // The rows a person ticked (mass actions); the rules above still apply.
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { poNumber: { contains: q.search, mode: 'insensitive' } },
+        { siNumber: { contains: q.search, mode: 'insensitive' } },
+        { drNumber: { contains: q.search, mode: 'insensitive' } },
+        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+        { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
+        { quotation: { subject: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const base: Prisma.SalesOrderWhereInput = and.length ? { AND: and } : {};
+  if (!f.status) return { base, where: base };
+  if (!(SALES_ORDER_STATUSES as readonly string[]).includes(f.status)) throw badRequest(`Unknown status: ${f.status}`);
+  return { base, where: { AND: [...and, { status: f.status as SoStatus }] } };
+}
+
+/**
+ * The tabs' counts under `base` ('' is All), the count under `where`, and the
+ * booked value: the totals of the orders `where` selects that are still
+ * standing — a cancelled order books nothing (the quotation page's
+ * "Booked"), so it is counted apart, never summed in.
+ */
+export async function salesOrderListSummary(base: Prisma.SalesOrderWhereInput, where: Prisma.SalesOrderWhereInput) {
+  const [perStatus, live, cancelled] = await Promise.all([
+    prisma.salesOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+    prisma.salesOrder.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { total: true }, _count: { _all: true } }),
+    prisma.salesOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+  ]);
+  const tabCounts: Record<string, number> = { '': 0 };
+  for (const st of SALES_ORDER_STATUSES) tabCounts[st] = 0;
+  for (const r of perStatus) {
+    tabCounts[r.status] = r._count._all;
+    tabCounts[''] += r._count._all;
+  }
+  return {
+    tabCounts,
+    count: live._count._all + cancelled,
+    value: num(live._sum.total),
+    cancelledCount: cancelled,
+  };
+}
+
+const SO_SORTS = ['number', 'orderDate', 'total', 'createdAt'];
+
+function salesOrderOrderBy(q: ReturnType<typeof listQuery>): Prisma.SalesOrderOrderByWithRelationInput {
+  if (q.sort === 'customer') return { customer: { name: q.dir } };
+  return orderBy(q, SO_SORTS, { createdAt: 'desc' });
+}
+
 salesOrderRoutes.get(
   '/',
   requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.SalesOrderWhereInput = {};
+    const { base, where } = salesOrderListWhere(me, q);
 
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all');
-    if (onlyOwn || q.scope === 'mine') where.ownerId = me.id;
-    if (q.filters.status && ['DRAFT', 'ISSUED', 'CANCELLED'].includes(q.filters.status)) {
-      where.status = q.filters.status as 'DRAFT' | 'ISSUED' | 'CANCELLED';
-    }
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    if (q.filters.quotationId) where.quotationId = q.filters.quotationId;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { poNumber: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-        { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
-        { quotation: { subject: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
-
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.salesOrder.findMany({
         where,
         include: ORDER_INCLUDE,
-        orderBy: orderBy(q, ['number', 'orderDate', 'total', 'createdAt'], { createdAt: 'desc' }),
+        orderBy: salesOrderOrderBy(q),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.salesOrder.count({ where }),
+      salesOrderListSummary(base, where),
     ]);
-    res.json(listResult(rows.map((r) => presentOrder(r as unknown as Record<string, unknown>, false)), total, q));
+
+    // Margin, only where the caller may see this order's cost — the
+    // quotation's rule — off the order's own lines.
+    const costed = rows.filter((r) => canSeeOrderCost(me, r.ownerId)).map((r) => r.id);
+    const lines = costed.length
+      ? await prisma.salesOrderLine.findMany({
+          where: { orderId: { in: costed } },
+          select: { orderId: true, amount: true, costAmount: true, providerUserId: true, providerSupplierId: true, isHeading: true },
+        })
+      : [];
+
+    res.json({
+      ...listResult(
+        rows.map((r) => {
+          let margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null = null;
+          if (costed.includes(r.id)) {
+            const t = quotationTotals({
+              lines: lines.filter((l) => l.orderId === r.id),
+              discountPct: r.discountPct,
+              vatRate: r.vatRate,
+              vatInclusive: r.vatInclusive,
+            });
+            if (t.cost.costedLines > 0) {
+              margin = { amount: t.cost.totalMargin, pct: t.cost.totalMarginPct, costedLines: t.cost.costedLines, lineCount: t.cost.lineCount };
+            }
+          }
+          return { ...presentOrder(r as unknown as Record<string, unknown>, false), margin };
+        }),
+        total,
+        q,
+      ),
+      summary,
+    });
+  }),
+);
+
+/**
+ * The sales order list on paper — the list as filtered, through
+ * `salesOrderListWhere`, so the paper is the screen (or, with `?ids=`, the
+ * rows ticked). Totals and value only, never cost: a list leaves the
+ * building more easily than an order does. Capped at 1,000 rows, audited,
+ * declared above `/:id`.
+ */
+salesOrderRoutes.get(
+  '/pdf',
+  requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const { base, where } = salesOrderListWhere(me, q);
+    const [rows, summary] = await Promise.all([
+      prisma.salesOrder.findMany({
+        where,
+        include: { customer: { select: { name: true } }, quotation: { select: { number: true, subject: true } } },
+        orderBy: salesOrderOrderBy(q),
+        take: 1000,
+      }),
+      salesOrderListSummary(base, where),
+    ]);
+    const f = q.filters;
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      f.status ? `status ${SO_STATUS_LABEL[f.status as SoStatus] ?? f.status}` : null,
+      f.customerId ? 'one client' : null,
+      f.ownerId ? 'one owner' : null,
+      f.quotationId ? 'one quotation' : null,
+      f.dateFrom || f.dateTo ? `dated ${f.dateFrom ?? '…'} to ${f.dateTo ?? '…'}` : null,
+      f.released === 'yes' ? 'released' : f.released === 'no' ? 'not yet released' : null,
+      q.scope === 'mine' ? 'mine only' : null,
+      f.ids ? 'the rows selected' : null,
+    ].filter(Boolean);
+
+    const pdf = await renderDocument({
+      title: 'Sales Orders',
+      date: new Date(),
+      reference: `${summary.count} order(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Quotation and client', 'Status', 'PO', 'SI / DR', 'Date', 'Total'],
+          widths: [1.7, 2.7, 1.4, 1.4, 1.3, 1.3, 1.4],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right'],
+          rows: rows.map((r) => [
+            r.number,
+            { title: r.quotation.subject, body: `${r.quotation.number} · ${r.customer.name}` },
+            SO_STATUS_LABEL[r.status as SoStatus] ?? r.status,
+            r.poNumber ?? '',
+            [r.siNumber, r.drNumber].filter(Boolean).join(' / '),
+            formatShortDate(r.orderDate),
+            r.status === 'CANCELLED' ? `(${formatAmount(num(r.total))})` : formatAmount(num(r.total)),
+          ]),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: 'Booked value, total:', value: formatMoney(summary.value), bold: true },
+            ...(summary.cancelledCount
+              ? [{ label: `Cancelled, not counted:`, value: `${summary.cancelledCount} order(s)` }]
+              : []),
+          ],
+        },
+      ],
+      signatories: [],
+    });
+
+    await audit(
+      { entityType: 'sales_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the sales orders list as PDF (${rows.length} order(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="sales-orders.pdf"');
+    res.send(pdf);
   }),
 );
 

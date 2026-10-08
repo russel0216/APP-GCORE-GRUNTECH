@@ -59,6 +59,7 @@ import { listQuery } from '../src/http/kit';
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
 import { quotationListSummary, quotationListWhere } from '../src/routes/sales';
+import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
@@ -1165,6 +1166,54 @@ async function main() {
       }
     }
     check('an unknown stage, a malformed date or an unknown choice is a 400, not an empty list', refused === 5, `${refused} of 5`);
+
+    // ── The sales order list, in the same layout ────────────────────────────
+    console.log('\nThe list of sales orders: status tabs, booked value, filters');
+    const LSO = `${TAG}-LSO`;
+    const soQ = (query: Record<string, string>) =>
+      listQuery({ query: { search: LSO, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+    // On the completed quotation only, which is booked already — the
+    // quotation list's checks over HTTP below stay as they were.
+    await prisma.salesOrder.update({ where: { number: `${TAG}-LSO1` }, data: { total: d(1000), orderDate: new Date('2026-05-30T00:00:00Z') } });
+    await prisma.salesOrder.update({ where: { number: `${TAG}-LSO2` }, data: { total: d(500) } });
+    await prisma.salesOrder.create({
+      data: { number: `${TAG}-LSO3`, quotationId: qCompleted.id, customerId: customer.id, ownerId: sales.id, orderDate: new Date(), status: 'PENDING_APPROVAL', total: d(2000) },
+    });
+    await prisma.salesOrder.create({
+      data: { number: `${TAG}-LSO4`, quotationId: qCompleted.id, customerId: customer.id, ownerId: sales.id, orderDate: new Date(), status: 'ISSUED', total: d(3000), siNumber: 'SI-9001' },
+    });
+
+    const soAll = salesOrderListWhere(superUser, soQ({}));
+    const soSummary = await salesOrderListSummary(soAll.base, soAll.where);
+    check(
+      'each status tab has its order, and the tabs add up to All',
+      soSummary.tabCounts[''] === 4 && ['DRAFT', 'PENDING_APPROVAL', 'ISSUED', 'CANCELLED'].every((k) => soSummary.tabCounts[k] === 1),
+      JSON.stringify(soSummary.tabCounts),
+    );
+    check(
+      'the booked value sums the orders still standing; a cancelled one is counted apart, never summed',
+      money(soSummary.value, 6000) && soSummary.cancelledCount === 1 && soSummary.count === 4,
+      JSON.stringify(soSummary),
+    );
+    const pending = await prisma.salesOrder.findMany({ where: salesOrderListWhere(superUser, soQ({ status: 'PENDING_APPROVAL' })).where, select: { number: true } });
+    check('Pending approval is a tab of its own (the old filter ignored it)', pending.length === 1 && pending[0].number === `${TAG}-LSO3`);
+    const released = await prisma.salesOrder.count({ where: salesOrderListWhere(superUser, soQ({ released: 'yes' })).where });
+    const unreleased = await prisma.salesOrder.count({ where: salesOrderListWhere(superUser, soQ({ released: 'no' })).where });
+    check('"Released" is an SI or DR number filled in', released === 1 && unreleased === 3, `${released} ${unreleased}`);
+    const dated = await prisma.salesOrder.count({ where: salesOrderListWhere(superUser, soQ({ dateFrom: '2026-05-30', dateTo: '2026-05-30' })).where });
+    check('the order date range includes the day it names', dated === 1, String(dated));
+    const ofQuote = await prisma.salesOrder.count({ where: salesOrderListWhere(superUser, soQ({ quotationId: qCompleted.id })).where });
+    const minePlain = await prisma.salesOrder.count({ where: salesOrderListWhere(salesUser, soQ({ scope: 'mine' })).where });
+    check('one quotation’s orders, and Mine, are what they say', ofQuote === 3 && minePlain === 3, `${ofQuote} ${minePlain}`);
+    let soRefused = 0;
+    for (const bad of [{ status: 'WON' }, { dateFrom: '2026-13-01' }, { released: 'maybe' }]) {
+      try {
+        salesOrderListWhere(superUser, soQ(bad));
+      } catch (err) {
+        if ((err as { status?: number }).status === 400) soRefused++;
+      }
+    }
+    check('an unknown status, a malformed date or an unknown choice is a 400', soRefused === 3, `${soRefused} of 3`);
   }
 
   console.log('\nDocuments');
@@ -2582,6 +2631,37 @@ async function main() {
         leadPdf.status === 200 && leadLine.includes(`${TAG} Print A`) && !leadLine.includes(`${TAG} Print B`),
         leadLine.slice(0, 200),
       );
+      // The sales order list over HTTP and on paper.
+      const soListed = await http(salesToken, 'GET', `/sales-orders?search=${encodeURIComponent(`${TAG}-LSO`)}&scope=all&pageSize=50`);
+      const soSum = soListed.body.summary as { tabCounts: Record<string, number>; count: number; value: number; cancelledCount: number } | undefined;
+      const soRows = (soListed.body.rows ?? []) as { status: string; total: number; margin?: unknown }[];
+      check(
+        'GET /sales-orders carries the summary, matching its rows: count, booked value without the cancelled',
+        soListed.status === 200 && !!soSum && soSum.count === soRows.length && soSum.tabCounts[''] === soRows.length &&
+          money(soSum.value, soRows.filter((r) => r.status !== 'CANCELLED').reduce((t, r) => t + r.total, 0)) &&
+          soRows.every((r) => 'margin' in r),
+        soListed.text.slice(0, 200),
+      );
+      const soPrinted = await fetch(`${BASE}/sales-orders/pdf?search=${encodeURIComponent(`${TAG}-LSO`)}&scope=all&status=ISSUED`, {
+        headers: { Authorization: `Bearer ${salesToken}` },
+      });
+      const soPrintedLine = pdfText(Buffer.from(await soPrinted.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'the printed sales order list is the list as filtered — the issued one, its SI, the filter named',
+        // A long number wraps across text runs; read it with the spaces out.
+        soPrinted.status === 200 && soPrintedLine.replace(/ /g, '').includes(`${TAG}-LSO4`) && !soPrintedLine.replace(/ /g, '').includes(`${TAG}-LSO3`) &&
+          soPrintedLine.includes('SI-9001') && soPrintedLine.includes('status Issued'),
+        soPrintedLine.slice(0, 300),
+      );
+      const soPick = await prisma.salesOrder.findUniqueOrThrow({ where: { number: `${TAG}-LSO3` }, select: { id: true } });
+      const soPickPdf = await fetch(`${BASE}/sales-orders/pdf?scope=all&ids=${soPick.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
+      const soPickLine = pdfText(Buffer.from(await soPickPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'and Print selected prints the ticked order alone',
+        soPickPdf.status === 200 && soPickLine.replace(/ /g, '').includes(`${TAG}-LSO3`) && !soPickLine.replace(/ /g, '').includes(`${TAG}-LSO4`) && soPickLine.includes('the rows selected'),
+        soPickLine.slice(0, 200),
+      );
+
       // A mass move is the PATCH per row: a legal move goes; Won without an
       // approved revision is refused with the reason the bar then shows.
       const openId = picked.find((p) => p.subject.endsWith('open'))!.id;

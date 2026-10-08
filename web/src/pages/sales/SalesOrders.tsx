@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf } from '../../lib/api';
+import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { NumberInput } from '../../components/NumberInput';
 import {
   Checkbox,
@@ -115,10 +115,52 @@ interface SalesOrderDetailRow extends SalesOrderRow {
   costPanel?: { totalCost: number; inHouseCost: number; outsourcedCost: number; totalMargin: number };
 }
 
+/** The statuses, as the list's tabs — in the order an order lives them. */
+const SO_STATUS_TABS = [
+  { value: 'DRAFT', label: 'Draft' },
+  { value: 'PENDING_APPROVAL', label: 'Pending approval' },
+  { value: 'ISSUED', label: 'Issued' },
+  { value: 'CANCELLED', label: 'Cancelled' },
+];
+
+interface SalesOrderListRow extends SalesOrderRow {
+  /** Only for a viewer who may see this order's cost; null otherwise or when no line is costed. */
+  margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null;
+}
+
+interface SalesOrderSummary {
+  count?: number;
+  value?: number;
+  cancelledCount?: number;
+}
+
+/**
+ * The sales order list, in the quotation list's layout (2026-10-08): the
+ * statuses as tabs with their counts, one Filters panel, client, PO and the
+ * release references in columns of their own, a totals line of the booked
+ * value, the printed list and mass actions. The tabs, the totals and the
+ * paper all come from the server's one list query.
+ */
 export function SalesOrders() {
   const navigate = useNavigate();
+  const { can } = useAuth();
+  const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
 
-  const columns: Column<SalesOrderRow>[] = [
+  const seesAll = can('gops.sales_orders.view_all');
+  // Whoever may edit sales orders opens on their own; a reader — finance,
+  // releasing what was booked — opens on all of them. A link's ?scope= wins.
+  const mayEdit = can('gops.sales_orders.edit_own') || can('gops.sales_orders.edit_all');
+  const seesCost = mayEdit || can('gops.costing.view_all');
+
+  useEffect(() => {
+    if (!seesAll) return;
+    api
+      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.sales_orders.create' })}`)
+      .then((people) => setOwners(people.map((p) => ({ value: p.id, label: p.name }))))
+      .catch(() => setOwners([]));
+  }, [seesAll]);
+
+  const columns: Column<SalesOrderListRow>[] = [
     { key: 'number', label: 'Number', sortKey: 'number', width: '120px', render: (r) => <span className="mono">{r.number}</span> },
     {
       key: 'quotation',
@@ -130,11 +172,79 @@ export function SalesOrders() {
         </div>
       ),
     },
-    { key: 'customer', label: 'Customer', render: (r) => r.customer.name },
-    { key: 'orderDate', label: 'Date', sortKey: 'orderDate', render: (r) => formatDate(r.orderDate) },
-    { key: 'total', label: 'Total', sortKey: 'total', align: 'right', render: (r) => <span className="mono">{formatMoney(r.total)}</span> },
-    { key: 'owner', label: 'Booked by', render: (r) => r.owner.name, optional: true },
+    { key: 'customer', label: 'Client', sortKey: 'customer', render: (r) => r.customer.name },
     { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} extra={SO_TONES} /> },
+    { key: 'po', label: 'PO', render: (r) => r.poNumber ?? <span className="faint">—</span> },
+    {
+      key: 'release',
+      label: 'SI / DR',
+      optional: true,
+      render: (r) => [r.siNumber, r.drNumber].filter(Boolean).join(' / ') || <span className="faint">—</span>,
+    },
+    { key: 'orderDate', label: 'Date', sortKey: 'orderDate', render: (r) => formatDate(r.orderDate) },
+    {
+      key: 'total',
+      label: 'Total',
+      sortKey: 'total',
+      align: 'right',
+      render: (r) => (
+        <span className={`mono${r.status === 'CANCELLED' ? ' faint' : ''}`} title={r.status === 'CANCELLED' ? 'Cancelled — books nothing' : undefined}>
+          {formatMoney(r.total)}
+        </span>
+      ),
+    },
+    ...(seesCost
+      ? [
+          {
+            key: 'margin',
+            label: 'Margin',
+            align: 'right' as const,
+            render: (r: SalesOrderListRow) =>
+              r.margin ? (
+                <span title={`${r.margin.costedLines} of ${r.margin.lineCount} lines costed`}>
+                  <span className="mono">{formatMoney(r.margin.amount)}</span>
+                  {r.margin.pct !== null && <div className="faint">{r.margin.pct}%</div>}
+                </span>
+              ) : (
+                <span className="faint">—</span>
+              ),
+          },
+        ]
+      : []),
+    { key: 'owner', label: 'Booked by', render: (r) => r.owner.name },
+    { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', optional: true, render: (r) => formatDate(r.createdAt) },
+  ];
+
+  const filters: FilterDef[] = [
+    // Declared before its people arrive, so a linked ?ownerId= is read on mount (rule 16).
+    ...(seesAll ? [{ key: 'ownerId', label: 'Booked by', options: owners }] : []),
+    ...(can('gops.customers.view_all')
+      ? [
+          {
+            key: 'customerId',
+            label: 'Client',
+            type: 'lookup' as const,
+            placeholder: 'Type a client name or code…',
+            search: async (term: string) =>
+              (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map(
+                (c) => ({ value: c.id, label: `${c.name} · ${c.code}` }),
+              ),
+            describe: async (id: string) => {
+              const c = await api.get<{ name: string; code: string }>(`/customers/${id}`);
+              return `${c.name} · ${c.code}`;
+            },
+          },
+        ]
+      : []),
+    { key: 'dateFrom', toKey: 'dateTo', label: 'Order date', type: 'dateRange' },
+    {
+      key: 'released',
+      label: 'Released',
+      options: [
+        { value: 'yes', label: 'SI or DR number filled in' },
+        { value: 'no', label: 'Not yet released' },
+      ],
+    },
   ];
 
   return (
@@ -150,27 +260,40 @@ export function SalesOrders() {
         </div>
       </div>
 
-      <DataList<SalesOrderRow>
+      <DataList<SalesOrderListRow>
         listKey="sales-orders"
         endpoint="/sales-orders"
         columns={columns}
         rowKey={(r) => r.id}
         scoped
-        searchPlaceholder="Search number, PO, customer, quotation…"
+        defaultScope={mayEdit ? 'mine' : 'all'}
+        searchPlaceholder="Search number, PO, SI/DR, client, quotation…"
         onRowClick={(r) => navigate(`/g-ops/sales-orders/${r.id}`)}
         emptyTitle="Nothing booked yet"
         emptyHint="Open a quotation and press Create Sales Order — that is where one starts."
-        filters={[
-          {
-            key: 'status',
-            label: 'Status',
-            options: [
-              { value: 'DRAFT', label: 'Draft' },
-              { value: 'ISSUED', label: 'Issued' },
-              { value: 'CANCELLED', label: 'Cancelled' },
-            ],
-          },
-        ]}
+        tabs={{ key: 'status', label: 'Statuses', allLabel: 'All orders', options: SO_STATUS_TABS }}
+        filters={filters}
+        printPath="/api/sales-orders/pdf"
+        selectable
+        rowLabel={(r) => `${r.number} ${r.quotation.subject}`}
+        summaryLine={(raw, total) => {
+          const s = raw as SalesOrderSummary;
+          return (
+            <>
+              <span>
+                <strong>{total}</strong> order{total === 1 ? '' : 's'}
+              </span>
+              <span>
+                Booked value <strong>{formatMoney(s.value ?? 0)}</strong>
+              </span>
+              {!!s.cancelledCount && (
+                <span>
+                  {s.cancelledCount} cancelled, not counted
+                </span>
+              )}
+            </>
+          );
+        }}
       />
     </div>
   );
