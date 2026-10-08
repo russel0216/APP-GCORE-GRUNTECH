@@ -18,9 +18,11 @@
 # then left until the next push, so a stuck deploy does not rebuild every five
 # minutes.
 #
-# The task runs as the user who registers it, with their password (schtasks
-# asks for it once): the pull needs that user's saved GitHub credentials, which
-# SYSTEM does not have. If that password changes, register again.
+# The task runs as the user who registers it, with their password (asked for
+# once): the pull needs that user's saved GitHub credentials, which SYSTEM does
+# not have. If that password changes, register again. Its settings (no battery
+# stop, a 3-hour limit per run, one run at a time) are set at registration -
+# a task holding a password cannot be changed later without it.
 #
 # Touches only the GCoreGruntechDeploy task. Never the Cloudflared service,
 # never PM2, never a process by image name - rebuild.ps1 holds those rules.
@@ -56,13 +58,18 @@ if ($Unregister) {
 if ($Register) {
     if ($EveryMinutes -lt 1) { throw 'EveryMinutes must be at least 1.' }
     $user = "$env:USERDOMAIN\$env:USERNAME"
-    $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$root\deploy\autodeploy.ps1`""
     Write-Host "    Registering $task to run every $EveryMinutes minutes as $user." -ForegroundColor Cyan
-    Write-Host "    schtasks will ask for $user's password - it is what lets the task pull from GitHub." -ForegroundColor Cyan
-    schtasks /Create /F /TN $task /SC MINUTE /MO $EveryMinutes /RU $user /RP * /RL HIGHEST /TR $cmd
-    if ($LASTEXITCODE -ne 0) { throw "schtasks could not create $task." }
-    & powershell -ExecutionPolicy Bypass -File "$root\deploy\tasks.ps1" -Ensure deploy
-    if ($LASTEXITCODE -ne 0) { throw "Could not update the $task task settings." }
+    Write-Host "    Your Windows password is what lets the task pull from GitHub as you." -ForegroundColor Cyan
+    $secure = Read-Host -Prompt "    Password for $user" -AsSecureString
+    $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+    # One call with the settings in it: a task that stores a password cannot
+    # be changed afterwards without the password again, so the 3-day limit
+    # and the battery stop are lifted here rather than by tasks.ps1.
+    $action = New-ScheduledTaskAction -Execute 'powershell' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$root\deploy\autodeploy.ps1`""
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes)
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 3) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -StartWhenAvailable
+    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Settings $settings -User $user -Password $plain -RunLevel Highest -Force | Out-Null
+    $plain = $null
     Write-Host "    Done. Every push to master now deploys itself. Watch it with:" -ForegroundColor Green
     Write-Host "        Get-Content $log -Tail 40 -Wait" -ForegroundColor Green
     exit 0

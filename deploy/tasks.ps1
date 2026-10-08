@@ -17,8 +17,11 @@
 #   -Ensure tunnel  removes them from GCoreGruntechTunnel, starts it if it is
 #                   not running (restarts it once if it was running under the
 #                   old limit), then proves the public address answers.
-#   -Ensure deploy  removes the battery stop from GCoreGruntechDeploy, the
-#                   every-five-minutes auto-deploy (autodeploy.ps1 -Register).
+#   -Ensure deploy  checks GCoreGruntechDeploy, the every-five-minutes
+#                   auto-deploy. autodeploy.ps1 -Register sets its settings
+#                   itself (a task holding a password cannot be changed here
+#                   without it), so this only reports, and says to register
+#                   again if they are wrong.
 #
 # It touches ONLY those three tasks - the names are checked below. Never the
 # `Cloudflared` service (gasiontech's tunnel), never PM2, never a process by
@@ -41,7 +44,9 @@ function Set-RunsIndefinitely([string]$taskName) {
     if (-not $t) { return 'missing' }
     $s = $t.Settings
     $limited = $s.ExecutionTimeLimit -and $s.ExecutionTimeLimit -ne 'PT0S'
+    if ($taskName -eq $ours.deploy) { $limited = $false }   # its runs are short; a per-run limit is right
     if (-not $limited -and -not $s.DisallowStartIfOnBatteries -and -not $s.StopIfGoingOnBatteries) { return 'ok' }
+    if ($taskName -eq $ours.deploy) { return 'limited' }
     $s.ExecutionTimeLimit = 'PT0S'
     $s.DisallowStartIfOnBatteries = $false
     $s.StopIfGoingOnBatteries = $false
@@ -60,6 +65,10 @@ switch ($state) {
         throw "The $name task does not exist. Run deploy\install.ps1 first."
     }
     'changed' { Write-Host "    $name no longer stops after 3 days or on battery power." -ForegroundColor Green }
+    'limited' {
+        Write-Host "    $name would stop on battery power - run deploy\autodeploy.ps1 -Register again to fix its settings." -ForegroundColor Yellow
+        exit 1
+    }
     'ok'      { Write-Host "    $name has no time limit." -ForegroundColor DarkGray }
 }
 if ($Ensure -ne 'tunnel') { exit 0 }
