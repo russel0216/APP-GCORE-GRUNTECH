@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, idsFilter } from '../http/kit';
+import { formatShortDate, renderDocument } from '../shared/pdf';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { upload } from '../shared/attachments';
@@ -31,7 +32,120 @@ import {
 export const partnerRoutes = Router();
 partnerRoutes.use(authenticate);
 
-// ── List ─────────────────────────────────────────────────────────────────────
+// ── List (the quotation list's layout, 2026-10-08) ───────────────────────────
+
+const PUBLISHES = ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP'] as const;
+const PARTNER_DAY = /^\d{4}-\d{2}-\d{2}$/;
+/** An item with a list price on it, still sold — what "priced items" counts. */
+const PRICED_ITEM: Prisma.ItemWhereInput = { isActive: true, listPrice: { not: null } };
+
+function partnerDay(value: string | undefined, label: string): string | null {
+  if (!value) return null;
+  if (!PARTNER_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
+  return value;
+}
+
+/**
+ * A category as one tab: trimmed and case-blind — exactly what the tab's
+ * filter (`equals`, insensitive) can match, so a tab's count is always what
+ * clicking it shows. Inner spaces are not folded: the database cannot.
+ */
+const categoryKey = (c: string) => c.trim().toLowerCase();
+
+/**
+ * Which partners a list query means — ONE rule for the list, its summary
+ * (the "What they supply" tabs) and its PDF. `base` is everything but the
+ * category tab. A category is free text on the supplier, so the tab matches
+ * it case-blind, and `none` is the partners with nothing stated.
+ */
+export function partnerListWhere(
+  me: ReturnType<typeof currentUser>,
+  q: ReturnType<typeof listQuery>,
+): { base: Prisma.SupplierWhereInput; where: Prisma.SupplierWhereInput } {
+  const and: Prisma.SupplierWhereInput[] = [{ isPartner: true }];
+  if (q.search) {
+    and.push({
+      OR: [
+        { name: { contains: q.search, mode: 'insensitive' } },
+        { brand: { contains: q.search, mode: 'insensitive' } },
+        { code: { contains: q.search, mode: 'insensitive' } },
+        { category: { contains: q.search, mode: 'insensitive' } },
+        { contacts: { some: { name: { contains: q.search, mode: 'insensitive' } } } },
+      ],
+    });
+  }
+  const f = q.filters;
+  if (f.isActive) {
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    and.push({ isActive: f.isActive === 'true' });
+  }
+  if (q.scope === 'mine') and.push({ createdById: me.id });
+  if (f.publishes) {
+    if (!(PUBLISHES as readonly string[]).includes(f.publishes)) throw badRequest(`Unknown resource kind: ${f.publishes}`);
+    and.push({ resources: { some: { kind: f.publishes as (typeof PUBLISHES)[number], isActive: true } } });
+  }
+  if (f.priced === 'yes') and.push({ preferredItems: { some: PRICED_ITEM } });
+  else if (f.priced === 'no') and.push({ preferredItems: { none: PRICED_ITEM } });
+  else if (f.priced) throw badRequest('Priced items is yes or no');
+  const from = partnerDay(f.sinceFrom, 'Partner since, from');
+  const to = partnerDay(f.sinceTo, 'Partner since, to');
+  if (from || to) {
+    and.push({
+      partnerSince: {
+        ...(from ? { gte: new Date(`${from}T00:00:00.000Z`) } : {}),
+        ...(to ? { lte: new Date(`${to}T23:59:59.999Z`) } : {}),
+      },
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+
+  const base: Prisma.SupplierWhereInput = { AND: and };
+  if (!f.category) return { base, where: base };
+  const category: Prisma.SupplierWhereInput =
+    f.category === 'none'
+      ? { OR: [{ category: null }, { category: '' }] }
+      : { category: { equals: f.category.trim(), mode: 'insensitive' } };
+  return { base, where: { AND: [...and, category] } };
+}
+
+/**
+ * The tabs — every category on file under `base`, case-blind, the first
+ * spelling naming it, and "Not stated" while any partner has none — with
+ * their counts ('' is All), and the count, how many publish a price list and
+ * how many priced items there are under `where`.
+ */
+export async function partnerListSummary(base: Prisma.SupplierWhereInput, where: Prisma.SupplierWhereInput) {
+  const [perCategory, count, withPriceList, pricedItems] = await Promise.all([
+    prisma.supplier.groupBy({ by: ['category'], where: base, _count: { _all: true }, orderBy: { category: 'asc' } }),
+    prisma.supplier.count({ where }),
+    prisma.supplier.count({ where: { AND: [where, { resources: { some: { kind: 'PRICE_LIST', isActive: true } } }] } }),
+    prisma.item.count({ where: { ...PRICED_ITEM, preferredSupplier: where } }),
+  ]);
+  const tabCounts: Record<string, number> = { '': 0 };
+  const byKey = new Map<string, { value: string; label: string }>();
+  let none = 0;
+  for (const r of perCategory) {
+    tabCounts[''] += r._count._all;
+    const name = (r.category ?? '').trim();
+    if (!name) {
+      none += r._count._all;
+      continue;
+    }
+    const key = categoryKey(name);
+    if (!byKey.has(key)) byKey.set(key, { value: name, label: name });
+    const tab = byKey.get(key)!;
+    tabCounts[tab.value] = (tabCounts[tab.value] ?? 0) + r._count._all;
+  }
+  const tabs = [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
+  if (none > 0) {
+    tabs.push({ value: 'none', label: 'Not stated' });
+    tabCounts.none = none;
+  }
+  return { tabs, tabCounts, count, withPriceList, pricedItems };
+}
+
+const PARTNER_SORTS = ['code', 'name', 'brand', 'createdAt', 'partnerSince'];
 
 partnerRoutes.get(
   '/',
@@ -39,39 +153,26 @@ partnerRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.SupplierWhereInput = { isPartner: true };
+    const { base, where } = partnerListWhere(me, q);
 
-    if (q.search) {
-      where.OR = [
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { brand: { contains: q.search, mode: 'insensitive' } },
-        { code: { contains: q.search, mode: 'insensitive' } },
-        { category: { contains: q.search, mode: 'insensitive' } },
-        { contacts: { some: { name: { contains: q.search, mode: 'insensitive' } } } },
-      ];
-    }
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.scope === 'mine') where.createdById = me.id;
-
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.supplier.findMany({
         where,
         include: {
           contacts: { select: { id: true } },
           resources: { where: { isActive: true }, select: { kind: true } },
-          _count: {
-            select: { preferredItems: { where: { isActive: true, listPrice: { not: null } } } },
-          },
+          _count: { select: { preferredItems: { where: PRICED_ITEM } } },
         },
-        orderBy: orderBy(q, ['code', 'name', 'brand', 'createdAt'], { name: 'asc' }),
+        orderBy: orderBy(q, PARTNER_SORTS, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.supplier.count({ where }),
+      partnerListSummary(base, where),
     ]);
 
-    res.json(
-      listResult(
+    res.json({
+      ...listResult(
         rows.map((r) => ({
           id: r.id,
           code: r.code,
@@ -95,7 +196,80 @@ partnerRoutes.get(
         total,
         q,
       ),
+      summary,
+    });
+  }),
+);
+
+/**
+ * The partner list on paper — the list as filtered (or the rows ticked,
+ * `?ids=`), through `partnerListWhere`. Counts only, never a price or a
+ * cost. Above `/:id`; audited; capped at 1,000 rows.
+ */
+partnerRoutes.get(
+  '/pdf',
+  require_('gops.partners.view_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const { base, where } = partnerListWhere(me, q);
+    const [rows, summary] = await Promise.all([
+      prisma.supplier.findMany({
+        where,
+        include: {
+          resources: { where: { isActive: true }, select: { kind: true } },
+          _count: { select: { preferredItems: { where: PRICED_ITEM } } },
+        },
+        orderBy: orderBy(q, PARTNER_SORTS, { name: 'asc' }),
+        take: 1000,
+      }),
+      partnerListSummary(base, where),
+    ]);
+    const f = q.filters;
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      f.category ? `supplies ${f.category === 'none' ? 'not stated' : f.category}` : null,
+      f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
+      f.publishes ? `publishes a ${humanKind(f.publishes as (typeof PUBLISHES)[number]).toLowerCase()}` : null,
+      f.priced === 'yes' ? 'with priced items' : f.priced === 'no' ? 'no priced items' : null,
+      f.sinceFrom || f.sinceTo ? `partner since ${f.sinceFrom ?? '…'} to ${f.sinceTo ?? '…'}` : null,
+      q.scope === 'mine' ? 'added by me' : null,
+      f.ids ? 'the rows selected' : null,
+    ].filter(Boolean);
+    const kinds = (r: (typeof rows)[number], k: string) => String(r.resources.filter((x) => x.kind === k).length);
+
+    const pdf = await renderDocument({
+      title: 'Partners',
+      date: new Date(),
+      reference: `${summary.count} partner(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Brand and name', 'Supplies', 'Catalogues', 'Price lists', 'Sizing apps', 'Priced items', 'Since', 'Status'],
+          widths: [1.5, 2.6, 1.6, 1, 1, 1, 1, 1.2, 1],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
+          rows: rows.map((r) => [
+            r.code,
+            { title: r.brand ?? r.name, body: r.brand && r.brand !== r.name ? r.name : undefined },
+            r.category ?? '',
+            kinds(r, 'CATALOGUE'),
+            kinds(r, 'PRICE_LIST'),
+            kinds(r, 'SIZING_APP'),
+            String(r._count.preferredItems),
+            r.partnerSince ? formatShortDate(r.partnerSince) : '',
+            r.isActive ? 'Active' : 'Inactive',
+          ]),
+        },
+      ],
+      signatories: [],
+    });
+    await audit(
+      { entityType: 'supplier', entityId: 'list', action: 'EXPORTED', summary: `Exported the partner list as PDF (${rows.length} partner(s))` },
+      req,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="partners.pdf"');
+    res.send(pdf);
   }),
 );
 

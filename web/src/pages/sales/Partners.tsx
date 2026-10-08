@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { ApiError, api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { openAttachment } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
@@ -67,6 +67,116 @@ interface PartnerRow {
   sizingApps: number;
   pricedItems: number;
   createdAt: string;
+}
+
+interface PartnerSummary {
+  count?: number;
+  withPriceList?: number;
+  pricedItems?: number;
+  tabs?: { value: string; label: string }[];
+}
+
+// ── Mass actions: Set what they supply ───────────────────────────────────────
+
+/**
+ * File the ticked partners under one category ("what they supply") — each
+ * the ordinary PATCH /partners/:id, so the audit row is the PATCH's. The box
+ * offers the categories already on file, so a new spelling is a choice, not
+ * an accident. Clearing one is done on the partner's own page, never in
+ * bulk. What did not change stays ticked, with why.
+ */
+function PartnerBulkCategory({ ctx, known }: { ctx: BulkContext<PartnerRow>; known: string[] }) {
+  const toast = useToast();
+  const [category, setCategory] = useState('');
+  const [open, setOpen] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
+  const [refused, setRefused] = useState<{ code: string; why: string }[]>([]);
+  const clean = category.trim().replace(/\s+/g, ' ');
+  const same = (p: PartnerRow) => (p.category ?? '').trim().toLowerCase() === clean.toLowerCase();
+  const go = ctx.rows.filter((p) => !same(p));
+  const stay = ctx.rows.filter(same);
+
+  async function apply() {
+    if (!clean) return;
+    const failed: { row: PartnerRow; why: string }[] = [];
+    let done = 0;
+    setRefused([]);
+    for (let i = 0; i < go.length; i++) {
+      setProgress({ done: i, of: go.length });
+      try {
+        await api.patch(`/partners/${go[i].id}`, { category: clean });
+        done++;
+      } catch (err) {
+        failed.push({ row: go[i], why: err instanceof ApiError ? err.message : 'could not be changed' });
+      }
+    }
+    setProgress(null);
+    const left = [...stay.map((row) => ({ row, why: `already ${clean}` })), ...failed];
+    toast(done > 0 ? 'ok' : 'error', `${done} partner${done === 1 ? '' : 's'} filed under ${clean}${left.length ? `; ${left.length} unchanged` : ''}`);
+    setRefused(left.map((l) => ({ code: l.row.code, why: l.why })));
+    setOpen(false);
+    setCategory('');
+    ctx.reload();
+    if (left.length) ctx.keep(left.map((l) => l.row.id));
+    else ctx.clear();
+  }
+
+  if (!open) {
+    return (
+      <>
+        <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+          Set what they supply…
+        </button>
+        {refused.length > 0 && (
+          <div className="list-bulk-result" role="status">
+            Still selected — these did not change:
+            <ul>
+              {refused.map((r) => (
+                <li key={r.code}>
+                  <span className="mono">{r.code}</span>: {r.why}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </>
+    );
+  }
+  return (
+    <>
+      <input
+        type="text"
+        className="list-bulk-reason"
+        list="partner-bulk-categories"
+        autoFocus
+        aria-label="What the selected partners supply"
+        placeholder="What they supply, e.g. Compressors"
+        value={category}
+        disabled={!!progress}
+        onChange={(e) => setCategory(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setOpen(false);
+        }}
+      />
+      <datalist id="partner-bulk-categories">
+        {known.map((k) => (
+          <option key={k} value={k} />
+        ))}
+      </datalist>
+      <button type="button" className="btn btn-sm btn-primary" disabled={!clean || !go.length || !!progress} onClick={() => void apply()}>
+        {progress
+          ? `Working ${progress.done + 1} of ${progress.of}…`
+          : !clean
+            ? 'Type what they supply'
+            : go.length
+              ? `File ${go.length} under ${clean}`
+              : 'Nothing to change'}
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" disabled={!!progress} onClick={() => setOpen(false)}>
+        Cancel
+      </button>
+    </>
+  );
 }
 
 interface ResourceFile {
@@ -179,6 +289,38 @@ export function Partners() {
   const [reload, setReload] = useState(0);
 
   const count = (n: number) => (n === 0 ? <span className="faint">none</span> : n);
+  // The categories on file, for the bulk box's suggestions — learnt from the
+  // tabs the list's summary sends, so there is no second query for them.
+  const [knownCategories, setKnownCategories] = useState<string[]>([]);
+
+  const filters: FilterDef[] = [
+    {
+      key: 'isActive',
+      label: 'Status',
+      options: [
+        { value: 'true', label: 'Active' },
+        { value: 'false', label: 'Inactive' },
+      ],
+    },
+    {
+      key: 'publishes',
+      label: 'Publishes',
+      options: [
+        { value: 'CATALOGUE', label: 'A catalogue' },
+        { value: 'PRICE_LIST', label: 'A price list' },
+        { value: 'SIZING_APP', label: 'A sizing app' },
+      ],
+    },
+    {
+      key: 'priced',
+      label: 'Priced items',
+      options: [
+        { value: 'yes', label: 'Has items with a list price' },
+        { value: 'no', label: 'None priced yet' },
+      ],
+    },
+    { key: 'sinceFrom', toKey: 'sinceTo', label: 'Partner since', type: 'dateRange' },
+  ];
 
   const columns: Column<PartnerRow>[] = [
     {
@@ -213,7 +355,7 @@ export function Partners() {
         );
       },
     },
-    { key: 'since', label: 'Since', optional: true, render: (p) => formatDate(p.partnerSince) },
+    { key: 'since', label: 'Since', sortKey: 'partnerSince', render: (p) => formatDate(p.partnerSince) },
     { key: 'contacts', label: 'Contacts', align: 'right', optional: true, render: (p) => count(p.contactCount) },
     {
       key: 'isActive',
@@ -253,32 +395,47 @@ export function Partners() {
         emptyTitle="No partners yet"
         emptyHint="Add the principals you represent, or import a list."
         emptyAction={addButton || undefined}
-        filters={[
-          {
-            key: 'isActive',
-            label: 'Status',
-            options: [
-              { value: 'true', label: 'Active' },
-              { value: 'false', label: 'Inactive' },
-            ],
-          },
-        ]}
-        actions={
-          <>
-            {addButton}
-            {can('gops.partners.create') && (
-              <button
-                className="btn btn-sm"
-                onClick={async () => {
-                  const spec = await loadImportSpec('partners');
-                  if (spec) setImporting(spec as { label: string; columns: never[] });
-                }}
-              >
-                Import
-              </button>
-            )}
-          </>
+        tabs={{ key: 'category', label: 'What they supply', allLabel: 'All partners', options: [] }}
+        filters={filters}
+        printPath="/api/partners/pdf"
+        selectable
+        rowLabel={(p) => `${p.code} ${p.brand ?? p.name}`}
+        bulkActions={can('gops.partners.edit_all') ? (ctx) => <PartnerBulkCategory ctx={ctx} known={knownCategories} /> : undefined}
+        menuItems={
+          can('gops.partners.create')
+            ? [
+                {
+                  label: 'Import partners…',
+                  hint: 'From a spreadsheet, checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('partners').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
         }
+        summaryLine={(raw, total) => {
+          const sum = raw as PartnerSummary;
+          return (
+            <>
+              <span>
+                <strong>{total}</strong> partner{total === 1 ? '' : 's'}
+              </span>
+              <span>
+                <strong>{sum.withPriceList ?? 0}</strong> publish a price list
+              </span>
+              <span>
+                <strong>{sum.pricedItems ?? 0}</strong> priced items
+              </span>
+            </>
+          );
+        }}
+        onSummary={(raw) =>
+          setKnownCategories(((raw as PartnerSummary).tabs ?? []).filter((t) => t.value !== 'none').map((t) => t.label))
+        }
+        actions={addButton || null}
       />
 
       {adding && (

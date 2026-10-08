@@ -28,6 +28,8 @@ import { globalSearch } from '../src/shared/search';
 import { deleteAttachment } from '../src/shared/attachments';
 import { previewNext } from '../src/shared/numbering';
 import { listQuery } from '../src/http/kit';
+import { partnerListSummary, partnerListWhere } from '../src/routes/partners';
+import zlib from 'node:zlib';
 import {
   PARTNER_RESOURCE_ENTITY,
   makePartner,
@@ -676,6 +678,102 @@ async function httpCases(ctx: {
     bills.some((b) => b.number === `${TAG}-BILL-1` && b.outstanding === 110),
     JSON.stringify(bills).slice(0, 160),
   );
+
+  // ── The partner list, in the quotation list's layout (2026-10-08) ──────────
+  console.log('\nThe partner list: what-they-supply tabs, filters, print');
+  const LISTP = `${TAG} LISTP`;
+  const mk = (name: string, category: string | null, since?: string) =>
+    prisma.supplier.create({
+      data: {
+        code: `${TAG}-LP-${name}`,
+        name: `${LISTP} ${name}`,
+        isPartner: true,
+        category,
+        partnerSince: since ? new Date(`${since}T00:00:00Z`) : null,
+      },
+    });
+  const pA = await mk('A', 'Verify Compressors', '2026-03-01');
+  const pB = await mk('B', 'VERIFY compressors');
+  await mk('C', null);
+  await prisma.partnerResource.create({ data: { supplierId: pA.id, kind: 'PRICE_LIST', title: 'Price list', url: 'https://example.com/p' } });
+  await prisma.item.create({ data: { code: `${TAG}-LPI`, name: `${TAG} LISTP item`, preferredSupplierId: pA.id, listPrice: new Prisma.Decimal(5) } });
+
+  const me = (await resolveUser(ctx.admin.id))!;
+  const pq = (query: Record<string, string>) =>
+    listQuery({ query: { search: LISTP, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+  const all = partnerListWhere(me, pq({}));
+  const sum = await partnerListSummary(all.base, all.where);
+  check(
+    'one tab per category, case- and space-blind, and "Not stated" for the partner with none',
+    sum.tabCounts[''] === 3 && sum.tabs.length === 2 && sum.tabCounts[sum.tabs[0].value] === 2 && sum.tabCounts.none === 1 &&
+      sum.tabs[1]?.value === 'none',
+    JSON.stringify(sum),
+  );
+  const count = (query: Record<string, string>) => prisma.supplier.count({ where: partnerListWhere(me, pq(query)).where });
+  let tabsHold = true;
+  for (const t of sum.tabs) if ((await count({ category: t.value })) !== sum.tabCounts[t.value]) tabsHold = false;
+  check(
+    'every tab shows exactly what its count says — a category matched case-blind, Not stated the partner with none',
+    tabsHold && (await count({ category: 'verify compressors' })) === 2 && (await count({ category: 'none' })) === 1,
+  );
+  check(
+    '"Publishes a price list", "Priced items" and "Partner since" select what they say',
+    (await count({ publishes: 'PRICE_LIST' })) === 1 && (await count({ priced: 'yes' })) === 1 && (await count({ priced: 'no' })) === 2 &&
+      (await count({ sinceFrom: '2026-03-01', sinceTo: '2026-03-01' })) === 1,
+  );
+  check('the totals count the price lists and the priced items', sum.withPriceList === 1 && sum.pricedItems === 1, JSON.stringify(sum));
+  let bad = 0;
+  for (const q of [{ publishes: 'BROCHURE' }, { priced: 'maybe' }, { sinceFrom: '1 March' }, { isActive: 'yes' }]) {
+    try {
+      partnerListWhere(me, pq(q));
+    } catch (err) {
+      if ((err as { status?: number }).status === 400) bad++;
+    }
+  }
+  check('a malformed filter is a 400', bad === 4, `${bad} of 4`);
+
+  const overHttp = await http(viewerT, 'GET', `/partners?search=${encodeURIComponent(LISTP)}`);
+  const httpSum = overHttp.body.summary as { tabCounts: Record<string, number>; count: number } | undefined;
+  check(
+    'GET /partners carries the summary, matching its rows',
+    overHttp.status === 200 && !!httpSum && httpSum.count === (overHttp.body.rows as unknown[]).length && httpSum.tabCounts[''] === 3,
+    overHttp.text.slice(0, 160),
+  );
+  const paper = await fetch(`${BASE}/partners/pdf?ids=${pB.id}`, { headers: { Authorization: `Bearer ${viewerT}` } });
+  const paperText = pdfLine(Buffer.from(await paper.arrayBuffer()));
+  check(
+    'the printed partner list prints the ticked partner alone, and says so',
+    paper.status === 200 && paperText.replace(/ /g, '').includes(`${TAG}-LP-B`) && !paperText.replace(/ /g, '').includes(`${TAG}-LP-A`) &&
+      paperText.includes('the rows selected'),
+    paperText.slice(0, 200),
+  );
+  check('printing is refused without the key', (await fetch(`${BASE}/partners/pdf`, { headers: { Authorization: `Bearer ${outsiderT}` } })).status === 403);
+  const recat = await http(mgrT, 'PATCH', `/partners/${pB.id}`, { category: 'Verify Compressors' });
+  check('"Set what they supply" is the ordinary PATCH', recat.status === 200);
+}
+
+/** A PDF's text runs, joined and with runs of whitespace collapsed. */
+function pdfLine(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  for (const m of raw.matchAll(/stream\r?\n/g)) {
+    const start = m.index! + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join(' ').replace(/\s+/g, ' ');
 }
 
 main()

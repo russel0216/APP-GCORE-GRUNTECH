@@ -135,6 +135,8 @@ interface Props<T> {
   menuItems?: { label: string; hint?: string; onSelect: () => void }[];
   /** The totals line under the table, from the endpoint's `summary` and the filtered total. */
   summaryLine?: (summary: ListSummary, total: number) => ReactNode;
+  /** Told each time a fetch brings a summary — for a screen that learns from it (the partners' categories). */
+  onSummary?: (summary: ListSummary) => void;
   rowKey: (row: T) => string;
 }
 
@@ -161,6 +163,7 @@ export function DataList<T>({
   rowLabel,
   menuItems = [],
   summaryLine,
+  onSummary,
   rowKey,
 }: Props<T>) {
   const [data, setData] = useState<ListResult<T> | null>(null);
@@ -334,6 +337,12 @@ export function DataList<T>({
   useEffect(() => {
     void load();
   }, [load, reloadToken]);
+
+  const onSummaryRef = useRef(onSummary);
+  onSummaryRef.current = onSummary;
+  useEffect(() => {
+    if (data?.summary) onSummaryRef.current?.(data.summary);
+  }, [data]);
 
   // A ticked row on the page just fetched is replaced by its fresh copy, so a
   // mass action never plans from a status the row no longer has.

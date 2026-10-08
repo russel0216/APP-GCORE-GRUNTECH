@@ -102,7 +102,8 @@ four databases and four copies of "customer".
    `idsFilter()` in `api/src/http/kit.ts`, ANDed with its visibility rule,
    at most 500, and `rowKey` must be the record id) and the screen's own
    `bulkActions(ctx)`. A screen's own tools (the customer list's Import) go
-   in the ⋯ menu through `menuItems`. A selection outlives a page change, never a change of
+   in the ⋯ menu through `menuItems`; `onSummary` hands a screen each fetch's
+   summary (never set state from inside `summaryLine`, which runs in render). A selection outlives a page change, never a change of
    search, scope or filters; the rules are `pageSelection` / `togglePage` in
    `lib/listUrl.ts`. A ticked row's box never opens the record. **Never a
    bulk delete** — a record is deleted from its own page, with its own
@@ -185,9 +186,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,499 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+**2,508 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
 masters 62, sales 379, costing 120, pipeline 71, calendar 46, numbering 46,
-partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
+partners 91, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -772,6 +773,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   industry and Active / Inactive, each the ordinary `PATCH /customers/:id`
   per row — the code never moves with the industry, and an inactive
   industry is refused by the PATCH. Import moved into the ⋯ menu.
+- **The partner list is the quotation list's layout** (2026-10-08): "What
+  they supply" as tabs — every category on file under the other filters,
+  matched **trimmed and case-blind** (`equals`, insensitive), the first
+  spelling naming it, and "Not stated" while any partner has none
+  (`partnerListSummary()` sends `summary.tabs`). Inner spaces are NOT
+  folded: the filter cannot fold them, and a tab must show exactly what its
+  count says (verify-partners asserts it for every tab). Filters: status,
+  Publishes (a catalogue / price list / sizing app), Priced items, Partner
+  since (a DATE); the totals line counts partners, those publishing a price
+  list and priced items; `GET /partners/pdf` (above `/:id`, counts only —
+  never a price or a cost; audited) and Print selected. The master is
+  shared, so All for everyone. Mass action (`gops.partners.edit_all`): Set
+  what they supply — the ordinary `PATCH /partners/:id` per row, the box
+  suggesting the categories on file; clearing one is done on the partner's
+  own page, never in bulk. Import moved into the ⋯ menu.
 - **An import that matches on a non-unique name refuses rather than guesses** —
   the items import's Preferred Supplier matching two suppliers (a principal and
   its distributor sharing a brand) is an error, not a silent pick.
