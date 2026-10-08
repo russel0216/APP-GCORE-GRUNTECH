@@ -93,8 +93,19 @@ four databases and four copies of "customer".
    `dateRange` (two keys) or a `lookup` (`search` + `describe`). `tabs` draws a
    strip over one filter key with counts from the endpoint's
    `summary.tabCounts` (and its names from `summary.tabs` when sent);
-   `summaryLine` prints the endpoint's totals for the whole filtered set;
-   `defaultScope` is where Mine/All starts when the URL says nothing. Saved
+   `footer` is the **totals row** at the foot of the table (2026-10-08, the
+   owner's call, after SCORO's list of quotes): cells by column key from the
+   endpoint's `summary` — the count under Number, the sum under Total, the
+   margin under Margin, each a `FootCell` (label over figure); a hidden
+   column takes its cell with it. Never a loose totals line again.
+   `defaultScope` is where the scope switch starts when the URL says
+   nothing; the switch is **Mine · Team · All** where `teamScope` is on —
+   Team for a viewer whose employee record has a team (`me.user.team`,
+   `shared/team.ts`: the Team IS `Employee.industryId`), on the quotation,
+   lead and sales order lists, and the API's `?scope=team` falls back to
+   Mine for a viewer with none. **A list screen is its title and the list**:
+   no paragraph under the title, and the primary button is "+ New …" on
+   every one of them (the owner's call, 2026-10-08). Saved
    views are per viewer in localStorage (`gcore_views_<listKey>`), like column
    choices. **Mass actions** (`selectable`): tick boxes and a bar over the
    table with Export selected, Print selected (`printPath` with the ticked
@@ -107,7 +118,7 @@ four databases and four copies of "customer".
    on the quotation and sales order lists — SCORO's icon: the paper without
    opening the record; the click and the keys stop at the cell, so the row
    never opens with it); `onSummary` hands a screen each fetch's
-   summary (never set state from inside `summaryLine`, which runs in render). A selection outlives a page change, never a change of
+   summary (never set state from inside `footer`, which runs in render). A selection outlives a page change, never a change of
    search, scope or filters; the rules are `pageSelection` / `togglePage` in
    `lib/listUrl.ts`. A ticked row's box never opens the record. **Never a
    bulk delete** — a record is deleted from its own page, with its own
@@ -196,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,526 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
-masters 71, sales 380, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,536 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 388, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 99, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -498,6 +509,10 @@ are permission-configurable — that is deliberate, not a stub left behind.
 - **Burdened, never the wage.** A project is charged
   `dailyRate × burden ÷ hoursPerDay × premium`. Nobody sees a colleague's salary
   on a project screen; `ghr.employee_rates.view_all` gates the rate itself.
+- **The Sales strip is the sales flow** (2026-10-08, the owner's call):
+  Sales Pipeline, Leads, Quotations, Sales Orders, Customers, Partners,
+  Calendar — the registry's order, pinned by verify-foundation like Project
+  Management's.
 - **The menu highlights the longest matching path.** A module dashboard lives at
   the module root (`/g-hr`, `/g-chain`), so a plain prefix test lights it up on
   every screen in that module. `Shell.tsx` picks the most specific match.
@@ -646,6 +661,17 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   modules. The `/my-work` row contract is `{ id, kind, title, subtitle?, when?,
   overdue?, link }` with `link` starting `/` — a new source of work adds a query
   and a mapper, never a new section shape.
+- **"My team" is `teamOf(userId)` / `teamMembers(teamId)` in `shared/team.ts`**
+  (2026-10-08): the Industry row on the viewer's employee record, nothing
+  else — a login with no employee, or an employee with no team, has none.
+  `listQuery` parses `scope=team`; `quotationListWhere`, `leadListWhere` and
+  `salesOrderListWhere` take the team id and narrow to its members' records
+  (`owner` / `assignedTo`), and their summaries carry `team: { count, value
+  }` — the team's share of the set for the totals row — and `margin` only
+  where the caller may see every listed record's cost (edit-all, costing
+  rights, own-scope, or the set is their own): `revisionsMargin()` sums the
+  rows' own margins through one GROUP BY, never a figure a row would not
+  show. `/auth/me` sends `user.team`.
 - **Search providers may declare `permission: string[]` and `ownWhere(user)`**;
   own-scope narrowing applies only when the caller holds none of the provider's
   non-`view_own` keys. A provider without it shows every record to a `view_own`
@@ -1749,13 +1775,21 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   date or an unknown choice is a 400. The old `?outcome=` still filters.
 - **Mine for whoever may edit quotations, All for a reader** (the owner's
   call): `defaultScope` is Mine for `edit_own`/`edit_all` holders. A link's
-  `?scope=` wins.
+  `?scope=` wins. **Team** sits between them for a viewer with a team
+  (2026-10-08): the quotations of everyone on their team. The totals row
+  carries the count, the total value, the margin (where every listed
+  quotation's cost is theirs to see) and "My team: n · ₱x" — the team's
+  share of the set — under Owner, while the Team view is off.
 - **Columns**: Number, Quotation (contact under it), Customer (sorts by name),
   Status (the stage on `StatusBadge` with `STAGE_TONES`, its name from the
   row's `stageLabel`), Revision, Total, Margin (only for a viewer who may see
   cost — `canSeeQuotationCost` per row, read off the value revision's lines
   through `quotationTotals`; null when no line is costed), Owner, Closing,
-  Raised; Probability and Modified are under Columns.
+  Raised, then **PDF** — `PdfButton`, the value revision's paper (the row
+  carries `valueRevision.id`); Probability and Modified are under Columns.
+  The column pattern every Sales list follows: Number · Name · Customer ·
+  Status · figures (right-aligned) · Owner · dates · PDF; the masters put
+  Status right after their classification.
 - **The leads and installed-base lists print through `printPath` too**; their
   hand-built "Export PDF" buttons, which re-read the URL themselves, are gone.
   All three honour `?ids=` for Print selected.

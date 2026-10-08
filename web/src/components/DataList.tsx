@@ -133,8 +133,15 @@ interface Props<T> {
    * Columns. A tool goes here, never back on the toolbar line (rule 9).
    */
   menuItems?: { label: string; hint?: string; onSelect: () => void }[];
-  /** The totals line under the table, from the endpoint's `summary` and the filtered total. */
-  summaryLine?: (summary: ListSummary, total: number) => ReactNode;
+  /**
+   * The totals row under the columns (2026-10-08, after SCORO's list of
+   * quotes): cells by column key — the count under Number, the sum under
+   * Total — from the endpoint's `summary`, the filtered total and the scope
+   * on. A cell whose column is hidden goes with it. `FootCell` draws one.
+   */
+  footer?: (summary: ListSummary, total: number, scope: ListScope) => Record<string, ReactNode>;
+  /** Offer Team between Mine and All — for a viewer whose employee record has a team (`me.user.team`). */
+  teamScope?: boolean;
   /** Told each time a fetch brings a summary — for a screen that learns from it (the partners' categories). */
   onSummary?: (summary: ListSummary) => void;
   rowKey: (row: T) => string;
@@ -162,7 +169,8 @@ export function DataList<T>({
   bulkActions,
   rowLabel,
   menuItems = [],
-  summaryLine,
+  footer,
+  teamScope = false,
   onSummary,
   rowKey,
 }: Props<T>) {
@@ -556,6 +564,19 @@ export function DataList<T>({
             >
               Mine
             </button>
+            {teamScope && (
+              <button
+                type="button"
+                className={scope === 'team' ? 'active' : ''}
+                aria-pressed={scope === 'team'}
+                onClick={() => {
+                  setScope('team');
+                  setPage(1);
+                }}
+              >
+                Team
+              </button>
+            )}
             <button
               type="button"
               className={scope === 'all' ? 'active' : ''}
@@ -1032,15 +1053,27 @@ export function DataList<T>({
                 </tr>
               ))}
             </tbody>
+            {footer &&
+              data.summary &&
+              data.total > 0 &&
+              (() => {
+                const cells = footer(data.summary, data.total, scope);
+                return (
+                  <tfoot>
+                    <tr className="list-foot">
+                      {selectable && <td className="list-select" />}
+                      {visible.map((c) => (
+                        <td key={c.key} className={c.align === 'right' ? 'num' : undefined} style={{ textAlign: c.align }}>
+                          {cells[c.key] ?? null}
+                        </td>
+                      ))}
+                    </tr>
+                  </tfoot>
+                );
+              })()}
           </table>
         )}
       </div>
-
-      {summaryLine && data?.summary && data.total > 0 && (
-        <div className="list-totals" aria-live="polite">
-          {summaryLine(data.summary, data.total)}
-        </div>
-      )}
 
       {data && data.total > 0 && (
         <div className="pager">
@@ -1228,4 +1261,14 @@ function extractText(node: ReactNode): string {
 function csvCell(value: string): string {
   const v = value.replace(/\s+/g, ' ').trim();
   return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** One cell of the totals row: a small label over the figure. */
+export function FootCell({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <span className="list-foot-label">{label}</span>
+      <span className="list-foot-value">{children}</span>
+    </>
+  );
 }

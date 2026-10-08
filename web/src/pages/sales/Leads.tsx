@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Attachments } from '../../components/Attachments';
 import { ActivityLog } from '../../components/ActivityLog';
 import {
@@ -238,6 +238,8 @@ interface LeadSummary {
   count?: number;
   value?: number;
   weighted?: number;
+  /** The viewer's team's share of the set; only for a viewer with a team. */
+  team?: { count: number; value: number; weighted: number };
 }
 
 // ── Mass actions: Change status, Assign to ──────────────────────────────────
@@ -409,7 +411,7 @@ function LeadBulkActions({ ctx, people }: { ctx: BulkContext<LeadRow>; people: P
 }
 
 export function Leads() {
-  const { can } = useAuth();
+  const { me, can } = useAuth();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   /*
@@ -553,10 +555,6 @@ export function Leads() {
       <div className="page-head">
         <div>
           <h1>Leads</h1>
-          <p>
-            Work in progress before it is a quotation. Assign a lead to whoever is chasing it — they
-            get notified, and it shows up in their pipeline.
-          </p>
         </div>
       </div>
 
@@ -579,27 +577,29 @@ export function Leads() {
         selectable
         rowLabel={(l) => `${l.number} ${l.companyName}`}
         bulkActions={(ctx) => <LeadBulkActions ctx={ctx} people={people} />}
-        summaryLine={(raw, total) => {
+        teamScope={!!me?.user.team && can('gops.leads.view_all')}
+        footer={(raw, total, scope) => {
           const sum = raw as LeadSummary;
-          return (
-            <>
-              <span>
-                <strong>{total}</strong> lead{total === 1 ? '' : 's'}
-              </span>
-              <span>
-                Estimated value <strong>{formatMoney(sum.value ?? 0)}</strong>
-              </span>
-              <span>
-                Weighted <strong>{formatMoney(sum.weighted ?? 0)}</strong>
-              </span>
-            </>
-          );
+          return {
+            number: <FootCell label={`Lead${total === 1 ? '' : 's'}`}>{total}</FootCell>,
+            estimatedValue: <FootCell label="Estimated value">{formatMoney(sum.value ?? 0)}</FootCell>,
+            weighted: <FootCell label="Weighted">{formatMoney(sum.weighted ?? 0)}</FootCell>,
+            ...(sum.team && scope !== 'team'
+              ? {
+                  assignedTo: (
+                    <FootCell label="My team">
+                      {sum.team.count} · {formatMoney(sum.team.value)}
+                    </FootCell>
+                  ),
+                }
+              : {}),
+          };
         }}
         actions={
           <>
             {can('gops.leads.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-                + Add lead
+                + New lead
               </button>
             )}
           </>

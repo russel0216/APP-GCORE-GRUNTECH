@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { openAttachment } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
@@ -323,6 +323,7 @@ export function Partners() {
   ];
 
   const columns: Column<PartnerRow>[] = [
+    { key: 'code', label: 'Code', sortKey: 'code', render: (p) => <span className="mono">{p.code}</span> },
     {
       key: 'brand',
       label: 'Brand',
@@ -334,8 +335,12 @@ export function Partners() {
         </div>
       ),
     },
-    { key: 'code', label: 'Code', sortKey: 'code', render: (p) => <span className="mono">{p.code}</span> },
     { key: 'category', label: 'Supplies', render: (p) => p.category ?? '—' },
+    {
+      key: 'isActive',
+      label: 'Status',
+      render: (p) => <StatusBadge status={p.isActive ? 'ACTIVE' : 'INACTIVE'} extra={STATUS_EXTRA} />,
+    },
     { key: 'catalogues', label: 'Catalogues', align: 'right', render: (p) => count(p.catalogues) },
     { key: 'priceLists', label: 'Price lists', align: 'right', render: (p) => count(p.priceLists) },
     { key: 'sizingApps', label: 'Sizing apps', align: 'right', render: (p) => count(p.sizingApps) },
@@ -357,16 +362,11 @@ export function Partners() {
     },
     { key: 'since', label: 'Since', sortKey: 'partnerSince', render: (p) => formatDate(p.partnerSince) },
     { key: 'contacts', label: 'Contacts', align: 'right', optional: true, render: (p) => count(p.contactCount) },
-    {
-      key: 'isActive',
-      label: 'Status',
-      render: (p) => <StatusBadge status={p.isActive ? 'ACTIVE' : 'INACTIVE'} extra={STATUS_EXTRA} />,
-    },
   ];
 
   const addButton = can('gops.partners.create') && (
     <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-      + Add partner
+      + New partner
     </button>
   );
 
@@ -375,11 +375,6 @@ export function Partners() {
       <div className="page-head">
         <div>
           <h1>Partners</h1>
-          <p>
-            The principals whose equipment we sell and service — their catalogues, price lists and
-            sizing tools in one place. Each is also a supplier: procurement orders from the same
-            record.
-          </p>
         </div>
       </div>
 
@@ -416,21 +411,13 @@ export function Partners() {
               ]
             : []
         }
-        summaryLine={(raw, total) => {
+        footer={(raw, total) => {
           const sum = raw as PartnerSummary;
-          return (
-            <>
-              <span>
-                <strong>{total}</strong> partner{total === 1 ? '' : 's'}
-              </span>
-              <span>
-                <strong>{sum.withPriceList ?? 0}</strong> publish a price list
-              </span>
-              <span>
-                <strong>{sum.pricedItems ?? 0}</strong> priced items
-              </span>
-            </>
-          );
+          return {
+            code: <FootCell label={`Partner${total === 1 ? '' : 's'}`}>{total}</FootCell>,
+            priceLists: <FootCell label="Publish a price list">{sum.withPriceList ?? 0}</FootCell>,
+            pricedItems: <FootCell label="Priced items">{sum.pricedItems ?? 0}</FootCell>,
+          };
         }}
         onSummary={(raw) =>
           setKnownCategories(((raw as PartnerSummary).tabs ?? []).filter((t) => t.value !== 'none').map((t) => t.label))

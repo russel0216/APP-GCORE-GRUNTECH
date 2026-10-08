@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import type { Industry } from './Reference';
@@ -221,6 +221,11 @@ export function Customers() {
     },
     { key: 'industry', label: 'Industry', render: (c) => <IndustryLabel industry={c.industry} /> },
     {
+      key: 'isActive',
+      label: 'Status',
+      render: (c) => <StatusBadge status={c.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
+    },
+    {
       key: 'contacts',
       label: 'Contacts',
       align: 'right',
@@ -266,11 +271,6 @@ export function Customers() {
         </div>
       ),
     },
-    {
-      key: 'isActive',
-      label: 'Status',
-      render: (c) => <StatusBadge status={c.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
-    },
   ];
 
   const filters: FilterDef[] = [
@@ -307,12 +307,6 @@ export function Customers() {
       <div className="page-head">
         <div>
           <h1>Customers</h1>
-          <p>
-            One customer record, used by Sales, Projects, Procurement, Finance and Service. A
-            customer can hold many contacts and many sites — a hospital group is one customer with
-            one plant per location. Every customer is filed under an industry, so sales can be
-            counted by the market they come from.
-          </p>
         </div>
       </div>
 
@@ -353,21 +347,17 @@ export function Customers() {
               ]
             : []
         }
-        summaryLine={(raw, total) => {
+        footer={(raw, total) => {
           const sum = raw as CustomerSummary;
-          return (
-            <>
-              <span>
-                <strong>{total}</strong> customer{total === 1 ? '' : 's'}
-              </span>
-              {!!sum.inactive && <span>{sum.inactive} inactive</span>}
-            </>
-          );
+          return {
+            code: <FootCell label={`Customer${total === 1 ? '' : 's'}`}>{total}</FootCell>,
+            ...(sum.inactive ? { isActive: <FootCell label="Inactive">{sum.inactive}</FootCell> } : {}),
+          };
         }}
         actions={
           can('gops.customers.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + Add customer
+              + New customer
             </button>
           ) : null
         }

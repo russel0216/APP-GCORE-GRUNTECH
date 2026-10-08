@@ -101,19 +101,22 @@ export const REGISTRY: ModuleDef[] = [
     blurb: 'Operations — sales, projects, costing, after market',
     submodules: [
       { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-ops', actions: READ, phase: 3 },
+      // The Sales strip, in the order of the sales flow (2026-10-08, the
+      // owner's call): pipeline, leads, quotations, sales orders, then the
+      // masters and the calendar. The registry's order is the strip's order.
+      { key: 'pipeline', group: 'Sales', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
       { key: 'leads', group: 'Sales', label: 'Leads', path: '/g-ops/leads', actions: OWNED, phase: 3 },
-      { key: 'customers', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
-      { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
       { key: 'quotations', group: 'Sales', label: 'Quotations', path: '/g-ops/quotations', actions: OWNED_APPROVABLE, phase: 3 },
       { key: 'sales_orders', group: 'Sales', label: 'Sales Orders', path: '/g-ops/sales-orders', actions: OWNED, phase: 9,
         note: 'Books a quotation in operations — SCORO\'s "Create invoice"' },
+      { key: 'customers', group: 'Sales', label: 'Customers', path: '/g-ops/customers', actions: SHARED, phase: 2 },
+      { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
+        note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, sizing apps. One supplier record, seen from Sales.' },
+      { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
       // The SCORO history, read-only. Continuing an open SCORO quote raises a live
       // quotation under the quotations permission; 'create' here is the admin import.
       { key: 'quote_archive', group: 'Sales', label: 'SCORO Archive', path: '/g-ops/quote-archive', actions: ['view_all', 'export', 'create'], phase: 3, hidden: true,
         note: 'Read-only SCORO quotation history. Create = run the SCORO import; continuing a quote uses the Quotations create permission.' },
-      { key: 'pipeline', group: 'Sales', label: 'Sales Pipeline', path: '/g-ops/pipeline', actions: READ, phase: 3 },
-      { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
-        note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, sizing apps. One supplier record, seen from Sales.' },
       // Project Management (2026-10-06, the owner's order): Costing, Job
       // Orders, Projects — the way the old gasiontech G-CORE arranged it. The
       // registers that follow are hidden (rule: hidden, never deleted): each

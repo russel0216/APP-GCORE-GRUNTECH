@@ -200,6 +200,8 @@ export interface Me {
     roles: string[];
     /** Attachment id — see components/ui.tsx's Avatar. */
     photoPath: string | null;
+    /** The Team on the employee record (HR's field), for the lists' Mine · Team · All switch; null without one. */
+    team: { id: string; code: string; name: string } | null;
   };
   permissions: string[];
   menu: MenuModule[];

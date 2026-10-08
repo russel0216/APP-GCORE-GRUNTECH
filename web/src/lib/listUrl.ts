@@ -10,7 +10,8 @@
  * route's preset, so a menu entry keeps the path the registry declares.
  */
 
-export type ListScope = 'mine' | 'all';
+/** Mine · Team · All — `team` is offered only to a viewer whose employee record has a team (see `teamScope` on DataList). */
+export type ListScope = 'mine' | 'team' | 'all';
 
 export interface ListOption {
   value: string;
@@ -85,7 +86,7 @@ export function readListUrl(params: URLSearchParams, filterKeys: string[]): List
   const pageRaw = Number(params.get('page'));
   return {
     q: params.get('q'),
-    scope: scopeRaw === 'mine' || scopeRaw === 'all' ? scopeRaw : null,
+    scope: scopeRaw === 'mine' || scopeRaw === 'team' || scopeRaw === 'all' ? scopeRaw : null,
     page: Number.isInteger(pageRaw) && pageRaw > 0 ? pageRaw : null,
     filters,
   };

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
+import { teamMembers, teamOf } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -220,10 +221,13 @@ function soDay(value: string | undefined, label: string): string | null {
 export function salesOrderListWhere(
   me: ReturnType<typeof currentUser>,
   q: ReturnType<typeof listQuery>,
+  /** The viewer's team (shared/team.ts) for `?scope=team`; without one the Team view is Mine. */
+  team: string | null = null,
 ): { base: Prisma.SalesOrderWhereInput; where: Prisma.SalesOrderWhereInput } {
   const and: Prisma.SalesOrderWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all');
   if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+  if (q.scope === 'team') and.push(team ? { owner: teamMembers(team) } : { ownerId: me.id });
   const f = q.filters;
   if (f.customerId) and.push({ customerId: f.customerId });
   if (f.quotationId) and.push({ quotationId: f.quotationId });
@@ -272,12 +276,51 @@ export function salesOrderListWhere(
  * standing — a cancelled order books nothing (the quotation page's
  * "Booked"), so it is counted apart, never summed in.
  */
-export async function salesOrderListSummary(base: Prisma.SalesOrderWhereInput, where: Prisma.SalesOrderWhereInput) {
-  const [perStatus, live, cancelled] = await Promise.all([
+export async function salesOrderListSummary(
+  base: Prisma.SalesOrderWhereInput,
+  where: Prisma.SalesOrderWhereInput,
+  /** `teamWhere`: the viewer's team's share of the booked value; `margin`: only where the caller may see every listed order's cost. */
+  opts: { teamWhere?: Prisma.SalesOrderWhereInput | null; margin?: boolean } = {},
+) {
+  const LIVE: Prisma.SalesOrderWhereInput = { status: { not: 'CANCELLED' } };
+  const [perStatus, live, cancelled, team, liveOrders] = await Promise.all([
     prisma.salesOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
-    prisma.salesOrder.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { total: true }, _count: { _all: true } }),
+    prisma.salesOrder.aggregate({ where: { AND: [where, LIVE] }, _sum: { total: true }, _count: { _all: true } }),
     prisma.salesOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+    opts.teamWhere ? prisma.salesOrder.aggregate({ where: { AND: [where, LIVE, opts.teamWhere] }, _sum: { total: true }, _count: { _all: true } }) : null,
+    opts.margin ? prisma.salesOrder.findMany({ where: { AND: [where, LIVE] }, select: { id: true, discountPct: true, vatRate: true, vatInclusive: true } }) : null,
   ]);
+  // The totals row's margin: every live order with a costed line, the row's
+  // own figure summed, against the orders' sums without tax (the quotation
+  // list's rule, over SalesOrderLine).
+  let margin: { amount: number; pct: number | null; costed: number } | undefined;
+  if (liveOrders) {
+    const sums = liveOrders.length
+      ? await prisma.salesOrderLine.groupBy({
+          by: ['orderId'],
+          where: { orderId: { in: liveOrders.map((o) => o.id) }, isHeading: false },
+          _sum: { amount: true, costAmount: true },
+          _count: { costAmount: true },
+        })
+      : [];
+    let marginCents = 0;
+    let netCents = 0;
+    let costed = 0;
+    for (const s of sums) {
+      if (!s._count.costAmount) continue;
+      const o = liveOrders.find((x) => x.id === s.orderId)!;
+      const t = quotationTotals({
+        lines: [{ amount: s._sum.amount ?? 0, costAmount: s._sum.costAmount ?? 0 }],
+        discountPct: o.discountPct,
+        vatRate: o.vatRate,
+        vatInclusive: o.vatInclusive,
+      });
+      marginCents += Math.round(t.cost.totalMargin * 100);
+      netCents += Math.round(t.netOfTax * 100);
+      costed++;
+    }
+    margin = { amount: marginCents / 100, pct: netCents > 0 ? Math.round((marginCents / netCents) * 1000) / 10 : null, costed };
+  }
   const tabCounts: Record<string, number> = { '': 0 };
   for (const st of SALES_ORDER_STATUSES) tabCounts[st] = 0;
   for (const r of perStatus) {
@@ -289,6 +332,8 @@ export async function salesOrderListSummary(base: Prisma.SalesOrderWhereInput, w
     count: live._count._all + cancelled,
     value: num(live._sum.total),
     cancelledCount: cancelled,
+    ...(team ? { team: { count: team._count._all, value: num(team._sum.total) } } : {}),
+    ...(margin ? { margin } : {}),
   };
 }
 
@@ -305,7 +350,8 @@ salesOrderRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = salesOrderListWhere(me, q);
+    const team = await teamOf(me.id);
+    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null);
 
     const [rows, total, summary] = await Promise.all([
       prisma.salesOrder.findMany({
@@ -316,7 +362,15 @@ salesOrderRoutes.get(
         take: q.pageSize,
       }),
       prisma.salesOrder.count({ where }),
-      salesOrderListSummary(base, where),
+      salesOrderListSummary(base, where, {
+        teamWhere: team ? { owner: teamMembers(team.id) } : null,
+        margin:
+          me.isSuperAdmin ||
+          me.permissions.has('gops.sales_orders.edit_all') ||
+          me.permissions.has('gops.costing.view_all') ||
+          !me.permissions.has('gops.sales_orders.view_all') ||
+          q.scope === 'mine',
+      }),
     ]);
 
     // Margin, only where the caller may see this order's cost — the
@@ -367,7 +421,8 @@ salesOrderRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = salesOrderListWhere(me, q);
+    const team = await teamOf(me.id);
+    const { base, where } = salesOrderListWhere(me, q, team?.id ?? null);
     const [rows, summary] = await Promise.all([
       prisma.salesOrder.findMany({
         where,

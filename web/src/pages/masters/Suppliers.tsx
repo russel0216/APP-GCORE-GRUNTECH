@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import {
   Checkbox,
@@ -328,6 +328,11 @@ export function Suppliers() {
       ),
     },
     { key: 'category', label: 'Supplies', render: (s) => s.category ?? '—' },
+    {
+      key: 'isActive',
+      label: 'Status',
+      render: (s) => <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
+    },
     { key: 'city', label: 'City', render: (s) => s.city ?? '—' },
     { key: 'paymentTerms', label: 'Terms', render: (s) => s.paymentTerms ?? '—' },
     {
@@ -356,11 +361,6 @@ export function Suppliers() {
           {s.createdAt && <div className="faint">{formatDate(s.createdAt)}</div>}
         </div>
       ),
-    },
-    {
-      key: 'isActive',
-      label: 'Status',
-      render: (s) => <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
     },
   ];
 
@@ -400,7 +400,7 @@ export function Suppliers() {
 
   const addButton = can('gchain.suppliers.create') && (
     <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-      + Add supplier
+      + New supplier
     </button>
   );
 
@@ -409,11 +409,6 @@ export function Suppliers() {
       <div className="page-head">
         <div>
           <h1>Suppliers</h1>
-          <p>
-            One supplier record for canvassing, purchase orders, receiving and payables. Keeping
-            "Supplies" filled in is what makes a canvass quick — it is how you find the three
-            suppliers to ask.
-          </p>
         </div>
       </div>
 
@@ -452,22 +447,14 @@ export function Suppliers() {
               ]
             : []
         }
-        summaryLine={(raw, total) => {
+        footer={(raw, total) => {
           const sum = raw as SupplierSummary;
-          return (
-            <>
-              <span>
-                <strong>{total}</strong> supplier{total === 1 ? '' : 's'}
-              </span>
-              {!!sum.partners && <span>{sum.partners} Sales partner{sum.partners === 1 ? '' : 's'}</span>}
-              {!!sum.inactive && <span>{sum.inactive} inactive</span>}
-              {sum.awaiting !== undefined && (
-                <span>
-                  <strong>{sum.awaiting}</strong> with an order awaiting delivery
-                </span>
-              )}
-            </>
-          );
+          return {
+            code: <FootCell label={`Supplier${total === 1 ? '' : 's'}`}>{total}</FootCell>,
+            ...(sum.partners ? { name: <FootCell label="Sales partners">{sum.partners}</FootCell> } : {}),
+            ...(sum.inactive ? { isActive: <FootCell label="Inactive">{sum.inactive}</FootCell> } : {}),
+            ...(sum.awaiting !== undefined ? { awaiting: <FootCell label="Awaiting delivery">{sum.awaiting}</FootCell> } : {}),
+          };
         }}
         onSummary={(raw) =>
           setKnownCategories(((raw as SupplierSummary).tabs ?? []).filter((t) => t.value !== 'none').map((t) => t.label))

@@ -63,6 +63,7 @@ import { listQuery } from '../src/http/kit';
 import '../src/routes/sales';
 import { leadListSummary, leadListWhere, quotationListSummary, quotationListWhere } from '../src/routes/sales';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
+import { teamMembers, teamOf } from '../src/shared/team';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
@@ -108,7 +109,7 @@ async function editorTokenIsSpare(): Promise<boolean> {
       where: { employeeNo: { not: null }, NOT: { email: { endsWith: '@verifys.local' } } },
       select: { employeeNo: true },
     }),
-    prisma.employee.findMany({ select: { employeeNo: true } }),
+    prisma.employee.findMany({ where: { NOT: { employeeNo: { startsWith: TAG } } }, select: { employeeNo: true } }),
   ]);
   return ![...users, ...employees].some((r) => employeeToken(r.employeeNo) === EDITOR_TOKEN);
 }
@@ -178,6 +179,7 @@ async function cleanup() {
   }
   // Sales orders hold their quotation (Restrict), so they go first.
   await prisma.salesOrder.deleteMany({ where: { quotation: { subject: { startsWith: TAG } } } });
+  await prisma.employee.deleteMany({ where: { employeeNo: { startsWith: TAG } } });
   await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   // Quotations route to the seeded sales_manager role, so whoever really holds
   // it was asked about, and told of, the test quotations too.
@@ -289,6 +291,14 @@ async function main() {
   const sales = await makeUser('Verify Sales', 'sales@verifys.local', ['sales']);
   const manager = await makeUser('Verify Sales Manager', 'mgr@verifys.local', ['sales_manager']);
   const other = await makeUser('Verify Other', 'other@verifys.local', ['sales']);
+  // A team (2026-10-08) is the Industry on the employee record: Sales and
+  // Other are on Healthcare, the manager has an employee record on no team.
+  const teamHI = await prisma.industry.findUniqueOrThrow({ where: { code: 'HI' } });
+  // Sales' employee number carries the EDITOR_TOKEN digits: Employee.employeeNo
+  // wins over User.employeeNo for {EMP}, and the numbering checks expect them.
+  for (const [u, n, team] of [[sales, EDITOR_TOKEN, teamHI.id], [other, 'E2', teamHI.id], [manager, 'E3', null]] as const) {
+    await prisma.employee.create({ data: { employeeNo: `${TAG}-${n}`, firstName: 'Verify', lastName: `${TAG} ${n}`, userId: u.id, industryId: team } });
+  }
 
   const customer = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital`, createdById: sales.id },
@@ -1072,6 +1082,27 @@ async function main() {
     const all = quotationListWhere(superUser, listQ({}), stages);
     const summary = await quotationListSummary(all.base, all.where, stages);
     check('the All tab counts every quotation the search selects', summary.tabCounts[''] === 6 && summary.count === 6, JSON.stringify(summary.tabCounts));
+    // Mine · Team · All (2026-10-08): Team is the owners on the viewer's team.
+    const myTeam = await teamOf(sales.id);
+    const teamOnly = await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ scope: 'team' }), stages, myTeam!.id).where });
+    const otherTeam = await prisma.industry.findFirstOrThrow({ where: { code: { not: 'HI' } } });
+    check(
+      'the Team view lists the quotations of everyone on the team, and nobody else’s',
+      myTeam?.code === 'HI' && teamOnly === 6 &&
+        (await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ scope: 'team' }), stages, otherTeam.id).where })) === 0 &&
+        (await teamOf(manager.id)) === null,
+      `${myTeam?.code} ${teamOnly}`,
+    );
+    check(
+      'a Team view for a viewer with no team is Mine',
+      (await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ scope: 'team' }), stages, null).where })) === 0,
+    );
+    const withTeam = await quotationListSummary(all.base, all.where, stages, { teamWhere: { owner: teamMembers(myTeam!.id) }, margin: true });
+    check(
+      'the summary carries the team’s share of the set, and a margin over the costed quotations — none yet',
+      withTeam.team?.count === 6 && money(withTeam.team.value, withTeam.value) && withTeam.margin?.costed === 0 && withTeam.margin.pct === null,
+      JSON.stringify({ team: withTeam.team, margin: withTeam.margin }),
+    );
     const perStage = Object.entries(summary.tabCounts).filter(([k]) => k !== '');
     check(
       'every stage has one, and the stage counts add up to All',
@@ -1188,6 +1219,14 @@ async function main() {
 
     const soAll = salesOrderListWhere(superUser, soQ({}));
     const soSummary = await salesOrderListSummary(soAll.base, soAll.where);
+    const soTeamId = (await teamOf(sales.id))!.id;
+    const soTeam = await salesOrderListSummary(soAll.base, soAll.where, { teamWhere: { owner: teamMembers(soTeamId) }, margin: true });
+    check(
+      'the team’s booked value and the margin (no costed line yet) ride on the sales order summary; the Team view counts the cancelled one too',
+      soTeam.team?.count === 3 && money(soTeam.team.value, 6000) && soTeam.margin?.costed === 0 &&
+        (await prisma.salesOrder.count({ where: salesOrderListWhere(superUser, soQ({ scope: 'team' }), soTeamId).where })) === 4,
+      JSON.stringify({ team: soTeam.team, margin: soTeam.margin }),
+    );
     check(
       'each status tab has its order, and the tabs add up to All',
       soSummary.tabCounts[''] === 4 && ['DRAFT', 'PENDING_APPROVAL', 'ISSUED', 'CANCELLED'].every((k) => soSummary.tabCounts[k] === 1),
@@ -1252,6 +1291,15 @@ async function main() {
     );
     const lAll = leadListWhere(superUser, leadQ({}), stages);
     const lSum = await leadListSummary(lAll.base, lAll.where, stages);
+    const hiTeam = (await teamOf(sales.id))!;
+    const teamLeads = await prisma.lead.count({ where: { AND: [lAll.where, { assignedTo: teamMembers(hiTeam.id) }] } });
+    const lTeam = await leadListSummary(lAll.base, lAll.where, stages, { teamWhere: { assignedTo: teamMembers(hiTeam.id) } });
+    check(
+      'the Team view and the team figure agree on the team’s leads',
+      (await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ scope: 'team' }), stages, hiTeam.id).where })) === teamLeads &&
+        lTeam.team?.count === teamLeads && teamLeads === 7,
+      `${teamLeads} / ${lTeam.team?.count}`,
+    );
     check(
       'the tabs count each stage and add up to All',
       lSum.tabCounts[''] === 7 && lSum.tabCounts.OPPORTUNITY === 2 &&
@@ -2644,6 +2692,36 @@ async function main() {
         'margin reaches only a reader who may see that quotation\u2019s cost',
         !!authorMargin && money(authorMargin.amount, 200) && (readerMay ? !!readerMargin : readerMargin === null),
         `${JSON.stringify(authorMargin)} / ${JSON.stringify(readerMargin)} (reader may: ${readerMay})`,
+      );
+      // The totals row's margin and the Team view, over HTTP.
+      const authorList = await http(otherToken, 'GET', `/quotations?search=${encodeURIComponent(`${LISTQ} completed`)}&scope=mine`);
+      const authorSum = authorList.body.summary as { margin?: { amount: number; pct: number | null; costed: number } } | undefined;
+      check(
+        'the totals row’s margin is the rows’ own margin summed, for a set whose cost is the viewer’s to see',
+        authorList.status === 200 && !!authorSum?.margin && money(authorSum.margin.amount, 200) && authorSum.margin.pct === 40 && authorSum.margin.costed === 1,
+        JSON.stringify(authorSum),
+      );
+      const readerSum = (await http(salesToken, 'GET', `/quotations?search=${encodeURIComponent(`${LISTQ} completed`)}&scope=all`)).body.summary as
+        | { margin?: unknown }
+        | undefined;
+      const readerSeesEvery =
+        salesUser.permissions.has('gops.quotations.edit_all') ||
+        salesUser.permissions.has('gops.costing.view_all') ||
+        !salesUser.permissions.has('gops.quotations.view_all');
+      check(
+        'and is left out — never 0 — for a reader who may not see every listed quotation’s cost',
+        readerSeesEvery ? !!readerSum?.margin : !readerSum?.margin,
+        JSON.stringify(readerSum),
+      );
+      const teamList = await http(salesToken, 'GET', `/quotations?search=${encodeURIComponent(LISTQ)}&scope=team&pageSize=50`);
+      const teamRows = (teamList.body.rows ?? []) as { owner: { id: string } }[];
+      const salesSeesAll = salesUser.permissions.has('gops.quotations.view_all');
+      check(
+        'the Team view over HTTP: a colleague’s quotations with one’s own (a view-own holder: one’s own alone)',
+        teamList.status === 200 &&
+          (salesSeesAll ? teamRows.length === 6 : teamRows.every((r) => r.owner.id === sales.id)) &&
+          (teamList.body.summary as { team?: { count: number } }).team?.count === teamRows.length,
+        `${teamRows.length} rows`,
       );
       const badStage = await http(salesToken, 'GET', '/quotations?stage=NOPE');
       check('an unknown stage is a 400 over HTTP too', badStage.status === 400, badStage.text.slice(0, 120));

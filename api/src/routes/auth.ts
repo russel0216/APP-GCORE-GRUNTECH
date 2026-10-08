@@ -12,6 +12,7 @@ import { upload, saveAttachment, deleteAttachment } from '../shared/attachments'
 import { consumeToken, deliverLink, issueToken, liveToken } from '../shared/accounts';
 import { mailEnabled } from '../shared/mail';
 import { currentAppearance } from './appearance';
+import { teamOf } from '../shared/team';
 
 export const authRoutes = Router();
 
@@ -46,13 +47,15 @@ authRoutes.get(
   authenticate,
   handler(async (req, res) => {
     const user = currentUser(req);
-    const [company, row, appearance] = await Promise.all([
+    const [company, row, appearance, team] = await Promise.all([
       prisma.company.findUnique({ where: { id: 'company' } }),
       prisma.user.findUnique({ where: { id: user.id }, select: { photoPath: true, phone: true } }),
       // Rides along rather than taking a request of its own: every browser
       // needs it to draw the page, and this is already the call that says
       // what to draw.
       currentAppearance(),
+      // The viewer's team, for the lists' Mine · Team · All switch.
+      teamOf(user.id),
     ]);
     res.json({
       user: {
@@ -64,6 +67,7 @@ authRoutes.get(
         roles: user.roleKeys,
         photoPath: row?.photoPath ?? null,
         phone: row?.phone ?? null,
+        team,
       },
       permissions: [...user.permissions],
       menu: menuFor(user),

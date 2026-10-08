@@ -1424,19 +1424,38 @@ table.data tr.selected td {
 }
 
 /* The totals line: what the whole filtered set adds up to, not the page. */
-.list-totals {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--s-2) var(--s-5);
-  padding: var(--s-2) var(--s-3);
-  font-size: var(--fs-md);
-  color: var(--muted);
+/*
+  The totals row (2026-10-08, the owner's call, after SCORO's list of quotes):
+  a footer row under the columns — the count under Number, the sum under
+  Total, the margin under Margin — so a list ends with what it adds up to.
+  Each cell is a small label over its figure.
+*/
+table.data tfoot td {
+  background: var(--surface-2);
+  border-top: 2px solid var(--line);
+  border-bottom: 0;
+  font-variant-numeric: tabular-nums;
+  vertical-align: bottom;
 }
 
-.list-totals strong {
+.list-foot-label {
+  display: block;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.list-foot-value {
+  display: block;
+  font-weight: 600;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
+}
+
+.list-foot-value .faint {
+  font-weight: 500;
 }
 
 /*

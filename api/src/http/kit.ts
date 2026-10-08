@@ -49,7 +49,8 @@ export interface ListQuery {
   search: string;
   sort: string | null;
   dir: 'asc' | 'desc';
-  scope: 'mine' | 'all';
+  /** Mine · Team · All (2026-10-08): `team` is the viewer's team on their employee record — see shared/team.ts. */
+  scope: 'mine' | 'team' | 'all';
   filters: Record<string, string>;
 }
 
@@ -67,7 +68,7 @@ export function listQuery(req: Request): ListQuery {
     search: (q.search ?? '').trim(),
     sort: q.sort ?? null,
     dir: q.dir === 'asc' ? 'asc' : 'desc',
-    scope: q.scope === 'mine' ? 'mine' : 'all',
+    scope: q.scope === 'mine' ? 'mine' : q.scope === 'team' ? 'team' : 'all',
     filters,
   };
 }

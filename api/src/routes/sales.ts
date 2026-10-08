@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
+import { teamMembers, teamOf } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -127,11 +128,14 @@ export function leadListWhere(
   me: ReturnType<typeof currentUser>,
   q: ReturnType<typeof listQuery>,
   stages: Awaited<ReturnType<typeof pipelineStages>>,
+  /** The viewer's team (shared/team.ts) for `?scope=team`; without one the Team view is Mine. */
+  team: string | null = null,
 ): { base: Prisma.LeadWhereInput; where: Prisma.LeadWhereInput } {
   const and: Prisma.LeadWhereInput[] = [];
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all');
   if (onlyOwn || q.scope === 'mine') and.push({ assignedToId: me.id });
+  if (q.scope === 'team') and.push(team ? { assignedTo: teamMembers(team) } : { assignedToId: me.id });
 
   if (q.search) {
     and.push({
@@ -199,10 +203,23 @@ export async function leadListSummary(
   base: Prisma.LeadWhereInput,
   where: Prisma.LeadWhereInput,
   stages: Awaited<ReturnType<typeof pipelineStages>>,
+  opts: { teamWhere?: Prisma.LeadWhereInput | null } = {},
 ) {
-  const [perStatus, valued] = await Promise.all([
+  const valueOf = (rows: { estimatedValue: Prisma.Decimal | null; probability: number }[]) => {
+    let valueCents = 0;
+    let weightedCents = 0;
+    for (const l of rows) {
+      const cents = Math.round(num(l.estimatedValue) * 100);
+      valueCents += cents;
+      weightedCents += (cents * l.probability) / 100;
+    }
+    return { count: rows.length, value: valueCents / 100, weighted: Math.round(weightedCents) / 100 };
+  };
+  const [perStatus, valued, teamRows] = await Promise.all([
     prisma.lead.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
     prisma.lead.findMany({ where, select: { estimatedValue: true, probability: true } }),
+    // The viewer's team's share of the same set, for the totals row.
+    opts.teamWhere ? prisma.lead.findMany({ where: { AND: [where, opts.teamWhere] }, select: { estimatedValue: true, probability: true } }) : null,
   ]);
   const tabCounts: Record<string, number> = { '': 0 };
   for (const st of leadStages(stages)) tabCounts[st.key] = 0;
@@ -211,15 +228,8 @@ export async function leadListSummary(
     if (key) tabCounts[key] = (tabCounts[key] ?? 0) + r._count._all;
     tabCounts[''] += r._count._all;
   }
-  let valueCents = 0;
-  let weightedCents = 0;
-  for (const l of valued) {
-    const cents = Math.round(num(l.estimatedValue) * 100);
-    valueCents += cents;
-    weightedCents += (cents * l.probability) / 100;
-  }
   const tabs = leadStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
-  return { tabs, tabCounts, count: valued.length, value: valueCents / 100, weighted: Math.round(weightedCents) / 100 };
+  return { tabs, tabCounts, ...valueOf(valued), ...(teamRows ? { team: valueOf(teamRows) } : {}) };
 }
 
 const LEAD_SORTS = ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt', 'probability'];
@@ -231,7 +241,8 @@ leadRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const stages = await pipelineStages();
-    const { base, where } = leadListWhere(me, q, stages);
+    const team = await teamOf(me.id);
+    const { base, where } = leadListWhere(me, q, stages, team?.id ?? null);
 
     const [rows, total, summary] = await Promise.all([
       prisma.lead.findMany({
@@ -248,7 +259,7 @@ leadRoutes.get(
         take: q.pageSize,
       }),
       prisma.lead.count({ where }),
-      leadListSummary(base, where, stages),
+      leadListSummary(base, where, stages, { teamWhere: team ? { assignedTo: teamMembers(team.id) } : null }),
     ]);
 
     res.json({
@@ -299,7 +310,8 @@ leadRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const stages = await pipelineStages();
-    const { base, where } = leadListWhere(me, q, stages);
+    const team = await teamOf(me.id);
+    const { base, where } = leadListWhere(me, q, stages, team?.id ?? null);
     const [rows, summary] = await Promise.all([
       prisma.lead.findMany({
         where,
@@ -986,11 +998,14 @@ export function quotationListWhere(
   me: ResolvedUser,
   q: ReturnType<typeof listQuery>,
   stages: Awaited<ReturnType<typeof pipelineStages>>,
+  /** The viewer's team (shared/team.ts) for `?scope=team`; without one the Team view is Mine. */
+  team: string | null = null,
 ): { base: Prisma.QuotationWhereInput; where: Prisma.QuotationWhereInput } {
   const and: Prisma.QuotationWhereInput[] = [];
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
   if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+  if (q.scope === 'team') and.push(team ? { owner: teamMembers(team) } : { ownerId: me.id });
 
   if (q.search) {
     and.push({
@@ -1084,11 +1099,16 @@ export async function quotationListSummary(
   base: Prisma.QuotationWhereInput,
   where: Prisma.QuotationWhereInput,
   stages: Awaited<ReturnType<typeof pipelineStages>>,
+  /** `teamWhere`: the viewer's team's share of the set; `margin`: only where the caller may see every listed quotation's cost. */
+  opts: { teamWhere?: Prisma.QuotationWhereInput | null; margin?: boolean } = {},
 ) {
-  const [perOutcome, bookedPerOutcome, valued] = await Promise.all([
+  const [perOutcome, bookedPerOutcome, valued, teamRows] = await Promise.all([
     prisma.quotation.groupBy({ by: ['outcome'], where: base, _count: { _all: true } }),
     prisma.quotation.groupBy({ by: ['outcome'], where: { AND: [base, QUOTATION_BOOKED_WHERE] }, _count: { _all: true } }),
-    prisma.quotation.findMany({ where, select: { revisions: { select: { status: true, total: true, revision: true } } } }),
+    prisma.quotation.findMany({ where, select: { revisions: { select: LIST_REVISION_SELECT } } }),
+    opts.teamWhere
+      ? prisma.quotation.findMany({ where: { AND: [where, opts.teamWhere] }, select: { revisions: { select: { status: true, total: true, revision: true } } } })
+      : null,
   ]);
   const flat = (rows: { outcome: string; _count: { _all: number } }[]) =>
     rows.map((r) => ({ outcome: r.outcome, count: r._count._all }));
@@ -1098,8 +1118,51 @@ export async function quotationListSummary(
   // The tabs themselves, as Admin › Pipeline Stages names and colours them —
   // sent with the counts so a list reader needs no pipeline right to see them.
   const tabs = quotationStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
-  return { tabs, tabCounts, count: valued.length, value: valueCents / 100 };
+  const team = teamRows ? { count: teamRows.length, value: teamRows.reduce((t, r) => t + toCents(quotationValue(r.revisions)), 0) / 100 } : undefined;
+  const margin = opts.margin
+    ? await revisionsMargin(valued.map((r) => valueRevision(r.revisions)).filter((r): r is NonNullable<typeof r> => !!r))
+    : undefined;
+  return { tabs, tabCounts, count: valued.length, value: valueCents / 100, ...(team ? { team } : {}), ...(margin ? { margin } : {}) };
 }
+
+/**
+ * The totals row's margin (2026-10-08): the margin of every listed revision
+ * that has a costed line — the row's own figure, summed — against the
+ * revisions' sums without tax, so the percentage is the set's. Read with one
+ * GROUP BY over the lines; a revision's discount and tax are applied through
+ * `quotationTotals` on its sums, which gives the row's `totalMargin` exactly.
+ * Only computed where the caller may see every listed quotation's cost.
+ */
+export async function revisionsMargin(
+  revisions: { id: string; discountPct: Prisma.Decimal; vatRate: Prisma.Decimal; vatInclusive: boolean }[],
+): Promise<{ amount: number; pct: number | null; costed: number }> {
+  const sums = revisions.length
+    ? await prisma.quotationItem.groupBy({
+        by: ['revisionId'],
+        where: { revisionId: { in: revisions.map((r) => r.id) }, isHeading: false },
+        _sum: { amount: true, costAmount: true },
+        _count: { costAmount: true },
+      })
+    : [];
+  let marginCents = 0;
+  let netCents = 0;
+  let costed = 0;
+  for (const s of sums) {
+    if (!s._count.costAmount) continue;
+    const rev = revisions.find((r) => r.id === s.revisionId)!;
+    const t = quotationTotals({
+      lines: [{ amount: s._sum.amount ?? 0, costAmount: s._sum.costAmount ?? 0 }],
+      discountPct: rev.discountPct,
+      vatRate: rev.vatRate,
+      vatInclusive: rev.vatInclusive,
+    });
+    marginCents += toCents(t.cost.totalMargin);
+    netCents += toCents(t.netOfTax);
+    costed++;
+  }
+  return { amount: marginCents / 100, pct: netCents > 0 ? Math.round((marginCents / netCents) * 1000) / 10 : null, costed };
+}
+
 
 quotationRoutes.get(
   '/',
@@ -1108,7 +1171,8 @@ quotationRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const stages = await pipelineStages();
-    const { base, where } = quotationListWhere(me, q, stages);
+    const team = await teamOf(me.id);
+    const { base, where } = quotationListWhere(me, q, stages, team?.id ?? null);
 
     const [rows, total, summary] = await Promise.all([
       prisma.quotation.findMany({
@@ -1126,7 +1190,17 @@ quotationRoutes.get(
         take: q.pageSize,
       }),
       prisma.quotation.count({ where }),
-      quotationListSummary(base, where, stages),
+      quotationListSummary(base, where, stages, {
+        teamWhere: team ? { owner: teamMembers(team.id) } : null,
+        // The totals row's margin only where every listed quotation's cost is
+        // the caller's to see: all of them, or the set is their own.
+        margin:
+          me.isSuperAdmin ||
+          me.permissions.has('gops.quotations.edit_all') ||
+          me.permissions.has('gops.costing.view_all') ||
+          !me.permissions.has('gops.quotations.view_all') ||
+          q.scope === 'mine',
+      }),
     ]);
 
     // Margin, only where the caller may see this quotation's cost — the
@@ -1224,7 +1298,8 @@ quotationRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const stages = await pipelineStages();
-    const { base, where } = quotationListWhere(me, q, stages);
+    const team = await teamOf(me.id);
+    const { base, where } = quotationListWhere(me, q, stages, team?.id ?? null);
     const [rows, summary] = await Promise.all([
       prisma.quotation.findMany({
         where,

@@ -240,6 +240,16 @@ async function main() {
     .submodules.filter((s) => s.group === 'Project Management' && !s.hidden)
     .map((s) => s.label);
   check('Project Management shows Costing, Job Orders, Projects in that order', pmStrip.join() === 'Costing,Job Orders,Projects', pmStrip.join());
+  // The Sales strip is the sales flow (2026-10-08, the owner's call).
+  const salesStrip = menuFor(superUser)
+    .find((m) => m.key === 'gops')!
+    .submodules.filter((s) => s.group === 'Sales' && !s.hidden)
+    .map((s) => s.label);
+  check(
+    'Sales shows Sales Pipeline, Leads, Quotations, Sales Orders, Customers, Partners, Calendar in that order',
+    salesStrip.join() === 'Sales Pipeline,Leads,Quotations,Sales Orders,Customers,Partners,Calendar',
+    salesStrip.join(),
+  );
   // Working days on real dates: Thursday 1 Jan 2026.
   const jan1 = new Date('2026-01-01');
   const onDay = (n: number) => workingDayDate(jan1, n).toISOString().slice(0, 10);
@@ -1524,6 +1534,10 @@ async function main() {
       read.q === 'pump' && read.scope === 'all' && read.page === 2 &&
         JSON.stringify(read.filters) === JSON.stringify({ createdFrom: '2026-03-01', stage: 'COMPLETED' }),
       JSON.stringify(read),
+    );
+    check(
+      'a link may say ?scope=team; anything else than mine, team or all reads as unset',
+      readListUrl(new URLSearchParams('scope=team'), keys).scope === 'team' && readListUrl(new URLSearchParams('scope=ours'), keys).scope === null,
     );
 
     const written = writeListUrl(

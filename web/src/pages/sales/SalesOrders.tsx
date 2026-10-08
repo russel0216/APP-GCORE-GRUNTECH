@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
-import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, FootCell, type Column, type FilterDef } from '../../components/DataList';
 import { NumberInput } from '../../components/NumberInput';
 import {
   Checkbox,
@@ -133,6 +133,10 @@ interface SalesOrderSummary {
   count?: number;
   value?: number;
   cancelledCount?: number;
+  /** Only where the viewer may see every listed order's cost. */
+  margin?: { amount: number; pct: number | null; costed: number };
+  /** The viewer's team's share of the booked value; only for a viewer with a team. */
+  team?: { count: number; value: number };
 }
 
 /**
@@ -144,7 +148,7 @@ interface SalesOrderSummary {
  */
 export function SalesOrders() {
   const navigate = useNavigate();
-  const { can } = useAuth();
+  const { me, can } = useAuth();
   const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
 
   const seesAll = can('gops.sales_orders.view_all');
@@ -182,7 +186,6 @@ export function SalesOrders() {
       optional: true,
       render: (r) => [r.siNumber, r.drNumber].filter(Boolean).join(' / ') || <span className="faint">—</span>,
     },
-    { key: 'orderDate', label: 'Date', sortKey: 'orderDate', render: (r) => formatDate(r.orderDate) },
     {
       key: 'total',
       label: 'Total',
@@ -213,6 +216,7 @@ export function SalesOrders() {
         ]
       : []),
     { key: 'owner', label: 'Booked by', render: (r) => r.owner.name },
+    { key: 'orderDate', label: 'Date', sortKey: 'orderDate', render: (r) => formatDate(r.orderDate) },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', optional: true, render: (r) => formatDate(r.createdAt) },
     {
       key: 'pdf',
@@ -260,11 +264,6 @@ export function SalesOrders() {
       <div className="page-head">
         <div>
           <h1>Sales Orders</h1>
-          <p>
-            What was won, booked into operations. A sales order is raised from its quotation — all of
-            it, chosen lines, or one summary line — and later orders on the same quotation carry a
-            .1, .2 suffix, so progress bookings stay one family.
-          </p>
         </div>
       </div>
 
@@ -284,23 +283,37 @@ export function SalesOrders() {
         printPath="/api/sales-orders/pdf"
         selectable
         rowLabel={(r) => `${r.number} ${r.quotation.subject}`}
-        summaryLine={(raw, total) => {
+        teamScope={!!me?.user.team && can('gops.sales_orders.view_all')}
+        footer={(raw, total, scope) => {
           const s = raw as SalesOrderSummary;
-          return (
-            <>
-              <span>
-                <strong>{total}</strong> order{total === 1 ? '' : 's'}
-              </span>
-              <span>
-                Booked value <strong>{formatMoney(s.value ?? 0)}</strong>
-              </span>
-              {!!s.cancelledCount && (
-                <span>
-                  {s.cancelledCount} cancelled, not counted
-                </span>
-              )}
-            </>
-          );
+          return {
+            number: (
+              <FootCell label={`Order${total === 1 ? '' : 's'}`}>
+                {total}
+                {!!s.cancelledCount && <span className="faint"> · {s.cancelledCount} cancelled, not counted</span>}
+              </FootCell>
+            ),
+            total: <FootCell label="Booked value">{formatMoney(s.value ?? 0)}</FootCell>,
+            ...(s.margin
+              ? {
+                  margin: (
+                    <FootCell label={`Margin · ${s.margin.costed} costed`}>
+                      {formatMoney(s.margin.amount)}
+                      {s.margin.pct !== null && <span className="faint"> {s.margin.pct}%</span>}
+                    </FootCell>
+                  ),
+                }
+              : {}),
+            ...(s.team && scope !== 'team'
+              ? {
+                  owner: (
+                    <FootCell label="My team">
+                      {s.team.count} · {formatMoney(s.team.value)}
+                    </FootCell>
+                  ),
+                }
+              : {}),
+          };
         }}
       />
     </div>

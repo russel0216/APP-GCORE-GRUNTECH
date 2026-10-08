@@ -3,7 +3,7 @@ import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-r
 import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
-import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
@@ -107,6 +107,10 @@ const STAGE_TABS = [
 interface QuotationSummary {
   count?: number;
   value?: number;
+  /** Only where the viewer may see every listed quotation's cost. */
+  margin?: { amount: number; pct: number | null; costed: number };
+  /** The viewer's team's share of the set; only for a viewer with a team. */
+  team?: { count: number; value: number };
 }
 
 /**
@@ -116,7 +120,7 @@ interface QuotationSummary {
  * totals and the printed list all come from the server's one list query.
  */
 export function Quotations() {
-  const { can } = useAuth();
+  const { me, can } = useAuth();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
@@ -289,10 +293,6 @@ export function Quotations() {
       <div className="page-head">
         <div>
           <h1>Quotations</h1>
-          <p>
-            Revisions are preserved, never overwritten — R0 stays readable after R1 changes the
-            price. Only the author can edit a quotation, and only one revision can be approved.
-          </p>
         </div>
       </div>
 
@@ -312,18 +312,33 @@ export function Quotations() {
         selectable
         rowLabel={(q) => `${q.number} ${q.subject}`}
         bulkActions={(ctx) => <QuotationBulkStatus ctx={ctx} />}
-        summaryLine={(raw, total) => {
+        teamScope={seesAll && !!me?.user.team}
+        footer={(raw, total, scope) => {
           const s = raw as QuotationSummary;
-          return (
-            <>
-              <span>
-                <strong>{total}</strong> quotation{total === 1 ? '' : 's'}
-              </span>
-              <span>
-                Total value <strong>{formatMoney(s.value ?? 0)}</strong>
-              </span>
-            </>
-          );
+          return {
+            number: <FootCell label={`Quotation${total === 1 ? '' : 's'}`}>{total}</FootCell>,
+            total: <FootCell label="Total value">{formatMoney(s.value ?? 0)}</FootCell>,
+            ...(s.margin
+              ? {
+                  margin: (
+                    <FootCell label={`Margin · ${s.margin.costed} costed`}>
+                      {formatMoney(s.margin.amount)}
+                      {s.margin.pct !== null && <span className="faint"> {s.margin.pct}%</span>}
+                    </FootCell>
+                  ),
+                }
+              : {}),
+            // My team's share of the set — redundant while the Team view is on.
+            ...(s.team && scope !== 'team'
+              ? {
+                  owner: (
+                    <FootCell label="My team">
+                      {s.team.count} · {formatMoney(s.team.value)}
+                    </FootCell>
+                  ),
+                }
+              : {}),
+          };
         }}
         actions={
           can('gops.quotations.create') ? (
