@@ -11,7 +11,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, openPdf } from '../lib/api';
+import { Icon } from './Icon';
 
 // ── Toasts ───────────────────────────────────────────────────────────────────
 
@@ -525,5 +526,31 @@ export function Avatar({
         initials(name)
       )}
     </span>
+  );
+}
+
+/**
+ * A list row's PDF icon (2026-10-08, the owner's call, after SCORO's list of
+ * quotes): opens the record's paper in a new tab without opening the record.
+ * A real button, so the keyboard reaches it; its click and its keys stop at
+ * the cell, so the row underneath never opens with it. `path` is the full
+ * API path, as `openPdf` takes it.
+ */
+export function PdfButton({ path, label }: { path: string; label: string }) {
+  const toast = useToast();
+  return (
+    <button
+      type="button"
+      className="btn btn-sm btn-icon btn-ghost list-pdf"
+      aria-label={label}
+      title={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        openPdf(path, () => toast('error', 'The PDF could not be opened'));
+      }}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      <Icon name="document" size={18} />
+    </button>
   );
 }

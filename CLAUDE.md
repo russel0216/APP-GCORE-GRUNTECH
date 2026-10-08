@@ -102,7 +102,11 @@ four databases and four copies of "customer".
    `idsFilter()` in `api/src/http/kit.ts`, ANDed with its visibility rule,
    at most 500, and `rowKey` must be the record id) and the screen's own
    `bulkActions(ctx)`. A screen's own tools (the customer list's Import) go
-   in the ⋯ menu through `menuItems`; `onSummary` hands a screen each fetch's
+   in the ⋯ menu through `menuItems`; a record's paper opens from its row
+   through `PdfButton` (`components/ui.tsx`, a `PDF` column at the row's end
+   on the quotation and sales order lists — SCORO's icon: the paper without
+   opening the record; the click and the keys stop at the cell, so the row
+   never opens with it); `onSummary` hands a screen each fetch's
    summary (never set state from inside `summaryLine`, which runs in render). A selection outlives a page change, never a change of
    search, scope or filters; the rules are `pageSelection` / `togglePage` in
    `lib/listUrl.ts`. A ticked row's box never opens the record. **Never a
@@ -180,14 +184,20 @@ four databases and four copies of "customer".
     `lib/number.ts`, DOM-free and pinned by verify-foundation. `Field` wires
     its label to it because it carries a static `fieldControl`.
 
+18. **The word is "customer", never "client"** (2026-10-08, the owner's call) —
+    on every label, column, filter, placeholder, message and PDF heading, in
+    every module. Only the leads list's URL key `clientId` keeps the old word,
+    because it is a link key, not a label (rule 16). "Client" in a code comment
+    about the HTTP client or the Prisma client is a different word and stays.
+
 ## Verification
 
 ```bash
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,525 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
-masters 71, sales 379, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,526 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+masters 71, sales 380, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 99, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -906,10 +916,10 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `leadStage()` / `leadStageStatuses()` in `shared/pipeline.ts`, the board's
   own `statuses` lookup; never Completed, which is a quotation's), the fine
   status still a column (with its stage under it) and a filter, Filters
-  (status, owner, added by, client, Added — a timestamp, Manila days — and
+  (status, owner, added by, customer, Added — a timestamp, Manila days — and
   Expected closing — a DATE), a totals line of estimated and weighted value
   (`leadListSummary()`, summed in centavos), the printed list and mass
-  actions. **The client filter's key is `clientId`, never `customerId`**:
+  actions. **The customer filter's key is `clientId`, never `customerId`**:
   this page's `?new=1&customerId=` is the "new lead for this customer"
   hand-off, and a list must not eat it (rule 16). `leadListWhere(me, q,
   stages)` returns `{ base, where }` and feeds the rows, the summary and the
@@ -1421,11 +1431,11 @@ the detail.
   quotation's audit rows — there is no history table. The PATCH writes each
   move as `before/after: { outcome }`; older rows are read from the summary
   `…: FROM → TO`, so never reword that summary. **Duplicate** is the editor's
-  `?duplicate=&revision=` preset: client, contact, site, name, terms and lines
+  `?duplicate=&revision=` preset: customer, contact, site, name, terms and lines
   (cost only where the viewer was sent it), never the PR number, enquiry or
   costing; nothing is written and no number used until Save.
 - **The editor is SCORO's "Modify quote details" too**: one card, labels
-  beside their values (`.qe-rows`), the contact beside the client, quantity
+  beside their values (`.qe-rows`), the contact beside the customer, quantity
   beside unit, SCORO's grey with-VAT figure under each amount (shown, never
   stored), the person/building toggles for who carries a line's cost, and Add
   row / Append quote under the lines. **Append quote** pulls another
@@ -1553,7 +1563,11 @@ the detail.
   product takes what is left; narrower than the table's minimum, the table
   scrolls inside its card. Never split a line's cost onto a row of its own.
   Labels and values share one size (`--fs-md`) on both pages. The quotation
-  page has no Margin card — the cost panel beside the totals says it.
+  page has no Margin card — the cost panel beside the totals says it. **A
+  line with no provider says nothing about it** (2026-10-08, the owner's
+  call): no "No provider named" caption in the editor's cost cell nor under
+  a line on the quotation page; the cost panel's third row is "Unassigned
+  cost", shown only while there is some.
 
 ## Quotation groups (2026-10-06)
 
@@ -1656,7 +1670,7 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   (the person/building toggles and the provider lookup), `Static`,
   `LeaveBar` — which the quotation editor imports too, so the two cannot
   drift: one card, labels beside values (`.qe-rows`), the contact beside the
-  client, the `qe-lines` table (group, product over description, quantity
+  customer, the `qe-lines` table (group, product over description, quantity
   beside unit, price, amount with the with-VAT figure, cost and provider,
   margin), SCORO's Tax dropdown (`taxOptions` on `GET /sales-orders/:id`),
   the totals beside `CostPanelBlock`, Back / Save at both ends and the
@@ -1667,8 +1681,8 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
 - **The list is the quotation list's layout** (2026-10-08): the statuses as
   tabs with counts (All orders, Draft, Pending approval, Issued, Cancelled —
   the old status filter ignored Pending approval), Filters (booked by,
-  client, order date range — a DATE, UTC-midnight edges — and Released: an
-  SI or DR number filled in), Client / PO / SI-DR / Margin columns (margin
+  customer, order date range — a DATE, UTC-midnight edges — and Released: an
+  SI or DR number filled in), Customer / PO / SI-DR / Margin columns (margin
   only where `canSeeOrderCost`), the printed list `GET /sales-orders/pdf`
   (above `/:id`, value never cost, audited, `?ids=` for Print selected) and
   tick boxes with Export / Print selected. `salesOrderListWhere()` is the one
@@ -1726,7 +1740,7 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   each tab lists exactly the quotations its count says, and the summary
   equals its rows.
 - **Filters**: owner (people holding `gops.quotations.create`, declared
-  before they load so a linked `?ownerId=` is read), client (a lookup, for
+  before they load so a linked `?ownerId=` is read), customer (a lookup, for
   `gops.customers.view_all` holders), Raised (`createdFrom`/`createdTo`, a
   timestamp: Manila midnight to midnight), Expected closing
   (`closingFrom`/`closingTo`, a DATE: UTC-midnight edges), Revision (has a
@@ -1736,7 +1750,7 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
 - **Mine for whoever may edit quotations, All for a reader** (the owner's
   call): `defaultScope` is Mine for `edit_own`/`edit_all` holders. A link's
   `?scope=` wins.
-- **Columns**: Number, Quotation (contact under it), Client (sorts by name),
+- **Columns**: Number, Quotation (contact under it), Customer (sorts by name),
   Status (the stage on `StatusBadge` with `STAGE_TONES`, its name from the
   row's `stageLabel`), Revision, Total, Margin (only for a viewer who may see
   cost — `canSeeQuotationCost` per row, read off the value revision's lines

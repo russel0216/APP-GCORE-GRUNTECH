@@ -151,7 +151,7 @@ export function QuoteArchive() {
     { key: 'date', label: 'Date', sortKey: 'date', render: (r) => formatDate(r.date) },
     {
       key: 'customer',
-      label: 'Client',
+      label: 'Customer',
       sortKey: 'customerName',
       render: (r) => (
         <div>
@@ -245,7 +245,7 @@ export function QuoteArchive() {
         filters={filters}
         initialFilters={customerId ? { customerId } : undefined}
         rowKey={(r) => r.id}
-        searchPlaceholder="Search quote no., client, name, author…"
+        searchPlaceholder="Search quote no., customer, name, author…"
         reloadToken={reload}
         onRowClick={(r) => navigate(`/g-ops/quote-archive/${r.id}`)}
         emptyTitle={facets?.total === 0 ? 'The SCORO archive is empty' : 'No SCORO quotes match'}
@@ -764,7 +764,7 @@ export function QuoteArchiveDetail() {
       {!quote.customer && (
         <div className="alert warn archive-link-alert">
           <span>
-            SCORO&rsquo;s client &ldquo;{quote.customerName}&rdquo; is not linked to a G-CORE customer.
+            SCORO&rsquo;s customer &ldquo;{quote.customerName}&rdquo; is not linked to a G-CORE customer.
             {quote.isOpen && ' Link this SCORO quote to a customer first, then continue it.'}
           </span>
           {quote.canLink && (
@@ -788,7 +788,7 @@ export function QuoteArchiveDetail() {
             <Detail label="Quote No." value={<span className="mono">{quote.number}</span>} />
             <Detail label="Date of issue" value={quote.date ? formatDate(quote.date) : null} />
             <Detail
-              label="Client"
+              label="Customer"
               value={
                 quote.customer ? (
                   <Link to={`/g-ops/customers/${quote.customer.id}`}>{quote.customer.name}</Link>
@@ -826,7 +826,7 @@ export function QuoteArchiveDetail() {
             <Detail label="Payment Terms" value={quote.paymentTerms} />
             <Detail label="Currency" value={currency} />
             <Detail label="Invoices" value={quote.invoiceNos} />
-            <Detail label="Sent to client" value={quote.isSent ? 'Yes' : 'No'} />
+            <Detail label="Sent to customer" value={quote.isSent ? 'Yes' : 'No'} />
           </dl>
         </div>
       </div>
@@ -1033,7 +1033,7 @@ function LinkCustomerDialog({
   return (
     <Modal title="Link to a G-CORE customer" onClose={close}>
       <p className="muted">
-        SCORO called this client &ldquo;{quote.customerName}&rdquo;. Pick the G-CORE customer it is.
+        SCORO called this customer &ldquo;{quote.customerName}&rdquo;. Pick the G-CORE customer it is.
       </p>
       <Field label="Find customer">
         <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Name or code" />

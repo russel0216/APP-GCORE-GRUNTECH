@@ -55,6 +55,7 @@ import {
   leadStages,
 } from '../src/shared/pipeline';
 import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
+import { valueRevision as valuedRevisionOf } from '../src/shared/pipeline';
 import { listQuery } from '../src/http/kit';
 // Imported for its side effect: this is what registers the quotation's
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
@@ -1270,7 +1271,7 @@ async function main() {
     }
     check('each tab lists exactly the leads its count says, each standing in that stage', leadTabsAgree);
     const ofClient = await prisma.lead.findMany({ where: leadListWhere(superUser, leadQ({ clientId: customer.id }), stages).where, select: { id: true } });
-    check('the client filter reads ?clientId=, never the page’s ?customerId= hand-off', ofClient.length === 1 && ofClient[0].id === lNew.id);
+    check('the customer filter reads ?clientId=, never the page’s ?customerId= hand-off', ofClient.length === 1 && ofClient[0].id === lNew.id);
     const addedFirst = await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ createdFrom: '2026-03-01', createdTo: '2026-03-01' }), stages).where });
     const closingDay = await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ closingFrom: '2026-04-30', closingTo: '2026-04-30' }), stages).where });
     check('"Added" runs on Manila’s days and "Expected closing" includes its day', addedFirst === 1 && closingDay === 1, `${addedFirst} ${closingDay}`);
@@ -2604,6 +2605,17 @@ async function main() {
         'each row says its stage and the stage’s name',
         lRows.length === 6 && lRows.every((r) => !!r.stage && !!r.stageLabel),
       );
+      // The PDF icon on the list prints the value revision — the row names it.
+      const withIds = (listed.body.rows ?? []) as { id: string; valueRevision: { id: string } | null }[];
+      let namesItsRevision = withIds.length > 0;
+      for (const r of withIds) {
+        const q = await prisma.quotation.findUniqueOrThrow({
+          where: { id: r.id },
+          select: { revisions: { select: { id: true, status: true, revision: true, total: true }, orderBy: { revision: 'desc' } } },
+        });
+        if ((valuedRevisionOf(q.revisions)?.id ?? null) !== (r.valueRevision?.id ?? null)) namesItsRevision = false;
+      }
+      check('each row names the revision its value — and its PDF icon — comes from', namesItsRevision);
       // A costed line on the colleague's completed quotation: its author sees
       // the margin; another salesperson only with a right that shows cost.
       const colleagues = await prisma.quotation.findFirstOrThrow({

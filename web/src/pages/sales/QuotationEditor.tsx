@@ -442,7 +442,7 @@ export function QuotationEditor() {
   /*
     ── Duplicate (?duplicate=&revision=, create only) ─────────────────────────
     SCORO's most-used button: a new quotation starting from an old one. It
-    copies the client, contact, site, name, terms and lines — cost included
+    copies the customer, contact, site, name, terms and lines — cost included
     only where the server sent it to this viewer — and leaves the PR number,
     the enquiry and the costing to be set, because those belong to the new
     request. Nothing is written, and no number used, until Save.
@@ -748,7 +748,7 @@ export function QuotationEditor() {
       found[key] = message;
       order.push(fieldId);
     };
-    if (!header.customer) flag('customer', 'Choose the client, or add them as a new customer', 'qe-customer');
+    if (!header.customer) flag('customer', 'Choose the customer, or add them as a new one', 'qe-customer');
     if (header.subject.trim().length < 2) flag('subject', 'Give the quotation a name', 'qe-subject');
     if (!isDayKey(header.dueDate) || daysBetween(issueDate, header.dueDate) < 1) {
       flag('dueDate', 'The due date must be after the date of issue', 'qe-dueDate');
@@ -953,13 +953,13 @@ export function QuotationEditor() {
       <ErrorBox error={error} />
       {duplicateOf && (
         <div className="alert info">
-          Copied from <span className="mono">{duplicateOf}</span> — client, terms and lines. Set the PR
+          Copied from <span className="mono">{duplicateOf}</span> — customer, terms and lines. Set the PR
           Number, the enquiry and the costing for this request, then Save; the new number is issued then.
         </div>
       )}
       {leadWithoutCustomer && (
         <div className="alert warn">
-          This lead is not linked to a customer yet. Choose the client below, or open the lead, Modify,
+          This lead is not linked to a customer yet. Choose the customer below, or open the lead, Modify,
           and pick or add the company first.
         </div>
       )}
@@ -1016,16 +1016,16 @@ export function QuotationEditor() {
             />
             <Static label="Date of issue">{formatDate(parseDay(issueDate))}</Static>
 
-            {/* SCORO puts the contact beside the client, on the same line. */}
+            {/* SCORO puts the contact beside the customer, on the same line. */}
             {editing ? (
-              <Static label="Client">
+              <Static label="Customer">
                 <div className="qe-client">
                   <Link to={`/g-ops/customers/${quotation!.customer.id}`}>{quotation!.customer.name}</Link>
                   <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
                 </div>
               </Static>
             ) : (
-              <LooseField label="Client" htmlFor="qe-customer" required error={errors.customer}>
+              <LooseField label="Customer" htmlFor="qe-customer" required error={errors.customer}>
                 <div className="qe-client">
                   <CustomerPicker
                     inputId="qe-customer"
@@ -1566,7 +1566,7 @@ export function QuotationEditor() {
               </div>
             </dl>
             <p id="qe-tax-hint" className="faint sales-hint">
-              6% is for a government client; 0% for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
+              6% is for a government customer; 0% for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
             </p>
             {errors.discountPct && <CellError message={errors.discountPct} />}
             <Checkbox
@@ -1659,7 +1659,7 @@ function AppendQuotePanel({
       <input
         id="qe-append-find"
         autoFocus
-        placeholder="Find by number, name or client"
+        placeholder="Find by number, name or customer"
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
@@ -1968,7 +1968,7 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               editing
               onChange={(v) => setForm((f) => ({ ...f, number: v }))}
             />
-            <Static label="Client">
+            <Static label="Customer">
               <Link to={`/g-ops/customers/${quotation.customer.id}`}>{quotation.customer.name}</Link>
             </Static>
             {contacts.length > 0 && (

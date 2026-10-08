@@ -65,7 +65,7 @@ export function Costings() {
         <div>
           <div>{c.title}</div>
           <div className="faint">
-            {c.customer?.name ?? 'No client linked'}
+            {c.customer?.name ?? 'No customer linked'}
             {c.systemUnit ? ` · ${c.systemUnit}` : ''}
           </div>
         </div>
@@ -129,7 +129,7 @@ export function Costings() {
             columns={columns}
             rowKey={(c) => c.id}
             scoped
-            searchPlaceholder="Search number, title, client, system…"
+            searchPlaceholder="Search number, title, customer, system…"
             onRowClick={(c) => navigate(`/g-ops/costing/${c.id}`)}
             emptyTitle="No costings yet"
             emptyHint="A costing is the first thing you make when a job looks real."

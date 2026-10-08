@@ -1192,7 +1192,7 @@ function CancelModal({
           rows={3}
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          placeholder="Client moved the date, key people unavailable…"
+          placeholder="Customer moved the date, key people unavailable…"
         />
       </Field>
     </Modal>

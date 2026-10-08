@@ -360,7 +360,7 @@ export function CostingDetailPage() {
           <Fact label="Project / job" value={costing.title} />
           <Fact label="Valid until" value={costing.validUntil ? formatDate(`${costing.validUntil}T00:00:00`) : null} />
           <Fact
-            label="Client"
+            label="Customer"
             value={
               costing.customer ? (
                 can('gops.customers.view_all') ? (

@@ -339,10 +339,6 @@ tr.qe-line-heading td {
   color: var(--magenta);
 }
 
-.qe-kind-none {
-  font-size: var(--fs-sm);
-}
-
 .qe-cost-sum {
   font-size: var(--fs-sm);
   text-align: right;

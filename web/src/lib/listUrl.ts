@@ -34,7 +34,7 @@ export interface DateRangeFilterDef {
 }
 
 /**
- * A search-as-you-type pick from a list too long for a dropdown — a client,
+ * A search-as-you-type pick from a list too long for a dropdown — a customer,
  * say. `search` answers a typed term; `describe` names a value that arrived
  * in the URL, so its chip reads as a name rather than an id.
  */

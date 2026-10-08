@@ -321,7 +321,7 @@ leadRoutes.get(
       f.status ? `status ${f.status.split(',').map((v) => LEAD_STATUS_LABEL[v] ?? v).join(', ')}` : null,
       f.assignedToId ? 'one owner' : null,
       f.createdById ? 'added by one person' : null,
-      f.clientId ? 'one client' : null,
+      f.clientId ? 'one customer' : null,
       f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
       f.closingFrom || f.closingTo ? `closing ${f.closingFrom ?? '…'} to ${f.closingTo ?? '…'}` : null,
       q.scope === 'mine' ? 'mine only' : null,
@@ -929,7 +929,7 @@ async function loadQuotation(id: string) {
           email: true,
           website: true,
           paymentTerms: true,
-          // The client block on the PDF prints an address; a customer keeps
+          // The customer block on the PDF prints an address; a customer keeps
           // its addresses on its sites, so the first active one stands in
           // when the quotation names none.
           sites: {
@@ -1181,7 +1181,8 @@ quotationRoutes.get(
             updatedAt: r.updatedAt,
             legacyQuote: r.legacyQuote,
             value: quotationValue(r.revisions),
-            valueRevision: valued ? { revision: valued.revision, status: valued.status } : null,
+            // The id is what the list's PDF icon opens (2026-10-08): the value revision's paper, without opening the quote.
+            valueRevision: valued ? { id: valued.id, revision: valued.revision, status: valued.status } : null,
             latest: latest
               ? { revision: latest.revision, status: latest.status, total: num(latest.total), updatedAt: latest.updatedAt }
               : null,
@@ -1244,7 +1245,7 @@ quotationRoutes.get(
       q.search ? `search "${q.search}"` : null,
       q.filters.stage ? `stage ${stageLabel(q.filters.stage)}` : null,
       q.filters.outcome ? `outcome ${OUTCOME_LABEL[q.filters.outcome] ?? q.filters.outcome}` : null,
-      q.filters.customerId ? 'one client' : null,
+      q.filters.customerId ? 'one customer' : null,
       q.filters.ownerId ? 'one owner' : null,
       q.filters.createdFrom || q.filters.createdTo ? `raised ${q.filters.createdFrom ?? '…'} to ${q.filters.createdTo ?? '…'}` : null,
       q.filters.closingFrom || q.filters.closingTo ? `closing ${q.filters.closingFrom ?? '…'} to ${q.filters.closingTo ?? '…'}` : null,
@@ -1261,7 +1262,7 @@ quotationRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Quotation and client', 'Stage', 'Value', 'Owner', 'Raised', 'Closing'],
+          head: ['Number', 'Quotation and customer', 'Stage', 'Value', 'Owner', 'Raised', 'Closing'],
           widths: [1.6, 2.5, 1.6, 1.4, 1.4, 1.35, 1.35],
           align: ['left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => {

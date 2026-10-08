@@ -958,7 +958,7 @@ async function checkReferences(body: SheetBody, tx: Tx) {
   }
   if (body.siteId && body.customerId) {
     const site = await tx.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } });
-    if (!site || site.customerId !== body.customerId) throw badRequest('That location is not one of the client\'s sites');
+    if (!site || site.customerId !== body.customerId) throw badRequest('That location is not one of the customer\'s sites');
   }
 }
 
@@ -1873,7 +1873,7 @@ costingRoutes.get(
         columns: 2,
         fields: [
           { label: 'Project', value: costing.title },
-          { label: 'Client', value: costing.customer?.name ?? '' },
+          { label: 'Customer', value: costing.customer?.name ?? '' },
           { label: 'Location', value: location },
           { label: 'System / Unit', value: costing.systemUnit ?? '' },
           { label: 'Valid until', value: costing.validUntil ? formatDate(costing.validUntil) : '' },

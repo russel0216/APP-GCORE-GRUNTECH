@@ -138,7 +138,7 @@ export function Static({ label, children }: { label: string; children: ReactNode
   );
 }
 
-/** A field around a control that is not a single element (the client picker). */
+/** A field around a control that is not a single element (the customer picker). */
 export function LooseField({
   label,
   htmlFor,
@@ -187,6 +187,8 @@ export function CellError({ id, message }: { id?: string; message?: string }) {
  * cost — one of our people (in-house) or a supplier (outsourced); pressing the
  * one that is on clears it — the person or supplier beside them, then the
  * notes and the unit cost. The line's cost (quantity × unit cost) sits under.
+ * Nothing is said while no provider is named (2026-10-08, the owner's call):
+ * most lines have none, and a caption on every one of them was noise.
  */
 export function CostCell({
   line,
@@ -228,7 +230,7 @@ export function CostCell({
             );
           })}
         </div>
-        {line.providerKind !== 'none' ? (
+        {line.providerKind !== 'none' && (
           <ProviderLookup
             key={line.providerKind}
             kind={line.providerKind}
@@ -236,8 +238,6 @@ export function CostCell({
             value={line.provider}
             onChange={(provider) => onChange({ provider })}
           />
-        ) : (
-          <span className="faint qe-kind-none">No provider named</span>
         )}
       </div>
       <div className="qe-cost-row">
@@ -266,7 +266,7 @@ export function CostCell({
   );
 }
 
-/** The contact person, beside the client as SCORO has it. Nothing until the client has contacts. */
+/** The contact person, beside the customer as SCORO has it. Nothing until the customer has contacts. */
 export function ContactSelect({ contacts, value, onChange }: { contacts: Option[]; value: string; onChange: (v: string) => void }) {
   if (contacts.length === 0) return null;
   return (

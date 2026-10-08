@@ -15,7 +15,7 @@ import { NumberInput } from '../../components/NumberInput';
 
   Everything is typed in place, top to bottom as the estimate prints:
 
-    Costing details      project, client, location, system / unit, valid until
+    Costing details      project, customer, location, system / unit, valid until
     Project budgeted cost the five buckets, each a block of rows with its own
                           subtotal; subheadings; paste straight from Excel
     Cost summary          markup, contingency, discount, VAT, grand total — and
@@ -361,7 +361,7 @@ export function CostingSheet() {
       .finally(() => setLoaded(true));
   }, [id]);
 
-  // "Start costing" from a lead, or "New costing" from Customer 360: the client,
+  // "Start costing" from a lead, or "New costing" from Customer 360: the customer,
   // site and title come prefilled, and only into what is still empty.
   useEffect(() => {
     if (editing) return;
@@ -856,7 +856,7 @@ export function CostingSheet() {
                 onChange={(e) => setH('title', e.target.value)}
               />
             </Field>
-            <Field label="Client" htmlFor="cs-client">
+            <Field label="Customer" htmlFor="cs-client">
               <CustomerPicker
                 inputId="cs-client"
                 value={header.customer}
@@ -866,7 +866,7 @@ export function CostingSheet() {
             </Field>
             <Field label="Location / site">
               <select value={header.siteId} onChange={(e) => setH('siteId', e.target.value)} disabled={!sites.length}>
-                <option value="">{header.customer ? (sites.length ? '— none —' : 'No sites on file') : 'Choose the client first'}</option>
+                <option value="">{header.customer ? (sites.length ? '— none —' : 'No sites on file') : 'Choose the customer first'}</option>
                 {sites.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
@@ -1553,7 +1553,7 @@ export function TemplateSavePanel({
         Save as template
       </h3>
       <p className="muted">
-        The lines, phases, tasks, markup and terms are kept, to start the next costing from. The client, dates and approval are
+        The lines, phases, tasks, markup and terms are kept, to start the next costing from. The customer, dates and approval are
         not.
       </p>
       <ErrorBox error={error} />

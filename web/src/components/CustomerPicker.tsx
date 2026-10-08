@@ -8,7 +8,7 @@ export interface CustomerRef {
 }
 
 /**
- * "Create or choose a client" — type, pick one of the matching customers, or
+ * "Create or choose a customer" — type, pick one of the matching customers, or
  * add the company as a new customer without leaving the form.
  *
  * The same lookup-or-add the lead form carries (Leads.tsx `LeadForm`): search
@@ -137,7 +137,7 @@ export function CustomerPicker({
         value={text}
         autoFocus={autoFocus}
         autoComplete="off"
-        placeholder="Create or choose a client"
+        placeholder="Create or choose a customer"
         aria-invalid={invalid || undefined}
         aria-describedby={describedBy}
         aria-expanded={open}

@@ -1967,7 +1967,7 @@ function PreviewControl({
           <div className="pt-picker">
             <input
               value={search}
-              placeholder="Number, client or name"
+              placeholder="Number, customer or name"
               aria-label={`Find the ${lower} to preview with`}
               onChange={(e) => setSearch(e.target.value)}
             />

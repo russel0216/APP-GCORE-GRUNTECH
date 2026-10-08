@@ -7,7 +7,7 @@ import { DataList, type BulkContext, type Column, type FilterDef } from '../../c
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
-import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
+import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
 export const OUTCOMES = [
@@ -61,7 +61,8 @@ interface QuotationRow {
   legacyQuote: LegacyRef | null;
   /** `quotationValue()`: the approved revision's total, else the latest's. */
   value: number;
-  valueRevision: { revision: number; status: string } | null;
+  /** The revision the value comes from — and the one the PDF icon prints. */
+  valueRevision: { id: string; revision: number; status: string } | null;
   latest: { revision: number; status: string; total: number; updatedAt: string } | null;
   salesOrderCount: number;
   /** Only for a viewer who may see this quotation's cost; null otherwise or when no line is costed. */
@@ -110,7 +111,7 @@ interface QuotationSummary {
 
 /**
  * The list of quotations, after SCORO's (2026-10-08): the stages as tabs with
- * their counts, one Filters panel, the client and status in columns of their
+ * their counts, one Filters panel, the customer and status in columns of their
  * own, and a totals line that adds up the whole filtered set. The tabs, the
  * totals and the printed list all come from the server's one list query.
  */
@@ -177,7 +178,7 @@ export function Quotations() {
         </div>
       ),
     },
-    { key: 'customer', label: 'Client', sortKey: 'customer', render: (q) => q.customer.name },
+    { key: 'customer', label: 'Customer', sortKey: 'customer', render: (q) => q.customer.name },
     {
       key: 'stage',
       label: 'Status',
@@ -229,6 +230,16 @@ export function Quotations() {
     },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (q) => formatDate(q.createdAt) },
     { key: 'updatedAt', label: 'Modified', sortKey: 'updatedAt', optional: true, render: (q) => formatDate(q.updatedAt) },
+    {
+      key: 'pdf',
+      label: 'PDF',
+      align: 'center',
+      width: '56px',
+      render: (q) =>
+        q.valueRevision ? (
+          <PdfButton path={`/api/quotations/${q.id}/revisions/${q.valueRevision.id}/pdf`} label={`Open the PDF of ${q.number}`} />
+        ) : null,
+    },
   ];
 
   const filters: FilterDef[] = [
@@ -238,9 +249,9 @@ export function Quotations() {
       ? [
           {
             key: 'customerId',
-            label: 'Client',
+            label: 'Customer',
             type: 'lookup' as const,
-            placeholder: 'Type a client name or code…',
+            placeholder: 'Type a customer name or code…',
             search: async (term: string) =>
               (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map(
                 (c) => ({ value: c.id, label: `${c.name} · ${c.code}` }),
@@ -292,7 +303,7 @@ export function Quotations() {
         rowKey={(q) => q.id}
         scoped
         defaultScope={mayEdit ? 'mine' : 'all'}
-        searchPlaceholder="Search number, name, client, contact…"
+        searchPlaceholder="Search number, name, customer, contact…"
         onRowClick={(q) => navigate(`/g-ops/quotations/${q.id}`)}
         emptyTitle="No quotations yet"
         tabs={{ key: 'stage', label: 'Stages', allLabel: 'All quotes', options: STAGE_TABS }}
@@ -849,7 +860,7 @@ export function QuotationDetail() {
               <Link
                 className="btn"
                 to={`/g-ops/quotations/new${qs({ duplicate: quotation.id, revision: revision.id })}`}
-                title="A new quotation with this one's client, terms and lines — numbered when you save it"
+                title="A new quotation with this one's customer, terms and lines — numbered when you save it"
               >
                 Duplicate
               </Link>
@@ -922,7 +933,7 @@ export function QuotationDetail() {
             </dl>
 
             <dl className="qd-group">
-              <Detail label="Client">
+              <Detail label="Customer">
                 <Link className="qd-strong" to={`/g-ops/customers/${quotation.customer.id}`}>
                   {quotation.customer.legalName || quotation.customer.name}
                 </Link>
@@ -1461,12 +1472,10 @@ function LineCost({ item }: { item: Item }) {
   return (
     <div className="quote-line-cost">
       <div className="mono">{item.costAmount == null ? '—' : formatMoney(item.costAmount)}</div>
-      {who ? (
+      {who && (
         <div className="faint">
           {who.kind} · {who.name}
         </div>
-      ) : (
-        <div className="faint">no provider named</div>
       )}
       {item.costNote && <div className="faint quote-line-desc">{item.costNote}</div>}
     </div>
@@ -1597,7 +1606,7 @@ export function CostPanelBlock({ panel }: { panel: CostPanel }) {
         {row('Total cost', panel.totalCost, panel.totalCostPct)}
         {row('In-house cost', panel.inHouseCost, panel.inHouseCostPct)}
         {row('Outsourced cost', panel.outsourcedCost, panel.outsourcedCostPct)}
-        {panel.unassignedCost > 0 && row('No provider named', panel.unassignedCost, null)}
+        {panel.unassignedCost > 0 && row('Unassigned cost', panel.unassignedCost, null)}
         {row('Total margin', panel.totalMargin, panel.totalMarginPct, true)}
         {row('In-house margin', panel.inHouseMargin, panel.inHouseMarginPct)}
         {row('Outsourced margin', panel.outsourcedMargin, panel.outsourcedMarginPct)}

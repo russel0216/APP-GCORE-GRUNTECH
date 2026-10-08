@@ -530,9 +530,9 @@ export function Leads() {
       ? [
           {
             key: 'clientId',
-            label: 'Client',
+            label: 'Customer',
             type: 'lookup' as const,
-            placeholder: 'Type a client name or code…',
+            placeholder: 'Type a customer name or code…',
             search: async (term: string) =>
               (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map(
                 (c) => ({ value: c.id, label: `${c.name} · ${c.code}` }),
@@ -566,7 +566,7 @@ export function Leads() {
         columns={columns}
         rowKey={(l) => l.id}
         scoped
-        searchPlaceholder="Search number, company, contact, client…"
+        searchPlaceholder="Search number, company, contact, customer…"
         reloadToken={reload}
         onRowClick={(l) => navigate(`/g-ops/leads/${l.id}`)}
         emptyTitle="No leads yet"

@@ -381,7 +381,7 @@ salesOrderRoutes.get(
     const filters = [
       q.search ? `search "${q.search}"` : null,
       f.status ? `status ${SO_STATUS_LABEL[f.status as SoStatus] ?? f.status}` : null,
-      f.customerId ? 'one client' : null,
+      f.customerId ? 'one customer' : null,
       f.ownerId ? 'one owner' : null,
       f.quotationId ? 'one quotation' : null,
       f.dateFrom || f.dateTo ? `dated ${f.dateFrom ?? '…'} to ${f.dateTo ?? '…'}` : null,
@@ -397,7 +397,7 @@ salesOrderRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Quotation and client', 'Status', 'PO', 'SI / DR', 'Date', 'Total'],
+          head: ['Number', 'Quotation and customer', 'Status', 'PO', 'SI / DR', 'Date', 'Total'],
           widths: [1.7, 2.7, 1.4, 1.4, 1.3, 1.3, 1.4],
           align: ['left', 'left', 'left', 'left', 'left', 'left', 'right'],
           rows: rows.map((r) => [

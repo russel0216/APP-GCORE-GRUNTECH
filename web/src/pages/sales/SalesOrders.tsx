@@ -15,6 +15,7 @@ import {
   formatMoney,
   useToast,
   type Tone,
+  PdfButton,
 } from '../../components/ui';
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CostPanelBlock } from './Quotations';
@@ -136,7 +137,7 @@ interface SalesOrderSummary {
 
 /**
  * The sales order list, in the quotation list's layout (2026-10-08): the
- * statuses as tabs with their counts, one Filters panel, client, PO and the
+ * statuses as tabs with their counts, one Filters panel, customer, PO and the
  * release references in columns of their own, a totals line of the booked
  * value, the printed list and mass actions. The tabs, the totals and the
  * paper all come from the server's one list query.
@@ -172,7 +173,7 @@ export function SalesOrders() {
         </div>
       ),
     },
-    { key: 'customer', label: 'Client', sortKey: 'customer', render: (r) => r.customer.name },
+    { key: 'customer', label: 'Customer', sortKey: 'customer', render: (r) => r.customer.name },
     { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} extra={SO_TONES} /> },
     { key: 'po', label: 'PO', render: (r) => r.poNumber ?? <span className="faint">—</span> },
     {
@@ -213,6 +214,13 @@ export function SalesOrders() {
       : []),
     { key: 'owner', label: 'Booked by', render: (r) => r.owner.name },
     { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', optional: true, render: (r) => formatDate(r.createdAt) },
+    {
+      key: 'pdf',
+      label: 'PDF',
+      align: 'center',
+      width: '56px',
+      render: (r) => <PdfButton path={`/api/sales-orders/${r.id}/pdf`} label={`Open the PDF of ${r.number}`} />,
+    },
   ];
 
   const filters: FilterDef[] = [
@@ -222,9 +230,9 @@ export function SalesOrders() {
       ? [
           {
             key: 'customerId',
-            label: 'Client',
+            label: 'Customer',
             type: 'lookup' as const,
-            placeholder: 'Type a client name or code…',
+            placeholder: 'Type a customer name or code…',
             search: async (term: string) =>
               (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map(
                 (c) => ({ value: c.id, label: `${c.name} · ${c.code}` }),
@@ -267,7 +275,7 @@ export function SalesOrders() {
         rowKey={(r) => r.id}
         scoped
         defaultScope={mayEdit ? 'mine' : 'all'}
-        searchPlaceholder="Search number, PO, SI/DR, client, quotation…"
+        searchPlaceholder="Search number, PO, SI/DR, customer, quotation…"
         onRowClick={(r) => navigate(`/g-ops/sales-orders/${r.id}`)}
         emptyTitle="Nothing booked yet"
         emptyHint="Open a quotation and press Create Sales Order — that is where one starts."
@@ -981,8 +989,8 @@ export function SalesOrderEditor() {
             <Field label="Date of issue" required error={errors.orderDate}>
               <input id="so-orderDate" type="date" value={header.orderDate} onChange={(e) => set('orderDate', e.target.value)} />
             </Field>
-            {/* SCORO puts the contact beside the client, on the same line. */}
-            <Static label="Client">
+            {/* SCORO puts the contact beside the customer, on the same line. */}
+            <Static label="Customer">
               <div className="qe-client">
                 <Link to={`/g-ops/customers/${order.customer.id}`}>{order.customer.name}</Link>
                 <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
