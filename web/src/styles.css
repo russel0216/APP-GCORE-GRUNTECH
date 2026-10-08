@@ -1172,58 +1172,41 @@ a.card:hover {
 }
 
 /*
-  SCORO's status bookmarks: one strip over one filter key, each tab with the
-  count it would show with every other filter kept. The colour is the stage's
-  own, through --tab-color; the number is always printed, so the strip reads
-  without colour.
+  SCORO's summary row (2026-10-08, the owner's call): the cards over the
+  table that say what the filtered set adds up to — the count, the sum, the
+  margin, the quotes by team. Narrower tiles than a dashboard's, so a row of
+  four to six fits over a list; a wide card (the quotes by team) spans two.
 */
-.list-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-1);
+.kpi-grid.list-summary {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   margin-bottom: var(--s-3);
-  border-bottom: 1px solid var(--line);
 }
 
-.list-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-2);
-  padding: var(--s-2) var(--s-3);
-  border: 0;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: var(--fs-md);
-  cursor: pointer;
+.list-summary .kpi-card.wide {
+  grid-column: span 2;
 }
 
-.list-tab:hover {
-  color: var(--text);
-}
-
-.list-tab[aria-pressed='true'] {
-  color: var(--text);
-  border-bottom-color: var(--tab-color, var(--neon));
-}
-
-.list-tab-dot {
-  width: 0.6em;
-  height: 0.6em;
-  border-radius: 50%;
-  background: var(--tab-color, var(--faint));
-}
-
-.list-tab-count {
-  font-size: var(--fs-xs);
-  color: var(--faint);
+.list-summary-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
 }
 
-.list-tab[aria-pressed='true'] .list-tab-count {
-  color: var(--muted);
+.list-summary-row {
+  display: grid;
+  grid-template-columns: 3.5rem 1fr auto;
+  column-gap: var(--s-2);
+  align-items: baseline;
+}
+
+.list-summary-row .code {
+  font-weight: 600;
+}
+
+.list-summary-row .num {
+  text-align: right;
 }
 
 /* The Filters panel: every filter the screen declares, in a grid. */
@@ -1421,41 +1404,6 @@ table.data td.list-select {
 
 table.data tr.selected td {
   background: rgb(var(--magenta-rgb) / 0.08);
-}
-
-/* The totals line: what the whole filtered set adds up to, not the page. */
-/*
-  The totals row (2026-10-08, the owner's call, after SCORO's list of quotes):
-  a footer row under the columns — the count under Number, the sum under
-  Total, the margin under Margin — so a list ends with what it adds up to.
-  Each cell is a small label over its figure.
-*/
-table.data tfoot td {
-  background: var(--surface-2);
-  border-top: 2px solid var(--line);
-  border-bottom: 0;
-  font-variant-numeric: tabular-nums;
-  vertical-align: bottom;
-}
-
-.list-foot-label {
-  display: block;
-  font-size: var(--fs-xs);
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--muted);
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.list-foot-value {
-  display: block;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.list-foot-value .faint {
-  font-weight: 500;
 }
 
 /*

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import {
   Checkbox,
@@ -296,6 +297,8 @@ export function Suppliers() {
   // The categories on file, for the bulk box's suggestions — learnt from the
   // tabs the list's summary sends, so there is no second query for them.
   const [knownCategories, setKnownCategories] = useState<string[]>([]);
+  // The same categories as the filter's choices ("Not stated" among them).
+  const [categoryOptions, setCategoryOptions] = useState<{ value: string; label: string }[]>([]);
   const mayOrders = can('gchain.purchase_orders.view_all');
 
   useEffect(() => {
@@ -365,6 +368,7 @@ export function Suppliers() {
   ];
 
   const filters: FilterDef[] = [
+    { key: 'category', label: 'What they supply', options: categoryOptions },
     {
       key: 'isActive',
       label: 'Status',
@@ -424,7 +428,6 @@ export function Suppliers() {
         emptyTitle="No suppliers yet"
         emptyHint="Add the first one, or import a list you already have."
         emptyAction={addButton || undefined}
-        tabs={{ key: 'category', label: 'What they supply', allLabel: 'All suppliers', options: [] }}
         filters={filters}
         printPath="/api/suppliers/pdf"
         selectable
@@ -447,18 +450,22 @@ export function Suppliers() {
               ]
             : []
         }
-        footer={(raw, total) => {
+        summary={(raw, total) => {
           const sum = raw as SupplierSummary;
-          return {
-            code: <FootCell label={`Supplier${total === 1 ? '' : 's'}`}>{total}</FootCell>,
-            ...(sum.partners ? { name: <FootCell label="Sales partners">{sum.partners}</FootCell> } : {}),
-            ...(sum.inactive ? { isActive: <FootCell label="Inactive">{sum.inactive}</FootCell> } : {}),
-            ...(sum.awaiting !== undefined ? { awaiting: <FootCell label="Awaiting delivery">{sum.awaiting}</FootCell> } : {}),
-          };
+          return (
+            <>
+              <Stat label="Suppliers" value={total} />
+              {!!sum.partners && <Stat label="Sales partners" value={sum.partners} />}
+              {!!sum.inactive && <Stat label="Inactive" value={sum.inactive} />}
+              {sum.awaiting !== undefined && <Stat label="Awaiting delivery" value={sum.awaiting} />}
+            </>
+          );
         }}
-        onSummary={(raw) =>
-          setKnownCategories(((raw as SupplierSummary).tabs ?? []).filter((t) => t.value !== 'none').map((t) => t.label))
-        }
+        onSummary={(raw) => {
+          const tabs = (raw as SupplierSummary).tabs ?? [];
+          setKnownCategories(tabs.filter((t) => t.value !== 'none').map((t) => t.label));
+          setCategoryOptions(tabs.map((t) => ({ value: t.value, label: t.label })));
+        }}
         actions={addButton || null}
       />
 

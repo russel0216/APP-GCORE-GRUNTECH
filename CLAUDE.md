@@ -90,14 +90,19 @@ four databases and four copies of "customer".
    CSV, Print (`printPath`, sent the list's own query), Save view and Refresh
    on the right. Never put a tool button back on the toolbar line. Filters open
    in a panel and show as removable chips; a filter is a select, a
-   `dateRange` (two keys) or a `lookup` (`search` + `describe`). `tabs` draws a
-   strip over one filter key with counts from the endpoint's
-   `summary.tabCounts` (and its names from `summary.tabs` when sent);
-   `footer` is the **totals row** at the foot of the table (2026-10-08, the
-   owner's call, after SCORO's list of quotes): cells by column key from the
-   endpoint's `summary` — the count under Number, the sum under Total, the
-   margin under Margin, each a `FootCell` (label over figure); a hidden
-   column takes its cell with it. Never a loose totals line again.
+   `dateRange` (two keys) or a `lookup` (`search` + `describe`).
+   **No tab strip and no totals row** (2026-10-08, the owner's call: "remove
+   this line in all, not necessary" / "instead it become a summary card at
+   the top of list like in SCORO"): what the strip filtered is an ordinary
+   Filters select on the same key (`stage`, `status`, `industry`,
+   `category`), so every old link still narrows the list, and the endpoint's
+   `summary` is drawn as **summary cards** over the table — `summary` on
+   `DataList` returns `Stat` tiles (`components/charts.tsx`) into a
+   `kpi-grid list-summary`: the count, the sum, the margin, and on the
+   quotation list **Quotes by team** (`TeamQuotesCard`, a wide tile: every
+   active team's count and value from `summary.teams`). A screen that
+   learns from the summary (the stage names, the categories on file) still
+   takes `onSummary`. Never a totals line, under or over, again.
    `defaultScope` is where the scope switch starts when the URL says
    nothing; the switch is **Mine · Team · All** where `teamScope` is on —
    Team for a viewer whose employee record has a team (`me.user.team`,
@@ -118,7 +123,7 @@ four databases and four copies of "customer".
    on the quotation and sales order lists — SCORO's icon: the paper without
    opening the record; the click and the keys stop at the cell, so the row
    never opens with it); `onSummary` hands a screen each fetch's
-   summary (never set state from inside `footer`, which runs in render). A selection outlives a page change, never a change of
+   summary (never set state from inside `summary`, which runs in render). A selection outlives a page change, never a change of
    search, scope or filters; the rules are `pageSelection` / `togglePage` in
    `lib/listUrl.ts`. A ticked row's box never opens the record. **Never a
    bulk delete** — a record is deleted from its own page, with its own
@@ -207,8 +212,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,635 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 422, costing 120, pipeline 86, calendar 84, numbering 46,
+**2,636 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 423, costing 120, pipeline 86, calendar 84, numbering 46,
 partners 111, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -667,7 +672,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `listQuery` parses `scope=team`; `quotationListWhere`, `leadListWhere` and
   `salesOrderListWhere` take the team id and narrow to its members' records
   (`owner` / `assignedTo`), and their summaries carry `team: { count, value
-  }` — the team's share of the set for the totals row — and `margin` only
+  }` — the team's share of the set for the "My team" card — and `margin` only
   where the caller may see every listed record's cost (edit-all, costing
   rights, own-scope, or the set is their own): `revisionsMargin()` sums the
   rows' own margins through one GROUP BY, never a figure a row would not
@@ -796,10 +801,11 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   it comes from, and arrives as `[]` otherwise. Add a collection the same way —
   never unconditionally.
 - **The customer list is the quotation list's layout** (2026-10-08): the
-  industries as tabs with counts — every active industry, an inactive one
-  still holding a customer, and Unclassified only while somebody is
-  (`customerListSummary()` sends them as `summary.tabs`); the tab key stays
-  `industry` (a code, or `none`), so older links keep working. Filters:
+  industry as a filter (`?industry=`, a code or `none`; the counts and names
+  still come as `summary.tabs` / `tabCounts` — every active industry, an
+  inactive one still holding a customer, and Unclassified only while
+  somebody is — from `customerListSummary()`), summary cards (customers,
+  inactive). Filters:
   status, added by, Added (Manila days), Open quotation (one OPEN /
   SUBMITTED / NEGOTIATION) and Project; Code, Open quotes and Projects
   columns; the printed list `GET /customers/pdf` (above `/:id`, audited, no
@@ -810,26 +816,28 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   per row — the code never moves with the industry, and an inactive
   industry is refused by the PATCH. Import moved into the ⋯ menu.
 - **The partner list is the quotation list's layout** (2026-10-08): "What
-  they supply" as tabs — every category on file under the other filters,
-  matched **trimmed and case-blind** (`equals`, insensitive), the first
-  spelling naming it, and "Not stated" while any partner has none
-  (`partnerListSummary()` sends `summary.tabs`). Inner spaces are NOT
-  folded: the filter cannot fold them, and a tab must show exactly what its
-  count says (verify-partners asserts it for every tab). The rule is
+  they supply" as a filter (`?category=`) whose choices are every category
+  on file under the other filters, matched **trimmed and case-blind**
+  (`equals`, insensitive), the first spelling naming it, and "Not stated"
+  while any partner has none (`partnerListSummary()` sends `summary.tabs`,
+  which the screen's `onSummary` turns into the filter's choices and the
+  bulk box's suggestions). Inner spaces are NOT folded: the filter cannot
+  fold them, and a choice must show exactly what its count says
+  (verify-partners asserts it for every one). The rule is
   `categoryTabs()` / `categoryTabWhere()` in `shared/supplierCategories.ts`,
   shared with the supplier list — partners and suppliers are one record. Filters: status,
-  Publishes (a catalogue / price list / software), Priced items, Partner
-  since (a DATE); the totals line counts partners, those publishing a price
-  list and priced items; `GET /partners/pdf` (above `/:id`, counts only —
+  Publishes (a catalogue / price list / software / links), Priced items,
+  Partner since (a DATE); the summary cards count partners, those publishing
+  a price list and priced items; `GET /partners/pdf` (above `/:id`, counts only —
   never a price or a cost; audited) and Print selected. The master is
   shared, so All for everyone. Mass action (`gops.partners.edit_all`): Set
   what they supply — the ordinary `PATCH /partners/:id` per row, the box
   suggesting the categories on file; clearing one is done on the partner's
   own page, never in bulk. Import moved into the ⋯ menu.
 - **The supplier list is the same layout** (2026-10-08): the same "What
-  they supply" tabs (`categoryTabs()`), Filters (status, Partner, added by,
+  they supply" filter (`categoryTabs()`), Filters (status, Partner, added by,
   Added — Manila days — and Purchase orders: awaiting delivery / ordered
-  from / never), Orders and Awaiting columns, a totals line (suppliers,
+  from / never), Orders and Awaiting columns, summary cards (suppliers,
   Sales partners, inactive, with an order awaiting delivery), `GET
   /suppliers/pdf` (above `/:id`, no TIN, audited, `?ids=`) and mass actions
   for `gchain.suppliers.edit_all` — Set what they supply and Active /
@@ -839,7 +847,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   RECEIVED — never a draft); "awaiting" is the PO list's `?awaiting=true`.
   **Order figures are Supplier 360's window**: only for a caller holding
   `gchain.purchase_orders.view_all` — otherwise the row counts are null, the
-  totals line leaves "awaiting" out (never 0), the paper drops the columns
+  summary leaves "awaiting" out (never 0), the paper drops the columns
   and the filter is a 403. The master is shared, so All for everyone.
 - **A partner's "Sizing app" is "Software"** (2026-10-08, the owner's call) —
   on the filter, the column, the cards, the PDF head, search and the import
@@ -1009,15 +1017,16 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   shows a different set (its filter line says what narrowed it; capped at
   1,000 rows). Both audit EXPORTED; the list export's entityId is `list`.
 - **The leads list is the quotation list's layout** (2026-10-08): the board's
-  stages a lead can stand in as tabs with counts (All leads, Opportunity,
+  stages a lead can stand in as a Stage filter (`?stage=`: Opportunity,
   Negotiation, Closing, Confirmed, Lost, On hold — `leadStages()` /
   `leadStage()` / `leadStageStatuses()` in `shared/pipeline.ts`, the board's
-  own `statuses` lookup; never Completed, which is a quotation's), the fine
+  own `statuses` lookup; never Completed, which is a quotation's; the
+  counts still come as `summary.tabCounts`), the fine
   status still a column (with its stage under it) and a filter, Filters
   (status, owner, added by, customer, Added — a timestamp, Manila days — and
-  Expected closing — a DATE), a totals line of estimated and weighted value
-  (`leadListSummary()`, summed in centavos), the printed list and mass
-  actions. **The customer filter's key is `clientId`, never `customerId`**:
+  Expected closing — a DATE), summary cards of the count, the estimated and
+  the weighted value and My team (`leadListSummary()`, summed in centavos),
+  the printed list and mass actions. **The customer filter's key is `clientId`, never `customerId`**:
   this page's `?new=1&customerId=` is the "new lead for this customer"
   hand-off, and a list must not eat it (rule 16). `leadListWhere(me, q,
   stages)` returns `{ base, where }` and feeds the rows, the summary and the
@@ -1902,17 +1911,17 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   line (one or the other, checked to exist). Add a shared cell to
   `editorParts.tsx`, never to one editor. `audit-workflows.ts` knows sales and sales
   managers raise sales orders.
-- **The list is the quotation list's layout** (2026-10-08): the statuses as
-  tabs with counts (All orders, Draft, Pending approval, Issued, Cancelled —
-  the old status filter ignored Pending approval), Filters (booked by,
+- **The list is the quotation list's layout** (2026-10-08): the status as
+  a filter (`?status=`: Draft, Pending approval, Issued, Cancelled — the
+  counts still come as `summary.tabCounts`), Filters (booked by,
   customer, order date range — a DATE, UTC-midnight edges — and Released: an
   SI or DR number filled in), Customer / PO / SI-DR / Margin columns (margin
   only where `canSeeOrderCost`), the printed list `GET /sales-orders/pdf`
   (above `/:id`, value never cost, audited, `?ids=` for Print selected) and
   tick boxes with Export / Print selected. `salesOrderListWhere()` is the one
-  query for the rows, `salesOrderListSummary()` and the paper. **The totals
-  line is the BOOKED value** — orders still standing; a cancelled one is
-  counted apart ("N cancelled, not counted"), never summed, as the
+  query for the rows, `salesOrderListSummary()` and the paper. **The summary
+  cards' value is the BOOKED value** — orders still standing; a cancelled
+  one is counted apart ("N cancelled, not counted"), never summed, as the
   quotation page's Booked figure. Mine for `edit_own`/`edit_all` holders,
   All for a reader (finance). No bulk status change: submitting, issuing and
   cancelling an order each have consequences of their own, and stay on the
@@ -1941,14 +1950,16 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
 
 SCORO's "list of quotes", on the shared list pattern (rule 9).
 
-- **The stages are tabs, with counts.** All quotes, Opportunity, Negotiation,
-  Closing, Confirmed, Completed, Lost — `quotationStages()` in
-  `shared/pipeline.ts`, the stages a quotation can stand in (never On hold),
-  named and coloured as Admin › Pipeline Stages has them and sent with the
-  list's `summary.tabs`, so a reader needs no pipeline right to see them. A
-  quotation's stage is `quotationStage(outcome, booked)` — the board's own
-  `columnFor` + `stageOfCard` — and `quotationStageWhere()` is the same rule
-  as a where-clause, built pair by pair from it, so a tab and the board can
+- **The stage is a filter** (`?stage=`; the tab strip went on 2026-10-08,
+  the owner's call). All quotes, Opportunity, Negotiation, Closing,
+  Confirmed, Completed, Lost — `quotationStages()` in `shared/pipeline.ts`,
+  the stages a quotation can stand in (never On hold), named and coloured
+  as Admin › Pipeline Stages has them and sent with the list's
+  `summary.tabs` (the filter's choices; a reader needs no pipeline right
+  to see them) and counted in `summary.tabCounts`. A quotation's stage is
+  `quotationStage(outcome, booked)` — the board's own `columnFor` +
+  `stageOfCard` — and `quotationStageWhere()` is the same rule as a
+  where-clause, built pair by pair from it, so the filter and the board can
   never sort a quotation differently. `QUOTATION_BOOKED_WHERE` is the twin of
   the board's `booked` (a sales order or a project); change one, change the
   other.
@@ -1956,13 +1967,18 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   returns `base` (everything but the stage) and `where`. The rows, the
   printed list (`GET /quotations/pdf`, above `/:id`, audited EXPORTED with
   entityId `list`, capped at 1,000 rows, value never cost) and
-  `quotationListSummary()` all read it: the tabs count under `base` (each tab
-  says what clicking it would show with the other filters kept, `''` is All),
-  the totals under `where`. The totals line's value is `quotationValue()`
-  summed in cents — the approved revision, never a later draft — and the
-  Total column shows the same figure. verify-sales asserts the counts add up,
-  each tab lists exactly the quotations its count says, and the summary
-  equals its rows.
+  `quotationListSummary()` all read it: the stage counts under `base`, the
+  totals under `where`. **The summary cards** (SCORO's row over the list;
+  the owner's four): Quotations (the count), Sum (`quotationValue()` summed
+  in cents — the approved revision, never a later draft — the figure the
+  Total column shows), Margin (where every listed quotation's cost is the
+  viewer's) and **Quotes by team** — `summary.teams`, the set split by the
+  OWNER's team (`Employee.industryId`, `shared/team.ts`): every active team
+  in the master's order even at zero, a team since switched off as it is
+  met, "No team" last while any listed owner has none; the shares add up
+  to the count and the sum, which verify-sales asserts, along with the
+  stage counts adding up and each stage listing exactly what its count
+  says.
 - **Filters**: owner (people holding `gops.quotations.create`, declared
   before they load so a linked `?ownerId=` is read), customer (a lookup, for
   `gops.customers.view_all` holders), Raised (`createdFrom`/`createdTo`, a
@@ -1974,10 +1990,10 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
 - **Mine for whoever may edit quotations, All for a reader** (the owner's
   call): `defaultScope` is Mine for `edit_own`/`edit_all` holders. A link's
   `?scope=` wins. **Team** sits between them for a viewer with a team
-  (2026-10-08): the quotations of everyone on their team. The totals row
-  carries the count, the total value, the margin (where every listed
-  quotation's cost is theirs to see) and "My team: n · ₱x" — the team's
-  share of the set — under Owner, while the Team view is off.
+  (2026-10-08): the quotations of everyone on their team. The summary's
+  `team` (the viewer's team's share) is still sent; the quotation list's
+  cards show every team's share instead (Quotes by team), the leads and
+  sales order lists a "My team" card while the Team view is off.
 - **Columns**: Number, Quotation (contact under it), Customer (sorts by name),
   Status (the stage on `StatusBadge` with `STAGE_TONES`, its name from the
   row's `stageLabel`), Revision, Total, Margin (only for a viewer who may see

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import type { Industry } from './Reference';
@@ -183,11 +184,11 @@ function CustomerBulkActions({ ctx, industries }: { ctx: BulkContext<CustomerRow
 }
 
 /**
- * The customer list, in the quotation list's layout (2026-10-08): the
- * industries as tabs with their counts (and Unclassified while anybody is),
- * one Filters panel, open quotations and projects as columns, the printed
- * list and mass actions. The customer master is shared, so the list opens on
- * All for everyone; Mine is the customers you added.
+ * The customer list, in the quotation list's layout (2026-10-08): summary
+ * cards over the table, one Filters panel (the industry among them), open
+ * quotations and projects as columns, the printed list and mass actions. The
+ * customer master is shared, so the list opens on All for everyone; Mine is
+ * the customers you added.
  */
 export function Customers() {
   const { can } = useAuth();
@@ -275,6 +276,11 @@ export function Customers() {
 
   const filters: FilterDef[] = [
     {
+      key: 'industry',
+      label: 'Industry',
+      options: (industries ?? []).filter((i) => i.isActive).map((i) => ({ value: i.code, label: i.name })),
+    },
+    {
       key: 'isActive',
       label: 'Status',
       options: [
@@ -321,12 +327,6 @@ export function Customers() {
         onRowClick={(c) => navigate(`/g-ops/customers/${c.id}`)}
         emptyTitle="No customers yet"
         emptyHint="Add the first one, or import a list you already have."
-        tabs={{
-          key: 'industry',
-          label: 'Industries',
-          allLabel: 'All customers',
-          options: (industries ?? []).filter((i) => i.isActive).map((i) => ({ value: i.code, label: i.name })),
-        }}
         filters={filters}
         printPath="/api/customers/pdf"
         selectable
@@ -347,12 +347,14 @@ export function Customers() {
               ]
             : []
         }
-        footer={(raw, total) => {
+        summary={(raw, total) => {
           const sum = raw as CustomerSummary;
-          return {
-            code: <FootCell label={`Customer${total === 1 ? '' : 's'}`}>{total}</FootCell>,
-            ...(sum.inactive ? { isActive: <FootCell label="Inactive">{sum.inactive}</FootCell> } : {}),
-          };
+          return (
+            <>
+              <Stat label="Customers" value={total} />
+              {!!sum.inactive && <Stat label="Inactive" value={sum.inactive} />}
+            </>
+          );
         }}
         actions={
           can('gops.customers.create') ? (

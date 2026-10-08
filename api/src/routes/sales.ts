@@ -1103,10 +1103,24 @@ const LIST_REVISION_SELECT = {
 /** Cents, so a sum of hundreds of totals does not drift by a centavo. */
 const toCents = (v: number) => Math.round(v * 100);
 
+/** One line of the "Quotes by team" card: a team (Industry row) and its share of the listed set. */
+export interface TeamQuotes {
+  /** null for the quotations whose owner has no team. */
+  id: string | null;
+  code: string;
+  name: string;
+  count: number;
+  value: number;
+}
+
 /**
  * The summary a list query carries: a count per stage under `base` (with
- * '' for all of them), and the count and value of what `where` selects. A
- * quotation's value is `quotationValue()` and nothing else.
+ * '' for all of them), the count and value of what `where` selects, and
+ * that set split by the owner's TEAM (2026-10-08, the owner's call, the
+ * list's "Quotes by team" card): every active team in the master's order,
+ * even at zero, and "No team" last while any listed owner has none. A
+ * quotation's value is `quotationValue()` and nothing else; a team is
+ * `Employee.industryId` (shared/team.ts) and nothing else.
  */
 export async function quotationListSummary(
   base: Prisma.QuotationWhereInput,
@@ -1115,27 +1129,64 @@ export async function quotationListSummary(
   /** `teamWhere`: the viewer's team's share of the set; `margin`: only where the caller may see every listed quotation's cost. */
   opts: { teamWhere?: Prisma.QuotationWhereInput | null; margin?: boolean } = {},
 ) {
-  const [perOutcome, bookedPerOutcome, valued, teamRows] = await Promise.all([
+  const [perOutcome, bookedPerOutcome, valued, teamRows, teamList] = await Promise.all([
     prisma.quotation.groupBy({ by: ['outcome'], where: base, _count: { _all: true } }),
     prisma.quotation.groupBy({ by: ['outcome'], where: { AND: [base, QUOTATION_BOOKED_WHERE] }, _count: { _all: true } }),
-    prisma.quotation.findMany({ where, select: { revisions: { select: LIST_REVISION_SELECT } } }),
+    prisma.quotation.findMany({
+      where,
+      select: {
+        revisions: { select: LIST_REVISION_SELECT },
+        owner: { select: { employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } },
+      },
+    }),
     opts.teamWhere
       ? prisma.quotation.findMany({ where: { AND: [where, opts.teamWhere] }, select: { revisions: { select: { status: true, total: true, revision: true } } } })
       : null,
+    prisma.industry.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+      select: { id: true, code: true, name: true },
+    }),
   ]);
   const flat = (rows: { outcome: string; _count: { _all: number } }[]) =>
     rows.map((r) => ({ outcome: r.outcome, count: r._count._all }));
   const tabCounts = quotationStageCounts(flat(perOutcome), flat(bookedPerOutcome), stages);
   tabCounts[''] = perOutcome.reduce((t, r) => t + r._count._all, 0);
-  const valueCents = valued.reduce((t, r) => t + toCents(quotationValue(r.revisions)), 0);
-  // The tabs themselves, as Admin › Pipeline Stages names and colours them —
-  // sent with the counts so a list reader needs no pipeline right to see them.
+
+  // Every active team first, in the master's order, so a team with nothing
+  // listed still shows at zero; a team since switched off joins as it is met.
+  const byTeam = new Map<string, { id: string | null; code: string; name: string; count: number; valueCents: number }>();
+  for (const t of teamList) byTeam.set(t.id, { id: t.id, code: t.code, name: t.name, count: 0, valueCents: 0 });
+  const noTeam = { id: null, code: '—', name: 'No team', count: 0, valueCents: 0 };
+  let valueCents = 0;
+  for (const r of valued) {
+    const cents = toCents(quotationValue(r.revisions));
+    valueCents += cents;
+    const team = r.owner.employee?.industry ?? null;
+    let row = team ? byTeam.get(team.id) : noTeam;
+    if (!row) {
+      row = { id: team!.id, code: team!.code, name: team!.name, count: 0, valueCents: 0 };
+      byTeam.set(team!.id, row);
+    }
+    row.count++;
+    row.valueCents += cents;
+  }
+  const teams: TeamQuotes[] = [...byTeam.values(), ...(noTeam.count ? [noTeam] : [])].map((t) => ({
+    id: t.id,
+    code: t.code,
+    name: t.name,
+    count: t.count,
+    value: t.valueCents / 100,
+  }));
+
+  // The stages, as Admin › Pipeline Stages names and colours them — sent with
+  // the counts so a list reader needs no pipeline right to filter by them.
   const tabs = quotationStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
   const team = teamRows ? { count: teamRows.length, value: teamRows.reduce((t, r) => t + toCents(quotationValue(r.revisions)), 0) / 100 } : undefined;
   const margin = opts.margin
     ? await revisionsMargin(valued.map((r) => valueRevision(r.revisions)).filter((r): r is NonNullable<typeof r> => !!r))
     : undefined;
-  return { tabs, tabCounts, count: valued.length, value: valueCents / 100, ...(team ? { team } : {}), ...(margin ? { margin } : {}) };
+  return { tabs, tabCounts, count: valued.length, value: valueCents / 100, teams, ...(team ? { team } : {}), ...(margin ? { margin } : {}) };
 }
 
 /**

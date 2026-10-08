@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { ActivityLog } from '../../components/ActivityLog';
 import {
@@ -523,6 +524,7 @@ export function Leads() {
 
   const personOptions = people.map((p) => ({ value: p.id, label: p.name }));
   const leadFilters: FilterDef[] = [
+    { key: 'stage', label: 'Stage', options: LEAD_STAGE_TABS },
     { key: 'status', label: 'Status', options: LEAD_STATUSES },
     { key: 'assignedToId', label: 'Owner', options: personOptions },
     { key: 'createdById', label: 'Added by', options: personOptions },
@@ -570,7 +572,6 @@ export function Leads() {
         emptyTitle="No leads yet"
         emptyHint="Record an enquiry the moment it arrives — even a phone call worth following up."
         defaultScope={mayEdit ? 'mine' : 'all'}
-        tabs={{ key: 'stage', label: 'Stages', allLabel: 'All leads', options: LEAD_STAGE_TABS }}
         filters={leadFilters}
         // The paper matches the screen: DataList sends the list's own query.
         printPath="/api/leads/pdf"
@@ -578,22 +579,18 @@ export function Leads() {
         rowLabel={(l) => `${l.number} ${l.companyName}`}
         bulkActions={(ctx) => <LeadBulkActions ctx={ctx} people={people} />}
         teamScope={!!me?.user.team && can('gops.leads.view_all')}
-        footer={(raw, total, scope) => {
+        summary={(raw, total, scope) => {
           const sum = raw as LeadSummary;
-          return {
-            number: <FootCell label={`Lead${total === 1 ? '' : 's'}`}>{total}</FootCell>,
-            estimatedValue: <FootCell label="Estimated value">{formatMoney(sum.value ?? 0)}</FootCell>,
-            weighted: <FootCell label="Weighted">{formatMoney(sum.weighted ?? 0)}</FootCell>,
-            ...(sum.team && scope !== 'team'
-              ? {
-                  assignedTo: (
-                    <FootCell label="My team">
-                      {sum.team.count} · {formatMoney(sum.team.value)}
-                    </FootCell>
-                  ),
-                }
-              : {}),
-          };
+          return (
+            <>
+              <Stat label="Leads" value={total} />
+              <Stat label="Estimated value" value={formatMoney(sum.value ?? 0)} figure />
+              <Stat label="Weighted" value={formatMoney(sum.weighted ?? 0)} figure />
+              {sum.team && scope !== 'team' && (
+                <Stat label="My team" value={sum.team.count} sub={formatMoney(sum.team.value)} />
+              )}
+            </>
+          );
         }}
         actions={
           <>

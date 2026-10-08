@@ -3,7 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
-import { DataList, FootCell, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
 import {
   Checkbox,
@@ -237,6 +238,7 @@ export function SalesOrders() {
   ];
 
   const filters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: SO_STATUS_TABS },
     // Declared before its people arrive, so a linked ?ownerId= is read on mount (rule 16).
     ...(seesAll ? [{ key: 'ownerId', label: 'Booked by', options: owners }] : []),
     ...(can('gops.customers.view_all')
@@ -287,42 +289,30 @@ export function SalesOrders() {
         onRowClick={(r) => navigate(`/g-ops/sales-orders/${r.id}`)}
         emptyTitle="Nothing booked yet"
         emptyHint="Open a quotation and press Create Sales Order — that is where one starts."
-        tabs={{ key: 'status', label: 'Statuses', allLabel: 'All orders', options: SO_STATUS_TABS }}
         filters={filters}
         printPath="/api/sales-orders/pdf"
         selectable
         rowLabel={(r) => `${r.number} ${r.quotation.subject}`}
         teamScope={!!me?.user.team && can('gops.sales_orders.view_all')}
-        footer={(raw, total, scope) => {
+        summary={(raw, total, scope) => {
           const s = raw as SalesOrderSummary;
-          return {
-            number: (
-              <FootCell label={`Order${total === 1 ? '' : 's'}`}>
-                {total}
-                {!!s.cancelledCount && <span className="faint"> · {s.cancelledCount} cancelled, not counted</span>}
-              </FootCell>
-            ),
-            total: <FootCell label="Booked value">{formatMoney(s.value ?? 0)}</FootCell>,
-            ...(s.margin
-              ? {
-                  margin: (
-                    <FootCell label={`Margin · ${s.margin.costed} costed`}>
-                      {formatMoney(s.margin.amount)}
-                      {s.margin.pct !== null && <span className="faint"> {s.margin.pct}%</span>}
-                    </FootCell>
-                  ),
-                }
-              : {}),
-            ...(s.team && scope !== 'team'
-              ? {
-                  owner: (
-                    <FootCell label="My team">
-                      {s.team.count} · {formatMoney(s.team.value)}
-                    </FootCell>
-                  ),
-                }
-              : {}),
-          };
+          return (
+            <>
+              <Stat label="Orders" value={total} sub={s.cancelledCount ? `${s.cancelledCount} cancelled, not counted` : undefined} />
+              <Stat label="Booked value" value={formatMoney(s.value ?? 0)} figure />
+              {s.margin && (
+                <Stat
+                  label="Margin"
+                  value={formatMoney(s.margin.amount)}
+                  figure
+                  sub={`${s.margin.pct !== null ? `${s.margin.pct}% · ` : ''}${s.margin.costed} costed`}
+                />
+              )}
+              {s.team && scope !== 'team' && (
+                <Stat label="My team" value={s.team.count} sub={formatMoney(s.team.value)} />
+              )}
+            </>
+          );
         }}
       />
     </div>

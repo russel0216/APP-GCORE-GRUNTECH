@@ -1177,6 +1177,21 @@ async function main() {
       withTeam.team?.count === 6 && money(withTeam.team.value, withTeam.value) && withTeam.margin?.costed === 0 && withTeam.margin.pct === null,
       JSON.stringify({ team: withTeam.team, margin: withTeam.margin }),
     );
+    // Quotes by team (2026-10-08, the owner's call — the list's summary card):
+    // the set split by the owner's team, every active team listed even at
+    // zero, and the shares add up to the whole.
+    const activeTeams = await prisma.industry.findMany({ where: { isActive: true }, select: { id: true } });
+    const teamShares = withTeam.teams ?? [];
+    const myShare = teamShares.find((t) => t.id === myTeam!.id);
+    check(
+      'the summary splits the set by the owner’s team: every active team listed, the shares adding up to the whole',
+      activeTeams.every((t) => teamShares.some((s) => s.id === t.id)) &&
+        myShare?.count === 6 && money(myShare.value, withTeam.value) &&
+        teamShares.reduce((n, t) => n + t.count, 0) === withTeam.count &&
+        money(teamShares.reduce((v, t) => v + t.value, 0), withTeam.value) &&
+        teamShares.filter((t) => t.id !== myTeam!.id).every((t) => t.count === 0 && t.value === 0),
+      JSON.stringify(teamShares),
+    );
     const perStage = Object.entries(summary.tabCounts).filter(([k]) => k !== '');
     check(
       'every stage has one, and the stage counts add up to All',

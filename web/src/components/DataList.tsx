@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs, type ListResult, type ListSummary } from '../lib/api';
 import { parseDay, todayLocal } from '../lib/day';
@@ -19,7 +19,6 @@ import {
   type ListScope,
   type LookupFilterDef,
   type SavedView,
-  type TabsDef,
 } from '../lib/listUrl';
 import { Menu } from './Menu';
 import { Empty, ErrorBox, Loading, formatDate } from './ui';
@@ -51,9 +50,11 @@ export interface BulkContext<T> {
  * Mine/All switch and one Filters button that opens every filter in a panel.
  * On the right, one "..." menu with the tools nobody came for: Columns,
  * Export CSV, Print (where the screen has a printed list), Save view and
- * Refresh. Under the toolbar, an optional tab strip over one filter key — the
- * quotation list's stages, each with its count — then a chip for every filter
- * on, each removable, then the table, then the totals line.
+ * Refresh. Under the toolbar, a chip for every filter on, each removable,
+ * then the screen's SUMMARY CARDS — SCORO's row over the list: the count,
+ * the sum, the margin, the quotes by team (2026-10-08, the owner's call,
+ * replacing the totals row under the table and the tab strip over it) —
+ * then the table.
  *
  * The list's state lives in the URL (rule 16, `lib/listUrl.ts`). `?q=`,
  * `?scope=`, `?page=` and every key the screen DECLARES — its filters, a date
@@ -83,8 +84,6 @@ interface Props<T> {
   endpoint: string;
   columns: Column<T>[];
   filters?: FilterDef[];
-  /** A strip of tabs over one filter key, each with the count the endpoint's `summary.tabCounts` gives it. */
-  tabs?: TabsDef;
   searchPlaceholder?: string;
   /** Shows the Mine/All switch — for records that have an owner. */
   scoped?: boolean;
@@ -134,12 +133,13 @@ interface Props<T> {
    */
   menuItems?: { label: string; hint?: string; onSelect: () => void }[];
   /**
-   * The totals row under the columns (2026-10-08, after SCORO's list of
-   * quotes): cells by column key — the count under Number, the sum under
-   * Total — from the endpoint's `summary`, the filtered total and the scope
-   * on. A cell whose column is hidden goes with it. `FootCell` draws one.
+   * The summary cards over the table (2026-10-08, the owner's call, after
+   * SCORO's list of quotes): `Stat` tiles from the endpoint's `summary`, the
+   * filtered total and the scope on — the count, the sum, the margin, the
+   * quotes by team. Drawn in a `kpi-grid` under the chips; they say what the
+   * whole filtered set adds up to, so there is no totals row under it.
    */
-  footer?: (summary: ListSummary, total: number, scope: ListScope) => Record<string, ReactNode>;
+  summary?: (summary: ListSummary, total: number, scope: ListScope) => ReactNode;
   /** Offer Team between Mine and All — for a viewer whose employee record has a team (`me.user.team`). */
   teamScope?: boolean;
   /** Told each time a fetch brings a summary — for a screen that learns from it (the partners' categories). */
@@ -152,7 +152,6 @@ export function DataList<T>({
   endpoint,
   columns,
   filters = [],
-  tabs,
   searchPlaceholder = 'Search…',
   scoped = false,
   defaultScope = 'all',
@@ -169,7 +168,7 @@ export function DataList<T>({
   bulkActions,
   rowLabel,
   menuItems = [],
-  footer,
+  summary,
   teamScope = false,
   onSummary,
   rowKey,
@@ -179,7 +178,7 @@ export function DataList<T>({
   const [error, setError] = useState<unknown>(null);
 
   const [params, setParams] = useSearchParams();
-  const filterKeys = filterKeysOf(filters, tabs);
+  const filterKeys = filterKeysOf(filters);
   const filterKeysKey = filterKeys.join('|');
   // Read once for the initial state — the URL is the linked window, so the
   // first fetch is already the filtered one rather than a flash of everything.
@@ -534,9 +533,6 @@ export function DataList<T>({
     setPage(1);
   }
 
-  const tabCounts = data?.summary?.tabCounts;
-  const tabOptions = data?.summary?.tabs ?? tabs?.options ?? [];
-
   return (
     <div>
       <div className="list-toolbar">
@@ -840,32 +836,6 @@ export function DataList<T>({
         </div>
       )}
 
-      {tabs && (
-        <nav className="list-tabs" aria-label={tabs.label ?? 'Narrow the list'}>
-          {[{ value: '', label: tabs.allLabel ?? 'All', color: undefined as string | undefined }, ...tabOptions].map(
-            (o) => {
-              const on = (active[tabs.key] ?? '') === o.value;
-              const count = tabCounts?.[o.value];
-              return (
-                <button
-                  key={o.value || 'all'}
-                  type="button"
-                  className="list-tab"
-                  aria-pressed={on}
-                  // A CSS variable, not a raw value: the tab's own colour.
-                  style={o.color ? ({ '--tab-color': o.color } as CSSProperties) : undefined}
-                  onClick={() => setFilter(tabs.key, o.value)}
-                >
-                  {o.color && <span className="list-tab-dot" aria-hidden="true" />}
-                  {o.label}
-                  {count !== undefined && <span className="list-tab-count">{count}</span>}
-                </button>
-              );
-            },
-          )}
-        </nav>
-      )}
-
       {/*
         A filtered list used to look exactly like an empty one. Three rows out
         of four hundred with nothing on screen explaining why is how people
@@ -901,6 +871,17 @@ export function DataList<T>({
           <button type="button" className="btn btn-ghost btn-sm" onClick={clearAll}>
             Clear all
           </button>
+        </div>
+      )}
+
+      {/*
+        SCORO's summary row: what the whole filtered set adds up to, in cards
+        over the table rather than a line under it, so the figures are read
+        before the rows and never scroll away.
+      */}
+      {summary && data?.summary && (
+        <div className="kpi-grid list-summary" aria-label="What this list adds up to">
+          {summary(data.summary, data.total, scope)}
         </div>
       )}
 
@@ -1053,24 +1034,6 @@ export function DataList<T>({
                 </tr>
               ))}
             </tbody>
-            {footer &&
-              data.summary &&
-              data.total > 0 &&
-              (() => {
-                const cells = footer(data.summary, data.total, scope);
-                return (
-                  <tfoot>
-                    <tr className="list-foot">
-                      {selectable && <td className="list-select" />}
-                      {visible.map((c) => (
-                        <td key={c.key} className={c.align === 'right' ? 'num' : undefined} style={{ textAlign: c.align }}>
-                          {cells[c.key] ?? null}
-                        </td>
-                      ))}
-                    </tr>
-                  </tfoot>
-                );
-              })()}
           </table>
         )}
       </div>
@@ -1261,14 +1224,4 @@ function extractText(node: ReactNode): string {
 function csvCell(value: string): string {
   const v = value.replace(/\s+/g, ' ').trim();
   return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-}
-
-/** One cell of the totals row: a small label over the figure. */
-export function FootCell({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <>
-      <span className="list-foot-label">{label}</span>
-      <span className="list-foot-value">{children}</span>
-    </>
-  );
 }

@@ -3,7 +3,8 @@ import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-r
 import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
-import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { Stat } from '../../components/charts';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
@@ -140,6 +141,15 @@ export function stageLabelFor(outcome: string, stages?: StageOption[] | null): s
   return stages?.find((s) => s.key === key)?.label ?? STAGE_TABS.find((t) => t.value === key)?.label ?? outcomeLabel(outcome);
 }
 
+/** One line of the "Quotes by team" card: a team and its share of the listed set. */
+interface TeamQuotes {
+  id: string | null;
+  code: string;
+  name: string;
+  count: number;
+  value: number;
+}
+
 interface QuotationSummary {
   count?: number;
   value?: number;
@@ -147,19 +157,54 @@ interface QuotationSummary {
   margin?: { amount: number; pct: number | null; costed: number };
   /** The viewer's team's share of the set; only for a viewer with a team. */
   team?: { count: number; value: number };
+  /** The set split by the owner's team — every active team, "No team" last while anybody has none. */
+  teams?: TeamQuotes[];
+  /** The stages as Admin › Pipeline Stages names them — the Stage filter's choices. */
+  tabs?: { value: string; label: string }[];
 }
 
 /**
- * The list of quotations, after SCORO's (2026-10-08): the stages as tabs with
- * their counts, one Filters panel, the customer and status in columns of their
- * own, and a totals line that adds up the whole filtered set. The tabs, the
- * totals and the printed list all come from the server's one list query.
+ * SCORO's summary row, one card wider: the listed quotations split by their
+ * owner's team (`Employee.industryId`, shared/team.ts) — KAT, HIT, UIT, GIB,
+ * SIT — each with its count and value, so a manager reads the teams' share
+ * of the set before the rows.
+ */
+function TeamQuotesCard({ teams }: { teams: TeamQuotes[] }) {
+  return (
+    <div className="kpi-card wide">
+      <div className="kpi-label">Quotes by team</div>
+      {teams.length === 0 ? (
+        <div className="kpi-subtext">No teams yet — HR sets a person's team on the employee record.</div>
+      ) : (
+        <div className="list-summary-rows">
+          {teams.map((t) => (
+            <div key={t.id ?? 'none'} className="list-summary-row" title={t.name}>
+              <span className="code">{t.code}</span>
+              <span className="num">{t.count}</span>
+              <span className="num">{formatMoney(t.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The list of quotations, after SCORO's (2026-10-08): the summary cards over
+ * the table — the count, the sum, the margin and the quotes by team — one
+ * Filters panel (the stage among them), the customer and status in columns
+ * of their own. The cards, the filters and the printed list all come from
+ * the server's one list query.
  */
 export function Quotations() {
   const { me, can } = useAuth();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
+  // The stages as the server names them (Admin › Pipeline Stages); the
+  // defaults stand in until the first answer arrives.
+  const [stageOptions, setStageOptions] = useState<{ value: string; label: string }[]>(STAGE_TABS);
 
   const seesAll = can('gops.quotations.view_all');
   // The owner's call: whoever may edit quotations opens on their own; a
@@ -283,6 +328,7 @@ export function Quotations() {
   ];
 
   const filters: FilterDef[] = [
+    { key: 'stage', label: 'Stage', options: stageOptions },
     // Declared before its people arrive, so a linked ?ownerId= is read on mount (rule 16).
     ...(seesAll ? [{ key: 'ownerId', label: 'Owner', options: owners }] : []),
     ...(can('gops.customers.view_all')
@@ -342,39 +388,33 @@ export function Quotations() {
         searchPlaceholder="Search number, name, customer, contact…"
         onRowClick={(q) => navigate(`/g-ops/quotations/${q.id}`)}
         emptyTitle="No quotations yet"
-        tabs={{ key: 'stage', label: 'Stages', allLabel: 'All quotes', options: STAGE_TABS }}
         filters={filters}
         printPath="/api/quotations/pdf"
         selectable
         rowLabel={(q) => `${q.number} ${q.subject}`}
         bulkActions={(ctx) => <QuotationBulkStatus ctx={ctx} />}
         teamScope={seesAll && !!me?.user.team}
-        footer={(raw, total, scope) => {
+        onSummary={(raw) => {
+          const named = (raw as QuotationSummary).tabs;
+          if (named?.length) setStageOptions(named.map((t) => ({ value: t.value, label: t.label })));
+        }}
+        summary={(raw, total) => {
           const s = raw as QuotationSummary;
-          return {
-            number: <FootCell label={`Quotation${total === 1 ? '' : 's'}`}>{total}</FootCell>,
-            total: <FootCell label="Total value">{formatMoney(s.value ?? 0)}</FootCell>,
-            ...(s.margin
-              ? {
-                  margin: (
-                    <FootCell label={`Margin · ${s.margin.costed} costed`}>
-                      {formatMoney(s.margin.amount)}
-                      {s.margin.pct !== null && <span className="faint"> {s.margin.pct}%</span>}
-                    </FootCell>
-                  ),
-                }
-              : {}),
-            // My team's share of the set — redundant while the Team view is on.
-            ...(s.team && scope !== 'team'
-              ? {
-                  owner: (
-                    <FootCell label="My team">
-                      {s.team.count} · {formatMoney(s.team.value)}
-                    </FootCell>
-                  ),
-                }
-              : {}),
-          };
+          return (
+            <>
+              <Stat label="Quotations" value={total} />
+              <Stat label="Sum" value={formatMoney(s.value ?? 0)} figure />
+              {s.margin && (
+                <Stat
+                  label="Margin"
+                  value={formatMoney(s.margin.amount)}
+                  figure
+                  sub={`${s.margin.pct !== null ? `${s.margin.pct}% · ` : ''}${s.margin.costed} costed`}
+                />
+              )}
+              <TeamQuotesCard teams={s.teams ?? []} />
+            </>
+          );
         }}
         actions={
           can('gops.quotations.create') ? (

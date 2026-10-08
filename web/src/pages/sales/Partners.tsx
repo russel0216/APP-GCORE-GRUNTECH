@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, FootCell, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { openAttachment } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
@@ -300,8 +300,11 @@ export function Partners() {
   // The categories on file, for the bulk box's suggestions — learnt from the
   // tabs the list's summary sends, so there is no second query for them.
   const [knownCategories, setKnownCategories] = useState<string[]>([]);
+  // The same categories as the filter's choices ("Not stated" among them).
+  const [categoryOptions, setCategoryOptions] = useState<{ value: string; label: string }[]>([]);
 
   const filters: FilterDef[] = [
+    { key: 'category', label: 'What they supply', options: categoryOptions },
     {
       key: 'isActive',
       label: 'Status',
@@ -400,7 +403,6 @@ export function Partners() {
         emptyTitle="No partners yet"
         emptyHint="Add the principals you represent, or import a list."
         emptyAction={addButton || undefined}
-        tabs={{ key: 'category', label: 'What they supply', allLabel: 'All partners', options: [] }}
         filters={filters}
         printPath="/api/partners/pdf"
         selectable
@@ -421,17 +423,21 @@ export function Partners() {
               ]
             : []
         }
-        footer={(raw, total) => {
+        summary={(raw, total) => {
           const sum = raw as PartnerSummary;
-          return {
-            code: <FootCell label={`Partner${total === 1 ? '' : 's'}`}>{total}</FootCell>,
-            priceLists: <FootCell label="Publish a price list">{sum.withPriceList ?? 0}</FootCell>,
-            pricedItems: <FootCell label="Priced items">{sum.pricedItems ?? 0}</FootCell>,
-          };
+          return (
+            <>
+              <Stat label="Partners" value={total} />
+              <Stat label="Publish a price list" value={sum.withPriceList ?? 0} />
+              <Stat label="Priced items" value={sum.pricedItems ?? 0} />
+            </>
+          );
         }}
-        onSummary={(raw) =>
-          setKnownCategories(((raw as PartnerSummary).tabs ?? []).filter((t) => t.value !== 'none').map((t) => t.label))
-        }
+        onSummary={(raw) => {
+          const tabs = (raw as PartnerSummary).tabs ?? [];
+          setKnownCategories(tabs.filter((t) => t.value !== 'none').map((t) => t.label));
+          setCategoryOptions(tabs.map((t) => ({ value: t.value, label: t.label })));
+        }}
         actions={addButton || null}
       />
 
