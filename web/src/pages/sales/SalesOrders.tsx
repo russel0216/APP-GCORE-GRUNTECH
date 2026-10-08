@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, openPdf } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -16,7 +16,30 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { quotationTotals } from '../../lib/quotationMath';
+import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
+import { CostPanelBlock } from './Quotations';
+import {
+  blankLine,
+  CellError,
+  ContactSelect,
+  CostCell,
+  figure,
+  isBlank,
+  LeaveBar,
+  lineField,
+  linePayload,
+  moneyOf,
+  nextKey,
+  numberOk,
+  pct,
+  ProductInput,
+  Static,
+  withTax,
+  type Line,
+  type Option,
+  type ProductSuggestion,
+  type TaxOption,
+} from './editorParts';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice" under its real name: the document
@@ -513,40 +536,74 @@ function ReleaseCard({ order, onSaved }: { order: SalesOrderDetailRow; onSaved: 
 
 // ── The editor — SCORO's invoice edit screen, as a page ──────────────────────
 
-interface EditLine {
-  key: string;
-  id?: string;
-  isHeading: boolean;
-  group: string;
-  title: string;
-  description: string;
-  quantity: string;
-  unit: string;
-  unitPrice: string;
-  unitCost: string;
-  costNote: string;
+/**
+ * SCORO's "Modify" on an invoice, done the way the quotation is modified
+ * (2026-10-08, the owner's call): one card, the header in two columns with
+ * the labels beside the values, the lines as one row each — group, product
+ * over description, quantity beside unit, price, amount with the with-VAT
+ * figure under it, cost and provider, margin — the totals beside the cost
+ * panel, and Back / Save at both ends. The cells, the line arithmetic and
+ * the payload are the quotation editor's own (`editorParts.tsx`), so the two
+ * cannot drift. One Save sends the header and every line in one PUT; a line
+ * sent back with its id keeps what it books of the quotation.
+ */
+interface SoHeader {
+  orderDate: string;
+  termsDays: string;
+  paymentMethod: string;
+  referenceNo: string;
+  poNumber: string;
+  comment: string;
+  contactId: string;
+  discountPct: string;
+  vatRate: number;
+  vatInclusive: boolean;
 }
 
-let lineKey = 0;
-const freshKey = () => `so-${++lineKey}`;
+function fromSoLine(l: SoLine): Line {
+  return {
+    key: nextKey(),
+    isHeading: l.isHeading,
+    group: l.group ?? '',
+    title: l.title ?? '',
+    description: l.description ?? '',
+    quantity: String(l.quantity),
+    unit: l.unit,
+    unitPrice: String(l.unitPrice),
+    unitCost: l.unitCost == null ? '' : String(l.unitCost),
+    providerKind: l.providerUser ? 'user' : l.providerSupplier ? 'supplier' : 'none',
+    provider: l.providerUser ?? l.providerSupplier ?? null,
+    costNote: l.costNote ?? '',
+  };
+}
 
 export function SalesOrderEditor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const toast = useToast();
-  const [order, setOrder] = useState<SalesOrderDetailRow | null>(null);
+  const { me } = useAuth();
+  const [order, setOrder] = useState<(SalesOrderDetailRow & { taxOptions?: TaxOption[] }) | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  const [lines, setLines] = useState<EditLine[]>([]);
+  const [dirty, setDirty] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [lines, setLines] = useState<Line[]>([]);
+  /** The saved line behind each row — sent back so a line keeps its booking. */
+  const [idByKey, setIdByKey] = useState<Record<string, string>>({});
   const [groups, setGroups] = useState<string[]>([]);
-  const [header, setHeader] = useState({
+  const [contacts, setContacts] = useState<Option[]>([]);
+  const [header, setHeader] = useState<SoHeader>({
     orderDate: '',
     termsDays: '30',
     paymentMethod: '',
     referenceNo: '',
     poNumber: '',
     comment: '',
+    contactId: '',
     discountPct: '0',
+    vatRate: 0.12,
     vatInclusive: false,
   });
 
@@ -560,7 +617,7 @@ export function SalesOrderEditor() {
   useEffect(() => {
     if (!id) return;
     api
-      .get<SalesOrderDetailRow>(`/sales-orders/${id}`)
+      .get<SalesOrderDetailRow & { taxOptions?: TaxOption[] }>(`/sales-orders/${id}`)
       .then((o) => {
         setOrder(o);
         setHeader({
@@ -570,35 +627,180 @@ export function SalesOrderEditor() {
           referenceNo: o.referenceNo ?? '',
           poNumber: o.poNumber ?? '',
           comment: o.comment ?? '',
+          contactId: o.contact?.id ?? '',
           discountPct: String(o.discountPct),
+          vatRate: o.vatRate,
           vatInclusive: o.vatInclusive,
         });
-        setLines(
-          o.lines.map((l) => ({
-            key: freshKey(),
-            id: l.id,
-            isHeading: l.isHeading,
-            group: l.group ?? '',
-            title: l.title ?? '',
-            description: l.description,
-            quantity: String(l.quantity),
-            unit: l.unit,
-            unitPrice: String(l.unitPrice),
-            unitCost: l.unitCost == null ? '' : String(l.unitCost),
-            costNote: l.costNote ?? '',
-          })),
-        );
+        const rows = o.lines.map(fromSoLine);
+        setLines(rows.length ? rows : [blankLine()]);
+        setIdByKey(Object.fromEntries(rows.map((l, i) => [l.key, o.lines[i].id])));
+        api
+          .get<{ contacts: Option[] }>(`/customers/${o.customer.id}`)
+          .then((c) => setContacts(c.contacts))
+          .catch(() => setContacts([]));
       })
-      .catch(setError);
+      .catch(setLoadError);
   }, [id]);
 
-  if (!order) return error ? <ErrorBox error={error} /> : <Loading />;
+  // Leaving with unsaved work asks first — the browser's own prompt.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  const set = <K extends keyof SoHeader>(k: K, v: SoHeader[K]) => {
+    setHeader((h) => ({ ...h, [k]: v }));
+    setDirty(true);
+  };
+  function updateLine(key: string, patch: Partial<Line>) {
+    setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+    setDirty(true);
+  }
+  function addLine(after?: string, heading = false) {
+    const fresh = blankLine(heading);
+    setLines((ls) => {
+      const i = after ? ls.findIndex((l) => l.key === after) : -1;
+      return i < 0 ? [...ls, fresh] : [...ls.slice(0, i + 1), fresh, ...ls.slice(i + 1)];
+    });
+    setDirty(true);
+    setTimeout(() => document.getElementById(lineField(fresh.key, 'title'))?.focus(), 0);
+  }
+  function removeLine(key: string) {
+    setLines((ls) => (ls.length === 1 ? [blankLine()] : ls.filter((l) => l.key !== key)));
+    setDirty(true);
+  }
+  function moveLine(key: string, by: -1 | 1) {
+    setLines((ls) => {
+      const i = ls.findIndex((l) => l.key === key);
+      const j = i + by;
+      if (i < 0 || j < 0 || j >= ls.length) return ls;
+      const next = [...ls];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+    setDirty(true);
+  }
+  function pickProduct(l: Line, sg: ProductSuggestion) {
+    updateLine(l.key, {
+      title: sg.title,
+      description: sg.description || l.description,
+      unit: sg.unit || l.unit,
+      unitPrice: sg.unitPrice != null ? String(sg.unitPrice) : l.unitPrice,
+      ...(sg.unitCost != null && l.unitCost.trim() === '' ? { unitCost: String(sg.unitCost) } : {}),
+    });
+    setTimeout(() => document.getElementById(lineField(l.key, 'quantity'))?.focus(), 0);
+  }
+
+  // ── Live figures (the server's arithmetic, mirrored) ──────────────────────
+  const priced = useMemo(() => lines.filter((l) => !isBlank(l)), [lines]);
+  const totals = useMemo(
+    () =>
+      quotationTotals({
+        lines: priced.map(moneyOf),
+        discountPct: figure(header.discountPct),
+        vatRate: header.vatRate,
+        vatInclusive: header.vatInclusive,
+      }),
+    [priced, header.discountPct, header.vatRate, header.vatInclusive],
+  );
+  const marginByKey = new Map<string, LineMargin>(priced.map((l, i) => [l.key, totals.lines[i]]));
+
+  function validate(): { errors: Record<string, string>; first: string | null } {
+    const found: Record<string, string> = {};
+    const order: string[] = [];
+    const flag = (key: string, message: string, fieldId = key) => {
+      if (found[key]) return;
+      found[key] = message;
+      order.push(fieldId);
+    };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(header.orderDate)) flag('orderDate', 'When was it issued?', 'so-orderDate');
+    if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'title') : 'so-add-line');
+    for (const l of priced) {
+      if (l.isHeading) continue;
+      if (!l.title.trim() && !l.description.trim()) flag(lineField(l.key, 'title'), 'Give the line a product title or a description');
+      if (!numberOk(l.quantity)) flag(lineField(l.key, 'quantity'), 'Quantity must be zero or more');
+      if (!numberOk(l.unitPrice)) flag(lineField(l.key, 'unitPrice'), 'Price must be zero or more');
+      if (l.unitCost.trim() !== '' && !numberOk(l.unitCost)) flag(lineField(l.key, 'unitCost'), 'Cost must be zero or more');
+    }
+    const disc = Number(header.discountPct || 0);
+    if (!Number.isFinite(disc) || disc < 0 || disc > 100) flag('discountPct', 'A discount from 0 to 100%', 'so-discount');
+    return { errors: found, first: order[0] ?? null };
+  }
+
+  async function save() {
+    const check = validate();
+    setErrors(check.errors);
+    if (check.first) {
+      setError(new Error('Some fields need attention — they are marked below.'));
+      document.getElementById(check.first)?.focus();
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      await api.put(`/sales-orders/${order!.id}`, {
+        orderDate: header.orderDate,
+        termsDays: Number(header.termsDays) || 0,
+        paymentMethod: header.paymentMethod.trim() || null,
+        referenceNo: header.referenceNo.trim() || null,
+        poNumber: header.poNumber.trim() || null,
+        comment: header.comment.trim() || null,
+        contactId: header.contactId || null,
+        discountPct: Number(header.discountPct || 0),
+        vatRate: header.vatRate,
+        vatInclusive: header.vatInclusive,
+        // The cost keys go only where the caller may see cost; the server
+        // ignores them otherwise, and a saved line keeps its booking by id.
+        lines: priced.map((l) => {
+          const payload = linePayload(l);
+          const { unitCost, providerUserId, providerSupplierId, costNote, ...plain } = payload as typeof payload & {
+            providerUserId?: string | null;
+            providerSupplierId?: string | null;
+            costNote?: string | null;
+          };
+          return {
+            ...(idByKey[l.key] ? { id: idByKey[l.key] } : {}),
+            ...plain,
+            ...(showCost ? { unitCost, providerUserId, providerSupplierId, costNote } : {}),
+          };
+        }),
+      });
+      setDirty(false);
+      toast('ok', `Saved ${order!.number}`);
+      navigate(`/g-ops/sales-orders/${order!.id}`);
+      window.scrollTo(0, 0);
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  function cancel() {
+    if (dirty && !leaving) {
+      setLeaving(true);
+      return;
+    }
+    leave();
+  }
+  function leave() {
+    setLeaving(false);
+    setDirty(false);
+    navigate(`/g-ops/sales-orders/${id}`);
+  }
+
+  if (!order) return loadError ? <ErrorBox error={loadError} /> : <Loading />;
   if (!order.canEdit || order.status !== 'DRAFT') {
     return (
       <div className="card">
         <h3 className="card-title">{order.number} cannot be modified</h3>
         <p className="muted">
-          {order.status !== 'DRAFT' ? `It is ${order.status.toLowerCase()} — reopen it first.` : 'Only its author can edit it.'}
+          {order.status !== 'DRAFT' ? `It is ${order.status.toLowerCase().replace(/_/g, ' ')} — reopen it first.` : 'Only its author can edit it.'}
         </p>
         <Link className="btn" to={`/g-ops/sales-orders/${order.id}`}>
           Back to {order.number}
@@ -608,56 +810,12 @@ export function SalesOrderEditor() {
   }
 
   const showCost = order.canSeeCost;
-  const n = (v: string) => Number(v) || 0;
-  const totals = quotationTotals({
-    lines: lines
-      .filter((l) => !l.isHeading)
-      .map((l) => ({ amount: n(l.quantity) * n(l.unitPrice), costAmount: l.unitCost === '' ? undefined : n(l.quantity) * n(l.unitCost) })),
-    discountPct: n(header.discountPct),
-    vatRate: order.vatRate,
-    vatInclusive: header.vatInclusive,
-  });
-
-  function update(key: string, patch: Partial<EditLine>) {
-    setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
-  }
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.put(`/sales-orders/${order!.id}`, {
-        orderDate: header.orderDate,
-        termsDays: Number(header.termsDays) || 0,
-        paymentMethod: header.paymentMethod.trim() || null,
-        referenceNo: header.referenceNo.trim() || null,
-        poNumber: header.poNumber.trim() || null,
-        comment: header.comment.trim() || null,
-        discountPct: n(header.discountPct),
-        vatInclusive: header.vatInclusive,
-        lines: lines
-          .filter((l) => (l.isHeading ? l.title.trim() : l.title.trim() || l.description.trim()))
-          .map((l) =>
-            l.isHeading
-              ? { isHeading: true, title: l.title.trim() }
-              : {
-                  group: l.group.trim() || null,
-                  title: l.title.trim() || null,
-                  description: l.description,
-                  quantity: n(l.quantity),
-                  unit: l.unit.trim() || 'lot',
-                  unitPrice: n(l.unitPrice),
-                  ...(showCost ? { unitCost: l.unitCost === '' ? null : n(l.unitCost), costNote: l.costNote.trim() || null } : {}),
-                },
-          ),
-      });
-      toast('ok', `Saved ${order!.number}`);
-      navigate(`/g-ops/sales-orders/${order!.id}`);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
+  const currency = me?.company?.currency ?? 'PHP';
+  const pctLabel = (r: number) => `${Number((r * 100).toFixed(2))}%`;
+  const serverTax: TaxOption[] = order.taxOptions ?? [{ rate: order.vatRate, label: pctLabel(order.vatRate) }];
+  const taxOptions: TaxOption[] = serverTax.some((o) => Math.abs(o.rate - header.vatRate) < 0.00005)
+    ? serverTax
+    : [...serverTax, { rate: header.vatRate, label: `${pctLabel(header.vatRate)} (this order)` }];
 
   return (
     <div className="qe">
@@ -671,138 +829,239 @@ export function SalesOrderEditor() {
         <span>Modify</span>
       </div>
 
-      <section className="card qe-card">
+      <section className="card qe-card" aria-labelledby="so-title">
         <div className="qe-head">
           <div>
-            <h1 className="qe-heading">Sales order details</h1>
-            <p className="faint qe-lead">Nothing changes until you save.</p>
+            <h1 id="so-title" className="qe-heading">
+              Modify sales order details
+            </h1>
+            <p className="faint qe-lead">Draft. Nothing changes until you save.</p>
           </div>
           <div className="row qe-actions">
-            <Link className="btn" to={`/g-ops/sales-orders/${order.id}`}>
+            <button type="button" className="btn" onClick={cancel} disabled={busy}>
               Back
-            </Link>
-            <button className="btn btn-primary" onClick={() => void save()} disabled={busy}>
+            </button>
+            <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
               {busy ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>
+
+        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
         <ErrorBox error={error} />
 
-        <div className="grid grid-3">
-          <Field label="Date of issue">
-            <input type="date" value={header.orderDate} onChange={(e) => setHeader({ ...header, orderDate: e.target.value })} />
-          </Field>
-          <Field label="Payment terms (days)">
-            <NumberInput kind="count" min={0} max={365} value={header.termsDays} onChange={(e) => setHeader({ ...header, termsDays: e.target.value })} />
-          </Field>
-          <Field label="Payment method">
-            <input value={header.paymentMethod} placeholder="e.g. Bank transfer" onChange={(e) => setHeader({ ...header, paymentMethod: e.target.value })} />
-          </Field>
-          <Field label="Purchase order number" hint="The customer's PO this books against">
-            <input value={header.poNumber} onChange={(e) => setHeader({ ...header, poNumber: e.target.value })} />
-          </Field>
-          <Field label="Reference number">
-            <input value={header.referenceNo} onChange={(e) => setHeader({ ...header, referenceNo: e.target.value })} />
-          </Field>
-          <Field label="Discount %">
-            <NumberInput kind="percent" min={0} max={100} value={header.discountPct} onChange={(e) => setHeader({ ...header, discountPct: e.target.value })} />
-          </Field>
-        </div>
-        <Field label="Notes" hint="Printed on the order">
-          <textarea rows={2} value={header.comment} onChange={(e) => setHeader({ ...header, comment: e.target.value })} />
-        </Field>
+        <div className="qe-header qe-rows">
+          <div className="qe-col">
+            <Static label="Order No.">
+              <span className="mono">{order.number}</span>
+            </Static>
+            <Field label="Date of issue" required error={errors.orderDate}>
+              <input id="so-orderDate" type="date" value={header.orderDate} onChange={(e) => set('orderDate', e.target.value)} />
+            </Field>
+            {/* SCORO puts the contact beside the client, on the same line. */}
+            <Static label="Client">
+              <div className="qe-client">
+                <Link to={`/g-ops/customers/${order.customer.id}`}>{order.customer.name}</Link>
+                <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
+              </div>
+            </Static>
+            <Static label="Quotation">
+              <Link to={`/g-ops/quotations/${order.quotation.id}`} className="mono">
+                {order.quotation.number}
+              </Link>{' '}
+              {order.quotation.subject}
+            </Static>
+            <Static label="Author">{order.owner.name}</Static>
+            <Field label="Comment" hint="Printed under Notes on the order">
+              <textarea rows={3} value={header.comment} onChange={(e) => set('comment', e.target.value)} />
+            </Field>
+          </div>
 
-        <div className="table-wrap so-edit-lines">
-          <table className="data">
+          <div className="qe-col">
+            <Field label="Payment terms (days)">
+              <NumberInput kind="count" min={0} max={365} value={header.termsDays} onChange={(e) => set('termsDays', e.target.value)} />
+            </Field>
+            <Field label="Payment method">
+              <input value={header.paymentMethod} placeholder="e.g. Bank transfer" onChange={(e) => set('paymentMethod', e.target.value)} />
+            </Field>
+            <Field label="PO Number" hint="The customer's purchase order this books against">
+              <input value={header.poNumber} onChange={(e) => set('poNumber', e.target.value)} />
+            </Field>
+            <Field label="Reference No.">
+              <input value={header.referenceNo} onChange={(e) => set('referenceNo', e.target.value)} />
+            </Field>
+            <Static label="Currency">{currency}</Static>
+            <Static label="Status">
+              <StatusBadge status={order.status} extra={SO_TONES} />
+            </Static>
+          </div>
+        </div>
+
+        {/* ── Lines ── */}
+        <h2 className="visually-hidden">Lines</h2>
+        {errors.lines && (
+          <div className="alert error" role="alert">
+            {errors.lines}
+          </div>
+        )}
+        <div className="table-wrap qe-table-wrap">
+          <table className={`data qe-lines${showCost ? '' : ' qe-lines-nocost'}`}>
             <thead>
               <tr>
-                <th className="so-col-group">Group</th>
-                <th>Product and description</th>
-                <th className="so-col-qty">Qty</th>
-                <th className="so-col-unit">Unit</th>
-                <th className="so-col-money">Unit price</th>
-                <th className="right">Amount</th>
-                {showCost && <th className="so-col-money">Unit cost</th>}
-                {showCost && <th className="right">Margin</th>}
-                <th className="so-col-x" />
+                <th className="qe-col-move">
+                  <span className="visually-hidden">Order</span>
+                </th>
+                <th className="qe-col-group">Group</th>
+                <th className="qe-col-product">Product | Description</th>
+                <th className="qe-col-qty">Quantity | Unit</th>
+                <th className="qe-col-price right">Unit price</th>
+                <th className="qe-col-amount right">Amount</th>
+                {showCost && <th className="qe-col-cost">Cost and provider info</th>}
+                {showCost && <th className="qe-col-margin right">Margin</th>}
+                <th className="qe-col-remove">
+                  <span className="visually-hidden">Remove</span>
+                </th>
               </tr>
             </thead>
             <tbody>
               {lines.map((l, i) => {
-                const label = l.isHeading ? `Subheading ${i + 1}` : `Line ${i + 1}`;
+                const n = i + 1;
+                const m = marginByKey.get(l.key);
+                const last = i === lines.length - 1;
+                const err = (f: string) => errors[lineField(l.key, f)];
+                const amount = m?.amount ?? 0;
+                const what = l.isHeading ? `subheading ${n}` : `line ${n}`;
+                const moveCell = (
+                  <td className="qe-col-move">
+                    <div className="qe-move">
+                      <span className="mono faint">{n}</span>
+                      <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Move ${what} up`} disabled={i === 0} onClick={() => moveLine(l.key, -1)}>
+                        ↑
+                      </button>
+                      <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Move ${what} down`} disabled={last} onClick={() => moveLine(l.key, 1)}>
+                        ↓
+                      </button>
+                    </div>
+                  </td>
+                );
+                const removeCell = (
+                  <td className="qe-col-remove">
+                    <button type="button" className="btn btn-sm btn-icon btn-ghost" aria-label={`Remove ${what}`} onClick={() => removeLine(l.key)}>
+                      ✕
+                    </button>
+                  </td>
+                );
                 if (l.isHeading) {
                   return (
-                    <tr key={l.key} className="so-heading">
-                      <td colSpan={showCost ? 8 : 6}>
+                    <tr key={l.key} id={`line-${n}`} className="qe-line-heading">
+                      {moveCell}
+                      <td colSpan={showCost ? 7 : 5}>
                         <input
-                          className="qe-title"
-                          aria-label={`${label} text`}
-                          placeholder="Subheading"
+                          id={lineField(l.key, 'title')}
+                          className="qe-heading-input"
+                          aria-label={`Subheading ${n}`}
+                          placeholder="Subheading — e.g. General Requirements"
                           value={l.title}
-                          onChange={(e) => update(l.key, { title: e.target.value })}
+                          aria-invalid={err('title') ? true : undefined}
+                          onChange={(e) => updateLine(l.key, { title: e.target.value })}
                         />
+                        <CellError message={err('title')} />
                       </td>
-                      <td className="so-col-x">
-                        <button className="btn btn-ghost btn-sm" aria-label={`Remove ${label}`} onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}>
-                          ✕
-                        </button>
-                      </td>
+                      {removeCell}
                     </tr>
                   );
                 }
-                const amount = n(l.quantity) * n(l.unitPrice);
-                const margin = l.unitCost === '' ? null : amount - n(l.quantity) * n(l.unitCost);
                 return (
-                  <Fragment key={l.key}>
-                    <tr>
-                      <td className="so-col-group">
-                        <input aria-label={`${label} group`} list="so-groups" value={l.group} onChange={(e) => update(l.key, { group: e.target.value })} />
-                      </td>
-                      <td>
-                        <input
-                          className="qe-title"
-                          aria-label={`${label} product`}
-                          placeholder="Product"
-                          value={l.title}
-                          onChange={(e) => update(l.key, { title: e.target.value })}
+                  <tr key={l.key} id={`line-${n}`}>
+                    {moveCell}
+                    <td>
+                      <input aria-label={`Line ${n} group`} list="so-groups" value={l.group} onChange={(e) => updateLine(l.key, { group: e.target.value })} />
+                    </td>
+                    <td>
+                      <ProductInput
+                        id={lineField(l.key, 'title')}
+                        label={`Line ${n} product`}
+                        value={l.title}
+                        invalid={!!err('title')}
+                        describedBy={err('title') ? `${lineField(l.key, 'title')}-error` : undefined}
+                        onChange={(v) => updateLine(l.key, { title: v })}
+                        onPick={(sg) => pickProduct(l, sg)}
+                      />
+                      <textarea
+                        aria-label={`Line ${n} description`}
+                        placeholder="Description"
+                        rows={Math.min(10, Math.max(2, l.description.split('\n').length + 1))}
+                        value={l.description}
+                        onChange={(e) => updateLine(l.key, { description: e.target.value })}
+                      />
+                      <CellError id={`${lineField(l.key, 'title')}-error`} message={err('title')} />
+                    </td>
+                    <td>
+                      <div className="qe-qty">
+                        <NumberInput
+                          kind="quantity"
+                          id={lineField(l.key, 'quantity')}
+                          className="qe-num"
+                          min={0}
+                          step="any"
+                          aria-label={`Line ${n} quantity`}
+                          value={l.quantity}
+                          aria-invalid={err('quantity') ? true : undefined}
+                          onChange={(e) => updateLine(l.key, { quantity: e.target.value })}
                         />
-                        <textarea
-                          rows={2}
-                          aria-label={`${label} description`}
-                          placeholder="Additional info"
-                          value={l.description}
-                          onChange={(e) => update(l.key, { description: e.target.value })}
-                        />
-                      </td>
-                      <td className="so-col-qty">
-                        <NumberInput kind="quantity" aria-label={`${label} quantity`} value={l.quantity} onChange={(e) => update(l.key, { quantity: e.target.value })} />
-                      </td>
-                      <td className="so-col-unit">
-                        <input aria-label={`${label} unit`} value={l.unit} onChange={(e) => update(l.key, { unit: e.target.value })} />
-                      </td>
-                      <td className="so-col-money">
-                        <NumberInput kind="money" aria-label={`${label} unit price`} value={l.unitPrice} onChange={(e) => update(l.key, { unitPrice: e.target.value })} />
-                      </td>
-                      <td className="right mono">{formatMoney(amount)}</td>
-                      {showCost && (
-                        <td className="so-col-money">
-                          <NumberInput kind="money" aria-label={`${label} unit cost`} placeholder="0.00" value={l.unitCost} onChange={(e) => update(l.key, { unitCost: e.target.value })} />
-                          <input
-                            aria-label={`${label} cost note`}
-                            placeholder="Notes"
-                            value={l.costNote}
-                            onChange={(e) => update(l.key, { costNote: e.target.value })}
-                          />
-                        </td>
+                        <input aria-label={`Line ${n} unit`} placeholder="lot" value={l.unit} onChange={(e) => updateLine(l.key, { unit: e.target.value })} />
+                      </div>
+                      <CellError message={err('quantity')} />
+                    </td>
+                    <td>
+                      <NumberInput
+                        kind="money"
+                        id={lineField(l.key, 'unitPrice')}
+                        className="qe-num"
+                        min={0}
+                        step="0.01"
+                        aria-label={`Line ${n} unit price`}
+                        value={l.unitPrice}
+                        aria-invalid={err('unitPrice') ? true : undefined}
+                        onChange={(e) => updateLine(l.key, { unitPrice: e.target.value })}
+                        onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+                          // Enter on the last row's price starts the next line.
+                          if (e.key === 'Enter' && last) {
+                            e.preventDefault();
+                            addLine(l.key);
+                          }
+                        }}
+                      />
+                      <CellError message={err('unitPrice')} />
+                    </td>
+                    <td className="right mono">
+                      {formatMoney(amount, currency)}
+                      {!header.vatInclusive && header.vatRate > 0 && amount > 0 && (
+                        <div className="faint qe-with-vat" title={`With ${pctLabel(header.vatRate)} VAT`}>
+                          <span className="visually-hidden">With VAT: </span>
+                          {formatMoney(withTax(amount, header.vatRate), currency)}
+                        </div>
                       )}
-                      {showCost && <td className="right mono">{margin == null ? '—' : formatMoney(margin)}</td>}
-                      <td className="so-col-x">
-                        <button className="btn btn-ghost btn-sm" aria-label={`Remove ${label}`} onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}>
-                          ✕
-                        </button>
+                    </td>
+                    {showCost && (
+                      <td>
+                        <CostCell line={l} n={n} costError={err('unitCost')} amount={m?.costAmount ?? null} currency={currency} onChange={(patch) => updateLine(l.key, patch)} />
                       </td>
-                    </tr>
-                  </Fragment>
+                    )}
+                    {showCost && (
+                      <td className="right mono">
+                        {m?.margin == null ? (
+                          <span className="faint">—</span>
+                        ) : (
+                          <>
+                            <div className={m.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(m.margin, currency)}</div>
+                            <div className="faint">{pct(m.marginPct)}</div>
+                          </>
+                        )}
+                      </td>
+                    )}
+                    {removeCell}
+                  </tr>
                 );
               })}
             </tbody>
@@ -813,52 +1072,87 @@ export function SalesOrderEditor() {
             <option key={g} value={g} />
           ))}
         </datalist>
-        <div className="row so-add">
-          <button
-            className="btn btn-sm"
-            onClick={() =>
-              setLines((ls) => [...ls, { key: freshKey(), isHeading: true, group: '', title: '', description: '', quantity: '0', unit: 'lot', unitPrice: '0', unitCost: '', costNote: '' }])
-            }
-          >
-            Add subheading
+
+        <div className="row qe-line-actions">
+          <button type="button" className="btn btn-sm" onClick={() => addLine(undefined, true)}>
+            + Add subheading
           </button>
-          <button
-            className="btn btn-sm"
-            onClick={() =>
-              setLines((ls) => [...ls, { key: freshKey(), isHeading: false, group: '', title: '', description: '', quantity: '1', unit: 'lot', unitPrice: '0', unitCost: '', costNote: '' }])
-            }
-          >
-            Add row
+          <button type="button" id="so-add-line" className="btn btn-sm" onClick={() => addLine()}>
+            + Add row
           </button>
+        </div>
+        <p className="faint sales-hint">
+          Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
+          left out when you save. A line kept from the quotation keeps what it books of it; a new line books nothing.
+          {showCost ? ' Cost, provider and margin are internal — never on the customer’s paper.' : ''}
+        </p>
+
+        {/* ── Totals and the cost panel ── */}
+        <div className={`quote-summary${showCost && priced.length > 0 ? '' : ' quote-summary-single'}`}>
+          <div>
+            <dl className="quote-totals" aria-label="Totals">
+              <div>
+                <dt>Subtotal</dt>
+                <dd className="mono">{formatMoney(totals.subtotal, currency)}</dd>
+              </div>
+              <div>
+                <dt>
+                  <label className="quote-discount" htmlFor="so-discount">
+                    Discount
+                    <NumberInput
+                      kind="percent"
+                      id="so-discount"
+                      min={0}
+                      max={100}
+                      step="0.01"
+                      value={header.discountPct}
+                      aria-invalid={errors.discountPct ? true : undefined}
+                      onChange={(e) => set('discountPct', e.target.value)}
+                    />
+                    %
+                  </label>
+                </dt>
+                <dd className="mono">{totals.discountAmount > 0 ? `−${formatMoney(totals.discountAmount, currency)}` : formatMoney(0, currency)}</dd>
+              </div>
+              <div>
+                <dt>Sum without tax</dt>
+                <dd className="mono">{formatMoney(totals.netOfTax, currency)}</dd>
+              </div>
+              <div>
+                <dt>
+                  <label className="quote-discount" htmlFor="so-tax">
+                    {header.vatInclusive ? 'Tax included' : 'Tax'}
+                    <select id="so-tax" value={String(header.vatRate)} onChange={(e) => set('vatRate', Number(e.target.value))}>
+                      {taxOptions.map((o) => (
+                        <option key={o.rate} value={String(o.rate)}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </dt>
+                <dd className="mono">{formatMoney(totals.vatAmount, currency)}</dd>
+              </div>
+              <div className="quote-totals-grand">
+                <dt>Total</dt>
+                <dd className="mono">{formatMoney(totals.total, currency)}</dd>
+              </div>
+            </dl>
+            {errors.discountPct && <CellError message={errors.discountPct} />}
+            <Checkbox checked={header.vatInclusive} onChange={(v) => set('vatInclusive', v)} label="Prices are VAT inclusive — the tax is backed out rather than added on" />
+          </div>
+          {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} />}
         </div>
 
-        <div className="so-totals-wrap">
-          <dl className="so-totals">
-            <dt>Subtotal</dt>
-            <dd className="mono">{formatMoney(totals.subtotal)}</dd>
-            {totals.discountAmount > 0 && (
-              <>
-                <dt>Discount</dt>
-                <dd className="mono">-{formatMoney(totals.discountAmount)}</dd>
-                <dt>Sum without tax</dt>
-                <dd className="mono">{formatMoney(totals.netOfTax)}</dd>
-              </>
-            )}
-            <dt>{header.vatInclusive ? `VAT included (${(order.vatRate * 100).toFixed(0)}%)` : `Tax (${(order.vatRate * 100).toFixed(0)}%)`}</dt>
-            <dd className="mono">{formatMoney(totals.vatAmount)}</dd>
-            <dt className="so-grand">Total (PHP)</dt>
-            <dd className="mono so-grand">{formatMoney(totals.total)}</dd>
-          </dl>
-          {showCost && (
-            <dl className="so-totals">
-              <dt>Total cost</dt>
-              <dd className="mono">{formatMoney(totals.cost.totalCost)}</dd>
-              <dt className="so-grand">Total margin</dt>
-              <dd className="mono so-grand">{formatMoney(totals.cost.totalMargin)}</dd>
-            </dl>
-          )}
+        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
+        <div className="row qe-foot">
+          <button type="button" className="btn" onClick={cancel} disabled={busy}>
+            Back
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
         </div>
-        <Checkbox checked={header.vatInclusive} onChange={(v) => setHeader({ ...header, vatInclusive: v })} label="Prices include VAT" />
       </section>
     </div>
   );
