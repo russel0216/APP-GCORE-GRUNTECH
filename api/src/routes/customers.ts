@@ -11,16 +11,117 @@ import {
   notFound,
   conflict,
   badRequest,
+  idsFilter,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
+import { manilaDayEnd, manilaDayStart } from '../shared/day';
+import { formatShortDate, renderDocument } from '../shared/pdf';
 
 export const customerRoutes = Router();
 customerRoutes.use(authenticate);
 
 const SORTABLE = ['code', 'name', 'createdAt', 'updatedAt'];
+
+/** A quotation still in play — the "Open quotation" filter and column. */
+const OPEN_QUOTE: Prisma.QuotationWhereInput = { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } };
+const CUST_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function custDay(value: string | undefined, label: string): string | null {
+  if (!value) return null;
+  if (!CUST_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
+  return value;
+}
+
+/** A yes/no filter, or a 400 naming it. */
+function yesNo(value: string | undefined, label: string): boolean | null {
+  if (!value) return null;
+  if (value !== 'yes' && value !== 'no') throw badRequest(`${label} is yes or no`);
+  return value === 'yes';
+}
+
+/**
+ * Which customers a list query means — ONE rule for the list, its summary
+ * (the industry tabs' counts) and its PDF (the quotation list's pattern,
+ * 2026-10-08). `base` is everything but the industry tab, whose key stays
+ * `industry` (a code, or `none` for the unclassified) so older links work.
+ */
+export function customerListWhere(
+  me: ReturnType<typeof currentUser>,
+  q: ReturnType<typeof listQuery>,
+): { base: Prisma.CustomerWhereInput; where: Prisma.CustomerWhereInput } {
+  const and: Prisma.CustomerWhereInput[] = [];
+  if (q.search) {
+    and.push({
+      OR: [
+        { name: { contains: q.search, mode: 'insensitive' } },
+        { code: { contains: q.search, mode: 'insensitive' } },
+        { legalName: { contains: q.search, mode: 'insensitive' } },
+        { tin: { contains: q.search, mode: 'insensitive' } },
+        // Searching a customer by their contact's name is what people
+        // actually do — they remember the person, not the company.
+        { contacts: { some: { name: { contains: q.search, mode: 'insensitive' } } } },
+      ],
+    });
+  }
+  const f = q.filters;
+  if (f.isActive) {
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    and.push({ isActive: f.isActive === 'true' });
+  }
+  if (q.scope === 'mine') and.push({ createdById: me.id });
+  if (f.createdById) and.push({ createdById: f.createdById });
+  const from = custDay(f.createdFrom, 'Added from');
+  const to = custDay(f.createdTo, 'Added to');
+  if (from || to) {
+    and.push({ createdAt: { ...(from ? { gte: manilaDayStart(from) } : {}), ...(to ? { lte: manilaDayEnd(to) } : {}) } });
+  }
+  const openQuote = yesNo(f.openQuote, 'Open quotation');
+  if (openQuote !== null) and.push(openQuote ? { quotations: { some: OPEN_QUOTE } } : { quotations: { none: OPEN_QUOTE } });
+  const project = yesNo(f.project, 'Project');
+  if (project !== null) and.push(project ? { jobs: { some: {} } } : { jobs: { none: {} } });
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+
+  const base: Prisma.CustomerWhereInput = and.length ? { AND: and } : {};
+  // Industry is a reference row; the tab takes its code, or 'none' for the
+  // customers nobody has classified yet — that tab is how those get found.
+  if (!f.industry) return { base, where: base };
+  const industry: Prisma.CustomerWhereInput =
+    f.industry === 'none' ? { industryId: null } : { industry: { code: String(f.industry).toUpperCase() } };
+  return { base, where: { AND: [...and, industry] } };
+}
+
+/**
+ * The industry tabs — every active industry, any inactive one still holding
+ * a customer here, and Unclassified when somebody is — with their counts
+ * under `base` ('' is All), and the count and inactive count under `where`.
+ */
+export async function customerListSummary(base: Prisma.CustomerWhereInput, where: Prisma.CustomerWhereInput) {
+  const [perIndustry, industries, count, inactive] = await Promise.all([
+    prisma.customer.groupBy({ by: ['industryId'], where: base, _count: { _all: true } }),
+    prisma.industry.findMany({ orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true, code: true, name: true, isActive: true } }),
+    prisma.customer.count({ where }),
+    prisma.customer.count({ where: { AND: [where, { isActive: false }] } }),
+  ]);
+  const byId = new Map(perIndustry.map((r) => [r.industryId, r._count._all]));
+  const tabCounts: Record<string, number> = { '': perIndustry.reduce((t, r) => t + r._count._all, 0) };
+  const tabs: { value: string; label: string }[] = [];
+  for (const i of industries) {
+    const n = byId.get(i.id) ?? 0;
+    if (!i.isActive && n === 0) continue;
+    tabs.push({ value: i.code, label: i.name });
+    tabCounts[i.code] = n;
+  }
+  const unclassified = byId.get(null) ?? 0;
+  if (unclassified > 0) {
+    tabs.push({ value: 'none', label: 'Unclassified' });
+    tabCounts.none = unclassified;
+  }
+  return { tabs, tabCounts, count, inactive };
+}
 
 // ── List ─────────────────────────────────────────────────────────────────────
 
@@ -30,55 +131,114 @@ customerRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.CustomerWhereInput = {};
+    const { base, where } = customerListWhere(me, q);
 
-    if (q.search) {
-      where.OR = [
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { code: { contains: q.search, mode: 'insensitive' } },
-        { legalName: { contains: q.search, mode: 'insensitive' } },
-        { tin: { contains: q.search, mode: 'insensitive' } },
-        // Searching a customer by their contact's name is what people
-        // actually do — they remember the person, not the company.
-        { contacts: { some: { name: { contains: q.search, mode: 'insensitive' } } } },
-      ];
-    }
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    // Industry is a reference row; the filter takes its code, or 'none' for the
-    // customers nobody has classified yet — the list filter is how those get found.
-    if (q.filters.industry) {
-      if (q.filters.industry === 'none') where.industryId = null;
-      else where.industry = { code: String(q.filters.industry).toUpperCase() };
-    }
-    if (q.scope === 'mine') where.createdById = me.id;
-
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.customer.findMany({
         where,
         include: {
           createdBy: { select: { id: true, name: true } },
           industry: { select: { id: true, code: true, name: true } },
-          _count: { select: { contacts: true, sites: true } },
+          _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.customer.count({ where }),
+      customerListSummary(base, where),
     ]);
 
-    res.json(
-      listResult(
+    res.json({
+      ...listResult(
         rows.map((r) => ({
           ...r,
           creditLimit: r.creditLimit ? Number(r.creditLimit) : null,
           contactCount: r._count.contacts,
           siteCount: r._count.sites,
+          openQuoteCount: r._count.quotations,
+          projectCount: r._count.jobs,
         })),
         total,
         q,
       ),
+      summary,
+    });
+  }),
+);
+
+/**
+ * The customer list on paper — the list as filtered (or the rows ticked,
+ * `?ids=`), through `customerListWhere`, so the paper is the screen. Above
+ * `/:id`; audited as an export; capped at 1,000 rows. No credit limits:
+ * a list leaves the building more easily than a customer record does.
+ */
+customerRoutes.get(
+  '/pdf',
+  require_('gops.customers.view_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const { base, where } = customerListWhere(me, q);
+    const [rows, summary] = await Promise.all([
+      prisma.customer.findMany({
+        where,
+        include: {
+          industry: { select: { code: true } },
+          createdBy: { select: { name: true } },
+          _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
+        },
+        orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
+        take: 1000,
+      }),
+      customerListSummary(base, where),
+    ]);
+    const f = q.filters;
+    const industryName = f.industry === 'none' ? 'Unclassified' : summary.tabs.find((t) => t.value === String(f.industry ?? '').toUpperCase())?.label;
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      f.industry ? `industry ${industryName ?? f.industry}` : null,
+      f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
+      f.createdById ? 'added by one person' : null,
+      f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
+      f.openQuote === 'yes' ? 'with an open quotation' : f.openQuote === 'no' ? 'no open quotation' : null,
+      f.project === 'yes' ? 'with a project' : f.project === 'no' ? 'no project' : null,
+      q.scope === 'mine' ? 'added by me' : null,
+      f.ids ? 'the rows selected' : null,
+    ].filter(Boolean);
+
+    const pdf = await renderDocument({
+      title: 'Customers',
+      date: new Date(),
+      reference: `${summary.count} customer(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Customer', 'Industry', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'],
+          widths: [1.6, 3, 0.9, 0.9, 0.7, 1, 0.9, 1.2, 1],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
+          rows: rows.map((c) => [
+            c.code,
+            { title: c.name, body: c.legalName && c.legalName !== c.name ? c.legalName : undefined },
+            c.industry?.code ?? '—',
+            String(c._count.contacts),
+            String(c._count.sites),
+            String(c._count.quotations),
+            String(c._count.jobs),
+            formatShortDate(c.createdAt),
+            c.isActive ? 'Active' : 'Inactive',
+          ]),
+        },
+      ],
+      signatories: [],
+    });
+    await audit(
+      { entityType: 'customer', entityId: 'list', action: 'EXPORTED', summary: `Exported the customer list as PDF (${rows.length} customer(s))` },
+      req,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="customers.pdf"');
+    res.send(pdf);
   }),
 );
 

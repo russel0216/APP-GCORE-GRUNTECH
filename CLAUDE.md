@@ -101,7 +101,8 @@ four databases and four copies of "customer".
    keys as `?ids=` — so a `printPath` endpoint must honour `ids` through
    `idsFilter()` in `api/src/http/kit.ts`, ANDed with its visibility rule,
    at most 500, and `rowKey` must be the record id) and the screen's own
-   `bulkActions(ctx)`. A selection outlives a page change, never a change of
+   `bulkActions(ctx)`. A screen's own tools (the customer list's Import) go
+   in the ⋯ menu through `menuItems`. A selection outlives a page change, never a change of
    search, scope or filters; the rules are `pageSelection` / `togglePage` in
    `lib/listUrl.ts`. A ticked row's box never opens the record. **Never a
    bulk delete** — a record is deleted from its own page, with its own
@@ -184,8 +185,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,489 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
-masters 54, sales 377, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,499 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+masters 62, sales 379, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -757,6 +758,20 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   collection loads only when the caller holds the list permission of the screen
   it comes from, and arrives as `[]` otherwise. Add a collection the same way —
   never unconditionally.
+- **The customer list is the quotation list's layout** (2026-10-08): the
+  industries as tabs with counts — every active industry, an inactive one
+  still holding a customer, and Unclassified only while somebody is
+  (`customerListSummary()` sends them as `summary.tabs`); the tab key stays
+  `industry` (a code, or `none`), so older links keep working. Filters:
+  status, added by, Added (Manila days), Open quotation (one OPEN /
+  SUBMITTED / NEGOTIATION) and Project; Code, Open quotes and Projects
+  columns; the printed list `GET /customers/pdf` (above `/:id`, audited, no
+  credit limits); `customerListWhere()` feeds rows, summary and paper. The
+  master is shared, so the list opens on **All for everyone** — Mine is
+  "customers I added". Mass actions (for `gops.customers.edit_all`): Set
+  industry and Active / Inactive, each the ordinary `PATCH /customers/:id`
+  per row — the code never moves with the industry, and an inactive
+  industry is refused by the PATCH. Import moved into the ⋯ menu.
 - **An import that matches on a non-unique name refuses rather than guesses** —
   the items import's Preferred Supplier matching two suppliers (a principal and
   its distributor sharing a brand) is an error, not a silent pick.

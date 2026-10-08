@@ -18,6 +18,8 @@ import { parseCsv, runImport, templateFor, type ImportSpec } from '../src/shared
 // a copy that has drifted from what users actually get.
 import { customerSpec, customerWrite } from '../src/routes/imports';
 import { globalSearch } from '../src/shared/search';
+import { customerListSummary, customerListWhere } from '../src/routes/customers';
+import { listQuery } from '../src/http/kit';
 import bcrypt from 'bcryptjs';
 
 if (env.isProduction) {
@@ -41,6 +43,8 @@ function check(label: string, condition: boolean, detail?: string) {
 const TAG = 'ZZVERIFY';
 
 async function cleanup() {
+  // The list section's quotation holds its customer (Restrict); it goes first.
+  await prisma.quotation.deleteMany({ where: { subject: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.supplier.deleteMany({ where: { name: { startsWith: TAG } } });
   await prisma.item.deleteMany({ where: { name: { startsWith: TAG } } });
@@ -347,6 +351,64 @@ async function main() {
     !pmSearch.some((h) => h.kind === 'supplier'),
     JSON.stringify([...new Set(pmSearch.map((h) => h.kind))]),
   );
+
+  // ── The customer list (the quotation list's layout, 2026-10-08) ─────────────
+  console.log('\nThe customer list: industry tabs, filters, counts');
+  {
+    const LISTC = `${TAG} LISTC`;
+    const custQ = (query: Record<string, string>) =>
+      listQuery({ query: { search: LISTC, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+    const hiRow = await prisma.industry.findUniqueOrThrow({ where: { code: 'HI' } });
+    const biRow = await prisma.industry.findUniqueOrThrow({ where: { code: 'BI' } });
+    const cHi = await prisma.customer.create({
+      data: { code: `${TAG}-LC1`, name: `${LISTC} Hospital`, industryId: hiRow.id, createdById: admin!.id, createdAt: new Date('2026-03-01T00:30:00+08:00') },
+    });
+    await prisma.customer.create({ data: { code: `${TAG}-LC2`, name: `${LISTC} Builder`, industryId: biRow.id, isActive: false } });
+    await prisma.customer.create({ data: { code: `${TAG}-LC3`, name: `${LISTC} Nobody filed` } });
+    await prisma.quotation.create({
+      data: { number: `${TAG}-LCQ1`, customerId: cHi.id, ownerId: admin!.id, subject: `${TAG} list quote`, outcome: 'SUBMITTED' },
+    });
+
+    const all = customerListWhere(superUser, custQ({}));
+    const sum = await customerListSummary(all.base, all.where);
+    check(
+      'the industry tabs count each industry and Unclassified, and add up to All',
+      sum.tabCounts[''] === 3 && sum.tabCounts.HI === 1 && sum.tabCounts.BI === 1 && sum.tabCounts.none === 1 &&
+        Object.entries(sum.tabCounts).filter(([k]) => k !== '').reduce((t, [, n]) => t + n, 0) === 3,
+      JSON.stringify(sum.tabCounts),
+    );
+    check(
+      'the tabs are the industries by name, Unclassified last and only while somebody is',
+      sum.tabs[sum.tabs.length - 1]?.value === 'none' && sum.tabs.some((t) => t.value === 'HI' && t.label === hiRow.name),
+      JSON.stringify(sum.tabs),
+    );
+    check('the summary counts the inactive', sum.count === 3 && sum.inactive === 1, JSON.stringify(sum));
+    const count = (query: Record<string, string>) => prisma.customer.count({ where: customerListWhere(superUser, custQ(query)).where });
+    check(
+      'an industry tab, the Unclassified tab and the status filter select what they say',
+      (await count({ industry: 'HI' })) === 1 && (await count({ industry: 'none' })) === 1 && (await count({ isActive: 'false' })) === 1,
+    );
+    check(
+      '"Open quotation" reads quotations still in play',
+      (await count({ openQuote: 'yes' })) === 1 && (await count({ openQuote: 'no' })) === 2 && (await count({ project: 'no' })) === 3,
+    );
+    check(
+      '"Added" runs on Manila’s days, and Mine is what the caller added',
+      (await count({ createdFrom: '2026-03-01', createdTo: '2026-03-01' })) === 1 &&
+        (await count({ createdFrom: '2026-02-28', createdTo: '2026-02-28' })) === 0 &&
+        (await count({ scope: 'mine' })) === 1,
+    );
+    check('?ids= selects the rows ticked', (await count({ ids: cHi.id })) === 1);
+    let refusedC = 0;
+    for (const bad of [{ isActive: 'maybe' }, { openQuote: 'perhaps' }, { createdFrom: '2026/03/01' }]) {
+      try {
+        customerListWhere(superUser, custQ(bad));
+      } catch (err) {
+        if ((err as { status?: number }).status === 400) refusedC++;
+      }
+    }
+    check('a malformed filter is a 400, never an empty list', refusedC === 3, `${refusedC} of 3`);
+  }
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

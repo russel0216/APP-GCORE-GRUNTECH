@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import type { Industry } from './Reference';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -25,7 +25,16 @@ export interface CustomerRow {
   isActive: boolean;
   contactCount: number;
   siteCount: number;
+  /** Quotations still in play (open, submitted, in negotiation), and projects — list rows only. */
+  openQuoteCount?: number;
+  projectCount?: number;
   createdBy: { id: string; name: string } | null;
+  createdAt?: string;
+}
+
+interface CustomerSummary {
+  count?: number;
+  inactive?: number;
 }
 
 /**
@@ -54,6 +63,132 @@ export function IndustryLabel({ industry }: { industry: CustomerRow['industry'] 
   );
 }
 
+// ── Mass actions: Set industry, active / inactive ───────────────────────────
+
+/**
+ * Reclassify the ticked customers, or mark them active or inactive — each the
+ * ordinary PATCH /customers/:id, so the audit row and the rules (an industry
+ * must be active; a code never moves when the industry does) are the PATCH's.
+ * Whatever did not change stays ticked, with why.
+ */
+function CustomerBulkActions({ ctx, industries }: { ctx: BulkContext<CustomerRow>; industries: Industry[] }) {
+  const toast = useToast();
+  const [action, setAction] = useState('');
+  const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
+  const [refused, setRefused] = useState<{ code: string; why: string }[]>([]);
+
+  const industry = action.startsWith('industry:') ? industries.find((i) => i.id === action.slice(9)) ?? null : null;
+  const active = action === 'active' ? true : action === 'inactive' ? false : null;
+  const plan = !action
+    ? null
+    : {
+        go: ctx.rows.filter((c) => (industry ? c.industryId !== industry.id : c.isActive !== active)),
+        stay: ctx.rows
+          .filter((c) => (industry ? c.industryId === industry.id : c.isActive === active))
+          .map((c) => ({ row: c, why: industry ? `already ${industry.code}` : `already ${active ? 'active' : 'inactive'}` })),
+      };
+  const what = industry ? `filed under ${industry.code}` : active ? 'marked active' : 'marked inactive';
+
+  async function apply() {
+    if (!plan || !plan.go.length) return;
+    const failed: { row: CustomerRow; why: string }[] = [];
+    let done = 0;
+    setRefused([]);
+    for (let i = 0; i < plan.go.length; i++) {
+      setProgress({ done: i, of: plan.go.length });
+      const row = plan.go[i];
+      try {
+        await api.patch(`/customers/${row.id}`, industry ? { industryId: industry.id } : { isActive: active });
+        done++;
+      } catch (err) {
+        failed.push({ row, why: err instanceof ApiError ? err.message : 'could not be changed' });
+      }
+    }
+    setProgress(null);
+    const left = [...plan.stay, ...failed];
+    toast(done > 0 ? 'ok' : 'error', `${done} customer${done === 1 ? '' : 's'} ${what}${left.length ? `; ${left.length} unchanged` : ''}`);
+    setRefused(left.map((l) => ({ code: l.row.code, why: l.why })));
+    setAction('');
+    ctx.reload();
+    if (left.length) ctx.keep(left.map((l) => l.row.id));
+    else ctx.clear();
+  }
+
+  return (
+    <>
+      <select
+        aria-label="Reclassify, or mark active or inactive, the selected customers"
+        value={action}
+        disabled={!!progress}
+        onChange={(e) => {
+          setAction(e.target.value);
+          setRefused([]);
+        }}
+      >
+        <option value="">Set industry or status…</option>
+        <optgroup label="Set industry">
+          {industries
+            .filter((i) => i.isActive)
+            .map((i) => (
+              <option key={i.id} value={`industry:${i.id}`}>
+                {i.code} — {i.name}
+              </option>
+            ))}
+        </optgroup>
+        <optgroup label="Status">
+          <option value="active">Active</option>
+          <option value="inactive">Inactive</option>
+        </optgroup>
+      </select>
+      {plan && (
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={!plan.go.length || !!progress}
+          onClick={() => void apply()}
+        >
+          {progress
+            ? `Working ${progress.done + 1} of ${progress.of}…`
+            : plan.go.length
+              ? industry
+                ? `File ${plan.go.length} under ${industry.code}`
+                : `Mark ${plan.go.length} ${active ? 'active' : 'inactive'}`
+              : 'Nothing to change'}
+        </button>
+      )}
+      {plan && plan.stay.length > 0 && !progress && (
+        <p className="list-bulk-result">
+          {plan.stay.length} will stay as they are:{' '}
+          {plan.stay
+            .slice(0, 6)
+            .map((st) => `${st.row.code} (${st.why})`)
+            .join(', ')}
+          {plan.stay.length > 6 ? `, and ${plan.stay.length - 6} more` : ''}.
+        </p>
+      )}
+      {!plan && refused.length > 0 && (
+        <div className="list-bulk-result" role="status">
+          Still selected — these did not change:
+          <ul>
+            {refused.map((r) => (
+              <li key={r.code}>
+                <span className="mono">{r.code}</span>: {r.why}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The customer list, in the quotation list's layout (2026-10-08): the
+ * industries as tabs with their counts (and Unclassified while anybody is),
+ * one Filters panel, open quotations and projects as columns, the printed
+ * list and mass actions. The customer master is shared, so the list opens on
+ * All for everyone; Mine is the customers you added.
+ */
 export function Customers() {
   const { can } = useAuth();
   const navigate = useNavigate();
@@ -61,8 +196,18 @@ export function Customers() {
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
+  const [people, setPeople] = useState<{ value: string; label: string }[]>([]);
+  const mayEdit = can('gops.customers.edit_all');
+
+  useEffect(() => {
+    api
+      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.customers.create' })}`)
+      .then((rows) => setPeople(rows.map((p) => ({ value: p.id, label: p.name }))))
+      .catch(() => setPeople([]));
+  }, []);
 
   const columns: Column<CustomerRow>[] = [
+    { key: 'code', label: 'Code', sortKey: 'code', width: '150px', render: (c) => <span className="mono">{c.code}</span> },
     {
       key: 'name',
       label: 'Customer',
@@ -87,6 +232,20 @@ export function Customers() {
       align: 'right',
       render: (c) => (c.siteCount === 0 ? <span className="faint">none</span> : c.siteCount),
     },
+    {
+      key: 'openQuotes',
+      label: 'Open quotes',
+      align: 'right',
+      render: (c) => (c.openQuoteCount ? c.openQuoteCount : <span className="faint">—</span>),
+    },
+    {
+      key: 'projects',
+      label: 'Projects',
+      align: 'right',
+      render: (c) => (c.projectCount ? c.projectCount : <span className="faint">—</span>),
+    },
+    { key: 'phone', label: 'Phone', render: (c) => c.phone ?? '—', optional: true },
+    { key: 'email', label: 'Email', render: (c) => c.email ?? '—', optional: true },
     { key: 'paymentTerms', label: 'Terms', render: (c) => c.paymentTerms ?? '—', optional: true },
     {
       key: 'creditLimit',
@@ -96,11 +255,50 @@ export function Customers() {
       optional: true,
     },
     { key: 'tin', label: 'TIN', render: (c) => <span className="mono">{c.tin ?? '—'}</span>, optional: true },
-    { key: 'createdBy', label: 'Added by', render: (c) => c.createdBy?.name ?? '—', optional: true },
+    {
+      key: 'createdBy',
+      label: 'Added by',
+      sortKey: 'createdAt',
+      render: (c) => (
+        <div>
+          <div>{c.createdBy?.name ?? '—'}</div>
+          {c.createdAt && <div className="faint">{formatDate(c.createdAt)}</div>}
+        </div>
+      ),
+    },
     {
       key: 'isActive',
       label: 'Status',
       render: (c) => <StatusBadge status={c.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />,
+    },
+  ];
+
+  const filters: FilterDef[] = [
+    {
+      key: 'isActive',
+      label: 'Status',
+      options: [
+        { value: 'true', label: 'Active' },
+        { value: 'false', label: 'Inactive' },
+      ],
+    },
+    { key: 'createdById', label: 'Added by', options: people },
+    { key: 'createdFrom', toKey: 'createdTo', label: 'Added', type: 'dateRange' },
+    {
+      key: 'openQuote',
+      label: 'Open quotation',
+      options: [
+        { value: 'yes', label: 'Has one in play' },
+        { value: 'no', label: 'None in play' },
+      ],
+    },
+    {
+      key: 'project',
+      label: 'Project',
+      options: [
+        { value: 'yes', label: 'Has a project' },
+        { value: 'no', label: 'No project yet' },
+      ],
     },
   ];
 
@@ -129,43 +327,49 @@ export function Customers() {
         onRowClick={(c) => navigate(`/g-ops/customers/${c.id}`)}
         emptyTitle="No customers yet"
         emptyHint="Add the first one, or import a list you already have."
-        filters={[
-          {
-            key: 'industry',
-            label: 'Industry',
-            options: [
-              ...(industries ?? []).map((i) => ({ value: i.code, label: `${i.code} — ${i.name}` })),
-              { value: 'none', label: 'Unclassified' },
-            ],
-          },
-          {
-            key: 'isActive',
-            label: 'Status',
-            options: [
-              { value: 'true', label: 'Active' },
-              { value: 'false', label: 'Inactive' },
-            ],
-          },
-        ]}
+        tabs={{
+          key: 'industry',
+          label: 'Industries',
+          allLabel: 'All customers',
+          options: (industries ?? []).filter((i) => i.isActive).map((i) => ({ value: i.code, label: i.name })),
+        }}
+        filters={filters}
+        printPath="/api/customers/pdf"
+        selectable
+        rowLabel={(c) => `${c.code} ${c.name}`}
+        bulkActions={mayEdit ? (ctx) => <CustomerBulkActions ctx={ctx} industries={industries ?? []} /> : undefined}
+        menuItems={
+          can('gops.customers.create')
+            ? [
+                {
+                  label: 'Import customers…',
+                  hint: 'From a spreadsheet, checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('customers').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
+        }
+        summaryLine={(raw, total) => {
+          const sum = raw as CustomerSummary;
+          return (
+            <>
+              <span>
+                <strong>{total}</strong> customer{total === 1 ? '' : 's'}
+              </span>
+              {!!sum.inactive && <span>{sum.inactive} inactive</span>}
+            </>
+          );
+        }}
         actions={
-          <>
-            {can('gops.customers.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-                + Add customer
-              </button>
-            )}
-            {can('gops.customers.create') && (
-              <button
-                className="btn btn-sm"
-                onClick={async () => {
-                  const spec = await loadImportSpec('customers');
-                  if (spec) setImporting(spec as { label: string; columns: never[] });
-                }}
-              >
-                Import
-              </button>
-            )}
-          </>
+          can('gops.customers.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+              + Add customer
+            </button>
+          ) : null
         }
       />
 

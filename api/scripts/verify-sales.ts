@@ -2765,6 +2765,23 @@ async function main() {
         `${assigned.status} ${nowOwner.assignedToId === other.id} ${told}`,
       );
 
+      // The customer list over HTTP and on paper.
+      const custListed = await http(salesToken, 'GET', `/customers?search=${encodeURIComponent(`${TAG} Hospital`)}`);
+      const custSum = custListed.body.summary as { tabCounts: Record<string, number>; count: number } | undefined;
+      check(
+        'GET /customers carries its industry tabs’ counts and each row its open quotations',
+        custListed.status === 200 && !!custSum && custSum.count === (custListed.body.rows as unknown[]).length &&
+          ((custListed.body.rows ?? []) as { openQuoteCount?: number }[]).every((r) => typeof r.openQuoteCount === 'number'),
+        custListed.text.slice(0, 200),
+      );
+      const custPdf = await fetch(`${BASE}/customers/pdf?ids=${customer.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
+      const custLine = pdfText(Buffer.from(await custPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'the printed customer list prints the ticked customer and says it is a selection',
+        custPdf.status === 200 && custLine.includes(`${TAG} Hospital`) && custLine.includes('the rows selected'),
+        custLine.slice(0, 200),
+      );
+
       // A mass move is the PATCH per row: a legal move goes; Won without an
       // approved revision is refused with the reason the bar then shows.
       const openId = picked.find((p) => p.subject.endsWith('open'))!.id;

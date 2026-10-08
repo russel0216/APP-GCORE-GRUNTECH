@@ -128,6 +128,11 @@ interface Props<T> {
   bulkActions?: (ctx: BulkContext<T>) => ReactNode;
   /** How a row is named to a screen reader on its tick box ("Select 0062602018"). */
   rowLabel?: (row: T) => string;
+  /**
+   * The screen's own tools for the "..." menu — an Import, say — listed above
+   * Columns. A tool goes here, never back on the toolbar line (rule 9).
+   */
+  menuItems?: { label: string; hint?: string; onSelect: () => void }[];
   /** The totals line under the table, from the endpoint's `summary` and the filtered total. */
   summaryLine?: (summary: ListSummary, total: number) => ReactNode;
   rowKey: (row: T) => string;
@@ -154,6 +159,7 @@ export function DataList<T>({
   selectable = false,
   bulkActions,
   rowLabel,
+  menuItems = [],
   summaryLine,
   rowKey,
 }: Props<T>) {
@@ -594,6 +600,21 @@ export function DataList<T>({
                   menuButton.current?.focus();
                 }}
               >
+                {menuItems.map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      item.onSelect();
+                    }}
+                  >
+                    {item.label}
+                    {item.hint && <span className="menu-pop-why">{item.hint}</span>}
+                  </button>
+                ))}
+                {menuItems.length > 0 && <div role="separator" />}
                 <button
                   type="button"
                   role="menuitem"
