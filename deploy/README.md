@@ -197,7 +197,7 @@ your saved GitHub login. Register again if that password changes;
 `-Unregister` removes the task.
 
 ```powershell
-Get-Content C:\G-CORE-GRUNTECH\data\logs\deploy.log -Tail 40 -Wait   # watch a deploy
+Get-Content C:\G-CORE-GRUNTECH\data\logs\deploy.log -Tail 40 -Wait -Encoding UTF8   # watch a deploy
 Get-Content C:\G-CORE-GRUNTECH\data\logs\deploy-last.txt             # OK or FAILED, which commit, when
 ```
 

@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 function Log([string]$m) {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m"
-    Add-Content -Path $log -Value $line
+    Add-Content -Path $log -Value $line -Encoding UTF8
     Write-Host $line
 }
 
@@ -71,7 +71,7 @@ if ($Register) {
     Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Settings $settings -User $user -Password $plain -RunLevel Highest -Force | Out-Null
     $plain = $null
     Write-Host "    Done. Every push to master now deploys itself. Watch it with:" -ForegroundColor Green
-    Write-Host "        Get-Content $log -Tail 40 -Wait" -ForegroundColor Green
+    Write-Host "        Get-Content $log -Tail 40 -Wait -Encoding UTF8" -ForegroundColor Green
     exit 0
 }
 
@@ -104,7 +104,9 @@ Log "==> deploying $($local.Substring(0, 7)) -> $short"
 # A separate process, with its own output appended to the log: npm and git
 # write ordinary progress to stderr, and capturing that inside this process
 # would turn it into errors.
-cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File `"$root\deploy\rebuild.ps1`" >> `"$log`" 2>&1"
+# chcp 65001 so npm's and PM2's UTF-8 output lands in the log as UTF-8; read
+# the log back with -Encoding UTF8 (Get-Content's default is not).
+cmd /c "chcp 65001 >nul && powershell -NoProfile -ExecutionPolicy Bypass -File `"$root\deploy\rebuild.ps1`" >> `"$log`" 2>&1"
 $code = $LASTEXITCODE
 $now = (& git -c $safe rev-parse HEAD).Trim()
 if ($code -eq 0 -and $now -eq $remote) {
