@@ -125,6 +125,53 @@ const ROLES: RoleSeed[] = [
     ],
   },
   {
+    // The sales order's second signature (2026-10-08, the owner's route:
+    // Sales creates › Team Leader › Back Support / Admin › Cost Controller ›
+    // CEO). Reads the order and the quotation behind it; changes nothing.
+    // Assign it in Admin › Users — until somebody holds it, sales orders
+    // stall at step 2, and audit-workflows.ts says so.
+    key: 'back_support',
+    name: 'Back Support / Admin',
+    description: 'Checks a sales order after the team leader — the second signature on the sales order route',
+    only: [
+      'gops.dashboard.view_all',
+      'gops.sales_orders.view_all',
+      'gops.sales_orders.export',
+      'gops.quotations.view_all',
+      'gops.quote_archive.view_all',
+      'gops.customers.view_all',
+      'gops.partners.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+    ],
+  },
+  {
+    // The third signature: checks the cost and the margin, so it holds the
+    // right that shows them (gops.costing.view_all — the quotation's and the
+    // sales order's cost rule).
+    key: 'cost_controller',
+    name: 'Cost Controller',
+    description: 'Checks the cost and margin of a sales order — the third signature on the sales order route',
+    only: [
+      'gops.dashboard.view_all',
+      'gops.sales_orders.view_all',
+      'gops.sales_orders.export',
+      'gops.quotations.view_all',
+      'gops.quotations.export',
+      'gops.costing.view_all',
+      'gops.costing.export',
+      'gops.quote_archive.view_all',
+      'gops.customers.view_all',
+      'gops.partners.view_all',
+      'gops.projects.view_all',
+      'gops.budget_monitoring.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+    ],
+  },
+  {
     key: 'project_manager',
     name: 'Project Manager',
     description: 'Runs projects — budget, procurement requests, progress and billing',
@@ -607,24 +654,22 @@ const WORKFLOWS: WorkflowSeed[] = [
     ],
   },
   {
-    // A sales order books a quotation's work in operations (2026-10-07, the
-    // owner's call: a fixed approver and an optional one). The salesperson's
-    // own supervisor decides, the sales managers when none is set — the
-    // quotation's rule.
+    // A sales order books a quotation's work in operations. Its route
+    // (2026-10-08, the owner's call): Sales creates, then the Team Leader —
+    // the salesperson's own "Reports to", the sales managers when none is
+    // set, the quotation's rule — then Back Support / Admin, then the Cost
+    // Controller, then the CEO. Four signatures and no option: the CEO is a
+    // fixed step now, so "Add the CEO as approver" is gone. The two earlier
+    // routes ("Sales Order — sales manager" and "… with the CEO") are
+    // RETIRED below, history kept — the step count changed, which
+    // `previously` cannot update in place.
     documentType: 'sales_order',
-    name: 'Sales Order — sales manager',
-    steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' }],
-  },
-  {
-    // The OPTION: whoever submits may tick "Add the CEO as approver", and the
-    // CEO decides after the sales manager. No amount band — an administrator
-    // sets one in Admin › Approval Workflows if the CEO only wants the big ones.
-    documentType: 'sales_order',
-    name: 'Sales Order — with the CEO',
-    optionLabel: 'Add the CEO as approver',
+    name: 'Sales Order — team leader, back support, cost controller, CEO',
     steps: [
-      { sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
-      { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 2, name: 'Back Support / Admin', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 4, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
     ],
   },
   {
@@ -917,6 +962,11 @@ async function main() {
     // (2026-10-07); its route now opens with the project's manager.
     'Budget Request — finance then management',
     'Purchase Order — procurement then finance',
+    // The sales order's route became four signatures (2026-10-08): the two
+    // routes before it — one step, and the CEO as an option — stop matching
+    // new orders; an order already pending on one finishes on it.
+    'Sales Order — sales manager',
+    'Sales Order — with the CEO',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });

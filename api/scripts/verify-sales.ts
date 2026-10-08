@@ -2769,24 +2769,32 @@ async function main() {
       `${edited.status} ${edited.body.total}`,
     );
 
-    // ── Approval: a fixed approver and an optional one, through the one engine ──
+    // ── Approval: the owner's route (2026-10-08) — Team Leader, Back Support /
+    //    Admin, Cost Controller, CEO — through the one engine ──
+    const backSupport = await makeUser('Verify Back Support', 'bs@verifys.local', ['back_support']);
+    const costController = await makeUser('Verify Cost Controller', 'cc@verifys.local', ['cost_controller']);
     const issueRefused = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/issue`);
     check('with a route active, Issue is refused — the order is submitted instead', issueRefused.status === 400 && issueRefused.text.includes('approval'), issueRefused.text.slice(0, 120));
     const soRoute = await http(salesToken, 'GET', `/sales-orders/${so1Body.id}`);
     const soRouteBody = soRoute.body as unknown as {
       needsApproval: boolean;
       approvalOptions: { id: string; label: string }[];
-      approvalRoutes: { standard: { steps: { approvers: { id: string }[] }[] } | null } | null;
+      approvalRoutes: { standard: { steps: { name: string; approvers: { id: string }[] }[] } | null } | null;
     };
+    const soSteps = soRouteBody.approvalRoutes?.standard?.steps ?? [];
     check(
-      'the order names its route — the sales manager — and offers the CEO as an option',
+      'the order names its four signatures — the team leader (the sales managers, with no "Reports to"), back support, the cost controller, the CEO — each by name, and offers no option',
       soRouteBody.needsApproval === true &&
-        soRouteBody.approvalOptions.some((o) => o.label === 'Add the CEO as approver') &&
-        !!soRouteBody.approvalRoutes?.standard?.steps[0]?.approvers.some((p) => p.id === manager.id),
-      soRoute.text.slice(0, 200),
+        soRouteBody.approvalOptions.length === 0 &&
+        soSteps.map((s) => s.name).join(' › ') === 'Team Leader › Back Support / Admin › Cost Controller › CEO approval' &&
+        soSteps[0].approvers.some((p) => p.id === manager.id) &&
+        soSteps[1].approvers.some((p) => p.id === backSupport.id) &&
+        soSteps[2].approvers.some((p) => p.id === costController.id) &&
+        soSteps[3].approvers.some((p) => p.id === ceo.id),
+      soRoute.text.slice(0, 400),
     );
     const submitted = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/submit`, {});
-    check('submitting puts it with the sales manager', submitted.status === 200 && submitted.body.status === 'PENDING_APPROVAL', submitted.text.slice(0, 120));
+    check('submitting puts it with the team leader', submitted.status === 200 && submitted.body.status === 'PENDING_APPROVAL', submitted.text.slice(0, 120));
     check('a pending order refuses edits', (await http(salesToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 45 })).status === 400);
     const soPulled = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/withdraw`);
     const soPulledReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so1Body.id }, orderBy: { createdAt: 'desc' } });
@@ -2795,12 +2803,26 @@ async function main() {
     const openReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so1Body.id, status: 'PENDING' } });
     await act({ requestId: openReq!.id, userId: manager.id, action: 'REJECTED' });
     const afterReject = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id } });
-    check('rejected, it returns to draft', submittedAgain.status === 200 && afterReject.status === 'DRAFT', afterReject.status);
+    check('rejected by the team leader, it returns to draft', submittedAgain.status === 200 && afterReject.status === 'DRAFT', afterReject.status);
     const submittedThird = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/submit`, {});
     const openReq2 = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so1Body.id, status: 'PENDING' } });
     await act({ requestId: openReq2!.id, userId: manager.id, action: 'APPROVED' });
+    const afterLeader = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id } });
+    check("the team leader's approval alone books nothing — the order waits on back support", submittedThird.status === 200 && afterLeader.status === 'PENDING_APPROVAL', afterLeader.status);
+    let skipped = false;
+    try {
+      await act({ requestId: openReq2!.id, userId: ceo.id, action: 'APPROVED' });
+    } catch {
+      skipped = true;
+    }
+    check('the CEO cannot sign before back support and the cost controller have', skipped);
+    await act({ requestId: openReq2!.id, userId: backSupport.id, action: 'APPROVED' });
+    await act({ requestId: openReq2!.id, userId: costController.id, action: 'APPROVED' });
+    const afterController = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id } });
+    check('three signatures in, it still waits on the CEO', afterController.status === 'PENDING_APPROVAL', afterController.status);
+    await act({ requestId: openReq2!.id, userId: ceo.id, action: 'APPROVED' });
     const afterApprove = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id } });
-    check('approved, it is issued — the sale is booked', submittedThird.status === 200 && afterApprove.status === 'ISSUED', afterApprove.status);
+    check('with the CEO’s, it is issued — the sale is booked', afterApprove.status === 'ISSUED', afterApprove.status);
     const delIssued = await http(salesToken, 'DELETE', `/sales-orders/${so1Body.id}`);
     check('an issued order cannot be deleted', delIssued.status === 400, String(delIssued.status));
     const editIssued = await http(salesToken, 'PUT', `/sales-orders/${so1Body.id}`, { termsDays: 45 });
@@ -2818,6 +2840,11 @@ async function main() {
       'the PDF prints through the Sales Order template: customer, PO, totals — and cost and margin for who may see them',
       soPdfOwner.includes('SALES ORDER') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('Margin sum:') && soPdfOwner.includes('SI / BS No.: SI-4622'),
       soPdfOwner.slice(0, 200),
+    );
+    check(
+      'and its sign-offs name all four signatures, dated',
+      [manager, backSupport, costController, ceo].every((p) => soPdfOwner.includes(p.name)) && !soPdfOwner.includes('Pending'),
+      soPdfOwner.slice(-400),
     );
     check(
       'and the paper is A4 on its side — the cost columns are why it is landscape',

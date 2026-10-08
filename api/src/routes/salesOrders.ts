@@ -958,14 +958,17 @@ salesOrderRoutes.post(
   }),
 );
 
-// ── Approval: the one engine, a fixed approver and an optional one ──────────
+// ── Approval: the one engine. The route is the owner's four signatures
+//    (2026-10-08): Team Leader › Back Support / Admin › Cost Controller › CEO,
+//    seeded in prisma/seed.ts; Admin › Approval Workflows may change it. ──────
 
 salesOrderRoutes.post(
   '/:id/submit',
   require_('gops.sales_orders.edit_own'),
   handler(async (req, res) => {
     const { me, order } = await orderForEdit(req, req.params.id);
-    // An optional route the submitter ticked — "Add the CEO as approver".
+    // An optional route the submitter ticked, when an administrator offers one
+    // (none is seeded since the CEO became a fixed step).
     const { optionId } = parseBody(z.object({ optionId: z.string().optional().nullable() }), req.body ?? {});
     const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
     if (!hasLine) throw badRequest('Add at least one line before submitting it');

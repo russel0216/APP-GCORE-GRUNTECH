@@ -207,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,580 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 418, costing 120, pipeline 83, calendar 46, numbering 46,
+**2,584 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 422, costing 120, pipeline 83, calendar 46, numbering 46,
 partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1750,26 +1750,38 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   everybody else gets lines with the cost keys REMOVED server-side
   (`stripLineCost`), on the JSON and on the paper alike.
 - **DRAFT → PENDING_APPROVAL → ISSUED (booked) → CANCELLED (reason
-  kept)**. **Approval is the one engine** (2026-10-07, the owner's call: "a
-  fixed approver and an optional approver"): two seeded `sales_order`
-  workflows — "Sales Order — sales manager" (a SUPERVISOR step falling back
-  to `sales_manager`, the quotation's rule) and "Sales Order — with the
-  CEO", an OPTION (`optionLabel: 'Add the CEO as approver'`, no amount band;
-  Admin › Approval Workflows sets one). `POST /:id/submit { optionId? }`
+  kept)**. **Approval is the one engine, and the route is the owner's four
+  signatures** (2026-10-08: "Sales (Create) › Team Leader › Back Support or
+  Admin › Cost Controller › CEO or Executive"): ONE seeded `sales_order`
+  workflow, "Sales Order — team leader, back support, cost controller,
+  CEO" — step 1 a SUPERVISOR step named Team Leader (the salesperson's
+  "Reports to", falling back to `sales_manager`, the quotation's rule),
+  then ROLE `back_support` (**Back Support / Admin**, a seeded role), ROLE
+  `cost_controller` (**Cost Controller**, seeded, holding
+  `gops.costing.view_all` so the margin shows), then ROLE `executive`. No
+  option any more: the CEO is a fixed step, so the "Add the CEO as
+  approver" tick is gone from the order page. The two earlier routes are
+  in the seed's RETIRED list (deactivated, history kept — the step count
+  changed, which `previously` cannot update in place; an order pending on
+  one finishes on it). **Assign the two new roles in Admin › Users**: until
+  somebody holds them, orders stall at step 2 and `audit-workflows.ts`
+  says so. `POST /:id/submit { optionId? }`
   claims DRAFT → PENDING_APPROVAL and calls `submitForApproval`; a refusal
   puts it back to DRAFT. `settleSalesOrder()` (exported, idempotent) claims
-  PENDING_APPROVAL → ISSUED on approval, → DRAFT on rejection, and writes "…
-  not applied" when a decision lands after a cancel. `POST /:id/withdraw`
+  PENDING_APPROVAL → ISSUED on approval — only once EVERY step has approved
+  (verify-sales proves three signatures book nothing) — → DRAFT on
+  rejection, and writes "… not applied" when a decision lands after a
+  cancel. `POST /:id/withdraw`
   pulls it back to draft through `cancelOpenRequest`, as a quotation's
   revision is; cancelling a pending order withdraws its request in the same
   transaction. **Issue is refused while a route is active** (`pickWorkflow`)
   — deactivate the seeded workflow to issue without approval, as with the
   costing. `GET /:id` carries `needsApproval`, `approvalOptions` and
   `approvalRoutes` (names only), so the page shows "Submit for approval
-  sends it to …", the CEO tick, and the Approval panel (`DocumentApproval`,
-  type `sales_order`). The PDF's sign-offs come from `approvalSlots` —
-  Prepared by, then each step (Pending until it acts); Noted/Approved stay
-  open only where no route exists. An issued order refuses the full save
+  sends it to …" (the four, each by name) and the Approval panel
+  (`DocumentApproval`, type `sales_order`). The PDF's sign-offs come from
+  `approvalSlots` — Prepared by, then each step (Pending until it acts);
+  Noted/Approved stay open only where no route exists. An issued order refuses the full save
   but still takes its release references (`PATCH`: SI/BS No., DR No.,
   payment method, reference); Reopen goes back to DRAFT; **Delete takes a
   draft or a cancelled order** (2026-10-07), never an issued or pending one.
