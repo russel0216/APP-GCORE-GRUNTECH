@@ -67,7 +67,7 @@ import { teamMembers, teamOf } from '../src/shared/team';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
-import { groupKey, rememberGroups } from '../src/shared/quotationGroups';
+import { OWNER_GROUPS, groupKey, rememberGroups, seedOwnerGroups } from '../src/shared/quotationGroups';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -1602,7 +1602,8 @@ async function main() {
           providerSupplierId: k >= 0.35 && k < 0.7 ? 's' : null,
         };
       });
-      const input = { lines: set, discountPct: rand() < 0.4 ? 0 : pick(35, 2), vatRate: 0.12, vatInclusive: rand() < 0.5 };
+      // Discounts to six decimals, as the calculator inserts them (2026-10-08).
+      const input = { lines: set, discountPct: rand() < 0.4 ? 0 : pick(35, 6), vatRate: 0.12, vatInclusive: rand() < 0.5 };
       if (!same(editorTotals(input), quotationTotals(input))) mismatches++;
     }
     check('and on 500 generated quotations, not one figure differs', mismatches === 0, `${mismatches} differ`);
@@ -1701,6 +1702,18 @@ async function main() {
     });
     check('a line cannot name a supplier AND a person', both.status === 400, both.text.slice(0, 160));
 
+    // The discount is to six decimals (2026-10-08): SCORO's calculator finds
+    // the one that lands on the sum wanted — ₱150,000 with tax on ₱143,750.
+    const calc = quotationTotals({ lines: [{ amount: 143_750 }], discountPct: 6.832298, vatRate: 0.12 });
+    check(
+      'a six-decimal discount is kept to six and lands on the sum the calculator promised, on both sides of the mirror',
+      calc.discountPct === 6.832298 && money(calc.total, 150_000) && money(calc.netOfTax, 133_928.57) &&
+        same(editorTotals({ lines: [{ amount: 143_750 }], discountPct: 6.832298, vatRate: 0.12 }), calc),
+      JSON.stringify({ pct: calc.discountPct, total: calc.total }),
+    );
+    const sixDp = await http(salesToken, 'PATCH', base, { discountPct: 12.345678 });
+    const sixDpRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: qid } });
+    check('and a revision stores it to six decimals', sixDp.status === 200 && Number(sixDpRev.discountPct) === 12.345678, String(sixDpRev.discountPct));
     const patched = await http(salesToken, 'PATCH', base, { discountPct: 10, prNumber: 'PR-ZZ-4471', delivery: '4 to 6 weeks' });
     check('the revision takes a discount, PR number and delivery', patched.status === 200, patched.text.slice(0, 200));
 
@@ -1895,6 +1908,25 @@ async function main() {
         probability: 40,
       },
     });
+    // The owner's twelve product groups (2026-10-08): seeded once, in his
+    // order, with what each covers and its brand; blanks filled, never overwritten.
+    {
+      const first = await seedOwnerGroups();
+      const again = await seedOwnerGroups();
+      const others = await prisma.quotationGroup.findUniqueOrThrow({ where: { key: groupKey('OTHERS') } });
+      await prisma.quotationGroup.update({ where: { id: others.id }, data: { description: `${TAG} custom` } });
+      await seedOwnerGroups();
+      const kept = await prisma.quotationGroup.findUniqueOrThrow({ where: { id: others.id } });
+      await prisma.quotationGroup.update({ where: { id: others.id }, data: { description: others.description } });
+      const omega = await prisma.quotationGroup.findUniqueOrThrow({ where: { key: groupKey('OMEGA AIR') } });
+      const onFile = await prisma.quotationGroup.count({ where: { key: { in: OWNER_GROUPS.map((g) => groupKey(g.name)) } } });
+      check(
+        'the owner’s twelve groups are on file, in his order, with what they cover and their brand; a second seed adds none and overwrites nothing',
+        again === 0 && onFile === 12 && omega.description === 'Compressed Air & Gas Treatment and Separation' && omega.brand === 'OMEGA AIR' &&
+          omega.sortOrder === 1 && kept.description === `${TAG} custom`,
+        `${first}/${again} ${onFile} ${JSON.stringify(omega)}`,
+      );
+    }
     const editorLines = [
       {
         group: `${TAG} Installation`,
@@ -1908,7 +1940,7 @@ async function main() {
         costNote: `${TAG} editor note`,
       },
       { title: 'Second', description: '', quantity: 1.5, unit: 'set', unitPrice: 3_333.33, unitCost: 1_000, providerUserId: sales.id },
-      { title: '', description: 'Third, description only', quantity: 3, unit: 'pc', unitPrice: 99.99 },
+      { group: `${TAG} Installation`, title: '', description: 'Third, description only', quantity: 3, unit: 'pc', unitPrice: 99.99 },
     ];
 
     const promised = await previewNext('quotation', { ownerId: sales.id });
@@ -1938,6 +1970,97 @@ async function main() {
       'amount and cost amount are computed on the server',
       Number(madeRev.items[1].amount) === 5_000 && Number(madeRev.items[0].costAmount) === 15_555.54 && madeRev.items[2].costAmount === null,
       `${madeRev.items[1].amount} ${madeRev.items[0].costAmount}`,
+    );
+    // The product's three boxes print as one sentence (2026-10-08).
+    const parted = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Parts quote`,
+      lines: [
+        {
+          group: `${TAG} Installation`,
+          brand: 'SCHNEIDER ELECTRIC',
+          productType: 'CIRCUIT BREAKER',
+          partNumber: 'EZC100H3030',
+          description: '30A, 3P',
+          quantity: 2,
+          unit: 'pc',
+          unitPrice: 1500,
+        },
+        { group: `${TAG} Installation`, productType: '  Pressure   gauge ', partNumber: 'PG-63', quantity: 1, unit: 'pc', unitPrice: 300 },
+        { group: `${TAG} Installation`, title: 'Typed as a title', description: '', quantity: 1, unit: 'lot', unitPrice: 100 },
+      ],
+    });
+    const partedId = String(parted.body.id);
+    const partedRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: partedId }, include: { items: { orderBy: { sortOrder: 'asc' } } } });
+    const pi = partedRev.items;
+    check(
+      'brand, product type and part number are stored apart and titled as one sentence; a title typed alone stays',
+      parted.status === 201 &&
+        pi[0]?.title === 'SCHNEIDER ELECTRIC, CIRCUIT BREAKER, EZC100H3030' &&
+        pi[0].brand === 'SCHNEIDER ELECTRIC' &&
+        pi[0].productType === 'CIRCUIT BREAKER' &&
+        pi[0].partNumber === 'EZC100H3030' &&
+        pi[1]?.title === 'Pressure gauge, PG-63' &&
+        pi[1].brand === null &&
+        pi[2]?.title === 'Typed as a title' &&
+        pi[2].partNumber === null,
+      `${parted.text.slice(0, 120)} ${pi.map((i) => i.title).join(' | ')}`,
+    );
+    const partedPdf = await fetch(`${BASE}/quotations/${partedId}/revisions/${partedRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } });
+    const partedText = pdfText(Buffer.from(await partedPdf.arrayBuffer())).replace(/\s+/g, '');
+    check(
+      'the paper prints the sentence, bold over the description, as one product',
+      partedPdf.status === 200 && partedText.includes('SCHNEIDERELECTRIC,CIRCUITBREAKER,EZC100H3030') && partedText.includes('30A,3P'),
+      partedText.slice(0, 160),
+    );
+    const partedRevs = await http(salesToken, 'GET', `/quotations/${partedId}`);
+    const partedItems = ((partedRevs.body.revisions as { items: { brand: string | null; partNumber: string | null }[] }[])[0]?.items ?? []);
+    check('and the page gets the three boxes back to edit', partedItems[0]?.brand === 'SCHNEIDER ELECTRIC' && partedItems[0]?.partNumber === 'EZC100H3030');
+    const typedPatch = await http(salesToken, 'PATCH', `/quotations/${partedId}/revisions/${partedRev.id}/items/${pi[2].id}`, { brand: 'KSB PUMPS', partNumber: 'ETANORM 065' });
+    const typedAfter = await prisma.quotationItem.findUniqueOrThrow({ where: { id: pi[2].id } });
+    check(
+      'editing one box on a line typed as a title re-titles it from the boxes',
+      typedPatch.status === 200 && typedAfter.title === 'KSB PUMPS, ETANORM 065' && typedAfter.productType === null,
+      `${typedPatch.status} ${typedAfter.title}`,
+    );
+
+    // Suggestions know the three boxes (2026-10-08).
+    const byPart = await http(salesToken, 'GET', `/quotations/suggest?q=${encodeURIComponent('EZC100')}`);
+    const partRow = (byPart.body as unknown as { title: string; brand: string | null; partNumber: string | null; source: string }[]).find((r) => r.partNumber === 'EZC100H3030');
+    check('typing a part number offers the line it was on, with its brand', byPart.status === 200 && partRow?.brand === 'SCHNEIDER ELECTRIC' && partRow?.source === 'history', JSON.stringify(partRow));
+    const brands = await http(salesToken, 'GET', `/quotations/suggest/fields?field=brand&q=${encodeURIComponent('schnei')}`);
+    const types = await http(salesToken, 'GET', `/quotations/suggest/fields?field=productType&brand=${encodeURIComponent('SCHNEIDER ELECTRIC')}`);
+    const typesOfKsb = await http(salesToken, 'GET', `/quotations/suggest/fields?field=productType&brand=${encodeURIComponent('KSB PUMPS')}`);
+    check(
+      'the Brand and Product type boxes offer what was used before — a type under its brand',
+      brands.status === 200 && (brands.body as unknown as string[]).includes('SCHNEIDER ELECTRIC') &&
+        (types.body as unknown as string[]).includes('CIRCUIT BREAKER') && !(typesOfKsb.body as unknown as string[]).includes('CIRCUIT BREAKER'),
+      `${brands.text.slice(0, 80)} / ${types.text.slice(0, 80)}`,
+    );
+
+    // Booking copies the three boxes onto the order's lines.
+    const partedOrder = await http(salesToken, 'POST', '/sales-orders', { quotationId: partedId, mode: 'all' });
+    const partedOrderLines = partedOrder.status === 201 ? await prisma.salesOrderLine.findMany({ where: { orderId: String(partedOrder.body.id) }, orderBy: { sortOrder: 'asc' } }) : [];
+    check(
+      'a sales order booked from it carries the boxes and the sentence',
+      partedOrder.status === 201 && partedOrderLines[0]?.brand === 'SCHNEIDER ELECTRIC' && partedOrderLines[0]?.partNumber === 'EZC100H3030' &&
+        partedOrderLines[0]?.title === 'SCHNEIDER ELECTRIC, CIRCUIT BREAKER, EZC100H3030',
+      partedOrder.text.slice(0, 160),
+    );
+
+    // Every priced line names its product group before the quotation moves on.
+    const ungrouped = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Ungrouped quote`,
+      lines: [{ title: 'No group', quantity: 1, unit: 'lot', unitPrice: 10 }],
+    });
+    const ungroupedRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(ungrouped.body.id) } });
+    const gated = await http(salesToken, 'POST', `/quotations/${ungrouped.body.id}/revisions/${ungroupedRev.id}/submit`, {});
+    check(
+      'a line is saved without a group, but the quotation cannot be submitted until every priced line has one',
+      ungrouped.status === 201 && gated.status === 400 && /product group/.test(gated.text) &&
+        (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: ungroupedRev.id } })).status === 'DRAFT',
+      `${ungrouped.status} ${gated.status} ${gated.text.slice(0, 120)}`,
     );
     const madeTotals = quotationTotals({
       lines: madeRev.items,
@@ -2232,9 +2355,9 @@ async function main() {
       subject: `${TAG} With subheadings`,
       lines: [
         { isHeading: true, title: 'General Requirements', quantity: 5, unit: 'lot', unitPrice: 999, unitCost: 1 },
-        { title: 'Service kit', description: '', quantity: 1, unit: 'lot', unitPrice: 7000, unitCost: 4000 },
+        { group: `${TAG} Installation`, title: 'Service kit', description: '', quantity: 1, unit: 'lot', unitPrice: 7000, unitCost: 4000 },
         { isHeading: true, title: 'Installation', quantity: 0, unit: 'lot', unitPrice: 0 },
-        { title: 'Labour', description: 'Assembly and programming', quantity: 1, unit: 'lot', unitPrice: 39400 },
+        { group: `${TAG} Installation`, title: 'Labour', description: 'Assembly and programming', quantity: 1, unit: 'lot', unitPrice: 39400 },
       ],
     });
     check('a quotation saves with subheadings among its lines', headed.status === 201, headed.text.slice(0, 200));
@@ -2313,7 +2436,7 @@ async function main() {
     const big = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Over a million`,
-      lines: [{ title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
+      lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
     });
     const bigView = await http(salesToken, 'GET', `/quotations/${big.body.id}`);
     const options = (bigView.body.approvalOptions ?? []) as { id: string; label: string }[];
@@ -2396,7 +2519,7 @@ async function main() {
     const plain = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Over a million, standard route`,
-      lines: [{ title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
+      lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
     });
     const plainRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(plain.body.id) } });
     await http(salesToken, 'POST', `/quotations/${plain.body.id}/revisions/${plainRev.id}/submit`);

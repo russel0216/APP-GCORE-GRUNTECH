@@ -1195,6 +1195,10 @@ referenceRoutes.get(
 
 const quotationGroupSchema = z.object({
   name: z.string().trim().min(1, 'Name the group').max(120),
+  /** What the group covers — the dropdown's hint. */
+  description: z.string().trim().max(200).optional().nullable(),
+  /** The brand a line filed under it carries (pre-filled into the line's Brand box). */
+  brand: z.string().trim().max(120).optional().nullable(),
   sortOrder: z.number().int().default(0),
   isActive: z.boolean().default(true),
 });

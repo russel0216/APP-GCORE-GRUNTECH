@@ -1298,7 +1298,7 @@ model QuotationRevision {
   subtotal       Decimal @default(0) @db.Decimal(18, 2)
   /// Quote-level discount, as SCORO carried it. discountAmount is stored, not
   /// re-derived on read, so a printed revision cannot drift by a centavo.
-  discountPct    Decimal @default(0) @db.Decimal(7, 4)
+  discountPct    Decimal @default(0) @db.Decimal(9, 6)
   discountAmount Decimal @default(0) @db.Decimal(18, 2)
   vatAmount      Decimal @default(0) @db.Decimal(18, 2)
   total          Decimal @default(0) @db.Decimal(18, 2)
@@ -1372,7 +1372,7 @@ model SalesOrder {
 
   /// Same arithmetic as a quotation revision (shared/quotation.ts): subtotal
   /// pre-discount, VAT on the net, totals stored by recalc only.
-  discountPct    Decimal @default(0) @db.Decimal(7, 4)
+  discountPct    Decimal @default(0) @db.Decimal(9, 6)
   vatRate        Decimal @default(0.12) @db.Decimal(6, 4)
   vatInclusive   Boolean @default(false)
   subtotal       Decimal @default(0) @db.Decimal(18, 2)
@@ -1405,7 +1405,11 @@ model SalesOrderLine {
   order   SalesOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   group       String?
+  /// The quotation line's three boxes, copied at booking; `title` is their sentence (see QuotationItem).
   title       String?
+  brand       String?
+  productType String?
+  partNumber  String?
   description String  @default("")
   isHeading   Boolean @default(false)
   quantity    Decimal @default(1) @db.Decimal(18, 3)
@@ -1441,8 +1445,14 @@ model QuotationItem {
 
   /// SCORO's line group, e.g. "Gruntech Installation", "Gruntech Services".
   group       String?
-  /// Product name, printed in bold above the description.
+  /// Product name, printed in bold above the description. Since 2026-10-08 the
+  /// sentence of the three boxes under it — "SCHNEIDER ELECTRIC, CIRCUIT
+  /// BREAKER, EZC100H3030", empty parts left out (`productTitle()`) — or, on a
+  /// line typed before them, the title as typed.
   title       String?
+  brand       String?
+  productType String?
+  partNumber  String?
   description String
   /// A subheading over the lines below it: its title is the heading, it has no
   /// quantity or price, and it prints as a heading row.
@@ -1490,6 +1500,12 @@ model QuotationItem {
 model QuotationGroup {
   id        String   @id @default(cuid())
   name      String
+  /// What the group covers — "Compressed Air & Gas Treatment and Separation" —
+  /// the dropdown's hint under the name (2026-10-08).
+  description String?
+  /// The brand a line filed under it carries: pre-filled into the line's Brand
+  /// box when that is empty. None for a house group (GRUNTECHNOLOGY, OTHERS).
+  brand       String?
   /// The name trimmed and lower-cased: one group per spelling, case-blind.
   key       String   @unique
   sortOrder Int      @default(0)
@@ -1530,7 +1546,7 @@ model LegacyQuote {
   statusChangedBy String?
 
   currency    String  @default("PHP")
-  discountPct Decimal @default(0) @db.Decimal(7, 4)
+  discountPct Decimal @default(0) @db.Decimal(9, 6)
   /// After discount, as SCORO reported it.
   subtotal    Decimal @default(0) @db.Decimal(18, 2)
   vat         Decimal @default(0) @db.Decimal(18, 2)

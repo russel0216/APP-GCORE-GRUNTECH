@@ -160,7 +160,7 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
 
   return {
     subtotal: out(subtotal),
-    discountPct: Number(pct.toFixed(4)),
+    discountPct: Number(pct.toFixed(6)),
     discountAmount: out(discountAmount),
     net: out(net),
     vatRate: Number(rate),
@@ -349,4 +349,18 @@ export async function withdrawStaleQuotationApprovals(revisionIds?: string[]): P
     if (label && !withdrawn.includes(label)) withdrawn.push(label);
   }
   return withdrawn;
+}
+
+/**
+ * A line's product as one sentence (2026-10-08, the owner's call): the brand,
+ * the product type and the part number — three boxes on the editor — printed
+ * as "SCHNEIDER ELECTRIC, CIRCUIT BREAKER, EZC100H3030", empty parts left
+ * out. Null when none is given, so a line typed as a title alone (every line
+ * from before, SCORO's included) keeps the title it has.
+ */
+export function productTitle(parts: { brand?: string | null; productType?: string | null; partNumber?: string | null }): string | null {
+  const t = [parts.brand, parts.productType, parts.partNumber]
+    .map((p) => (p ?? '').trim().replace(/\s+/g, ' '))
+    .filter(Boolean);
+  return t.length ? t.join(', ') : null;
 }

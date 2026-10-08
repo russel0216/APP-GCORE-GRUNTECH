@@ -6,7 +6,7 @@ import { backfillPositions } from '../src/shared/plantilla';
 import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
-import { seedQuotationGroups } from '../src/shared/quotationGroups';
+import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -1030,6 +1030,9 @@ async function main() {
   {
     const added = await seedQuotationGroups();
     if (added) console.log(`  · Added ${added} quotation group(s) from the lines that use them`);
+    // The owner's twelve, with what each covers and its brand; blanks filled, nothing overwritten.
+    const owned = await seedOwnerGroups();
+    if (owned) console.log(`  · Seeded ${owned} of the owner's quotation group(s)`);
   }
 
   // The register's common equipment types (the owner's list, CAPSLOCK), in

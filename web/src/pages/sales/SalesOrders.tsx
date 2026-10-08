@@ -20,6 +20,12 @@ import {
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CostPanelBlock } from './Quotations';
 import {
+  DiscountCalculator,
+  ProductCells,
+  partsFromSuggestion,
+  productSentence,
+  knownGroupOf,
+  type KnownGroup,
   blankLine,
   CellError,
   ContactSelect,
@@ -33,7 +39,6 @@ import {
   nextKey,
   numberOk,
   pct,
-  ProductInput,
   Static,
   withTax,
   type Line,
@@ -56,6 +61,10 @@ interface SoLine {
   id: string;
   group: string | null;
   title: string | null;
+  /** The three boxes, copied from the quotation line (2026-10-08). */
+  brand?: string | null;
+  productType?: string | null;
+  partNumber?: string | null;
   description: string;
   isHeading: boolean;
   quantity: number;
@@ -709,6 +718,9 @@ function fromSoLine(l: SoLine): Line {
     key: nextKey(),
     isHeading: l.isHeading,
     group: l.group ?? '',
+    brand: l.brand ?? '',
+    productType: l.productType ?? (l.brand || l.partNumber ? '' : (l.title ?? '')),
+    partNumber: l.partNumber ?? '',
     title: l.title ?? '',
     description: l.description ?? '',
     quantity: String(l.quantity),
@@ -736,7 +748,9 @@ export function SalesOrderEditor() {
   const [lines, setLines] = useState<Line[]>([]);
   /** The saved line behind each row — sent back so a line keeps its booking. */
   const [idByKey, setIdByKey] = useState<Record<string, string>>({});
-  const [groups, setGroups] = useState<string[]>([]);
+  const [groups, setGroups] = useState<KnownGroup[]>([]);
+  /** SCORO's discount calculator, open under the totals. */
+  const [calcOpen, setCalcOpen] = useState(false);
   const [contacts, setContacts] = useState<Option[]>([]);
   const [header, setHeader] = useState<SoHeader>({
     orderDate: '',
@@ -753,8 +767,8 @@ export function SalesOrderEditor() {
 
   useEffect(() => {
     api
-      .get<{ name: string }[]>('/reference/quotation-groups?active=true')
-      .then((rows) => setGroups(rows.map((g) => g.name)))
+      .get<KnownGroup[]>('/reference/quotation-groups?active=true')
+      .then((rows) => setGroups(rows.map((g) => ({ name: g.name, description: g.description, brand: g.brand }))))
       .catch(() => {});
   }, []);
 
@@ -830,9 +844,17 @@ export function SalesOrderEditor() {
     });
     setDirty(true);
   }
+  /** The dropdown's rows for a line: the master, plus the line's own group when it is not on it. */
+  function groupOptions(current: string): KnownGroup[] {
+    return current.trim() && !knownGroupOf(groups, current) ? [...groups, { name: current, description: null, brand: null }] : groups;
+  }
+  function pickGroup(l: Line, name: string) {
+    const brand = knownGroupOf(groups, name)?.brand;
+    updateLine(l.key, { group: name, ...(brand && !l.brand.trim() ? { brand } : {}) });
+  }
   function pickProduct(l: Line, sg: ProductSuggestion) {
     updateLine(l.key, {
-      title: sg.title,
+      ...partsFromSuggestion(l, sg),
       description: sg.description || l.description,
       unit: sg.unit || l.unit,
       unitPrice: sg.unitPrice != null ? String(sg.unitPrice) : l.unitPrice,
@@ -864,10 +886,13 @@ export function SalesOrderEditor() {
       order.push(fieldId);
     };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(header.orderDate)) flag('orderDate', 'When was it issued?', 'so-orderDate');
-    if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'title') : 'so-add-line');
+    if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'productType') : 'so-add-line');
     for (const l of priced) {
       if (l.isHeading) continue;
-      if (!l.title.trim() && !l.description.trim()) flag(lineField(l.key, 'title'), 'Give the line a product title or a description');
+      if (!l.group.trim()) flag(lineField(l.key, 'group'), 'Choose a product group');
+      if (!productSentence(l) && !l.title.trim() && !l.description.trim()) {
+        flag(lineField(l.key, 'productType'), 'Give the line a brand, product type or part number, or a description');
+      }
       if (!numberOk(l.quantity)) flag(lineField(l.key, 'quantity'), 'Quantity must be zero or more');
       if (!numberOk(l.unitPrice)) flag(lineField(l.key, 'unitPrice'), 'Price must be zero or more');
       if (l.unitCost.trim() !== '' && !numberOk(l.unitCost)) flag(lineField(l.key, 'unitCost'), 'Cost must be zero or more');
@@ -1056,7 +1081,7 @@ export function SalesOrderEditor() {
                   <span className="visually-hidden">Order</span>
                 </th>
                 <th className="qe-col-group">Group</th>
-                <th className="qe-col-product">Product | Description</th>
+                <th className="qe-col-product">Brand | Product type | Part number | Description</th>
                 <th className="qe-col-qty">Quantity | Unit</th>
                 <th className="qe-col-price right">Unit price</th>
                 <th className="qe-col-amount right">Amount</th>
@@ -1119,16 +1144,31 @@ export function SalesOrderEditor() {
                   <tr key={l.key} id={`line-${n}`}>
                     {moveCell}
                     <td>
-                      <input aria-label={`Line ${n} group`} list="so-groups" value={l.group} onChange={(e) => updateLine(l.key, { group: e.target.value })} />
+                      <select
+                        id={lineField(l.key, 'group')}
+                        className="qe-group-select"
+                        aria-label={`Line ${n} group`}
+                        aria-invalid={err('group') ? true : undefined}
+                        value={knownGroupOf(groups, l.group)?.name ?? l.group}
+                        onChange={(e) => pickGroup(l, e.target.value)}
+                      >
+                        <option value="">— choose —</option>
+                        {groupOptions(l.group).map((g) => (
+                          <option key={g.name} value={g.name}>
+                            {g.name}
+                          </option>
+                        ))}
+                      </select>
+                      {knownGroupOf(groups, l.group)?.description && <span className="qe-group-hint">{knownGroupOf(groups, l.group)?.description}</span>}
+                      <CellError message={err('group')} />
                     </td>
                     <td>
-                      <ProductInput
-                        id={lineField(l.key, 'title')}
-                        label={`Line ${n} product`}
-                        value={l.title}
-                        invalid={!!err('title')}
-                        describedBy={err('title') ? `${lineField(l.key, 'title')}-error` : undefined}
-                        onChange={(v) => updateLine(l.key, { title: v })}
+                      <ProductCells
+                        line={l}
+                        n={n}
+                        invalid={!!err('productType')}
+                        describedBy={err('productType') ? `${lineField(l.key, 'productType')}-error` : undefined}
+                        onChange={(patch) => updateLine(l.key, patch)}
                         onPick={(sg) => pickProduct(l, sg)}
                       />
                       <textarea
@@ -1138,7 +1178,7 @@ export function SalesOrderEditor() {
                         value={l.description}
                         onChange={(e) => updateLine(l.key, { description: e.target.value })}
                       />
-                      <CellError id={`${lineField(l.key, 'title')}-error`} message={err('title')} />
+                      <CellError id={`${lineField(l.key, 'productType')}-error`} message={err('productType')} />
                     </td>
                     <td>
                       <div className="qe-qty">
@@ -1211,12 +1251,6 @@ export function SalesOrderEditor() {
             </tbody>
           </table>
         </div>
-        <datalist id="so-groups">
-          {[...new Set([...groups, ...lines.map((l) => l.group.trim()).filter(Boolean)])].map((g) => (
-            <option key={g} value={g} />
-          ))}
-        </datalist>
-
         <div className="row qe-line-actions">
           <button type="button" className="btn btn-sm" onClick={() => addLine(undefined, true)}>
             + Add subheading
@@ -1248,12 +1282,22 @@ export function SalesOrderEditor() {
                       id="so-discount"
                       min={0}
                       max={100}
-                      step="0.01"
+                      step="any"
                       value={header.discountPct}
                       aria-invalid={errors.discountPct ? true : undefined}
                       onChange={(e) => set('discountPct', e.target.value)}
                     />
                     %
+                    <button
+                      type="button"
+                      className={`btn btn-sm${calcOpen ? ' is-on' : ''}`}
+                      aria-label="Discount calculator — set the sum you want"
+                      title="Discount calculator — set the sum you want"
+                      aria-expanded={calcOpen}
+                      onClick={() => setCalcOpen((o) => !o)}
+                    >
+                      Σ
+                    </button>
                   </label>
                 </dt>
                 <dd className="mono">{totals.discountAmount > 0 ? `−${formatMoney(totals.discountAmount, currency)}` : formatMoney(0, currency)}</dd>
@@ -1282,6 +1326,19 @@ export function SalesOrderEditor() {
                 <dd className="mono">{formatMoney(totals.total, currency)}</dd>
               </div>
             </dl>
+            {calcOpen && (
+              <DiscountCalculator
+                subtotal={totals.subtotal}
+                vatRate={header.vatRate}
+                vatInclusive={header.vatInclusive}
+                currency={currency}
+                onInsert={(v) => {
+                  set('discountPct', v);
+                  setCalcOpen(false);
+                }}
+                onClose={() => setCalcOpen(false)}
+              />
+            )}
             {errors.discountPct && <CellError message={errors.discountPct} />}
             <Checkbox checked={header.vatInclusive} onChange={(v) => set('vatInclusive', v)} label="Prices are VAT inclusive — the tax is backed out rather than added on" />
           </div>

@@ -26,6 +26,7 @@ import {
   quotationTaxOptions,
   stripLineCost,
   QUOTATION_EXTRA_TAX_RATES,
+  productTitle,
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
@@ -696,6 +697,9 @@ salesOrderRoutes.post(
                       : {
                           group: i.group,
                           title: i.title,
+                          brand: i.brand,
+                          productType: i.productType,
+                          partNumber: i.partNumber,
                           description: i.description,
                           isHeading: false,
                           quantity: d(quantity),
@@ -744,6 +748,9 @@ const lineFields = {
   group: z.string().trim().max(120).optional().nullable(),
   isHeading: z.boolean().optional(),
   title: z.string().trim().max(300).optional().nullable(),
+  brand: z.string().trim().max(120).optional().nullable(),
+  productType: z.string().trim().max(160).optional().nullable(),
+  partNumber: z.string().trim().max(80).optional().nullable(),
   description: z.string().optional().nullable(),
   quantity: z.number().min(0).default(1),
   unit: z.string().trim().min(1).default('lot'),
@@ -819,8 +826,8 @@ salesOrderRoutes.put(
       if (body.lines) {
         for (const [i, line] of body.lines.entries()) {
           if (line.isHeading && !(line.title ?? '').trim()) throw badRequest(`Line ${i + 1}: give the subheading its text`);
-          if (!line.isHeading && !(line.title ?? '').trim() && !(line.description ?? '').trim()) {
-            throw badRequest(`Line ${i + 1}: give the line a product title or a description`);
+          if (!line.isHeading && !(line.title ?? '').trim() && !productTitle(line) && !(line.description ?? '').trim()) {
+            throw badRequest(`Line ${i + 1}: give the line a brand, product type or part number, or a description`);
           }
           if (line.providerUserId && line.providerSupplierId) throw badRequest(`Line ${i + 1}: a line's cost is carried by a person or a supplier, not both`);
           if (line.providerUserId && !(await tx.user.findUnique({ where: { id: line.providerUserId }, select: { id: true } }))) {
@@ -855,7 +862,10 @@ salesOrderRoutes.put(
               orderId: order.id,
               isHeading: false,
               group: l.group || null,
-              title: l.title || null,
+              brand: l.brand || null,
+              productType: l.productType || null,
+              partNumber: l.partNumber || null,
+              title: productTitle(l) ?? (l.title || null),
               description: l.description ?? '',
               quantity: d(l.quantity),
               unit: l.unit,
@@ -959,6 +969,9 @@ salesOrderRoutes.post(
     const { optionId } = parseBody(z.object({ optionId: z.string().optional().nullable() }), req.body ?? {});
     const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
     if (!hasLine) throw badRequest('Add at least one line before submitting it');
+    // The quotation's rule (2026-10-08): every priced line names its product group before the order moves on.
+    const ungrouped = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false, OR: [{ group: null }, { group: '' }] } });
+    if (ungrouped) throw badRequest(`Every line needs a product group before the order can be submitted — ${ungrouped} line${ungrouped === 1 ? ' has' : 's have'} none`);
     const full = await prisma.salesOrder.findUniqueOrThrow({
       where: { id: order.id },
       include: { customer: { select: { name: true } }, quotation: { select: { subject: true } } },

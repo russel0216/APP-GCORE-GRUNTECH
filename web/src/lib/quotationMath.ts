@@ -247,7 +247,7 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
 
   return {
     subtotal: out(subtotal),
-    discountPct: fixed(pct, 4),
+    discountPct: fixed(pct, 6),
     discountAmount: out(discountAmount),
     net: out(net),
     vatRate: Number(String(input.vatRate ?? 0) || 0),

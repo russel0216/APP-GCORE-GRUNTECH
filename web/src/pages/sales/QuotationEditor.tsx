@@ -17,6 +17,12 @@ import {
 } from './Quotations';
 import { NumberInput } from '../../components/NumberInput';
 import {
+  DiscountCalculator,
+  ProductCells,
+  partsFromSuggestion,
+  productSentence,
+  knownGroupOf,
+  type KnownGroup,
   blankLine,
   CellError,
   ContactSelect,
@@ -31,7 +37,6 @@ import {
   nextKey,
   numberOk,
   pct,
-  ProductInput,
   Static,
   withTax,
   type Line,
@@ -134,6 +139,9 @@ function fromItem(i: Item): Line {
     key: nextKey(),
     isHeading: !!i.isHeading,
     group: i.group ?? '',
+    brand: i.brand ?? '',
+    productType: i.productType ?? (i.brand || i.partNumber ? '' : (i.title ?? '')),
+    partNumber: i.partNumber ?? '',
     title: i.title ?? '',
     description: i.description ?? '',
     quantity: String(i.quantity),
@@ -156,7 +164,7 @@ function linesFromItems(items: Item[]): Line[] {
 }
 
 function fromCostingLine(c: CostingLine): Line {
-  return { ...blankLine(), title: c.title, description: c.description, quantity: String(c.quantity), unit: c.unit, unitPrice: String(c.unitPrice) };
+  return { ...blankLine(), productType: c.title, title: c.title, description: c.description, quantity: String(c.quantity), unit: c.unit, unitPrice: String(c.unitPrice) };
 }
 
 const daysBetween = (from: string, to: string) => Math.round((parseDay(to).getTime() - parseDay(from).getTime()) / 86_400_000);
@@ -206,14 +214,16 @@ export function QuotationEditor() {
   const [lead, setLead] = useState<LeadForQuote | null>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
   const [pinnedCostings, setPinnedCostings] = useState<CostingOption[]>([]);
-  /** The Quotation Groups master (Admin › Categories), active ones only: what Group suggests. */
-  const [knownGroups, setKnownGroups] = useState<string[]>([]);
+  /** The Quotation Groups master (Admin › Categories), active ones only: what the Group dropdown offers. */
+  const [knownGroups, setKnownGroups] = useState<KnownGroup[]>([]);
   useEffect(() => {
     api
-      .get<{ name: string }[]>('/reference/quotation-groups?active=true')
-      .then((rows) => setKnownGroups(rows.map((g) => g.name)))
+      .get<KnownGroup[]>('/reference/quotation-groups?active=true')
+      .then((rows) => setKnownGroups(rows.map((g) => ({ name: g.name, description: g.description, brand: g.brand }))))
       .catch(() => setKnownGroups([]));
   }, []);
+  /** SCORO's discount calculator, open under the totals. */
+  const [calcOpen, setCalcOpen] = useState(false);
   /** The contact to pick once the customer's contacts arrive, by name (a lead's). */
   const [wantContact, setWantContact] = useState<string | null>(null);
 
@@ -703,9 +713,18 @@ export function QuotationEditor() {
   }, [location.hash, lines, loading]);
 
   /** A product picked from what was quoted before: its words, unit and price come with it. */
+  /** The dropdown's rows for a line: the master, plus the line's own group when it is not on it (an older spelling, or one since deactivated). */
+  function groupOptions(current: string): KnownGroup[] {
+    return current.trim() && !knownGroupOf(knownGroups, current) ? [...knownGroups, { name: current, description: null, brand: null }] : knownGroups;
+  }
+  /** Choosing a group fills an empty Brand box with the brand the group carries. */
+  function pickGroup(l: Line, name: string) {
+    const brand = knownGroupOf(knownGroups, name)?.brand;
+    updateLine(l.key, { group: name, ...(brand && !l.brand.trim() ? { brand } : {}) });
+  }
   function pickProduct(l: Line, sg: ProductSuggestion) {
     updateLine(l.key, {
-      title: sg.title,
+      ...partsFromSuggestion(l, sg),
       description: l.description.trim() ? l.description : sg.description,
       unit: sg.unit || l.unit,
       unitPrice: sg.unitPrice != null ? String(sg.unitPrice) : l.unitPrice,
@@ -756,11 +775,13 @@ export function QuotationEditor() {
     if (!header.number.trim()) flag('number', 'Give the quotation a number', 'qe-number');
     else if (numberProblem) flag('number', numberProblem, 'qe-number');
 
-    if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'title') : 'qe-add-line');
+    if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'productType') : 'qe-add-line');
     for (const l of priced) {
       if (l.isHeading) continue;
-      if (!l.title.trim() && !l.description.trim()) {
-        flag(lineField(l.key, 'title'), 'Give the line a product title or a description');
+      // The owner's call (2026-10-08): a quotation cannot proceed with a line that names no product group.
+      if (!l.group.trim()) flag(lineField(l.key, 'group'), 'Choose a product group');
+      if (!productSentence(l) && !l.title.trim() && !l.description.trim()) {
+        flag(lineField(l.key, 'productType'), 'Give the line a brand, product type or part number, or a description');
       }
       if (!numberOk(l.quantity)) flag(lineField(l.key, 'quantity'), 'Quantity must be zero or more');
       if (!numberOk(l.unitPrice)) flag(lineField(l.key, 'unitPrice'), 'Price must be zero or more');
@@ -1269,7 +1290,7 @@ export function QuotationEditor() {
                   <span className="visually-hidden">Order</span>
                 </th>
                 <th className="qe-col-group">Group</th>
-                <th className="qe-col-product">Product | Description</th>
+                <th className="qe-col-product">Brand | Product type | Part number | Description</th>
                 <th className="qe-col-qty">Quantity | Unit</th>
                 <th className="qe-col-price right">Unit price</th>
                 <th className="qe-col-amount right">Amount</th>
@@ -1352,21 +1373,33 @@ export function QuotationEditor() {
                   <tr key={l.key} id={`line-${n}`}>
                     {moveCell}
                     <td>
-                      <input
+                      <select
+                        id={lineField(l.key, 'group')}
+                        className="qe-group-select"
                         aria-label={`Line ${n} group`}
-                        list="qe-groups"
-                        value={l.group}
-                        onChange={(e) => updateLine(l.key, { group: e.target.value })}
-                      />
+                        aria-invalid={err('group') ? true : undefined}
+                        value={knownGroupOf(knownGroups, l.group)?.name ?? l.group}
+                        onChange={(e) => pickGroup(l, e.target.value)}
+                      >
+                        <option value="">— choose —</option>
+                        {groupOptions(l.group).map((g) => (
+                          <option key={g.name} value={g.name}>
+                            {g.name}
+                          </option>
+                        ))}
+                      </select>
+                      {knownGroupOf(knownGroups, l.group)?.description && (
+                        <span className="qe-group-hint">{knownGroupOf(knownGroups, l.group)?.description}</span>
+                      )}
+                      <CellError message={err('group')} />
                     </td>
                     <td>
-                      <ProductInput
-                        id={lineField(l.key, 'title')}
-                        label={`Line ${n} product`}
-                        value={l.title}
-                        invalid={!!err('title')}
-                        describedBy={err('title') ? `${lineField(l.key, 'title')}-error` : undefined}
-                        onChange={(v) => updateLine(l.key, { title: v })}
+                      <ProductCells
+                        line={l}
+                        n={n}
+                        invalid={!!err('productType')}
+                        describedBy={err('productType') ? `${lineField(l.key, 'productType')}-error` : undefined}
+                        onChange={(patch) => updateLine(l.key, patch)}
                         onPick={(sg) => pickProduct(l, sg)}
                       />
                       <textarea
@@ -1376,7 +1409,7 @@ export function QuotationEditor() {
                         value={l.description}
                         onChange={(e) => updateLine(l.key, { description: e.target.value })}
                       />
-                      <CellError id={`${lineField(l.key, 'title')}-error`} message={err('title')} />
+                      <CellError id={`${lineField(l.key, 'productType')}-error`} message={err('productType')} />
                     </td>
                     <td>
                       {/* Quantity and unit side by side, as SCORO sets them. */}
@@ -1463,11 +1496,6 @@ export function QuotationEditor() {
             </tbody>
           </table>
         </div>
-        <datalist id="qe-groups">
-          {[...new Set([...knownGroups, ...lines.map((l) => l.group.trim()).filter(Boolean)])].map((g) => (
-            <option key={g} value={g} />
-          ))}
-        </datalist>
 
         {/* SCORO's buttons under the lines, in SCORO's order. */}
         <div className="row qe-line-actions">
@@ -1499,8 +1527,9 @@ export function QuotationEditor() {
         </div>
         {appendOpen && <AppendQuotePanel excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
-          Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
-          left out when you save. A subheading prints as a heading over its lines; a group does not, unless the PDF layout has a Group column.
+          Every priced line needs a product group. Brand, product type and part number print as one line — type a part number and pick
+          from what was quoted before. Enter on the last line’s price adds a line; empty lines are left out when you save. A subheading
+          prints as a heading over its lines; a group does not, unless the PDF layout has a Group column.
           {showCost ? ' Cost, provider and margin are internal — never printed.' : ''}
         </p>
 
@@ -1521,12 +1550,22 @@ export function QuotationEditor() {
                       id="qe-discount"
                       min={0}
                       max={100}
-                      step="0.01"
+                      step="any"
                       value={header.discountPct}
                       aria-invalid={errors.discountPct ? true : undefined}
                       onChange={(e) => set('discountPct', e.target.value)}
                     />
                     %
+                    <button
+                      type="button"
+                      className={`btn btn-sm${calcOpen ? ' is-on' : ''}`}
+                      aria-label="Discount calculator — set the sum you want"
+                      title="Discount calculator — set the sum you want"
+                      aria-expanded={calcOpen}
+                      onClick={() => setCalcOpen((o) => !o)}
+                    >
+                      Σ
+                    </button>
                   </label>
                 </dt>
                 <dd className="mono">
@@ -1565,6 +1604,19 @@ export function QuotationEditor() {
                 <dd className="mono">{formatMoney(totals.total, currency)}</dd>
               </div>
             </dl>
+            {calcOpen && (
+              <DiscountCalculator
+                subtotal={totals.subtotal}
+                vatRate={vatRate}
+                vatInclusive={header.vatInclusive}
+                currency={currency}
+                onInsert={(v) => {
+                  set('discountPct', v);
+                  setCalcOpen(false);
+                }}
+                onClose={() => setCalcOpen(false)}
+              />
+            )}
             <p id="qe-tax-hint" className="faint sales-hint">
               6% is for a government customer; 0% for a zero-rated sale — a PEZA or BOI-registered customer, or an export.
             </p>

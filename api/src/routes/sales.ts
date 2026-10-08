@@ -86,6 +86,7 @@ import {
   costingScopeSections,
   quotationTaxOptions,
   QUOTATION_EXTRA_TAX_RATES,
+  productTitle,
 } from '../shared/quotation';
 
 const d = (v: number | string | null | undefined) =>
@@ -1439,6 +1440,78 @@ quotationRoutes.get(
 );
 
 /**
+ * What the Brand and Product type boxes offer as they are typed
+ * (2026-10-08): the values used before on lines the caller may read —
+ * a product type under the brand typed first — plus, for Brand, the
+ * partners' brands and the brands the product groups carry. Values only,
+ * case-blind, fifty at most. Declared above `/:id`.
+ */
+quotationRoutes.get(
+  '/suggest/fields',
+  requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const field = req.query.field === 'productType' ? 'productType' : 'brand';
+    const q = String(req.query.q ?? '').trim().slice(0, 80);
+    const brand = String(req.query.brand ?? '').trim();
+    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
+    const readable = { revision: { quotation: onlyOwn ? { ownerId: me.id } : {} } };
+    const values: string[] = [];
+    if (field === 'brand') {
+      const [lines, partners, groups] = await Promise.all([
+        prisma.quotationItem.findMany({
+          where: { isHeading: false, brand: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) }, ...readable },
+          distinct: ['brand'],
+          select: { brand: true },
+          orderBy: { brand: 'asc' },
+          take: 50,
+        }),
+        prisma.supplier.findMany({
+          where: {
+            isPartner: true,
+            isActive: true,
+            ...(q ? { OR: [{ brand: { contains: q, mode: 'insensitive' } }, { name: { contains: q, mode: 'insensitive' } }] } : {}),
+          },
+          select: { brand: true, name: true },
+          take: 50,
+        }),
+        prisma.quotationGroup.findMany({
+          where: { isActive: true, brand: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) } },
+          select: { brand: true },
+          take: 50,
+        }),
+      ]);
+      values.push(...lines.map((l) => l.brand!), ...partners.map((p) => p.brand ?? p.name), ...groups.map((g) => g.brand!));
+    } else {
+      const lines = await prisma.quotationItem.findMany({
+        where: {
+          isHeading: false,
+          productType: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) },
+          ...(brand ? { brand: { equals: brand, mode: 'insensitive' } } : {}),
+          ...readable,
+        },
+        distinct: ['productType'],
+        select: { productType: true },
+        orderBy: { productType: 'asc' },
+        take: 50,
+      });
+      values.push(...lines.map((l) => l.productType!));
+    }
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const v of values) {
+      const clean = v.trim().replace(/\s+/g, ' ');
+      const key = clean.toUpperCase();
+      if (!clean || seen.has(key)) continue;
+      seen.add(key);
+      out.push(clean);
+    }
+    out.sort((a, b) => a.localeCompare(b));
+    res.json(out.slice(0, 50));
+  }),
+);
+
+/**
  * What was quoted before, as a product is typed: past lines (their latest
  * price, unit and description, and how often) and items from the item master.
  * Only from quotations the caller may read; a line's cost only where they may
@@ -1459,11 +1532,20 @@ quotationRoutes.get(
     const past = await prisma.quotationItem.findMany({
       where: {
         isHeading: false,
-        OR: [{ title: { contains: q, mode: 'insensitive' } }, { description: { contains: q, mode: 'insensitive' } }],
+        OR: [
+          { title: { contains: q, mode: 'insensitive' } },
+          { partNumber: { contains: q, mode: 'insensitive' } },
+          { productType: { contains: q, mode: 'insensitive' } },
+          { brand: { contains: q, mode: 'insensitive' } },
+          { description: { contains: q, mode: 'insensitive' } },
+        ],
         revision: { quotation: onlyOwn ? { ownerId: me.id } : {} },
       },
       select: {
         title: true,
+        brand: true,
+        productType: true,
+        partNumber: true,
         description: true,
         unit: true,
         unitPrice: true,
@@ -1475,7 +1557,19 @@ quotationRoutes.get(
     });
     const byName = new Map<
       string,
-      { title: string; description: string; unit: string; unitPrice: number; unitCost?: number | null; source: 'history'; uses: number; lastNumber: string }
+      {
+        title: string;
+        brand: string | null;
+        productType: string | null;
+        partNumber: string | null;
+        description: string;
+        unit: string;
+        unitPrice: number;
+        unitCost?: number | null;
+        source: 'history';
+        uses: number;
+        lastNumber: string;
+      }
     >();
     for (const l of past) {
       const title = (l.title || l.description.split('\n')[0]).trim();
@@ -1489,6 +1583,9 @@ quotationRoutes.get(
       const mayCost = canSeeQuotationCost(me, l.revision.quotation.ownerId);
       byName.set(key, {
         title,
+        brand: l.brand,
+        productType: l.productType,
+        partNumber: l.partNumber,
         description: l.title ? l.description : '',
         unit: l.unit,
         unitPrice: num(l.unitPrice),
@@ -1503,8 +1600,11 @@ quotationRoutes.get(
 
     const seeItemCost = can(me, 'gops.costing.view_all') || can(me, 'gchain.items.view_all');
     const items = await prisma.item.findMany({
-      where: { isActive: true, OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] },
-      select: { id: true, code: true, name: true, description: true, unit: true, listPrice: true, standardCost: seeItemCost },
+      where: {
+        isActive: true,
+        OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }, { partNumber: { contains: q, mode: 'insensitive' } }],
+      },
+      select: { id: true, code: true, name: true, partNumber: true, description: true, unit: true, listPrice: true, standardCost: seeItemCost },
       orderBy: { name: 'asc' },
       take: 6,
     });
@@ -1515,6 +1615,9 @@ quotationRoutes.get(
         .filter((i) => !named.has(i.name.toUpperCase()))
         .map((i) => ({
           title: i.name,
+          brand: null,
+          productType: i.name,
+          partNumber: i.partNumber,
           description: i.description ?? '',
           unit: i.unit,
           unitPrice: i.listPrice == null ? null : num(i.listPrice),
@@ -1705,6 +1808,10 @@ const itemFields = {
   /** A subheading: its title is the heading; it carries no quantity, price or cost. */
   isHeading: z.boolean().optional(),
   title: z.string().trim().max(300).optional().nullable(),
+  // The product's three boxes (2026-10-08); `title` is their sentence, or the title typed before them.
+  brand: z.string().trim().max(120).optional().nullable(),
+  productType: z.string().trim().max(160).optional().nullable(),
+  partNumber: z.string().trim().max(80).optional().nullable(),
   description: z.string().optional().nullable(),
   quantity: z.number().min(0),
   unit: z.string().trim().min(1).default('lot'),
@@ -1730,6 +1837,9 @@ async function checkLine(
   line: {
     isHeading?: boolean | null;
     title?: string | null;
+    brand?: string | null;
+    productType?: string | null;
+    partNumber?: string | null;
     description?: string | null;
     providerSupplierId?: string | null;
     providerUserId?: string | null;
@@ -1741,8 +1851,8 @@ async function checkLine(
     if (!(line.title ?? '').trim()) throw badRequest(`${where}Give the subheading its text`);
     return;
   }
-  if (!(line.title ?? '').trim() && !(line.description ?? '').trim()) {
-    throw badRequest(`${where}Give the line a product title or a description`);
+  if (!(line.title ?? '').trim() && !productTitle(line) && !(line.description ?? '').trim()) {
+    throw badRequest(`${where}Give the line a brand, product type or part number, or a description`);
   }
   if (line.providerSupplierId && line.providerUserId) {
     throw badRequest(`${where}A line’s cost is carried by a supplier OR by one of our people, not both`);
@@ -1770,6 +1880,9 @@ function lineData(line: z.infer<typeof itemSchema>, sortOrder: number) {
       group: null,
       isHeading: true,
       title: (line.title ?? '').trim(),
+      brand: null,
+      productType: null,
+      partNumber: null,
       description: '',
       quantity: d(0),
       unit: line.unit || 'lot',
@@ -1787,7 +1900,10 @@ function lineData(line: z.infer<typeof itemSchema>, sortOrder: number) {
   return {
     isHeading: false,
     group: line.group || null,
-    title: line.title || null,
+    brand: line.brand || null,
+    productType: line.productType || null,
+    partNumber: line.partNumber || null,
+    title: productTitle(line) ?? (line.title || null),
     description: line.description ?? '',
     quantity: d(line.quantity),
     unit: line.unit,
@@ -2291,6 +2407,9 @@ quotationRoutes.post(
                   group: i.group,
                   isHeading: i.isHeading,
                   title: i.title,
+                  brand: i.brand,
+                  productType: i.productType,
+                  partNumber: i.partNumber,
                   description: i.description,
                   quantity: i.quantity,
                   unit: i.unit,
@@ -2572,9 +2691,16 @@ quotationRoutes.patch(
           ? null
           : Number(existing.unitCost)
         : body.unitCost;
+    const parts = {
+      brand: body.brand !== undefined ? body.brand || null : existing.brand,
+      productType: body.productType !== undefined ? body.productType || null : existing.productType,
+      partNumber: body.partNumber !== undefined ? body.partNumber || null : existing.partNumber,
+    };
     const merged = {
       isHeading: heading,
-      title: body.title !== undefined ? body.title : existing.title,
+      ...parts,
+      // The sentence of the three boxes once any is set; a title typed on its own stays.
+      title: productTitle(parts) ?? (body.title !== undefined ? body.title : existing.title),
       description: body.description !== undefined ? body.description : existing.description,
       providerSupplierId: body.providerSupplierId !== undefined ? body.providerSupplierId || null : existing.providerSupplierId,
       providerUserId: body.providerUserId !== undefined ? body.providerUserId || null : existing.providerUserId,
@@ -2591,7 +2717,8 @@ quotationRoutes.patch(
         where: { id: req.params.itemId },
         data: {
           ...(body.group !== undefined ? { group: body.group || null } : {}),
-          ...(body.title !== undefined ? { title: body.title || null } : {}),
+          ...(heading ? { brand: null, productType: null, partNumber: null } : parts),
+          ...(heading ? (body.title !== undefined ? { title: body.title || null } : {}) : { title: merged.title || null }),
           ...(body.description !== undefined ? { description: body.description ?? '' } : {}),
           ...(body.unit !== undefined ? { unit: body.unit } : {}),
           ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
@@ -2666,6 +2793,15 @@ quotationRoutes.post(
     });
     if (!withItems?.items.some((i) => !i.isHeading)) {
       throw badRequest('Add at least one line before submitting for approval');
+    }
+    // Every priced line names its product group before the quotation moves on
+    // (2026-10-08, the owner's call) — the editor refuses to save without one;
+    // this is the gate for a quotation filled another way (SCORO, a costing).
+    const ungrouped = withItems.items.filter((i) => !i.isHeading && !(i.group ?? '').trim()).length;
+    if (ungrouped) {
+      throw badRequest(
+        `Every line needs a product group before the quotation can be submitted — ${ungrouped} line${ungrouped === 1 ? ' has' : 's have'} none`,
+      );
     }
 
     await prisma.quotationRevision.update({

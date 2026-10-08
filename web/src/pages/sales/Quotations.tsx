@@ -522,6 +522,10 @@ export interface Item {
   /** A subheading: its title is the heading; no quantity, price or cost. */
   isHeading?: boolean;
   title: string | null;
+  /** The three boxes (2026-10-08); `title` is their sentence, or the title typed before them. */
+  brand?: string | null;
+  productType?: string | null;
+  partNumber?: string | null;
   description: string;
   quantity: number;
   unit: string;

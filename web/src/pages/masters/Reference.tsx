@@ -35,6 +35,10 @@ export interface Industry {
 export interface QuotationGroup {
   id: string;
   name: string;
+  /** What the group covers — the editor's hint under its name. */
+  description: string | null;
+  /** The brand a line filed under it carries; none for a house group. */
+  brand: string | null;
   sortOrder: number;
   isActive: boolean;
   lineCount?: number;
@@ -298,6 +302,8 @@ export function Categories() {
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Covers</th>
+                  <th>Brand</th>
                   <th className="right">Lines</th>
                   <th>Status</th>
                   {mayEdit && <th className="m-col-action" />}
@@ -307,6 +313,8 @@ export function Categories() {
                 {groups.map((g) => (
                   <tr key={g.id}>
                     <td>{g.name}</td>
+                    <td>{g.description ?? <span className="faint">—</span>}</td>
+                    <td>{g.brand ?? <span className="faint">—</span>}</td>
                     <td className="right">{(g.lineCount ?? 0).toLocaleString('en-US')}</td>
                     <td>
                       <StatusBadge status={g.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
@@ -326,9 +334,10 @@ export function Categories() {
         )}
 
         <p className="m-footnote">
-          The quotation editor suggests these for a line&apos;s Group. A line keeps the group it was
-          saved with, so renaming one here does not rewrite quotations already issued; a group in use
-          is deactivated rather than deleted.
+          The quotation editor offers these for a line&apos;s Group, which every priced line must
+          choose. A line keeps the group it was saved with, so renaming one here does not rewrite
+          quotations already issued; a group in use is deactivated rather than deleted. Picking a
+          group with a brand fills the line&apos;s Brand box when it is empty.
         </p>
       </div>
 
@@ -493,6 +502,8 @@ function QuotationGroupModal({
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
     name: group?.name ?? '',
+    description: group?.description ?? '',
+    brand: group?.brand ?? '',
     sortOrder: group?.sortOrder ?? 0,
     isActive: group?.isActive ?? true,
   });
@@ -501,8 +512,9 @@ function QuotationGroupModal({
     setBusy(true);
     setError(null);
     try {
-      if (group) await api.patch(`/reference/quotation-groups/${group.id}`, form);
-      else await api.post('/reference/quotation-groups', form);
+      const payload = { ...form, description: form.description.trim() || null, brand: form.brand.trim() || null };
+      if (group) await api.patch(`/reference/quotation-groups/${group.id}`, payload);
+      else await api.post('/reference/quotation-groups', payload);
       onSaved();
     } catch (err) {
       setError(err);
@@ -552,8 +564,14 @@ function QuotationGroupModal({
           under this group, so it cannot be deleted — untick Active to stop it being suggested.
         </div>
       )}
-      <Field label="Name" hint="e.g. Gruntech Installation, Trading">
+      <Field label="Name" hint="e.g. OMEGA AIR, GRUNTECH SERVICES">
         <input value={form.name} autoFocus maxLength={120} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Covers" hint="Shown under the name in the editor's dropdown — e.g. Compressed Air & Gas Treatment and Separation">
+        <input value={form.description} maxLength={200} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+      </Field>
+      <Field label="Brand" hint="Fills a line's Brand box when the group is picked; leave blank for a house group">
+        <input value={form.brand} maxLength={120} onChange={(e) => setForm({ ...form, brand: e.target.value })} />
       </Field>
       <Field label="Sort order">
         <NumberInput

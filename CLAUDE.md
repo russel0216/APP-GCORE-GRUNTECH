@@ -207,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,536 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 388, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,547 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 399, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 99, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1480,6 +1480,16 @@ the detail.
   billing still takes the company rate** (`routes/progress.ts`), so a job won
   from a zero-rated quotation is billed VAT — an open item: billing should
   read the rate of the revision the job came from.
+- **The discount is to six decimals** (2026-10-08): `discountPct` is
+  `Decimal(9,6)` on the revision, the sales order and the archive;
+  `quotationTotals` and its mirror return it to six. **SCORO's discount
+  calculator** is `DiscountCalculator` in `editorParts.tsx`, opened by the
+  Σ beside the Discount box on both editors — in the page, never a dialog:
+  Excl tax / Incl tax, the sum as it stands, the sum wanted (type in either
+  column, the other follows), the discount to six decimals and "Sum after
+  discount" — the exact figure that percentage gives through the mirror's
+  own arithmetic, the nearer of the floor and the ceiling at six decimals —
+  then Insert puts it in the box.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
   lines and prices without the totals block; the stored totals are computed
   as always, and a new revision copies the flag.
@@ -1585,7 +1595,21 @@ the detail.
 - **A line is ONE row, as SCORO edits it** (2026-10-02): Group | Product and
   description | Quantity and unit | Unit price | Amount (with-VAT under) |
   Cost and provider info (toggles and provider, then notes beside the unit
-  cost) | Margin. Every column but the product has a fixed width, so the
+  cost) | Margin. **The product is three boxes** (2026-10-08, the owner's
+  call): Brand, Product type and Part number — `QuotationItem.brand`,
+  `productType`, `partNumber` (and the same three on `SalesOrderLine`,
+  copied at booking) — and `title` is their sentence, "SCHNEIDER ELECTRIC,
+  CIRCUIT BREAKER, EZC100H3030", empty parts left out: `productTitle()` in
+  `shared/quotation.ts`, the one writer, mirrored by `productSentence()` in
+  `editorParts.tsx`; every reader of a line (the PDFs, the quotation page,
+  search, the suggestions) keeps reading `title`. A line typed before the
+  boxes keeps its title and shows it in Product type. `ProductCells` in
+  `editorParts.tsx` is the cell for both editors: Brand and Product type
+  offer what was used before (`GET /quotations/suggest/fields?field=&q=&
+  brand=` — a type under its brand first; Brand also the partners' brands
+  and the groups'), Part number offers past lines and item-master part
+  numbers (`/quotations/suggest` matches any of the three) and a pick fills
+  all three with the description, unit and price (`partsFromSuggestion`). Every column but the product has a fixed width, so the
   product takes what is left; narrower than the table's minimum, the table
   scrolls inside its card. Never split a line's cost onto a row of its own.
   Labels and values share one size (`--fs-md`) on both pages. The quotation
@@ -1595,16 +1619,34 @@ the detail.
   a line on the quotation page; the cost panel's third row is "Unassigned
   cost", shown only while there is some.
 
-## Quotation groups (2026-10-06)
+## Quotation groups (2026-10-06; required since 2026-10-08)
 
 - **`QuotationGroup` is a list, not a reference.** A line keeps its group
   as text (`QuotationItem.group`); the master (Admin › Categories ›
   Quotation groups, `/api/reference/quotation-groups`, `admin.categories.*`
-  to change, anyone signed in to read) is what the editor's Group box
-  suggests (active ones) and what "By group" names. `key` is the name
-  trimmed, single-spaced and lower-cased: one group per spelling. Renaming a
-  group never rewrites a saved line; a group any line uses is deactivated,
-  not deleted (the next save would only add it back).
+  to change, anyone signed in to read) is what the editor's Group
+  **dropdown** offers (active ones) and what "By group" names. `key` is the
+  name trimmed, single-spaced and lower-cased: one group per spelling.
+  Renaming a group never rewrites a saved line; a group any line uses is
+  deactivated, not deleted (the next save would only add it back).
+- **Every priced line names its group** (2026-10-08, the owner's call: "it
+  should be selected or else the quotation cannot be proceeded"). The
+  editor refuses to save a line without one — a `<select>` of the master,
+  with the line's own group as an extra row when it is not on it (an older
+  spelling, one since deactivated) so an old quotation still saves — and
+  the API refuses **submit for approval** (quotation and sales order) while
+  any priced line has none, which is the gate for a quotation filled another
+  way (SCORO, from a costing). The line routes still take a line without a
+  group (scripts, imports), and `rememberGroups` still adds a typed one.
+- **A group carries what it covers and a brand** (`description`, `brand`):
+  the description is the dropdown's hint under the choice; picking a group
+  fills an empty Brand box with its brand. `OWNER_GROUPS` in
+  `shared/quotationGroups.ts` are the owner's twelve — OMEGA AIR …
+  HORIBA, each with its line of business and its name as brand, then
+  GRUNTECHNOLOGY, GRUNTECH SERVICES and OTHERS with none — seeded in his
+  order by `seedOwnerGroups()` on every deploy: a group already on file is
+  kept, and only what is blank on it (description, brand, a sort order of
+  0) is filled. An administrator's spelling or wording is never overwritten.
 - **Every save that writes a line calls `rememberGroups(tx, names)`**
   (`shared/quotationGroups.ts`) — create with lines, replace lines, add a
   line, edit a line — so a group typed on a quotation joins the master with
