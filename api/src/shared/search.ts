@@ -295,6 +295,7 @@ registerSearch({
       CATALOGUE: 'Catalogue',
       PRICE_LIST: 'Price list',
       SIZING_APP: 'Software',
+      LINK: 'Link',
       OTHER: 'Document',
     };
     return rows.map((r) => ({

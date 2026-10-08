@@ -207,9 +207,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,625 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+**2,635 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
 masters 71, sales 422, costing 120, pipeline 86, calendar 84, numbering 46,
-partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
+partners 111, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -846,6 +846,17 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   template's `Software URL` header, which still accepts the old `Sizing App
   URL`. The stored kind stays `SIZING_APP`; nothing migrates. `humanKind()`
   in `shared/partners.ts` is the one label.
+- **A partner's other sites are LINKS** (2026-10-08, the owner's call: "add
+  resources so I can put a link for other sites of the partner"): resource
+  kind `LINK`, the **Links** tab on the partner page after Software — a
+  support portal, an e-shop, training, downloads, each a card with "Open
+  link ↗". **A link is a url and never a file**: `checkResourceSource(kind,
+  url, hasFile)` in `shared/partners.ts` is the one rule for the create and
+  the modify route (a LINK without an address is a 400, a file alone will not
+  do; every other kind still takes a file or a link), and the form offers no
+  file box for it. The list and its paper count them (Links column,
+  "Publishes: links to other sites"), the partner page's `counts.links`, the
+  search labels it "Link", and the CSV import takes one in `Other Site URL`.
 - **An import that matches on a non-unique name refuses rather than guesses** —
   the items import's Preferred Supplier matching two suppliers (a principal and
   its distributor sharing a brand) is an error, not a silent pick.

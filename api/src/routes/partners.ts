@@ -21,6 +21,7 @@ import {
   removeResourceFile,
   safeHttpUrl,
   humanKind,
+  checkResourceSource,
 } from '../shared/partners';
 
 /**
@@ -35,7 +36,7 @@ partnerRoutes.use(authenticate);
 
 // ── List (the quotation list's layout, 2026-10-08) ───────────────────────────
 
-const PUBLISHES = ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP'] as const;
+const PUBLISHES = ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP', 'LINK'] as const;
 const PARTNER_DAY = /^\d{4}-\d{2}-\d{2}$/;
 /** An item with a list price on it, still sold — what "priced items" counts. */
 const PRICED_ITEM: Prisma.ItemWhereInput = { isActive: true, listPrice: { not: null } };
@@ -158,6 +159,7 @@ partnerRoutes.get(
           catalogues: r.resources.filter((x) => x.kind === 'CATALOGUE').length,
           priceLists: r.resources.filter((x) => x.kind === 'PRICE_LIST').length,
           sizingApps: r.resources.filter((x) => x.kind === 'SIZING_APP').length,
+          links: r.resources.filter((x) => x.kind === 'LINK').length,
           pricedItems: r._count.preferredItems,
           createdAt: r.createdAt,
         })),
@@ -213,9 +215,9 @@ partnerRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Brand and name', 'Supplies', 'Catalogues', 'Price lists', 'Software', 'Priced items', 'Since', 'Status'],
-          widths: [1.5, 2.6, 1.6, 1, 1, 1, 1, 1.2, 1],
-          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
+          head: ['Code', 'Brand and name', 'Supplies', 'Catalogues', 'Price lists', 'Software', 'Links', 'Priced items', 'Since', 'Status'],
+          widths: [1.5, 2.6, 1.6, 1, 1, 1, 0.8, 1, 1.2, 1],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right', 'left', 'left'],
           rows: rows.map((r) => [
             r.code,
             { title: r.brand ?? r.name, body: r.brand && r.brand !== r.name ? r.name : undefined },
@@ -223,6 +225,7 @@ partnerRoutes.get(
             kinds(r, 'CATALOGUE'),
             kinds(r, 'PRICE_LIST'),
             kinds(r, 'SIZING_APP'),
+            kinds(r, 'LINK'),
             String(r._count.preferredItems),
             r.partnerSince ? formatShortDate(r.partnerSince) : '',
             r.isActive ? 'Active' : 'Inactive',
@@ -380,7 +383,7 @@ partnerRoutes.post(
     const body = parseBody(resourceSchema, req.body ?? {});
 
     const url = body.url ? safeHttpUrl(body.url) : null;
-    if (!url && !req.file) throw badRequest('Attach a file or give a link');
+    checkResourceSource(body.kind, url, !!req.file);
 
     const resource = await prisma.partnerResource.create({
       data: {
@@ -428,7 +431,7 @@ partnerRoutes.patch(
 
     const url = body.url === undefined ? before.url : body.url ? safeHttpUrl(body.url) : null;
     const hasFile = !!req.file || (!removeFile && (await resourceWithFile(before.id))?.attachment != null);
-    if (!url && !hasFile) throw badRequest('Attach a file or give a link');
+    checkResourceSource(body.kind ?? before.kind, url, hasFile);
 
     const resource = await prisma.partnerResource.update({
       where: { id: before.id },

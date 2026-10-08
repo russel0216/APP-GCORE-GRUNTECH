@@ -696,12 +696,16 @@ enum PartnerResourceKind {
   CATALOGUE
   PRICE_LIST
   SIZING_APP
+  /// One of the partner's other sites — a support portal, an e-shop, training,
+  /// downloads. A url, never a file.
+  LINK
   OTHER
 }
 
-/// A catalogue, price list or sizing tool a partner publishes. EITHER an uploaded
+/// A catalogue, price list, software or link a partner publishes. EITHER an uploaded
 /// file (one Attachment with entityType 'partner_resource', entityId = this id)
-/// OR an external URL, or both. Files stay in the one attachment service.
+/// OR an external URL, or both (a LINK is a url only). Files stay in the one
+/// attachment service.
 model PartnerResource {
   id          String              @id @default(cuid())
   supplierId  String

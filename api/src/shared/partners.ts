@@ -16,16 +16,30 @@ import { saveAttachment, deleteAttachment } from './attachments';
  * remove.
  *
  * What a partner has that a plain supplier does not: a brand, a date, and
- * RESOURCES — catalogues, price lists and sizing tools. A resource is metadata
- * (kind, title, validity) over EITHER one file in the attachment service OR
- * an external link, or both. The logic lives here so the verify script can
- * drive it without HTTP.
+ * RESOURCES — catalogues, price lists, software and links. A resource is
+ * metadata (kind, title, validity) over EITHER one file in the attachment
+ * service OR an external link, or both; a LINK (one of the partner's other
+ * sites, 2026-10-08, the owner's call) is a url and nothing else. The logic
+ * lives here so the verify script can drive it without HTTP.
  */
 
 export const PARTNER_RESOURCE_ENTITY = 'partner_resource';
 
-export const RESOURCE_KINDS = ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP', 'OTHER'] as const;
+export const RESOURCE_KINDS = ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP', 'LINK', 'OTHER'] as const;
 export type ResourceKind = (typeof RESOURCE_KINDS)[number];
+
+/**
+ * What a resource must carry — the one rule for the create and the modify
+ * route. Any kind needs a file or a link; a LINK is a link to another site,
+ * so it needs its address and a file alone will not do.
+ */
+export function checkResourceSource(kind: ResourceKind, url: string | null, hasFile: boolean): void {
+  if (kind === 'LINK') {
+    if (!url) throw badRequest("Give the link's address — a link is a site, not a file");
+    return;
+  }
+  if (!url && !hasFile) throw badRequest('Attach a file or give a link');
+}
 
 /**
  * A stored URL becomes an <a href> on the client. Only http(s) may pass —
@@ -250,6 +264,7 @@ export async function partnerDetail(id: string) {
     catalogues: active.filter((r) => r.kind === 'CATALOGUE').length,
     priceLists: active.filter((r) => r.kind === 'PRICE_LIST').length,
     sizingApps: active.filter((r) => r.kind === 'SIZING_APP').length,
+    links: active.filter((r) => r.kind === 'LINK').length,
     pricedItems,
   };
 
@@ -339,6 +354,9 @@ export function humanKind(kind: string): string {
       // "Software" since 2026-10-08 (the owner's call): the partner's
       // selection, sizing and configuration tools. The stored key stays.
       return 'Software';
+    case 'LINK':
+      // One of the partner's other sites (2026-10-08, the owner's call).
+      return 'Link';
     default:
       return 'Document';
   }

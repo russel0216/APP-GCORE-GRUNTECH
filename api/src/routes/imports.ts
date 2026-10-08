@@ -212,7 +212,7 @@ const supplierSpec: ImportSpec<Prisma.SupplierCreateInput> = {
 };
 
 // ── Partners ─────────────────────────────────────────────────────────────────
-// One row per principal: the supplier core fields plus up to three links,
+// One row per principal: the supplier core fields plus up to four links,
 // one per resource kind. Files cannot come through a CSV; those are added on
 // the partner page. Exported so verify-partners.ts drives the real spec.
 
@@ -232,6 +232,9 @@ const PARTNER_LINK_COLUMNS: { header: string; aliases?: string[]; kind: Resource
   // "Software" since 2026-10-08; a file written against the old template's
   // "Sizing App URL" header still imports.
   { header: 'Software URL', aliases: ['Sizing App URL'], kind: 'SIZING_APP', title: 'Software' },
+  // One of the partner's other sites (2026-10-08): a support portal, an
+  // e-shop, downloads. More go on the partner's page, under Links.
+  { header: 'Other Site URL', kind: 'LINK', title: 'Other site' },
 ];
 
 export const partnerSpec: ImportSpec<PartnerImportRecord> = {
@@ -245,6 +248,7 @@ export const partnerSpec: ImportSpec<PartnerImportRecord> = {
     { header: 'Catalogue URL', example: '', hint: 'http(s) link to the online catalogue' },
     { header: 'Price List URL', example: '', hint: 'http(s) link to the published price list' },
     { header: 'Software URL', example: '', hint: 'http(s) link to the partner\'s selection or sizing software' },
+    { header: 'Other Site URL', example: '', hint: 'http(s) link to another of the partner\'s sites — support portal, e-shop, downloads' },
     { header: 'Contact Name', example: 'Jun Reyes', hint: 'Creates one primary contact on a new partner' },
     { header: 'Active', example: 'Yes' },
   ],

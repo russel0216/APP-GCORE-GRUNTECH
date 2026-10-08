@@ -39,6 +39,7 @@ import {
   partnerPriceList,
   resourceSchema,
   safeHttpUrl,
+  checkResourceSource,
 } from '../src/shared/partners';
 import { partnerSpec, partnerWrite, itemSpec, itemWrite } from '../src/routes/imports';
 
@@ -219,6 +220,13 @@ async function main() {
     resourceSchema.safeParse({ kind: 'SIZING_APP', title: 'Sizer' }).success,
   );
   check('an unknown kind is refused', !resourceSchema.safeParse({ kind: 'BROCHURE', title: 'Sizer' }).success);
+  // A LINK (2026-10-08) is one of the partner's other sites: an address, never
+  // a file. The one rule for both routes is checkResourceSource.
+  check('a link is a resource kind, labelled Link', resourceSchema.safeParse({ kind: 'LINK', title: 'Portal' }).success && humanKind('LINK') === 'Link');
+  check('a link with a file and no address is refused', throws(() => checkResourceSource('LINK', null, true)));
+  check('a link with its address passes', !throws(() => checkResourceSource('LINK', 'https://portal.example.com', false)));
+  check('any other kind still takes a file alone', !throws(() => checkResourceSource('CATALOGUE', null, true)));
+  check('but not nothing', throws(() => checkResourceSource('CATALOGUE', null, false)));
   const parsedForm = resourceSchema.parse({ kind: 'CATALOGUE', title: 'Cat', isActive: 'false', validFrom: '' });
   check(
     'multipart "false" means false, and a blank date means none',
@@ -292,8 +300,8 @@ async function main() {
   console.log('\nPartner import');
 
   const partnerCsv = [
-    'Name,Brand,Category,Website,Catalogue URL,Price List URL,Software URL,Contact Name,Active',
-    `${TAG} Pumps Corp,${TAG}PUMP,Pumps,https://pumps.example.com,https://pumps.example.com/cat,https://pumps.example.com/prices,https://pumps.example.com/size,Ana Reyes,Yes`,
+    'Name,Brand,Category,Website,Catalogue URL,Price List URL,Software URL,Other Site URL,Contact Name,Active',
+    `${TAG} Pumps Corp,${TAG}PUMP,Pumps,https://pumps.example.com,https://pumps.example.com/cat,https://pumps.example.com/prices,https://pumps.example.com/size,https://support.pumps.example.com,Ana Reyes,Yes`,
   ].join('\n');
   const first = await runImport(partnerCsv, partnerSpec, true, partnerWrite);
   check('one partner imported', first.committed && first.created === 1, JSON.stringify(first.rows));
@@ -303,9 +311,9 @@ async function main() {
   });
   check('it is a partner', pumps?.isPartner === true);
   check(
-    'with one link of each kind',
-    ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP'].every((k) => pumps?.resources.some((r) => r.kind === k)) &&
-      pumps?.resources.length === 3,
+    'with one link of each kind — the catalogue, the price list, the software and the other site',
+    ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP', 'LINK'].every((k) => pumps?.resources.some((r) => r.kind === k)) &&
+      pumps?.resources.length === 4,
     pumps?.resources.map((r) => r.kind).join(','),
   );
   check('and a primary contact', pumps?.contacts.length === 1 && pumps.contacts[0].isPrimary);
@@ -314,7 +322,7 @@ async function main() {
   check('re-importing updates rather than creates', again.updated === 1 && again.created === 0);
   check(
     'and does not duplicate the links',
-    (await prisma.partnerResource.count({ where: { supplierId: pumps!.id } })) === 3,
+    (await prisma.partnerResource.count({ where: { supplierId: pumps!.id } })) === 4,
   );
 
   // The old template's header still imports (the column was "Sizing App URL"
@@ -531,6 +539,37 @@ async function httpCases(ctx: {
   check(
     'a viewer cannot remove a resource',
     (await http(viewerT, 'DELETE', `/partners/${newId}/resources/${uploaded.id}`)).status === 403,
+  );
+
+  // Links (2026-10-08): the partner's other sites. A url, never a file.
+  const linkFile = new FormData();
+  linkFile.set('kind', 'LINK');
+  linkFile.set('title', 'Support portal');
+  linkFile.set('file', new Blob(['%PDF-1.4\n%verify\n'], { type: 'application/pdf' }), 'portal.pdf');
+  const linkRefused = await http(mgrT, 'POST', `/partners/${newId}/resources`, linkFile);
+  check('a link with a file and no address is refused by the route', linkRefused.status === 400, linkRefused.text.slice(0, 120));
+  const linkForm = new FormData();
+  linkForm.set('kind', 'LINK');
+  linkForm.set('title', 'Support portal');
+  linkForm.set('url', 'https://support.chillers.example.com');
+  const linkMade = await http(mgrT, 'POST', `/partners/${newId}/resources`, linkForm);
+  const linkRow = linkMade.body as { id?: string; kind?: string; url?: string };
+  check('a link with its address is added', linkMade.status === 201 && linkRow.kind === 'LINK' && linkRow.url === 'https://support.chillers.example.com', linkMade.text.slice(0, 160));
+  const linkPage = await http(viewerT, 'GET', `/partners/${newId}`);
+  const linkCounts = (linkPage.body as { counts?: { links?: number } }).counts;
+  check('the partner page counts its links', linkCounts?.links === 1, JSON.stringify(linkCounts));
+  const linkList = await http(viewerT, 'GET', `/partners?search=${encodeURIComponent(`${TAG} Chillers`)}&publishes=LINK`);
+  const linkListRows = (linkList.body.rows ?? []) as { id: string; links: number }[];
+  check(
+    'the list counts them and "Publishes: links to other sites" finds the partner',
+    linkList.status === 200 && linkListRows.length === 1 && linkListRows[0].id === newId && linkListRows[0].links === 1,
+    linkList.text.slice(0, 160),
+  );
+  const dropUrl = new FormData();
+  dropUrl.set('url', '');
+  check(
+    'and a link cannot lose its address',
+    (await http(mgrT, 'PATCH', `/partners/${newId}/resources/${linkRow.id}`, dropUrl)).status === 400,
   );
 
   // Procurement's delete refuses while Sales lists it — otherwise its

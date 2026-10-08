@@ -32,22 +32,28 @@ import {
  * What it adds on top of the supplier: a brand, a "partner since" date, and
  * resources — catalogues, price lists and software (selection and sizing
  * tools; "Software" since 2026-10-08, the owner's call), each a file, a link,
- * or both — plus the partner's price list, read off Item.listPrice for the
- * items that name the partner as preferred supplier. A list PRICE, never a
- * cost: the price-list route selects no cost field at all.
+ * or both, and LINKS (2026-10-08, the owner's call): the partner's other
+ * sites — a support portal, an e-shop, training, downloads — each a url and
+ * nothing else — plus the partner's price list, read off Item.listPrice for
+ * the items that name the partner as preferred supplier. A list PRICE, never
+ * a cost: the price-list route selects no cost field at all.
  */
 
-type ResourceKind = 'CATALOGUE' | 'PRICE_LIST' | 'SIZING_APP' | 'OTHER';
+type ResourceKind = 'CATALOGUE' | 'PRICE_LIST' | 'SIZING_APP' | 'LINK' | 'OTHER';
 
 const KIND_LABEL: Record<ResourceKind, string> = {
   CATALOGUE: 'Catalogue',
   PRICE_LIST: 'Price list',
   SIZING_APP: 'Software',
+  LINK: 'Link',
   OTHER: 'Document',
 };
 
 /** Resource kinds are categories, not states — all neutral. */
-const KIND_TONES = { CATALOGUE: '', PRICE_LIST: '', SIZING_APP: '', OTHER: '' } as const;
+const KIND_TONES = { CATALOGUE: '', PRICE_LIST: '', SIZING_APP: '', LINK: '', OTHER: '' } as const;
+
+/** A link is a site: it takes an address and never a file. */
+const URL_ONLY: ReadonlySet<ResourceKind> = new Set<ResourceKind>(['LINK']);
 
 interface PartnerRow {
   id: string;
@@ -66,6 +72,7 @@ interface PartnerRow {
   catalogues: number;
   priceLists: number;
   sizingApps: number;
+  links: number;
   pricedItems: number;
   createdAt: string;
 }
@@ -231,7 +238,7 @@ interface Partner {
   createdBy: { id: string; name: string } | null;
   contacts: PartnerContact[];
   resources: Resource[];
-  counts: { catalogues: number; priceLists: number; sizingApps: number; pricedItems: number };
+  counts: { catalogues: number; priceLists: number; sizingApps: number; links: number; pricedItems: number };
 }
 
 interface PriceRow {
@@ -310,6 +317,7 @@ export function Partners() {
         { value: 'CATALOGUE', label: 'A catalogue' },
         { value: 'PRICE_LIST', label: 'A price list' },
         { value: 'SIZING_APP', label: 'Software' },
+        { value: 'LINK', label: 'Links to other sites' },
       ],
     },
     {
@@ -345,6 +353,7 @@ export function Partners() {
     { key: 'catalogues', label: 'Catalogues', align: 'right', render: (p) => count(p.catalogues) },
     { key: 'priceLists', label: 'Price lists', align: 'right', render: (p) => count(p.priceLists) },
     { key: 'sizingApps', label: 'Software', align: 'right', render: (p) => count(p.sizingApps) },
+    { key: 'links', label: 'Links', align: 'right', render: (p) => count(p.links) },
     { key: 'pricedItems', label: 'Priced items', align: 'right', render: (p) => count(p.pricedItems) },
     {
       key: 'website',
@@ -710,8 +719,8 @@ function PartnerForm({
 //  DETAIL
 // ════════════════════════════════════════════════════════════════════
 
-type Tab = 'catalogues' | 'prices' | 'sizing' | 'people' | 'notes';
-const TABS: Tab[] = ['catalogues', 'prices', 'sizing', 'people', 'notes'];
+type Tab = 'catalogues' | 'prices' | 'sizing' | 'links' | 'people' | 'notes';
+const TABS: Tab[] = ['catalogues', 'prices', 'sizing', 'links', 'people', 'notes'];
 
 export function PartnerDetail() {
   const { id } = useParams<{ id: string }>();
@@ -767,6 +776,7 @@ export function PartnerDetail() {
   const others = byKind(['OTHER']);
   const priceLists = byKind(['PRICE_LIST']);
   const sizingApps = byKind(['SIZING_APP']);
+  const links = byKind(['LINK']);
 
   async function removePartner() {
     if (!partner) return;
@@ -784,6 +794,7 @@ export function PartnerDetail() {
     catalogues: 'Catalogues',
     prices: 'Price list',
     sizing: 'Software',
+    links: 'Links',
     people: 'People',
     notes: 'Notes',
   };
@@ -791,6 +802,7 @@ export function PartnerDetail() {
     catalogues: catalogues.length + others.length,
     prices: priceLists.length,
     sizing: sizingApps.length,
+    links: links.length,
     people: partner.contacts.length,
   };
 
@@ -1038,6 +1050,23 @@ export function PartnerDetail() {
         </div>
       )}
 
+      {tab === 'links' && (
+        <div className="stack">
+          <div className="m-card-head">
+            <h3 className="card-title">Links</h3>
+            {addResource('LINK', 'link')}
+          </div>
+          {links.length === 0 ? (
+            <Empty
+              title="No links yet"
+              hint="The partner's other sites — support portal, e-shop, training, documentation, downloads. Each opens in a new tab."
+            />
+          ) : (
+            cards(links)
+          )}
+        </div>
+      )}
+
       {tab === 'people' && (
         <div className="card">
           <div className="m-card-head">
@@ -1275,13 +1304,16 @@ function ResourceModal({
     isActive: resource?.isActive ?? true,
   });
 
-  const keepsFile = !!resource?.attachment && !removeFile;
-  const hasSource = form.url.trim() !== '' || !!file || keepsFile;
+  // A link is a site: the address is the whole resource, and no file is
+  // offered (the API refuses one without an address, `checkResourceSource`).
+  const urlOnly = URL_ONLY.has(form.kind);
+  const keepsFile = !urlOnly && !!resource?.attachment && !removeFile;
+  const hasSource = form.url.trim() !== '' || (!urlOnly && !!file) || keepsFile;
   const urlLooksWrong = form.url.trim() !== '' && !/^https?:\/\//i.test(form.url.trim());
 
   async function save() {
     if (!hasSource) {
-      setError(new Error('Attach a file or give a link'));
+      setError(new Error(urlOnly ? "Give the link's address" : 'Attach a file or give a link'));
       return;
     }
     setBusy(true);
@@ -1295,8 +1327,9 @@ function ResourceModal({
       body.set('validFrom', form.validFrom);
       body.set('validUntil', form.validUntil);
       body.set('isActive', String(form.isActive));
-      if (file) body.set('file', file);
-      if (resource && removeFile && !file) body.set('removeFile', 'true');
+      if (file && !urlOnly) body.set('file', file);
+      // Turning a resource into a link lets its file go with it.
+      if (resource?.attachment && (urlOnly || (removeFile && !file))) body.set('removeFile', 'true');
       if (resource) await api.patch(`/partners/${partnerId}/resources/${resource.id}`, body);
       else await api.post(`/partners/${partnerId}/resources`, body);
       toast('ok', `${form.title} saved`);
@@ -1360,7 +1393,7 @@ function ResourceModal({
           <input
             value={form.title}
             autoFocus
-            placeholder="2026 compressor catalogue"
+            placeholder={urlOnly ? 'Support portal' : '2026 compressor catalogue'}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
           />
         </Field>
@@ -1369,7 +1402,8 @@ function ResourceModal({
         <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
       </Field>
       <Field
-        label="Link"
+        label={urlOnly ? 'Address' : 'Link'}
+        required={urlOnly}
         hint="http:// or https:// — opens in a new tab"
         error={urlLooksWrong ? 'Links must start with http:// or https://' : null}
       >
@@ -1380,22 +1414,27 @@ function ResourceModal({
           onChange={(e) => setForm({ ...form, url: e.target.value })}
         />
       </Field>
-      <Field
-        label="File"
-        hint={
-          resource?.attachment && !removeFile
-            ? `Current: ${resource.attachment.fileName} — choosing a new file replaces it`
-            : 'PDF, spreadsheet, document or image'
-        }
-      >
-        <input
-          type="file"
-          accept=".pdf,.xlsx,.xls,.csv,.docx,.doc,.png,.jpg,.jpeg"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        />
-      </Field>
-      {resource?.attachment && !file && (
+      {!urlOnly && (
+        <Field
+          label="File"
+          hint={
+            resource?.attachment && !removeFile
+              ? `Current: ${resource.attachment.fileName} — choosing a new file replaces it`
+              : 'PDF, spreadsheet, document or image'
+          }
+        >
+          <input
+            type="file"
+            accept=".pdf,.xlsx,.xls,.csv,.docx,.doc,.png,.jpg,.jpeg"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+        </Field>
+      )}
+      {!urlOnly && resource?.attachment && !file && (
         <Checkbox checked={removeFile} onChange={setRemoveFile} label="Remove the current file" />
+      )}
+      {urlOnly && resource?.attachment && (
+        <p className="muted">Saving as a link lets the file {resource.attachment.fileName} go.</p>
       )}
       {form.kind === 'PRICE_LIST' && (
         <div className="grid grid-2">
