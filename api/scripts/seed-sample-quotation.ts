@@ -32,6 +32,7 @@ import { rememberGroups } from '../src/shared/quotationGroups';
 import { audit } from '../src/shared/audit';
 import { LEGACY_QUOTE_ENTITY } from '../src/shared/legacyQuotes';
 import { recalcOrder } from '../src/routes/salesOrders';
+import { valueRevision } from '../src/shared/pipeline';
 
 const NUMBER = '0062602018';
 /** What an earlier version of this script filed it as. */
@@ -221,18 +222,35 @@ const ORDER_DESCRIPTIONS: Record<string, string> = {
 async function seedOrders(quotationId: string, actor: { actorId: string; actorName: string }) {
   const quotation = await prisma.quotation.findUniqueOrThrow({
     where: { id: quotationId },
-    include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } }, orderBy: { revision: 'desc' } } },
+    include: { revisions: { include: { items: { orderBy: { sortOrder: 'asc' } } } } },
   });
-  const revision = quotation.revisions[0];
+  // The revision an order books: approved, else latest — the booking rule.
+  const revision = valueRevision(quotation.revisions);
+  if (!revision) throw new Error(`${quotation.number} has no revision to book`);
   for (const spec of ORDERS) {
-    const taken = await prisma.salesOrder.findUnique({ where: { number: spec.number }, select: { id: true, quotationId: true } });
-    if (taken) {
-      console.log(
-        taken.quotationId === quotationId
-          ? `Sales order ${spec.number} already filed (/g-ops/sales-orders/${taken.id})`
-          : `Sales order ${spec.number} exists on another quotation — skipped`,
-      );
+    const taken = await prisma.salesOrder.findUnique({
+      where: { number: spec.number },
+      select: { id: true, quotationId: true, status: true, quotation: { select: { number: true } } },
+    });
+    if (taken && taken.quotationId === quotationId) {
+      console.log(`Sales order ${spec.number} already filed (/g-ops/sales-orders/${taken.id})`);
       continue;
+    }
+    if (taken && taken.status !== 'DRAFT') {
+      console.log(`Sales order ${spec.number} is ${taken.status} on ${taken.quotation.number} — left where it is`);
+      continue;
+    }
+    if (taken) {
+      // A draft an earlier run filed on the wrong quotation: refile it here.
+      await prisma.$transaction(async (tx) => {
+        await tx.salesOrder.delete({ where: { id: taken.id } });
+        await audit(
+          { entityType: 'sales_order', entityId: taken.id, action: 'DELETED', summary: `Draft sales order ${spec.number} removed from ${taken.quotation.number} to be refiled on ${quotation.number} (sample seed)`, ...actor },
+          undefined,
+          tx,
+        );
+      });
+      console.log(`Sales order ${spec.number} moved off ${taken.quotation.number}`);
     }
     const order = await prisma.$transaction(async (tx) => {
       const created = await tx.salesOrder.create({
@@ -311,10 +329,15 @@ async function main() {
   const actor = { actorId: owner.id, actorName: owner.name };
   console.log(`Owner: ${owner.name} <${owner.email}>`);
 
-  const existing = await prisma.quotation.findFirst({
-    where: { number: { in: [NUMBER, OLD_NUMBER], mode: 'insensitive' } },
-    select: { id: true, number: true },
-  });
+  // The live quotation is the one carrying the SCORO number — on the server
+  // that is the one "Continue in G-CORE" raised. Only when there is none is
+  // an earlier run's 0062602018.2 renumbered to take its place.
+  const live = await prisma.quotation.findFirst({ where: { number: { equals: NUMBER, mode: 'insensitive' } }, select: { id: true, number: true } });
+  const old = await prisma.quotation.findFirst({ where: { number: { equals: OLD_NUMBER, mode: 'insensitive' } }, select: { id: true, number: true } });
+  if (live && old) {
+    console.log(`${OLD_NUMBER} (an earlier sample) is still on file beside the live ${NUMBER} — delete it from its page, /g-ops/quotations/${old.id}`);
+  }
+  const existing = live ?? old;
   if (existing) {
     if (existing.number !== NUMBER) {
       await prisma.$transaction(async (tx) => {
