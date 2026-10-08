@@ -294,7 +294,7 @@ registerSearch({
     const kindLabel: Record<string, string> = {
       CATALOGUE: 'Catalogue',
       PRICE_LIST: 'Price list',
-      SIZING_APP: 'Sizing app',
+      SIZING_APP: 'Software',
       OTHER: 'Document',
     };
     return rows.map((r) => ({

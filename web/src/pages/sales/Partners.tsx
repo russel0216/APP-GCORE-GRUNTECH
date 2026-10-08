@@ -30,7 +30,8 @@ import {
  * without holding any G-CHAIN permission.
  *
  * What it adds on top of the supplier: a brand, a "partner since" date, and
- * resources — catalogues, price lists and sizing tools, each a file, a link,
+ * resources — catalogues, price lists and software (selection and sizing
+ * tools; "Software" since 2026-10-08, the owner's call), each a file, a link,
  * or both — plus the partner's price list, read off Item.listPrice for the
  * items that name the partner as preferred supplier. A list PRICE, never a
  * cost: the price-list route selects no cost field at all.
@@ -41,7 +42,7 @@ type ResourceKind = 'CATALOGUE' | 'PRICE_LIST' | 'SIZING_APP' | 'OTHER';
 const KIND_LABEL: Record<ResourceKind, string> = {
   CATALOGUE: 'Catalogue',
   PRICE_LIST: 'Price list',
-  SIZING_APP: 'Sizing app',
+  SIZING_APP: 'Software',
   OTHER: 'Document',
 };
 
@@ -308,7 +309,7 @@ export function Partners() {
       options: [
         { value: 'CATALOGUE', label: 'A catalogue' },
         { value: 'PRICE_LIST', label: 'A price list' },
-        { value: 'SIZING_APP', label: 'A sizing app' },
+        { value: 'SIZING_APP', label: 'Software' },
       ],
     },
     {
@@ -343,7 +344,7 @@ export function Partners() {
     },
     { key: 'catalogues', label: 'Catalogues', align: 'right', render: (p) => count(p.catalogues) },
     { key: 'priceLists', label: 'Price lists', align: 'right', render: (p) => count(p.priceLists) },
-    { key: 'sizingApps', label: 'Sizing apps', align: 'right', render: (p) => count(p.sizingApps) },
+    { key: 'sizingApps', label: 'Software', align: 'right', render: (p) => count(p.sizingApps) },
     { key: 'pricedItems', label: 'Priced items', align: 'right', render: (p) => count(p.pricedItems) },
     {
       key: 'website',
@@ -782,7 +783,7 @@ export function PartnerDetail() {
   const tabLabel: Record<Tab, string> = {
     catalogues: 'Catalogues',
     prices: 'Price list',
-    sizing: 'Sizing apps',
+    sizing: 'Software',
     people: 'People',
     notes: 'Notes',
   };
@@ -872,7 +873,7 @@ export function PartnerDetail() {
       <div className="kpi-grid m-kpis">
         <Stat label="Catalogues" value={partner.counts.catalogues} sub="active, files or links" />
         <Stat label="Price lists" value={partner.counts.priceLists} sub="published documents" />
-        <Stat label="Sizing apps" value={partner.counts.sizingApps} sub="the partner's own tools" />
+        <Stat label="Software" value={partner.counts.sizingApps} sub="selection and sizing tools" />
         <Stat label="Priced items" value={partner.counts.pricedItems} sub="items with a list price" />
       </div>
 
@@ -1023,13 +1024,13 @@ export function PartnerDetail() {
       {tab === 'sizing' && (
         <div className="stack">
           <div className="m-card-head">
-            <h3 className="card-title">Sizing apps</h3>
-            {addResource('SIZING_APP', 'sizing app')}
+            <h3 className="card-title">Software</h3>
+            {addResource('SIZING_APP', 'software')}
           </div>
           {sizingApps.length === 0 ? (
             <Empty
-              title="No sizing apps yet"
-              hint="Link the partner's online selection or sizing tool — it opens in a new tab."
+              title="No software yet"
+              hint="Link the partner's online selection, sizing or configuration software — it opens in a new tab."
             />
           ) : (
             cards(sizingApps)

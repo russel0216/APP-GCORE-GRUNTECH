@@ -246,8 +246,8 @@ async function main() {
     .submodules.filter((s) => s.group === 'Sales' && !s.hidden)
     .map((s) => s.label);
   check(
-    'Sales shows Sales Pipeline, Leads, Quotations, Sales Orders, Customers, Partners, Calendar in that order',
-    salesStrip.join() === 'Sales Pipeline,Leads,Quotations,Sales Orders,Customers,Partners,Calendar',
+    'Sales shows Sales Pipeline, Forecast, Leads, Quotations, Sales Orders, Customers, Partners, Calendar in that order',
+    salesStrip.join() === 'Sales Pipeline,Forecast,Leads,Quotations,Sales Orders,Customers,Partners,Calendar',
     salesStrip.join(),
   );
   // Working days on real dates: Thursday 1 Jan 2026.

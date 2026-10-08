@@ -336,7 +336,9 @@ export function humanKind(kind: string): string {
     case 'PRICE_LIST':
       return 'Price list';
     case 'SIZING_APP':
-      return 'Sizing app';
+      // "Software" since 2026-10-08 (the owner's call): the partner's
+      // selection, sizing and configuration tools. The stored key stays.
+      return 'Software';
     default:
       return 'Document';
   }

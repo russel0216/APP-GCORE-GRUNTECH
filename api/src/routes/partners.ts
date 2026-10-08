@@ -213,7 +213,7 @@ partnerRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Brand and name', 'Supplies', 'Catalogues', 'Price lists', 'Sizing apps', 'Priced items', 'Since', 'Status'],
+          head: ['Code', 'Brand and name', 'Supplies', 'Catalogues', 'Price lists', 'Software', 'Priced items', 'Since', 'Status'],
           widths: [1.5, 2.6, 1.6, 1, 1, 1, 1, 1.2, 1],
           align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
           rows: rows.map((r) => [

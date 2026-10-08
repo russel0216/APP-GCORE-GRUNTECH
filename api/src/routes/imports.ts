@@ -226,10 +226,12 @@ export interface PartnerImportRecord {
   links: { kind: ResourceKind; url: string }[];
 }
 
-const PARTNER_LINK_COLUMNS: { header: string; kind: ResourceKind; title: string }[] = [
+const PARTNER_LINK_COLUMNS: { header: string; aliases?: string[]; kind: ResourceKind; title: string }[] = [
   { header: 'Catalogue URL', kind: 'CATALOGUE', title: 'Online catalogue' },
   { header: 'Price List URL', kind: 'PRICE_LIST', title: 'Price list' },
-  { header: 'Sizing App URL', kind: 'SIZING_APP', title: 'Sizing app' },
+  // "Software" since 2026-10-08; a file written against the old template's
+  // "Sizing App URL" header still imports.
+  { header: 'Software URL', aliases: ['Sizing App URL'], kind: 'SIZING_APP', title: 'Software' },
 ];
 
 export const partnerSpec: ImportSpec<PartnerImportRecord> = {
@@ -242,7 +244,7 @@ export const partnerSpec: ImportSpec<PartnerImportRecord> = {
     { header: 'Website', example: 'https://www.atlascopco.com' },
     { header: 'Catalogue URL', example: '', hint: 'http(s) link to the online catalogue' },
     { header: 'Price List URL', example: '', hint: 'http(s) link to the published price list' },
-    { header: 'Sizing App URL', example: '', hint: 'http(s) link to the sizing tool' },
+    { header: 'Software URL', example: '', hint: 'http(s) link to the partner\'s selection or sizing software' },
     { header: 'Contact Name', example: 'Jun Reyes', hint: 'Creates one primary contact on a new partner' },
     { header: 'Active', example: 'Yes' },
   ],
@@ -262,7 +264,7 @@ export const partnerSpec: ImportSpec<PartnerImportRecord> = {
   build: async (row) => {
     const links: { kind: ResourceKind; url: string }[] = [];
     for (const col of PARTNER_LINK_COLUMNS) {
-      const v = row[col.header];
+      const v = row[col.header] || (col.aliases ?? []).map((a) => row[a]).find(Boolean);
       if (!v) continue;
       try {
         links.push({ kind: col.kind, url: safeHttpUrl(v) });

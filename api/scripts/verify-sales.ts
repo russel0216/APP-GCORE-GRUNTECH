@@ -56,6 +56,17 @@ import {
 } from '../src/shared/pipeline';
 import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
 import { valueRevision as valuedRevisionOf } from '../src/shared/pipeline';
+import {
+  buildForecast,
+  defaultWindow,
+  isoWeek,
+  periodBucket,
+  periodNext,
+  periodsBetween,
+  periodStart,
+  weightedOf,
+  type ForecastRow,
+} from '../src/shared/forecast';
 import { listQuery } from '../src/http/kit';
 // Imported for its side effect: this is what registers the quotation's
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
@@ -898,6 +909,69 @@ async function main() {
   check('the last day of last month is not', !inForecastMonth(lastOfPrev, now));
   check('the first day of next month is not', !inForecastMonth(firstOfNext, now));
   check('no date is not', !inForecastMonth(null, now));
+
+  // ── The Forecast's periods and buckets (shared/forecast.ts, pure) ────────
+  console.log('\nThe Forecast: periods, labels and buckets');
+  check('a week starts on its Monday', periodStart('2026-10-08', 'week') === '2026-10-05' && periodStart('2026-10-05', 'week') === '2026-10-05' && periodStart('2026-10-11', 'week') === '2026-10-05');
+  check('a month, quarter and year start on their first day', periodStart('2026-10-08', 'month') === '2026-10-01' && periodStart('2026-11-30', 'quarter') === '2026-10-01' && periodStart('2026-06-15', 'year') === '2026-01-01');
+  check('the next period follows without a gap', periodNext('2026-10-05', 'week') === '2026-10-12' && periodNext('2026-12-01', 'month') === '2027-01-01' && periodNext('2026-10-01', 'quarter') === '2027-01-01' && periodNext('2026-01-01', 'year') === '2027-01-01');
+  const w41 = periodBucket('2026-10-05', 'week');
+  check('a week is keyed by its ISO number and labelled by its days', w41.key === '2026-W41' && w41.label === '5–11 Oct 2026' && w41.to === '2026-10-11', JSON.stringify(w41));
+  check('a week across a month names both months', periodBucket('2026-10-26', 'week').label === '26 Oct – 1 Nov 2026');
+  check('a week across a year names both years', periodBucket('2025-12-29', 'week').label === '29 Dec 2025 – 4 Jan 2026' && periodBucket('2025-12-29', 'week').key === '2026-W01');
+  check('ISO week 53 exists where it should', isoWeek('2020-12-31').week === 53 && isoWeek('2021-01-03').year === 2020 && isoWeek('2026-01-01').week === 1);
+  check('a month, a quarter and a year are labelled plainly', periodBucket('2026-10-01', 'month').label === 'October 2026' && periodBucket('2026-10-01', 'quarter').label === 'Q4 2026 (Oct–Dec)' && periodBucket('2026-01-01', 'year').label === '2026');
+  const months = periodsBetween('2026-10-15', '2027-02-03', 'month');
+  check('a window lists every period it touches, from the one its start falls in', months.map((m) => m.key).join() === '2026-10,2026-11,2026-12,2027-01,2027-02');
+  check('the default window is twelve months, eight quarters, three years, twelve weeks from the current period', JSON.stringify(defaultWindow('2026-10-08', 'month')) === '{"from":"2026-10-01","to":"2027-09-30"}' && JSON.stringify(defaultWindow('2026-10-08', 'quarter')) === '{"from":"2026-10-01","to":"2028-09-30"}' && JSON.stringify(defaultWindow('2026-10-08', 'year')) === '{"from":"2026-01-01","to":"2028-12-31"}' && JSON.stringify(defaultWindow('2026-10-08', 'week')) === '{"from":"2026-10-05","to":"2026-12-27"}', JSON.stringify(defaultWindow('2026-10-08', 'week')));
+  let tooWide = false;
+  try {
+    periodsBetween('2000-01-01', '2026-01-01', 'week');
+  } catch {
+    tooWide = true;
+  }
+  check('a window of more than MAX_BUCKETS periods is refused', tooWide);
+  const fRow = (n: number, closing: string | null, value: number, probability: number, owner = 'A'): ForecastRow => ({
+    kind: 'quotation',
+    id: `q${n}`,
+    number: `Q-${n}`,
+    title: 'Customer',
+    subject: null,
+    customer: null,
+    owner: { id: owner, name: owner },
+    stage: 'OPPORTUNITY',
+    stageLabel: 'Opportunity',
+    status: 'OPEN',
+    probability,
+    expectedClosing: closing,
+    value,
+    weighted: weightedOf(value, probability),
+    overdue: closing !== null && closing < '2026-10-08',
+    link: '/',
+  });
+  const fc = buildForecast({
+    period: 'month',
+    from: '2026-10-01',
+    to: '2026-12-31',
+    today: '2026-10-08',
+    rows: [
+      fRow(1, '2026-10-02', 100.01, 33), // past closing, in October
+      fRow(2, '2026-10-20', 200.02, 33),
+      fRow(3, '2026-12-31', 300.03, 50, 'B'),
+      fRow(4, '2026-09-30', 400.04, 10), // before the window
+      fRow(5, '2027-01-01', 500.05, 10), // after it
+      fRow(6, null, 600.06, 90, 'B'), // undated
+    ],
+  });
+  check('every row lands in exactly one group, so the groups add up to everything', fc.totals.count === 6 && fc.inWindow.count === 3 && fc.earlier.count === 1 && fc.later.count === 1 && fc.undated.count === 1);
+  check('October holds both of its rows and counts the one past its closing date', fc.buckets[0].key === '2026-10' && fc.buckets[0].count === 2 && fc.buckets[0].overdue === 1 && fc.buckets[0].value === 300.03);
+  check('an empty period is still listed, at zero', fc.buckets[1].key === '2026-11' && fc.buckets[1].count === 0 && fc.buckets[1].value === 0);
+  check('the weighted sum is rounded once, at the end: 100.01 × 33% + 200.02 × 33% = 99.01', fc.buckets[0].weighted === 99.01, String(fc.buckets[0].weighted));
+  check('the window total is the buckets summed in cents', fc.inWindow.value === 600.06 && fc.inWindow.weighted === 249.03, `${fc.inWindow.value} ${fc.inWindow.weighted}`);
+  check('and everything open adds the three groups outside it', fc.totals.value === 2100.21 && fc.totals.overdue === 2, `${fc.totals.value} ${fc.totals.overdue}`);
+  // A: 33.0033 + 66.0066 + 40.004 + 50.005 = 189.0189; B: 150.015 + 540.054 = 690.069.
+  check('owners are ranked by weighted value, each with their own share', fc.owners.map((o) => `${o.id}:${o.count}:${o.weighted}`).join() === 'B:2:690.07,A:4:189.02', fc.owners.map((o) => `${o.id}:${o.count}:${o.weighted}`).join());
+  check('rows within a group are in closing-date order', fc.buckets[0].rows.map((r) => r.number).join() === 'Q-1,Q-2');
 
   const b2 = board(
     [

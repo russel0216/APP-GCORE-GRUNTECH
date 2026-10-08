@@ -221,6 +221,8 @@ async function main() {
   const boardRole = await makeRole('zzpipe_board', 'Verify board manager', [
     'gops.pipeline.view_all',
     'gops.pipeline.export',
+    'gops.forecast.view_all',
+    'gops.forecast.export',
     'gops.leads.view_all',
     'gops.leads.edit_all',
     'gops.leads.edit_own',
@@ -432,6 +434,62 @@ async function main() {
   check('GET /pipeline without gops.pipeline.view_all is 403', denied.status === 403, `${denied.status}`);
   const deniedCsv = await http(sellerToken, 'GET', '/pipeline/board.csv');
   check('and the CSV without gops.pipeline.export is 403', deniedCsv.status === 403, `${deniedCsv.status}`);
+
+  // ── 3b. The Forecast reconciles with the quotation list ──────────────────
+  console.log('\nThe Forecast');
+  await prisma.quotation.update({ where: { id: negotiating.id }, data: { expectedClosing: new Date('2026-12-15T00:00:00Z') } });
+  await prisma.quotation.update({ where: { id: draftOnly.id }, data: { expectedClosing: new Date('2026-11-03T00:00:00Z') } });
+  // The manager's own deals only, so other people's quotations on this
+  // database never enter the arithmetic. bareLead closes 2026-11-20 at 400,000 × 20%.
+  const fcQuery = `period=month&from=2026-11-01&to=2026-12-31&scope=all&ownerId=${manager.id}`;
+  const fc = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}`);
+  interface FcBucket { key: string; count: number; value: number; weighted: number; overdue: number; rows: { number: string; kind: string }[] }
+  interface FcBody { buckets: FcBucket[]; inWindow: { count: number; value: number; weighted: number }; totals: { count: number }; undated: { count: number }; people: { id: string }[] }
+  const fcBody = fc.body as unknown as FcBody;
+  check('GET /pipeline/forecast answers the board manager', fc.status === 200, `${fc.status} ${fc.text.slice(0, 120)}`);
+  check('November and December are its two buckets', fcBody.buckets?.map((b) => b.key).join() === '2026-11,2026-12', fcBody.buckets?.map((b) => b.key).join());
+  const nov = fcBody.buckets?.find((b) => b.key === '2026-11');
+  const dec = fcBody.buckets?.find((b) => b.key === '2026-12');
+  check(
+    'the draft-only quotation closes in November at its draft total × 17%',
+    nov?.count === 1 && nov.rows[0].number === draftOnly.number && cents(nov.value, 250_000.11) && cents(nov.weighted, 42_500.02),
+    JSON.stringify(nov),
+  );
+  check(
+    'the negotiated plant closes in December at its APPROVED revision × 33%',
+    dec?.count === 1 && cents(dec.value, 1_344_000.37) && cents(dec.weighted, 443_520.12),
+    JSON.stringify(dec),
+  );
+  // Reconciliation: a bucket's value is what the quotation list says for the
+  // same closing dates — the three open outcomes, summed.
+  let listCount = 0;
+  let listCents = 0;
+  for (const outcome of ['OPEN', 'SUBMITTED', 'NEGOTIATION']) {
+    const l = await http(managerToken, 'GET', `/quotations?closingFrom=2026-11-01&closingTo=2026-11-30&scope=all&ownerId=${manager.id}&outcome=${outcome}`);
+    const s = l.body.summary as { count: number; value: number };
+    listCount += s.count;
+    listCents += Math.round(s.value * 100);
+  }
+  check('November reconciles with the quotation list filtered to the same closing dates', nov?.count === listCount && Math.round((nov?.value ?? 0) * 100) === listCents, `${nov?.count}/${nov?.value} vs ${listCount}/${listCents / 100}`);
+  const fcLeads = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&leads=true`);
+  const novLeads = (fcLeads.body as unknown as FcBody).buckets.find((b) => b.key === '2026-11');
+  check(
+    'with leads included, the bare lead joins November at its estimate × 20%',
+    novLeads?.count === 2 && novLeads.rows.some((r) => r.kind === 'lead' && r.number === bareLead.number) && cents(novLeads.value, 650_000.11) && cents(novLeads.weighted, 122_500.02),
+    JSON.stringify(novLeads),
+  );
+  const fcCsv = await http(managerToken, 'GET', `/pipeline/forecast.csv?${fcQuery}`);
+  check('the CSV twin answers text/csv with a Period column first', fcCsv.status === 200 && fcCsv.contentType.startsWith('text/csv') && fcCsv.text.includes('Period,Kind,Number') && fcCsv.text.includes(draftOnly.number), `${fcCsv.status}`);
+  const fcExported = await prisma.auditLog.findFirst({ where: { entityType: 'pipeline', entityId: 'forecast', action: 'EXPORTED', actorId: manager.id, at: { gte: since } } });
+  check('and is audited before the bytes go out', !!fcExported);
+  const fcPdf = await http(managerToken, 'GET', `/pipeline/forecast.pdf?${fcQuery}`);
+  check('the Forecast prints', fcPdf.status === 200 && fcPdf.contentType.startsWith('application/pdf'), `${fcPdf.status} ${fcPdf.contentType}`);
+  const fcBad = await http(managerToken, 'GET', '/pipeline/forecast?period=daily');
+  check('an unknown period is a 400', fcBad.status === 400 && errorOf(fcBad).includes('week, month, quarter or year'), `${fcBad.status}`);
+  const fcBadDay = await http(managerToken, 'GET', '/pipeline/forecast?period=month&from=2026-13-01');
+  check('a malformed date is a 400', fcBadDay.status === 400, `${fcBadDay.status}`);
+  const fcDenied = await http(sellerToken, 'GET', '/pipeline/forecast');
+  check('GET /pipeline/forecast without gops.forecast.view_all is 403', fcDenied.status === 403, `${fcDenied.status}`);
 
   // ── 4. The move rules are on the routes ──────────────────────────────────
   console.log('\nMove rules, over HTTP');

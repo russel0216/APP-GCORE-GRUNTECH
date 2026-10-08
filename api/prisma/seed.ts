@@ -74,6 +74,9 @@ const ROLES: RoleSeed[] = [
       'gops.sales_orders.delete',
       'gops.dashboard.view_all',
       'gops.pipeline.view_all',
+      // The Forecast: their own closing dates, and the team's.
+      'gops.forecast.view_all',
+      'gops.forecast.export',
       'gops.projects.view_all',
       // A partner's catalogue and price list are what a salesperson sells from.
       'gops.partners.view_all',
@@ -97,6 +100,7 @@ const ROLES: RoleSeed[] = [
       ['gops', 'quotations'],
       ['gops', 'sales_orders'],
       ['gops', 'pipeline'],
+      ['gops', 'forecast'],
       ['gops', 'costing'],
       ['gops', 'partners'],
     ],

@@ -207,9 +207,9 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,547 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 399, costing 120, pipeline 71, calendar 46, numbering 46,
-partners 99, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
+**2,580 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 418, costing 120, pipeline 83, calendar 46, numbering 46,
+partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -510,9 +510,9 @@ are permission-configurable — that is deliberate, not a stub left behind.
   `dailyRate × burden ÷ hoursPerDay × premium`. Nobody sees a colleague's salary
   on a project screen; `ghr.employee_rates.view_all` gates the rate itself.
 - **The Sales strip is the sales flow** (2026-10-08, the owner's call):
-  Sales Pipeline, Leads, Quotations, Sales Orders, Customers, Partners,
-  Calendar — the registry's order, pinned by verify-foundation like Project
-  Management's.
+  Sales Pipeline, Forecast, Leads, Quotations, Sales Orders, Customers,
+  Partners, Calendar — the registry's order, pinned by verify-foundation like
+  Project Management's.
 - **The menu highlights the longest matching path.** A module dashboard lives at
   the module root (`/g-hr`, `/g-chain`), so a plain prefix test lights it up on
   every screen in that module. `Shell.tsx` picks the most specific match.
@@ -818,7 +818,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   count says (verify-partners asserts it for every tab). The rule is
   `categoryTabs()` / `categoryTabWhere()` in `shared/supplierCategories.ts`,
   shared with the supplier list — partners and suppliers are one record. Filters: status,
-  Publishes (a catalogue / price list / sizing app), Priced items, Partner
+  Publishes (a catalogue / price list / software), Priced items, Partner
   since (a DATE); the totals line counts partners, those publishing a price
   list and priced items; `GET /partners/pdf` (above `/:id`, counts only —
   never a price or a cost; audited) and Print selected. The master is
@@ -841,9 +841,52 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `gchain.purchase_orders.view_all` — otherwise the row counts are null, the
   totals line leaves "awaiting" out (never 0), the paper drops the columns
   and the filter is a 403. The master is shared, so All for everyone.
+- **A partner's "Sizing app" is "Software"** (2026-10-08, the owner's call) —
+  on the filter, the column, the cards, the PDF head, search and the import
+  template's `Software URL` header, which still accepts the old `Sizing App
+  URL`. The stored kind stays `SIZING_APP`; nothing migrates. `humanKind()`
+  in `shared/partners.ts` is the one label.
 - **An import that matches on a non-unique name refuses rather than guesses** —
   the items import's Preferred Supplier matching two suppliers (a principal and
   its distributor sharing a brand) is an error, not a silent pick.
+
+### Forecast (2026-10-08)
+
+- **The Forecast is a separate menu after the Sales Pipeline** (the owner's
+  call): every open quotation by the closing date its salesperson expects,
+  consolidated weekly, monthly, quarterly or annually. `gops.forecast.*`
+  (READ; sales, sales managers and executives hold it), `/g-ops/forecast`,
+  `pages/sales/Forecast.tsx`; `GET /pipeline/forecast?period=week|month|
+  quarter|year&from=&to=&scope=&ownerId=&leads=` with `.csv` and `.pdf` twins
+  (`gops.forecast.export`, audited under `pipeline` / `forecast`). **No
+  table, and it must never acquire one**: the rows are the open quotations
+  (OPEN / SUBMITTED / NEGOTIATION) read through `quotationListWhere()` — the
+  list's visibility rule and Mine · Team · All — each valued by
+  `quotationValue()` at its own probability, and, when `leads=true`, the
+  open leads with no quotation at their estimate through `leadListWhere()`.
+  verify-pipeline asserts a month's bucket against the quotation list
+  filtered to the same closing dates.
+- **The bucketing is `shared/forecast.ts`, pure** (verify-sales): weeks start
+  on Monday and are keyed by ISO week (`2026-W41`, '5–11 Oct 2026', across a
+  month '26 Oct – 1 Nov 2026'), months `2026-10`, quarters `2026-Q4`
+  ('Q4 2026 (Oct–Dec)'), years `2026`; all on 'YYYY-MM-DD' keys — a DATE
+  column's own value, the Manila day — in UTC arithmetic, so the host clock
+  takes no part. Every row lands in exactly one of the window's buckets,
+  `earlier` (closing before the window), `later` or `undated`, so the four
+  add up to everything open; an empty period is still listed at zero. The
+  weighted sum is rounded once at the end, the board's rule. The default
+  window is the current period and the next eleven weeks, eleven months,
+  seven quarters or two years (`defaultWindow`); more than `MAX_BUCKETS`
+  periods is a 400. A row is `overdue` when its closing date is before
+  today (Manila) and it is still open.
+- **The page**: the period and Mine · Team · All as `scope-switch`es, the
+  window's dates, a salesperson picker fed by `people` (everyone with
+  something in scope, before the owner filter) and "Include leads without a
+  quotation"; the view lives in the URL (`?period=&from=&to=&scope=&ownerId=
+  &leads=`); a period's row and bar link to the quotation list filtered to
+  its closing dates (`closingFrom`/`closingTo`, declared keys — rule 16); the
+  consolidated list groups the quotations under their period with the stage
+  on `StatusBadge` (`STAGE_TONES`, exported from `Quotations.tsx`).
 
 ### Sales: board, calendar, costing
 

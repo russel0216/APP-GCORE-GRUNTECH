@@ -56,7 +56,7 @@ previous implementation traces back to its absence.
 | Quotation and costing PDFs | Print on either screen |
 | Sales calendar — a week per screen, or the month, with the view and position in the URL | `/g-ops/calendar` |
 | **Pipeline board** over leads and quotations — move by drag or keyboard, this-month forecast, CSV | `/g-ops/pipeline` |
-| **Partners** — principals' catalogues, price lists and sizing tools | `/g-ops/partners` |
+| **Partners** — principals' catalogues, price lists and software | `/g-ops/partners` |
 
 **Phase 4 — Delivery.** Job → budget → progress → billing.
 

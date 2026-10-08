@@ -10,6 +10,7 @@ import './styles.css';
 */
 import './styles/calendar.css';
 import './styles/pipeline.css';
+import './styles/forecast.css';
 import './styles/brief.css';
 import './styles/masters.css';
 import './styles/numbering.css';

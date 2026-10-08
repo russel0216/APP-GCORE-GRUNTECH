@@ -32,6 +32,7 @@ import { partnerListSummary, partnerListWhere } from '../src/routes/partners';
 import zlib from 'node:zlib';
 import {
   PARTNER_RESOURCE_ENTITY,
+  humanKind,
   makePartner,
   unflagPartner,
   partnerDetail,
@@ -291,7 +292,7 @@ async function main() {
   console.log('\nPartner import');
 
   const partnerCsv = [
-    'Name,Brand,Category,Website,Catalogue URL,Price List URL,Sizing App URL,Contact Name,Active',
+    'Name,Brand,Category,Website,Catalogue URL,Price List URL,Software URL,Contact Name,Active',
     `${TAG} Pumps Corp,${TAG}PUMP,Pumps,https://pumps.example.com,https://pumps.example.com/cat,https://pumps.example.com/prices,https://pumps.example.com/size,Ana Reyes,Yes`,
   ].join('\n');
   const first = await runImport(partnerCsv, partnerSpec, true, partnerWrite);
@@ -316,6 +317,8 @@ async function main() {
     (await prisma.partnerResource.count({ where: { supplierId: pumps!.id } })) === 3,
   );
 
+  // The old template's header still imports (the column was "Sizing App URL"
+  // until 2026-10-08), and a hostile link in it is still refused.
   const hostile = [
     'Name,Sizing App URL',
     `${TAG} Hostile,javascript:alert(1)`,
@@ -324,6 +327,19 @@ async function main() {
   const refused = await runImport(hostile, partnerSpec, true, partnerWrite);
   check('a javascript: link in the file is an error', refused.errors === 1, refused.rows[0]?.message);
   check('and blocks the whole file', !refused.committed);
+  const oldHeader = await runImport(
+    ['Name,Sizing App URL', `${TAG} Legacy Header,https://legacy.example.com/sizer`].join('\n'),
+    partnerSpec,
+    true,
+    partnerWrite,
+  );
+  const legacy = await prisma.supplier.findFirst({ where: { name: `${TAG} Legacy Header` }, include: { resources: true } });
+  check(
+    'the old "Sizing App URL" header still imports as software',
+    oldHeader.committed && legacy?.resources.some((r) => r.kind === 'SIZING_APP' && r.title === 'Software') === true,
+    JSON.stringify(oldHeader.rows),
+  );
+  check('and the kind is labelled Software', humanKind('SIZING_APP') === 'Software');
 
   // ══ 6. Items: preferred supplier by brand, list price ═══════════════════
   console.log('\nItem import');

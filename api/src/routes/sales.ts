@@ -74,8 +74,19 @@ import {
   leadStageStatuses,
   valueRevision,
 } from '../shared/pipeline';
-import { manilaDayEnd, manilaDayStart } from '../shared/day';
+import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { pipelineStageOverrides, pipelineStages, stageSettingsSchema, STAGE_SETTING_KEY, DEFAULT_STAGES, mergeStages } from '../shared/pipelineStages';
+import {
+  buildForecast,
+  defaultWindow,
+  FORECAST_PERIODS,
+  isDayKey,
+  periodsBetween,
+  weightedOf,
+  type Forecast,
+  type ForecastPeriod,
+  type ForecastRow,
+} from '../shared/forecast';
 import {
   quotationTotals,
   lineAmount,
@@ -3693,5 +3704,281 @@ pipelineRoutes.get(
         rows,
       ),
     );
+  }),
+);
+
+// ════════════════════════════════════════════════════════════════════
+//  FORECAST (2026-10-08, the owner's call: a separate menu after the
+//  Sales Pipeline — every open quotation by its expected closing date,
+//  consolidated weekly, monthly, quarterly or annually)
+// ════════════════════════════════════════════════════════════════════
+
+/** A quotation still in play — the board's three open columns. */
+const FORECAST_OUTCOMES = ['OPEN', 'SUBMITTED', 'NEGOTIATION'] as const;
+/** A lead still in play with no quotation yet — the board's lead cards, On hold aside. */
+const FORECAST_LEAD_STATUSES = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING'] as const;
+
+interface ForecastLoad {
+  forecast: Forecast;
+  stages: { key: string; label: string; color: string }[];
+  /** Everyone who owns something in scope, before the owner filter — the page's owner picker. */
+  people: { id: string; name: string }[];
+  includeLeads: boolean;
+  scope: 'mine' | 'team' | 'all';
+  ownerId: string | null;
+  /** What narrowed it, for the paper's reference line. */
+  filters: string[];
+}
+
+/**
+ * The Forecast's rows: the open quotations the caller may list (the quotation
+ * list's own visibility rule and Mine · Team · All, so the Forecast and the
+ * list can never show different sets), each valued by `quotationValue()`;
+ * and, when asked, the open leads with no quotation at their estimate. The
+ * bucketing is `buildForecast()` in shared/forecast.ts, pure.
+ */
+async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<ForecastLoad> {
+  const me = currentUser(req);
+  const query = req.query as Record<string, string | undefined>;
+  const period = (query.period ?? 'month') as ForecastPeriod;
+  if (!FORECAST_PERIODS.includes(period)) throw badRequest('Period is week, month, quarter or year');
+  const today = manilaDayKey(new Date());
+  const defaults = defaultWindow(today, period);
+  for (const [key, label] of [['from', 'From'], ['to', 'To']] as const) {
+    if (query[key] && !isDayKey(query[key]!)) throw badRequest(`${label} is a date written YYYY-MM-DD`);
+  }
+  const from = query.from ?? defaults.from;
+  const to = query.to ?? defaults.to;
+  if (from > to) throw badRequest('From is after To');
+  try {
+    periodsBetween(from, to, period);
+  } catch (err) {
+    throw badRequest(err instanceof Error ? err.message : 'That window is too wide');
+  }
+  const includeLeads = query.leads === 'true';
+  const ownerId = query.ownerId?.trim() || null;
+
+  const stages = await pipelineStages();
+  const team = await teamOf(me.id);
+  // The list's own where-builders, with only the scope: the owner is applied
+  // afterwards so the owner picker can still name everyone in scope.
+  const lq = { ...listQuery(req), search: '', filters: {} };
+  const stageOf = (key: string) => stages.find((s) => s.key === key);
+  const { where: quotationWhere } = quotationListWhere(me, lq, stages, team?.id ?? null);
+  const quotations = await prisma.quotation.findMany({
+    where: { AND: [quotationWhere, { outcome: { in: [...FORECAST_OUTCOMES] } }] },
+    include: {
+      customer: { select: { id: true, name: true } },
+      owner: { select: { id: true, name: true } },
+      revisions: { select: { revision: true, status: true, total: true } },
+    },
+  });
+  const rows: ForecastRow[] = quotations.map((q) => {
+    const closing = q.expectedClosing ? q.expectedClosing.toISOString().slice(0, 10) : null;
+    const value = quotationValue(q.revisions);
+    const stage = quotationStage(q.outcome, false, stages);
+    return {
+      kind: 'quotation',
+      id: q.id,
+      number: q.number,
+      title: q.customer.name,
+      subject: q.subject,
+      customer: q.customer,
+      owner: q.owner,
+      stage,
+      stageLabel: stageOf(stage)?.label ?? stage,
+      status: q.outcome,
+      probability: q.probability,
+      expectedClosing: closing,
+      value,
+      weighted: weightedOf(value, q.probability),
+      overdue: closing !== null && closing < today,
+      link: `/g-ops/quotations/${q.id}`,
+    };
+  });
+  if (includeLeads) {
+    const { where: leadWhere } = leadListWhere(me, lq, stages, team?.id ?? null);
+    const leads = await prisma.lead.findMany({
+      where: { AND: [leadWhere, { status: { in: [...FORECAST_LEAD_STATUSES] }, quotations: { none: {} } }] },
+      include: {
+        customer: { select: { id: true, name: true } },
+        assignedTo: { select: { id: true, name: true } },
+      },
+    });
+    for (const l of leads) {
+      const closing = l.expectedClosing ? l.expectedClosing.toISOString().slice(0, 10) : null;
+      const value = num(l.estimatedValue);
+      const stage = leadStage(l.status, stages);
+      rows.push({
+        kind: 'lead',
+        id: l.id,
+        number: l.number,
+        title: l.customer?.name ?? l.companyName,
+        subject: l.description ? l.description.split('\n')[0] : null,
+        customer: l.customer,
+        owner: l.assignedTo,
+        stage,
+        stageLabel: stageOf(stage)?.label ?? stage,
+        status: l.status,
+        probability: l.probability,
+        expectedClosing: closing,
+        value,
+        weighted: weightedOf(value, l.probability),
+        overdue: closing !== null && closing < today,
+        link: `/g-ops/leads/${l.id}`,
+      });
+    }
+  }
+
+  const people = [...new Map(rows.map((r) => [r.owner.id, r.owner])).values()].sort((a, b) => a.name.localeCompare(b.name));
+  const chosen = ownerId ? rows.filter((r) => r.owner.id === ownerId) : rows;
+  const filters = [
+    lq.scope === 'mine' ? 'mine only' : lq.scope === 'team' ? 'my team' : null,
+    ownerId ? `owner ${people.find((p) => p.id === ownerId)?.name ?? 'one person'}` : null,
+    includeLeads ? 'leads without a quotation included' : null,
+  ].filter((f): f is string => !!f);
+
+  return {
+    forecast: buildForecast({ period, from, to, today, rows: chosen }),
+    stages: stages.map((s) => ({ key: s.key, label: s.label, color: s.color })),
+    people,
+    includeLeads,
+    scope: lq.scope,
+    ownerId,
+    filters,
+  };
+}
+
+/** The groups a Forecast lists, in order, each with the label the page and the paper print. */
+function forecastGroups(f: Forecast): { label: string; group: { rows: ForecastRow[]; count: number; value: number; weighted: number; overdue: number } }[] {
+  return [
+    { label: `Before ${f.from}`, group: f.earlier },
+    ...f.buckets.map((b) => ({ label: b.label, group: b })),
+    { label: `After ${f.to}`, group: f.later },
+    { label: 'No closing date', group: f.undated },
+  ];
+}
+
+const PERIOD_WORD: Record<ForecastPeriod, string> = { week: 'Weekly', month: 'Monthly', quarter: 'Quarterly', year: 'Annually' };
+
+pipelineRoutes.get(
+  '/forecast',
+  require_('gops.forecast.view_all'),
+  handler(async (req, res) => {
+    const { forecast, ...rest } = await loadForecast(req);
+    res.json({ ...forecast, ...rest, asOf: new Date().toISOString() });
+  }),
+);
+
+/** The Forecast's CSV twin: one row per quotation (or lead), under its period. Audited before the bytes go out. */
+pipelineRoutes.get(
+  '/forecast.csv',
+  require_('gops.forecast.export'),
+  handler(async (req, res) => {
+    const { forecast } = await loadForecast(req);
+    const rows = forecastGroups(forecast).flatMap(({ label, group }) =>
+      group.rows.map((r) => [
+        label,
+        r.kind,
+        r.number,
+        r.title,
+        r.subject ?? '',
+        r.owner.name,
+        r.stageLabel,
+        r.probability,
+        r.expectedClosing ?? '',
+        r.value.toFixed(2),
+        r.weighted.toFixed(2),
+        r.overdue ? 'yes' : 'no',
+      ]),
+    );
+    await audit(
+      {
+        entityType: 'pipeline',
+        entityId: 'forecast',
+        action: 'EXPORTED',
+        summary: `Sales forecast exported (${PERIOD_WORD[forecast.period].toLowerCase()}, ${forecast.from} to ${forecast.to}, ${rows.length} rows)`,
+      },
+      req,
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sales-forecast.csv"');
+    res.send(
+      toCsv(
+        ['Period', 'Kind', 'Number', 'Customer', 'Title', 'Salesperson', 'Stage', 'Probability %', 'Expected closing', 'Value', 'Weighted', 'Overdue'],
+        rows,
+      ),
+    );
+  }),
+);
+
+/** The Forecast on house-style paper: the periods, then each period's quotations. Audited. */
+pipelineRoutes.get(
+  '/forecast.pdf',
+  require_('gops.forecast.export'),
+  handler(async (req, res) => {
+    const { forecast, filters } = await loadForecast(req);
+    const groups = forecastGroups(forecast).filter(({ group }) => group.count > 0);
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        title: `By period — ${PERIOD_WORD[forecast.period].toLowerCase()}`,
+        head: ['Period', 'Quotations', 'Value', 'Weighted', 'Past closing'],
+        widths: [2.4, 1, 1.6, 1.6, 1],
+        align: ['left', 'right', 'right', 'right', 'right'],
+        rows: forecastGroups(forecast)
+          .filter(({ group }, i, all) => group.count > 0 || (i > 0 && i < all.length - 2))
+          .map(({ label, group }) => [label, String(group.count), formatAmount(group.value), formatAmount(group.weighted), String(group.overdue)]),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: `In the window (${forecast.inWindow.count}), value:`, value: formatMoney(forecast.inWindow.value) },
+          { label: 'In the window, weighted:', value: formatMoney(forecast.inWindow.weighted) },
+          { label: `Everything open (${forecast.totals.count}), value:`, value: formatMoney(forecast.totals.value), bold: true },
+          { label: 'Everything open, weighted:', value: formatMoney(forecast.totals.weighted), bold: true },
+        ],
+      },
+      ...groups.map(
+        ({ label, group }): PdfSection => ({
+          kind: 'table',
+          title: `${label} — ${group.count} · ${formatMoney(group.value)} · weighted ${formatMoney(group.weighted)}`,
+          head: ['Number', 'Quotation and customer', 'Owner', 'Stage', 'Odds', 'Closing', 'Value', 'Weighted'],
+          widths: [1.4, 2.4, 1.3, 1.3, 0.8, 1.3, 1.4, 1.4],
+          align: ['left', 'left', 'left', 'left', 'right', 'left', 'right', 'right'],
+          rows: group.rows.map((r) => [
+            r.number,
+            { title: r.subject ?? r.title, body: r.subject ? r.title : undefined },
+            r.owner.name,
+            r.stageLabel,
+            `${r.probability}%`,
+            r.expectedClosing
+              ? { title: formatShortDate(new Date(`${r.expectedClosing}T00:00:00Z`)), body: r.overdue ? 'past closing' : undefined }
+              : '',
+            formatAmount(r.value),
+            formatAmount(r.weighted),
+          ]),
+        }),
+      ),
+    ];
+    const pdf = await renderDocument({
+      title: 'Sales Forecast',
+      date: new Date(),
+      reference: `${PERIOD_WORD[forecast.period]}, ${forecast.from} to ${forecast.to}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections,
+      signatories: [],
+    });
+    await audit(
+      {
+        entityType: 'pipeline',
+        entityId: 'forecast',
+        action: 'EXPORTED',
+        summary: `Sales forecast printed (${PERIOD_WORD[forecast.period].toLowerCase()}, ${forecast.from} to ${forecast.to})`,
+      },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="sales-forecast.pdf"');
+    res.send(pdf);
   }),
 );

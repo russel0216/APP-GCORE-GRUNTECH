@@ -33,6 +33,7 @@ import { Quotations, QuotationDetail } from './pages/sales/Quotations';
 import { QuotationEditor } from './pages/sales/QuotationEditor';
 import { SalesCalendar } from './pages/sales/Calendar';
 import { Pipeline } from './pages/sales/Pipeline';
+import { Forecast } from './pages/sales/Forecast';
 import { Partners, PartnerDetail } from './pages/sales/Partners';
 import { QuoteArchive, QuoteArchiveDetail } from './pages/sales/QuoteArchive';
 import { Projects } from './pages/delivery/Projects';
@@ -518,6 +519,15 @@ function Routed() {
           element={
             <Guard permission="gops.pipeline.view_all">
               <Pipeline />
+            </Guard>
+          }
+        />
+        {/* The Forecast: open quotations by expected closing date, by period. */}
+        <Route
+          path="/g-ops/forecast"
+          element={
+            <Guard permission="gops.forecast.view_all">
+              <Forecast />
             </Guard>
           }
         />

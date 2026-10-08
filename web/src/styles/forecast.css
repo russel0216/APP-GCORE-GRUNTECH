@@ -1,0 +1,87 @@
+/* The Forecast (2026-10-08): open quotations by expected closing date, by period. Tokens only. */
+
+.forecast .fc-controls {
+  align-items: flex-end;
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.forecast .fc-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.forecast .fc-control input,
+.forecast .fc-control select {
+  min-width: calc(var(--s-8) * 4);
+}
+
+.forecast .fc-stats {
+  margin-bottom: var(--s-5);
+}
+
+.forecast .fc-panels {
+  margin-bottom: var(--s-5);
+}
+
+.forecast .fc-periods td.fc-period {
+  white-space: nowrap;
+}
+
+.forecast .fc-periods tr.fc-empty td {
+  color: var(--faint);
+}
+
+.forecast .fc-periods tfoot td {
+  font-weight: 600;
+  border-top: 1px solid var(--line);
+}
+
+.forecast .fc-periods tfoot tr.fc-outside td {
+  font-weight: 400;
+  color: var(--muted);
+  border-top: 0;
+}
+
+.forecast .fc-overdue {
+  color: var(--warn);
+}
+
+.forecast .fc-past {
+  font-size: var(--fs-xs);
+  color: var(--warn);
+}
+
+.forecast .fc-owners {
+  margin-top: var(--s-4);
+}
+
+.forecast .fc-owners h4 {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.forecast .fc-group + .fc-group {
+  margin-top: var(--s-5);
+}
+
+.forecast .fc-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.forecast .fc-group-head .faint {
+  font-weight: 400;
+  font-size: var(--fs-sm);
+}

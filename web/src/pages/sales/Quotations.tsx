@@ -85,7 +85,7 @@ interface LegacyRef {
  * administrator's (it tints the tab); the pill keeps the lifecycle tones so
  * it reads the same as every other status in the app.
  */
-const STAGE_TONES: Record<string, Tone> = {
+export const STAGE_TONES: Record<string, Tone> = {
   OPPORTUNITY: '',
   NEGOTIATION: 'warn',
   CLOSING: 'info',
