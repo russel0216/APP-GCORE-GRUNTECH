@@ -1546,7 +1546,20 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   payment method, reference); Reopen goes back to DRAFT; **Delete takes a
   draft or a cancelled order** (2026-10-07), never an issued or pending one.
   Editing is one PUT — header and lines together — and saved groups go
-  through `rememberGroups`. `audit-workflows.ts` knows sales and sales
+  through `rememberGroups`. **The editor is the quotation editor's**
+  (2026-10-08, the owner's call): `SalesOrderEditor` in
+  `pages/sales/SalesOrders.tsx` is built from `pages/sales/editorParts.tsx`
+  — the `Line` shape, `moneyOf` / `linePayload`, `ProductInput`, `CostCell`
+  (the person/building toggles and the provider lookup), `Static`,
+  `LeaveBar` — which the quotation editor imports too, so the two cannot
+  drift: one card, labels beside values (`.qe-rows`), the contact beside the
+  client, the `qe-lines` table (group, product over description, quantity
+  beside unit, price, amount with the with-VAT figure, cost and provider,
+  margin), SCORO's Tax dropdown (`taxOptions` on `GET /sales-orders/:id`),
+  the totals beside `CostPanelBlock`, Back / Save at both ends and the
+  leave bar. The PUT takes `providerUserId` / `providerSupplierId` per
+  line (one or the other, checked to exist). Add a shared cell to
+  `editorParts.tsx`, never to one editor. `audit-workflows.ts` knows sales and sales
   managers raise sales orders.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in

@@ -841,37 +841,6 @@
   color: inherit;
 }
 
-.so-edit-lines td {
-  vertical-align: top;
-}
-
-.so-edit-lines textarea {
-  margin-top: var(--s-1);
-  font-size: var(--fs-sm);
-}
-
-.so-col-group {
-  width: 9rem;
-}
-
-.so-col-qty,
-.so-col-unit {
-  width: 5.5rem;
-}
-
-.so-col-money {
-  width: 8.5rem;
-}
-
-.so-col-x {
-  width: 2.5rem;
-}
-
-.so-add {
-  gap: var(--s-2);
-  margin-top: var(--s-3);
-}
-
 /* The Create Sales Order panel on the quotation page. */
 .so-create-modes {
   display: flex;

@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, isDayKey, parseDay, todayLocal } from '../../lib/day';
-import { lineAmount, quotationTotals, type LineMargin } from '../../lib/quotationMath';
+import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
-import { Icon } from '../../components/Icon';
 import {
   CostPanelBlock,
   NEXT_OUTCOMES,
@@ -17,6 +16,30 @@ import {
   type Revision,
 } from './Quotations';
 import { NumberInput } from '../../components/NumberInput';
+import {
+  blankLine,
+  CellError,
+  ContactSelect,
+  CostCell,
+  figure,
+  isBlank,
+  LeaveBar,
+  lineField,
+  linePayload,
+  LooseField,
+  moneyOf,
+  nextKey,
+  numberOk,
+  pct,
+  ProductInput,
+  Static,
+  withTax,
+  type Line,
+  type Option,
+  type ProductSuggestion,
+  type QuotationListRow,
+  type TaxOption,
+} from './editorParts';
 
 /*
   SCORO's "Modify quote details", as a page rather than a dialog.
@@ -39,26 +62,6 @@ import { NumberInput } from '../../components/NumberInput';
   a mirror of the server's `quotationTotals`, pinned equal to it by
   verify-sales — so what the page shows before saving is what gets stored.
 */
-
-type ProviderKind = 'none' | 'user' | 'supplier';
-
-interface Line {
-  /** Client-side identity for React and for field ids; never sent. */
-  key: string;
-  /** A subheading: its title is the heading; no quantity, price or cost. */
-  isHeading: boolean;
-  /** SCORO's group — "Gruntech Installation", "Trading". Suggested from Admin › Categories; never printed as a heading. */
-  group: string;
-  title: string;
-  description: string;
-  quantity: string;
-  unit: string;
-  unitPrice: string;
-  unitCost: string;
-  providerKind: ProviderKind;
-  provider: { id: string; name: string } | null;
-  costNote: string;
-}
 
 interface Header {
   /** The quote number — the suggested next one, or typed by hand. */
@@ -122,60 +125,9 @@ interface CostingLine {
   unitPrice: number;
 }
 
-type Option = { id: string; name: string };
-type TaxOption = { rate: number; label: string };
-
-/** What /quotations/suggest offers as a product is typed. */
-interface ProductSuggestion {
-  title: string;
-  description: string;
-  unit: string;
-  unitPrice: number | null;
-  /** Only where the server decided this viewer may see it. */
-  unitCost?: number | null;
-  source: 'history' | 'item';
-  uses: number;
-  lastNumber?: string;
-  itemCode?: string;
-}
-
 /** The shape the API takes for a quote number. */
 const NUMBER_RX = /^[A-Za-z0-9][A-Za-z0-9\-/_.]{0,39}$/;
 type CostingOption = { id: string; number: string; title: string };
-
-let keySeq = 0;
-const nextKey = () => `l${++keySeq}`;
-
-function blankLine(isHeading = false): Line {
-  return {
-    key: nextKey(),
-    isHeading,
-    group: '',
-    title: '',
-    description: '',
-    quantity: '1',
-    unit: 'lot',
-    unitPrice: '',
-    unitCost: '',
-    providerKind: 'none',
-    provider: null,
-    costNote: '',
-  };
-}
-
-/** Nothing typed — the starter row, or one added and left empty. Not saved. */
-function isBlank(l: Line): boolean {
-  if (l.isHeading) return !l.title.trim();
-  return (
-    !l.group.trim() &&
-    !l.title.trim() &&
-    !l.description.trim() &&
-    l.unitPrice.trim() === '' &&
-    l.unitCost.trim() === '' &&
-    !l.costNote.trim() &&
-    !l.provider
-  );
-}
 
 function fromItem(i: Item): Line {
   return {
@@ -207,49 +159,7 @@ function fromCostingLine(c: CostingLine): Line {
   return { ...blankLine(), title: c.title, description: c.description, quantity: String(c.quantity), unit: c.unit, unitPrice: String(c.unitPrice) };
 }
 
-/** A typed number for the live figures: nothing, nonsense or below zero counts as 0. */
-const figure = (s: string) => {
-  const n = Number(s);
-  return s.trim() !== '' && Number.isFinite(n) && n >= 0 ? n : 0;
-};
-const numberOk = (s: string) => s.trim() !== '' && Number.isFinite(Number(s)) && Number(s) >= 0;
 const daysBetween = (from: string, to: string) => Math.round((parseDay(to).getTime() - parseDay(from).getTime()) / 86_400_000);
-const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(1)}%`);
-/** A line's amount with the tax on — SCORO's grey figure under Amount. Shown, never stored. */
-const withTax = (amount: number, rate: number) => Math.round(amount * (1 + rate) * 100) / 100;
-
-/** The mirror's view of a line — the same fields the server's arithmetic reads. */
-function moneyOf(l: Line) {
-  if (l.isHeading) return { amount: 0, costAmount: null, providerUserId: null, providerSupplierId: null, isHeading: true };
-  const qty = figure(l.quantity);
-  return {
-    amount: lineAmount(qty, figure(l.unitPrice)),
-    costAmount: l.unitCost.trim() === '' ? null : lineAmount(qty, figure(l.unitCost)),
-    providerUserId: l.providerKind === 'user' ? (l.provider?.id ?? null) : null,
-    providerSupplierId: l.providerKind === 'supplier' ? (l.provider?.id ?? null) : null,
-  };
-}
-
-/** A line as the API's itemSchema takes it. */
-function linePayload(l: Line) {
-  if (l.isHeading) {
-    return { isHeading: true, title: l.title.trim(), description: '', quantity: 0, unit: 'lot', unitPrice: 0, unitCost: null };
-  }
-  return {
-    group: l.group.trim() || null,
-    title: l.title.trim() || null,
-    description: l.description,
-    quantity: Number(l.quantity),
-    unit: l.unit.trim() || 'lot',
-    unitPrice: Number(l.unitPrice),
-    unitCost: l.unitCost.trim() === '' ? null : Number(l.unitCost),
-    providerUserId: l.providerKind === 'user' ? (l.provider?.id ?? null) : null,
-    providerSupplierId: l.providerKind === 'supplier' ? (l.provider?.id ?? null) : null,
-    costNote: l.costNote.trim() || null,
-  };
-}
-
-const lineField = (key: string, field: string) => `qe-line-${key}-${field}`;
 
 export function QuotationEditor() {
   const { id } = useParams<{ id: string }>();
@@ -1692,167 +1602,6 @@ function merge<T extends { id: string }>(pinned: T[], list: T[]) {
   return [...pinned, ...list].filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
 }
 
-/** A read-only header value, laid out like a field. */
-function Static({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="field qe-static">
-      <span className="qe-static-label">{label}</span>
-      <div>{children}</div>
-    </div>
-  );
-}
-
-/** A field around a control that is not a single element (the client picker). */
-function LooseField({
-  label,
-  htmlFor,
-  required,
-  error,
-  children,
-}: {
-  label: string;
-  htmlFor: string;
-  required?: boolean;
-  error?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className={`field${error ? ' invalid' : ''}`}>
-      <label htmlFor={htmlFor}>
-        {label}
-        {required && (
-          <span className="req" aria-hidden="true">
-            *
-          </span>
-        )}
-      </label>
-      {children}
-      {error && (
-        <div className="field-error" id={`${htmlFor}-error`}>
-          <span aria-hidden="true">⚠</span>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CellError({ id, message }: { id?: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <div className="qe-cell-error" id={id}>
-      <span aria-hidden="true">⚠</span> {message}
-    </div>
-  );
-}
-
-/**
- * SCORO's "Cost and provider info": two toggles for who carries the line's
- * cost — one of our people (in-house) or a supplier (outsourced); pressing the
- * one that is on clears it — the person or supplier beside them, then the
- * notes and the unit cost. The line's cost (quantity × unit cost) sits under.
- */
-function CostCell({
-  line,
-  n,
-  costError,
-  amount,
-  currency,
-  onChange,
-}: {
-  line: Line;
-  n: number;
-  costError?: string;
-  amount: number | null;
-  currency: string;
-  onChange: (patch: Partial<Line>) => void;
-}) {
-  const kinds: [Exclude<ProviderKind, 'none'>, 'person' | 'building', string][] = [
-    ['user', 'person', 'In-house — one of our people'],
-    ['supplier', 'building', 'Outsourced — a supplier'],
-  ];
-  return (
-    <div className="qe-cost">
-      <div className="qe-provider">
-        <div className="qe-kind" role="group" aria-label={`Line ${n}: who carries the cost`}>
-          {kinds.map(([value, icon, label]) => {
-            const on = line.providerKind === value;
-            return (
-              <button
-                key={value}
-                type="button"
-                className={`btn btn-sm btn-icon qe-kind-btn${on ? ' is-on' : ''}`}
-                aria-pressed={on}
-                aria-label={label}
-                title={label}
-                onClick={() => onChange({ providerKind: on ? 'none' : value, provider: null })}
-              >
-                <Icon name={icon} size={16} />
-              </button>
-            );
-          })}
-        </div>
-        {line.providerKind !== 'none' ? (
-          <ProviderLookup
-            key={line.providerKind}
-            kind={line.providerKind}
-            label={`Line ${n} ${line.providerKind === 'user' ? 'in-house person' : 'supplier'}`}
-            value={line.provider}
-            onChange={(provider) => onChange({ provider })}
-          />
-        ) : (
-          <span className="faint qe-kind-none">No provider named</span>
-        )}
-      </div>
-      <div className="qe-cost-row">
-        <input
-          aria-label={`Line ${n} cost notes`}
-          placeholder="Notes"
-          value={line.costNote}
-          onChange={(e) => onChange({ costNote: e.target.value })}
-        />
-        <NumberInput
-          kind="money"
-          id={lineField(line.key, 'unitCost')}
-          className="qe-num"
-          min={0}
-          step="0.01"
-          placeholder="Unit cost"
-          aria-label={`Line ${n} unit cost`}
-          aria-invalid={costError ? true : undefined}
-          value={line.unitCost}
-          onChange={(e) => onChange({ unitCost: e.target.value })}
-        />
-      </div>
-      <div className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</div>
-      <CellError message={costError} />
-    </div>
-  );
-}
-
-/** The contact person, beside the client as SCORO has it. Nothing until the client has contacts. */
-function ContactSelect({ contacts, value, onChange }: { contacts: Option[]; value: string; onChange: (v: string) => void }) {
-  if (contacts.length === 0) return null;
-  return (
-    <select aria-label="Contact person" value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">— contact person —</option>
-      {contacts.map((c) => (
-        <option key={c.id} value={c.id}>
-          {c.name}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-interface QuotationListRow {
-  id: string;
-  number: string;
-  subject: string;
-  customer: { name: string };
-  latest: { revision: number; total: number } | null;
-}
-
 /**
  * SCORO's "Append quote", in the page: find another quotation and its newest
  * revision's lines are added under these. The search is the quotation list's
@@ -1946,107 +1695,6 @@ function AppendQuotePanel({
  * `/quotations/providers`, which the sales role may read without the supplier
  * master permission.
  */
-function ProviderLookup({
-  kind,
-  label,
-  value,
-  onChange,
-}: {
-  kind: 'user' | 'supplier';
-  label: string;
-  value: { id: string; name: string } | null;
-  onChange: (v: { id: string; name: string } | null) => void;
-}) {
-  const [text, setText] = useState(value?.name ?? '');
-  const [open, setOpen] = useState(false);
-  const [options, setOptions] = useState<{ id: string; name: string; code?: string; position?: string | null }[]>([]);
-  const menuRef = useRef<HTMLUListElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // A choice made elsewhere shows its name; clearing it leaves the typing alone.
-  useEffect(() => {
-    if (value) setText(value.name);
-  }, [value]);
-
-  useEffect(() => {
-    if (!open || value) return;
-    const t = setTimeout(() => {
-      api
-        .get<typeof options>(`/quotations/providers${qs({ kind, q: text.trim() || undefined })}`)
-        .then(setOptions)
-        .catch(() => setOptions([]));
-    }, 200);
-    return () => clearTimeout(t);
-  }, [kind, text, open, value]);
-
-  function pick(o: { id: string; name: string }) {
-    onChange({ id: o.id, name: o.name });
-    setText(o.name);
-    setOpen(false);
-    // Back to the input: the button pressed leaves with the list, and focus
-    // would otherwise fall to <body>.
-    inputRef.current?.focus();
-  }
-
-  return (
-    <div
-      className="lookup"
-      onBlur={(e: FocusEvent<HTMLDivElement>) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
-      }}
-    >
-      <input
-        ref={inputRef}
-        aria-label={label}
-        placeholder={kind === 'user' ? 'Choose a person' : 'Choose a supplier'}
-        autoComplete="off"
-        value={text}
-        aria-expanded={open}
-        onFocus={() => setOpen(true)}
-        onChange={(e) => {
-          setText(e.target.value);
-          setOpen(true);
-          if (value) onChange(null);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') setOpen(false);
-          if (e.key === 'ArrowDown') {
-            const first = menuRef.current?.querySelector<HTMLElement>('button');
-            if (first) {
-              e.preventDefault();
-              first.focus();
-            }
-          }
-        }}
-      />
-      {value && (
-        <span className="lookup-tick" title="Chosen">
-          ✓
-        </span>
-      )}
-      {open && !value && options.length > 0 && (
-        <ul className="lookup-menu" ref={menuRef}>
-          {options.map((o) => (
-            <li key={o.id}>
-              <button
-                type="button"
-                onClick={() => pick(o)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') setOpen(false);
-                }}
-              >
-                {o.code ? `${o.code} — ` : ''}
-                {o.name}
-                {o.position ? ` (${o.position})` : ''}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 /**
  * The quote number: the next free one in the author's series, suggested and
  * already filled in — or typed by hand. A number already used (by another
@@ -2112,145 +1760,6 @@ function NumberField({
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-/** Leaving with unsaved work, asked in the page rather than in a dialog. */
-function LeaveBar({ onLeave, onStay }: { onLeave: () => void; onStay: () => void }) {
-  return (
-    <div className="alert warn row qe-leave" role="alert">
-      <span>You have changes that are not saved.</span>
-      <button type="button" className="btn btn-sm btn-danger" onClick={onLeave}>
-        Leave without saving
-      </button>
-      <button type="button" className="btn btn-sm" autoFocus onClick={onStay}>
-        Keep editing
-      </button>
-    </div>
-  );
-}
-
-/**
- * A line's product, with what was quoted before offered as it is typed: past
- * lines (latest price, unit and description, and how often) and items from the
- * item master. Keyboard: ArrowDown reaches the list, arrows move in it, Escape
- * closes it, and focus leaving the box and its list closes it too.
- */
-function ProductInput({
-  id,
-  label,
-  value,
-  invalid,
-  describedBy,
-  onChange,
-  onPick,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  invalid?: boolean;
-  describedBy?: string;
-  onChange: (v: string) => void;
-  onPick: (sg: ProductSuggestion) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [matches, setMatches] = useState<ProductSuggestion[]>([]);
-  const menuRef = useRef<HTMLUListElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const term = value.trim();
-    if (!open || term.length < 2) {
-      setMatches([]);
-      return;
-    }
-    const t = setTimeout(() => {
-      api
-        .get<ProductSuggestion[]>(`/quotations/suggest${qs({ q: term })}`)
-        .then((rows) => setMatches(rows.filter((r) => r.title.toUpperCase() !== term.toUpperCase() || r.unitPrice != null)))
-        .catch(() => setMatches([]));
-    }, 220);
-    return () => clearTimeout(t);
-  }, [value, open]);
-
-  function choose(sg: ProductSuggestion) {
-    onPick(sg);
-    setOpen(false);
-    setMatches([]);
-  }
-
-  const buttons = () => [...(menuRef.current?.querySelectorAll<HTMLElement>('button') ?? [])];
-
-  return (
-    <div
-      className="lookup"
-      onBlur={(e: FocusEvent<HTMLDivElement>) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
-      }}
-    >
-      <input
-        ref={inputRef}
-        id={id}
-        className="qe-title"
-        aria-label={label}
-        placeholder="Product"
-        autoComplete="off"
-        aria-autocomplete="list"
-        aria-expanded={open && matches.length > 0}
-        aria-invalid={invalid || undefined}
-        aria-describedby={describedBy}
-        value={value}
-        onFocus={() => setOpen(true)}
-        onChange={(e) => {
-          onChange(e.target.value);
-          setOpen(true);
-        }}
-        onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-          if (e.key === 'Escape' && open) {
-            e.preventDefault();
-            setOpen(false);
-          }
-          if (e.key === 'ArrowDown' && matches.length) {
-            e.preventDefault();
-            buttons()[0]?.focus();
-          }
-        }}
-      />
-      {open && matches.length > 0 && (
-        <ul className="lookup-menu qe-suggest" ref={menuRef}>
-          {matches.map((sg, i) => (
-            <li key={`${sg.source}-${sg.title}-${i}`}>
-              <button
-                type="button"
-                onClick={() => choose(sg)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') {
-                    setOpen(false);
-                    inputRef.current?.focus();
-                  }
-                  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    const list = buttons();
-                    const next = list[list.indexOf(e.currentTarget) + (e.key === 'ArrowDown' ? 1 : -1)];
-                    if (next) next.focus();
-                    else if (e.key === 'ArrowUp') inputRef.current?.focus();
-                  }
-                }}
-              >
-                <span className="qe-suggest-name">{sg.title}</span>
-                <span className="faint qe-suggest-meta">
-                  {sg.unitPrice != null ? `${formatMoney(sg.unitPrice)} / ${sg.unit}` : sg.unit}
-                  {sg.source === 'item'
-                    ? ` · item ${sg.itemCode ?? ''}`
-                    : ` · quoted ${sg.uses}×${sg.lastNumber ? `, last on ${sg.lastNumber}` : ''}`}
-                </span>
-                {sg.description && <span className="faint qe-suggest-desc">{sg.description}</span>}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }

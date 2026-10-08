@@ -21,6 +21,7 @@ import { rememberGroups } from '../shared/quotationGroups';
 import {
   lineAmount,
   quotationTotals,
+  quotationTaxOptions,
   stripLineCost,
   QUOTATION_EXTRA_TAX_RATES,
 } from '../shared/quotation';
@@ -281,10 +282,19 @@ salesOrderRoutes.get(
             options: await Promise.all(options.map(async (o) => ({ id: o.id, route: brief(await routePreview('sales_order', total, me.id, o.id)) }))),
           }
         : null;
+    // The editor's Tax dropdown: the quotation's choices, and the rate this
+    // order was created with should Settings have moved since.
+    const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
+    const taxOptions = quotationTaxOptions(company ? num(company.vatRate) : 0.12);
+    const ownRate = num(order.vatRate);
+    if (!taxOptions.some((o) => Math.abs(o.rate - ownRate) < 0.00005)) {
+      taxOptions.push({ rate: ownRate, label: `${Number((ownRate * 100).toFixed(2))}% (this order)` });
+    }
     res.json({
       ...presentOrder(order as unknown as Record<string, unknown>, showCost),
       canEdit: canEditRecord(me, 'gops', 'sales_orders', order.ownerId),
       canSeeCost: showCost,
+      taxOptions,
       needsApproval: !!workflow,
       approvalOptions: options,
       approvalRoutes,
@@ -473,6 +483,9 @@ const lineFields = {
   unit: z.string().trim().min(1).default('lot'),
   unitPrice: z.number().min(0).default(0),
   unitCost: z.number().min(0).optional().nullable(),
+  /** Who carries the line's cost — one of our people, or a supplier; never both. The quotation's rule. */
+  providerUserId: z.string().optional().nullable(),
+  providerSupplierId: z.string().optional().nullable(),
   costNote: z.string().optional().nullable(),
 };
 
@@ -543,6 +556,13 @@ salesOrderRoutes.put(
           if (!line.isHeading && !(line.title ?? '').trim() && !(line.description ?? '').trim()) {
             throw badRequest(`Line ${i + 1}: give the line a product title or a description`);
           }
+          if (line.providerUserId && line.providerSupplierId) throw badRequest(`Line ${i + 1}: a line's cost is carried by a person or a supplier, not both`);
+          if (line.providerUserId && !(await tx.user.findUnique({ where: { id: line.providerUserId }, select: { id: true } }))) {
+            throw badRequest(`Line ${i + 1}: that person does not exist`);
+          }
+          if (line.providerSupplierId && !(await tx.supplier.findUnique({ where: { id: line.providerSupplierId }, select: { id: true } }))) {
+            throw badRequest(`Line ${i + 1}: that supplier does not exist`);
+          }
         }
         // A line sent back with its id keeps what it books of the quotation.
         const kept = new Map(
@@ -579,6 +599,8 @@ salesOrderRoutes.put(
               unitCost: hasCost ? d(l.unitCost!) : null,
               costAmount: hasCost ? lineAmount(l.quantity, l.unitCost!) : null,
               costNote: l.costNote || null,
+              providerUserId: l.providerUserId || null,
+              providerSupplierId: l.providerSupplierId || null,
               quotationItemId: (l.id && kept.get(l.id)?.quotationItemId) || null,
               bookedItems: (l.id && kept.get(l.id)?.bookedItems) || undefined,
             };
