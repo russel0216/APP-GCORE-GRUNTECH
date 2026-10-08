@@ -68,8 +68,8 @@ const QUERY: Record<string, string> = {
   service_visit: '/g-ops/visits?visit=',
   payment: '/g-fin/payments?payment=',
   disbursement: '/g-fin/payments?payment=',
-  sales_activity: '/g-ops/calendar?activity=',
-  activity: '/g-ops/calendar?activity=',
+  sales_activity: '/g-ops/calendar/activities/',
+  activity: '/g-ops/calendar/activities/',
   course: '/g-hr/academy/courses?course=',
 };
 

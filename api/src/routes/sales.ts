@@ -76,6 +76,8 @@ import {
   valueRevision,
 } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
+import { env } from '../env';
+import { googleCalendarUrl } from '../shared/calendar-links';
 import { pipelineStageOverrides, pipelineStages, stageSettingsSchema, STAGE_SETTING_KEY, DEFAULT_STAGES, mergeStages } from '../shared/pipelineStages';
 import {
   buildForecast,
@@ -3273,12 +3275,13 @@ activityRoutes.get(
 );
 
 const ACTIVITY_INCLUDE = {
-  assignedTo: { select: { id: true, name: true } },
+  // The photo (an attachment id) draws the faces on the activity's page.
+  assignedTo: { select: { id: true, name: true, photoPath: true } },
   lead: { select: { id: true, number: true, companyName: true } },
   quotation: { select: { id: true, number: true } },
   customer: { select: { id: true, name: true } },
   invitees: {
-    select: { userId: true, notifiedAt: true, response: true, respondedAt: true, user: { select: { id: true, name: true } } },
+    select: { userId: true, notifiedAt: true, response: true, respondedAt: true, user: { select: { id: true, name: true, photoPath: true } } },
     orderBy: { createdAt: 'asc' },
   },
 } as const;
@@ -3376,7 +3379,14 @@ activityRoutes.post(
   }),
 );
 
-/** One activity, for a deep link (`/g-ops/calendar?activity=<id>`). */
+/**
+ * One activity, for its page (`/g-ops/calendar/activities/<id>`). It carries
+ * `googleCalendarUrl` — SCORO's "Open in Google Calendar": the pre-filled
+ * create-event hand-off from `shared/calendar-links.ts` (G-Core holds no
+ * Google credentials), the people on it as guests, for a planned activity —
+ * as the meeting's does. Their addresses ride in that link's guest list;
+ * the JSON carries no email field of its own.
+ */
 activityRoutes.get(
   '/:id',
   require_('gops.calendar.view_all'),
@@ -3386,7 +3396,32 @@ activityRoutes.get(
       include: ACTIVITY_INCLUDE,
     });
     if (!row) throw notFound('Activity not found');
-    res.json(presentActivity(row, await activityTypeNames()));
+    const names = await activityTypeNames();
+    const shown = presentActivity(row, names);
+    let googleUrl: string | null = null;
+    if (row.status === 'PLANNED') {
+      const guests = await prisma.user.findMany({
+        where: { id: { in: [row.assignedToId, ...row.invitees.map((i) => i.userId)] }, isActive: true },
+        select: { email: true },
+      });
+      googleUrl = googleCalendarUrl(
+        {
+          uid: row.id,
+          number: shown.typeName,
+          title: row.subject,
+          description: row.notes,
+          location: row.location,
+          startsAt: row.startsAt,
+          endsAt: shown.endsAt,
+          sequence: 0,
+          cancelled: false,
+          url: activityLink(row),
+        },
+        guests,
+        env.appUrl,
+      );
+    }
+    res.json({ ...shown, googleCalendarUrl: googleUrl });
   }),
 );
 

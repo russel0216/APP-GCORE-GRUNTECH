@@ -412,8 +412,8 @@ async function main() {
     );
     const invited = await prisma.notification.findFirst({ where: { userId: colleague.id, title: `Invited: ${TAG} plant walk-through` } });
     check(
-      'the invitee is told on save, with a link to the activity on its day',
-      !!invited && invited.link === `/g-ops/calendar?activity=${actId}&date=2031-03-03`,
+      "the invitee is told on save, with a link to the activity's page",
+      !!invited && invited.link === `/g-ops/calendar/activities/${actId}`,
       JSON.stringify(invited),
     );
     const theirs = await apiGet(salesToken, `/activities?from=2031-03-02T00:00:00Z&to=2031-03-04T00:00:00Z&assignedToId=${colleague.id}`);
@@ -446,18 +446,34 @@ async function main() {
     const toldGoing = await prisma.notification.findFirst({
       where: { userId: sales.id, type: 'activity.responded', title: `${colleague.name} is going: ${TAG} plant walk-through` },
     });
-    check('and whoever booked it is told, with a link to the activity', !!toldGoing && toldGoing.link === `/g-ops/calendar?activity=${actId}&date=2031-03-03`, JSON.stringify(toldGoing));
+    check("and whoever booked it is told, with a link to the activity's page", !!toldGoing && toldGoing.link === `/g-ops/calendar/activities/${actId}`, JSON.stringify(toldGoing));
     check('their My Work row says what they answered', ((await scheduleFor((await resolveUser(colleague.id))!, { from: new Date('2031-03-02T16:00:00Z'), to: new Date('2031-03-03T16:00:00Z') })).find((r) => r.id === actId)?.sub ?? '').includes('(invited, going)'));
     const declined = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'DECLINED' });
     const afterDecline = (declined.body.responses as { going: number; notGoing: number } | undefined) ?? { going: -1, notGoing: -1 };
     check('changing the answer moves the tally', declined.status === 200 && afterDecline.going === 0 && afterDecline.notGoing === 1, JSON.stringify(afterDecline));
     const badAnswer = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'PENDING' });
     check('"No reply" is not an answer anyone gives (400)', badAnswer.status === 400, String(badAnswer.status));
-    const readBack = (await apiGet(salesToken, `/activities/${actId}`)).body as { invitees?: { userId: string; response: string }[]; responses?: { notGoing: number } };
+    const readBack = (await apiGet(salesToken, `/activities/${actId}`)).body as {
+      invitees?: { userId: string; response: string; user?: { photoPath?: string | null } }[];
+      responses?: { notGoing: number };
+      googleCalendarUrl?: string | null;
+    };
     check(
       'the activity reads back with every answer and the tally',
       readBack.invitees?.find((i) => i.userId === colleague.id)?.response === 'DECLINED' && readBack.responses?.notGoing === 1,
       JSON.stringify(readBack.responses),
+    );
+    // The page's "Open in Google Calendar ↗" (SCORO's event page): the hand-off
+    // from shared/calendar-links, with the people on it as guests and the
+    // activity's own page in the details.
+    const google = readBack.googleCalendarUrl ?? '';
+    check(
+      "a planned activity's read carries the Google Calendar hand-off naming its page and the people on it",
+      google.startsWith('https://calendar.google.com/calendar/render?') &&
+        google.includes(encodeURIComponent(`/g-ops/calendar/activities/${actId}`)) &&
+        decodeURIComponent(google).includes(colleague.email) &&
+        readBack.invitees?.every((i) => i.user && 'photoPath' in i.user) === true,
+      google.slice(0, 120),
     );
     const doneAct = await apiSend(salesToken, 'POST', '/activities', {
       subject: `${TAG} already done`,
@@ -467,11 +483,14 @@ async function main() {
     });
     const lateAnswer = await apiSend(colleagueToken, 'POST', `/activities/${doneAct.body.id}/respond`, { response: 'ACCEPTED' });
     check('an activity that is done or cancelled takes no more answers (409)', lateAnswer.status === 409, String(lateAnswer.status));
-    const mail = activityEmailText({ title: 'Invited: x', body: 'when' }, 'https://app/g-ops/calendar?activity=1&date=2031-03-03', true);
+    const mail = activityEmailText({ title: 'Invited: x', body: 'when' }, 'https://app/g-ops/calendar/activities/1', true);
+    const oldMail = activityEmailText({ title: 'Invited: x', body: 'when' }, 'https://app/g-ops/calendar?activity=1&date=2031-03-03', true);
     check(
       'the invitation email carries Going / Not going / Maybe links that answer on opening',
-      mail.includes('Going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=ACCEPTED') &&
-        mail.includes('Not going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=DECLINED') &&
+      mail.includes('Going: https://app/g-ops/calendar/activities/1?respond=ACCEPTED') &&
+        mail.includes('Not going: https://app/g-ops/calendar/activities/1?respond=DECLINED') &&
+        mail.includes('Maybe: https://app/g-ops/calendar/activities/1?respond=TENTATIVE') &&
+        oldMail.includes('Going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=ACCEPTED') &&
         !activityEmailText({ title: 'Moved: x', body: 'when' }, 'https://app/x').includes('respond='),
     );
 

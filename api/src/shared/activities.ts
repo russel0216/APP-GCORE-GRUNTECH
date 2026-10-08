@@ -67,9 +67,13 @@ export const REMINDER_MINUTES = [15, 60, 120, 1440] as const;
 /** The longest an activity may run: a site visit can take most of a week. */
 export const MAX_ACTIVITY_MINUTES = 7 * 1440;
 
-/** Where a notification about an activity lands: the activity, on its Manila day. */
-export function activityLink(a: { id: string; startsAt: Date }): string {
-  return `/g-ops/calendar?activity=${a.id}&date=${manilaDayKey(a.startsAt)}`;
+/**
+ * Where a notification about an activity lands: the activity's own page
+ * (2026-10-08, SCORO's event page — it was `?activity=` on the calendar,
+ * which still redirects there).
+ */
+export function activityLink(a: { id: string }): string {
+  return `/g-ops/calendar/activities/${a.id}`;
 }
 
 /**
@@ -113,13 +117,14 @@ export async function tellAboutActivity(
 
 /**
  * The plain-text email about an activity. An invitation adds the answers as
- * links: the calendar opens the activity and records the answer the link
- * carries (`?respond=`), so "Going" is one tap from the inbox.
+ * links: the activity's page opens and records the answer the link carries
+ * (`?respond=`), so "Going" is one tap from the inbox.
  */
 export function activityEmailText(message: { title: string; body: string }, url: string, respondLinks = false): string {
   const lines = [message.title, '', message.body, '', `Open it in G-CORE: ${url}`];
   if (respondLinks) {
-    lines.push('', 'Let them know:', `Going: ${url}&respond=ACCEPTED`, `Not going: ${url}&respond=DECLINED`, `Maybe: ${url}&respond=TENTATIVE`);
+    const answer = (r: string) => `${url}${url.includes('?') ? '&' : '?'}respond=${r}`;
+    lines.push('', 'Let them know:', `Going: ${answer('ACCEPTED')}`, `Not going: ${answer('DECLINED')}`, `Maybe: ${answer('TENTATIVE')}`);
   }
   return `${lines.join('\n')}\n`;
 }

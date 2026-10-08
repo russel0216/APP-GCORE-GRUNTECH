@@ -11,7 +11,7 @@ Verify: `cd api && npx tsx scripts/verify-workspace.ts` (API must be running; 39
     on `targetEndDate` except ON_HOLD), SCHEDULED visits on my name
     (`/g-ops/visits?visit=`), open tasks (≠ DONE, link to the job), APPROVED job
     orders assigned to me, and PLANNED sales activities that slipped past their
-    day (always overdue, `/g-ops/calendar?activity=`). Overdue first, then by date.
+    day (always overdue, `/g-ops/calendar/activities/<id>`). Overdue first, then by date.
   - `todaysSchedule` — the union of every `registerSchedule()` provider for
     [local midnight, next midnight). workspace.ts registers the one provider it
     owns: PLANNED sales activities assigned to me, `kind: 'activity'`, ending at

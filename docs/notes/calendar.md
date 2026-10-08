@@ -49,15 +49,15 @@ Package P5 (area-sales.md item 5, audit fix 12). Files: `web/src/components/Mont
   outside this week": a day picked inside this week also gets 09:00, because picking
   Thursday and being offered an hour from now on Tuesday is the wrong answer. Month view: clicking a day or "+N more" zooms to that week — the month is
   the overview, the week is the zoom. No drag-to-reschedule in either.
-- `?activity=<id>` (the notification deep link P3 writes, `?activity=<id>&date=<Manila day>`)
-  opens the ActivityModal on that activity. `?date=` has already put the calendar on
-  the right week before the first fetch; the page then reads the activity from
-  `GET /activities/:id` (not out of the loaded window), so a link whose date went stale
-  because the activity was moved still finds it and moves the calendar to where it is
-  now. A 404 toasts "That activity no longer exists". The id is read once on mount and
-  NOT consumed inside the effect — StrictMode runs the effect twice and cancels the
-  first, so consuming it there would open nothing. Closing the modal drops `activity=`
-  from the URL (replace).
+- An activity has its own page since 2026-10-08 (SCORO's event page):
+  `/g-ops/calendar/activities/<id>` (`pages/sales/ActivityPage.tsx`). A chip click
+  navigates there; every notification links there (`activityLink()` in
+  `shared/activities.ts`); the page reads `GET /activities/:id` itself, so a link to
+  a moved activity still finds it, and a 404 says "Activity not found". The older
+  `?activity=<id>&date=<Manila day>` link on the calendar redirects to the page on
+  mount (replace), carrying `?respond=` with it. The id is read once from a ref —
+  StrictMode runs the effect twice and cancels the first, so consuming it inside the
+  effect would redirect nothing.
 - The person filter (`who`) is NOT mirrored to the URL (plan decision). It reads
   `/users/lookup?holding=gops.calendar.view_all` — only people who can open the
   calendar can be booked on it — instead of the admin-gated `/users` list. An

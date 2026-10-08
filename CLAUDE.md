@@ -212,8 +212,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,645 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 74, sales 423, costing 120, pipeline 86, calendar 84, numbering 46,
+**2,646 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 74, sales 423, costing 120, pipeline 86, calendar 85, numbering 46,
 partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1156,15 +1156,26 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   it is told (`activity.responded`, "Maria is going: …"). Every read with
   invitees carries `responses: { going, maybe, notGoing, noReply }`, so a
   chip says "✓2 ✗1 ?3" (readable without colour) and My Work's row says
-  what the viewer answered. **Clicking an activity opens its detailed
-  view** (`ActivityPanel` in `Calendar.tsx`) — what, when, where, who, the
-  links, notes, and the answers as a table grouped Going / Maybe / Not
-  going / No reply with when each answered — with the invitee's own
-  Going / Maybe / Not going buttons, and Modify (the form), Mark done and
-  Cancel; `?activity=` lands there. The invitation email carries
-  Going / Not going / Maybe links (`activityEmailText`, `respondLinks`):
-  `?respond=` on the calendar link records the answer on opening, for the
-  invitee only, then drops out of the URL.
+  what the viewer answered. **Clicking an activity opens its own page**
+  (2026-10-08, SCORO's event page, the owner's screenshot):
+  `/g-ops/calendar/activities/:id` (`pages/sales/ActivityPage.tsx`,
+  `gops.calendar.view_all`) — the date as a block, the title, the status
+  and type, when and for how long ("8h 00min", `durationLabel`), where,
+  the people on it as faces (`Avatar` on `photoPath`, which the activity
+  reads carry) with their answer under each, "Open in Google Calendar ↗"
+  (`googleCalendarUrl` on `GET /activities/:id`, the meeting's hand-off
+  from `shared/calendar-links.ts`, for a planned activity), Details,
+  Description, **Responses as a table grouped Going / Maybe / Not going /
+  No reply with when each answered** (the thing SCORO's page lacked, the
+  owner's ask), the invitee's own Going / Maybe / Not going buttons, Files
+  (attachments on `sales_activity`), and Modify (the form, `ActivityModal`
+  exported from `Calendar.tsx`), Mark done and Cancel, confirmed in the
+  page. `activityLink()` in `shared/activities.ts` is where every
+  notification about an activity lands; the calendar's old
+  `?activity=<id>` link redirects there, carrying `?respond=`. The
+  invitation email carries Going / Not going / Maybe links
+  (`activityEmailText`, `respondLinks`): `?respond=` on the page records
+  the answer on opening, for the invitee only, then drops out of the URL.
 - **Reminders are the one thing G-CORE runs on a timer.** `reminderMinutes`
   is null, 15, 60, 120 or 1440 (`REMINDER_MINUTES`).
   `startActivityReminders()` (called from `index.ts` after `listen`, never

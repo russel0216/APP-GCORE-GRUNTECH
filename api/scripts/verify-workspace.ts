@@ -352,7 +352,7 @@ async function main() {
   check(
     'a planned activity that slipped past its day is on my plate, overdue',
     byKind('activity', slipped.id)?.overdue === true &&
-      byKind('activity', slipped.id)?.link === `/g-ops/calendar?activity=${slipped.id}`,
+      byKind('activity', slipped.id)?.link === `/g-ops/calendar/activities/${slipped.id}`,
   );
   check(
     'overdue rows come first',
@@ -389,10 +389,10 @@ async function main() {
     JSON.stringify(again.todaysSchedule.map((r) => [r.kind, r.title])),
   );
   check(
-    'it runs for its duration and deep-links to the calendar',
+    "it runs for its duration and deep-links to the activity's page",
     !!mine &&
       new Date(mine.endsAt).getTime() - new Date(mine.startsAt).getTime() === 90 * 60_000 &&
-      mine.link === `/g-ops/calendar?activity=${today.id}`,
+      mine.link === `/g-ops/calendar/activities/${today.id}`,
     mine?.link,
   );
   check('its subtitle names the customer', mine?.sub?.includes(`${TAG} Hospital`) === true, mine?.sub);

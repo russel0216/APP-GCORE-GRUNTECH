@@ -32,6 +32,7 @@ import { CostingSheet } from './pages/sales/CostingSheet';
 import { Quotations, QuotationDetail } from './pages/sales/Quotations';
 import { QuotationEditor } from './pages/sales/QuotationEditor';
 import { SalesCalendar } from './pages/sales/Calendar';
+import { ActivityPage } from './pages/sales/ActivityPage';
 import { Pipeline } from './pages/sales/Pipeline';
 import { Forecast } from './pages/sales/Forecast';
 import { Partners, PartnerDetail } from './pages/sales/Partners';
@@ -511,6 +512,14 @@ function Routed() {
           element={
             <Guard permission="gops.calendar.view_all">
               <SalesCalendar />
+            </Guard>
+          }
+        />
+        <Route
+          path="/g-ops/calendar/activities/:id"
+          element={
+            <Guard permission="gops.calendar.view_all">
+              <ActivityPage />
             </Guard>
           }
         />

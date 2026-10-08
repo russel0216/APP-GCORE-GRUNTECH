@@ -276,7 +276,7 @@ registerSchedule(async (user, { from, to }) => {
     title: r.subject,
     startsAt: r.startsAt,
     endsAt: new Date(r.startsAt.getTime() + r.durationMinutes * 60_000),
-    link: `/g-ops/calendar?activity=${r.id}`,
+    link: `/g-ops/calendar/activities/${r.id}`,
     meetLink: null,
     sub: [
       typeNames.get(r.typeKey ?? r.type) ?? humanise(r.typeKey ?? r.type),
@@ -463,7 +463,7 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       subtitle: [humanise(r.type), r.lead?.companyName ?? r.customer?.name ?? null].filter(Boolean).join(' · '),
       when: r.startsAt,
       overdue: true,
-      link: `/g-ops/calendar?activity=${r.id}`,
+      link: `/g-ops/calendar/activities/${r.id}`,
     })),
   ];
   return rows.sort(byUrgency);

@@ -103,9 +103,9 @@ plus the SVC "Request job order" WON-block edit).
   the lead, Modify, and pick or add the company".
 - **Activities**: `GET /activities` spreads `activityWhere()` from
   `shared/activities.ts`; `GET /activities/:id` exists; the assignee
-  notification links to `/g-ops/calendar?activity=<id>&date=<Manila day>`
-  (the `date` lets the calendar load the right window first) and its body is
-  Manila-pinned `formatDateTime`. Activity create / update / delete are now
+  notification links to the activity's page, `/g-ops/calendar/activities/<id>`
+  (`activityLink()`; it was `/g-ops/calendar?activity=<id>&date=<Manila day>`,
+  which still redirects there) and its body is Manila-pinned `formatDateTime`. Activity create / update / delete are now
   audited (`entityType 'sales_activity'`). `ActivityLog` takes a time of day
   (the old `T12:00:00` put every planned visit at noon) and is shown on the
   quotation page too.
