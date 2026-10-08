@@ -51,6 +51,8 @@ import {
   NO_GROUP,
   quotationStage,
   quotationStages,
+  leadStage,
+  leadStages,
 } from '../src/shared/pipeline';
 import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
 import { listQuery } from '../src/http/kit';
@@ -58,7 +60,7 @@ import { listQuery } from '../src/http/kit';
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
-import { quotationListSummary, quotationListWhere } from '../src/routes/sales';
+import { leadListSummary, leadListWhere, quotationListSummary, quotationListWhere } from '../src/routes/sales';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
@@ -1214,6 +1216,76 @@ async function main() {
       }
     }
     check('an unknown status, a malformed date or an unknown choice is a 400', soRefused === 3, `${soRefused} of 3`);
+
+    // ── The leads list, in the same layout ──────────────────────────────────
+    console.log('\nThe list of leads: stage tabs, values, filters');
+    const LEADL = `${TAG} LEADL`;
+    const leadQ = (query: Record<string, string>) =>
+      listQuery({ query: { search: LEADL, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+    const leadOf = (name: string, status: string, value: number, probability: number, extra: Partial<Prisma.LeadUncheckedCreateInput> = {}) =>
+      prisma.lead.create({
+        data: {
+          number: `${TAG}-LL-${name}`,
+          companyName: `${LEADL} ${name}`,
+          assignedToId: sales.id,
+          createdById: sales.id,
+          status: status as Prisma.LeadUncheckedCreateInput['status'],
+          estimatedValue: d(value),
+          probability,
+          ...extra,
+        },
+      });
+    const lNew = await leadOf('new', 'NEW', 1000, 10, { customerId: customer.id, createdAt: new Date('2026-03-01T00:30:00+08:00') });
+    await leadOf('created', 'QUOTATION_CREATED', 2000, 10);
+    await leadOf('submitted', 'QUOTATION_SUBMITTED', 3000, 50);
+    await leadOf('negotiation', 'NEGOTIATION', 4000, 90, { expectedClosing: new Date('2026-04-30T00:00:00Z') });
+    await leadOf('won', 'WON', 5000, 100);
+    await leadOf('lost', 'LOST', 6000, 0, { lostReason: 'verify' });
+    await leadOf('hold', 'ON_HOLD', 7000, 20, { assignedToId: other.id });
+
+    check(
+      'a lead stands in the board’s stages: Opportunity to On hold, never Completed',
+      leadStages(stages).map((st) => st.key).join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,LOST,HOLD' &&
+        leadStage('QUOTATION_SUBMITTED', stages) === 'NEGOTIATION' && leadStage('NEGOTIATION', stages) === 'CLOSING',
+      leadStages(stages).map((st) => st.key).join(','),
+    );
+    const lAll = leadListWhere(superUser, leadQ({}), stages);
+    const lSum = await leadListSummary(lAll.base, lAll.where, stages);
+    check(
+      'the tabs count each stage and add up to All',
+      lSum.tabCounts[''] === 7 && lSum.tabCounts.OPPORTUNITY === 2 &&
+        ['NEGOTIATION', 'CLOSING', 'CONFIRMED', 'LOST', 'HOLD'].every((k) => lSum.tabCounts[k] === 1),
+      JSON.stringify(lSum.tabCounts),
+    );
+    check(
+      'the totals are the estimated value and the value weighted by each lead’s probability',
+      money(lSum.value, 28000) && money(lSum.weighted, 100 + 200 + 1500 + 3600 + 5000 + 0 + 1400) && lSum.count === 7,
+      JSON.stringify({ value: lSum.value, weighted: lSum.weighted }),
+    );
+    let leadTabsAgree = true;
+    for (const st of leadStages(stages)) {
+      const w = leadListWhere(superUser, leadQ({ stage: st.key }), stages);
+      const rows = await prisma.lead.findMany({ where: w.where, select: { status: true } });
+      if (rows.length !== lSum.tabCounts[st.key] || !rows.every((r) => leadStage(r.status, stages) === st.key)) leadTabsAgree = false;
+    }
+    check('each tab lists exactly the leads its count says, each standing in that stage', leadTabsAgree);
+    const ofClient = await prisma.lead.findMany({ where: leadListWhere(superUser, leadQ({ clientId: customer.id }), stages).where, select: { id: true } });
+    check('the client filter reads ?clientId=, never the page’s ?customerId= hand-off', ofClient.length === 1 && ofClient[0].id === lNew.id);
+    const addedFirst = await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ createdFrom: '2026-03-01', createdTo: '2026-03-01' }), stages).where });
+    const closingDay = await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ closingFrom: '2026-04-30', closingTo: '2026-04-30' }), stages).where });
+    check('"Added" runs on Manila’s days and "Expected closing" includes its day', addedFirst === 1 && closingDay === 1, `${addedFirst} ${closingDay}`);
+    const mineLeads = await prisma.lead.count({ where: leadListWhere(salesUser, leadQ({ scope: 'mine' }), stages).where });
+    const finer = await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ stage: 'OPPORTUNITY', status: 'NEW' }), stages).where });
+    check('Mine is the caller’s own, and a status narrows within its stage', mineLeads === 6 && finer === 1, `${mineLeads} ${finer}`);
+    let leadRefused = 0;
+    for (const bad of [{ stage: 'COMPLETED' }, { status: 'OPEN' }, { createdFrom: '1/3/2026' }]) {
+      try {
+        leadListWhere(superUser, leadQ(bad), stages);
+      } catch (err) {
+        if ((err as { status?: number }).status === 400) leadRefused++;
+      }
+    }
+    check('an unknown stage or status, or a malformed date, is a 400', leadRefused === 3, `${leadRefused} of 3`);
   }
 
   console.log('\nDocuments');
@@ -2660,6 +2732,37 @@ async function main() {
         'and Print selected prints the ticked order alone',
         soPickPdf.status === 200 && soPickLine.replace(/ /g, '').includes(`${TAG}-LSO3`) && !soPickLine.replace(/ /g, '').includes(`${TAG}-LSO4`) && soPickLine.includes('the rows selected'),
         soPickLine.slice(0, 200),
+      );
+
+      // The leads list over HTTP and on paper; its mass actions are the PATCH.
+      const lListed = await http(salesToken, 'GET', `/leads?search=${encodeURIComponent(`${TAG} LEADL`)}&scope=all&pageSize=50`);
+      const lSumHttp = lListed.body.summary as { tabCounts: Record<string, number>; count: number; value: number } | undefined;
+      const lRowsHttp = (lListed.body.rows ?? []) as { id: string; stage: string; stageLabel: string; canEdit: boolean; assignedTo: { id: string }; estimatedValue: number | null }[];
+      check(
+        'GET /leads carries the summary and each row its stage, its name and whether the reader may change it',
+        lListed.status === 200 && !!lSumHttp && lSumHttp.count === lRowsHttp.length && lSumHttp.tabCounts[''] === lRowsHttp.length &&
+          money(lSumHttp.value, lRowsHttp.reduce((t, r) => t + (r.estimatedValue ?? 0), 0)) &&
+          lRowsHttp.every((r) => !!r.stage && !!r.stageLabel && r.canEdit === canEditRecord(salesUser, 'gops', 'leads', r.assignedTo.id)),
+        lListed.text.slice(0, 200),
+      );
+      const lPrinted = await fetch(`${BASE}/leads/pdf?search=${encodeURIComponent(`${TAG} LEADL`)}&scope=all&stage=HOLD`, {
+        headers: { Authorization: `Bearer ${salesToken}` },
+      });
+      const lPrintedLine = pdfText(Buffer.from(await lPrinted.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'the printed leads list is the list as filtered — the one on hold, the stage named, the weighted total',
+        lPrinted.status === 200 && lPrintedLine.includes(`${TAG} LEADL hold`) && !lPrintedLine.includes(`${TAG} LEADL new`) &&
+          lPrintedLine.includes('stage On hold') && lPrintedLine.includes('Weighted by probability'),
+        lPrintedLine.slice(0, 300),
+      );
+      const toMove = lRowsHttp.find((r) => r.stage === 'OPPORTUNITY' && r.canEdit)!;
+      const assigned = await http(salesToken, 'PATCH', `/leads/${toMove.id}`, { assignedToId: other.id });
+      const nowOwner = await prisma.lead.findUniqueOrThrow({ where: { id: toMove.id }, select: { assignedToId: true } });
+      const told = await prisma.notification.count({ where: { userId: other.id, link: { contains: toMove.id } } });
+      check(
+        'Assign to is the PATCH: the lead goes to the colleague, and the colleague is told',
+        assigned.status === 200 && nowOwner.assignedToId === other.id && told >= 1,
+        `${assigned.status} ${nowOwner.assignedToId === other.id} ${told}`,
       );
 
       // A mass move is the PATCH per row: a legal move goes; Won without an

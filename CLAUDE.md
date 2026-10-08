@@ -184,8 +184,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,478 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
-masters 54, sales 366, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,489 assertions across twenty-two scripts** (counted 2026-10-08): foundation 233,
+masters 54, sales 377, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -852,6 +852,27 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `leadListWhere()`, the same where-builder the list uses, so the paper never
   shows a different set (its filter line says what narrowed it; capped at
   1,000 rows). Both audit EXPORTED; the list export's entityId is `list`.
+- **The leads list is the quotation list's layout** (2026-10-08): the board's
+  stages a lead can stand in as tabs with counts (All leads, Opportunity,
+  Negotiation, Closing, Confirmed, Lost, On hold — `leadStages()` /
+  `leadStage()` / `leadStageStatuses()` in `shared/pipeline.ts`, the board's
+  own `statuses` lookup; never Completed, which is a quotation's), the fine
+  status still a column (with its stage under it) and a filter, Filters
+  (status, owner, added by, client, Added — a timestamp, Manila days — and
+  Expected closing — a DATE), a totals line of estimated and weighted value
+  (`leadListSummary()`, summed in centavos), the printed list and mass
+  actions. **The client filter's key is `clientId`, never `customerId`**:
+  this page's `?new=1&customerId=` is the "new lead for this customer"
+  hand-off, and a list must not eat it (rule 16). `leadListWhere(me, q,
+  stages)` returns `{ base, where }` and feeds the rows, the summary and the
+  paper. Mine for `edit_own`/`edit_all` holders, All for a reader. **Mass
+  actions are Change status and Assign to**, each the ordinary
+  `PATCH /leads/:id` per row (the move rules, the stage's odds, the new
+  owner's notification and the audit row are the PATCH's): the statuses
+  offered are a lead's own (New … Costing, On hold, Lost — one reason for
+  all), never the quotation stages, and a lead with a quotation stays — it
+  moves with its quotation (`planLeadMove()` in `Leads.tsx`). Rows carry
+  `stage`, `stageLabel` and `canEdit`.
 - **A lead says who added it** (2026-10-06): `Lead.createdById`, set once on
   create and never edited, is the list's "Added by" column (with the date) and
   `?createdById=` filter, and the lead page's "Added by" row. It is not the

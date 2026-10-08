@@ -692,6 +692,39 @@ export function quotationStageWhere(stageKey: string, stages: Stage[]): Prisma.Q
   return parts.length === 1 ? parts[0] : { OR: parts };
 }
 
+// ── A lead's stage, as a query (the leads list's tabs, 2026-10-08) ──────────
+
+export const LEAD_STATUS_KEYS = [
+  'NEW',
+  'CONTACTED',
+  'QUALIFIED',
+  'SITE_VISIT',
+  'COSTING',
+  'QUOTATION_CREATED',
+  'QUOTATION_SUBMITTED',
+  'NEGOTIATION',
+  'WON',
+  'LOST',
+  'ON_HOLD',
+] as const;
+
+/** The stage a lead's own status stands in — `stageFor`, the board's lookup. */
+export function leadStage(status: string, stages: Stage[]): string {
+  return stages.find((s) => s.statuses.includes(status))?.key ?? '';
+}
+
+/** The stages a lead can stand in, in the board's order (Completed is a quotation's alone). */
+export function leadStages(stages: Stage[]): Stage[] {
+  const reached = new Set(LEAD_STATUS_KEYS.map((st) => leadStage(st, stages)));
+  return stages.filter((s) => reached.has(s.key));
+}
+
+/** The lead statuses standing in one stage, or null for a key that is not a lead stage. */
+export function leadStageStatuses(stageKey: string, stages: Stage[]): (typeof LEAD_STATUS_KEYS)[number][] | null {
+  const statuses = LEAD_STATUS_KEYS.filter((st) => leadStage(st, stages) === stageKey);
+  return statuses.length ? statuses : null;
+}
+
 /**
  * Per-stage counts from two group-bys: quotations per outcome, and booked
  * quotations per outcome. Every quotation lands in exactly one stage, so the

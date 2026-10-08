@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Attachments } from '../../components/Attachments';
 import { ActivityLog } from '../../components/ActivityLog';
 import {
@@ -217,6 +217,195 @@ interface LeadRow {
   customer: { id: string; name: string } | null;
   quotationCount?: number;
   createdAt: string;
+  /** The pipeline stage its status stands in, and the stage's name — the server's `leadStage`. */
+  stage?: string;
+  stageLabel?: string | null;
+  /** What the mass actions plan with; the PATCH still decides. */
+  canEdit?: boolean;
+}
+
+/** The board's stages a lead can stand in — the tabs, before the first answer names them. */
+const LEAD_STAGE_TABS = [
+  { value: 'OPPORTUNITY', label: 'Opportunity' },
+  { value: 'NEGOTIATION', label: 'Negotiation' },
+  { value: 'CLOSING', label: 'Closing' },
+  { value: 'CONFIRMED', label: 'Confirmed' },
+  { value: 'LOST', label: 'Lost' },
+  { value: 'HOLD', label: 'On hold' },
+];
+
+interface LeadSummary {
+  count?: number;
+  value?: number;
+  weighted?: number;
+}
+
+// ── Mass actions: Change status, Assign to ──────────────────────────────────
+
+/**
+ * The statuses a lead is moved to by hand. The quotation stages (created,
+ * submitted, negotiation, won) belong to the lead's quotation and follow it;
+ * they are never offered here.
+ */
+const BULK_LEAD_TARGETS = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD', 'LOST'];
+const leadStatusLabel = (v: string) => LEAD_STATUSES.find((x) => x.value === v)?.label ?? v;
+
+/**
+ * Which ticked leads a status move would take, and why the rest stay. A lead
+ * with a quotation moves with its quotation — the board's rule — so it stays;
+ * the PATCH (assertLeadStatusChange) still decides every one that is sent.
+ */
+export function planLeadMove(rows: LeadRow[], target: string): { go: LeadRow[]; stay: { row: LeadRow; why: string }[] } {
+  const go: LeadRow[] = [];
+  const stay: { row: LeadRow; why: string }[] = [];
+  for (const r of rows) {
+    if (r.status === target) stay.push({ row: r, why: `already ${leadStatusLabel(target).toLowerCase()}` });
+    else if (!r.canEdit) stay.push({ row: r, why: 'assigned to someone else' });
+    else if ((r.quotationCount ?? 0) > 0) stay.push({ row: r, why: 'it moves with its quotation' });
+    else go.push(r);
+  }
+  return { go, stay };
+}
+
+/**
+ * Change status, or hand the ticked leads to somebody — each one the ordinary
+ * PATCH /leads/:id, so the move rules, the stage's odds, the new owner's
+ * notification and the audit row are the PATCH's. Lost asks one reason for
+ * all. Whatever did not change stays ticked, with why.
+ */
+function LeadBulkActions({ ctx, people }: { ctx: BulkContext<LeadRow>; people: Person[] }) {
+  const toast = useToast();
+  const [action, setAction] = useState('');
+  const [reason, setReason] = useState('');
+  const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
+  const [refused, setRefused] = useState<{ number: string; why: string }[]>([]);
+
+  const assigning = action.startsWith('assign:');
+  const target = action.startsWith('status:') ? action.slice(7) : '';
+  const assignee = assigning ? action.slice(7) : '';
+  const assigneeName = people.find((p) => p.id === assignee)?.name ?? '';
+  const needsReason = target === 'LOST';
+
+  const plan = target
+    ? planLeadMove(ctx.rows, target)
+    : assigning
+      ? {
+          go: ctx.rows.filter((r) => r.canEdit && r.assignedTo.id !== assignee),
+          stay: ctx.rows
+            .filter((r) => !r.canEdit || r.assignedTo.id === assignee)
+            .map((r) => ({ row: r, why: r.assignedTo.id === assignee ? `already ${assigneeName}'s` : 'assigned to someone else' })),
+        }
+      : null;
+
+  async function apply() {
+    if (!plan || !plan.go.length || (needsReason && !reason.trim())) return;
+    const failed: { row: LeadRow; why: string }[] = [];
+    let done = 0;
+    setRefused([]);
+    for (let i = 0; i < plan.go.length; i++) {
+      setProgress({ done: i, of: plan.go.length });
+      const row = plan.go[i];
+      const body = assigning
+        ? { assignedToId: assignee }
+        : needsReason
+          ? { status: target, lostReason: reason.trim() }
+          : { status: target };
+      try {
+        await api.patch(`/leads/${row.id}`, body);
+        done++;
+      } catch (err) {
+        failed.push({ row, why: err instanceof ApiError ? err.message : 'could not be changed' });
+      }
+    }
+    setProgress(null);
+    const left = [...plan.stay, ...failed];
+    const what = assigning ? `assigned to ${assigneeName}` : `moved to ${leadStatusLabel(target).toLowerCase()}`;
+    toast(done > 0 ? 'ok' : 'error', `${done} lead${done === 1 ? '' : 's'} ${what}${left.length ? `; ${left.length} unchanged` : ''}`);
+    setRefused(left.map((l) => ({ number: l.row.number, why: l.why })));
+    setAction('');
+    setReason('');
+    ctx.reload();
+    if (left.length) ctx.keep(left.map((l) => l.row.id));
+    else ctx.clear();
+  }
+
+  const verb = assigning ? `Assign ${plan?.go.length ?? 0} to ${assigneeName}` : `Move ${plan?.go.length ?? 0} to ${leadStatusLabel(target)}`;
+
+  return (
+    <>
+      <select
+        aria-label="Change status of, or assign, the selected leads"
+        value={action}
+        disabled={!!progress}
+        onChange={(e) => {
+          setAction(e.target.value);
+          setRefused([]);
+        }}
+      >
+        <option value="">Change status or assign…</option>
+        <optgroup label="Change status">
+          {BULK_LEAD_TARGETS.map((t) => (
+            <option key={t} value={`status:${t}`}>
+              {leadStatusLabel(t)}
+              {t === 'LOST' ? '…' : ''}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Assign to">
+          {people
+            .filter((p) => p.isSales)
+            .map((p) => (
+              <option key={p.id} value={`assign:${p.id}`}>
+                {p.name}
+              </option>
+            ))}
+        </optgroup>
+      </select>
+      {needsReason && (
+        <input
+          type="text"
+          className="list-bulk-reason"
+          aria-label="Why were they lost? One reason for all of them"
+          placeholder="Why were they lost? (one reason for all)"
+          value={reason}
+          disabled={!!progress}
+          onChange={(e) => setReason(e.target.value)}
+        />
+      )}
+      {plan && (
+        <button
+          type="button"
+          className={`btn btn-sm ${needsReason ? 'btn-danger' : 'btn-primary'}`}
+          disabled={!plan.go.length || !!progress || (needsReason && !reason.trim())}
+          onClick={() => void apply()}
+        >
+          {progress ? `Working ${progress.done + 1} of ${progress.of}…` : plan.go.length ? verb : 'None can change'}
+        </button>
+      )}
+      {plan && plan.stay.length > 0 && !progress && (
+        <p className="list-bulk-result">
+          {plan.stay.length} will stay as they are:{' '}
+          {plan.stay
+            .slice(0, 6)
+            .map((st) => `${st.row.number} (${st.why})`)
+            .join(', ')}
+          {plan.stay.length > 6 ? `, and ${plan.stay.length - 6} more` : ''}.
+        </p>
+      )}
+      {!plan && refused.length > 0 && (
+        <div className="list-bulk-result" role="status">
+          Still selected — these did not change:
+          <ul>
+            {refused.map((r) => (
+              <li key={r.number}>
+                <span className="mono">{r.number}</span>: {r.why}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
+  );
 }
 
 export function Leads() {
@@ -251,7 +440,10 @@ export function Leads() {
     loadPeople().then(setPeople).catch(() => {});
   }, []);
 
+  const mayEdit = can('gops.leads.edit_own') || can('gops.leads.edit_all');
+
   const columns: Column<LeadRow>[] = [
+    { key: 'number', label: 'Number', sortKey: 'number', width: '130px', render: (l) => <span className="mono">{l.number}</span> },
     {
       key: 'company',
       label: 'Company',
@@ -263,7 +455,16 @@ export function Leads() {
         </div>
       ),
     },
-    { key: 'status', label: 'Status', render: (l) => <StatusBadge status={l.status} /> },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (l) => (
+        <div>
+          <StatusBadge status={l.status} />
+          {l.stageLabel && <div className="faint">{l.stageLabel}</div>}
+        </div>
+      ),
+    },
     {
       key: 'estimatedValue',
       label: 'Est. value',
@@ -271,7 +472,7 @@ export function Leads() {
       align: 'right',
       render: (l) => (l.estimatedValue == null ? '—' : <span className="mono">{formatMoney(l.estimatedValue)}</span>),
     },
-    { key: 'probability', label: 'Prob.', align: 'right', render: (l) => `${l.probability}%` },
+    { key: 'probability', label: 'Prob.', sortKey: 'probability', align: 'right', render: (l) => `${l.probability}%` },
     {
       key: 'weighted',
       label: 'Weighted',
@@ -314,9 +515,37 @@ export function Leads() {
       label: 'Expected close',
       sortKey: 'expectedClosing',
       render: (l) => formatDate(l.expectedClosing),
-      optional: true,
     },
     { key: 'source', label: 'Source', render: (l) => l.source ?? '—', optional: true },
+  ];
+
+  const personOptions = people.map((p) => ({ value: p.id, label: p.name }));
+  const leadFilters: FilterDef[] = [
+    { key: 'status', label: 'Status', options: LEAD_STATUSES },
+    { key: 'assignedToId', label: 'Owner', options: personOptions },
+    { key: 'createdById', label: 'Added by', options: personOptions },
+    // `clientId`: this page's ?customerId= is the "new lead for this
+    // customer" hand-off, and the list must never read it as a filter.
+    ...(can('gops.customers.view_all')
+      ? [
+          {
+            key: 'clientId',
+            label: 'Client',
+            type: 'lookup' as const,
+            placeholder: 'Type a client name or code…',
+            search: async (term: string) =>
+              (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map(
+                (c) => ({ value: c.id, label: `${c.name} · ${c.code}` }),
+              ),
+            describe: async (id: string) => {
+              const c = await api.get<{ name: string; code: string }>(`/customers/${id}`);
+              return `${c.name} · ${c.code}`;
+            },
+          },
+        ]
+      : []),
+    { key: 'createdFrom', toKey: 'createdTo', label: 'Added', type: 'dateRange' },
+    { key: 'closingFrom', toKey: 'closingTo', label: 'Expected closing', type: 'dateRange' },
   ];
 
   return (
@@ -337,18 +566,35 @@ export function Leads() {
         columns={columns}
         rowKey={(l) => l.id}
         scoped
-        searchPlaceholder="Search company or contact…"
+        searchPlaceholder="Search number, company, contact, client…"
         reloadToken={reload}
         onRowClick={(l) => navigate(`/g-ops/leads/${l.id}`)}
         emptyTitle="No leads yet"
         emptyHint="Record an enquiry the moment it arrives — even a phone call worth following up."
-        filters={[
-          { key: 'status', label: 'Status', options: LEAD_STATUSES },
-          { key: 'assignedToId', label: 'Owner', options: people.map((p) => ({ value: p.id, label: p.name })) },
-          { key: 'createdById', label: 'Added by', options: people.map((p) => ({ value: p.id, label: p.name })) },
-        ]}
+        defaultScope={mayEdit ? 'mine' : 'all'}
+        tabs={{ key: 'stage', label: 'Stages', allLabel: 'All leads', options: LEAD_STAGE_TABS }}
+        filters={leadFilters}
         // The paper matches the screen: DataList sends the list's own query.
         printPath="/api/leads/pdf"
+        selectable
+        rowLabel={(l) => `${l.number} ${l.companyName}`}
+        bulkActions={(ctx) => <LeadBulkActions ctx={ctx} people={people} />}
+        summaryLine={(raw, total) => {
+          const sum = raw as LeadSummary;
+          return (
+            <>
+              <span>
+                <strong>{total}</strong> lead{total === 1 ? '' : 's'}
+              </span>
+              <span>
+                Estimated value <strong>{formatMoney(sum.value ?? 0)}</strong>
+              </span>
+              <span>
+                Weighted <strong>{formatMoney(sum.weighted ?? 0)}</strong>
+              </span>
+            </>
+          );
+        }}
         actions={
           <>
             {can('gops.leads.create') && (

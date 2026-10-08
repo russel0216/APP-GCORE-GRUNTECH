@@ -68,6 +68,9 @@ import {
   quotationStageWhere,
   quotationStages,
   quotationValue,
+  leadStage,
+  leadStages,
+  leadStageStatuses,
   valueRevision,
 } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
@@ -114,39 +117,112 @@ function presentLead(lead: Record<string, unknown>) {
 }
 
 /**
- * Which leads a list query means — one rule for the list AND its PDF export,
- * so the paper never shows a different set from the screen it was printed off.
+ * Which leads a list query means — ONE rule for the list, its summary (the
+ * stage tabs' counts and the totals line) and its PDF, so the paper never
+ * shows a different set from the screen it was printed off. `base` is
+ * everything but the stage tab; the tabs count under it (the quotation
+ * list's pattern, 2026-10-08).
  */
-function leadListWhere(me: ReturnType<typeof currentUser>, q: ReturnType<typeof listQuery>): Prisma.LeadWhereInput {
-  const where: Prisma.LeadWhereInput = {};
+export function leadListWhere(
+  me: ReturnType<typeof currentUser>,
+  q: ReturnType<typeof listQuery>,
+  stages: Awaited<ReturnType<typeof pipelineStages>>,
+): { base: Prisma.LeadWhereInput; where: Prisma.LeadWhereInput } {
+  const and: Prisma.LeadWhereInput[] = [];
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all');
-  if (onlyOwn || q.scope === 'mine') where.assignedToId = me.id;
+  if (onlyOwn || q.scope === 'mine') and.push({ assignedToId: me.id });
 
   if (q.search) {
-    where.OR = [
-      { companyName: { contains: q.search, mode: 'insensitive' } },
-      { number: { contains: q.search, mode: 'insensitive' } },
-      { contactPerson: { contains: q.search, mode: 'insensitive' } },
-      { description: { contains: q.search, mode: 'insensitive' } },
-    ];
+    and.push({
+      OR: [
+        { companyName: { contains: q.search, mode: 'insensitive' } },
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { contactPerson: { contains: q.search, mode: 'insensitive' } },
+        { description: { contains: q.search, mode: 'insensitive' } },
+        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
   }
-  if (q.filters.status) {
+  const f = q.filters;
+  if (f.status) {
     // One status, or several comma-separated — the quotation editor asks for
     // every open one at once. An unknown value is a 400, not a Prisma 500.
-    const asked = q.filters.status.split(',').map((s) => s.trim()).filter(Boolean);
-    const unknown = asked.filter((s) => !(Object.values(LeadStatus) as string[]).includes(s));
+    const asked = f.status.split(',').map((st) => st.trim()).filter(Boolean);
+    const unknown = asked.filter((st) => !(Object.values(LeadStatus) as string[]).includes(st));
     if (unknown.length) throw badRequest(`Unknown lead status: ${unknown.join(', ')}`);
-    where.status = { in: asked as LeadStatus[] };
+    and.push({ status: { in: asked as LeadStatus[] } });
   }
-  if (q.filters.assignedToId) where.assignedToId = q.filters.assignedToId;
-  if (q.filters.createdById) where.createdById = q.filters.createdById;
-  if (q.filters.source) where.source = q.filters.source;
+  if (f.assignedToId) and.push({ assignedToId: f.assignedToId });
+  if (f.createdById) and.push({ createdById: f.createdById });
+  if (f.source) and.push({ source: f.source });
+  // `clientId`, not `customerId`: the leads page's ?customerId= is the
+  // "new lead for this customer" hand-off, and a list must never eat it.
+  if (f.clientId) and.push({ customerId: f.clientId });
+  const createdFrom = dayFilter(f.createdFrom, 'Added from');
+  const createdTo = dayFilter(f.createdTo, 'Added to');
+  if (createdFrom || createdTo) {
+    and.push({
+      createdAt: {
+        ...(createdFrom ? { gte: manilaDayStart(createdFrom) } : {}),
+        ...(createdTo ? { lte: manilaDayEnd(createdTo) } : {}),
+      },
+    });
+  }
+  const closingFrom = dayFilter(f.closingFrom, 'Closing from');
+  const closingTo = dayFilter(f.closingTo, 'Closing to');
+  if (closingFrom || closingTo) {
+    and.push({
+      expectedClosing: {
+        ...(closingFrom ? { gte: new Date(`${closingFrom}T00:00:00.000Z`) } : {}),
+        ...(closingTo ? { lte: new Date(`${closingTo}T23:59:59.999Z`) } : {}),
+      },
+    });
+  }
   // The rows a person ticked (Print selected); the rules above still apply.
-  const ids = idsFilter(q.filters.ids);
-  if (ids) where.id = { in: ids };
-  return where;
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+
+  const base: Prisma.LeadWhereInput = and.length ? { AND: and } : {};
+  if (!f.stage) return { base, where: base };
+  const statuses = leadStageStatuses(f.stage, stages);
+  if (!statuses) throw badRequest(`Unknown stage: ${f.stage}`);
+  return { base, where: { AND: [...and, { status: { in: statuses } }] } };
 }
+
+/**
+ * The tabs' counts under `base` ('' is All), and the count, estimated value
+ * and weighted value (estimate × probability) of what `where` selects —
+ * summed in centavos, rounded once.
+ */
+export async function leadListSummary(
+  base: Prisma.LeadWhereInput,
+  where: Prisma.LeadWhereInput,
+  stages: Awaited<ReturnType<typeof pipelineStages>>,
+) {
+  const [perStatus, valued] = await Promise.all([
+    prisma.lead.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+    prisma.lead.findMany({ where, select: { estimatedValue: true, probability: true } }),
+  ]);
+  const tabCounts: Record<string, number> = { '': 0 };
+  for (const st of leadStages(stages)) tabCounts[st.key] = 0;
+  for (const r of perStatus) {
+    const key = leadStage(r.status, stages);
+    if (key) tabCounts[key] = (tabCounts[key] ?? 0) + r._count._all;
+    tabCounts[''] += r._count._all;
+  }
+  let valueCents = 0;
+  let weightedCents = 0;
+  for (const l of valued) {
+    const cents = Math.round(num(l.estimatedValue) * 100);
+    valueCents += cents;
+    weightedCents += (cents * l.probability) / 100;
+  }
+  const tabs = leadStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
+  return { tabs, tabCounts, count: valued.length, value: valueCents / 100, weighted: Math.round(weightedCents) / 100 };
+}
+
+const LEAD_SORTS = ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt', 'probability'];
 
 leadRoutes.get(
   '/',
@@ -154,9 +230,10 @@ leadRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where = leadListWhere(me, q);
+    const stages = await pipelineStages();
+    const { base, where } = leadListWhere(me, q, stages);
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.lead.findMany({
         where,
         include: {
@@ -166,22 +243,32 @@ leadRoutes.get(
           customer: { select: { id: true, name: true } },
           _count: { select: { quotations: true } },
         },
-        orderBy: orderBy(q, ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt'], {
-          createdAt: 'desc',
-        }),
+        orderBy: orderBy(q, LEAD_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.lead.count({ where }),
+      leadListSummary(base, where, stages),
     ]);
 
-    res.json(
-      listResult(
-        rows.map((r) => ({ ...presentLead(r as unknown as Record<string, unknown>), quotationCount: r._count.quotations })),
+    res.json({
+      ...listResult(
+        rows.map((r) => {
+          const stage = leadStage(r.status, stages);
+          return {
+            ...presentLead(r as unknown as Record<string, unknown>),
+            quotationCount: r._count.quotations,
+            stage,
+            stageLabel: stages.find((st) => st.key === stage)?.label ?? null,
+            // What the mass actions plan with; the PATCH still decides.
+            canEdit: canEditRecord(me, 'gops', 'leads', r.assignedToId),
+          };
+        }),
         total,
         q,
       ),
-    );
+      summary,
+    });
   }),
 );
 
@@ -201,9 +288,9 @@ const LEAD_STATUS_LABEL: Record<string, string> = {
 
 /**
  * The leads list on paper (2026-10-07, the owner's call: "for reporting
- * purposes"). The SAME query as the list — search, status, owner, added-by,
- * scope — through `leadListWhere`, so the paper matches the screen it was
- * printed off. Declared above `/:id`, or that route swallows it.
+ * purposes"). The SAME query as the list, through `leadListWhere` — or, with
+ * `?ids=`, the rows ticked — so the paper matches the screen it was printed
+ * off. Declared above `/:id`, or that route swallows it.
  */
 leadRoutes.get(
   '/pdf',
@@ -211,30 +298,40 @@ leadRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const rows = await prisma.lead.findMany({
-      where: leadListWhere(me, q),
-      include: {
-        assignedTo: { select: { name: true } },
-        createdBy: { select: { name: true } },
-        customer: { select: { name: true } },
-      },
-      orderBy: orderBy(q, ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt'], {
-        createdAt: 'desc',
+    const stages = await pipelineStages();
+    const { base, where } = leadListWhere(me, q, stages);
+    const [rows, summary] = await Promise.all([
+      prisma.lead.findMany({
+        where,
+        include: {
+          assignedTo: { select: { name: true } },
+          createdBy: { select: { name: true } },
+          customer: { select: { name: true } },
+        },
+        orderBy: orderBy(q, LEAD_SORTS, { createdAt: 'desc' }),
+        take: 1000,
       }),
-      take: 1000,
-    });
+      leadListSummary(base, where, stages),
+    ]);
 
+    const f = q.filters;
     const filters = [
       q.search ? `search "${q.search}"` : null,
-      q.filters.status ? `status ${q.filters.status.split(',').map((v) => LEAD_STATUS_LABEL[v] ?? v).join(', ')}` : null,
+      f.stage ? `stage ${stages.find((st) => st.key === f.stage)?.label ?? f.stage}` : null,
+      f.status ? `status ${f.status.split(',').map((v) => LEAD_STATUS_LABEL[v] ?? v).join(', ')}` : null,
+      f.assignedToId ? 'one owner' : null,
+      f.createdById ? 'added by one person' : null,
+      f.clientId ? 'one client' : null,
+      f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
+      f.closingFrom || f.closingTo ? `closing ${f.closingFrom ?? '…'} to ${f.closingTo ?? '…'}` : null,
       q.scope === 'mine' ? 'mine only' : null,
-      q.filters.ids ? 'the rows selected' : null,
+      f.ids ? 'the rows selected' : null,
     ].filter(Boolean);
 
     const pdf = await renderDocument({
       title: 'Leads',
       date: new Date(),
-      reference: `${rows.length} lead(s)${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference: `${summary.count} lead(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
       sections: [
         {
           kind: 'table',
@@ -255,11 +352,8 @@ leadRoutes.get(
         {
           kind: 'totals',
           rows: [
-            {
-              label: 'Estimated value, total:',
-              value: formatMoney(rows.reduce((t, l) => t + num(l.estimatedValue), 0)),
-              bold: true,
-            },
+            { label: 'Estimated value, total:', value: formatMoney(summary.value), bold: true },
+            { label: 'Weighted by probability:', value: formatMoney(summary.weighted) },
           ],
         },
       ],
