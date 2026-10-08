@@ -1597,9 +1597,32 @@ enum ActivityStatus {
 }
 
 /// "One look at what all the sales personnel are going to do by day."
+/// An activity type as data (2026-10-08, SCORO's customisable activity types):
+/// Admin › Categories › Activity types. The six built-ins are seeded with the
+/// enum's own keys, so every activity written before this maps 1:1.
+model SalesActivityType {
+  id        String   @id @default(cuid())
+  /// CALL, SITE_VISIT … or a key derived from a typed name (DEMO_WALK). Never changes.
+  key       String   @unique
+  name      String
+  /// #RRGGBB, the chip's edge on the calendar; null takes the default.
+  color     String?
+  sortOrder Int      @default(0)
+  /// The six built-ins: renamed and recoloured freely, never deleted; OTHER is the fallback and stays active.
+  isSystem  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model SalesActivity {
   id       String         @id @default(cuid())
+  /// The built-in kind, kept for the rows written before types became data;
+  /// OTHER for a custom type. `typeKey` is what is read.
   type     ActivityType   @default(FOLLOW_UP)
+  /// SalesActivityType.key — set on every write since 2026-10-08 and backfilled
+  /// from `type` by the seed; read as `typeKey ?? type`.
+  typeKey  String?
   status   ActivityStatus @default(PLANNED)
   subject  String
   notes    String?

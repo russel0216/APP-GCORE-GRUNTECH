@@ -66,6 +66,21 @@
 }
 
 /* Action column in a reference table: wide enough for "Modify", no wider. */
+/* A colour swatch beside its hex, on the activity types card. */
+.m-swatch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.m-swatch {
+  display: inline-block;
+  width: var(--s-4);
+  height: var(--s-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+
 .m-col-action {
   width: 1%;
   white-space: nowrap;

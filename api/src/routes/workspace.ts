@@ -16,6 +16,7 @@ import {
 import { renderDocument, formatDate } from '../shared/pdf';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/aftermarket';
+import { activityTypeNames } from '../shared/activityTypes';
 
 // ════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -240,6 +241,7 @@ export async function scheduleFor(
  * seam — the module never had a provider to move.
  */
 registerSchedule(async (user, { from, to }) => {
+  const typeNames = await activityTypeNames();
   const rows = await prisma.salesActivity.findMany({
     // Booked for them, or invited to it.
     where: {
@@ -251,6 +253,7 @@ registerSchedule(async (user, { from, to }) => {
     select: {
       id: true,
       type: true,
+      typeKey: true,
       assignedToId: true,
       assignedTo: { select: { name: true } },
       subject: true,
@@ -274,7 +277,7 @@ registerSchedule(async (user, { from, to }) => {
     link: `/g-ops/calendar?activity=${r.id}`,
     meetLink: null,
     sub: [
-      humanise(r.type),
+      typeNames.get(r.typeKey ?? r.type) ?? humanise(r.typeKey ?? r.type),
       r.lead?.companyName ?? r.customer?.name ?? r.quotation?.number ?? null,
       r.location,
       r.assignedToId === user.id

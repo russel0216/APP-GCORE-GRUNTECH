@@ -52,6 +52,19 @@ interface ItemCategory {
   _count: { items: number };
 }
 
+/** A sales activity type (the calendar's Type list, 2026-10-08), with how many activities are of it. */
+export interface ActivityTypeDef {
+  id: string;
+  /** Fixed for life — an activity carries it. */
+  key: string;
+  name: string;
+  color: string | null;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  activityCount?: number;
+}
+
 export function Categories() {
   const { can } = useAuth();
   const toast = useToast();
@@ -65,20 +78,24 @@ export function Categories() {
   const [editingIndustry, setEditingIndustry] = useState<Industry | 'new' | null>(null);
   const [groups, setGroups] = useState<QuotationGroup[]>([]);
   const [editingGroup, setEditingGroup] = useState<QuotationGroup | 'new' | null>(null);
+  const [activityTypes, setActivityTypes] = useState<ActivityTypeDef[]>([]);
+  const [editingType, setEditingType] = useState<ActivityTypeDef | 'new' | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, i, ind, g] = await Promise.all([
+      const [c, i, ind, g, at] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
         api.get<QuotationGroup[]>('/reference/quotation-groups'),
+        api.get<ActivityTypeDef[]>('/reference/activity-types'),
       ]);
       setCost(c);
       setItems(i);
       setIndustries(ind);
       setGroups(g);
+      setActivityTypes(at);
       setError(null);
     } catch (err) {
       setError(err);
@@ -341,6 +358,85 @@ export function Categories() {
         </p>
       </div>
 
+      {/*
+        Activity types (2026-10-08, SCORO's customisable activity types): the
+        sales calendar's Type list as data. An activity carries the type's
+        key, so a rename never rewrites one.
+      */}
+      <div className="card m-industries">
+        <div className="m-card-head">
+          <h3 className="card-title">Activity types</h3>
+          {can('admin.categories.create') && (
+            <button className="btn btn-sm" onClick={() => setEditingType('new')}>
+              + Add
+            </button>
+          )}
+        </div>
+
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Colour</th>
+                <th className="right">Activities</th>
+                <th>Status</th>
+                {mayEdit && <th className="m-col-action" />}
+              </tr>
+            </thead>
+            <tbody>
+              {activityTypes.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    {t.name}
+                    {t.isSystem && <span className="faint"> · built-in</span>}
+                  </td>
+                  <td>
+                    {t.color ? (
+                      <span className="m-swatch-row">
+                        <span className="m-swatch" style={{ background: t.color }} aria-hidden="true" />
+                        <span className="mono">{t.color}</span>
+                      </span>
+                    ) : (
+                      <span className="faint">default</span>
+                    )}
+                  </td>
+                  <td className="right">{(t.activityCount ?? 0).toLocaleString('en-US')}</td>
+                  <td>
+                    <StatusBadge status={t.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
+                  </td>
+                  {mayEdit && (
+                    <td className="m-col-action">
+                      <button className="btn btn-sm" onClick={() => setEditingType(t)}>
+                        Modify
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="m-footnote">
+          What the sales calendar offers as an activity&apos;s Type, each with the colour its chip
+          wears. The six built-ins can be renamed and recoloured but not deleted; a type in use is
+          deactivated rather than deleted, and the activities of that type keep it.
+        </p>
+      </div>
+
+      {editingType && (
+        <ActivityTypeModal
+          type={editingType === 'new' ? null : editingType}
+          onClose={() => setEditingType(null)}
+          onSaved={() => {
+            setEditingType(null);
+            void load();
+            toast('ok', 'Saved');
+          }}
+        />
+      )}
+
       {editingGroup && (
         <QuotationGroupModal
           group={editingGroup === 'new' ? null : editingGroup}
@@ -584,6 +680,100 @@ function QuotationGroupModal({
         checked={form.isActive}
         onChange={(v) => setForm({ ...form, isActive: v })}
         label="Active — an inactive group stays on its lines but is not suggested"
+      />
+    </Modal>
+  );
+}
+
+function ActivityTypeModal({
+  type,
+  onClose,
+  onSaved,
+}: {
+  type: ActivityTypeDef | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    name: type?.name ?? '',
+    color: type?.color ?? '#5B2A8C',
+    sortOrder: type?.sortOrder ?? 0,
+    isActive: type?.isActive ?? true,
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const payload = { ...form, color: form.color || null };
+      if (type) await api.patch(`/reference/activity-types/${type.id}`, payload);
+      else await api.post('/reference/activity-types', payload);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!type) return;
+    setBusy(true);
+    try {
+      await api.del(`/reference/activity-types/${type.id}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const inUse = type?.activityCount ?? 0;
+
+  return (
+    <Modal
+      title={type ? `Modify ${type.name}` : 'Add activity type'}
+      onClose={onClose}
+      footer={
+        <>
+          {type && !type.isSystem && inUse === 0 && can('admin.categories.delete') && (
+            <button className="btn btn-danger" onClick={remove} disabled={busy}>
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !form.name.trim()}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      {type && (type.isSystem || inUse > 0) && (
+        <div className="alert info">
+          {type.isSystem
+            ? 'A built-in type: rename or recolour it, or untick Active to stop offering it.'
+            : `${inUse === 1 ? 'One activity is' : `${inUse.toLocaleString('en-US')} activities are`} of this type, so it cannot be deleted — untick Active to stop offering it.`}
+        </div>
+      )}
+      <Field label="Name" hint={type ? `Key ${type.key} — an activity carries the key, so renaming rewrites nothing` : 'e.g. Demo, Site survey, Training'}>
+        <input value={form.name} autoFocus maxLength={60} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Colour" hint="The edge of its chips on the calendar">
+        <input type="color" value={form.color || '#5B2A8C'} onChange={(e) => setForm({ ...form, color: e.target.value })} />
+      </Field>
+      <Field label="Sort order">
+        <NumberInput kind="count" value={form.sortOrder} onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })} />
+      </Field>
+      <Checkbox
+        checked={form.isActive}
+        onChange={(v) => setForm({ ...form, isActive: v })}
+        label="Active — an inactive type stays on its activities but is not offered"
       />
     </Modal>
   );

@@ -49,9 +49,14 @@ export interface CalendarEvent {
   tone?: Tone;
   /** Dims the chip. */
   done?: boolean;
+  /** Epoch ms of the end, for the time grid's block height; undefined = an hour. */
+  endAt?: number;
+  /** The activity type's own colour (#RRGGBB) — the chip's edge; the tone still says done or cancelled. */
+  color?: string;
 }
 
-export type CalendarView = 'week' | 'month';
+/** Day (2026-10-08, the time scale), week and month. */
+export type CalendarView = 'day' | 'week' | 'month';
 
 export interface CalendarNav {
   view: CalendarView;
@@ -61,16 +66,18 @@ export interface CalendarNav {
   month: string;
   /** Monday 'YYYY-MM-DD' (meaningful when view === 'week'). */
   week: string;
-  /** The roving-tabindex day, ALWAYS inside the current grid/week. */
+  /** 'YYYY-MM-DD' (meaningful when view === 'day'); otherwise the focus. */
+  day: string;
+  /** The roving-tabindex day, ALWAYS inside the current grid/week/day. */
   focus: string;
-  /** Memoised on [view, month, week]; to = last grid day 23:59:59.999 local. */
+  /** Memoised on [view, month, week, day]; to = last grid day 23:59:59.999 local. */
   from: Date;
   to: Date;
-  /** 'month:2026-09' | 'week:2026-09-21' — fetch effects depend on THIS, never on from/to. */
+  /** 'month:2026-09' | 'week:2026-09-21' | 'day:2026-09-23' — fetch effects depend on THIS, never on from/to. */
   windowKey: string;
-  /** 'September 2026' | '21 Sep — 27 Sep 2026'. */
+  /** 'September 2026' | '21 Sep — 27 Sep 2026' | 'Wednesday, 23 September 2026'. */
   label: string;
-  /** Pushes history; sets month = monthOf(focus) / week = mondayOf(focus). */
+  /** Pushes history; sets month = monthOf(focus) / week = mondayOf(focus) / day = focus. */
   setView(v: CalendarView): void;
   /** Replace history; ALWAYS write ?view= too. */
   prev(): void;
@@ -79,12 +86,18 @@ export interface CalendarNav {
   /** React state only. */
   setFocus(day: string): void;
   goToWeekOf(day: string): void;
+  /** Opens the day view on that day, where the page offers one; else the week's. */
+  goToDay(day: string): void;
 }
 
-const ALL_VIEWS: readonly CalendarView[] = ['week', 'month'];
+const ALL_VIEWS: readonly CalendarView[] = ['day', 'week', 'month'];
 
 function isView(s: string | null, views: readonly CalendarView[]): s is CalendarView {
-  return s === 'week' || s === 'month' ? views.includes(s) : false;
+  return s === 'day' || s === 'week' || s === 'month' ? views.includes(s) : false;
+}
+
+function dayLabel(day: string): string {
+  return parseDay(day).toLocaleDateString('en-PH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 function weekLabel(monday: string): string {
@@ -114,7 +127,7 @@ export function useCalendarNav(opts: { defaultView?: CalendarView; views?: Calen
   const [params, setParams] = useSearchParams();
   const viewsKey = (opts.views ?? ALL_VIEWS).join(',');
   const views = useMemo<readonly CalendarView[]>(
-    () => viewsKey.split(',').filter((v): v is CalendarView => v === 'week' || v === 'month'),
+    () => viewsKey.split(',').filter((v): v is CalendarView => v === 'day' || v === 'week' || v === 'month'),
     [viewsKey],
   );
   const defaultView: CalendarView =
@@ -128,28 +141,31 @@ export function useCalendarNav(opts: { defaultView?: CalendarView; views?: Calen
 
   const [focusState, setFocusState] = useState<string>(() => dateAlias ?? today);
 
-  // The active view's key comes from the URL; the other view's key is derived
-  // from the focus, which is always inside the active grid.
+  // The active view's key comes from the URL; the other views' keys are
+  // derived from the focus, which is always inside the active grid.
   const monthParam = params.get('month');
   const weekParam = params.get('week');
+  const dayParam = params.get('day');
   const activeMonth = dateAlias ? monthOf(dateAlias) : isMonthKey(monthParam) ? monthParam : monthOf(today);
   const activeWeek = dateAlias ? mondayOf(dateAlias) : isDayKey(weekParam) ? mondayOf(weekParam) : mondayOf(today);
+  const activeDay = dateAlias ?? (isDayKey(dayParam) ? dayParam : today);
 
   const grid = useMemo(
-    () => (view === 'month' ? monthGrid(activeMonth) : weekDays(activeWeek)),
-    [view, activeMonth, activeWeek],
+    () => (view === 'month' ? monthGrid(activeMonth) : view === 'week' ? weekDays(activeWeek) : [activeDay]),
+    [view, activeMonth, activeWeek, activeDay],
   );
   const focus = grid.includes(focusState) ? focusState : grid.includes(today) ? today : grid[0];
 
   const month = view === 'month' ? activeMonth : monthOf(focus);
   const week = view === 'week' ? activeWeek : mondayOf(focus);
-  const activeKey = view === 'month' ? month : week;
+  const day = view === 'day' ? activeDay : focus;
+  const activeKey = view === 'month' ? month : view === 'week' ? week : day;
   const windowKey = `${view}:${activeKey}`;
 
   const { from, to } = useMemo(() => windowFor(view, activeKey), [view, activeKey]);
-  const label = view === 'month' ? monthLabel(month) : weekLabel(week);
+  const label = view === 'month' ? monthLabel(month) : view === 'week' ? weekLabel(week) : dayLabel(day);
 
-  /** Every write names the view and the active key, and drops the other view's key. */
+  /** Every write names the view and the active key, and drops the other views' keys. */
   const write = useCallback(
     (v: CalendarView, key: string, replace: boolean) => {
       setParams(
@@ -157,19 +173,21 @@ export function useCalendarNav(opts: { defaultView?: CalendarView; views?: Calen
           const next = new URLSearchParams(prev);
           next.delete('date');
           next.set('view', v);
-          if (v === 'month') {
-            next.set('month', key);
-            next.delete('week');
-          } else {
-            next.set('week', key);
-            next.delete('month');
-          }
+          next.delete('month');
+          next.delete('week');
+          next.delete('day');
+          next.set(v, key);
           return next;
         },
         { replace },
       );
     },
     [setParams],
+  );
+  /** The key a view opens on from the focus: its month, its Monday, or the day itself. */
+  const keyFor = useCallback(
+    (v: CalendarView, d: string) => (v === 'month' ? monthOf(d) : v === 'week' ? mondayOf(d) : d),
+    [],
   );
 
   // `?date=` is a link, not a home: resolve it once and move the URL onto the
@@ -185,34 +203,47 @@ export function useCalendarNav(opts: { defaultView?: CalendarView; views?: Calen
   const setView = useCallback(
     (v: CalendarView) => {
       if (!views.includes(v)) return;
-      write(v, v === 'month' ? monthOf(focus) : mondayOf(focus), false);
+      write(v, keyFor(v, focus), false);
     },
-    [views, focus, write],
+    [views, focus, write, keyFor],
   );
 
-  const prev = useCallback(() => {
-    write(view, view === 'month' ? addMonthsKey(month, -1) : addDays(week, -7), true);
-  }, [view, month, week, write]);
-
-  const next = useCallback(() => {
-    write(view, view === 'month' ? addMonthsKey(month, 1) : addDays(week, 7), true);
-  }, [view, month, week, write]);
+  const step = useCallback(
+    (dir: -1 | 1) => {
+      const key = view === 'month' ? addMonthsKey(month, dir) : view === 'week' ? addDays(week, 7 * dir) : addDays(day, dir);
+      if (view === 'day') setFocusState(key);
+      write(view, key, true);
+    },
+    [view, month, week, day, write],
+  );
+  const prev = useCallback(() => step(-1), [step]);
+  const next = useCallback(() => step(1), [step]);
 
   const goToday = useCallback(() => {
     const now = todayLocal();
     setFocusState(now);
-    write(view, view === 'month' ? monthOf(now) : mondayOf(now), true);
-  }, [view, write]);
+    write(view, keyFor(view, now), true);
+  }, [view, write, keyFor]);
 
-  const setFocus = useCallback((day: string) => {
-    if (isDayKey(day)) setFocusState(day);
+  const setFocus = useCallback((d: string) => {
+    if (isDayKey(d)) setFocusState(d);
   }, []);
 
   const goToWeekOf = useCallback(
-    (day: string) => {
-      if (!isDayKey(day)) return;
-      setFocusState(day);
-      if (views.includes('week')) write('week', mondayOf(day), false);
+    (d: string) => {
+      if (!isDayKey(d)) return;
+      setFocusState(d);
+      if (views.includes('week')) write('week', mondayOf(d), false);
+    },
+    [views, write],
+  );
+
+  const goToDay = useCallback(
+    (d: string) => {
+      if (!isDayKey(d)) return;
+      setFocusState(d);
+      if (views.includes('day')) write('day', d, false);
+      else if (views.includes('week')) write('week', mondayOf(d), false);
     },
     [views, write],
   );
@@ -222,6 +253,7 @@ export function useCalendarNav(opts: { defaultView?: CalendarView; views?: Calen
     views,
     month,
     week,
+    day,
     focus,
     from,
     to,
@@ -233,10 +265,12 @@ export function useCalendarNav(opts: { defaultView?: CalendarView; views?: Calen
     today: goToday,
     setFocus,
     goToWeekOf,
+    goToDay,
   };
 }
 
-const VIEW_LABEL: Record<CalendarView, string> = { week: 'Week', month: 'Month' };
+const VIEW_LABEL: Record<CalendarView, string> = { day: 'Day', week: 'Week', month: 'Month' };
+const TODAY_LABEL: Record<CalendarView, string> = { day: 'Today', week: 'This week', month: 'This month' };
 
 /**
  * ‹ Previous · This week|This month · Next › · label · spacer · children ·
@@ -258,7 +292,7 @@ export function CalendarToolbar({ nav, children }: { nav: CalendarNav; children?
         ‹ Previous
       </button>
       <button type="button" className="btn btn-sm" onClick={nav.today}>
-        {nav.view === 'month' ? 'This month' : 'This week'}
+        {TODAY_LABEL[nav.view]}
       </button>
       <button type="button" className="btn btn-sm" onClick={nav.next}>
         Next ›
@@ -493,6 +527,8 @@ export function MonthCalendar({
                       key={ev.id}
                       type="button"
                       className={['mcal-event', ev.tone ?? '', ev.done ? 'done' : ''].filter(Boolean).join(' ')}
+                      // The type's own colour on the edge; a tone (done, cancelled) still wins through the class.
+                      style={ev.color && !ev.tone ? { borderLeftColor: ev.color } : undefined}
                       tabIndex={isFocus ? 0 : -1}
                       title={ev.detail ? `${ev.label} — ${ev.detail}` : ev.label}
                       onClick={(e) => {

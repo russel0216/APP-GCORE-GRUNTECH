@@ -134,9 +134,210 @@ button.cal-head[aria-pressed='true'] {
 
 /* Dim while a window loads rather than unmounting the grid under the cursor. */
 .calendar-week[aria-busy='true'],
+.tg[aria-busy='true'],
 .mcal[aria-busy='true'] {
   opacity: 0.55;
   transition: opacity 120ms ease;
+}
+
+/* ── The time grid: the day and week views on a time scale (2026-10-08) ───── */
+
+.tg {
+  /* The one token for an hour's height; every block is placed with calc() on it. */
+  --cal-hour: calc(var(--s-8) + var(--s-2));
+  --tg-gutter: calc(var(--s-8) * 1.6);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.tg-head,
+.tg-allday,
+.tg-body {
+  display: grid;
+  grid-template-columns: var(--tg-gutter) repeat(var(--tg-days, 7), minmax(0, 1fr));
+}
+
+.tg-head,
+.tg-allday {
+  border-bottom: 1px solid var(--line);
+}
+
+.tg-gutter {
+  padding: var(--s-1) var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  text-align: right;
+}
+
+.tg-day-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-2);
+  border: 0;
+  border-left: 1px solid var(--line-soft);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tg-day-head strong {
+  font-size: var(--fs-lg);
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.tg-day-head.today strong {
+  color: var(--neon);
+}
+
+.tg-day-head[aria-pressed='true'] {
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--neon-dim);
+}
+
+.tg-allday-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+  min-height: var(--s-6);
+  padding: var(--s-1);
+  border-left: 1px solid var(--line-soft);
+}
+
+.tg-allday-col .cal-item {
+  padding: var(--s-1) var(--s-2);
+}
+
+.tg-body {
+  position: relative;
+  max-height: calc(var(--cal-hour) * 13);
+  overflow-y: auto;
+}
+
+.tg-hours {
+  display: grid;
+  grid-auto-rows: var(--cal-hour);
+}
+
+.tg-hour {
+  padding-right: var(--s-2);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  text-align: right;
+}
+
+/* The label sits ON its hour line: half its own height up, not half the row's. */
+.tg-hour > span {
+  display: inline-block;
+  transform: translateY(-50%);
+}
+
+.tg-col {
+  position: relative;
+  display: grid;
+  grid-auto-rows: calc(var(--cal-hour) / 2);
+  border-left: 1px solid var(--line-soft);
+}
+
+/* A half-hour slot: a button that shows "+" under the pointer and books that time. */
+.tg-slot {
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  padding: 0 var(--s-1);
+  background: none;
+  color: transparent;
+  font: inherit;
+  text-align: right;
+  cursor: pointer;
+}
+
+.tg-slot.hour {
+  border-top-color: var(--line);
+}
+
+.tg-slot:hover {
+  background: rgb(var(--magenta-rgb) / 0.08);
+  color: var(--neon);
+}
+
+.tg-plus {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+/* A block: an activity sized by its Starts and Ends, in its lane. */
+.tg-block {
+  position: absolute;
+  z-index: 1;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: var(--s-1) var(--s-2);
+  border: 0;
+  border-left: 3px solid var(--type-color, var(--magenta));
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: 0 0 0 1px var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tg-block:hover,
+.tg-block:focus-visible {
+  z-index: 2;
+  background: var(--surface-3);
+}
+
+.tg-block > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tg-block-time {
+  color: var(--muted);
+}
+
+.tg-block-sub {
+  color: var(--faint);
+}
+
+.tg-block.done {
+  opacity: 0.55;
+}
+
+.tg-block.ok {
+  border-left-color: var(--ok);
+}
+
+.tg-block.danger {
+  border-left-color: var(--danger);
+}
+
+/* Now, on today's column. */
+.tg-now {
+  position: absolute;
+  right: 0;
+  left: 0;
+  z-index: 1;
+  border-top: 2px solid var(--danger);
+  pointer-events: none;
 }
 
 /* ── Toolbar ──────────────────────────────────────────────────────────────── */

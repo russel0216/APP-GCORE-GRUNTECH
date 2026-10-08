@@ -207,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,596 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 422, costing 120, pipeline 86, calendar 55, numbering 46,
+**2,615 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 422, costing 120, pipeline 86, calendar 74, numbering 46,
 partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1045,6 +1045,37 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   **Telling people is `tellAboutActivity()`**: a bell each, plus an email
   each through `shared/mail.ts` when SMTP is set, sent after the save and
   never allowed to fail it. No SMS (the owner's call).
+- **The sales calendar has a Day view, and the day and week views are a
+  time scale** (2026-10-08, SCORO's scheduling): `CalendarView` is `day |
+  week | month` (`useCalendarNav` carries `?day=` beside `?week=` and
+  `?month=`, `goToDay()` opens a day; the other calendars keep `views:
+  ['month']`); `windowFor('day', key)` is the one day. `TimeGrid` in
+  `Calendar.tsx` draws an hour gutter, a column per day, all-day items (a
+  service visit) in a row over the hours, and each activity a block sized
+  by its Starts and Ends — placed with `calc(minutes / 60 * var(--cal-hour))`
+  on the one token, never a pixel — in lanes where blocks overlap. **A
+  half-hour slot shows "+" under the pointer and books that time** (the
+  form opens on it, an hour long); the slots are not tab stops — "+
+  Schedule" on the focused day is the keyboard's way. The arithmetic is
+  `web/src/lib/timeGrid.ts` (`blockSpan`, `placeInLanes`, `slotAt`,
+  `minutesLabel`), DOM-free and pinned by verify-calendar; an activity
+  across midnight is clipped to each day it touches. The month's day click
+  opens the day.
+- **Activity types are data** (2026-10-08, SCORO's customisable types):
+  `SalesActivityType` (Admin › Categories › Activity types,
+  `/api/reference/activity-types`, `admin.categories.*` to change, anyone
+  signed in to read) — name, colour (the chip's edge, on the month grid and
+  the time grid), order, active. An activity carries the type's KEY
+  (`SalesActivity.typeKey`; the key is derived from the name once and never
+  changes, so a rename rewrites nothing); the enum column `type` stays one
+  deploy as the fallback — the six built-ins are seeded under the enum's
+  own keys (`seedActivityTypes()`, which also backfills `typeKey` from
+  `type` once), a custom type is written as OTHER in it, and every reader
+  takes `typeKey ?? type`. Every activity leaves the API with `type` (the
+  key) and `typeName`. A new activity must take an ACTIVE type (400
+  otherwise); the type an activity has may stay on it after it was
+  deactivated. The six built-ins are never deleted and OTHER never
+  deactivated; a custom type in use is deactivated, not deleted.
 - **Invitees answer Going / Maybe / Not going** (2026-10-08, SCORO's visual
   confirmation): `SalesActivityInvitee.response` (`InviteeResponse`, the
   meeting's enum — PENDING is "No reply") and `respondedAt`. `POST

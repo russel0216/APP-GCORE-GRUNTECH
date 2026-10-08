@@ -22,7 +22,7 @@
  * the month-grid edge cases.
  */
 
-export type CalendarViewKey = 'week' | 'month';
+export type CalendarViewKey = 'day' | 'week' | 'month';
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
@@ -114,7 +114,8 @@ export function weekDays(monday: string): string[] {
  * that starts there.
  */
 export function windowFor(view: CalendarViewKey, key: string): { from: Date; to: Date } {
-  const days = view === 'month' ? monthGrid(key) : weekDays(key);
+  // A day view's window is the one day; its key is the day itself.
+  const days = view === 'month' ? monthGrid(key) : view === 'week' ? weekDays(key) : [key];
   const from = parseDay(days[0]);
   const to = parseDay(days[days.length - 1]);
   to.setHours(23, 59, 59, 999);

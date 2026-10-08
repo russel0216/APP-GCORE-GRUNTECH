@@ -53,6 +53,7 @@ import {
   type ActivityQuery,
 } from '../shared/activities';
 import { toCsv } from '../shared/insights';
+import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
   probabilityAfterMove,
   assertLeadStatusChange,
@@ -3212,11 +3213,11 @@ activityRoutes.get(
     for (const key of ['from', 'to', 'leadId', 'quotationId', 'customerId', 'assignedToId'] as const) {
       if (q[key] !== undefined && q[key] !== '') query[key] = String(q[key]);
     }
-    const rows = await prisma.salesActivity.findMany({
-      ...activityWhere(query),
-      include: ACTIVITY_INCLUDE,
-    });
-    res.json(rows.map(presentActivity));
+    const [rows, names] = await Promise.all([
+      prisma.salesActivity.findMany({ ...activityWhere(query), include: ACTIVITY_INCLUDE }),
+      activityTypeNames(),
+    ]);
+    res.json(rows.map((r) => presentActivity(r, names)));
   }),
 );
 
@@ -3235,17 +3236,37 @@ const ACTIVITY_INCLUDE = {
  * Every activity leaves with its end: the form asks Starts and Ends, the row
  * stores a duration. One read with its invitees also leaves with the tally
  * of their answers (2026-10-08) — Going, Maybe, Not going, No reply — so a
- * chip can say "✓2 ✗1 ?3" without counting.
+ * chip can say "✓2 ✗1 ?3" without counting. Its `type` is the type's KEY
+ * (`typeKey`, else the enum it was written with) and `typeName` the type's
+ * name as Admin › Categories has it.
  */
-function presentActivity<A extends { startsAt: Date; durationMinutes: number; invitees?: { response: string }[] }>(a: A) {
+function presentActivity<A extends { type: string; typeKey: string | null; startsAt: Date; durationMinutes: number; invitees?: { response: string }[] }>(
+  a: A,
+  names: Map<string, string>,
+) {
   const count = (r: string) => (a.invitees ?? []).filter((i) => i.response === r).length;
+  const key = a.typeKey ?? a.type;
   return {
     ...a,
+    type: key,
+    typeName: names.get(key) ?? humaniseTypeKey(key),
     endsAt: new Date(a.startsAt.getTime() + a.durationMinutes * 60_000),
     ...(a.invitees
       ? { responses: { going: count('ACCEPTED'), maybe: count('TENTATIVE'), notGoing: count('DECLINED'), noReply: count('PENDING') } }
       : {}),
   };
+}
+
+/**
+ * The type an activity is written with: a key on the list (Admin ›
+ * Categories › Activity types). A new choice must be active; the type an
+ * activity already has may stay on it after it was deactivated.
+ */
+async function resolveActivityType(key: string, keep: string | null = null): Promise<string> {
+  const row = await prisma.salesActivityType.findUnique({ where: { key } });
+  if (!row) throw badRequest(`Unknown activity type "${key}"`);
+  if (!row.isActive && key !== keep) throw badRequest(`"${row.name}" is no longer an activity type on offer`);
+  return row.key;
 }
 
 // ── Going / Maybe / Not going (2026-10-08, SCORO's visual confirmation) ──────
@@ -3300,7 +3321,7 @@ activityRoutes.post(
       });
     }
     const after = await prisma.salesActivity.findUniqueOrThrow({ where: { id: activity.id }, include: ACTIVITY_INCLUDE });
-    res.json(presentActivity(after));
+    res.json(presentActivity(after, await activityTypeNames()));
   }),
 );
 
@@ -3314,12 +3335,13 @@ activityRoutes.get(
       include: ACTIVITY_INCLUDE,
     });
     if (!row) throw notFound('Activity not found');
-    res.json(presentActivity(row));
+    res.json(presentActivity(row, await activityTypeNames()));
   }),
 );
 
 const activitySchema = z.object({
-  type: z.enum(['CALL', 'SITE_VISIT', 'MEETING', 'FOLLOW_UP', 'SUBMISSION', 'OTHER']).default('FOLLOW_UP'),
+  /** A SalesActivityType key (Admin › Categories › Activity types); the six built-ins keep the enum's keys. */
+  type: z.string().trim().min(1).max(40).default('FOLLOW_UP'),
   subject: z.string().trim().min(2, 'What is happening?'),
   notes: z.string().optional().nullable(),
   location: z.string().trim().optional().nullable(),
@@ -3380,10 +3402,13 @@ activityRoutes.post(
     const assignedToId = body.assignedToId || me.id;
     const durationMinutes = body.endsAt ? minutesBetween(body.startsAt, body.endsAt) : body.durationMinutes;
     const inviteeIds = await checkInvitees(body.inviteeIds ?? [], assignedToId);
+    const typeKey = await resolveActivityType(body.type);
+    const names = await activityTypeNames();
 
     const activity = await prisma.salesActivity.create({
       data: {
-        type: body.type,
+        type: activityEnumOf(typeKey),
+        typeKey,
         subject: body.subject,
         notes: body.notes || null,
         location: body.location || null,
@@ -3434,12 +3459,12 @@ activityRoutes.post(
         entityType: 'sales_activity',
         entityId: activity.id,
         action: 'CREATED',
-        summary: `${activity.status === 'DONE' ? 'Logged' : 'Scheduled'} ${activity.type.toLowerCase().replace(/_/g, ' ')}: ${activity.subject}`,
+        summary: `${activity.status === 'DONE' ? 'Logged' : 'Scheduled'} ${(names.get(typeKey) ?? humaniseTypeKey(typeKey)).toLowerCase()}: ${activity.subject}`,
         after: { ...activity, inviteeIds },
       },
       req,
     );
-    res.status(201).json(presentActivity(activity));
+    res.status(201).json(presentActivity(activity, names));
   }),
 );
 
@@ -3470,12 +3495,15 @@ activityRoutes.patch(
     const moved =
       new Date(startsAt).getTime() !== existing.startsAt.getTime() || durationMinutes !== existing.durationMinutes;
     const reminderChanged = body.reminderMinutes !== undefined && body.reminderMinutes !== existing.reminderMinutes;
+    // The type it has may stay even if since deactivated; a new choice must be on offer.
+    const typeKey = body.type !== undefined ? await resolveActivityType(body.type, existing.typeKey ?? existing.type) : undefined;
 
     const { invitees: _invitees, ...existingRow } = existing;
     void _invitees;
     const updated = await prisma.salesActivity.update({
         where: { id: req.params.id },
         data: {
+          ...(typeKey !== undefined ? { type: activityEnumOf(typeKey), typeKey } : {}),
           ...(body.reminderMinutes !== undefined ? { reminderMinutes: body.reminderMinutes } : {}),
           // A new time or a new reminder is a reminder not yet sent.
           ...(moved || reminderChanged ? { reminderSentAt: null } : {}),
@@ -3487,7 +3515,6 @@ activityRoutes.patch(
                 },
               }
             : {}),
-          ...(body.type !== undefined ? { type: body.type } : {}),
           ...(body.subject !== undefined ? { subject: body.subject } : {}),
           ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
           ...(body.location !== undefined ? { location: body.location || null } : {}),
@@ -3541,7 +3568,7 @@ activityRoutes.patch(
       },
       req,
     );
-    res.json(presentActivity(updated));
+    res.json(presentActivity(updated, await activityTypeNames()));
   }),
 );
 

@@ -7,6 +7,7 @@ import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
+import { seedActivityTypes } from '../src/shared/activityTypes';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -1087,6 +1088,14 @@ async function main() {
     // The owner's twelve, with what each covers and its brand; blanks filled, nothing overwritten.
     const owned = await seedOwnerGroups();
     if (owned) console.log(`  · Seeded ${owned} of the owner's quotation group(s)`);
+  }
+
+  // Activity types as data (2026-10-08): the six built-ins under the enum's
+  // own keys, and every older activity given its typeKey once.
+  {
+    const types = await seedActivityTypes();
+    if (types.created) console.log(`  · Seeded ${types.created} activity type(s)`);
+    if (types.backfilled) console.log(`  · Gave ${types.backfilled} activit${types.backfilled === 1 ? 'y' : 'ies'} its type key`);
   }
 
   // The register's common equipment types (the owner's list, CAPSLOCK), in

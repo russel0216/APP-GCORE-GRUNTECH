@@ -21,18 +21,33 @@ import { Icon, type IconName } from './Icon';
  * in one list rather than in a log and a separate reminder that disagree.
  */
 
-const TYPES: { value: string; label: string; icon: IconName }[] = [
-  { value: 'CALL', label: 'Call', icon: 'people' },
-  { value: 'SITE_VISIT', label: 'Site visit', icon: 'truck' },
-  { value: 'MEETING', label: 'Meeting', icon: 'people' },
-  { value: 'FOLLOW_UP', label: 'Follow-up', icon: 'clock' },
-  { value: 'SUBMISSION', label: 'Submission', icon: 'document' },
-  { value: 'OTHER', label: 'Other', icon: 'panel' },
+/**
+ * The built-in types' icons, by key. The types themselves are data (Admin ›
+ * Categories › Activity types, 2026-10-08) and come from the API; a type
+ * added there gets the plain icon.
+ */
+const TYPE_ICONS: Record<string, IconName> = {
+  CALL: 'people',
+  SITE_VISIT: 'truck',
+  MEETING: 'people',
+  FOLLOW_UP: 'clock',
+  SUBMISSION: 'document',
+  OTHER: 'panel',
+};
+const BUILTIN_TYPES: { value: string; label: string }[] = [
+  { value: 'CALL', label: 'Call' },
+  { value: 'SITE_VISIT', label: 'Site visit' },
+  { value: 'MEETING', label: 'Meeting' },
+  { value: 'FOLLOW_UP', label: 'Follow-up' },
+  { value: 'SUBMISSION', label: 'Submission' },
+  { value: 'OTHER', label: 'Other' },
 ];
 
 interface Activity {
   id: string;
   type: string;
+  /** The type's name as Admin › Categories has it. */
+  typeName?: string;
   status: string;
   subject: string;
   notes: string | null;
@@ -42,7 +57,7 @@ interface Activity {
   assignedTo: { id: string; name: string } | null;
 }
 
-const typeOf = (v: string) => TYPES.find((t) => t.value === v) ?? TYPES[5];
+const iconOf = (key: string): IconName => TYPE_ICONS[key] ?? 'panel';
 
 /** The time now, to the quarter hour, as an `<input type="time">` value. */
 function nowTime(): string {
@@ -77,6 +92,17 @@ export function ActivityLog({
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(blankForm);
+  const [types, setTypes] = useState<{ value: string; label: string }[]>(BUILTIN_TYPES);
+
+  // The types on offer, as data; the built-ins stand in until they load.
+  useEffect(() => {
+    api
+      .get<{ key: string; name: string }[]>('/reference/activity-types?active=true')
+      .then((rows) => {
+        if (rows.length) setTypes(rows.map((t) => ({ value: t.key, label: t.name })));
+      })
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(() => {
     api
@@ -157,7 +183,7 @@ export function ActivityLog({
           <div className="grid grid-2">
             <Field label="What happened">
               <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
-                {TYPES.map((t) => (
+                {types.map((t) => (
                   <option key={t.value} value={t.value}>
                     {t.label}
                   </option>
@@ -230,12 +256,12 @@ export function ActivityLog({
               <ul className="activity-list">
                 {planned.map((row) => (
                   <li key={row.id} className="activity-row planned">
-                    <Icon name={typeOf(row.type).icon} size={16} />
+                    <Icon name={iconOf(row.type)} size={16} />
                     <div className="activity-body">
                       <strong>{row.subject}</strong>
                       {row.notes && <span className="activity-notes">{row.notes}</span>}
                       <span className="activity-meta">
-                        {typeOf(row.type).label} · due {formatDateTime(row.startsAt)} ·{' '}
+                        {row.typeName ?? row.type} · due {formatDateTime(row.startsAt)} ·{' '}
                         {row.assignedTo?.name ?? 'unassigned'}
                       </span>
                     </div>
@@ -256,12 +282,12 @@ export function ActivityLog({
               <ul className="activity-list">
                 {history.map((row) => (
                   <li key={row.id} className={`activity-row${row.status === 'CANCELLED' ? ' off' : ''}`}>
-                    <Icon name={typeOf(row.type).icon} size={16} />
+                    <Icon name={iconOf(row.type)} size={16} />
                     <div className="activity-body">
                       <strong>{row.subject}</strong>
                       {row.notes && <span className="activity-notes">{row.notes}</span>}
                       <span className="activity-meta">
-                        {typeOf(row.type).label} · {formatDateTime(row.startsAt)} ·{' '}
+                        {row.typeName ?? row.type} · {formatDateTime(row.startsAt)} ·{' '}
                         {row.assignedTo?.name ?? 'unassigned'}
                       </span>
                     </div>

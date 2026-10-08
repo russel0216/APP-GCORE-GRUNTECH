@@ -26,7 +26,9 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { activityEmailText, activityWhere, sendDueReminders } from '../src/shared/activities';
+import { seedActivityTypes } from '../src/shared/activityTypes';
 import { resolveUser } from '../src/permissions/resolve';
+import { blockSpan, minutesLabel, placeInLanes, slotAt } from '../../web/src/lib/timeGrid';
 // Imported for its side effect: it registers the sales-activity schedule provider.
 import { scheduleFor } from '../src/routes/workspace';
 import { manilaDayKey, manilaMonthKey } from '../src/shared/day';
@@ -72,6 +74,8 @@ const BASE = `http://localhost:${env.port}/api`;
 
 async function cleanup() {
   await prisma.salesActivity.deleteMany({ where: { subject: { startsWith: TAG } } });
+  // After the activities: a type in use refuses to go.
+  await prisma.salesActivityType.deleteMany({ where: { key: { startsWith: TAG } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verifycal.local' } },
     select: { id: true },
@@ -192,6 +196,35 @@ async function main() {
   check('month window ends 2026-10-11T23:59:59.999 local, not the next midnight', sep.to.getTime() === new Date(2026, 9, 11, 23, 59, 59, 999).getTime(), sep.to.toString());
   const wk = windowFor('week', '2026-09-21');
   check('week window is Monday 00:00 → Sunday 23:59:59.999', wk.from.getTime() === new Date(2026, 8, 21).getTime() && wk.to.getTime() === new Date(2026, 8, 27, 23, 59, 59, 999).getTime());
+  const dayWin = windowFor('day', '2026-09-23');
+  check('a day window is that one day, midnight to 23:59:59.999', dayWin.from.getTime() === new Date(2026, 8, 23).getTime() && dayWin.to.getTime() === new Date(2026, 8, 23, 23, 59, 59, 999).getTime());
+
+  // ══ The time grid (web/src/lib/timeGrid.ts) ════════════════════════════════
+  console.log('\nThe time grid');
+  const d0 = new Date(2026, 8, 23).getTime();
+  const at = (h: number, m = 0) => d0 + (h * 60 + m) * 60_000;
+  check('a block sits at its minutes from midnight, as tall as it is long', JSON.stringify(blockSpan(at(9, 30), at(11), d0)) === '{"top":570,"height":90}', JSON.stringify(blockSpan(at(9, 30), at(11), d0)));
+  check('a five-minute call is still drawn 20 minutes tall', blockSpan(at(9), at(9, 5), d0)?.height === 20);
+  check(
+    'an activity across midnight is clipped to each day it touches, and absent from a day it does not',
+    JSON.stringify(blockSpan(at(23), at(25), d0)) === '{"top":1380,"height":60}' &&
+      JSON.stringify(blockSpan(at(23), at(25), d0 + 86_400_000)) === '{"top":0,"height":60}' &&
+      blockSpan(at(1), at(2), d0 + 86_400_000) === null &&
+      blockSpan(at(10), at(10), d0) === null,
+  );
+  const lanes = placeInLanes([
+    { top: 540, height: 60, id: 'a' },
+    { top: 570, height: 60, id: 'b' },
+    { top: 600, height: 30, id: 'c' },
+    { top: 780, height: 60, id: 'd' },
+  ]);
+  check(
+    'overlapping blocks share the column in lanes; a later block takes the first lane free; a block alone has the column',
+    lanes.map((l) => `${l.id}:${l.lane}/${l.lanes}`).join() === 'a:0/2,b:1/2,c:0/2,d:0/1',
+    lanes.map((l) => `${l.id}:${l.lane}/${l.lanes}`).join(),
+  );
+  check('a click lands on the half hour, inside the day', slotAt(589) === 570 && slotAt(-5) === 0 && slotAt(1439) === 1410);
+  check('the gutter reads as a clock', minutesLabel(0) === '12:00 AM' && minutesLabel(570) === '9:30 AM' && minutesLabel(13 * 60) === '1:00 PM');
 
   // ══ activityWhere ══════════════════════════════════════════════════════════
   console.log('\nactivityWhere (api/src/shared/activities.ts)');
@@ -415,6 +448,59 @@ async function main() {
       mail.includes('Going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=ACCEPTED') &&
         mail.includes('Not going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=DECLINED') &&
         !activityEmailText({ title: 'Moved: x', body: 'when' }, 'https://app/x').includes('respond='),
+    );
+
+    // ══ Activity types as data (2026-10-08) ═══════════════════════════════
+    console.log('\nActivity types');
+    const typesPublic = await apiGet(salesToken, '/reference/activity-types?active=true');
+    const typeRows = Array.isArray(typesPublic.body) ? (typesPublic.body as { id: string; key: string; name: string; isSystem: boolean }[]) : [];
+    check(
+      'anyone signed in reads the types, and the six built-ins are there under the enum’s own keys',
+      typesPublic.status === 200 && ['CALL', 'SITE_VISIT', 'MEETING', 'FOLLOW_UP', 'SUBMISSION', 'OTHER'].every((k) => typeRows.some((t) => t.key === k && t.isSystem)),
+      `${typesPublic.status} ${typeRows.map((t) => t.key).join()}`,
+    );
+    const typeDenied = await apiSend(salesToken, 'POST', '/reference/activity-types', { name: `${TAG} demo walk` });
+    check('adding one needs admin.categories.create (403)', typeDenied.status === 403, String(typeDenied.status));
+    const adminRole = await makeRole('zzcal_admin', `${TAG} admin`, ['admin.categories.create', 'admin.categories.edit_all', 'admin.categories.delete']);
+    const admin = await makeUser(`${TAG} Admin`, 'admin@verifycal.local', [adminRole.id]);
+    const adminToken = signToken(admin.id, admin.email);
+    const madeType = await apiSend(adminToken, 'POST', '/reference/activity-types', { name: `${TAG} Demo walk`, color: '#2E9A4B' });
+    check('an administrator adds a type; its key is derived from the name and fixed', madeType.status === 201 && madeType.body.key === `${TAG}_DEMO_WALK`, `${madeType.status} ${String(madeType.body.key)}`);
+    const typed = await apiSend(salesToken, 'POST', '/activities', { type: `${TAG}_DEMO_WALK`, subject: `${TAG} walk the plant`, startsAt: startsAt.toISOString() });
+    check(
+      'an activity takes the new type and reads back with its name',
+      typed.status === 201 && typed.body.type === `${TAG}_DEMO_WALK` && typed.body.typeName === `${TAG} Demo walk`,
+      `${typed.status} ${String(typed.body.type)} ${String(typed.body.typeName)}`,
+    );
+    const stored = await prisma.salesActivity.findUnique({ where: { id: String(typed.body.id) } });
+    check('the enum column reads OTHER for a custom type, with the key kept beside it', stored?.type === 'OTHER' && stored.typeKey === `${TAG}_DEMO_WALK`, `${stored?.type} ${stored?.typeKey}`);
+    const unknownType = await apiSend(salesToken, 'POST', '/activities', { type: 'NOT_A_TYPE', subject: `${TAG} x`, startsAt: startsAt.toISOString() });
+    check('an unknown type is a 400', unknownType.status === 400, String(unknownType.status));
+    const inUseDelete = await apiSend(adminToken, 'DELETE', `/reference/activity-types/${madeType.body.id}`, {});
+    check('a type in use cannot be deleted', inUseDelete.status === 400, String(inUseDelete.status));
+    const renamed = await apiSend(adminToken, 'PATCH', `/reference/activity-types/${madeType.body.id}`, { name: `${TAG} Plant walk`, isActive: false });
+    const afterRename = (await apiGet(salesToken, `/activities/${typed.body.id}`)).body as { type: string; typeName: string };
+    check(
+      'renaming and deactivating a type keeps the activity on it, under the new name',
+      renamed.status === 200 && afterRename.type === `${TAG}_DEMO_WALK` && afterRename.typeName === `${TAG} Plant walk`,
+      JSON.stringify(afterRename),
+    );
+    const stale = await apiSend(salesToken, 'POST', '/activities', { type: `${TAG}_DEMO_WALK`, subject: `${TAG} stale`, startsAt: startsAt.toISOString() });
+    check('but a deactivated type is not offered to a new activity (400)', stale.status === 400, String(stale.status));
+    const keepType = await apiSend(salesToken, 'PATCH', `/activities/${typed.body.id}`, { subject: `${TAG} walk the plant again`, type: `${TAG}_DEMO_WALK` });
+    check('while the activity that has it may keep it on edit', keepType.status === 200, String(keepType.status));
+    const other = typeRows.find((t) => t.key === 'OTHER');
+    const sysDelete = await apiSend(adminToken, 'DELETE', `/reference/activity-types/${other?.id ?? ''}`, {});
+    const otherOff = await apiSend(adminToken, 'PATCH', `/reference/activity-types/${other?.id ?? ''}`, { isActive: false });
+    check('a built-in type is never deleted, and Other never deactivated', sysDelete.status === 400 && otherOff.status === 400, `${sysDelete.status} ${otherOff.status}`);
+    // The seed's backfill: an activity written with the enum alone gets its key, once.
+    await prisma.salesActivity.update({ where: { id: first.id }, data: { typeKey: null, type: 'CALL' } });
+    const seeded = await seedActivityTypes();
+    const backfilled = await prisma.salesActivity.findUnique({ where: { id: first.id } });
+    check(
+      'the seed gives an activity written before the list its key, and adds no second set of built-ins',
+      seeded.created === 0 && seeded.backfilled >= 1 && backfilled?.typeKey === 'CALL',
+      JSON.stringify(seeded),
     );
 
     const early = await sendDueReminders(new Date('2031-03-02T23:00:00Z'));

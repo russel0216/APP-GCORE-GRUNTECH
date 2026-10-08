@@ -18,6 +18,7 @@ import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { groupKey } from '../shared/quotationGroups';
+import { activityTypeKey } from '../shared/activityTypes';
 import { nextNumber } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
@@ -1269,6 +1270,90 @@ referenceRoutes.delete(
       { entityType: 'quotation_group', entityId: group.id, action: 'DELETED', summary: `Deleted quotation group "${group.name}"`, before: group },
       req,
     );
+    res.json({ ok: true });
+  }),
+);
+
+// ── Activity types (2026-10-08, SCORO's customisable activity types) ─────────
+// The sales calendar's Type list as data: Admin › Categories › Activity
+// types. An activity carries the type's KEY (shared/activityTypes.ts), so a
+// rename never rewrites one. Anyone signed in may read the list: the
+// calendar's form needs it.
+
+referenceRoutes.get(
+  '/activity-types',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    const [types, used] = await Promise.all([
+      prisma.salesActivityType.findMany({ where: activeOnly ? { isActive: true } : {}, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }),
+      prisma.salesActivity.groupBy({ by: ['typeKey'], where: { typeKey: { not: null } }, _count: { _all: true } }),
+    ]);
+    const counts = new Map(used.map((u) => [u.typeKey!, u._count._all]));
+    res.json(types.map((t) => ({ ...t, activityCount: counts.get(t.key) ?? 0 })));
+  }),
+);
+
+const activityTypeSchema = z.object({
+  name: z.string().trim().min(1, 'Name the type').max(60),
+  /** #RRGGBB — the chip's edge on the calendar. */
+  color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, 'A colour is #RRGGBB').optional().nullable(),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+referenceRoutes.post(
+  '/activity-types',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(activityTypeSchema, req.body);
+    const name = body.name.replace(/\s+/g, ' ');
+    const key = activityTypeKey(name);
+    if (await prisma.salesActivityType.findUnique({ where: { key } })) throw conflict(`There is already an activity type "${name}" (${key})`);
+    const created = await prisma.salesActivityType.create({ data: { ...body, name, key } });
+    await audit({ entityType: 'activity_type', entityId: created.id, action: 'CREATED', summary: `Created activity type "${created.name}"` }, req);
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/activity-types/:id',
+  require_('admin.categories.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(activityTypeSchema.partial(), req.body);
+    const before = await prisma.salesActivityType.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Activity type not found');
+    // OTHER is where a custom type lands in the enum column, and the form's
+    // fallback — it stays on offer.
+    if (body.isActive === false && before.key === 'OTHER') throw badRequest('"Other" is the fallback type and stays active');
+    const data: Prisma.SalesActivityTypeUpdateInput = { ...body };
+    if (body.name !== undefined) data.name = body.name.replace(/\s+/g, ' ');
+    const updated = await prisma.salesActivityType.update({ where: { id: before.id }, data });
+    await audit(
+      {
+        entityType: 'activity_type',
+        entityId: updated.id,
+        action: 'UPDATED',
+        summary: before.name !== updated.name ? `Renamed activity type "${before.name}" to "${updated.name}"` : `Updated activity type "${updated.name}"`,
+        before,
+        after: updated,
+      },
+      req,
+    );
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/activity-types/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const type = await prisma.salesActivityType.findUnique({ where: { id: req.params.id } });
+    if (!type) throw notFound('Activity type not found');
+    if (type.isSystem) throw badRequest(`"${type.name}" is a built-in type — rename or deactivate it instead`);
+    const used = await prisma.salesActivity.count({ where: { typeKey: type.key } });
+    if (used > 0) throw badRequest(`${used} activit${used === 1 ? 'y is' : 'ies are'} of type "${type.name}" — deactivate it instead`);
+    await prisma.salesActivityType.delete({ where: { id: type.id } });
+    await audit({ entityType: 'activity_type', entityId: type.id, action: 'DELETED', summary: `Deleted activity type "${type.name}"`, before: type }, req);
     res.json({ ok: true });
   }),
 );
