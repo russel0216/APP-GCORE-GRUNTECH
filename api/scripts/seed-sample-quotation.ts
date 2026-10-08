@@ -148,6 +148,44 @@ async function pickOwner() {
 }
 
 /**
+ * An earlier run's 0062602018.2, left beside the live quotation: deleted when
+ * nothing hangs off it — no sales order, project, job order, pending approval
+ * or won outcome — and otherwise left with a note. The same refusals as
+ * DELETE /quotations/:id.
+ */
+async function deleteStray(id: string, actor: { actorId: string; actorName: string }) {
+  const q = await prisma.quotation.findUniqueOrThrow({
+    where: { id },
+    include: {
+      revisions: { select: { status: true, jobs: { select: { id: true } } } },
+      salesOrders: { select: { id: true } },
+      jobOrders: { select: { id: true } },
+      legacyQuote: { select: { id: true } },
+    },
+  });
+  const reasons: string[] = [];
+  if (q.outcome === 'WON') reasons.push('it is won');
+  if (q.salesOrders.length) reasons.push(`${q.salesOrders.length} sales order(s) still point at it`);
+  if (q.jobOrders.length) reasons.push('a job order points at it');
+  if (q.revisions.some((r) => r.jobs.length)) reasons.push('a project was built from it');
+  if (q.revisions.some((r) => r.status === 'PENDING_APPROVAL')) reasons.push('a revision is pending approval');
+  if (q.legacyQuote) reasons.push('it continues an archive row');
+  if (reasons.length) {
+    console.log(`${OLD_NUMBER} (an earlier sample) left on file — ${reasons.join(', ')}: /g-ops/quotations/${id}`);
+    return;
+  }
+  await prisma.$transaction(async (tx) => {
+    await tx.quotation.delete({ where: { id } });
+    await audit(
+      { entityType: 'quotation', entityId: id, action: 'DELETED', summary: `Quotation ${OLD_NUMBER} ${SUBJECT} deleted — an earlier sample beside the live ${NUMBER} (sample seed)`, ...actor },
+      undefined,
+      tx,
+    );
+  });
+  console.log(`${OLD_NUMBER} (an earlier sample) deleted`);
+}
+
+/**
  * The archive's one-way link to the live quotation, where the archive holds
  * the SCORO quote: the archive page then says "Continued in G-CORE as …",
  * and the number check lets the quotation keep the number. The archive row
@@ -334,9 +372,7 @@ async function main() {
   // an earlier run's 0062602018.2 renumbered to take its place.
   const live = await prisma.quotation.findFirst({ where: { number: { equals: NUMBER, mode: 'insensitive' } }, select: { id: true, number: true } });
   const old = await prisma.quotation.findFirst({ where: { number: { equals: OLD_NUMBER, mode: 'insensitive' } }, select: { id: true, number: true } });
-  if (live && old) {
-    console.log(`${OLD_NUMBER} (an earlier sample) is still on file beside the live ${NUMBER} — delete it from its page, /g-ops/quotations/${old.id}`);
-  }
+  if (live && old) await deleteStray(old.id, actor);
   const existing = live ?? old;
   if (existing) {
     if (existing.number !== NUMBER) {
