@@ -25,7 +25,7 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
-import { activityWhere, sendDueReminders } from '../src/shared/activities';
+import { activityEmailText, activityWhere, sendDueReminders } from '../src/shared/activities';
 import { resolveUser } from '../src/permissions/resolve';
 // Imported for its side effect: it registers the sales-activity schedule provider.
 import { scheduleFor } from '../src/routes/workspace';
@@ -371,6 +371,51 @@ async function main() {
     });
     const row = day.find((r) => r.id === actId);
     check('and in their My Work for that day, saying whose it is', !!row && (row.sub ?? '').includes(`with ${sales.name}`), JSON.stringify(row));
+
+    // ══ Going / Maybe / Not going / No reply (2026-10-08) ═══════════════════
+    console.log('\nInvitee responses');
+    const colleagueToken = signToken(colleague.id, colleague.email);
+    const notInvited = await apiSend(salesToken, 'POST', `/activities/${actId}/respond`, { response: 'ACCEPTED' });
+    check('only an invitee answers — whoever booked it has nothing to answer (403)', notInvited.status === 403, String(notInvited.status));
+    const going = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'ACCEPTED' });
+    const goingRow = (going.body.invitees as { userId: string; response: string; respondedAt: string | null }[] | undefined)?.find((i) => i.userId === colleague.id);
+    const tally = going.body.responses as { going: number; notGoing: number; maybe: number; noReply: number } | undefined;
+    check(
+      'an invitee says Going: the answer and its time are kept, and the activity tallies it',
+      going.status === 200 && goingRow?.response === 'ACCEPTED' && !!goingRow.respondedAt && tally?.going === 1 && tally.noReply === 0,
+      `${going.status} ${JSON.stringify(tally)}`,
+    );
+    const toldGoing = await prisma.notification.findFirst({
+      where: { userId: sales.id, type: 'activity.responded', title: `${colleague.name} is going: ${TAG} plant walk-through` },
+    });
+    check('and whoever booked it is told, with a link to the activity', !!toldGoing && toldGoing.link === `/g-ops/calendar?activity=${actId}&date=2031-03-03`, JSON.stringify(toldGoing));
+    check('their My Work row says what they answered', ((await scheduleFor((await resolveUser(colleague.id))!, { from: new Date('2031-03-02T16:00:00Z'), to: new Date('2031-03-03T16:00:00Z') })).find((r) => r.id === actId)?.sub ?? '').includes('(invited, going)'));
+    const declined = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'DECLINED' });
+    const afterDecline = (declined.body.responses as { going: number; notGoing: number } | undefined) ?? { going: -1, notGoing: -1 };
+    check('changing the answer moves the tally', declined.status === 200 && afterDecline.going === 0 && afterDecline.notGoing === 1, JSON.stringify(afterDecline));
+    const badAnswer = await apiSend(colleagueToken, 'POST', `/activities/${actId}/respond`, { response: 'PENDING' });
+    check('"No reply" is not an answer anyone gives (400)', badAnswer.status === 400, String(badAnswer.status));
+    const readBack = (await apiGet(salesToken, `/activities/${actId}`)).body as { invitees?: { userId: string; response: string }[]; responses?: { notGoing: number } };
+    check(
+      'the activity reads back with every answer and the tally',
+      readBack.invitees?.find((i) => i.userId === colleague.id)?.response === 'DECLINED' && readBack.responses?.notGoing === 1,
+      JSON.stringify(readBack.responses),
+    );
+    const doneAct = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} already done`,
+      startsAt: startsAt.toISOString(),
+      inviteeIds: [colleague.id],
+      status: 'DONE',
+    });
+    const lateAnswer = await apiSend(colleagueToken, 'POST', `/activities/${doneAct.body.id}/respond`, { response: 'ACCEPTED' });
+    check('an activity that is done or cancelled takes no more answers (409)', lateAnswer.status === 409, String(lateAnswer.status));
+    const mail = activityEmailText({ title: 'Invited: x', body: 'when' }, 'https://app/g-ops/calendar?activity=1&date=2031-03-03', true);
+    check(
+      'the invitation email carries Going / Not going / Maybe links that answer on opening',
+      mail.includes('Going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=ACCEPTED') &&
+        mail.includes('Not going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=DECLINED') &&
+        !activityEmailText({ title: 'Moved: x', body: 'when' }, 'https://app/x').includes('respond='),
+    );
 
     const early = await sendDueReminders(new Date('2031-03-02T23:00:00Z'));
     const due = await sendDueReminders(new Date('2031-03-03T00:30:00Z'));

@@ -64,6 +64,74 @@ button.cal-head[aria-pressed='true'] {
   margin-left: var(--s-2);
 }
 
+/* ── The activity's detailed view (2026-10-08) ───────────────────────────── */
+
+/* Label beside value, SCORO's "Quote details" way. */
+.act-rows {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--s-2) var(--s-4);
+  margin: 0 0 var(--s-4);
+}
+
+.act-rows dt {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.act-rows dd {
+  margin: 0;
+}
+
+.act-notes {
+  white-space: pre-wrap;
+}
+
+/* The answers: Going / Maybe / Not going / No reply, each a group of names. */
+.act-rsvp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+}
+
+.act-rsvp-head h4 {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+
+.act-rsvp-buttons {
+  display: inline-flex;
+  gap: var(--s-1);
+}
+
+.act-rsvp-table td:first-child {
+  white-space: nowrap;
+}
+
+.act-rsvp-group {
+  font-weight: 600;
+}
+
+.act-rsvp-group.going {
+  color: var(--ok);
+}
+
+.act-rsvp-group.not-going {
+  color: var(--danger);
+}
+
+.act-rsvp-group.maybe {
+  color: var(--warn);
+}
+
+/* The chip's tally — "✓2 ✗1 ?3" — reads without colour. */
+.cal-rsvp {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Dim while a window loads rather than unmounting the grid under the cursor. */
 .calendar-week[aria-busy='true'],
 .mcal[aria-busy='true'] {

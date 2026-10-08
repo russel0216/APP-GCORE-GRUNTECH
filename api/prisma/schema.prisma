@@ -1648,6 +1648,11 @@ model SalesActivityInvitee {
   user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// When they were told they are invited (null until the save that told them).
   notifiedAt DateTime?
+  /// Going (ACCEPTED), Maybe (TENTATIVE), Not going (DECLINED) or No reply
+  /// (PENDING) — the invitee's own answer (2026-10-08, SCORO's visual
+  /// confirmation), kept with when it was given. Only they can set it.
+  response    InviteeResponse @default(PENDING)
+  respondedAt DateTime?
   createdAt  DateTime      @default(now())
 
   @@unique([activityId, userId])

@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf, parseDay, todayLocal, weekDays } from '../../lib/day';
-import { Checkbox, ErrorBox, Field, Modal, statusTone, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDateTime, statusTone, useToast } from '../../components/ui';
 import { KIND_LABEL } from '../service/Reports';
 import {
   CalendarToolbar,
@@ -29,6 +29,13 @@ const ACTIVITY_TYPES = [
 /** Planned is the default chip; done reads as settled. Cancelled falls to statusTone's danger. */
 const ACTIVITY_TONES = { PLANNED: '', DONE: 'ok' } as const;
 
+/** An invitee's answer (InviteeResponse): PENDING is "No reply". */
+type Rsvp = 'PENDING' | 'ACCEPTED' | 'TENTATIVE' | 'DECLINED';
+const RSVP_LABEL: Record<Rsvp, string> = { ACCEPTED: 'Going', TENTATIVE: 'Maybe', DECLINED: 'Not going', PENDING: 'No reply' };
+/** The marks a chip carries — readable without colour, and without the words. */
+const RSVP_MARK: Record<Rsvp, string> = { ACCEPTED: '✓', TENTATIVE: '~', DECLINED: '✗', PENDING: '?' };
+const ANSWERS: Rsvp[] = ['ACCEPTED', 'TENTATIVE', 'DECLINED'];
+
 interface Activity {
   id: string;
   type: string;
@@ -42,7 +49,9 @@ interface Activity {
   durationMinutes: number;
   reminderMinutes: number | null;
   assignedTo: { id: string; name: string };
-  invitees: { userId: string; user: { id: string; name: string } }[];
+  invitees: { userId: string; response: Rsvp; respondedAt: string | null; user: { id: string; name: string } }[];
+  /** The API's tally of the invitees' answers. */
+  responses?: { going: number; maybe: number; notGoing: number; noReply: number };
   lead: { id: string; number: string; companyName: string } | null;
   quotation: { id: string; number: string } | null;
   customer: { id: string; name: string } | null;
@@ -53,15 +62,25 @@ interface Person {
   name: string;
 }
 
+/** "✓2 ✗1 ?3" (and "~1" only when somebody said maybe), or null with nobody invited. */
+function tallyText(a: Activity): string | null {
+  if (!a.invitees.length) return null;
+  const n = (r: Rsvp) => a.invitees.filter((i) => i.response === r).length;
+  const parts = [`✓${n('ACCEPTED')}`, `✗${n('DECLINED')}`, `?${n('PENDING')}`];
+  if (n('TENTATIVE')) parts.splice(1, 0, `~${n('TENTATIVE')}`);
+  return parts.join(' ');
+}
+
 function toEvent(a: Activity): CalendarEvent {
   const at = new Date(a.startsAt);
+  const tally = tallyText(a);
   return {
     id: a.id,
     date: dayKeyOf(at),
     sortAt: at.getTime(),
     time: at.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
     label: a.subject,
-    detail: `${a.assignedTo.name}${a.invitees.length ? ` +${a.invitees.length}` : ''}${
+    detail: `${a.assignedTo.name}${tally ? ` · ${tally}` : ''}${
       a.lead ? ` · ${a.lead.companyName}` : a.customer ? ` · ${a.customer.name}` : ''
     }`,
     tone: statusTone(a.status, ACTIVITY_TONES),
@@ -131,7 +150,7 @@ function toLocalInput(d: Date): string {
  */
 export function SalesCalendar() {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const navigate = useNavigate();
   const nav = useCalendarNav({ defaultView: 'week' });
   const [params, setParams] = useSearchParams();
@@ -146,6 +165,8 @@ export function SalesCalendar() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState<Activity | 'new' | null>(null);
+  /** The activity's detailed view (2026-10-08): clicking a chip opens this, never the form. */
+  const [viewing, setViewing] = useState<Activity | null>(null);
   const [tick, setTick] = useState(0);
 
   const { from, to, windowKey } = nav;
@@ -220,7 +241,17 @@ export function SalesCalendar() {
       return;
     }
     const a = byId.get(id);
-    if (a) setEditing(a);
+    if (a) setViewing(a);
+  }
+
+  /** After an answer, Mark done or Cancel: the window reloads and the open view reads the activity again. */
+  async function refreshViewing(id: string) {
+    setTick((t) => t + 1);
+    try {
+      setViewing(await api.get<Activity>(`/activities/${encodeURIComponent(id)}`));
+    } catch {
+      setViewing(null);
+    }
   }
 
   useEffect(() => {
@@ -241,20 +272,48 @@ export function SalesCalendar() {
     says so instead of opening nothing.
   */
   const linked = useRef<string | null>(params.get('activity'));
+  // `?respond=ACCEPTED|TENTATIVE|DECLINED` comes from the invitation email's
+  // links (2026-10-08): the answer is recorded on opening, for an invitee of
+  // a planned activity only, and the key drops out of the URL.
+  const linkedAnswer = useRef<Rsvp | null>(
+    (ANSWERS as string[]).includes(params.get('respond') ?? '') ? (params.get('respond') as Rsvp) : null,
+  );
   useEffect(() => {
     // Not consumed here: StrictMode runs this twice and cancels the first,
     // so clearing the ref would leave the second run with nothing to open.
     const id = linked.current;
     if (!id) return;
     let cancelled = false;
+    const answer = linkedAnswer.current;
     api
       .get<Activity>(`/activities/${encodeURIComponent(id)}`)
-      .then((found) => {
+      .then(async (found) => {
         if (cancelled) return;
         const day = dayKeyOf(new Date(found.startsAt));
         if (nav.view === 'week' && weekDays(nav.week).includes(day)) nav.setFocus(day);
         else nav.goToWeekOf(day);
-        setEditing(found);
+        let shown = found;
+        if (answer && found.status === 'PLANNED' && found.invitees.some((i) => i.userId === me?.user.id)) {
+          try {
+            shown = await api.post<Activity>(`/activities/${encodeURIComponent(id)}/respond`, { response: answer });
+            toast('ok', `Marked as ${RSVP_LABEL[answer].toLowerCase()}`);
+            setTick((t) => t + 1);
+          } catch {
+            toast('error', 'Your answer was not recorded — use the buttons on the activity');
+          }
+        }
+        if (cancelled) return;
+        setViewing(shown);
+        if (answer) {
+          setParams(
+            (prev) => {
+              const next = new URLSearchParams(prev);
+              next.delete('respond');
+              return next;
+            },
+            { replace: true },
+          );
+        }
       })
       .catch(() => {
         if (!cancelled) toast('error', 'That activity no longer exists');
@@ -262,17 +321,19 @@ export function SalesCalendar() {
     return () => {
       cancelled = true;
     };
-    // Once, on mount: the id is consumed and the modal owns what happens next.
+    // Once, on mount: the id is consumed and the view owns what happens next.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function closeModal() {
     setEditing(null);
-    if (params.has('activity')) {
+    setViewing(null);
+    if (params.has('activity') || params.has('respond')) {
       setParams(
         (prev) => {
           const next = new URLSearchParams(prev);
           next.delete('activity');
+          next.delete('respond');
           return next;
         },
         { replace: true },
@@ -396,12 +457,26 @@ export function SalesCalendar() {
         </div>
       )}
 
+      {viewing && !editing && (
+        <ActivityPanel
+          activity={viewing}
+          meId={me?.user.id ?? ''}
+          onClose={closeModal}
+          onModify={() => setEditing(viewing)}
+          onChanged={() => refreshViewing(viewing.id)}
+        />
+      )}
+
       {editing && (
         <ActivityModal
           activity={editing === 'new' ? null : editing}
           people={people}
           defaultStart={defaultStart}
-          onClose={closeModal}
+          onClose={() => {
+            // Back from Modify to the detailed view; a new activity's form just closes.
+            if (editing === 'new' || !viewing) closeModal();
+            else setEditing(null);
+          }}
           onSaved={() => {
             closeModal();
             setTick((t) => t + 1);
@@ -410,6 +485,221 @@ export function SalesCalendar() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * The activity's detailed view (2026-10-08, SCORO's): what, when, where, who,
+ * the records it is linked to, the notes, and the answers as a table grouped
+ * Going / Maybe / Not going / No reply with when each was given — so who is
+ * coming is read off one screen. An invitee answers here; whoever may edit
+ * the calendar modifies (the form), marks it done or cancels it.
+ */
+function ActivityPanel({
+  activity,
+  meId,
+  onClose,
+  onModify,
+  onChanged,
+}: {
+  activity: Activity;
+  meId: string;
+  onClose: () => void;
+  onModify: () => void;
+  onChanged: () => Promise<void> | void;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+
+  const mine = activity.invitees.find((i) => i.userId === meId) ?? null;
+  const planned = activity.status === 'PLANNED';
+  const start = new Date(activity.startsAt);
+  const end = new Date(activity.endsAt);
+  const when = `${formatDateTime(start)} – ${
+    dayKeyOf(start) === dayKeyOf(end) ? end.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }) : formatDateTime(end)
+  }`;
+  const n = (r: Rsvp) => activity.invitees.filter((i) => i.response === r).length;
+  const summary = [
+    `${n('ACCEPTED')} going`,
+    n('TENTATIVE') ? `${n('TENTATIVE')} maybe` : null,
+    `${n('DECLINED')} not going`,
+    `${n('PENDING')} no reply`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const groups: { key: Rsvp; cls: string }[] = [
+    { key: 'ACCEPTED', cls: 'going' },
+    { key: 'TENTATIVE', cls: 'maybe' },
+    { key: 'DECLINED', cls: 'not-going' },
+    { key: 'PENDING', cls: 'no-reply' },
+  ];
+
+  async function run(fn: () => Promise<unknown>, done: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      toast('ok', done);
+      await onChanged();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const respond = (r: Rsvp) =>
+    run(() => api.post(`/activities/${activity.id}/respond`, { response: r }), `Marked as ${RSVP_LABEL[r].toLowerCase()}`);
+  const markDone = () => run(() => api.patch(`/activities/${activity.id}`, { status: 'DONE' }), 'Marked done');
+  const cancel = () => run(() => api.patch(`/activities/${activity.id}`, { status: 'CANCELLED' }), 'Cancelled — everyone on it is told');
+
+  return (
+    <Modal
+      title={activity.subject}
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          {planned &&
+            (confirmCancel ? (
+              <>
+                <span>Cancel this activity? Everyone on it is told.</span>
+                <button type="button" className="btn btn-danger" onClick={cancel} disabled={busy}>
+                  Yes, cancel it
+                </button>
+                <button type="button" className="btn" onClick={() => setConfirmCancel(false)} disabled={busy}>
+                  Keep it
+                </button>
+              </>
+            ) : (
+              <button type="button" className="btn btn-danger" onClick={() => setConfirmCancel(true)} disabled={busy}>
+                Cancel activity
+              </button>
+            ))}
+          {planned && !confirmCancel && (
+            <button type="button" className="btn" onClick={markDone} disabled={busy}>
+              Mark done
+            </button>
+          )}
+          <div className="topbar-spacer" />
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+          <button type="button" className="btn btn-primary" onClick={onModify} disabled={busy}>
+            Modify
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      <dl className="act-rows">
+        <dt>Type</dt>
+        <dd>{ACTIVITY_TYPES.find((t) => t.value === activity.type)?.label ?? activity.type}</dd>
+        <dt>Status</dt>
+        <dd>
+          <StatusBadge status={activity.status} extra={ACTIVITY_TONES} />
+        </dd>
+        <dt>When</dt>
+        <dd>{when}</dd>
+        {activity.location && (
+          <>
+            <dt>Where</dt>
+            <dd>{activity.location}</dd>
+          </>
+        )}
+        <dt>Who</dt>
+        <dd>{activity.assignedTo.name}</dd>
+        {(activity.lead || activity.quotation || activity.customer) && (
+          <>
+            <dt>Linked to</dt>
+            <dd>
+              {activity.lead && (
+                <Link to={`/g-ops/leads/${activity.lead.id}`} onClick={onClose}>
+                  {activity.lead.number} — {activity.lead.companyName}
+                </Link>
+              )}
+              {activity.lead && activity.quotation && ' · '}
+              {activity.quotation && (
+                <Link to={`/g-ops/quotations/${activity.quotation.id}`} onClick={onClose}>
+                  {activity.quotation.number}
+                </Link>
+              )}
+              {(activity.lead || activity.quotation) && activity.customer && ' · '}
+              {activity.customer && (
+                <Link to={`/g-ops/customers/${activity.customer.id}`} onClick={onClose}>
+                  {activity.customer.name}
+                </Link>
+              )}
+            </dd>
+          </>
+        )}
+        <dt>Reminder</dt>
+        <dd>{REMINDERS.find((r) => r.value === String(activity.reminderMinutes ?? ''))?.label ?? 'No reminder'}</dd>
+        {activity.notes && (
+          <>
+            <dt>Notes</dt>
+            <dd className="act-notes">{activity.notes}</dd>
+          </>
+        )}
+      </dl>
+
+      <div className="act-rsvp-head">
+        <h4>Invited{activity.invitees.length ? ` — ${summary}` : ''}</h4>
+        {mine && planned && (
+          <div className="act-rsvp-buttons" role="group" aria-label="Your answer">
+            {ANSWERS.map((r) => (
+              <button
+                key={r}
+                type="button"
+                className={`btn btn-sm${mine.response === r ? ' btn-primary' : ''}`}
+                aria-pressed={mine.response === r}
+                disabled={busy}
+                onClick={() => respond(r)}
+              >
+                {RSVP_LABEL[r]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {activity.invitees.length === 0 ? (
+        <p className="faint">Nobody else was invited.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data act-rsvp-table">
+            <thead>
+              <tr>
+                <th>Answer</th>
+                <th>Who</th>
+                <th>Answered</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => {
+                const rows = activity.invitees.filter((i) => i.response === g.key);
+                return rows.map((i, idx) => (
+                  <tr key={i.userId}>
+                    <td>
+                      {idx === 0 && (
+                        <span className={`act-rsvp-group ${g.cls}`}>
+                          {RSVP_MARK[g.key]} {RSVP_LABEL[g.key]} ({rows.length})
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {i.user.name}
+                      {i.userId === meId && <span className="faint"> (you)</span>}
+                    </td>
+                    <td className="faint">{i.respondedAt ? formatDateTime(i.respondedAt) : '—'}</td>
+                  </tr>
+                ));
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Modal>
   );
 }
 

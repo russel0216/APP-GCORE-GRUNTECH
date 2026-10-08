@@ -260,8 +260,11 @@ registerSchedule(async (user, { from, to }) => {
       lead: { select: { companyName: true } },
       customer: { select: { name: true } },
       quotation: { select: { number: true } },
+      // The viewer's own answer to an invitation — Going / Maybe / Not going / no reply yet.
+      invitees: { where: { userId: user.id }, select: { response: true } },
     },
   });
+  const answer: Record<string, string> = { ACCEPTED: 'going', TENTATIVE: 'maybe', DECLINED: 'not going', PENDING: 'no reply yet' };
   return rows.map((r) => ({
     kind: 'activity',
     id: r.id,
@@ -274,7 +277,9 @@ registerSchedule(async (user, { from, to }) => {
       humanise(r.type),
       r.lead?.companyName ?? r.customer?.name ?? r.quotation?.number ?? null,
       r.location,
-      r.assignedToId === user.id ? null : `with ${r.assignedTo.name} (invited)`,
+      r.assignedToId === user.id
+        ? null
+        : `with ${r.assignedTo.name} (invited${r.invitees[0] ? `, ${answer[r.invitees[0].response] ?? 'no reply yet'}` : ''})`,
     ]
       .filter(Boolean)
       .join(' · '),

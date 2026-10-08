@@ -38,6 +38,8 @@ export type NotificationType =
   | 'activity.invited'
   | 'activity.updated'
   | 'activity.reminder'
+  /** An invitee answered Going / Maybe / Not going — told to whoever booked it. */
+  | 'activity.responded'
   | 'system';
 
 export interface NotifyInput {

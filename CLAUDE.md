@@ -207,8 +207,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,587 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 71, sales 422, costing 120, pipeline 86, calendar 46, numbering 46,
+**2,596 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
+masters 71, sales 422, costing 120, pipeline 86, calendar 55, numbering 46,
 partners 101, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1045,6 +1045,23 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   **Telling people is `tellAboutActivity()`**: a bell each, plus an email
   each through `shared/mail.ts` when SMTP is set, sent after the save and
   never allowed to fail it. No SMS (the owner's call).
+- **Invitees answer Going / Maybe / Not going** (2026-10-08, SCORO's visual
+  confirmation): `SalesActivityInvitee.response` (`InviteeResponse`, the
+  meeting's enum — PENDING is "No reply") and `respondedAt`. `POST
+  /activities/:id/respond { response }` is the invitee's alone (403 for
+  anyone else, 409 once the activity is done or cancelled); whoever booked
+  it is told (`activity.responded`, "Maria is going: …"). Every read with
+  invitees carries `responses: { going, maybe, notGoing, noReply }`, so a
+  chip says "✓2 ✗1 ?3" (readable without colour) and My Work's row says
+  what the viewer answered. **Clicking an activity opens its detailed
+  view** (`ActivityPanel` in `Calendar.tsx`) — what, when, where, who, the
+  links, notes, and the answers as a table grouped Going / Maybe / Not
+  going / No reply with when each answered — with the invitee's own
+  Going / Maybe / Not going buttons, and Modify (the form), Mark done and
+  Cancel; `?activity=` lands there. The invitation email carries
+  Going / Not going / Maybe links (`activityEmailText`, `respondLinks`):
+  `?respond=` on the calendar link records the answer on opening, for the
+  invitee only, then drops out of the URL.
 - **Reminders are the one thing G-CORE runs on a timer.** `reminderMinutes`
   is null, 15, 60, 120 or 1440 (`REMINDER_MINUTES`).
   `startActivityReminders()` (called from `index.ts` after `listen`, never

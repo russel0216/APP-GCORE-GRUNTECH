@@ -3225,13 +3225,84 @@ const ACTIVITY_INCLUDE = {
   lead: { select: { id: true, number: true, companyName: true } },
   quotation: { select: { id: true, number: true } },
   customer: { select: { id: true, name: true } },
-  invitees: { select: { userId: true, notifiedAt: true, user: { select: { id: true, name: true } } }, orderBy: { createdAt: 'asc' } },
+  invitees: {
+    select: { userId: true, notifiedAt: true, response: true, respondedAt: true, user: { select: { id: true, name: true } } },
+    orderBy: { createdAt: 'asc' },
+  },
 } as const;
 
-/** Every activity leaves with its end: the form asks Starts and Ends, the row stores a duration. */
-function presentActivity<A extends { startsAt: Date; durationMinutes: number }>(a: A) {
-  return { ...a, endsAt: new Date(a.startsAt.getTime() + a.durationMinutes * 60_000) };
+/**
+ * Every activity leaves with its end: the form asks Starts and Ends, the row
+ * stores a duration. One read with its invitees also leaves with the tally
+ * of their answers (2026-10-08) — Going, Maybe, Not going, No reply — so a
+ * chip can say "✓2 ✗1 ?3" without counting.
+ */
+function presentActivity<A extends { startsAt: Date; durationMinutes: number; invitees?: { response: string }[] }>(a: A) {
+  const count = (r: string) => (a.invitees ?? []).filter((i) => i.response === r).length;
+  return {
+    ...a,
+    endsAt: new Date(a.startsAt.getTime() + a.durationMinutes * 60_000),
+    ...(a.invitees
+      ? { responses: { going: count('ACCEPTED'), maybe: count('TENTATIVE'), notGoing: count('DECLINED'), noReply: count('PENDING') } }
+      : {}),
+  };
 }
+
+// ── Going / Maybe / Not going (2026-10-08, SCORO's visual confirmation) ──────
+
+const respondSchema = z.object({ response: z.enum(['ACCEPTED', 'TENTATIVE', 'DECLINED']) });
+const RESPONSE_WORD: Record<'ACCEPTED' | 'TENTATIVE' | 'DECLINED', string> = {
+  ACCEPTED: 'is going',
+  TENTATIVE: 'might come',
+  DECLINED: 'is not going',
+};
+
+/**
+ * Only the invitee answers for themselves; whoever booked it is not on the
+ * list. The answer is kept with its time, and the person who booked the
+ * activity is told — a yes as well as a no, because the table on the
+ * activity is what they read it off.
+ */
+activityRoutes.post(
+  '/:id/respond',
+  require_('gops.calendar.view_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(respondSchema, req.body);
+    const activity = await prisma.salesActivity.findUnique({
+      where: { id: req.params.id },
+      include: { invitees: { select: { id: true, userId: true, response: true } } },
+    });
+    if (!activity) throw notFound('Activity not found');
+    const mine = activity.invitees.find((i) => i.userId === me.id);
+    if (!mine) throw forbidden('You are not invited to this activity, so there is nothing to answer');
+    if (activity.status !== 'PLANNED') throw conflict('This activity is no longer open for answers');
+
+    await prisma.salesActivityInvitee.update({ where: { id: mine.id }, data: { response: body.response, respondedAt: new Date() } });
+    await audit(
+      {
+        entityType: 'sales_activity',
+        entityId: activity.id,
+        action: 'UPDATED',
+        summary: `${activity.subject}: ${me.name} ${RESPONSE_WORD[body.response]}`,
+        before: { response: mine.response },
+        after: { response: body.response },
+      },
+      req,
+    );
+    if (mine.response !== body.response && activity.assignedToId !== me.id) {
+      await notify({
+        userId: activity.assignedToId,
+        type: 'activity.responded',
+        title: `${me.name} ${RESPONSE_WORD[body.response]}: ${activity.subject}`,
+        body: activityWhen(activity),
+        link: activityLink(activity),
+      });
+    }
+    const after = await prisma.salesActivity.findUniqueOrThrow({ where: { id: activity.id }, include: ACTIVITY_INCLUDE });
+    res.json(presentActivity(after));
+  }),
+);
 
 /** One activity, for a deep link (`/g-ops/calendar?activity=<id>`). */
 activityRoutes.get(
@@ -3356,6 +3427,7 @@ activityRoutes.post(
         body: `${activityWhen(activity)}${activity.location ? ` · ${activity.location}` : ''} · from ${me.name}`,
         link: activityLink(activity),
       },
+      { respondLinks: true },
     );
     await audit(
       {
@@ -3435,12 +3507,16 @@ activityRoutes.patch(
     // Who hears about it: the newly invited; and, when it moved or was
     // cancelled, everybody already on it — except whoever made the change.
     const link = activityLink(updated);
-    await tellAboutActivity(added.filter((id) => id !== me.id), {
-      type: 'activity.invited',
-      title: `Invited: ${updated.subject}`,
-      body: `${activityWhen(updated)}${updated.location ? ` · ${updated.location}` : ''} · from ${me.name}`,
-      link,
-    });
+    await tellAboutActivity(
+      added.filter((id) => id !== me.id),
+      {
+        type: 'activity.invited',
+        title: `Invited: ${updated.subject}`,
+        body: `${activityWhen(updated)}${updated.location ? ` · ${updated.location}` : ''} · from ${me.name}`,
+        link,
+      },
+      { respondLinks: true },
+    );
     const stayed = [updated.assignedToId, ...inviteeIds.filter((id) => !added.includes(id))].filter((id) => id !== me.id);
     if (body.status === 'CANCELLED' && existing.status !== 'CANCELLED') {
       await tellAboutActivity(stayed, { type: 'activity.updated', title: `Cancelled: ${updated.subject}`, body: `${activityWhen(updated)} · by ${me.name}`, link });

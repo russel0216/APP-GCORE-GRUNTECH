@@ -80,6 +80,8 @@ export function activityLink(a: { id: string; startsAt: Date }): string {
 export async function tellAboutActivity(
   userIds: string[],
   message: { type: NotificationType; title: string; body: string; link: string },
+  /** `respondLinks`: an invitation — the email carries Going / Not going / Maybe links (2026-10-08). */
+  opts: { respondLinks?: boolean } = {},
 ): Promise<void> {
   const ids = [...new Set(userIds)];
   if (!ids.length) return;
@@ -98,7 +100,7 @@ export async function tellAboutActivity(
           to: person.email,
           toName: person.name,
           subject: message.title,
-          text: `${message.title}\n\n${message.body}\n\nOpen it in G-CORE: ${url}\n`,
+          text: activityEmailText(message, url, opts.respondLinks ?? false),
         },
         cfg,
       );
@@ -106,6 +108,19 @@ export async function tellAboutActivity(
       console.error(`Activity email to ${person.email} failed:`, err instanceof Error ? err.message : err);
     }
   }
+}
+
+/**
+ * The plain-text email about an activity. An invitation adds the answers as
+ * links: the calendar opens the activity and records the answer the link
+ * carries (`?respond=`), so "Going" is one tap from the inbox.
+ */
+export function activityEmailText(message: { title: string; body: string }, url: string, respondLinks = false): string {
+  const lines = [message.title, '', message.body, '', `Open it in G-CORE: ${url}`];
+  if (respondLinks) {
+    lines.push('', 'Let them know:', `Going: ${url}&respond=ACCEPTED`, `Not going: ${url}&respond=DECLINED`, `Maybe: ${url}&respond=TENTATIVE`);
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 /** "Thu, Oct 8, 2026, 9:00 AM – 10:30 AM", Manila time, for a notification. */
