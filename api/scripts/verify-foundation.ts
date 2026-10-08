@@ -51,6 +51,16 @@ import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } fro
 import { resolveTemplate as editorResolve, emptyFieldsIn } from '../../web/src/lib/pdfTemplate';
 import { cleanNumberText, editNumberText, formatNumberText, isPartialNumber } from '../../web/src/lib/number';
 import {
+  countActiveFilters,
+  filterKeysOf,
+  readListUrl,
+  readView,
+  saveView,
+  viewQuery,
+  writeListUrl,
+  type FilterDef,
+} from '../../web/src/lib/listUrl';
+import {
   MAX_ROWS,
   columnName,
   isSpreadsheet,
@@ -1488,6 +1498,75 @@ async function main() {
     'empty stays empty, and the edit text has no commas',
     formatNumberText('', 'money') === '' && formatNumberText(null, 'money') === '' && editNumberText('1,000.5') === '1000.5' && editNumberText(42) === '42',
   );
+
+  // ── The list pattern's URL (web/src/lib/listUrl.ts, rule 16) ───────────────
+  console.log('\nList URLs, filters and saved views');
+  {
+    const defs: FilterDef[] = [
+      { key: 'ownerId', label: 'Owner', options: [] },
+      { key: 'createdFrom', toKey: 'createdTo', label: 'Raised', type: 'dateRange' },
+      { key: 'customerId', label: 'Client', type: 'lookup', search: async () => [] },
+    ];
+    const keys = filterKeysOf(defs, { key: 'stage', options: [] });
+    check(
+      'a list owns one key per filter, two for a date range, one for its tabs',
+      keys.join(',') === 'ownerId,createdFrom,createdTo,customerId,stage',
+      keys.join(','),
+    );
+
+    const linked = new URLSearchParams('stage=COMPLETED&createdFrom=2026-03-01&new=1&visit=abc&scope=all&page=2&q=pump');
+    const read = readListUrl(linked, keys);
+    check(
+      'reading the URL takes only the list’s own keys',
+      read.q === 'pump' && read.scope === 'all' && read.page === 2 &&
+        JSON.stringify(read.filters) === JSON.stringify({ createdFrom: '2026-03-01', stage: 'COMPLETED' }),
+      JSON.stringify(read),
+    );
+
+    const written = writeListUrl(
+      linked,
+      { q: '', scope: 'mine', page: 1, active: { stage: 'LOST', ownerId: '', createdTo: '2026-03-31' } },
+      { filterKeys: keys, defaultScope: 'mine' },
+    );
+    check(
+      'writing keeps every key the list does not own, and drops its own that are off',
+      written.get('new') === '1' && written.get('visit') === 'abc' && !written.has('q') && !written.has('page') &&
+        !written.has('ownerId') && !written.has('createdFrom') && written.get('createdTo') === '2026-03-31' &&
+        written.get('stage') === 'LOST',
+      written.toString(),
+    );
+    check(
+      'the default scope is never written; the other one always is',
+      !written.has('scope') &&
+        writeListUrl(new URLSearchParams(), { q: '', scope: 'all', page: 1, active: {} }, { filterKeys: keys, defaultScope: 'mine' }).get('scope') === 'all' &&
+        !writeListUrl(new URLSearchParams(), { q: '', scope: 'all', page: 1, active: {} }, { filterKeys: keys, defaultScope: 'all' }).has('scope'),
+    );
+    check(
+      'a route’s preset stays out of the URL, a departure from it goes in',
+      !writeListUrl(new URLSearchParams(), { q: '', scope: 'all', page: 1, active: { stage: 'LOST' } }, { filterKeys: keys, defaultScope: 'all', presets: { stage: 'LOST' } }).has('stage') &&
+        writeListUrl(new URLSearchParams(), { q: '', scope: 'all', page: 1, active: { stage: 'WON' } }, { filterKeys: keys, defaultScope: 'all', presets: { stage: 'LOST' } }).get('stage') === 'WON',
+    );
+
+    const q1 = viewQuery({ q: 'pump', scope: 'all', active: { stage: 'COMPLETED', ownerId: '' } }, keys);
+    const back = readView(q1, keys, 'mine');
+    check(
+      'a saved view keeps search, scope and filters — and reads back the same',
+      back.q === 'pump' && back.scope === 'all' && JSON.stringify(back.active) === JSON.stringify({ stage: 'COMPLETED' }),
+      q1,
+    );
+    let views = saveView([], '  My   open deals ', q1);
+    views = saveView(views, 'MY OPEN DEALS', 'scope=mine');
+    views = saveView(views, '   ', 'scope=all');
+    check(
+      'saving a view of the same name replaces it, case-blind; a blank name saves nothing',
+      views.length === 1 && views[0].name === 'MY OPEN DEALS' && views[0].query === 'scope=mine',
+      JSON.stringify(views),
+    );
+    check(
+      'the Filters badge counts filters — a date range once, the tab strip never',
+      countActiveFilters({ stage: 'LOST', createdTo: '2026-03-31', createdFrom: '2026-03-01', ownerId: 'u1' }, defs) === 2,
+    );
+  }
 
   // ── Spreadsheet viewer (web/src/lib/spreadsheet*.ts) ───────────────────────
   // An attached workbook opens at /files/:id instead of downloading. The page

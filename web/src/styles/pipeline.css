@@ -342,55 +342,11 @@
   position: relative;
 }
 
-.pipe-menu {
-  position: absolute;
-  z-index: 20;
-  top: 100%;
-  left: 0;
-  min-width: 14rem;
-  margin-top: var(--s-1);
-  padding: var(--s-1);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  box-shadow: var(--shadow-md);
-}
-
-/* The page's "+ New" sits at the right edge; its menu opens leftwards. */
-.page-head .pipe-menu {
+/* The menu itself is the shared `.menu-pop` (components/Menu.tsx, styles.css).
+   The page's "+ New" sits at the right edge; its menu opens leftwards. */
+.page-head .menu-pop {
   left: auto;
   right: 0;
-}
-
-.pipe-menu [role='menuitem'] {
-  display: block;
-  width: 100%;
-  text-align: left;
-  border: 0;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  font-size: var(--fs-sm);
-  padding: var(--s-2) var(--s-3);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-decoration: none;
-}
-
-.pipe-menu [role='menuitem']:hover,
-.pipe-menu [role='menuitem']:focus-visible {
-  background: var(--surface-3);
-}
-
-.pipe-menu [role='menuitem'][aria-disabled='true'] {
-  color: var(--faint);
-  cursor: not-allowed;
-}
-
-.pipe-menu .pipe-menu-why {
-  display: block;
-  font-size: var(--fs-xs);
-  color: var(--faint);
 }
 
 /* ── Toolbar, views, customise ────────────────────────────────────────────── */

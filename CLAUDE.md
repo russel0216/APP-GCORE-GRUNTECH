@@ -83,7 +83,20 @@ four databases and four copies of "customer".
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
    holding a password hash or a cost rate.
 9. **Every list screen uses `web/src/components/DataList.tsx`.** Same toolbar,
-   same scope switch, same export, everywhere. **Every chart uses
+   same scope switch, same export, everywhere. The toolbar has two weights
+   (2026-10-08, after SCORO's list of quotes): the screen's `actions`, search,
+   Mine/All and one **Filters** button on the left; one **⋯ menu**
+   (`components/Menu.tsx`, the board's menu moved there) with Columns, Export
+   CSV, Print (`printPath`, sent the list's own query), Save view and Refresh
+   on the right. Never put a tool button back on the toolbar line. Filters open
+   in a panel and show as removable chips; a filter is a select, a
+   `dateRange` (two keys) or a `lookup` (`search` + `describe`). `tabs` draws a
+   strip over one filter key with counts from the endpoint's
+   `summary.tabCounts` (and its names from `summary.tabs` when sent);
+   `summaryLine` prints the endpoint's totals for the whole filtered set;
+   `defaultScope` is where Mine/All starts when the URL says nothing. Saved
+   views are per viewer in localStorage (`gcore_views_<listKey>`), like column
+   choices. **Every chart uses
    `web/src/components/charts.tsx`** — `Stat`, `BarList`, `Funnel`, `Donut`,
    `Meter`, `MiniBar`, `Panel`. There were three hand-rolled bars before that
    file and none of them looked alike. Two rules they hold to: a chart is
@@ -126,7 +139,10 @@ four databases and four copies of "customer".
     keeps each entry's own path.
 16. **A DataList's state lives in the URL, and only for keys it declares.**
     `?q=`, `?scope=`, `?page=` and `?<key>=` for every key in the screen's
-    `filters` are read on mount and written back with `replace`; undeclared keys
+    `filters` (both keys of a date range) and its `tabs` are read on mount and
+    written back with `replace` — the rules are `web/src/lib/listUrl.ts`,
+    DOM-free and pinned by verify-foundation; `scope` is written only when it
+    differs from `defaultScope`; undeclared keys
     (`new`, `customerId`, `visit`, `tab`…) are left untouched, so a list never
     eats another screen's deep-link parameter. The URL beats `initialFilters`,
     and a value equal to the route's preset is not written, so a preset menu
@@ -159,8 +175,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,429 assertions across twenty-two scripts** (counted 2026-10-07): foundation 222,
-masters 54, sales 328, costing 120, pipeline 71, calendar 46, numbering 46,
+**2,459 assertions across twenty-two scripts** (counted 2026-10-08): foundation 230,
+masters 54, sales 350, costing 120, pipeline 71, calendar 46, numbering 46,
 partners 82, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1589,6 +1605,52 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   and `salesOrderPrintData(order, showCost)` sends no cost cell or cost
   total — because it is the internal booking record, never the customer's
   copy (the invoice is G-FIN's).
+
+## The list of quotations (2026-10-08)
+
+SCORO's "list of quotes", on the shared list pattern (rule 9).
+
+- **The stages are tabs, with counts.** All quotes, Opportunity, Negotiation,
+  Closing, Confirmed, Completed, Lost — `quotationStages()` in
+  `shared/pipeline.ts`, the stages a quotation can stand in (never On hold),
+  named and coloured as Admin › Pipeline Stages has them and sent with the
+  list's `summary.tabs`, so a reader needs no pipeline right to see them. A
+  quotation's stage is `quotationStage(outcome, booked)` — the board's own
+  `columnFor` + `stageOfCard` — and `quotationStageWhere()` is the same rule
+  as a where-clause, built pair by pair from it, so a tab and the board can
+  never sort a quotation differently. `QUOTATION_BOOKED_WHERE` is the twin of
+  the board's `booked` (a sales order or a project); change one, change the
+  other.
+- **One query: `quotationListWhere(me, q, stages)` in `routes/sales.ts`**
+  returns `base` (everything but the stage) and `where`. The rows, the
+  printed list (`GET /quotations/pdf`, above `/:id`, audited EXPORTED with
+  entityId `list`, capped at 1,000 rows, value never cost) and
+  `quotationListSummary()` all read it: the tabs count under `base` (each tab
+  says what clicking it would show with the other filters kept, `''` is All),
+  the totals under `where`. The totals line's value is `quotationValue()`
+  summed in cents — the approved revision, never a later draft — and the
+  Total column shows the same figure. verify-sales asserts the counts add up,
+  each tab lists exactly the quotations its count says, and the summary
+  equals its rows.
+- **Filters**: owner (people holding `gops.quotations.create`, declared
+  before they load so a linked `?ownerId=` is read), client (a lookup, for
+  `gops.customers.view_all` holders), Raised (`createdFrom`/`createdTo`, a
+  timestamp: Manila midnight to midnight), Expected closing
+  (`closingFrom`/`closingTo`, a DATE: UTC-midnight edges), Revision (has a
+  draft / pending / approved revision) and Sales order (yes / no — live
+  orders only; a cancelled one books nothing). An unknown stage, a malformed
+  date or an unknown choice is a 400. The old `?outcome=` still filters.
+- **Mine for whoever may edit quotations, All for a reader** (the owner's
+  call): `defaultScope` is Mine for `edit_own`/`edit_all` holders. A link's
+  `?scope=` wins.
+- **Columns**: Number, Quotation (contact under it), Client (sorts by name),
+  Status (the stage on `StatusBadge` with `STAGE_TONES`, its name from the
+  row's `stageLabel`), Revision, Total, Margin (only for a viewer who may see
+  cost — `canSeeQuotationCost` per row, read off the value revision's lines
+  through `quotationTotals`; null when no line is costed), Owner, Closing,
+  Raised; Probability and Modified are under Columns.
+- **The leads and installed-base lists print through `printPath` too**; their
+  hand-built "Export PDF" buttons, which re-read the URL themselves, are gone.
 
 ## Quotation PDF template (2026-10-02)
 

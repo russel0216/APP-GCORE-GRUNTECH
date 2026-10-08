@@ -1075,10 +1075,11 @@ a.card:hover {
 }
 
 /*
-  The tools on the right - Columns, Export, Refresh - are the same three on
-  every screen and are never the reason someone came. They group together and,
-  on a narrow screen, take a line of their own rather than pushing the search
-  box down to 190px.
+  The toolbar has two weights (2026-10-08, after SCORO's list of quotes): what
+  somebody came for - New, search, Mine/All, Filters - on the left, and the
+  tools nobody came for - Columns, Export, Print, Save view, Refresh - folded
+  into one "..." menu at the right. Seven buttons of one weight on one line
+  was the mess.
 */
 .list-tools {
   display: flex;
@@ -1087,28 +1088,302 @@ a.card:hover {
   margin-left: auto;
 }
 
+.list-filter-button[aria-expanded='true'] {
+  border-color: var(--neon-dim);
+}
+
+.list-filter-count {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-left: var(--s-1);
+  padding: 0 var(--s-1);
+  border-radius: 999px;
+  background: rgb(var(--magenta-rgb) / 0.25);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
 @media (max-width: 720px) {
   .list-search {
     max-width: none;
   }
-  .list-tools {
-    margin-left: 0;
-    width: 100%;
-    justify-content: flex-end;
-  }
+}
+
+/* The shared small menu (components/Menu.tsx). */
+.menu-wrap {
+  position: relative;
+}
+
+.menu-pop {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  min-width: 14rem;
+  margin-top: var(--s-1);
+  padding: var(--s-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md);
+}
+
+.list-tools .menu-pop {
+  left: auto;
+  right: 0;
+}
+
+.menu-pop [role='menuitem'] {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.menu-pop [role='menuitem']:hover,
+.menu-pop [role='menuitem']:focus-visible {
+  background: var(--surface-3);
+}
+
+.menu-pop [role='menuitem'][aria-disabled='true'] {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.menu-pop .menu-pop-why {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.menu-pop [role='separator'] {
+  height: 1px;
+  margin: var(--s-1) 0;
+  background: var(--line);
 }
 
 /*
-  Filters were invisible once set: a list could be filtered to three rows with
-  nothing on screen saying why. This says how many are on and offers the way out.
+  SCORO's status bookmarks: one strip over one filter key, each tab with the
+  count it would show with every other filter kept. The colour is the stage's
+  own, through --tab-color; the number is always printed, so the strip reads
+  without colour.
 */
-.filter-note {
+.list-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.list-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+.list-tab:hover {
+  color: var(--text);
+}
+
+.list-tab[aria-pressed='true'] {
+  color: var(--text);
+  border-bottom-color: var(--tab-color, var(--neon));
+}
+
+.list-tab-dot {
+  width: 0.6em;
+  height: 0.6em;
+  border-radius: 50%;
+  background: var(--tab-color, var(--faint));
+}
+
+.list-tab-count {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.list-tab[aria-pressed='true'] .list-tab-count {
+  color: var(--muted);
+}
+
+/* The Filters panel: every filter the screen declares, in a grid. */
+.list-filter-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: var(--s-3) var(--s-4);
+  margin-bottom: var(--s-3);
+}
+
+.list-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.list-filter-field .list-chip {
+  align-self: flex-start;
+}
+
+.list-columns-panel {
+  margin-bottom: var(--s-3);
+}
+
+.list-date-range {
   display: flex;
   align-items: center;
   gap: var(--s-2);
+}
+
+.list-date-range input {
+  min-width: 0;
+  flex: 1;
+}
+
+.list-lookup {
+  position: relative;
+}
+
+.list-lookup-results {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  right: 0;
+  max-height: 16rem;
+  overflow: auto;
+  margin: var(--s-1) 0 0;
+  padding: var(--s-1);
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md);
+}
+
+.list-lookup-results button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--s-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.list-lookup-results button:hover,
+.list-lookup-results button:focus-visible {
+  background: var(--surface-3);
+}
+
+.list-lookup-results .faint {
+  padding: var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+/*
+  What narrows the list, one chip each, every one removable on its own. A
+  filtered list used to look exactly like an empty one; three rows out of four
+  hundred with nothing saying why is how people conclude data went missing.
+*/
+.list-chips,
+.list-views {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
   font-size: var(--fs-sm);
   color: var(--muted);
+}
+
+.list-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-1) var(--s-1) var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.list-chip button {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  padding: 0 var(--s-2);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.list-chip button:hover,
+.list-chip button:focus-visible {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.list-chip.view-active {
+  border-color: var(--neon-dim);
+}
+
+.list-chip .view-apply {
+  padding: 0;
+  color: var(--text);
+}
+
+.list-save-view {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
   margin-bottom: var(--s-3);
+}
+
+.list-save-view input {
+  max-width: 20rem;
+}
+
+/* The totals line: what the whole filtered set adds up to, not the page. */
+.list-totals {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s-2) var(--s-5);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-md);
+  color: var(--muted);
+}
+
+.list-totals strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 /*

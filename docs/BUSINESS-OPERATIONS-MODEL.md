@@ -812,10 +812,16 @@ overdue; the calendar is where you plan, My Work is what is due.
    view-own finds only their own. Evaluations are deliberately not searchable: a
    rating is not something a search box should surface.
 
-4. **One list pattern everywhere.** Every list screen: *Add New · Search · Filter ·
-   Columns · Export · Refresh*, with sorting, pagination, saved filters, and the
-   requirement's **View category switch (Mine / All)** and category-grouped search
-   bar. Learn it once, use it in every module. A list's search, scope, page and
+4. **One list pattern everywhere.** Every list screen has one toolbar in two
+   weights, after SCORO's list of quotes: *Add New · Search · Mine / All ·
+   Filters* on the left — the requirement's **View category switch** and the
+   things somebody came for — and one *⋯* menu on the right holding *Columns ·
+   Export · Print · Save view · Refresh*. Filters open in a panel, and every
+   filter that is on shows as a chip that can be removed on its own. A list may
+   carry a strip of tabs over one filter, each with its count (the quotation
+   list's pipeline stages), and a totals line for the whole filtered set.
+   Saved views keep a person's own search, scope and filters in their browser.
+   Learn it once, use it in every module. A list's search, scope, page and
    declared filters live in the link, so a dashboard figure can open the list
    filtered to exactly what it counted, and Back returns to the same view.
 

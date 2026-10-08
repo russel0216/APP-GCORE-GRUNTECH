@@ -3,7 +3,7 @@ import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-r
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
-import { DataList, type Column } from '../../components/DataList';
+import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
@@ -48,12 +48,24 @@ interface QuotationRow {
   number: string;
   subject: string;
   outcome: string;
+  /** The pipeline stage it stands in — the board's band, worked out by the server — and its name. */
+  stage: string;
+  stageLabel: string | null;
   probability: number;
+  expectedClosing: string | null;
   customer: { id: string; name: string };
+  contact: { id: string; name: string } | null;
   owner: { id: string; name: string };
   createdAt: string;
+  updatedAt: string;
   legacyQuote: LegacyRef | null;
+  /** `quotationValue()`: the approved revision's total, else the latest's. */
+  value: number;
+  valueRevision: { revision: number; status: string } | null;
   latest: { revision: number; status: string; total: number; updatedAt: string } | null;
+  salesOrderCount: number;
+  /** Only for a viewer who may see this quotation's cost; null otherwise or when no line is costed. */
+  margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null;
 }
 
 /** The SCORO quote a live quotation carries on, under the same number. */
@@ -63,10 +75,60 @@ interface LegacyRef {
   status: string;
 }
 
+/**
+ * A stage on the shared pill (rule 12). The colour of each stage is the
+ * administrator's (it tints the tab); the pill keeps the lifecycle tones so
+ * it reads the same as every other status in the app.
+ */
+const STAGE_TONES: Record<string, Tone> = {
+  OPPORTUNITY: '',
+  NEGOTIATION: 'warn',
+  CLOSING: 'info',
+  CONFIRMED: 'ok',
+  COMPLETED: 'ok',
+  LOST: 'danger',
+};
+
+/** SCORO's statuses, for the tabs before the list's first answer names them. */
+const STAGE_TABS = [
+  { value: 'OPPORTUNITY', label: 'Opportunity' },
+  { value: 'NEGOTIATION', label: 'Negotiation' },
+  { value: 'CLOSING', label: 'Closing' },
+  { value: 'CONFIRMED', label: 'Confirmed' },
+  { value: 'COMPLETED', label: 'Completed' },
+  { value: 'LOST', label: 'Lost' },
+];
+
+interface QuotationSummary {
+  count?: number;
+  value?: number;
+}
+
+/**
+ * The list of quotations, after SCORO's (2026-10-08): the stages as tabs with
+ * their counts, one Filters panel, the client and status in columns of their
+ * own, and a totals line that adds up the whole filtered set. The tabs, the
+ * totals and the printed list all come from the server's one list query.
+ */
 export function Quotations() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
+
+  const seesAll = can('gops.quotations.view_all');
+  // The owner's call: whoever may edit quotations opens on their own; a
+  // reader (finance, an executive) opens on all of them. A link's ?scope= wins.
+  const mayEdit = can('gops.quotations.edit_own') || can('gops.quotations.edit_all');
+  const seesCost = mayEdit || can('gops.costing.view_all');
+
+  useEffect(() => {
+    if (!seesAll) return;
+    api
+      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.quotations.create' })}`)
+      .then((people) => setOwners(people.map((p) => ({ value: p.id, label: p.name }))))
+      .catch(() => setOwners([]));
+  }, [seesAll]);
 
   /*
     `?new=1&leadId=&costingId=&customerId=` is the old hand-off to the create
@@ -92,7 +154,7 @@ export function Quotations() {
       key: 'number',
       label: 'Number',
       sortKey: 'number',
-      width: '160px',
+      width: '140px',
       render: (q) => (
         <div>
           <span className="mono">{q.number}</span>
@@ -107,9 +169,15 @@ export function Quotations() {
       render: (q) => (
         <div>
           <div>{q.subject}</div>
-          <div className="faint">{q.customer.name}</div>
+          {q.contact && <div className="faint">{q.contact.name}</div>}
         </div>
       ),
+    },
+    { key: 'customer', label: 'Client', sortKey: 'customer', render: (q) => q.customer.name },
+    {
+      key: 'stage',
+      label: 'Status',
+      render: (q) => <StatusBadge status={q.stage || q.outcome} extra={STAGE_TONES} label={q.stageLabel ?? undefined} />,
     },
     {
       key: 'revision',
@@ -127,14 +195,77 @@ export function Quotations() {
       key: 'total',
       label: 'Total',
       align: 'right',
-      render: (q) => (q.latest ? <span className="mono">{formatMoney(q.latest.total)}</span> : '—'),
+      render: (q) => (q.valueRevision ? <span className="mono">{formatMoney(q.value)}</span> : '—'),
     },
+    ...(seesCost
+      ? [
+          {
+            key: 'margin',
+            label: 'Margin',
+            align: 'right' as const,
+            render: (q: QuotationRow) =>
+              q.margin ? (
+                <span title={`${q.margin.costedLines} of ${q.margin.lineCount} lines costed`}>
+                  <span className="mono">{formatMoney(q.margin.amount)}</span>
+                  {q.margin.pct !== null && <div className="faint">{q.margin.pct}%</div>}
+                </span>
+              ) : (
+                <span className="faint">—</span>
+              ),
+          },
+        ]
+      : []),
+    { key: 'probability', label: 'Probability', sortKey: 'probability', align: 'right', optional: true, render: (q) => `${q.probability}%` },
     { key: 'owner', label: 'Owner', render: (q) => q.owner.name },
-    { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (q) => formatDate(q.createdAt) },
     {
-      key: 'outcome',
-      label: 'Outcome',
-      render: (q) => <StatusBadge status={q.outcome} extra={QUOTATION_OUTCOME_TONES} />,
+      key: 'expectedClosing',
+      label: 'Closing',
+      sortKey: 'expectedClosing',
+      render: (q) => (q.expectedClosing ? formatDate(q.expectedClosing) : <span className="faint">—</span>),
+    },
+    { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (q) => formatDate(q.createdAt) },
+    { key: 'updatedAt', label: 'Modified', sortKey: 'updatedAt', optional: true, render: (q) => formatDate(q.updatedAt) },
+  ];
+
+  const filters: FilterDef[] = [
+    // Declared before its people arrive, so a linked ?ownerId= is read on mount (rule 16).
+    ...(seesAll ? [{ key: 'ownerId', label: 'Owner', options: owners }] : []),
+    ...(can('gops.customers.view_all')
+      ? [
+          {
+            key: 'customerId',
+            label: 'Client',
+            type: 'lookup' as const,
+            placeholder: 'Type a client name or code…',
+            search: async (term: string) =>
+              (await api.get<{ id: string; code: string; name: string }[]>(`/customers/lookup${qs({ q: term })}`)).map(
+                (c) => ({ value: c.id, label: `${c.name} · ${c.code}` }),
+              ),
+            describe: async (id: string) => {
+              const c = await api.get<{ name: string; code: string }>(`/customers/${id}`);
+              return `${c.name} · ${c.code}`;
+            },
+          },
+        ]
+      : []),
+    { key: 'createdFrom', toKey: 'createdTo', label: 'Raised', type: 'dateRange' },
+    { key: 'closingFrom', toKey: 'closingTo', label: 'Expected closing', type: 'dateRange' },
+    {
+      key: 'revision',
+      label: 'Revision',
+      options: [
+        { value: 'DRAFT', label: 'Has a draft' },
+        { value: 'PENDING_APPROVAL', label: 'Pending approval' },
+        { value: 'APPROVED', label: 'Has an approved revision' },
+      ],
+    },
+    {
+      key: 'salesOrder',
+      label: 'Sales order',
+      options: [
+        { value: 'yes', label: 'Booked in a sales order' },
+        { value: 'no', label: 'No sales order yet' },
+      ],
     },
   ];
 
@@ -156,10 +287,26 @@ export function Quotations() {
         columns={columns}
         rowKey={(q) => q.id}
         scoped
-        searchPlaceholder="Search number, subject, customer…"
+        defaultScope={mayEdit ? 'mine' : 'all'}
+        searchPlaceholder="Search number, name, client, contact…"
         onRowClick={(q) => navigate(`/g-ops/quotations/${q.id}`)}
         emptyTitle="No quotations yet"
-        filters={[{ key: 'outcome', label: 'Outcome', options: OUTCOMES }]}
+        tabs={{ key: 'stage', label: 'Stages', allLabel: 'All quotes', options: STAGE_TABS }}
+        filters={filters}
+        printPath="/api/quotations/pdf"
+        summaryLine={(raw, total) => {
+          const s = raw as QuotationSummary;
+          return (
+            <>
+              <span>
+                <strong>{total}</strong> quotation{total === 1 ? '' : 's'}
+              </span>
+              <span>
+                Total value <strong>{formatMoney(s.value ?? 0)}</strong>
+              </span>
+            </>
+          );
+        }}
         actions={
           can('gops.quotations.create') ? (
             <Link className="btn btn-primary btn-sm" to="/g-ops/quotations/new">

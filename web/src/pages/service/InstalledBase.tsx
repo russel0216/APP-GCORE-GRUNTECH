@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -71,7 +71,6 @@ export interface Asset {
 export function InstalledBase() {
   const { can } = useAuth();
   const navigate = useNavigate();
-  const [params] = useSearchParams();
   const [creating, setCreating] = useState(false);
   const [reload, setReload] = useState(0);
 
@@ -201,28 +200,11 @@ export function InstalledBase() {
             ],
           },
         ]}
+        // The paper matches the screen: DataList sends the list's own query.
+        // Its "Export CSV" is the Excel-ready twin.
+        printPath="/api/installed-assets/pdf"
         actions={
           <>
-            {/* The paper matches the screen: the same q/filters the list holds in the URL.
-                The toolbar's own Export is the Excel-ready CSV twin. */}
-            <button
-              className="btn btn-sm"
-              onClick={() =>
-                openPdf(
-                  `/api/installed-assets/pdf${qs({
-                    search: params.get('q') ?? undefined,
-                    warranty: params.get('warranty') ?? undefined,
-                    uncovered: params.get('uncovered') ?? undefined,
-                    status: params.get('status') ?? undefined,
-                    sort: params.get('sort') ?? undefined,
-                    dir: params.get('dir') ?? undefined,
-                  })}`,
-                  () => {},
-                )
-              }
-            >
-              Export PDF
-            </button>
             {can('gops.installed_base.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
                 + Register equipment

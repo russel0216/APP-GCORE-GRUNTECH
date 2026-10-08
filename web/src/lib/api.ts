@@ -152,6 +152,16 @@ export interface ListResult<T> {
   page: number;
   pageSize: number;
   pageCount: number;
+  /** What the whole filtered set adds up to, where an endpoint says (the quotation list does). */
+  summary?: ListSummary;
+}
+
+/** A list endpoint's summary: `tabCounts` feeds a DataList's tab strip ('' is All); the rest is the screen's. */
+export interface ListSummary {
+  /** The tabs as the server names them — a stage renamed in Admin is renamed here. Beats the screen's own options. */
+  tabs?: { value: string; label: string; color?: string }[];
+  tabCounts?: Record<string, number>;
+  [key: string]: unknown;
 }
 
 export interface MenuSubmodule {

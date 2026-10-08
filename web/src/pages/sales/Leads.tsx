@@ -347,28 +347,10 @@ export function Leads() {
           { key: 'assignedToId', label: 'Owner', options: people.map((p) => ({ value: p.id, label: p.name })) },
           { key: 'createdById', label: 'Added by', options: people.map((p) => ({ value: p.id, label: p.name })) },
         ]}
+        // The paper matches the screen: DataList sends the list's own query.
+        printPath="/api/leads/pdf"
         actions={
           <>
-            {/* The paper matches the screen: the same q/scope/filters the list holds in the URL. */}
-            <button
-              className="btn btn-sm"
-              onClick={() =>
-                openPdf(
-                  `/api/leads/pdf${qs({
-                    search: params.get('q') ?? undefined,
-                    scope: params.get('scope') ?? undefined,
-                    status: params.get('status') ?? undefined,
-                    assignedToId: params.get('assignedToId') ?? undefined,
-                    createdById: params.get('createdById') ?? undefined,
-                    sort: params.get('sort') ?? undefined,
-                    dir: params.get('dir') ?? undefined,
-                  })}`,
-                  () => {},
-                )
-              }
-            >
-              Export PDF
-            </button>
             {can('gops.leads.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
                 + Add lead

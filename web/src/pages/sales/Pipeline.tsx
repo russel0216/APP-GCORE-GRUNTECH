@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, api, downloadBlob, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Stat } from '../../components/charts';
+import { Menu } from '../../components/Menu';
 import { NumberInput } from '../../components/NumberInput';
 import {
   Avatar,
@@ -1394,7 +1395,7 @@ function MoveMenu({
             ) : (
               <button key={o.key} role="menuitem" aria-disabled="true" onClick={(e) => e.preventDefault()}>
                 {o.label}
-                <span className="pipe-menu-why">{o.why}</span>
+                <span className="menu-pop-why">{o.why}</span>
               </button>
             ),
           )
@@ -1406,62 +1407,13 @@ function MoveMenu({
       {cannotWin && (
         <button role="menuitem" aria-disabled="true" onClick={(e) => e.preventDefault()}>
           Won
-          <span className="pipe-menu-why">Needs an approved revision — open the quotation to submit it</span>
+          <span className="menu-pop-why">Needs an approved revision — open the quotation to submit it</span>
         </button>
       )}
       <Link role="menuitem" to={card.link}>
         Open {card.kind === 'lead' ? 'lead' : 'quotation'}
       </Link>
     </Menu>
-  );
-}
-
-/**
- * A small `role=menu`: focus lands on the first item, ↑/↓ (and Home/End)
- * cycle, Escape or a click elsewhere closes it and the caller puts focus back.
- */
-function Menu({ label, onClose, children }: { label: string; onClose: () => void; children: ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const items = () => Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
-
-  useEffect(() => {
-    items()[0]?.focus();
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.parentElement?.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function onKey(e: KeyboardEvent<HTMLDivElement>) {
-    e.stopPropagation();
-    const list = items();
-    const i = list.indexOf(document.activeElement as HTMLElement);
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose();
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      list[(i + 1) % list.length]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      list[(i - 1 + list.length) % list.length]?.focus();
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      list[0]?.focus();
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      list[list.length - 1]?.focus();
-    } else if (e.key === 'Tab') {
-      onClose();
-    }
-  }
-
-  return (
-    <div ref={ref} className="pipe-menu" role="menu" aria-label={label} onKeyDown={onKey}>
-      {children}
-    </div>
   );
 }
 

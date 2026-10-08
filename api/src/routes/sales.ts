@@ -60,7 +60,16 @@ import {
   outcomeChanges,
   outcomeStages,
   type BoardResponse,
+  QUOTATION_BOOKED_WHERE,
+  QUOTATION_OUTCOME_KEYS,
+  quotationStage,
+  quotationStageCounts,
+  quotationStageWhere,
+  quotationStages,
+  quotationValue,
+  valueRevision,
 } from '../shared/pipeline';
+import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { pipelineStageOverrides, pipelineStages, stageSettingsSchema, STAGE_SETTING_KEY, DEFAULT_STAGES, mergeStages } from '../shared/pipelineStages';
 import {
   quotationTotals,
@@ -853,68 +862,332 @@ async function loadQuotation(id: string) {
   });
 }
 
+// ── The list (SCORO's "list of quotes", 2026-10-08) ──────────────────────────
+
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
+const REVISION_FILTERS = ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'] as const;
+
+/** A 'YYYY-MM-DD' filter value, or a 400 naming the filter. */
+function dayFilter(value: string | undefined, label: string): string | null {
+  if (!value) return null;
+  if (!DAY_KEY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+    throw badRequest(`${label} is a date written YYYY-MM-DD`);
+  }
+  return value;
+}
+
+/**
+ * Which quotations a list query means — ONE rule for the list, its summary
+ * (the stage tabs' counts and the totals line) and its PDF, so the paper,
+ * the tabs and the rows can never show different sets. `base` is everything
+ * but the stage; the tabs count under `base`, so each tab says what clicking
+ * it would show with the other filters kept.
+ */
+export function quotationListWhere(
+  me: ResolvedUser,
+  q: ReturnType<typeof listQuery>,
+  stages: Awaited<ReturnType<typeof pipelineStages>>,
+): { base: Prisma.QuotationWhereInput; where: Prisma.QuotationWhereInput } {
+  const and: Prisma.QuotationWhereInput[] = [];
+
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
+  if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
+
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { subject: { contains: q.search, mode: 'insensitive' } },
+        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+        { contact: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+
+  const f = q.filters;
+  if (f.outcome) {
+    if (!(QUOTATION_OUTCOME_KEYS as readonly string[]).includes(f.outcome)) throw badRequest(`Unknown outcome: ${f.outcome}`);
+    and.push({ outcome: f.outcome as (typeof QUOTATION_OUTCOME_KEYS)[number] });
+  }
+  if (f.customerId) and.push({ customerId: f.customerId });
+  if (f.ownerId) and.push({ ownerId: f.ownerId });
+
+  // Raised: a timestamp, so Manila's midnight to Manila's last instant.
+  const createdFrom = dayFilter(f.createdFrom, 'Raised from');
+  const createdTo = dayFilter(f.createdTo, 'Raised to');
+  if (createdFrom || createdTo) {
+    and.push({
+      createdAt: {
+        ...(createdFrom ? { gte: manilaDayStart(createdFrom) } : {}),
+        ...(createdTo ? { lte: manilaDayEnd(createdTo) } : {}),
+      },
+    });
+  }
+  // Expected closing: a DATE column, so UTC midnight edges of the same days.
+  const closingFrom = dayFilter(f.closingFrom, 'Closing from');
+  const closingTo = dayFilter(f.closingTo, 'Closing to');
+  if (closingFrom || closingTo) {
+    and.push({
+      expectedClosing: {
+        ...(closingFrom ? { gte: new Date(`${closingFrom}T00:00:00.000Z`) } : {}),
+        ...(closingTo ? { lte: new Date(`${closingTo}T23:59:59.999Z`) } : {}),
+      },
+    });
+  }
+  if (f.revision) {
+    if (!(REVISION_FILTERS as readonly string[]).includes(f.revision)) throw badRequest(`Unknown revision status: ${f.revision}`);
+    and.push({ revisions: { some: { status: f.revision as (typeof REVISION_FILTERS)[number] } } });
+  }
+  // Booked in a sales order still standing — the quotation page's "Booked".
+  if (f.salesOrder === 'yes') and.push({ salesOrders: { some: { status: { not: 'CANCELLED' } } } });
+  else if (f.salesOrder === 'no') and.push({ salesOrders: { none: { status: { not: 'CANCELLED' } } } });
+  else if (f.salesOrder) throw badRequest('Sales order is yes or no');
+
+  const base: Prisma.QuotationWhereInput = and.length ? { AND: and } : {};
+  if (!f.stage) return { base, where: base };
+  const stageWhere = quotationStageWhere(f.stage, stages);
+  if (!stageWhere) throw badRequest(`Unknown stage: ${f.stage}`);
+  return { base, where: { AND: [...and, stageWhere] } };
+}
+
+const QUOTATION_SORTS = ['number', 'subject', 'createdAt', 'updatedAt', 'expectedClosing', 'probability'];
+
+function quotationOrderBy(q: ReturnType<typeof listQuery>): Prisma.QuotationOrderByWithRelationInput {
+  if (q.sort === 'customer') return { customer: { name: q.dir } };
+  return orderBy(q, QUOTATION_SORTS, { createdAt: 'desc' });
+}
+
+/** What each value revision's figures need to be valued and, for those who may, costed. */
+const LIST_REVISION_SELECT = {
+  id: true,
+  revision: true,
+  status: true,
+  total: true,
+  updatedAt: true,
+  discountPct: true,
+  vatRate: true,
+  vatInclusive: true,
+} as const;
+
+/** Cents, so a sum of hundreds of totals does not drift by a centavo. */
+const toCents = (v: number) => Math.round(v * 100);
+
+/**
+ * The summary a list query carries: a count per stage under `base` (with
+ * '' for all of them), and the count and value of what `where` selects. A
+ * quotation's value is `quotationValue()` and nothing else.
+ */
+export async function quotationListSummary(
+  base: Prisma.QuotationWhereInput,
+  where: Prisma.QuotationWhereInput,
+  stages: Awaited<ReturnType<typeof pipelineStages>>,
+) {
+  const [perOutcome, bookedPerOutcome, valued] = await Promise.all([
+    prisma.quotation.groupBy({ by: ['outcome'], where: base, _count: { _all: true } }),
+    prisma.quotation.groupBy({ by: ['outcome'], where: { AND: [base, QUOTATION_BOOKED_WHERE] }, _count: { _all: true } }),
+    prisma.quotation.findMany({ where, select: { revisions: { select: { status: true, total: true, revision: true } } } }),
+  ]);
+  const flat = (rows: { outcome: string; _count: { _all: number } }[]) =>
+    rows.map((r) => ({ outcome: r.outcome, count: r._count._all }));
+  const tabCounts = quotationStageCounts(flat(perOutcome), flat(bookedPerOutcome), stages);
+  tabCounts[''] = perOutcome.reduce((t, r) => t + r._count._all, 0);
+  const valueCents = valued.reduce((t, r) => t + toCents(quotationValue(r.revisions)), 0);
+  // The tabs themselves, as Admin › Pipeline Stages names and colours them —
+  // sent with the counts so a list reader needs no pipeline right to see them.
+  const tabs = quotationStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
+  return { tabs, tabCounts, count: valued.length, value: valueCents / 100 };
+}
+
 quotationRoutes.get(
   '/',
   requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.QuotationWhereInput = {};
+    const stages = await pipelineStages();
+    const { base, where } = quotationListWhere(me, q, stages);
 
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
-    if (onlyOwn || q.scope === 'mine') where.ownerId = me.id;
-
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { subject: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
-    if (q.filters.outcome) where.outcome = q.filters.outcome as Prisma.EnumQuotationOutcomeFilter['equals'];
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    if (q.filters.ownerId) where.ownerId = q.filters.ownerId;
-
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       prisma.quotation.findMany({
         where,
         include: {
           customer: { select: { id: true, name: true } },
+          contact: { select: { id: true, name: true } },
           owner: { select: { id: true, name: true } },
           legacyQuote: { select: { id: true, number: true, status: true } },
-          revisions: {
-            orderBy: { revision: 'desc' },
-            take: 1,
-            select: { revision: true, status: true, total: true, updatedAt: true },
-          },
+          revisions: { orderBy: { revision: 'desc' }, select: { ...LIST_REVISION_SELECT, jobs: { select: { id: true }, take: 1 } } },
+          _count: { select: { salesOrders: true } },
         },
-        orderBy: orderBy(q, ['number', 'subject', 'createdAt', 'updatedAt'], { createdAt: 'desc' }),
+        orderBy: quotationOrderBy(q),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.quotation.count({ where }),
+      quotationListSummary(base, where, stages),
     ]);
 
-    res.json(
-      listResult(
-        rows.map((r) => ({
-          id: r.id,
-          number: r.number,
-          subject: r.subject,
-          outcome: r.outcome,
-          probability: r.probability,
-          customer: r.customer,
-          owner: r.owner,
-          createdAt: r.createdAt,
-          legacyQuote: r.legacyQuote,
-          latest: r.revisions[0]
-            ? { ...r.revisions[0], total: num(r.revisions[0].total) }
-            : null,
-        })),
+    // Margin, only where the caller may see this quotation's cost — the
+    // quotation's own rule — read off the value revision's lines.
+    const costed = rows
+      .filter((r) => canSeeQuotationCost(me, r.ownerId))
+      .map((r) => valueRevision(r.revisions))
+      .filter((r): r is NonNullable<typeof r> => !!r);
+    const items = costed.length
+      ? await prisma.quotationItem.findMany({
+          where: { revisionId: { in: costed.map((r) => r.id) } },
+          select: { revisionId: true, amount: true, costAmount: true, providerUserId: true, providerSupplierId: true, isHeading: true },
+        })
+      : [];
+
+    res.json({
+      ...listResult(
+        rows.map((r) => {
+          const latest = r.revisions[0] ?? null;
+          const valued = valueRevision(r.revisions);
+          const booked = r._count.salesOrders > 0 || r.revisions.some((v) => v.jobs.length > 0);
+          let margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null = null;
+          if (valued && canSeeQuotationCost(me, r.ownerId)) {
+            const t = quotationTotals({
+              lines: items.filter((i) => i.revisionId === valued.id),
+              discountPct: valued.discountPct,
+              vatRate: valued.vatRate,
+              vatInclusive: valued.vatInclusive,
+            });
+            if (t.cost.costedLines > 0) {
+              margin = {
+                amount: t.cost.totalMargin,
+                pct: t.cost.totalMarginPct,
+                costedLines: t.cost.costedLines,
+                lineCount: t.cost.lineCount,
+              };
+            }
+          }
+          return {
+            id: r.id,
+            number: r.number,
+            subject: r.subject,
+            outcome: r.outcome,
+            stage: quotationStage(r.outcome, booked, stages),
+            stageLabel: stages.find((st) => st.key === quotationStage(r.outcome, booked, stages))?.label ?? null,
+            probability: r.probability,
+            expectedClosing: r.expectedClosing,
+            customer: r.customer,
+            contact: r.contact,
+            owner: r.owner,
+            createdAt: r.createdAt,
+            updatedAt: r.updatedAt,
+            legacyQuote: r.legacyQuote,
+            value: quotationValue(r.revisions),
+            valueRevision: valued ? { revision: valued.revision, status: valued.status } : null,
+            latest: latest
+              ? { revision: latest.revision, status: latest.status, total: num(latest.total), updatedAt: latest.updatedAt }
+              : null,
+            salesOrderCount: r._count.salesOrders,
+            margin,
+          };
+        }),
         total,
         q,
       ),
+      summary,
+    });
+  }),
+);
+
+const OUTCOME_LABEL: Record<string, string> = {
+  OPEN: 'Open',
+  SUBMITTED: 'Submitted',
+  NEGOTIATION: 'Negotiation',
+  WON: 'Won',
+  LOST: 'Lost',
+};
+
+/**
+ * The quotations list on paper — the list as filtered, through
+ * `quotationListWhere`, the list's own query, so the paper never shows a
+ * different set from the screen (the leads list's rule). Prints value, never
+ * cost. Capped at 1,000 rows. Declared above `/:id`, or that route swallows it.
+ */
+quotationRoutes.get(
+  '/pdf',
+  requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const stages = await pipelineStages();
+    const { base, where } = quotationListWhere(me, q, stages);
+    const [rows, summary] = await Promise.all([
+      prisma.quotation.findMany({
+        where,
+        include: {
+          customer: { select: { name: true } },
+          owner: { select: { name: true } },
+          revisions: { select: { revision: true, status: true, total: true, jobs: { select: { id: true }, take: 1 } } },
+          _count: { select: { salesOrders: true } },
+        },
+        orderBy: quotationOrderBy(q),
+        take: 1000,
+      }),
+      quotationListSummary(base, where, stages),
+    ]);
+
+    const stageLabel = (key: string) => stages.find((s) => s.key === key)?.label ?? key;
+    const filters = [
+      q.search ? `search "${q.search}"` : null,
+      q.filters.stage ? `stage ${stageLabel(q.filters.stage)}` : null,
+      q.filters.outcome ? `outcome ${OUTCOME_LABEL[q.filters.outcome] ?? q.filters.outcome}` : null,
+      q.filters.customerId ? 'one client' : null,
+      q.filters.ownerId ? 'one owner' : null,
+      q.filters.createdFrom || q.filters.createdTo ? `raised ${q.filters.createdFrom ?? '…'} to ${q.filters.createdTo ?? '…'}` : null,
+      q.filters.closingFrom || q.filters.closingTo ? `closing ${q.filters.closingFrom ?? '…'} to ${q.filters.closingTo ?? '…'}` : null,
+      q.filters.revision ? `with a ${q.filters.revision.toLowerCase().replace(/_/g, ' ')} revision` : null,
+      q.filters.salesOrder === 'yes' ? 'with a sales order' : q.filters.salesOrder === 'no' ? 'without a sales order' : null,
+      q.scope === 'mine' ? 'mine only' : null,
+    ].filter(Boolean);
+
+    const pdf = await renderDocument({
+      title: 'Quotations',
+      date: new Date(),
+      reference: `${summary.count} quotation(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Quotation and client', 'Stage', 'Value', 'Owner', 'Raised', 'Closing'],
+          widths: [1.6, 2.5, 1.6, 1.4, 1.4, 1.35, 1.35],
+          align: ['left', 'left', 'left', 'right', 'left', 'left', 'left'],
+          rows: rows.map((r) => {
+            const booked = r._count.salesOrders > 0 || r.revisions.some((v) => v.jobs.length > 0);
+            return [
+              r.number,
+              { title: r.subject, body: r.customer.name },
+              stageLabel(quotationStage(r.outcome, booked, stages)),
+              formatAmount(quotationValue(r.revisions)),
+              r.owner.name,
+              formatShortDate(r.createdAt),
+              r.expectedClosing ? formatShortDate(r.expectedClosing) : '',
+            ];
+          }),
+        },
+        {
+          kind: 'totals',
+          rows: [{ label: 'Value, total:', value: formatMoney(summary.value), bold: true }],
+        },
+      ],
+      signatories: [],
+    });
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the quotations list as PDF (${rows.length} quotation(s))`,
+      },
+      req,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="quotations.pdf"');
+    res.send(pdf);
   }),
 );
 

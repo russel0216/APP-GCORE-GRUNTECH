@@ -642,6 +642,78 @@ export function stageOfCard(card: Pick<Card, 'column' | 'booked'>, stages: Stage
   return (card.booked ? holding[holding.length - 1] : holding[0]).key;
 }
 
+// ── A quotation's stage, as a query ──────────────────────────────────────────
+// The quotation list's stage tabs (2026-10-08, SCORO's "list of quotes") ask
+// the database what the board works out card by card. Both are built from
+// the same two functions — `columnFor` and `stageOfCard` — so a tab's count
+// and the board's band can never sort a quotation differently.
+
+export const QUOTATION_OUTCOME_KEYS = ['OPEN', 'SUBMITTED', 'NEGOTIATION', 'WON', 'LOST'] as const;
+
+/**
+ * Booked in operations: a sales order or a project from one of its revisions.
+ * The where-clause twin of `booked` in `quotationCard` (`!!job ||
+ * salesOrderCount > 0`) — change one, change the other.
+ */
+export const QUOTATION_BOOKED_WHERE: Prisma.QuotationWhereInput = {
+  OR: [{ salesOrders: { some: {} } }, { revisions: { some: { jobs: { some: {} } } } }],
+};
+
+/** The stage a quotation stands in, from its outcome and whether it is booked. */
+export function quotationStage(outcome: string, booked: boolean, stages: Stage[]): string {
+  const column = columnFor({ kind: 'quotation', outcome });
+  return column ? stageOfCard({ column, booked }, stages) : '';
+}
+
+/** The stages a quotation can stand in, in the board's order. On hold is a lead's, never a quotation's. */
+export function quotationStages(stages: Stage[]): Stage[] {
+  const reached = new Set<string>();
+  for (const outcome of QUOTATION_OUTCOME_KEYS) {
+    for (const booked of [false, true]) reached.add(quotationStage(outcome, booked, stages));
+  }
+  return stages.filter((s) => reached.has(s.key));
+}
+
+/**
+ * The quotations standing in one stage, as a where-clause: every (outcome,
+ * booked) pair `quotationStage` sends there. Null for a key that is not a
+ * quotation stage — the route answers a 400 rather than an empty list.
+ */
+export function quotationStageWhere(stageKey: string, stages: Stage[]): Prisma.QuotationWhereInput | null {
+  const parts: Prisma.QuotationWhereInput[] = [];
+  for (const outcome of QUOTATION_OUTCOME_KEYS) {
+    const plain = quotationStage(outcome, false, stages) === stageKey;
+    const booked = quotationStage(outcome, true, stages) === stageKey;
+    if (plain && booked) parts.push({ outcome });
+    else if (booked) parts.push({ AND: [{ outcome }, QUOTATION_BOOKED_WHERE] });
+    else if (plain) parts.push({ AND: [{ outcome }, { NOT: QUOTATION_BOOKED_WHERE }] });
+  }
+  if (!parts.length) return null;
+  return parts.length === 1 ? parts[0] : { OR: parts };
+}
+
+/**
+ * Per-stage counts from two group-bys: quotations per outcome, and booked
+ * quotations per outcome. Every quotation lands in exactly one stage, so the
+ * counts add up to the total — `verify-sales` asserts it.
+ */
+export function quotationStageCounts(
+  perOutcome: { outcome: string; count: number }[],
+  bookedPerOutcome: { outcome: string; count: number }[],
+  stages: Stage[],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const s of quotationStages(stages)) counts[s.key] = 0;
+  for (const { outcome, count } of perOutcome) {
+    const booked = bookedPerOutcome.find((b) => b.outcome === outcome)?.count ?? 0;
+    const plainKey = quotationStage(outcome, false, stages);
+    const bookedKey = quotationStage(outcome, true, stages);
+    if (plainKey) counts[plainKey] = (counts[plainKey] ?? 0) + (count - booked);
+    if (bookedKey) counts[bookedKey] = (counts[bookedKey] ?? 0) + booked;
+  }
+  return counts;
+}
+
 /**
  * The whole board as a pure function of what was fetched.
  *

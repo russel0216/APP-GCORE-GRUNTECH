@@ -25,6 +25,7 @@ import {
   lineAmount,
   recalcQuotationRevision,
   withdrawStaleQuotationApprovals,
+  canSeeQuotationCost,
 } from '../src/shared/quotation';
 // The quotation editor's live figures. DOM-free, so it runs here as it does in
 // the page; the checks below pin it to the server's arithmetic.
@@ -48,11 +49,16 @@ import {
   type BoardQuotation,
   groupShares,
   NO_GROUP,
+  quotationStage,
+  quotationStages,
 } from '../src/shared/pipeline';
+import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
+import { listQuery } from '../src/http/kit';
 // Imported for its side effect: this is what registers the quotation's
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
+import { quotationListSummary, quotationListWhere } from '../src/routes/sales';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
@@ -994,6 +1000,172 @@ async function main() {
     remembered === 2 && again === 0 && tradingRow?.name === `${TAG} Trading`,
     `${remembered} ${again} ${tradingRow?.name}`,
   );
+
+  // ── The list of quotations (SCORO's, 2026-10-08) ──────────────────────────
+  console.log('\nThe list of quotations: stage tabs, counts, totals, filters');
+  {
+    const LISTQ = `${TAG} LISTQ`;
+    // A list query as the route would read it from a URL.
+    const listQ = (query: Record<string, string>) =>
+      listQuery({ query: { search: LISTQ, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+    const stages = DEFAULT_STAGES;
+
+    const raise = async (
+      name: string,
+      outcome: 'OPEN' | 'SUBMITTED' | 'NEGOTIATION' | 'WON' | 'LOST',
+      revisions: { status: 'DRAFT' | 'APPROVED' | 'PENDING_APPROVAL' | 'SUPERSEDED'; total: number }[],
+      extra: Partial<Prisma.QuotationUncheckedCreateInput> = {},
+    ) =>
+      prisma.quotation.create({
+        data: {
+          number: `${TAG}-L-${name}`,
+          customerId: customer.id,
+          ownerId: sales.id,
+          subject: `${LISTQ} ${name}`,
+          outcome,
+          ...extra,
+          revisions: { create: revisions.map((r, i) => ({ revision: i, status: r.status, total: d(r.total), vatRate: d(0.12) })) },
+        },
+      });
+
+    const qOpen = await raise('open', 'OPEN', [{ status: 'DRAFT', total: 100 }]);
+    await raise('submitted', 'SUBMITTED', [{ status: 'APPROVED', total: 200 }]);
+    await raise('negotiation', 'NEGOTIATION', [{ status: 'APPROVED', total: 300 }]);
+    // Approved R0 at 400 and a draft R1 at 999: the value is the approved one.
+    const qConfirmed = await raise('confirmed', 'WON', [
+      { status: 'APPROVED', total: 400 },
+      { status: 'DRAFT', total: 999 },
+    ]);
+    const qCompleted = await raise('completed', 'WON', [{ status: 'APPROVED', total: 500 }], { ownerId: other.id });
+    await raise('lost', 'LOST', [{ status: 'APPROVED', total: 600 }]);
+    // Booked: a sales order on the completed one, and a CANCELLED order on the open one.
+    await prisma.salesOrder.create({
+      data: { number: `${TAG}-LSO1`, quotationId: qCompleted.id, customerId: customer.id, ownerId: other.id, orderDate: new Date() },
+    });
+    await prisma.salesOrder.create({
+      data: {
+        number: `${TAG}-LSO2`,
+        quotationId: qOpen.id,
+        customerId: customer.id,
+        ownerId: sales.id,
+        orderDate: new Date(),
+        status: 'CANCELLED',
+        cancelReason: 'verify',
+      },
+    });
+
+    check(
+      'a quotation stands in the board’s stages: Opportunity to Lost, never On hold',
+      quotationStages(stages).map((st) => st.key).join(',') === 'OPPORTUNITY,NEGOTIATION,CLOSING,CONFIRMED,COMPLETED,LOST',
+      quotationStages(stages).map((st) => st.key).join(','),
+    );
+    check(
+      'won and booked is Completed, won alone is Confirmed — the board’s stageOfCard',
+      quotationStage('WON', true, stages) === 'COMPLETED' && quotationStage('WON', false, stages) === 'CONFIRMED' &&
+        quotationStage('OPEN', true, stages) === 'OPPORTUNITY',
+    );
+
+    const all = quotationListWhere(superUser, listQ({}), stages);
+    const summary = await quotationListSummary(all.base, all.where, stages);
+    check('the All tab counts every quotation the search selects', summary.tabCounts[''] === 6 && summary.count === 6, JSON.stringify(summary.tabCounts));
+    const perStage = Object.entries(summary.tabCounts).filter(([k]) => k !== '');
+    check(
+      'every stage has one, and the stage counts add up to All',
+      perStage.every(([, n]) => n === 1) && perStage.reduce((t, [, n]) => t + n, 0) === summary.tabCounts[''],
+      JSON.stringify(summary.tabCounts),
+    );
+    check(
+      'the totals line is quotationValue() summed: the approved revision, never a later draft',
+      money(summary.value, 100 + 200 + 300 + 400 + 500 + 600),
+      String(summary.value),
+    );
+    check(
+      'the summary carries the tabs, named and coloured as the stages are',
+      (summary.tabs ?? []).map((t) => t.label).join(',') === 'Opportunity,Negotiation,Closing,Confirmed,Completed,Lost' &&
+        (summary.tabs ?? []).every((t) => /^#[0-9A-F]{6}$/i.test(t.color ?? '')),
+    );
+
+    let tabsAgree = true;
+    const detail: string[] = [];
+    for (const st of quotationStages(stages)) {
+      const w = quotationListWhere(superUser, listQ({ stage: st.key }), stages);
+      const rows = await prisma.quotation.findMany({
+        where: w.where,
+        select: { subject: true, outcome: true, _count: { select: { salesOrders: true } }, revisions: { select: { jobs: { select: { id: true } } } } },
+      });
+      const tabSummary = await quotationListSummary(w.base, w.where, stages);
+      const ok =
+        rows.length === summary.tabCounts[st.key] &&
+        tabSummary.count === rows.length &&
+        rows.every((r) => quotationStage(r.outcome, r._count.salesOrders > 0 || r.revisions.some((v) => v.jobs.length > 0), stages) === st.key);
+      if (!ok) {
+        tabsAgree = false;
+        detail.push(`${st.key}: ${rows.map((r) => r.subject).join('/')}`);
+      }
+    }
+    check('each tab lists exactly the quotations its count says, each standing in that stage', tabsAgree, detail.join('; '));
+
+    const completed = quotationListWhere(superUser, listQ({ stage: 'COMPLETED' }), stages);
+    const completedRows = await prisma.quotation.findMany({ where: completed.where, select: { id: true } });
+    check('a won quotation with a sales order is Completed', completedRows.length === 1 && completedRows[0].id === qCompleted.id);
+    const confirmed = quotationListWhere(superUser, listQ({ stage: 'CONFIRMED' }), stages);
+    const confirmedRows = await prisma.quotation.findMany({ where: confirmed.where, select: { id: true } });
+    check('and one without is Confirmed', confirmedRows.length === 1 && confirmedRows[0].id === qConfirmed.id);
+
+    const withSo = await prisma.quotation.findMany({ where: quotationListWhere(superUser, listQ({ salesOrder: 'yes' }), stages).where, select: { id: true } });
+    const withoutSo = await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ salesOrder: 'no' }), stages).where });
+    check(
+      '"Booked in a sales order" counts live orders only — a cancelled one books nothing',
+      withSo.length === 1 && withSo[0].id === qCompleted.id && withoutSo === 5,
+      `${withSo.length} / ${withoutSo}`,
+    );
+
+    const tabsUnderFilter = await quotationListSummary(
+      quotationListWhere(superUser, listQ({ stage: 'LOST', salesOrder: 'no' }), stages).base,
+      quotationListWhere(superUser, listQ({ stage: 'LOST', salesOrder: 'no' }), stages).where,
+      stages,
+    );
+    check(
+      'the tabs count with the other filters kept and their own stage ignored',
+      tabsUnderFilter.tabCounts[''] === 5 && tabsUnderFilter.tabCounts.COMPLETED === 0 && tabsUnderFilter.count === 1,
+      JSON.stringify(tabsUnderFilter.tabCounts),
+    );
+
+    const mine = await prisma.quotation.count({ where: quotationListWhere(salesUser, listQ({ scope: 'mine' }), stages).where });
+    const owner = await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ ownerId: other.id }), stages).where });
+    check('Mine is the caller’s own, and an owner filter is that owner’s', mine === 5 && owner === 1, `${mine} ${owner}`);
+
+    const approvedRev = await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ revision: 'APPROVED' }), stages).where });
+    const draftRev = await prisma.quotation.count({ where: quotationListWhere(superUser, listQ({ revision: 'DRAFT' }), stages).where });
+    check('"Has an approved revision" and "Has a draft" read the revisions', approvedRev === 5 && draftRev === 2, `${approvedRev} ${draftRev}`);
+
+    // Raised is a timestamp: 00:30 in Manila on the 1st belongs to the 1st, not the day before.
+    await prisma.quotation.update({ where: { id: qOpen.id }, data: { createdAt: new Date('2026-03-01T00:30:00+08:00') } });
+    const onFirst = await prisma.quotation.findMany({
+      where: quotationListWhere(superUser, listQ({ createdFrom: '2026-03-01', createdTo: '2026-03-01' }), stages).where,
+      select: { id: true },
+    });
+    const dayBefore = await prisma.quotation.count({
+      where: quotationListWhere(superUser, listQ({ createdFrom: '2026-02-28', createdTo: '2026-02-28' }), stages).where,
+    });
+    check('"Raised" runs Manila midnight to midnight — 00:30 on the 1st is the 1st', onFirst.length === 1 && onFirst[0].id === qOpen.id && dayBefore === 0);
+    // Expected closing is a DATE: the day itself, both edges included.
+    await prisma.quotation.update({ where: { id: qConfirmed.id }, data: { expectedClosing: new Date('2026-04-30T00:00:00Z') } });
+    const closing = await prisma.quotation.count({
+      where: quotationListWhere(superUser, listQ({ closingFrom: '2026-04-30', closingTo: '2026-04-30' }), stages).where,
+    });
+    check('"Expected closing" includes the day it names', closing === 1, String(closing));
+
+    let refused = 0;
+    for (const bad of [{ stage: 'HOLD' }, { stage: 'NOPE' }, { createdFrom: '30/04/2026' }, { revision: 'SUPERSEDED' }, { salesOrder: 'maybe' }]) {
+      try {
+        quotationListWhere(superUser, listQ(bad), stages);
+      } catch (err) {
+        if ((err as { status?: number }).status === 400) refused++;
+      }
+    }
+    check('an unknown stage, a malformed date or an unknown choice is a 400, not an empty list', refused === 5, `${refused} of 5`);
+  }
 
   console.log('\nDocuments');
 
@@ -2295,6 +2467,75 @@ async function main() {
 
 
     // ── Pulling a revision back from the approver to edit it ─────────────────
+    console.log('\nThe list of quotations over HTTP, and on paper');
+    {
+      const LISTQ = `${TAG} LISTQ`;
+      const listed = await http(salesToken, 'GET', `/quotations?search=${encodeURIComponent(LISTQ)}&scope=all&pageSize=50`);
+      const lSummary = listed.body.summary as { tabCounts: Record<string, number>; count: number; value: number } | undefined;
+      const lRows = (listed.body.rows ?? []) as { stage: string; stageLabel: string; value: number; margin: unknown; owner: { id: string } }[];
+      check(
+        'GET /quotations carries the summary: stage counts, count and value, matching its rows',
+        listed.status === 200 && !!lSummary && lSummary.count === lRows.length && lSummary.tabCounts[''] === lRows.length &&
+          money(lSummary.value, lRows.reduce((t, r) => t + r.value, 0)),
+        listed.text.slice(0, 200),
+      );
+      check(
+        'each row says its stage and the stage’s name',
+        lRows.length === 6 && lRows.every((r) => !!r.stage && !!r.stageLabel),
+      );
+      // A costed line on the colleague's completed quotation: its author sees
+      // the margin; another salesperson only with a right that shows cost.
+      const colleagues = await prisma.quotation.findFirstOrThrow({
+        where: { subject: `${LISTQ} completed` },
+        select: { id: true, revisions: { select: { id: true } } },
+      });
+      await prisma.quotationItem.create({
+        data: {
+          revisionId: colleagues.revisions[0].id,
+          description: `${TAG} costed line`,
+          quantity: d(1),
+          unitPrice: d(500),
+          amount: d(500),
+          unitCost: d(300),
+          costAmount: d(300),
+        },
+      });
+      const marginOf = async (token: string) => {
+        const r = await http(token, 'GET', `/quotations?search=${encodeURIComponent(`${LISTQ} completed`)}&scope=all`);
+        return ((r.body.rows ?? []) as { margin: { amount: number } | null }[])[0]?.margin ?? null;
+      };
+      const authorMargin = await marginOf(otherToken);
+      const readerMargin = await marginOf(salesToken);
+      const readerMay = canSeeQuotationCost(salesUser, other.id);
+      check(
+        'margin reaches only a reader who may see that quotation\u2019s cost',
+        !!authorMargin && money(authorMargin.amount, 200) && (readerMay ? !!readerMargin : readerMargin === null),
+        `${JSON.stringify(authorMargin)} / ${JSON.stringify(readerMargin)} (reader may: ${readerMay})`,
+      );
+      const badStage = await http(salesToken, 'GET', '/quotations?stage=NOPE');
+      check('an unknown stage is a 400 over HTTP too', badStage.status === 400, badStage.text.slice(0, 120));
+
+      const printed = await fetch(`${BASE}/quotations/pdf?search=${encodeURIComponent(LISTQ)}&scope=all&stage=COMPLETED`, {
+        headers: { Authorization: `Bearer ${salesToken}` },
+      });
+      const printedText = pdfText(Buffer.from(await printed.arrayBuffer()));
+      const printedLine = printedText.replace(/\s+/g, ' ');
+      check(
+        'the printed list is the list as filtered: the one Completed quotation, its value, the filter named',
+        printed.status === 200 &&
+          // A cell's title wraps across text runs; read it as one line.
+          printedLine.includes(`${LISTQ} completed`) &&
+          !printedLine.includes(`${LISTQ} confirmed`) &&
+          printedText.includes('500.00') &&
+          printedText.includes('stage Completed'),
+        printedText.slice(0, 300),
+      );
+      const exported = await prisma.auditLog.count({
+        where: { entityType: 'quotation', entityId: 'list', action: 'EXPORTED', actorId: sales.id },
+      });
+      check('and printing it is audited as an export', exported >= 1);
+    }
+
     console.log('\nPulling a revision back from approval');
     const pulled = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
