@@ -1,7 +1,14 @@
 /**
- * File SCORO quote 0062602018.2 (AJOYA PAMPANGA, Aboitiz Land) as a sample
- * quotation to walk the whole setup with — approve it, book a sales order,
- * win it, build the project.
+ * File SCORO quote 0062602018 (AJOYA PAMPANGA, Aboitiz Land) — an ongoing
+ * project carried over from SCORO — as a live quotation to walk the whole
+ * setup with: approve it, book a sales order, win it, build the project.
+ *
+ * The quotation takes the SCORO number itself and CONTINUES the archive row
+ * where the archive holds it (continuedQuotationId, the archive's one-way
+ * link), the way "Continue in G-CORE" does — although that button refuses a
+ * quote SCORO marked Completed. This is the owner's call for this one: the
+ * project is still running, so the live record carries the number. A
+ * quotation an earlier run filed as 0062602018.2 is renamed and linked.
  *
  *   npx tsx scripts/seed-sample-quotation.ts
  *   OWNER_EMAIL=someone@gruntech.com npx tsx scripts/seed-sample-quotation.ts
@@ -23,9 +30,12 @@ import { nextNumber } from '../src/shared/numbering';
 import { recalcQuotationRevision } from '../src/shared/quotation';
 import { rememberGroups } from '../src/shared/quotationGroups';
 import { audit } from '../src/shared/audit';
+import { LEGACY_QUOTE_ENTITY } from '../src/shared/legacyQuotes';
 import { recalcOrder } from '../src/routes/salesOrders';
 
-const NUMBER = '0062602018.2';
+const NUMBER = '0062602018';
+/** What an earlier version of this script filed it as. */
+const OLD_NUMBER = '0062602018.2';
 const SUBJECT = 'AJOYA PAMPANGA';
 const ISSUED = new Date('2026-05-26T00:00:00+08:00');
 const CLOSING = '2026-06-25';
@@ -134,6 +144,51 @@ async function pickOwner() {
   const admin = await prisma.user.findUnique({ where: { email: 'admin@gruntech.com' } });
   if (!admin) throw new Error('No owner found: set OWNER_EMAIL');
   return admin;
+}
+
+/**
+ * The archive's one-way link to the live quotation, where the archive holds
+ * the SCORO quote: the archive page then says "Continued in G-CORE as …",
+ * and the number check lets the quotation keep the number. The archive row
+ * is also pointed at the customer when the import could not match it.
+ */
+async function linkArchive(quotationId: string, actor: { actorId: string; actorName: string }) {
+  const lq = await prisma.legacyQuote.findFirst({
+    where: { number: { equals: NUMBER, mode: 'insensitive' } },
+    select: { id: true, number: true, status: true, continuedQuotationId: true, customerId: true },
+  });
+  if (!lq) {
+    console.log(`The SCORO archive does not hold ${NUMBER} here — nothing to link`);
+    return;
+  }
+  if (lq.continuedQuotationId === quotationId) {
+    console.log(`SCORO quote ${lq.number} already continued as this quotation`);
+    return;
+  }
+  if (lq.continuedQuotationId) {
+    console.log(`SCORO quote ${lq.number} is continued as another quotation — left alone`);
+    return;
+  }
+  const quotation = await prisma.quotation.findUniqueOrThrow({ where: { id: quotationId }, select: { customerId: true } });
+  await prisma.$transaction(async (tx) => {
+    const linked = await tx.legacyQuote.updateMany({
+      where: { id: lq.id, continuedQuotationId: null },
+      data: { continuedQuotationId: quotationId, ...(lq.customerId ? {} : { customerId: quotation.customerId }) },
+    });
+    if (linked.count !== 1) throw new Error('Somebody continued this quote a moment ago');
+    await audit(
+      {
+        entityType: LEGACY_QUOTE_ENTITY,
+        entityId: lq.id,
+        action: 'CONVERTED',
+        summary: `Continued in G-CORE as quotation ${NUMBER} (SCORO status ${lq.status}; ongoing project, sample seed)`,
+        ...actor,
+      },
+      undefined,
+      tx,
+    );
+  });
+  console.log(`SCORO quote ${lq.number} (${lq.status}) linked: continued in G-CORE`);
 }
 
 /**
@@ -257,11 +312,23 @@ async function main() {
   console.log(`Owner: ${owner.name} <${owner.email}>`);
 
   const existing = await prisma.quotation.findFirst({
-    where: { number: { equals: NUMBER, mode: 'insensitive' } },
-    select: { id: true },
+    where: { number: { in: [NUMBER, OLD_NUMBER], mode: 'insensitive' } },
+    select: { id: true, number: true },
   });
   if (existing) {
-    console.log(`${NUMBER} is already filed (/g-ops/quotations/${existing.id})`);
+    if (existing.number !== NUMBER) {
+      await prisma.$transaction(async (tx) => {
+        await tx.quotation.update({ where: { id: existing.id }, data: { number: NUMBER } });
+        await audit(
+          { entityType: 'quotation', entityId: existing.id, action: 'UPDATED', summary: `Quotation ${existing.number} renumbered ${NUMBER} — the SCORO number (sample seed)`, before: { number: existing.number }, after: { number: NUMBER }, ...actor },
+          undefined,
+          tx,
+        );
+      });
+      console.log(`${existing.number} renumbered ${NUMBER}`);
+    }
+    await linkArchive(existing.id, actor);
+    console.log(`${NUMBER} is filed (/g-ops/quotations/${existing.id})`);
     await seedOrders(existing.id, actor);
     return;
   }
@@ -334,13 +401,7 @@ async function main() {
       console.log(`Supplier ${gasion.code} ${gasion.name} reused`);
     }
 
-    // The number: SCORO's own unless the archive already holds it.
-    let number = NUMBER;
-    const archived = await tx.legacyQuote.findFirst({ where: { number: { equals: NUMBER, mode: 'insensitive' } } });
-    if (archived) {
-      number = await nextNumber('quotation', tx, { ownerId: owner.id });
-      console.log(`${NUMBER} is in the SCORO archive — filing as ${number} instead`);
-    }
+    const number = NUMBER;
 
     const company = await tx.company.findUnique({ where: { id: 'company' }, select: { vatRate: true } });
     const vatRate = company?.vatRate ?? d(0.12);
@@ -434,6 +495,7 @@ async function main() {
   console.log(`Quotation ${result.number} — ${SUBJECT}`);
   console.log(`  subtotal ${Number(t?.subtotal ?? 0).toLocaleString()}  VAT ${Number(t?.vatAmount ?? 0).toLocaleString()}  total ${Number(t?.total ?? 0).toLocaleString()}`);
   console.log(`  open it at /g-ops/quotations/${result.quotation.id}`);
+  await linkArchive(result.quotation.id, actor);
   await seedOrders(result.quotation.id, actor);
 }
 
