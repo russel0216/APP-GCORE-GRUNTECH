@@ -18,7 +18,6 @@ import { Stat } from '../../components/charts';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
 import { ProgressBar } from '../delivery/Projects';
-import { openPdf } from '../../lib/api';
 import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
@@ -928,24 +927,6 @@ export function PurchaseOrderDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        {po.job && (
-          <>
-            <Link to={`/g-ops/projects/${po.job.id}`}>{po.job.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        {po.request && (
-          <>
-            <Link to={`/g-chain/purchase-requests/${po.request.id}`}>{po.request.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        <Link to="/g-chain/purchase-orders">Purchase Orders</Link>
-        <span className="sep">›</span>
-        <span className="mono">{po.number}</span>
-      </div>
-
       <RecordHeader
         type="Purchase Order"
         code={po.number}
@@ -953,21 +934,36 @@ export function PurchaseOrderDetail() {
         status={po.status}
         amount={formatMoney(po.total)}
         amountLabel="Order total"
+        meta={
+          <>
+            <Link to={`/g-chain/suppliers/${po.supplier.id}`}>{po.supplier.name}</Link> ·{' '}
+            {po.job ? (
+              <Link to={`/g-ops/projects/${po.job.id}`}>
+                {po.job.number} — {po.job.name}
+              </Link>
+            ) : (
+              `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
+            )}
+            {po.request && (
+              <>
+                {' '}
+                · from <Link to={`/g-chain/purchase-requests/${po.request.id}`}>{po.request.number}</Link>
+              </>
+            )}{' '}
+            · ordered {formatDate(po.orderDate)}
+            {po.deliveryDate ? ` · required by ${formatDate(po.deliveryDate)}` : ''}
+            {po.fromCanvass && (
+              <>
+                {' '}
+                · awarded on <Link to={`/g-chain/canvass/${po.fromCanvass.id}`}>{po.fromCanvass.number}</Link>
+              </>
+            )}
+          </>
+        }
         actions={
           <>
-            <button
-              className="btn"
-              onClick={() => openPdf(`/api/purchase-orders/${po.id}/pdf`, () => toast('error', 'Could not print'))}
-            >
-              Print
-            </button>
-            {po.canEdit && (
-              <button className="btn" onClick={() => setModifying(true)}>
-                Modify
-              </button>
-            )}
             {isDraft && can('gchain.purchase_orders.create') && po.items.length > 0 && (
-              <button className="btn btn-ok" onClick={submit}>
+              <button className="btn btn-primary" onClick={submit}>
                 Submit for approval
               </button>
             )}
@@ -979,26 +975,9 @@ export function PurchaseOrderDetail() {
               )}
           </>
         }
+        print={`/api/purchase-orders/${po.id}/pdf`}
+        modify={po.canEdit ? () => setModifying(true) : undefined}
       />
-
-      <p className="record-head-meta proc-meta">
-        <Link to={`/g-chain/suppliers/${po.supplier.id}`}>{po.supplier.name}</Link> ·{' '}
-        {po.job ? (
-          <Link to={`/g-ops/projects/${po.job.id}`}>
-            {po.job.number} — {po.job.name}
-          </Link>
-        ) : (
-          `Stock replenishment${po.warehouse ? ` for ${po.warehouse.name}` : ''}`
-        )}{' '}
-        · ordered {formatDate(po.orderDate)}
-        {po.deliveryDate ? ` · required by ${formatDate(po.deliveryDate)}` : ''}
-        {po.fromCanvass && (
-          <>
-            {' '}
-            · awarded on <Link to={`/g-chain/canvass/${po.fromCanvass.id}`}>{po.fromCanvass.number}</Link>
-          </>
-        )}
-      </p>
 
       <DocumentApproval documentType="purchase_order" documentId={po.id} reloadToken={reload} />
 

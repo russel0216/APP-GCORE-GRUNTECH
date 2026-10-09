@@ -115,11 +115,19 @@ export const api = {
  * pass it that way, and changing the convention would have meant touching
  * every print button for nothing.
  */
-export function openPdf(path: string, onError: () => void): void {
+export function openPdf(path: string, onError: (message: string) => void): void {
   fetch(path, { headers: { Authorization: `Bearer ${getToken()}` } })
-    .then((r) => r.blob())
+    .then(async (r) => {
+      // A refusal is JSON, not a PDF. Opening it would show the person a tab
+      // of raw JSON and never tell them why; say the server's reason instead.
+      if (!r.ok) {
+        const body = (await r.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `The PDF could not be opened (${r.status})`);
+      }
+      return r.blob();
+    })
     .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-    .catch(onError);
+    .catch((err: unknown) => onError(err instanceof Error ? err.message : ''));
 }
 
 /**

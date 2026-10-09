@@ -134,21 +134,50 @@ export function Empty({
 
 // ── Modal ────────────────────────────────────────────────────────────────────
 
+/*
+  Open modals, innermost last. Escape and the Tab trap belong to the top one
+  only: a modal opened from inside another (the employee's Evaluations tab
+  opens the schedule form) used to close BOTH on one Escape, because each
+  listened on the window for itself.
+*/
+const modalStack: number[] = [];
+let modalSeq = 0;
+
 export function Modal({
   title,
   onClose,
   children,
   footer,
   wide,
+  guard = true,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  /**
+   * Ask before Escape, a click outside or ✕ throws away what was typed
+   * (2026-10-09). On by default: the modal notices any change to a field
+   * inside it. The Cancel button is a deliberate choice and never asks.
+   */
+  guard?: boolean;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const [myId] = useState(() => ++modalSeq);
+  const [askDiscard, setAskDiscard] = useState(false);
+  const dirty = useRef(false);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const askRef = useRef(askDiscard);
+  askRef.current = askDiscard;
+
+  /** Close, unless something was changed — then ask first. */
+  const attemptClose = useCallback(() => {
+    if (guard && dirty.current) setAskDiscard(true);
+    else closeRef.current();
+  }, [guard]);
 
   /**
    * A dialog has to hold focus. Without this, Tab walked straight out of the
@@ -160,6 +189,7 @@ export function Modal({
    * page behind stops scrolling under the cursor.
    */
   useEffect(() => {
+    modalStack.push(myId);
     const restoreTo = document.activeElement as HTMLElement | null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -176,9 +206,18 @@ export function Modal({
     const first = focusable();
     (first.find((el) => !el.hasAttribute('aria-label')) ?? first[0])?.focus();
 
+    const markDirty = () => {
+      dirty.current = true;
+    };
+    const node = panel.current;
+    node?.addEventListener('input', markDirty);
+    node?.addEventListener('change', markDirty);
+
     const onKey = (e: KeyboardEvent) => {
+      if (modalStack[modalStack.length - 1] !== myId) return;
       if (e.key === 'Escape') {
-        onClose();
+        if (askRef.current) setAskDiscard(false);
+        else attemptClose();
         return;
       }
       if (e.key !== 'Tab') return;
@@ -194,13 +233,17 @@ export function Modal({
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = previousOverflow;
+      node?.removeEventListener('input', markDirty);
+      node?.removeEventListener('change', markDirty);
+      const at = modalStack.lastIndexOf(myId);
+      if (at >= 0) modalStack.splice(at, 1);
+      if (modalStack.length === 0) document.body.style.overflow = previousOverflow;
       restoreTo?.focus?.();
     };
-  }, [onClose]);
+  }, [myId, attemptClose]);
 
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && attemptClose()}>
       <div
         ref={panel}
         className={`modal${wide ? ' modal-wide' : ''}`}
@@ -213,16 +256,112 @@ export function Modal({
           <button
             type="button"
             className="btn btn-ghost btn-sm"
-            onClick={onClose}
+            onClick={attemptClose}
             aria-label="Close"
           >
             ✕
           </button>
         </div>
         <div className="modal-body">{children}</div>
+        {askDiscard && (
+          <div className="modal-discard" role="alert">
+            <span>Close without saving? What you changed in this form is lost.</span>
+            <button type="button" className="btn btn-sm" autoFocus onClick={() => setAskDiscard(false)}>
+              Keep editing
+            </button>
+            <button type="button" className="btn btn-sm btn-danger" onClick={() => closeRef.current()}>
+              Discard changes
+            </button>
+          </div>
+        )}
         {footer && <div className="modal-foot">{footer}</div>}
       </div>
     </div>
+  );
+}
+
+/**
+ * Every modal's foot, in one order (2026-10-09, the owner's call: buttons in
+ * the same place everywhere):
+ *
+ *   [Delete]                                   [Cancel]  [Save]
+ *
+ * The destructive action — only on a record that is edited in this modal and
+ * has no page of its own (an item, a category, a role) — sits alone on the
+ * left in red and asks in the foot before it acts. Cancel is always "Cancel"
+ * and closes without asking. The children are the primary button(s), last.
+ */
+export function ModalFoot({
+  onCancel,
+  cancelLabel = 'Cancel',
+  danger,
+  children,
+}: {
+  onCancel: () => void;
+  /** "Close" only on a modal with nothing to save. */
+  cancelLabel?: string;
+  danger?: {
+    label: string;
+    /** The question, e.g. "Delete this item? It cannot be undone." */
+    question: string;
+    onConfirm: () => Promise<unknown> | unknown;
+    disabled?: boolean;
+    /** Why it is disabled, as the button's tooltip. */
+    disabledReason?: string;
+  };
+  children?: ReactNode;
+}) {
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function go() {
+    if (!danger || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await danger.onConfirm();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That did not go through.');
+      setBusy(false);
+    }
+  }
+
+  if (asking && danger) {
+    return (
+      <>
+        <span className="modal-foot-question" role="alert">
+          {danger.question}
+          {error && <span className="modal-foot-error">{error}</span>}
+        </span>
+        <button type="button" className="btn" autoFocus disabled={busy} onClick={() => setAsking(false)}>
+          Keep it
+        </button>
+        <button type="button" className="btn btn-danger" disabled={busy} onClick={() => void go()}>
+          {busy ? 'Working…' : danger.label}
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {danger && (
+        <button
+          type="button"
+          className="btn btn-danger modal-foot-start"
+          disabled={danger.disabled}
+          title={danger.disabled ? danger.disabledReason : undefined}
+          onClick={() => setAsking(true)}
+        >
+          {danger.label}
+        </button>
+      )}
+      <button type="button" className="btn" onClick={onCancel}>
+        {cancelLabel}
+      </button>
+      {children}
+    </>
   );
 }
 

@@ -4906,17 +4906,132 @@ a.icon-row:hover {
   font-size: var(--fs-md);
 }
 
-/* The one way back from a record to its list — drawn by Shell, never per page.
-   It joins the header's own button row, so it takes that row's size. */
-.back-slot {
-  display: contents;
-}
-.page-head > .back-slot {
-  display: flex;
-  align-items: center;
-}
-.back-fallback {
+/* ─────────────── Back, confirm, the ⋯ menu, leaving (2026-10-09) ───────────────
+   One grammar for every record page: "← Back to …" alone on the first line
+   (Shell), then the header with its buttons in a fixed order — next steps,
+   Print, ⋯, Modify — and the confirm bar under it. See components/Navigation,
+   RecordHeader and Confirm. */
+.back-row {
   margin-bottom: var(--s-3);
+}
+
+.back-link {
+  color: var(--muted);
+}
+
+.back-link:hover {
+  color: var(--text);
+}
+
+.record-head-more .menu-pop {
+  left: auto;
+  right: 0;
+}
+
+.menu-pop [role='menuitem'].menu-danger {
+  color: var(--danger);
+}
+
+.menu-pop [role='menuitem'].menu-danger:hover,
+.menu-pop [role='menuitem'].menu-danger:focus-visible {
+  background: rgb(var(--danger-rgb) / 0.1);
+}
+
+.confirm-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid rgb(var(--danger-rgb) / 0.45);
+  border-radius: var(--radius-sm);
+  background: rgb(var(--danger-rgb) / 0.07);
+}
+
+.confirm-bar.confirm-primary {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.confirm-bar-text {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.confirm-bar-body {
+  margin-top: var(--s-1);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.confirm-bar-reason {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.confirm-bar-error {
+  flex: 1 1 100%;
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+.confirm-bar-actions {
+  display: flex;
+  gap: var(--s-2);
+  margin-left: auto;
+}
+
+.modal-foot-start {
+  margin-right: auto;
+}
+
+.modal-foot-question {
+  margin-right: auto;
+  align-self: center;
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+.modal-foot-error {
+  display: block;
+  color: var(--muted);
+}
+
+.modal-discard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-5);
+  border-top: 1px solid rgb(var(--warn-rgb) / 0.4);
+  background: rgb(var(--warn-rgb) / 0.07);
+  color: var(--warn);
+  font-size: var(--fs-sm);
+}
+
+.modal-discard > span {
+  margin-right: auto;
+}
+
+.leave-bar {
+  position: fixed;
+  left: 50%;
+  bottom: var(--s-5);
+  transform: translateX(-50%);
+  z-index: 70;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  max-width: calc(100vw - 2 * var(--s-4));
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid rgb(var(--warn-rgb) / 0.5);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-md);
+  color: var(--warn);
+  font-size: var(--fs-sm);
 }
 
 /* "Nothing yet" for a section of a record page, where a full empty state

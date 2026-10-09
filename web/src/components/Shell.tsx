@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api, qs, SHIPPED_PHASE, type ListResult } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -7,6 +6,7 @@ import { CommandPalette } from './CommandPalette';
 import { Avatar, relativeTime } from './ui';
 import { Icon, sectionIcon } from './Icon';
 import { LayoutEditor } from './LayoutEditor';
+import { NavigationProvider, type BackTarget, type NavigationApi } from './Navigation';
 
 interface Notification {
   id: string;
@@ -155,55 +155,65 @@ export function Shell() {
     activeSub && location.pathname.startsWith(`${activeSub.path}/`) ? activeSub : null;
 
   /*
-    It sits with the page's own buttons — Edit, Mark complete — rather than on
-    a line of its own above the title. The page draws that row, so Shell finds
-    it once the page has rendered and puts the button in with a portal. A page
-    whose header has no buttons gets it at the header's right edge; a page with
-    no header at all keeps it above the content, where it was.
+    A page may name a better way back than its menu entry's list — an editor
+    goes back to its record, a progress report to its project — through
+    `useBackLink` (components/Navigation.tsx). The latest one set wins.
   */
-  const mainRef = useRef<HTMLElement | null>(null);
-  const [backSlot, setBackSlot] = useState<HTMLElement | null>(null);
-  const [noHeader, setNoHeader] = useState(false);
-  useEffect(() => {
-    setBackSlot(null);
-    setNoHeader(false);
-    const main = mainRef.current;
-    if (!backTo || !main) return;
-    let current: HTMLElement | null = null;
-    const place = () => {
-      if (current?.isConnected) return;
-      const head = main.querySelector<HTMLElement>('.page-head, .record-head');
-      if (!head) return;
-      const actions = head.querySelector<HTMLElement>(
-        ':scope > .row, :scope .record-head-actions',
-      );
-      const slot = document.createElement('span');
-      slot.className = 'back-slot';
-      if (actions) actions.prepend(slot);
-      else head.append(slot);
-      current = slot;
-      setBackSlot(slot);
-      setNoHeader(false);
-    };
-    place();
-    const observer = new MutationObserver(place);
-    observer.observe(main, { childList: true, subtree: true });
-    // Still nothing once the page has had time to load: no header to join.
-    const timer = window.setTimeout(() => {
-      if (!current?.isConnected) setNoHeader(true);
-    }, 800);
-    return () => {
-      observer.disconnect();
-      window.clearTimeout(timer);
-      current?.remove();
-    };
-  }, [backTo?.path, location.pathname]);
+  const [backOverrides, setBackOverrides] = useState<{ owner: string; target: BackTarget }[]>([]);
+  /* Pages holding unsaved changes (`useUnsavedChanges`), and the link a person
+     clicked while one did — held until they choose to leave or stay. */
+  const dirtyOwners = useRef(new Set<string>());
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
 
-  const backLink = backTo && (
-    <Link className="btn back-link" to={backTo.path}>
-      ← Back to {backTo.label}
-    </Link>
+  const navApi = useMemo<NavigationApi>(
+    () => ({
+      setBack: (owner, target) =>
+        setBackOverrides((list) => {
+          const rest = list.filter((o) => o.owner !== owner);
+          return target ? [...rest, { owner, target }] : rest;
+        }),
+      setDirty: (owner, dirty) => {
+        if (dirty) dirtyOwners.current.add(owner);
+        else dirtyOwners.current.delete(owner);
+      },
+    }),
+    [],
   );
+
+  // A link clicked anywhere in the app while a page holds unsaved changes is
+  // stopped before the router sees it (capture phase, on the document) and
+  // asked about in the leave bar. New tabs, downloads and hash links pass.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (dirtyOwners.current.size === 0) return;
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const anchor = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+      if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return;
+      const href = anchor.getAttribute('href') ?? '';
+      if (!href.startsWith('/') || href.startsWith('//')) return;
+      if (href === location.pathname + location.search) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPendingHref(href);
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [location.pathname, location.search]);
+
+  // Moving on by any other way (a save that navigates) drops the question.
+  useEffect(() => {
+    setPendingHref(null);
+  }, [location.pathname]);
+
+  const back = backOverrides.length ? backOverrides[backOverrides.length - 1].target : backTo ? { to: backTo.path, label: backTo.label } : null;
+  const backLink = back && (
+    <div className="back-row">
+      <Link className="btn btn-sm back-link" to={back.to}>
+        ← Back to {back.label}
+      </Link>
+    </div>
+  );
+
 
   /**
    * The sidebar, cut into the headings the registry declares.
@@ -596,11 +606,32 @@ export function Shell() {
             on. Without it a nudge to "the second card in the first panel"
             would follow you onto every other page that happens to have one.
           */}
-          <main ref={mainRef} className="content" id="content" tabIndex={-1} data-route={location.pathname}>
-            {backLink && backSlot && createPortal(backLink, backSlot)}
-            {backLink && !backSlot && noHeader && <div className="back-fallback">{backLink}</div>}
-            <Outlet />
+          <main className="content" id="content" tabIndex={-1} data-route={location.pathname}>
+            <NavigationProvider value={navApi}>
+              {backLink}
+              <Outlet />
+            </NavigationProvider>
           </main>
+          {pendingHref && (
+            <div className="leave-bar" role="alertdialog" aria-label="Unsaved changes">
+              <span>You have changes that are not saved.</span>
+              <button
+                type="button"
+                className="btn btn-sm btn-danger"
+                onClick={() => {
+                  const to = pendingHref;
+                  dirtyOwners.current.clear();
+                  setPendingHref(null);
+                  navigate(to);
+                }}
+              >
+                Leave without saving
+              </button>
+              <button type="button" className="btn btn-sm" autoFocus onClick={() => setPendingHref(null)}>
+                Keep editing
+              </button>
+            </div>
+          )}
 
           <LayoutEditor />
         </div>
