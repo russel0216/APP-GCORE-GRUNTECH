@@ -451,6 +451,7 @@ salesOrderRoutes.get(
     ].filter(Boolean);
 
     const pdf = await renderDocument({
+      style: 'quote',
       title: 'Sales Orders',
       date: new Date(),
       reference: `${summary.count} order(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,

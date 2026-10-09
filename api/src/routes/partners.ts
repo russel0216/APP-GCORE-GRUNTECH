@@ -209,6 +209,7 @@ partnerRoutes.get(
     const kinds = (r: (typeof rows)[number], k: string) => String(r.resources.filter((x) => x.kind === k).length);
 
     const pdf = await renderDocument({
+      style: 'quote',
       title: 'Partners',
       date: new Date(),
       reference: `${summary.count} partner(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,

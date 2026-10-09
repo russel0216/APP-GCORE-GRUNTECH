@@ -77,7 +77,26 @@ four databases and four copies of "customer".
    every page, a running header after page one, no Conforme); table figures
    are `formatAmount`, because the currency is named in the head and the
    total. Every other document stays on the house style, which is code — see
-   "Quotation PDF template" below.
+   "Quotation PDF template" below. **The house engine has two dresses**
+   (2026-10-09, the owner's call: "pattern other PDF output to the quote
+   template — focus only on G-OPS"): `renderDocument({ style: 'quote', … })`
+   prints the SAME sections in the Quotation_Template's dress — 36pt
+   margins, the letterhead top-left (logo, the company in purple capitals,
+   its details), the document's name in purple and its number in green
+   top-right, a green rule, purple section titles and table heads on white
+   over light rules, green subheading rows, side-by-side sign-offs (role in
+   purple, name in bold, position, contact, the date or "Pending"), the
+   strapline centred in green along the foot, "Page n of m" on a multi-page
+   document and a running header from page two. Every G-OPS printout asks
+   for it — job order, CAD J.O., costing (its Gantt appendix included),
+   lead, progress report and billing, budget request, installed base, and
+   the printed lists of leads, quotations, sales orders, customers and
+   partners. G-CHAIN, G-FIN and G-HR paper stays on `house` (the default):
+   14pt margins, the document naming itself top-left, the company block in
+   the footer, slate heads, one-line sign-offs. The dress is `T`, a module
+   `Theme` set at the top of `renderDocument` before any drawing (all of
+   which is synchronous), never a parameter threaded through every helper;
+   verify-foundation renders one of each and measures the margin.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything

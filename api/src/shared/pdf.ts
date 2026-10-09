@@ -137,6 +137,18 @@ export interface PdfDocumentSpec {
   signatories?: Signatory[];
   /** Small print above the page number. */
   footerNote?: string;
+  /**
+   * The dress (2026-10-09, the owner's call: "pattern other PDF output to
+   * the quote template — focus only on G-OPS"). `house` is the internal
+   * paperwork (P00340, REQ-00073): 14pt margins, the document naming itself
+   * top-left, the company block in the footer, slate table heads, one-line
+   * sign-offs. `quote` is the Quotation_Template's dress for G-OPS: 36pt
+   * margins, the letterhead top-left with the document and its number in
+   * purple and green top-right, purple heads and green subheadings on light
+   * rules, side-by-side sign-offs, the strapline along the foot. The
+   * sections a module supplies are the same either way.
+   */
+  style?: 'house' | 'quote';
 }
 
 /**
@@ -179,8 +191,75 @@ interface Layout {
 
 const HOUSE: Layout = { left: MARGIN, right: MARGIN, footerTop: FOOTER_TOP, size: 9, padX: 8, padTop: 7, padRow: 14 };
 
-const usableWidth = (doc: PDFKit.PDFDocument) => doc.page.width - HOUSE.left - HOUSE.right;
-const contentBottom = (doc: PDFKit.PDFDocument) => doc.page.height - HOUSE.footerTop - 24;
+/** A dress: the page's measurements and its colours, named once. */
+interface Theme extends Layout {
+  name: 'house' | 'quote';
+  ink: string;
+  muted: string;
+  rule: string;
+  /** The band behind a table head, or null for head text on white over a rule. */
+  headBg: string | null;
+  headInk: string;
+  shade: string;
+  bar: string;
+  barStrong: string;
+  /** Section titles and the document's name. */
+  accent: string;
+  /** Subheadings, the number, the strapline. */
+  accent2: string;
+}
+
+const HOUSE_THEME: Theme = {
+  name: 'house',
+  ...HOUSE,
+  ink: INK,
+  muted: MUTED,
+  rule: RULE,
+  headBg: HEAD_BG,
+  headInk: HEAD_INK,
+  shade: SHADE,
+  bar: BAR,
+  barStrong: HEAD_BG,
+  accent: INK,
+  accent2: INK,
+};
+
+/**
+ * The Quotation_Template's dress (shared/quotationTemplate.ts): 36pt margins,
+ * purple #5B2A8C heads, green #2E9A4B subheadings and number, light #D9D9D9
+ * rules — for the G-OPS paper, so a job order reads like the quotation it
+ * follows.
+ */
+const QUOTE_THEME: Theme = {
+  name: 'quote',
+  left: 36,
+  right: 36,
+  footerTop: FOOTER_TOP,
+  size: 9,
+  padX: 6,
+  padTop: 6,
+  padRow: 12,
+  ink: '#222222',
+  muted: '#666666',
+  rule: '#D9D9D9',
+  headBg: null,
+  headInk: '#5B2A8C',
+  shade: '#F3EFF7',
+  bar: '#D9CCE6',
+  barStrong: '#5B2A8C',
+  accent: '#5B2A8C',
+  accent2: '#2E9A4B',
+};
+
+/**
+ * The dress of the document being drawn. Set at the top of renderDocument,
+ * before any drawing; everything from there to doc.end() is synchronous, so
+ * two documents rendering at once never read each other's dress.
+ */
+let T: Theme = HOUSE_THEME;
+
+const usableWidth = (doc: PDFKit.PDFDocument) => doc.page.width - T.left - T.right;
+const contentBottom = (doc: PDFKit.PDFDocument) => doc.page.height - T.footerTop - 24;
 
 /** A section that stands on landscape pages of its own after the signed body: the Gantt chart. */
 const isAppendix = (s: PdfSection) => s.kind === 'gantt' && !!s.landscape;
@@ -194,9 +273,10 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   const spec = safeSpec(input);
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
   const company = row && safeCompany(row);
+  T = spec.style === 'quote' ? QUOTE_THEME : HOUSE_THEME;
   const doc = new PDFDocument({
     size: 'A4',
-    margins: { top: MARGIN, bottom: 64, left: MARGIN, right: MARGIN },
+    margins: { top: T.left, bottom: 64, left: T.left, right: T.right },
     bufferPages: true,
     info: {
       Title: spec.documentNumber ? `${spec.documentNumber} — ${spec.title}` : spec.title,
@@ -420,8 +500,12 @@ export function footerTagline(
  * letterhead is what you check afterwards.
  */
 function drawHeader(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
-  const right = doc.page.width - MARGIN;
-  const top = MARGIN + 6;
+  if (T.name === 'quote') {
+    drawLetterhead(doc, spec, company);
+    return;
+  }
+  const right = doc.page.width - T.left;
+  const top = T.left + 6;
 
   if (company?.logoPath && fs.existsSync(company.logoPath)) {
     try {
@@ -432,16 +516,16 @@ function drawHeader(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Com
   }
 
   // "Purchase Request No. GT-PR-2026-0042" — one line, the way it is spoken.
-  doc.fillColor(INK).font('Helvetica-Bold').fontSize(13);
+  doc.fillColor(T.ink).font('Helvetica-Bold').fontSize(13);
   doc.text(
     spec.documentNumber ? `${spec.title} No. ${spec.documentNumber}` : spec.title,
-    MARGIN,
+    T.left,
     top,
-    { width: right - MARGIN - 170 },
+    { width: right - T.left - 170 },
   );
 
-  doc.font('Helvetica').fontSize(10).fillColor(INK);
-  doc.text(formatDate(spec.date ?? new Date()), MARGIN, doc.y + 3, { width: 300 });
+  doc.font('Helvetica').fontSize(10).fillColor(T.ink);
+  doc.text(formatDate(spec.date ?? new Date()), T.left, doc.y + 3, { width: 300 });
 
   // Bold label, regular value, on one line each — as on the reference.
   const meta: [string, string][] = [];
@@ -449,17 +533,93 @@ function drawHeader(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Com
   if (spec.reference) meta.push(['Reference:', spec.reference]);
   for (const [label, value] of meta) {
     const y = doc.y + 3;
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(T.ink);
     // Wraps inside the space left of the logo, and the next line starts below
     // however many lines it took — a long reference used to overprint what
     // followed it.
-    doc.text(label, MARGIN, y, { width: right - MARGIN - 170, continued: true });
+    doc.text(label, T.left, y, { width: right - T.left - 170, continued: true });
     doc.font('Helvetica').text(` ${value}`);
     doc.y = Math.max(doc.y, y + 13);
   }
 
   // Clear of the logo whatever the header ran to.
   doc.y = Math.max(doc.y, top + 58) + 12;
+}
+
+/**
+ * The Quotation_Template's letterhead, for the G-OPS paper: the logo top-left
+ * with the company name in purple capitals beside it and its details under
+ * that; the document's name top-right in purple with the number in green under
+ * it; a green rule; then the date, the reference and the revision in bold.
+ */
+function drawLetterhead(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Company) {
+  const left = T.left;
+  const right = doc.page.width - T.right;
+  const top = 30;
+  const logoW = 72;
+  const titleW = 240;
+  const titleX = right - titleW;
+  const textX = left + logoW + 9;
+  const textW = titleX - textX - 10;
+
+  let drewLogo = false;
+  if (company?.logoPath && fs.existsSync(company.logoPath)) {
+    try {
+      doc.image(company.logoPath, left, top, { fit: [logoW, logoW] });
+      drewLogo = true;
+    } catch {
+      /* a broken logo must never stop a document printing */
+    }
+  }
+  const nameX = drewLogo ? textX : left;
+  const nameW = drewLogo ? textW : titleX - left - 10;
+
+  doc.font('Helvetica-Bold').fontSize(15).fillColor(T.accent);
+  doc.text((company?.name ?? '').toUpperCase(), nameX, top + 7, { width: nameW, height: 18, ellipsis: true, lineBreak: false });
+  const join = (parts: string[], sep = ' | ') => parts.filter((p) => p.trim()).join(sep);
+  const lines = [
+    join([company?.address ?? '', [company?.city, company?.country].filter(Boolean).join(', ')], ', '),
+    join([company?.phone ? `Tel No.: ${company.phone}` : '', company?.fax ? `Fax No.: ${company.fax}` : '', company?.email ? `Email: ${company.email}` : '']),
+    company?.website ? `Website: ${company.website}` : '',
+    join([company?.tin ? `TIN: ${company.tin}` : '', company?.regNo ? `REG NO: ${company.regNo}` : '']),
+  ].filter((l) => l.trim());
+  doc.font('Helvetica').fontSize(7.5).fillColor(T.ink);
+  let y = top + 27.5;
+  for (const line of lines) {
+    // A line wraps onto a second when it must (Tel | Fax | Email), never a third.
+    const h = Math.min(20, Math.max(10, doc.heightOfString(line, { width: nameW, lineGap: 1 })));
+    doc.text(line, nameX, y, { width: nameW, height: h, ellipsis: true, lineGap: 1 });
+    y += h;
+  }
+
+  // The document's name, as large as fits the right-hand block.
+  const title = spec.title.toUpperCase();
+  let size = 24;
+  doc.font('Helvetica-Bold');
+  while (size > 13 && doc.fontSize(size).widthOfString(title) > titleW) size -= 1;
+  doc.fontSize(size).fillColor(T.accent).text(title, titleX, top - 4 + (24 - size) / 2, { width: titleW, align: 'right', lineBreak: false });
+  if (spec.documentNumber) {
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(T.accent2);
+    doc.text(`# ${spec.documentNumber}`, titleX, top + 32, { width: titleW, align: 'right', lineBreak: false });
+  }
+
+  const ruleY = Math.max(top + logoW + 12, y + 8, 114);
+  doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(T.accent2).lineWidth(1.5).stroke();
+
+  // Date, reference, revision — bold, as the quotation's DETAILS block.
+  doc.y = ruleY + 12;
+  const meta: [string, string][] = [['Date:', formatDate(spec.date ?? new Date())]];
+  if (spec.reference) meta.push(['Reference:', spec.reference]);
+  if (spec.revision) meta.push(['Revision:', spec.revision]);
+  for (const [label, value] of meta) {
+    const lineY = doc.y;
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(T.ink);
+    doc.text(label, left, lineY, { width: right - left, continued: true });
+    doc.font('Helvetica').text(` ${value}`);
+    doc.y = Math.max(doc.y, lineY + 13);
+  }
+  doc.x = left;
+  doc.y += 6;
 }
 
 function sectionTitle(doc: PDFKit.PDFDocument, title?: string) {
@@ -470,12 +630,12 @@ function sectionTitle(doc: PDFKit.PDFDocument, title?: string) {
   // own content — cramped on the page, and close enough to merge with it when
   // the PDF is parsed by anything that groups text into lines.
   doc.y += 10;
-  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(title.toUpperCase(), HOUSE.left, doc.y);
+  doc.font('Helvetica-Bold').fontSize(T.name === 'quote' ? 8.5 : 9.5).fillColor(T.accent).text(title.toUpperCase(), T.left, doc.y);
   doc.y += 7;
 }
 
 function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
-  const L = HOUSE;
+  const L = T;
   switch (section.kind) {
     case 'spacer':
       doc.y += section.height ?? 12;
@@ -487,7 +647,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       doc
         .moveTo(L.left, y)
         .lineTo(doc.page.width - L.right, y)
-        .strokeColor(RULE)
+        .strokeColor(T.rule)
         .lineWidth(0.75)
         .stroke();
       doc.x = L.left;
@@ -498,7 +658,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
     case 'text':
       sectionTitle(doc, section.title);
       ensureSpace(doc, 40);
-      doc.font('Helvetica').fontSize(L.size).fillColor(INK);
+      doc.font('Helvetica').fontSize(L.size).fillColor(T.ink);
       doc.text(section.body, L.left, doc.y, {
         width: usableWidth(doc),
         align: 'justify',
@@ -523,11 +683,11 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
             : 'Helvetica';
         const opts = { width: usableWidth(doc), lineGap: 1 };
         if (line.label) {
-          doc.font('Helvetica-Bold').fontSize(size).fillColor(INK).text(`${line.label} `, L.left, doc.y, { ...opts, continued: true });
+          doc.font('Helvetica-Bold').fontSize(size).fillColor(T.ink).text(`${line.label} `, L.left, doc.y, { ...opts, continued: true });
           // A space, never an empty string: PDFKit leaves a continued line open on ''.
           doc.font(font).text(line.text || ' ');
         } else {
-          doc.font(font).fontSize(size).fillColor(INK).text(line.text, L.left, doc.y, opts);
+          doc.font(font).fontSize(size).fillColor(T.ink).text(line.text, L.left, doc.y, opts);
         }
       }
       doc.x = L.left;
@@ -541,10 +701,10 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       const drawParty = (p: PdfParty, x: number, w: number): number => {
         let y = top;
         if (p.name) {
-          doc.font('Helvetica-Bold').fontSize(12).fillColor(INK).text(p.name, x, y, { width: w });
+          doc.font('Helvetica-Bold').fontSize(12).fillColor(T.ink).text(p.name, x, y, { width: w });
           y = doc.y + 1;
         }
-        doc.font('Helvetica').fontSize(L.size).fillColor(INK);
+        doc.font('Helvetica').fontSize(L.size).fillColor(T.ink);
         for (const line of p.lines ?? []) {
           if (!line.trim()) continue;
           doc.text(line, x, y, { width: w });
@@ -561,7 +721,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       // The labelled lines sit level with each other, below whichever side ran longer.
       const labelled = (p: PdfParty | undefined, x: number, w: number): number => {
         if (!p?.label) return below;
-        doc.font('Helvetica-Bold').fontSize(L.size).fillColor(INK).text(`${p.label} `, x, below, { width: w, continued: true });
+        doc.font('Helvetica-Bold').fontSize(L.size).fillColor(T.ink).text(`${p.label} `, x, below, { width: w, continued: true });
         doc.font('Helvetica').text(p.value || ' ');
         return doc.y;
       };
@@ -589,9 +749,12 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
           doc.addPage();
           y = doc.y;
         }
-        doc.font(row.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(L.size).fillColor(INK);
+        doc.font(row.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(L.size).fillColor(row.bold ? T.accent : T.ink);
         doc.text(row.label, L.left, y, { width: labelRight - L.left - L.padX, align: 'right', lineBreak: false });
         doc.text(row.value, labelRight, y, { width: valueWidth - L.padX, align: 'right', lineBreak: false });
+        if (T.name === 'quote') {
+          doc.moveTo(labelRight - 120, y + step - 4).lineTo(right, y + step - 4).strokeColor(row.bold ? T.accent : T.rule).lineWidth(row.bold ? 1.5 : 0.5).stroke();
+        }
         y += step;
       }
       doc.x = L.left;
@@ -618,9 +781,9 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
           rowHeight = 0;
         }
         const x = L.left + col * colWidth;
-        doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED);
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(T.muted);
         doc.text(field.label.toUpperCase(), x, rowTop, { width: colWidth - 10 });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(INK);
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(T.ink);
         doc.text(field.value || '—', x, doc.y + 1, { width: colWidth - 10 });
         rowHeight = Math.max(rowHeight, doc.y - rowTop);
         col = (col + 1) % cols;
@@ -698,7 +861,7 @@ function drawGantt(
   doc: PDFKit.PDFDocument,
   section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string },
 ) {
-  const L = HOUSE;
+  const L = T;
   const newPage = () => {
     if (section.landscape) doc.addPage({ size: 'A4', layout: 'landscape', margins: doc.page.margins });
     else doc.addPage();
@@ -724,8 +887,12 @@ function drawGantt(
     ensureSpace(doc, 60);
     const top = doc.y;
     const height = 20;
-    doc.rect(L.left, top, usable, height).fill(HEAD_BG);
-    doc.fillColor(HEAD_INK).font('Helvetica-Bold').fontSize(7.5);
+    if (T.headBg) doc.rect(L.left, top, usable, height).fill(T.headBg);
+    else {
+      doc.moveTo(L.left, top).lineTo(L.left + usable, top).strokeColor(T.rule).lineWidth(0.75).stroke();
+      doc.moveTo(L.left, top + height).lineTo(L.left + usable, top + height).strokeColor(T.rule).lineWidth(0.75).stroke();
+    }
+    doc.fillColor(T.headInk).font('Helvetica-Bold').fontSize(7.5);
     const cells: [string, number, number, 'left' | 'right'][] = [
       ['TASK', L.left, colTask, 'left'],
       ['START', L.left + colTask, colStart, 'left'],
@@ -744,9 +911,9 @@ function drawGantt(
 
   const gridLines = (top: number, height: number) => {
     for (let day = 1; day <= total; day += step) {
-      doc.moveTo(dayX(day), top).lineTo(dayX(day), top + height).strokeColor(RULE).lineWidth(0.4).stroke();
+      doc.moveTo(dayX(day), top).lineTo(dayX(day), top + height).strokeColor(T.rule).lineWidth(0.4).stroke();
     }
-    doc.moveTo(L.left, top + height).lineTo(L.left + usable, top + height).strokeColor(RULE).lineWidth(0.5).stroke();
+    doc.moveTo(L.left, top + height).lineTo(L.left + usable, top + height).strokeColor(T.rule).lineWidth(0.5).stroke();
   };
 
   const fits = (height: number) => {
@@ -762,14 +929,14 @@ function drawGantt(
     // A phase goes over with its first task, never alone at the foot of a page.
     fits(groupH + (group.tasks.length ? 18 : 0));
     const gTop = doc.y;
-    doc.rect(L.left, gTop, usable, groupH).fill(SHADE);
-    doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
+    doc.rect(L.left, gTop, usable, groupH).fill(T.shade);
+    doc.font('Helvetica-Bold').fontSize(size).fillColor(T.ink);
     doc.text(group.name, L.left + 5, gTop + 5, { width: colTask - 10, height: size + 2, ellipsis: true, lineGap: 0 });
     // The phase's own span — over its tasks, or its planned days when it has
     // none (a costing phased without tasks still has a schedule to show).
     const span = groupSpan(group);
     if (span) {
-      doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
+      doc.font('Helvetica-Bold').fontSize(size).fillColor(T.ink);
       doc.text(`Day ${span.from}`, L.left + colTask + 5, gTop + 5, { width: colStart - 10, lineBreak: false });
       doc.text(`Day ${span.to}`, L.left + colTask + colStart + 5, gTop + 5, { width: colEnd - 10, lineBreak: false });
       doc.text(String(span.to - span.from + 1), L.left + colTask + colStart + colEnd + 5, gTop + 5, {
@@ -777,7 +944,7 @@ function drawGantt(
         align: 'right',
         lineBreak: false,
       });
-      doc.roundedRect(dayX(span.from), gTop + 6, (span.to - span.from + 1) * dayW, 5, 2).fill(HEAD_BG);
+      doc.roundedRect(dayX(span.from), gTop + 6, (span.to - span.from + 1) * dayW, 5, 2).fill(T.barStrong);
     }
     gridLines(gTop, groupH);
     doc.y = gTop + groupH;
@@ -789,7 +956,7 @@ function drawGantt(
       fits(rowH);
       const top = doc.y;
       const end = task.start + Math.max(task.days, 1) - 1;
-      doc.font('Helvetica').fontSize(size).fillColor(INK);
+      doc.font('Helvetica').fontSize(size).fillColor(T.ink);
       doc.text(task.name, L.left + 14, top + 4, { width: colTask - 20 });
       const mid = top + rowH / 2 - size / 2 + 0.5;
       doc.text(`Day ${task.start}`, L.left + colTask + 5, mid, { width: colStart - 10, lineBreak: false });
@@ -800,9 +967,9 @@ function drawGantt(
         lineBreak: false,
       });
       const barW = Math.max(task.days, 1) * dayW;
-      doc.roundedRect(dayX(task.start) + 0.5, top + rowH / 2 - 5, Math.max(barW - 1, 2), 10, 2).fill(BAR);
+      doc.roundedRect(dayX(task.start) + 0.5, top + rowH / 2 - 5, Math.max(barW - 1, 2), 10, 2).fill(T.bar);
       const label = `${task.days}d`;
-      doc.font('Helvetica').fontSize(6.5).fillColor(INK);
+      doc.font('Helvetica').fontSize(6.5).fillColor(T.ink);
       if (doc.widthOfString(label) + 4 <= barW) {
         doc.text(label, dayX(task.start) + 2.5, top + rowH / 2 - 3, { lineBreak: false });
       }
@@ -815,8 +982,8 @@ function drawGantt(
     ensureSpace(doc, 20);
     doc.y += 6;
     const y = doc.y;
-    doc.rect(L.left, y + 1, 9, 6).fill(BAR);
-    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED).text(section.legend, L.left + 14, y, { width: usable - 14 });
+    doc.rect(L.left, y + 1, 9, 6).fill(T.bar);
+    doc.font('Helvetica').fontSize(7.5).fillColor(T.muted).text(section.legend, L.left + 14, y, { width: usable - 14 });
   }
   doc.x = L.left;
   doc.y += 6;
@@ -833,25 +1000,30 @@ function drawTableHead(
   widths: number[],
   align: ('left' | 'right' | 'center')[],
 ) {
-  const L = HOUSE;
+  const L = T;
   ensureSpace(doc, 44);
   const top = doc.y;
 
   // 24pt and white on slate, as measured off the reference documents. A taller
   // band reads as a header rather than as a slightly shaded first row.
   const height = 24;
-  doc.rect(L.left, top, sum(widths), height).fill(HEAD_BG);
-  doc.fillColor(HEAD_INK).font('Helvetica-Bold').fontSize(8.5);
+  if (T.headBg) doc.rect(L.left, top, sum(widths), height).fill(T.headBg);
+  else {
+    // The quotation's head: purple text on white, a rule above and a rule under.
+    doc.moveTo(L.left, top).lineTo(L.left + sum(widths), top).strokeColor(T.rule).lineWidth(0.75).stroke();
+    doc.moveTo(L.left, top + height).lineTo(L.left + sum(widths), top + height).strokeColor(T.rule).lineWidth(0.75).stroke();
+  }
+  doc.fillColor(T.headInk).font('Helvetica-Bold').fontSize(8.5);
   let x = L.left;
   head.forEach((cell, i) => {
-    doc.text(cell.toUpperCase(), x + 8, top + 8, { width: widths[i] - 16, align: align[i] });
+    doc.text(T.headBg ? cell.toUpperCase() : cell, x + L.padX, top + 8, { width: widths[i] - L.padX * 2, align: align[i] });
     x += widths[i];
   });
   doc.y = top + height;
 }
 
 function cellHeight(doc: PDFKit.PDFDocument, cell: PdfCell, width: number): number {
-  const size = HOUSE.size;
+  const size = T.size;
   if (typeof cell === 'object' && cell !== null) {
     doc.font('Helvetica-Bold').fontSize(size);
     const title = doc.heightOfString(cell.title || ' ', { width });
@@ -863,7 +1035,7 @@ function cellHeight(doc: PDFKit.PDFDocument, cell: PdfCell, width: number): numb
 }
 
 function rowHeight(doc: PDFKit.PDFDocument, row: PdfRow, widths: number[]): number {
-  const L = HOUSE;
+  const L = T;
   if (isHeading(row)) {
     doc.font('Helvetica-Bold').fontSize(L.size);
     return doc.heightOfString(row.heading || ' ', { width: sum(widths) - L.padX * 2 }) + L.padRow;
@@ -877,7 +1049,7 @@ function rowHeight(doc: PDFKit.PDFDocument, row: PdfRow, widths: number[]): numb
 
 /** The light hairline under a row. */
 function rowRule(doc: PDFKit.PDFDocument, y: number, widths: number[]) {
-  doc.moveTo(HOUSE.left, y).lineTo(HOUSE.left + sum(widths), y).strokeColor(RULE).lineWidth(0.5).stroke();
+  doc.moveTo(T.left, y).lineTo(T.left + sum(widths), y).strokeColor(T.rule).lineWidth(0.5).stroke();
 }
 
 function drawHeadingRow(
@@ -886,14 +1058,14 @@ function drawHeadingRow(
   widths: number[],
   height: number,
 ) {
-  const L = HOUSE;
+  const L = T;
   const top = doc.y;
   const total = sum(widths);
-  if (row.shade) doc.rect(L.left, top, total, height).fill(SHADE);
+  if (row.shade) doc.rect(L.left, top, total, height).fill(T.shade);
   doc
     .font('Helvetica-Bold')
     .fontSize(L.size)
-    .fillColor(INK)
+    .fillColor(T.accent2)
     .text(row.heading, L.left + L.padX, top + L.padTop, { width: total - L.padX * 2 });
   rowRule(doc, top + height, widths);
   doc.y = top + height;
@@ -906,9 +1078,9 @@ function drawTableRow(
   align: ('left' | 'right' | 'center')[],
   height: number,
 ) {
-  const L = HOUSE;
+  const L = T;
   const top = doc.y;
-  const ink = INK;
+  const ink = T.ink;
   doc.font('Helvetica').fontSize(L.size).fillColor(ink);
   let x = L.left;
   row.forEach((cell, i) => {
@@ -949,7 +1121,11 @@ function drawTableRow(
 function drawSignoffs(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
   const people = signatories ?? [];
   if (!people.length) return;
-  const L = HOUSE;
+  if (T.name === 'quote') {
+    drawSignoffColumns(doc, people);
+    return;
+  }
+  const L = T;
 
   const lineHeight = 15;
   const blockHeight = people.length * lineHeight + 6;
@@ -964,22 +1140,77 @@ function drawSignoffs(doc: PDFKit.PDFDocument, signatories?: Signatory[]) {
 
   for (const person of people) {
     const y = doc.y;
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(T.ink);
     doc.text(`${person.role.toUpperCase()} :`, L.left, y, { lineBreak: false });
 
     const x = L.left + labelWidth;
     if (person.name) {
-      doc.font('Helvetica').fontSize(9).fillColor(INK);
+      doc.font('Helvetica').fontSize(9).fillColor(T.ink);
       const name = person.position ? `${person.name} (${person.position}),` : `${person.name},`;
       doc.text(name, x, y, { lineBreak: false, continued: true });
-      doc.font('Helvetica-Oblique').fillColor(MUTED);
+      doc.font('Helvetica-Oblique').fillColor(T.muted);
       doc.text(person.at ? ` ${formatDateTime(person.at)}` : ' Pending', { lineBreak: false });
     } else {
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED);
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(T.muted);
       doc.text('Pending', x, y, { lineBreak: false });
     }
     doc.y = y + lineHeight;
   }
+}
+
+/**
+ * The quotation's sign-offs: side by side, each column the role in purple
+ * capitals, the name in bold, then the position, the contact number, the
+ * email and when — or "Pending". Four to a row; more wrap to another row.
+ * The block sits above the footer wherever the content ended, and goes over
+ * whole when it does not fit.
+ */
+function drawSignoffColumns(doc: PDFKit.PDFDocument, people: Signatory[]) {
+  const L = T;
+  const usable = usableWidth(doc);
+  const perRow = Math.min(4, Math.max(1, people.length));
+  const colW = usable / perRow;
+  const rows: Signatory[][] = [];
+  for (let i = 0; i < people.length; i += perRow) rows.push(people.slice(i, i + perRow));
+
+  const lineH = 11;
+  const rowHeightOf = (row: Signatory[]) =>
+    14 + 14 + Math.max(...row.map((p) => (p.name ? [p.position, p.phone, p.email].filter(Boolean).length + 1 : 1))) * lineH + 10;
+  const blockHeight = rows.reduce((t, row) => t + rowHeightOf(row), 0) + 12;
+  ensureSpace(doc, blockHeight + 10);
+  doc.y = Math.max(doc.y + 18, doc.page.height - L.footerTop - 10 - blockHeight);
+  // A light rule over the block, as the quotation rules off its text.
+  doc.moveTo(L.left, doc.y).lineTo(L.left + usable, doc.y).strokeColor(T.rule).lineWidth(0.75).stroke();
+  doc.y += 12;
+
+  for (const row of rows) {
+    const top = doc.y;
+    row.forEach((person, i) => {
+      const x = L.left + i * colW;
+      const w = colW - 8;
+      let y = top;
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(T.accent);
+      doc.text(person.role.toUpperCase(), x, y, { width: w, height: 10, ellipsis: true, lineBreak: false });
+      y += 14;
+      if (person.name) {
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(T.ink);
+        doc.text(person.name, x, y, { width: w, height: 12, ellipsis: true, lineBreak: false });
+        y += 14;
+        doc.font('Helvetica').fontSize(8).fillColor(T.ink);
+        for (const line of [person.position, person.phone, person.email].filter((v): v is string => !!v)) {
+          doc.text(line, x, y, { width: w, height: lineH, ellipsis: true, lineBreak: false });
+          y += lineH;
+        }
+        doc.font(person.at ? 'Helvetica' : 'Helvetica-Oblique').fillColor(person.at ? T.ink : T.muted);
+        doc.text(person.at ? formatDateTime(person.at) : 'Pending', x, y, { width: w, height: lineH, ellipsis: true, lineBreak: false });
+      } else {
+        doc.font('Helvetica-Oblique').fontSize(9).fillColor(T.muted);
+        doc.text('Pending', x, y, { width: w, lineBreak: false });
+      }
+    });
+    doc.y = top + rowHeightOf(row);
+  }
+  doc.x = L.left;
 }
 
 /**
@@ -1015,6 +1246,11 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
   if (company?.tin) ids.push(['TIN:', company.tin]);
   if (company?.regNo) ids.push(['REG. NO.:', company.regNo]);
 
+  if (T.name === 'quote') {
+    paginateQuote(doc, spec, company, range, strapline);
+    return;
+  }
+
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
 
@@ -1026,13 +1262,13 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
     const bottomMargin = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
 
-    const right = doc.page.width - MARGIN;
+    const right = doc.page.width - T.left;
     const top = doc.page.height - FOOTER_TOP + 8;
 
-    doc.moveTo(MARGIN, top - 8).lineTo(right, top - 8).strokeColor(RULE).lineWidth(0.7).stroke();
+    doc.moveTo(T.left, top - 8).lineTo(right, top - 8).strokeColor(T.rule).lineWidth(0.7).stroke();
 
-    const colTwo = MARGIN + 226;
-    const colThree = MARGIN + 390;
+    const colTwo = T.left + 226;
+    const colThree = T.left + 390;
     // Three rows of 7.5pt on 9.5pt leading, then the strapline row. The
     // strapline's baseline sits about 16pt off the paper's edge: clear of the
     // 14pt margin, and of the ~12pt below which consumer printers clip.
@@ -1044,26 +1280,26 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
     const oneLine = (width: number) => ({ width, height: line, ellipsis: true, lineGap: 0 });
 
     who.forEach((text, n) => {
-      doc.font(n === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5).fillColor(n === 0 ? INK : MUTED);
-      doc.text(text, MARGIN, top + n * line, oneLine(colTwo - MARGIN - 8));
+      doc.font(n === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5).fillColor(n === 0 ? T.ink : T.muted);
+      doc.text(text, T.left, top + n * line, oneLine(colTwo - T.left - 8));
     });
 
-    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+    doc.font('Helvetica').fontSize(7.5).fillColor(T.muted);
     reach.forEach((text, n) => {
       doc.text(text, colTwo, top + n * line, oneLine(colThree - colTwo - 8));
     });
 
     ids.forEach(([label, value], n) => {
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(INK);
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(T.ink);
       doc.text(label, colThree, top + n * line, { lineBreak: false, continued: true });
-      doc.font('Helvetica').fillColor(MUTED).text(` ${value}`, { lineBreak: false });
+      doc.font('Helvetica').fillColor(T.muted).text(` ${value}`, { lineBreak: false });
     });
 
     // Only when there is more than one page: "Page 1 of 1" is noise. Top
     // right of the block, on the TIN's row, so the rows below stay free for a
     // module's note to wrap into.
     if (range.count > 1) {
-      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+      doc.font('Helvetica').fontSize(7.5).fillColor(T.muted);
       doc.text(`Page ${i + 1} of ${range.count}`, right - 60, top, {
         width: 60,
         align: 'right',
@@ -1074,7 +1310,7 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
     if (spec.footerNote) {
       // Wraps down the third column as far as the strapline row, then stops.
       const noteTop = top + ids.length * line;
-      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+      doc.font('Helvetica').fontSize(7.5).fillColor(T.muted);
       doc.text(spec.footerNote, colThree, noteTop, {
         width: right - colThree,
         // A point of slack, or float rounding cuts the last line it has room for.
@@ -1085,9 +1321,9 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
     }
 
     if (strapline) {
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(HEAD_BG);
-      doc.text(strapline, MARGIN, baseRow, {
-        ...oneLine(colThree - MARGIN - 8),
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(T.barStrong);
+      doc.text(strapline, T.left, baseRow, {
+        ...oneLine(colThree - T.left - 8),
         characterSpacing: 0.8,
       });
     }
@@ -1095,6 +1331,55 @@ function paginate(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec, company: Compa
     doc.page.margins.bottom = bottomMargin;
   }
   // Leave the cursor on the last page so nothing is appended to page 1.
+  doc.switchToPage(range.start + range.count - 1);
+}
+
+/**
+ * The quotation's foot on every page: a light rule, the strapline centred in
+ * green capitals, "Page n of m" bottom right (only when there is more than one
+ * page), a module's footer note small above the rule; and on page two onward
+ * a running header — the reference, the document and its number, the date.
+ */
+function paginateQuote(
+  doc: PDFKit.PDFDocument,
+  spec: PdfDocumentSpec,
+  company: Company,
+  range: { start: number; count: number },
+  strapline: string,
+) {
+  for (let i = 0; i < range.count; i++) {
+    doc.switchToPage(range.start + i);
+    const bottomMargin = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    const left = T.left;
+    const right = doc.page.width - T.right;
+    const width = right - left;
+    const ruleY = doc.page.height - 57.4;
+
+    doc.moveTo(left, ruleY).lineTo(right, ruleY).strokeColor(T.rule).lineWidth(0.75).stroke();
+    if (strapline) {
+      let size = 14;
+      doc.font('Helvetica-Bold');
+      while (size > 8 && doc.fontSize(size).widthOfString(strapline.toUpperCase(), { characterSpacing: 1.5 }) > width) size -= 0.5;
+      doc.fontSize(size).fillColor(T.accent2);
+      doc.text(strapline.toUpperCase(), left, ruleY + 12.4, { width, align: 'center', characterSpacing: 1.5, lineBreak: false });
+    }
+    doc.font('Helvetica').fontSize(7.5).fillColor(T.muted);
+    if (range.count > 1) {
+      doc.text(`Page ${i + 1} of ${range.count}`, right - 60, ruleY + 32.4, { width: 60, align: 'right', lineBreak: false });
+    }
+    if (spec.footerNote) {
+      doc.font('Helvetica').fontSize(7).fillColor(T.muted);
+      doc.text(spec.footerNote, left, ruleY - 10, { width: width - 70, height: 9, ellipsis: true, lineBreak: false });
+    }
+    if (i > 0) {
+      const parts = [spec.reference, spec.documentNumber ? `${spec.title} # ${spec.documentNumber}` : spec.title, formatDate(spec.date ?? new Date())].filter(Boolean);
+      doc.font('Helvetica').fontSize(8).fillColor(T.muted);
+      doc.text(parts.join('   ·   '), left, 22, { width, align: 'center', height: 10, ellipsis: true, lineBreak: false });
+    }
+    doc.page.margins.bottom = bottomMargin;
+  }
+  void company;
   doc.switchToPage(range.start + range.count - 1);
 }
 

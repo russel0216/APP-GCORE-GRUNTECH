@@ -1132,6 +1132,32 @@ async function main() {
     check('and still starts 14pt from the edge', letteredEdges.left === 14, `${letteredEdges.left}pt`);
     check('a letterhead does not cost a page', pages(lettered) === 1, `${pages(lettered)} pages`);
 
+    // The quotation's dress for the G-OPS paper (2026-10-09, the owner's
+    // call): 36pt margins, the letterhead top-left, the strapline along the
+    // foot, side-by-side sign-offs — the same sections, a different dress.
+    const dressed = await renderDocument({
+      style: 'quote',
+      title: 'Job Order',
+      documentNumber: `${TAG}-JO`,
+      reference: 'Oxygen plant, Building B',
+      sections: [
+        { kind: 'fields', title: 'Project', fields: [{ label: 'Customer', value: 'Hospital' }] },
+        { kind: 'table', head: ['Item', 'Amount'], align: ['left', 'right'], rows: [{ heading: 'Compressors' }, ['Overhaul', formatMoney(1562.2)]] },
+      ],
+      signatories: [
+        { role: 'Requested by', name: 'Erwin Dela Pena', position: 'Sales', at: new Date('2026-01-02T03:04:00Z') },
+        { role: 'Approved by' },
+      ],
+    });
+    const dressedText = pdfText(dressed);
+    const dressedEdges = pdfEdges(dressed);
+    check('the G-OPS dress starts 36pt from the edge, as the quotation does', dressedEdges.left === 36, `${dressedEdges.left}pt`);
+    check('it names the document in capitals with its number', dressedText.includes('JOB ORDER') && dressedText.includes(`# ${TAG}-JO`));
+    check('the letterhead carries the company and the foot the strapline', dressedText.includes(co.name.toUpperCase()) && dressedText.includes((co.documentTagline ?? '').toUpperCase().slice(0, 12)));
+    check('the sign-offs name who signed and say Pending where nobody has', dressedText.includes('REQUESTED BY') && dressedText.includes('Erwin Dela Pena') && dressedText.includes('Pending'));
+    check('and the dress costs no page', pages(dressed) === 1, `${pages(dressed)} pages`);
+    check('the house style is untouched: 14pt', pdfEdges(lettered).left === 14);
+
     // ── 11. The quotation: a layout the administrator draws, the engine prints ──
     console.log('\nDesigned documents (the quotation)');
 

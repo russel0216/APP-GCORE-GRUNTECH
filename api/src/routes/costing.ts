@@ -1964,6 +1964,7 @@ costingRoutes.get(
     ];
 
     const pdf = await renderDocument({
+      style: 'quote',
       title: 'Material Cost Estimate',
       documentNumber: costing.number,
       date: costing.createdAt,
