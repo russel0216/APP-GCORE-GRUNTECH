@@ -99,8 +99,12 @@ four databases and four copies of "customer".
    `summary` is drawn as **summary cards** over the table — `summary` on
    `DataList` returns `Stat` tiles (`components/charts.tsx`) into a
    `kpi-grid list-summary`: the count, the sum, the margin, and on the
-   quotation list **Quotes by team** (`TeamQuotesCard`, a wide tile: every
-   active team's count and value from `summary.teams`). A screen that
+   quotation list **a card per team** (2026-10-09, the owner's call: "there
+   should be 8 cards, separate card by team" — KAT, HIT, UIT, GIB, SIT from
+   `summary.teams`, each its value over its count, `teamCards()`; a
+   quotation whose owner has no team is said on the Quotations card, never
+   a ninth card). Eight across: the list's cards take a smaller figure
+   (`.list-summary .kpi-value`, `nowrap`) so a sum never breaks mid-number. A screen that
    learns from the summary (the stage names, the categories on file) still
    takes `onSummary`. Never a totals line, under or over, again.
    `defaultScope` is where the scope switch starts when the URL says
@@ -2071,10 +2075,11 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   the owner's four): Quotations (the count), Sum (`quotationValue()` summed
   in cents — the approved revision, never a later draft — the figure the
   Total column shows), Margin (where every listed quotation's cost is the
-  viewer's) and **Quotes by team** — `summary.teams`, the set split by the
+  viewer's) and **one card per team** — `summary.teams`, the set split by the
   OWNER's team (`Employee.industryId`, `shared/team.ts`): every active team
   in the master's order even at zero, a team since switched off as it is
-  met, "No team" last while any listed owner has none; the shares add up
+  met, "No team" last while any listed owner has none (the Quotations
+  card's subtext, not a card); the shares add up
   to the count and the sum, which verify-sales asserts, along with the
   stage counts adding up and each stage listing exactly what its count
   says.
