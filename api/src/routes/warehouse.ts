@@ -12,7 +12,7 @@ import {
   badRequest,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import { can } from '../permissions/resolve';
+import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
 import { stockOnHand } from '../shared/chain';
@@ -118,64 +118,123 @@ receivingRoutes.get(
   }),
 );
 
+async function loadReceiving(id: string) {
+  return prisma.receiving.findUnique({
+    where: { id },
+    include: {
+      order: {
+        include: {
+          supplier: { select: { id: true, name: true } },
+          job: { select: { id: true, number: true, name: true } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      receivedBy: { select: { id: true, name: true } },
+      // The bill that covers these goods. Its presence is what stops the
+      // bill posting job cost a second time (Phase 7), so it is worth seeing.
+      bills: {
+        orderBy: { billDate: 'desc' },
+        select: { id: true, number: true, status: true },
+      },
+      items: {
+        include: {
+          orderItem: {
+            include: {
+              item: { select: { id: true, code: true, name: true } },
+              costCategory: { select: { id: true, name: true } },
+            },
+          },
+          location: { select: { id: true, code: true } },
+        },
+      },
+    },
+  });
+}
+
+function presentReceiving(receiving: NonNullable<Awaited<ReturnType<typeof loadReceiving>>>, me: ResolvedUser) {
+  // Finance's register, listed only to those who can open it.
+  const seesBills = can(me, 'gfin.ap.view_all');
+  return {
+    ...receiving,
+    bills: seesBills ? receiving.bills : [],
+    billsVisible: seesBills,
+    // Its references only (PATCH /:id): what arrived is the record.
+    canEdit: can(me, 'gchain.receiving.edit_all'),
+    order: { ...receiving.order, total: num(receiving.order.total) },
+    items: receiving.items.map((i) => ({
+      ...i,
+      quantity: num(i.quantity),
+      unitCost: num(i.unitCost),
+      amount: cents(num(i.quantity) * num(i.unitCost)),
+      orderItem: {
+        ...i.orderItem,
+        quantity: num(i.orderItem.quantity),
+        unitPrice: num(i.orderItem.unitPrice),
+        receivedQty: num(i.orderItem.receivedQty),
+      },
+    })),
+    value: cents(receiving.items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0)),
+  };
+}
+
 receivingRoutes.get(
   '/:id',
   require_('gchain.receiving.view_all'),
   handler(async (req, res) => {
-    const me = currentUser(req);
-    const receiving = await prisma.receiving.findUnique({
-      where: { id: req.params.id },
-      include: {
-        order: {
-          include: {
-            supplier: { select: { id: true, name: true } },
-            job: { select: { id: true, number: true, name: true } },
-          },
-        },
-        warehouse: { select: { id: true, name: true } },
-        receivedBy: { select: { id: true, name: true } },
-        // The bill that covers these goods. Its presence is what stops the
-        // bill posting job cost a second time (Phase 7), so it is worth seeing.
-        bills: {
-          orderBy: { billDate: 'desc' },
-          select: { id: true, number: true, status: true },
-        },
-        items: {
-          include: {
-            orderItem: {
-              include: {
-                item: { select: { id: true, code: true, name: true } },
-                costCategory: { select: { id: true, name: true } },
-              },
-            },
-            location: { select: { id: true, code: true } },
-          },
-        },
-      },
-    });
+    const receiving = await loadReceiving(req.params.id);
     if (!receiving) throw notFound('Receiving report not found');
+    res.json(presentReceiving(receiving, currentUser(req)));
+  }),
+);
 
-    // Finance's register, listed only to those who can open it.
-    const seesBills = can(me, 'gfin.ap.view_all');
-    res.json({
-      ...receiving,
-      bills: seesBills ? receiving.bills : [],
-      billsVisible: seesBills,
-      order: { ...receiving.order, total: num(receiving.order.total) },
-      items: receiving.items.map((i) => ({
-        ...i,
-        quantity: num(i.quantity),
-        unitCost: num(i.unitCost),
-        amount: cents(num(i.quantity) * num(i.unitCost)),
-        orderItem: {
-          ...i.orderItem,
-          quantity: num(i.orderItem.quantity),
-          unitPrice: num(i.orderItem.unitPrice),
-          receivedQty: num(i.orderItem.receivedQty),
-        },
-      })),
-      value: cents(receiving.items.reduce((s, i) => s + num(i.quantity) * num(i.unitCost), 0)),
-    });
+/**
+ * A receiving report is a record of what arrived: its lines, quantities,
+ * costs, warehouse and date moved stock and job cost, and stay as they were.
+ * Only its paper references change — the delivery receipt and supplier
+ * invoice numbers, and the notes — and a key it cannot change is refused,
+ * not ignored.
+ */
+receivingRoutes.patch(
+  '/:id',
+  require_('gchain.receiving.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z
+        .object({
+          deliveryRefNo: z.string().trim().optional().nullable(),
+          invoiceRefNo: z.string().trim().optional().nullable(),
+          notes: z.string().optional().nullable(),
+        })
+        .strict(),
+      req.body,
+    );
+    const existing = await prisma.receiving.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw notFound('Receiving report not found');
+
+    const next = {
+      deliveryRefNo: body.deliveryRefNo !== undefined ? body.deliveryRefNo || null : existing.deliveryRefNo,
+      invoiceRefNo: body.invoiceRefNo !== undefined ? body.invoiceRefNo || null : existing.invoiceRefNo,
+      notes: body.notes !== undefined ? body.notes?.trim() || null : existing.notes,
+    };
+    const changed = [
+      next.deliveryRefNo !== existing.deliveryRefNo && `DR no. ${existing.deliveryRefNo ?? '—'} → ${next.deliveryRefNo ?? '—'}`,
+      next.invoiceRefNo !== existing.invoiceRefNo && `invoice no. ${existing.invoiceRefNo ?? '—'} → ${next.invoiceRefNo ?? '—'}`,
+      next.notes !== existing.notes && 'notes',
+    ].filter(Boolean);
+
+    await prisma.receiving.update({ where: { id: existing.id }, data: next });
+    await audit(
+      {
+        entityType: 'receiving',
+        entityId: existing.id,
+        action: 'UPDATED',
+        summary: `Modified ${existing.number}${changed.length ? `: ${changed.join(', ')}` : ''}`,
+        before: { deliveryRefNo: existing.deliveryRefNo, invoiceRefNo: existing.invoiceRefNo, notes: existing.notes },
+        after: next,
+      },
+      req,
+    );
+    res.json(presentReceiving((await loadReceiving(existing.id))!, currentUser(req)));
   }),
 );
 
@@ -468,33 +527,43 @@ function presentIssue(issue: NonNullable<Awaited<ReturnType<typeof loadIssue>>>)
   return { ...issue, items, value: cents(items.reduce((s, i) => s + i.amount, 0)) };
 }
 
+/** Raising, and changing a draft: the create right, or edit_all. */
+const ISSUE_EDIT = ['gchain.stock_issuance.create', 'gchain.stock_issuance.edit_all'] as const;
+
 stockIssueRoutes.get(
   '/:id',
   require_('gchain.stock_issuance.view_all'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const issue = await loadIssue(req.params.id);
     if (!issue) throw notFound('Stock issue not found');
-    res.json(presentIssue(issue));
+    const draft = issue.status === 'DRAFT';
+    res.json({
+      ...presentIssue(issue),
+      // The routes' own rules: a DRAFT is changed by whoever may raise one
+      // (or edit_all) and deleted by a delete holder; issued stock has moved.
+      canEdit: draft && ISSUE_EDIT.some((k) => can(me, k)),
+      canDelete: draft && can(me, 'gchain.stock_issuance.delete'),
+    });
   }),
 );
+
+const issueSchema = z.object({
+  jobId: z.string().optional().nullable(),
+  warehouseId: z.string().min(1, 'Which warehouse?'),
+  issuedToId: z.string().optional().nullable(),
+  issuedToName: z.string().trim().optional().nullable(),
+  issueDate: z.string().optional().nullable(),
+  purpose: z.string().trim().min(3, 'Say what this is for'),
+  notes: z.string().optional().nullable(),
+});
 
 stockIssueRoutes.post(
   '/',
   require_('gchain.stock_issuance.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        jobId: z.string().optional().nullable(),
-        warehouseId: z.string().min(1, 'Which warehouse?'),
-        issuedToId: z.string().optional().nullable(),
-        issuedToName: z.string().trim().optional().nullable(),
-        issueDate: z.string().optional().nullable(),
-        purpose: z.string().trim().min(3, 'Say what this is for'),
-        notes: z.string().optional().nullable(),
-      }),
-      req.body,
-    );
+    const body = parseBody(issueSchema, req.body);
 
     const issue = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('stock_issue', tx);
@@ -513,6 +582,10 @@ stockIssueRoutes.post(
       });
     });
 
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'CREATED', summary: `Raised ${issue.number} — ${issue.purpose}` },
+      req,
+    );
     res.status(201).json(issue);
   }),
 );
@@ -526,9 +599,180 @@ async function issueForEdit(id: string) {
   return issue;
 }
 
+/**
+ * Holds a draft issue, as it was read, for a change to its lines: the row
+ * stays locked until the change commits. An Issue pressed meanwhile waits and
+ * then issues the line with the rest; one that went first — or a Modify that
+ * moved the draft to another warehouse or project, which a line's price and
+ * budget line depend on — leaves nothing to hold, and the change is refused.
+ */
+async function holdDraftIssue(
+  tx: Prisma.TransactionClient,
+  issue: { id: string; number: string; warehouseId: string; jobId: string | null },
+) {
+  const held = await tx.stockIssue.updateMany({
+    where: { id: issue.id, status: 'DRAFT', warehouseId: issue.warehouseId, jobId: issue.jobId },
+    data: { updatedAt: new Date() },
+  });
+  if (!held.count) throw badRequest(`${issue.number} was changed or issued a moment ago — reload to see where it stands`);
+}
+
+/**
+ * Modifying a draft issue's header: where it comes from, who and what it is
+ * for, its date. Nothing has moved yet, so everything may change, under two
+ * rules that keep the lines honest:
+ *
+ * - Moving it to another warehouse re-prices every line at THAT warehouse's
+ *   average cost — the price a draft shows is the one it would issue at — and
+ *   is refused for an item the new warehouse has never held.
+ * - Charging it to a project needs a budget line on every line: a line with
+ *   none takes its item's default category, as adding a line does, or the
+ *   change is refused naming the item.
+ */
+stockIssueRoutes.patch(
+  '/:id',
+  requireAny(...ISSUE_EDIT),
+  handler(async (req, res) => {
+    const body = parseBody(issueSchema.partial(), req.body);
+    const issue = await prisma.stockIssue.findUnique({
+      where: { id: req.params.id },
+      include: { items: { include: { item: { select: { name: true, costCategoryId: true } } } } },
+    });
+    if (!issue) throw notFound('Stock issue not found');
+    if (issue.status !== 'DRAFT') {
+      throw badRequest(`${issue.number} has been issued — stock has already moved and cannot be changed`);
+    }
+
+    const warehouseId = body.warehouseId ?? issue.warehouseId;
+    const jobId = body.jobId !== undefined ? body.jobId || null : issue.jobId;
+    const moved = warehouseId !== issue.warehouseId;
+
+    let warehouseName: string | null = null;
+    if (moved) {
+      const warehouse = await prisma.warehouse.findUnique({ where: { id: warehouseId }, select: { name: true } });
+      if (!warehouse) throw badRequest('That warehouse does not exist');
+      warehouseName = warehouse.name;
+    }
+    if (jobId && jobId !== issue.jobId) {
+      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+      if (!job) throw badRequest('That project does not exist');
+    }
+
+    // Each line's price at the new warehouse — Decimal throughout, so the
+    // stored amount is exact rather than a float rounded back.
+    const reprice = new Map<string, { unitCost: Prisma.Decimal; amount: Prisma.Decimal }>();
+    if (moved && issue.items.length) {
+      const balances = await prisma.inventoryBalance.findMany({
+        where: { warehouseId, itemId: { in: issue.items.map((l) => l.itemId) } },
+      });
+      const byItem = new Map(balances.map((b) => [b.itemId, b]));
+      const missing = issue.items.filter((l) => !byItem.has(l.itemId)).map((l) => l.item.name);
+      if (missing.length) {
+        throw badRequest(
+          `${warehouseName} does not hold ${missing.join(', ')} — remove ${missing.length === 1 ? 'that line' : 'those lines'} before moving the issue there`,
+        );
+      }
+      for (const line of issue.items) {
+        const unitCost = byItem.get(line.itemId)!.averageCost;
+        reprice.set(line.id, {
+          unitCost,
+          amount: line.quantity.mul(unitCost).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP),
+        });
+      }
+    }
+
+    // Charged to a project, every line needs its budget line.
+    const categoryFills = new Map<string, string>();
+    if (jobId) {
+      const bare: string[] = [];
+      for (const line of issue.items) {
+        if (line.costCategoryId) continue;
+        if (line.item.costCategoryId) categoryFills.set(line.id, line.item.costCategoryId);
+        else bare.push(line.item.name);
+      }
+      if (bare.length) {
+        throw badRequest(
+          `${bare.join(', ')} ${bare.length === 1 ? 'has' : 'have'} no cost bucket, so the issue cannot be charged to a budget line. ` +
+            'Set one on the item, or remove the line, first.',
+        );
+      }
+    }
+
+    const changed: string[] = [];
+    if (moved) changed.push(`now from ${warehouseName}, re-priced`);
+    if (jobId !== issue.jobId) changed.push(jobId ? 'project' : 'no project');
+    if (body.purpose !== undefined && body.purpose !== issue.purpose) changed.push('purpose');
+    if (body.issuedToName !== undefined && (body.issuedToName || null) !== issue.issuedToName) changed.push('issued to');
+    const issueDate = body.issueDate !== undefined ? asDate(body.issueDate) ?? today() : issue.issueDate;
+    if (issueDate.getTime() !== issue.issueDate.getTime()) changed.push('date');
+    if (body.notes !== undefined && (body.notes || null) !== issue.notes) changed.push('notes');
+
+    await prisma.$transaction(async (tx) => {
+      // Claimed on the draft exactly as read: an issue that went out since
+      // wins, and so does a line added or removed since (holdDraftIssue
+      // touches updatedAt) — the re-pricing and budget lines above were
+      // worked out for the lines read, and must not miss one.
+      const claimed = await tx.stockIssue.updateMany({
+        where: { id: issue.id, status: 'DRAFT', updatedAt: issue.updatedAt },
+        data: {
+          warehouseId,
+          jobId,
+          ...(body.issuedToId !== undefined ? { issuedToId: body.issuedToId || null } : {}),
+          ...(body.issuedToName !== undefined ? { issuedToName: body.issuedToName || null } : {}),
+          issueDate,
+          ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
+          ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+        },
+      });
+      if (!claimed.count) throw badRequest(`${issue.number} was changed or issued a moment ago — reload to see where it stands`);
+      for (const line of issue.items) {
+        const price = reprice.get(line.id);
+        const costCategoryId = categoryFills.get(line.id);
+        if (!price && !costCategoryId) continue;
+        await tx.stockIssueItem.update({
+          where: { id: line.id },
+          data: { ...(price ?? {}), ...(costCategoryId ? { costCategoryId } : {}) },
+        });
+      }
+      await audit(
+        {
+          entityType: 'stock_issue',
+          entityId: issue.id,
+          action: 'UPDATED',
+          summary: `Modified ${issue.number}${changed.length ? `: ${changed.join(', ')}` : ''}`,
+        },
+        req,
+        tx,
+      );
+    });
+
+    res.json(presentIssue((await loadIssue(issue.id))!));
+  }),
+);
+
+/** A draft is deleted outright — nothing has moved. An issued one is the record of stock that left. */
+stockIssueRoutes.delete(
+  '/:id',
+  require_('gchain.stock_issuance.delete'),
+  handler(async (req, res) => {
+    const issue = await prisma.stockIssue.findUnique({ where: { id: req.params.id } });
+    if (!issue) throw notFound('Stock issue not found');
+    if (issue.status !== 'DRAFT') {
+      throw badRequest(`${issue.number} has been issued — the stock has moved, so it stays on record`);
+    }
+    const gone = await prisma.stockIssue.deleteMany({ where: { id: issue.id, status: 'DRAFT' } });
+    if (!gone.count) throw badRequest(`${issue.number} was issued a moment ago — it stays on record`);
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'DELETED', summary: `Deleted ${issue.number}` },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);
+
 stockIssueRoutes.post(
   '/:id/items',
-  require_('gchain.stock_issuance.create'),
+  requireAny(...ISSUE_EDIT),
   handler(async (req, res) => {
     const issue = await issueForEdit(req.params.id);
     const body = parseBody(
@@ -543,10 +787,11 @@ stockIssueRoutes.post(
     );
 
     // Costing a job issue needs a category; the item's default fills it in.
+    const item = await prisma.item.findUnique({ where: { id: body.itemId } });
+    if (!item) throw badRequest('That item does not exist');
     let costCategoryId = body.costCategoryId || null;
     if (issue.jobId && !costCategoryId) {
-      const item = await prisma.item.findUnique({ where: { id: body.itemId } });
-      costCategoryId = item?.costCategoryId ?? null;
+      costCategoryId = item.costCategoryId ?? null;
       if (!costCategoryId) {
         throw badRequest(
           'That item has no cost bucket, so the issue cannot be charged to a budget line. Set one on the item, or choose a category here.',
@@ -560,18 +805,25 @@ stockIssueRoutes.post(
     });
     const unitCost = num(balance?.averageCost);
 
-    await prisma.stockIssueItem.create({
-      data: {
-        issueId: issue.id,
-        itemId: body.itemId,
-        costCategoryId,
-        locationId: body.locationId || null,
-        quantity: D(body.quantity),
-        unitCost: D(unitCost),
-        amount: D(cents(body.quantity * unitCost)),
-        remarks: body.remarks || null,
-      },
+    await prisma.$transaction(async (tx) => {
+      await holdDraftIssue(tx, issue);
+      await tx.stockIssueItem.create({
+        data: {
+          issueId: issue.id,
+          itemId: body.itemId,
+          costCategoryId,
+          locationId: body.locationId || null,
+          quantity: D(body.quantity),
+          unitCost: D(unitCost),
+          amount: D(cents(body.quantity * unitCost)),
+          remarks: body.remarks || null,
+        },
+      });
     });
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'UPDATED', summary: `Added ${item.name} to ${issue.number}` },
+      req,
+    );
 
     res.status(201).json(presentIssue((await loadIssue(issue.id))!));
   }),
@@ -579,14 +831,22 @@ stockIssueRoutes.post(
 
 stockIssueRoutes.delete(
   '/:id/items/:itemId',
-  require_('gchain.stock_issuance.create'),
+  requireAny(...ISSUE_EDIT),
   handler(async (req, res) => {
-    await issueForEdit(req.params.id);
+    const issue = await issueForEdit(req.params.id);
     const line = await prisma.stockIssueItem.findFirst({
       where: { id: req.params.itemId, issueId: req.params.id },
+      include: { item: { select: { name: true } } },
     });
     if (!line) throw notFound('Line not found');
-    await prisma.stockIssueItem.delete({ where: { id: line.id } });
+    await prisma.$transaction(async (tx) => {
+      await holdDraftIssue(tx, issue);
+      await tx.stockIssueItem.delete({ where: { id: line.id } });
+    });
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'UPDATED', summary: `Removed ${line.item.name} from ${issue.number}` },
+      req,
+    );
     res.json(presentIssue((await loadIssue(req.params.id))!));
   }),
 );
@@ -602,23 +862,39 @@ stockIssueRoutes.post(
     const me = currentUser(req);
     const issue = await prisma.stockIssue.findUnique({
       where: { id: req.params.id },
-      include: { items: { include: { item: true } }, job: true },
+      include: { items: { select: { id: true } } },
     });
     if (!issue) throw notFound('Stock issue not found');
     if (issue.status !== 'DRAFT') throw badRequest('This issue has already been made');
     if (!issue.items.length) throw badRequest('Add at least one line before issuing');
 
-    await prisma.$transaction(async (tx) => {
+    const issued = await prisma.$transaction(async (tx) => {
+      // Claimed first, on the draft as it was read: a second press, or a
+      // Modify that moved it to another warehouse or project since, finds
+      // nothing to claim — so stock never leaves twice, nor from a warehouse
+      // the record no longer names. Everything issued below is read again
+      // under the claim.
+      const claimed = await tx.stockIssue.updateMany({
+        where: { id: issue.id, status: 'DRAFT', warehouseId: issue.warehouseId, jobId: issue.jobId },
+        data: { status: 'ISSUED', issuedAt: new Date() },
+      });
+      if (!claimed.count) throw badRequest(`${issue.number} was changed or issued a moment ago — reload to see where it stands`);
+      const current = await tx.stockIssue.findUniqueOrThrow({
+        where: { id: issue.id },
+        include: { items: true, job: { select: { number: true } } },
+      });
+      if (!current.items.length) throw badRequest('Add at least one line before issuing');
+
       const byCategory = new Map<string, number>();
 
-      for (const line of issue.items) {
+      for (const line of current.items) {
         const moved = await issueStock(tx, {
           itemId: line.itemId,
-          warehouseId: issue.warehouseId,
+          warehouseId: current.warehouseId,
           quantity: num(line.quantity),
           sourceType: 'stock_issue',
-          sourceId: issue.id,
-          sourceNumber: issue.number,
+          sourceId: current.id,
+          sourceNumber: current.number,
           createdById: me.id,
         });
 
@@ -629,7 +905,7 @@ stockIssueRoutes.post(
           data: { unitCost: D(moved.unitCost), amount: D(moved.amount) },
         });
 
-        if (issue.jobId && line.costCategoryId) {
+        if (current.jobId && line.costCategoryId) {
           byCategory.set(
             line.costCategoryId,
             (byCategory.get(line.costCategoryId) ?? 0) + moved.amount,
@@ -637,48 +913,44 @@ stockIssueRoutes.post(
         }
       }
 
-      if (issue.jobId) {
+      if (current.jobId) {
         for (const [costCategoryId, amount] of byCategory) {
           // INCURRED — this is the first time the job bears this cost.
           await postJobCost(tx, {
-            jobId: issue.jobId,
+            jobId: current.jobId,
             costCategoryId,
             state: 'INCURRED',
             amount,
             sourceType: 'stock_issue',
-            sourceId: issue.id,
-            sourceNumber: issue.number,
-            description: `Issued from stock — ${issue.purpose}`,
+            sourceId: current.id,
+            sourceNumber: current.number,
+            description: `Issued from stock — ${current.purpose}`,
             createdById: me.id,
           });
           // CONSUMED — and it is physically in the work. Reported, not
           // subtracted again; see budgetPosition.
           await postJobCost(tx, {
-            jobId: issue.jobId,
+            jobId: current.jobId,
             costCategoryId,
             state: 'CONSUMED',
             amount,
             sourceType: 'stock_issue',
-            sourceId: issue.id,
-            sourceNumber: issue.number,
-            description: `Issued from stock — ${issue.purpose}`,
+            sourceId: current.id,
+            sourceNumber: current.number,
+            description: `Issued from stock — ${current.purpose}`,
             createdById: me.id,
           });
         }
       }
-
-      await tx.stockIssue.update({
-        where: { id: issue.id },
-        data: { status: 'ISSUED', issuedAt: new Date() },
-      });
+      return current;
     });
 
     await audit(
       {
         entityType: 'stock_issue',
-        entityId: issue.id,
+        entityId: issued.id,
         action: 'EXECUTED',
-        summary: `${issue.number} issued${issue.job ? ` to ${issue.job.number}` : ''}`,
+        summary: `${issued.number} issued${issued.job ? ` to ${issued.job.number}` : ''}`,
       },
       req,
     );
@@ -766,30 +1038,112 @@ borrowRoutes.get(
   }),
 );
 
+async function loadSlip(id: string) {
+  return prisma.borrowSlip.findUnique({
+    where: { id },
+    include: {
+      job: { select: { id: true, number: true, name: true } },
+      warehouse: { select: { id: true, name: true } },
+      issuedBy: { select: { id: true, name: true } },
+      items: { include: { item: { select: { id: true, code: true, name: true, unit: true } } } },
+    },
+  });
+}
+
+function presentSlip(slip: NonNullable<Awaited<ReturnType<typeof loadSlip>>>, me: ResolvedUser) {
+  return {
+    ...slip,
+    // The route's own rule (PATCH /:id): while anything is still out.
+    canEdit: slip.status !== 'RETURNED' && can(me, 'gchain.borrow_slips.edit_all'),
+    items: slip.items.map((i) => ({
+      ...i,
+      quantity: num(i.quantity),
+      returnedQty: num(i.returnedQty),
+      outstandingQty: cents(num(i.quantity) - num(i.returnedQty)),
+    })),
+  };
+}
+
 borrowRoutes.get(
   '/:id',
   require_('gchain.borrow_slips.view_all'),
   handler(async (req, res) => {
-    const slip = await prisma.borrowSlip.findUnique({
-      where: { id: req.params.id },
-      include: {
-        job: { select: { id: true, number: true, name: true } },
-        warehouse: { select: { id: true, name: true } },
-        issuedBy: { select: { id: true, name: true } },
-        items: { include: { item: { select: { id: true, code: true, name: true, unit: true } } } },
+    const slip = await loadSlip(req.params.id);
+    if (!slip) throw notFound('Borrow slip not found');
+    res.json(presentSlip(slip, currentUser(req)));
+  }),
+);
+
+/**
+ * Modifying a slip while anything on it is still out: who has it, when it is
+ * due back, what it is for, the notes. The warehouse and the items are fixed —
+ * the stock has moved out of available against them — so a key for either is
+ * refused rather than ignored. A borrower renamed without a login named loses
+ * the old login link, so the clearance scan matches the new name and never
+ * charges the tools to the person the slip no longer names.
+ */
+borrowRoutes.patch(
+  '/:id',
+  require_('gchain.borrow_slips.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z
+        .object({
+          borrowerId: z.string().optional().nullable(),
+          borrowerName: z.string().trim().min(2, 'Who is borrowing?').optional(),
+          dueAt: z.string().min(1, 'When is it due back?').optional(),
+          purpose: z.string().trim().min(3, 'What is it for?').optional(),
+          notes: z.string().optional().nullable(),
+        })
+        .strict(),
+      req.body,
+    );
+    const slip = await prisma.borrowSlip.findUnique({ where: { id: req.params.id } });
+    if (!slip) throw notFound('Borrow slip not found');
+    if (slip.status === 'RETURNED') {
+      throw badRequest(`Everything on ${slip.number} is back — the slip is a record now`);
+    }
+
+    const dueAt = body.dueAt !== undefined ? asDate(body.dueAt)! : slip.dueAt;
+    if (dueAt.getTime() < slip.borrowedAt.getTime()) {
+      throw badRequest(`It cannot be due back before it went out on ${formatDate(slip.borrowedAt)}`);
+    }
+    if (body.borrowerId) {
+      const user = await prisma.user.findUnique({ where: { id: body.borrowerId }, select: { id: true } });
+      if (!user) throw badRequest('That borrower has no login');
+    }
+    const renamed = body.borrowerName !== undefined && body.borrowerName !== slip.borrowerName;
+    const borrowerId =
+      body.borrowerId !== undefined ? body.borrowerId || null : renamed ? null : slip.borrowerId;
+
+    const changed: string[] = [];
+    if (renamed) changed.push(`borrower ${slip.borrowerName} → ${body.borrowerName}`);
+    if (dueAt.getTime() !== slip.dueAt.getTime()) changed.push(`due ${formatDate(slip.dueAt)} → ${formatDate(dueAt)}`);
+    if (body.purpose !== undefined && body.purpose !== slip.purpose) changed.push('purpose');
+    if (body.notes !== undefined && (body.notes?.trim() || null) !== slip.notes) changed.push('notes');
+
+    // Claimed on something still being out: the last return wins.
+    const claimed = await prisma.borrowSlip.updateMany({
+      where: { id: slip.id, status: { not: 'RETURNED' } },
+      data: {
+        borrowerId,
+        dueAt,
+        ...(body.borrowerName !== undefined ? { borrowerName: body.borrowerName } : {}),
+        ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
+        ...(body.notes !== undefined ? { notes: body.notes?.trim() || null } : {}),
       },
     });
-    if (!slip) throw notFound('Borrow slip not found');
-
-    res.json({
-      ...slip,
-      items: slip.items.map((i) => ({
-        ...i,
-        quantity: num(i.quantity),
-        returnedQty: num(i.returnedQty),
-        outstandingQty: cents(num(i.quantity) - num(i.returnedQty)),
-      })),
-    });
+    if (!claimed.count) throw badRequest(`Everything on ${slip.number} came back a moment ago — reload to see it`);
+    await audit(
+      {
+        entityType: 'borrow_slip',
+        entityId: slip.id,
+        action: 'UPDATED',
+        summary: `Modified ${slip.number}${changed.length ? `: ${changed.join(', ')}` : ''}`,
+      },
+      req,
+    );
+    res.json(presentSlip((await loadSlip(slip.id))!, currentUser(req)));
   }),
 );
 

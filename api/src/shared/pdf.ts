@@ -1174,8 +1174,17 @@ function drawSignoffColumns(doc: PDFKit.PDFDocument, people: Signatory[]) {
   for (let i = 0; i < people.length; i += perRow) rows.push(people.slice(i, i + perRow));
 
   const lineH = 11;
+  // A role may run to two lines ("APPROVED BY — PROJECT MANAGER" in a quarter
+  // of the page); it never loses a word to an ellipsis. Every column in a row
+  // starts its name on the same line, under the tallest role.
+  const ROLE_MAX = 20;
+  const roleHeight = (p: Signatory) => {
+    doc.font('Helvetica-Bold').fontSize(8);
+    return Math.min(ROLE_MAX, doc.heightOfString(p.role.toUpperCase(), { width: colW - 8 }));
+  };
+  const roleRowHeight = (row: Signatory[]) => Math.max(10, ...row.map(roleHeight)) + 4;
   const rowHeightOf = (row: Signatory[]) =>
-    14 + 14 + Math.max(...row.map((p) => (p.name ? [p.position, p.phone, p.email].filter(Boolean).length + 1 : 1))) * lineH + 10;
+    roleRowHeight(row) + 14 + Math.max(...row.map((p) => (p.name ? [p.position, p.phone, p.email].filter(Boolean).length + 1 : 1))) * lineH + 10;
   const blockHeight = rows.reduce((t, row) => t + rowHeightOf(row), 0) + 12;
   ensureSpace(doc, blockHeight + 10);
   doc.y = Math.max(doc.y + 18, doc.page.height - L.footerTop - 10 - blockHeight);
@@ -1185,13 +1194,14 @@ function drawSignoffColumns(doc: PDFKit.PDFDocument, people: Signatory[]) {
 
   for (const row of rows) {
     const top = doc.y;
+    const roleH = roleRowHeight(row);
     row.forEach((person, i) => {
       const x = L.left + i * colW;
       const w = colW - 8;
       let y = top;
       doc.font('Helvetica-Bold').fontSize(8).fillColor(T.accent);
-      doc.text(person.role.toUpperCase(), x, y, { width: w, height: 10, ellipsis: true, lineBreak: false });
-      y += 14;
+      doc.text(person.role.toUpperCase(), x, y, { width: w, height: ROLE_MAX, ellipsis: true });
+      y += roleH;
       if (person.name) {
         doc.font('Helvetica-Bold').fontSize(10).fillColor(T.ink);
         doc.text(person.name, x, y, { width: w, height: 12, ellipsis: true, lineBreak: false });

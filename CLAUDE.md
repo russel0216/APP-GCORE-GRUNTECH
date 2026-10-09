@@ -285,11 +285,14 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,767 assertions across twenty-three scripts** (counted 2026-10-09): foundation 235,
-masters 76, sales 425, costing 139, pipeline 86, calendar 96, numbering 46,
-partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
-evaluations 130, academy 97, finance 189, aftermarket 175, cad 86, archive 113,
-insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
+**3,006 assertions across twenty-three scripts** (counted 2026-10-09, after
+the Modify work): foundation 235, masters 76, sales 425, costing 139, pipeline
+86, calendar 96, numbering 46, partners 117, delivery 103, chain 135, hr 198,
+plantilla 99, meetings 85, evaluations 130, academy 97, finance 244,
+aftermarket 224, cad 86, archive 113, insights 97, insights-brief 50,
+workspace 39, accounts 86. A check must not depend on what the database
+already holds: count only the script's own TAG (verify-cad's lead queue), and
+build the fixture a check needs (verify-insights' uninvoiced billing). They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
@@ -1563,6 +1566,77 @@ Designer Support; the output is always a PDF for the requestor".
   Low / Normal / High / Urgent. Progress is a whole 0–100 reported by the
   designer on it (`NumberInput kind="count"` with 25 / 50 / 75 / 100
   buttons); a submitted revision sets it to 100.
+
+### Modify where nothing had one (2026-10-09, rule 19's second half)
+
+The owner asked for Modify, Delete and Back in the same place on every
+screen; ten documents had no Modify at all. Each now has one, in the header's
+right-most place, with the API behind it. The shape is always the same: **a
+draft is modified; a pending document is PULLED BACK first, never edited
+behind its approver** (`submitForApproval` snapshots the amount and subject
+and picks the workflow by amount band, so an edit after submission would
+leave the approver deciding on stale figures).
+
+- **The pull-back** (purchase request, expense claim, leave, overtime actual
+  hours; the quotation and sales order already had one) claims
+  PENDING_APPROVAL → DRAFT with a conditional `updateMany` and calls
+  `cancelOpenRequest` in the SAME transaction. An empty return means a
+  decision claimed the request first: the transaction rolls back and the
+  route answers 400 "decided a moment ago" — the decision must apply. Every
+  settle subscriber touched here (`settlePurchaseRequest`,
+  `settlePurchaseOrder`, `settleExpense`, the supplier-bill subscriber, leave
+  and overtime) applies an outcome only through a conditional claim on the
+  pending status and otherwise writes "… — not applied" to the trail.
+- **Submit claims DRAFT conditionally, and on `updatedAt` too** where a
+  Modify may race it ("It changed a moment ago — reload"), files the request
+  in the REQUESTER's name whoever presses the button (`requestedById`,
+  `claimedById`, the employee's login), and goes back to DRAFT when the
+  engine refuses — none of these documents is stranded pending with no
+  request any more.
+- **G-CHAIN**: a purchase request's header and lines change while DRAFT
+  (`PATCH /purchase-requests/:id`, `requireAny(edit_own, edit_all)` +
+  `canEditRecord`); kind and project change under the create rule
+  (`checkPrTarget`: direct-to-job needs a project and a budget line on every
+  line, filled from the item's category or refused naming the line; stock
+  needs a warehouse and drops the project). Its PDF prints the route a draft
+  would take (`routePreview`) and `approvalSlots` once submitted, so a
+  pulled-back request never prints the old approver's signature. A canvass
+  changes only its notes once opened, and its supplier rows' lead time,
+  terms and remarks while OPEN; a supplier is never removed once awarded. A
+  stock issue is modified or deleted only as a DRAFT — moving warehouse
+  re-prices every line at that warehouse's average (Decimal), refused for an
+  item it never held — and `POST /:id/issue` claims DRAFT on the warehouse
+  and project it read. A borrow slip changes who, when due, what for and
+  notes while anything is out; a receiving only its DR no., invoice no. and
+  notes (what arrived is the record).
+- **G-FIN**: `PUT /expense-claims/:id` (claimant with edit_own, or
+  edit_all), `PUT /supplier-bills/:id` (gfin.ap.edit_all), `PUT
+  /invoices/:id` (gfin.ar.edit_all) — DRAFT only, lines replaced in the same
+  transaction, money from one helper shared with create (`claimLines()`,
+  `billMoney()`, `manualInvoiceMoney()`), a draft keeps its stored VAT/EWT
+  rates. A liquidation keeps what it accounts for; a bill's links go through
+  `billLinks()` (an order with goods received always lends the bill its
+  receiving — what stops approval charging twice); an invoice raised from a
+  billing changes only dates, terms, PO reference and notes. `POST
+  /supplier-bills/:id/cancel` takes a draft with a reason. Cancelling an
+  invoice releases both `progressBillingId` and `jobOrderId`. Expense-claim
+  receipts have an attachment guard (the claimant or view_all).
+- **G-HR**: `PUT /leave/:id` (DRAFT, `checkLeave()` again — days, proof, a
+  clash check that leaves the request itself out; submit runs it too, so two
+  overlapping drafts cannot both go pending). `/g-hr/leave/:id` is a record
+  page now (`LeaveRecord`), not a modal. An overtime filing awaiting
+  authorisation changes through `PUT /overtime/:id` (withdrawn and re-sent in
+  the employee's name in one move; refused if it could not be sent again —
+  `assertRoutable()` mirrors the engine); once authorised the plan is fixed.
+  Filed actual hours are pulled back with `POST /overtime/:id/withdraw`.
+- **Service contract**: `PATCH /service-contracts/:id` (edit_own — the
+  job's PM — or edit_all). DRAFT changes every term; ACTIVE re-plans the
+  schedule in the same transaction (`planReplan`): once a generated visit has
+  come due or been attended, start and frequency are fixed and only the end
+  moves; a carried visit keeps its status, date, engineer and notes; a
+  re-plan is refused while a visit it would move has a service report, and
+  an end may not run into a renewal. EXPIRED/RENEWED/CANCELLED refuse. The
+  claim is on status AND `updatedAt` (409 if anything moved in between).
 
 ### Budget requests: project cash (2026-10-07)
 

@@ -1822,6 +1822,553 @@ async function main() {
       `${noAssets.status} ${JSON.stringify(noAssets.body).slice(0, 140)}`,
     );
 
+    const regenDraft = await api(managerToken, 'POST', `/service-contracts/${emptyContract!.id}/regenerate-schedule`);
+    check(
+      'a draft contract has no schedule to regenerate — activation writes it',
+      regenDraft.status === 400 && String(regenDraft.body.error).includes('Only an active contract'),
+      `${regenDraft.status} ${regenDraft.body.error}`,
+    );
+
+    // ── Modify a contract's cover (2026-10-09) ────────────────────────────────
+    //
+    // A DRAFT changes freely and its planned count follows the term; an ACTIVE
+    // one changes too, but moving its term or frequency re-plans the schedule
+    // in the same transaction (attended visits and call-outs kept, a booking
+    // that keeps its date kept); expired, renewed and cancelled ones are a
+    // record. The owner is the job's project manager; edit_all changes any.
+    console.log('\nModify a contract (over HTTP)');
+
+    const modifyJob = await prisma.job.create({
+      data: {
+        number: await nextNumber('project'),
+        type: 'SERVICE_CONTRACT',
+        name: `${TAG} Modify PMS`,
+        customerId: customer.id,
+        siteId: site.id,
+        costingId: serviceCosting.id,
+        createdById: manager.id,
+        projectManagerId: manager.id,
+        contractValue: D(60_000),
+      },
+    });
+    const coverStart = inDays(5);
+    const created = await api(managerToken, 'POST', '/service-contracts', {
+      jobId: modifyJob.id,
+      startsAt: iso(coverStart),
+      endsAt: iso(inDays(5 + 364)),
+      frequencyMonths: 3,
+      assetIds: [asset.id],
+    });
+    check('a draft contract is set up', created.status === 201 && created.body.plannedVisits === 3, `${created.status} ${created.body.plannedVisits ?? created.body.error}`);
+    const mcId = created.body.id as string;
+
+    const asManager = await api(managerToken, 'GET', `/service-contracts/${mcId}`);
+    const asEngineer = await api(engineerToken, 'GET', `/service-contracts/${mcId}`);
+    check(
+      'the page offers Modify to whoever may change it, and not to a reader',
+      asManager.body.canEdit === true && asEngineer.status === 200 && asEngineer.body.canEdit === false,
+      `${asManager.body.canEdit} / ${asEngineer.status} ${asEngineer.body.canEdit}`,
+    );
+
+    const readerEdit = await api(engineerToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: 'never' });
+    check('somebody who may only read contracts cannot change one', readerEdit.status === 403, String(readerEdit.status));
+
+    const ownPm = await makeUser('ZZ Own Contract PM', 'ownpm@verifya.local', []);
+    const ownKeys = await prisma.permission.findMany({
+      where: { key: { in: ['gops.service_contracts.view_own', 'gops.service_contracts.edit_own'] } },
+    });
+    await prisma.userPermissionOverride.createMany({
+      data: ownKeys.map((p) => ({ userId: ownPm.id, permissionId: p.id, effect: 'ALLOW' as const })),
+    });
+    const ownToken = signToken(ownPm.id, ownPm.email);
+    const notTheirs = await api(ownToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: 'not my job' });
+    check(
+      'with edit_own, somebody who is not the job’s project manager cannot change its cover',
+      notTheirs.status === 403,
+      `${notTheirs.status} ${notTheirs.body.error}`,
+    );
+    await prisma.job.update({ where: { id: modifyJob.id }, data: { projectManagerId: ownPm.id } });
+    const theirs2 = await api(ownToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: '4 hours' });
+    check(
+      'the project manager on the job can, with edit_own',
+      theirs2.status === 200 && theirs2.body.responseTime === '4 hours',
+      `${theirs2.status} ${theirs2.body.error ?? ''}`,
+    );
+    await prisma.job.update({ where: { id: modifyJob.id }, data: { projectManagerId: manager.id } });
+
+    const endsFirst = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { endsAt: iso(inDays(1)) });
+    check(
+      'a term that ends before it starts is refused',
+      endsFirst.status === 400 && String(endsFirst.body.error).includes('ends before it starts'),
+      `${endsFirst.status} ${endsFirst.body.error}`,
+    );
+
+    const foreignAsset = await prisma.installedAsset.create({
+      data: {
+        code: await nextNumber('installed_asset'),
+        customerId: other.id,
+        name: `${TAG} Someone else’s chiller`,
+      },
+    });
+    const foreign = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { assetIds: [asset.id, foreignAsset.id] });
+    check(
+      'a contract cannot be made to cover another customer’s machine',
+      foreign.status === 400 && String(foreign.body.error).includes('another customer'),
+      `${foreign.status} ${foreign.body.error}`,
+    );
+
+    const draftEdit = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, {
+      frequencyMonths: 2,
+      exclusions: `${TAG} consumables`,
+      assetIds: [asset.id, secondAsset.id, secondAsset.id],
+    });
+    const draftVisits = await prisma.serviceVisit.count({ where: { contractId: mcId } });
+    check(
+      'a draft’s cover changes, and its planned count follows the new frequency',
+      draftEdit.status === 200 &&
+        draftEdit.body.frequencyMonths === 2 &&
+        draftEdit.body.plannedVisits === 5 &&
+        draftEdit.body.assets.length === 2 &&
+        draftEdit.body.regenerated === null,
+      `${draftEdit.status} ${draftEdit.body.plannedVisits ?? draftEdit.body.error} ${draftEdit.body.assets?.length}`,
+    );
+    check('but a draft gets no schedule from a modify — activation writes it', draftVisits === 0, `${draftVisits} visit(s)`);
+    const draftAudit = await prisma.auditLog.findFirst({
+      where: { entityType: 'service_contract', entityId: mcId, action: 'UPDATED' },
+      orderBy: { at: 'desc' },
+    });
+    check(
+      'the change is audited with the cover before and after',
+      !!draftAudit &&
+        (draftAudit.before as { frequencyMonths?: number } | null)?.frequencyMonths === 3 &&
+        (draftAudit.after as { frequencyMonths?: number } | null)?.frequencyMonths === 2 &&
+        String(draftAudit.summary).includes('2 machine(s)'),
+      `${draftAudit?.summary}`,
+    );
+
+    const activated = await api(managerToken, 'POST', `/service-contracts/${mcId}/activate`);
+    check('activated, it writes five visits', activated.status === 200 && activated.body.created === 5, `${activated.status} ${activated.body.created ?? activated.body.error}`);
+
+    const noneCovered = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { assetIds: [] });
+    check(
+      'an active contract cannot be left covering nothing',
+      noneCovered.status === 400 && String(noneCovered.body.error).includes('at least one machine'),
+      `${noneCovered.status} ${noneCovered.body.error}`,
+    );
+
+    // Nothing has come due yet (cover starts in five days), so the start and
+    // the frequency may still move — but never so a visit lands on a day gone.
+    const fiveVisits = await prisma.serviceVisit.findMany({ where: { contractId: mcId }, select: { id: true } });
+    const intoPast = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, {
+      startsAt: iso(addMonths(coverStart, -4)),
+    });
+    const afterIntoPast = await prisma.serviceVisit.findMany({ where: { contractId: mcId }, select: { id: true } });
+    const startStill = await prisma.serviceContract.findUnique({ where: { id: mcId } });
+    check(
+      'a start moved back so a visit would fall on a day gone is refused, naming the day, and nothing is written',
+      intoPast.status === 400 &&
+        String(intoPast.body.error).includes('a day that has passed') &&
+        iso(startStill!.startsAt) === iso(coverStart) &&
+        afterIntoPast.length === 5 &&
+        fiveVisits.every((v) => afterIntoPast.some((a) => a.id === v.id)),
+      `${intoPast.status} ${intoPast.body.error} start ${iso(startStill!.startsAt)} ${afterIntoPast.length} visit(s)`,
+    );
+    const quarterlyNow = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { frequencyMonths: 3 });
+    const quarterlyVisits = await prisma.serviceVisit.count({ where: { contractId: mcId } });
+    check(
+      'before any visit comes due, an active contract’s frequency changes and its visits are re-planned',
+      quarterlyNow.status === 200 &&
+        quarterlyNow.body.regenerated?.created === 3 &&
+        quarterlyNow.body.regenerated?.carried === 0 &&
+        quarterlyNow.body.plannedVisits === 3 &&
+        quarterlyVisits === 3,
+      `${quarterlyNow.status} ${JSON.stringify(quarterlyNow.body.regenerated ?? quarterlyNow.body.error)} ${quarterlyVisits}`,
+    );
+    const backToTwo = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { frequencyMonths: 2 });
+    check(
+      'and back again',
+      backToTwo.status === 200 && backToTwo.body.plannedVisits === 5,
+      `${backToTwo.status} ${backToTwo.body.plannedVisits ?? backToTwo.body.error}`,
+    );
+
+    const genVisits = await prisma.serviceVisit.findMany({
+      where: { contractId: mcId },
+      orderBy: { sequence: 'asc' },
+    });
+    // Visit 1 attended, visit 2 booked on an engineer, and a call-out on the side.
+    await prisma.serviceVisit.update({ where: { id: genVisits[0].id }, data: { status: 'COMPLETED', performedAt: genVisits[0].dueDate } });
+    await prisma.serviceVisit.update({ where: { id: genVisits[1].id }, data: { assignedToId: engineer.id, notes: `${TAG} bring the spare filter` } });
+    const callout = await prisma.serviceVisit.create({
+      data: {
+        number: await nextNumber('service_visit'),
+        kind: 'CORRECTIVE',
+        contractId: mcId,
+        customerId: customer.id,
+        dueDate: inDays(20),
+        notes: `${TAG} breakdown call`,
+      },
+    });
+
+    const textOnly = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { coverageNotes: `${TAG} weekend calls billed` });
+    const untouched = await prisma.serviceVisit.findMany({ where: { contractId: mcId }, select: { id: true } });
+    check(
+      'an active contract’s wording changes without re-planning anything',
+      textOnly.status === 200 &&
+        textOnly.body.regenerated === null &&
+        untouched.length === 6 &&
+        genVisits.every((v) => untouched.some((u) => u.id === v.id)),
+      `${textOnly.status} ${textOnly.body.error ?? ''} ${untouched.length}`,
+    );
+
+    // Visit 1 has been made: the schedule has begun, so only the end may move.
+    const freqAfterMade = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { frequencyMonths: 4 });
+    const stillSix = await prisma.serviceVisit.findMany({ where: { contractId: mcId }, select: { id: true } });
+    const freqStill = await prisma.serviceContract.findUnique({ where: { id: mcId } });
+    check(
+      'once a visit has been made, a change of frequency is refused, naming the visit, and nothing is written',
+      freqAfterMade.status === 400 &&
+        String(freqAfterMade.body.error).includes(genVisits[0].number) &&
+        String(freqAfterMade.body.error).includes('only its end date can move') &&
+        freqStill?.frequencyMonths === 2 &&
+        stillSix.length === 6 &&
+        untouched.every((u) => stillSix.some((s) => s.id === u.id)),
+      `${freqAfterMade.status} ${freqAfterMade.body.error} freq ${freqStill?.frequencyMonths} ${stillSix.length}`,
+    );
+
+    const longerEnd = addMonths(coverStart, 24);
+    longerEnd.setUTCDate(longerEnd.getUTCDate() - 1);
+    const extended = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { endsAt: iso(longerEnd) });
+    const afterExtend = await prisma.serviceVisit.findMany({ where: { contractId: mcId }, orderBy: { dueDate: 'asc' } });
+    const generatedAfter = afterExtend.filter((v) => v.sequence !== null);
+    check(
+      'extending an active contract re-plans its schedule in the same save',
+      extended.status === 200 &&
+        extended.body.regenerated?.kept === 1 &&
+        extended.body.regenerated?.created === 10 &&
+        extended.body.plannedVisits === 11 &&
+        generatedAfter.length === 11,
+      `${extended.status} ${JSON.stringify(extended.body.regenerated ?? extended.body.error)} planned ${extended.body.plannedVisits}, ${generatedAfter.length} generated`,
+    );
+    check(
+      'the attended visit is kept as it was',
+      afterExtend.some((v) => v.id === genVisits[0].id && v.status === 'COMPLETED'),
+    );
+    check('the call-out survives the re-plan', afterExtend.some((v) => v.id === callout.id));
+    const rebooked = generatedAfter.find((v) => v.sequence === 2);
+    check(
+      'a visit that keeps its date keeps its engineer and notes',
+      rebooked?.assignedToId === engineer.id && rebooked?.notes === `${TAG} bring the spare filter`,
+      `${rebooked?.assignedToId} ${rebooked?.notes}`,
+    );
+    const replanAudit = await prisma.auditLog.findFirst({
+      where: { entityType: 'service_contract', entityId: mcId, action: 'UPDATED', summary: { contains: 're-planned' } },
+      orderBy: { at: 'desc' },
+    });
+    check('and the audit row says the schedule was re-planned', !!replanAudit, String(replanAudit?.summary));
+    type VisitTrail = { number: string; sequence: number; status: string; assignedToId: string | null };
+    const replacedTrail = ((replanAudit?.before as { visits?: VisitTrail[] } | null)?.visits ?? []);
+    const writtenTrail = ((replanAudit?.after as { visits?: VisitTrail[] } | null)?.visits ?? []);
+    check(
+      'and lists every visit it replaced and wrote — the old numbers are not lost',
+      replacedTrail.length === 4 &&
+        replacedTrail.some((v) => v.number === genVisits[1].number && v.assignedToId === engineer.id) &&
+        writtenTrail.length === 10 &&
+        writtenTrail.some((v) => v.sequence === 2 && v.assignedToId === engineer.id),
+      `${replacedTrail.length} replaced, ${writtenTrail.length} written`,
+    );
+
+    // A report already written against a visit that would be re-planned.
+    const onSite = generatedAfter.find((v) => v.sequence === 3)!;
+    const startedReport = await api(engineerToken, 'POST', '/service-reports', { visitId: onSite.id, data: {} });
+    check('an engineer starts a report on visit 3', startedReport.status === 201, `${startedReport.status} ${startedReport.body.error ?? ''}`);
+    const shorterEnd = addMonths(coverStart, 12);
+    shorterEnd.setUTCDate(shorterEnd.getUTCDate() - 1);
+    const blocked = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { endsAt: iso(shorterEnd) });
+    const endStill = await prisma.serviceContract.findUnique({ where: { id: mcId } });
+    const reportStill = await prisma.serviceReport.findUnique({ where: { id: startedReport.body.id } });
+    check(
+      'a re-plan that would delete a visit holding a report is refused, and nothing is written',
+      blocked.status === 400 &&
+        String(blocked.body.error).includes(onSite.number) &&
+        iso(endStill!.endsAt) === iso(longerEnd) &&
+        reportStill?.visitId === onSite.id,
+      `${blocked.status} ${blocked.body.error} ends ${iso(endStill!.endsAt)} visit ${reportStill?.visitId}`,
+    );
+    const blockedRegen = await api(managerToken, 'POST', `/service-contracts/${mcId}/regenerate-schedule`);
+    check(
+      'and so is a plain regenerate',
+      blockedRegen.status === 400 && String(blockedRegen.body.error).includes(onSite.number),
+      `${blockedRegen.status} ${blockedRegen.body.error}`,
+    );
+    const wordingStill = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: 'next working day' });
+    check('while a change that moves no visit still saves', wordingStill.status === 200, `${wordingStill.status} ${wordingStill.body.error ?? ''}`);
+
+    for (const [status, says, label] of [
+      ['EXPIRED', 'expired', 'an expired'],
+      ['RENEWED', 'renewed', 'a renewed'],
+      ['CANCELLED', 'cancelled', 'a cancelled'],
+    ] as const) {
+      await prisma.serviceContract.update({ where: { id: mcId }, data: { status } });
+      const closed = await api(managerToken, 'PATCH', `/service-contracts/${mcId}`, { responseTime: 'too late' });
+      const page = await api(managerToken, 'GET', `/service-contracts/${mcId}`);
+      check(
+        `${label} contract's cover cannot be changed, and the page offers no Modify`,
+        closed.status === 400 && String(closed.body.error).includes(says) && page.body.canEdit === false,
+        `${closed.status} ${closed.body.error} canEdit ${page.body.canEdit}`,
+      );
+    }
+
+    // ── A schedule that has begun (2026-10-09 review) ─────────────────────────
+    //
+    // regenerateSchedule writes every unattended visit, whatever its day. On a
+    // contract whose visits have come due, re-planning would write visits on
+    // days already gone — overdue at once, MISSED after the sweep: a record of
+    // work nobody failed to do. Once a visit has come due only the end date
+    // moves (to today or later, keeping every attended visit inside the term),
+    // and a visit the plan leaves on its day is carried as it was.
+    console.log('\nModify a contract whose visits have begun (over HTTP)');
+
+    const pastStart = addMonths(today, -8);
+    const pastEnd = addMonths(pastStart, 24);
+    pastEnd.setUTCDate(pastEnd.getUTCDate() - 1);
+    const begunJob = await prisma.job.create({
+      data: {
+        number: await nextNumber('project'),
+        type: 'SERVICE_CONTRACT',
+        name: `${TAG} Begun PMS`,
+        customerId: customer.id,
+        siteId: site.id,
+        costingId: serviceCosting.id,
+        createdById: manager.id,
+        projectManagerId: manager.id,
+        contractValue: D(60_000),
+      },
+    });
+    // A machine of its own, so this contract's cover never decides another test's.
+    const begunAsset = await prisma.installedAsset.create({
+      data: {
+        code: await nextNumber('installed_asset'),
+        customerId: customer.id,
+        siteId: site.id,
+        name: `${TAG} Begun Chiller`,
+      },
+    });
+    const begunCreated = await api(managerToken, 'POST', '/service-contracts', {
+      jobId: begunJob.id,
+      startsAt: iso(pastStart),
+      endsAt: iso(pastEnd),
+      frequencyMonths: 3,
+      assetIds: [begunAsset.id],
+    });
+    const bcId = begunCreated.body.id as string;
+    const begunActivated = await api(managerToken, 'POST', `/service-contracts/${bcId}/activate`);
+    check(
+      'a contract that started eight months ago is activated with its seven visits',
+      begunCreated.status === 201 && begunActivated.status === 200 && begunActivated.body.created === 7,
+      `${begunCreated.status} ${begunActivated.status} ${begunActivated.body.created ?? begunActivated.body.error}`,
+    );
+    const bv = await prisma.serviceVisit.findMany({ where: { contractId: bcId }, orderBy: { sequence: 'asc' } });
+    // Visit 1 made; visit 2 cancelled with its reason; visit 3 moved by hand
+    // and booked on an engineer; visit 4 made early, ahead of its due date.
+    await prisma.serviceVisit.update({ where: { id: bv[0].id }, data: { status: 'COMPLETED', performedAt: bv[0].dueDate } });
+    const cancelVisit = await api(managerToken, 'PATCH', `/service-visits/${bv[1].id}`, {
+      status: 'CANCELLED',
+      reason: `${TAG} plant shut for overhaul`,
+    });
+    const movedTo = new Date(bv[2].dueDate);
+    movedTo.setUTCDate(movedTo.getUTCDate() + 3);
+    const moveVisit = await api(managerToken, 'PATCH', `/service-visits/${bv[2].id}`, {
+      dueDate: iso(movedTo),
+      assignedToId: engineer.id,
+      notes: `${TAG} the customer asked for the Thursday`,
+    });
+    await prisma.serviceVisit.update({ where: { id: bv[3].id }, data: { status: 'COMPLETED', performedAt: today } });
+    check(
+      'the fixtures: visit 2 cancelled with a reason, visit 3 moved by hand',
+      cancelVisit.status === 200 && moveVisit.status === 200,
+      `${cancelVisit.status} ${cancelVisit.body.error ?? ''} / ${moveVisit.status} ${moveVisit.body.error ?? ''}`,
+    );
+    const begunBefore = await prisma.serviceVisit.findMany({
+      where: { contractId: bcId },
+      select: { id: true, status: true, dueDate: true },
+    });
+    const unchanged = async () => {
+      const now = await prisma.serviceVisit.findMany({
+        where: { contractId: bcId },
+        select: { id: true, status: true, dueDate: true },
+      });
+      return (
+        now.length === begunBefore.length &&
+        begunBefore.every((b) =>
+          now.some((n) => n.id === b.id && n.status === b.status && iso(n.dueDate) === iso(b.dueDate)),
+        )
+      );
+    };
+
+    const begunFreq = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, { frequencyMonths: 2 });
+    const begunFreqRow = await prisma.serviceContract.findUnique({ where: { id: bcId } });
+    check(
+      'once a visit has come due, a change of frequency is refused, naming the visit and its day',
+      begunFreq.status === 400 &&
+        String(begunFreq.body.error).includes(bv[0].number) &&
+        String(begunFreq.body.error).includes('only its end date can move'),
+      `${begunFreq.status} ${begunFreq.body.error}`,
+    );
+    check(
+      'and nothing is written — no visit re-planned, none made MISSED, the frequency unchanged',
+      begunFreqRow?.frequencyMonths === 3 && (await unchanged()),
+      `freq ${begunFreqRow?.frequencyMonths}`,
+    );
+
+    const begunStart = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, {
+      startsAt: iso(addMonths(pastStart, -1)),
+    });
+    check(
+      'and so is a change of start',
+      begunStart.status === 400 && String(begunStart.body.error).includes('only its end date can move') && (await unchanged()),
+      `${begunStart.status} ${begunStart.body.error}`,
+    );
+
+    const endsYesterday = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, { endsAt: iso(inDays(-1)) });
+    check(
+      'an active contract cannot be made to end before today',
+      endsYesterday.status === 400 && String(endsYesterday.body.error).includes('before today') && (await unchanged()),
+      `${endsYesterday.status} ${endsYesterday.body.error}`,
+    );
+
+    const beforeEarly = new Date(bv[3].dueDate);
+    beforeEarly.setUTCDate(beforeEarly.getUTCDate() - 1);
+    const dropsMade = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, { endsAt: iso(beforeEarly) });
+    check(
+      'nor end before a visit that has been made — the term keeps every attended visit inside it',
+      dropsMade.status === 400 &&
+        String(dropsMade.body.error).includes(bv[3].number) &&
+        String(dropsMade.body.error).includes('must still include it') &&
+        (await unchanged()),
+      `${dropsMade.status} ${dropsMade.body.error}`,
+    );
+
+    const begunLonger = addMonths(pastStart, 30);
+    begunLonger.setUTCDate(begunLonger.getUTCDate() - 1);
+    const begunExtended = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, { endsAt: iso(begunLonger) });
+    check(
+      'but its end date moves: extended, two visits are added and the five unattended ones carried',
+      begunExtended.status === 200 &&
+        begunExtended.body.plannedVisits === 9 &&
+        begunExtended.body.regenerated?.kept === 2 &&
+        begunExtended.body.regenerated?.created === 7 &&
+        begunExtended.body.regenerated?.carried === 5,
+      `${begunExtended.status} ${JSON.stringify(begunExtended.body.regenerated ?? begunExtended.body.error)} planned ${begunExtended.body.plannedVisits}`,
+    );
+    // The page sweeps before it answers — so this is what the sweep makes of it.
+    const begunPage = await api(managerToken, 'GET', `/service-contracts/${bcId}`);
+    const begunAfter = await prisma.serviceVisit.findMany({ where: { contractId: bcId }, orderBy: { sequence: 'asc' } });
+    const missedNow = begunAfter.filter((v) => v.status === 'MISSED').length;
+    check(
+      'the extension writes no visit on a day gone — none is MISSED, even after the sweep',
+      begunPage.status === 200 && begunPage.body.progress?.missed === 0 && missedNow === 0,
+      `${begunPage.status} missed ${begunPage.body.progress?.missed} / ${missedNow}`,
+    );
+    const stillCancelled = begunAfter.find((v) => v.sequence === 2);
+    check(
+      'a cancelled visit stays cancelled, on its day, with its written reason',
+      stillCancelled?.status === 'CANCELLED' &&
+        iso(stillCancelled.dueDate) === iso(bv[1].dueDate) &&
+        String(stillCancelled.notes).includes('plant shut for overhaul'),
+      `${stillCancelled?.status} ${stillCancelled && iso(stillCancelled.dueDate)} ${stillCancelled?.notes}`,
+    );
+    const stillMoved = begunAfter.find((v) => v.sequence === 3);
+    check(
+      'a visit moved by hand keeps its day, its engineer and its notes',
+      stillMoved?.status === 'SCHEDULED' &&
+        iso(stillMoved.dueDate) === iso(movedTo) &&
+        stillMoved.assignedToId === engineer.id &&
+        stillMoved.notes === `${TAG} the customer asked for the Thursday`,
+      `${stillMoved?.status} ${stillMoved && iso(stillMoved.dueDate)} ${stillMoved?.assignedToId}`,
+    );
+    check(
+      'and both attended visits are the same rows, untouched',
+      begunAfter.some((v) => v.id === bv[0].id && v.status === 'COMPLETED') &&
+        begunAfter.some((v) => v.id === bv[3].id && v.status === 'COMPLETED'),
+    );
+    check(
+      'the two added visits fall after the old end, as planned',
+      begunAfter.filter((v) => v.sequence! > 7).length === 2 &&
+        begunAfter.filter((v) => v.sequence! > 7).every((v) => v.status === 'SCHEDULED' && v.dueDate > pastEnd),
+    );
+
+    // A renewed contract stays ACTIVE beside its renewal (nothing sets
+    // RENEWED), so the two terms must not be made to overlap.
+    const renewalJob = await prisma.job.create({
+      data: {
+        number: await nextNumber('project'),
+        type: 'SERVICE_CONTRACT',
+        name: `${TAG} Begun PMS renewal`,
+        customerId: customer.id,
+        siteId: site.id,
+        costingId: serviceCosting.id,
+        createdById: manager.id,
+        projectManagerId: manager.id,
+        contractValue: D(60_000),
+      },
+    });
+    const renewalStart = new Date(begunLonger);
+    renewalStart.setUTCDate(renewalStart.getUTCDate() + 1);
+    const renewalCreated = await api(managerToken, 'POST', '/service-contracts', {
+      jobId: renewalJob.id,
+      startsAt: iso(renewalStart),
+      endsAt: iso(addMonths(begunLonger, 12)),
+      frequencyMonths: 3,
+      assetIds: [begunAsset.id],
+      renewedFromId: bcId,
+    });
+    const renewalId = renewalCreated.body.id as string;
+    check('the contract is renewed as a draft starting the day after it ends', renewalCreated.status === 201, `${renewalCreated.status} ${renewalCreated.body.error ?? ''}`);
+    const overlapEnd = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, { endsAt: iso(renewalStart) });
+    check(
+      'a renewed contract cannot be extended into its renewal’s term',
+      overlapEnd.status === 400 &&
+        String(overlapEnd.body.error).includes(renewalCreated.body.number) &&
+        String(overlapEnd.body.error).includes('takes over'),
+      `${overlapEnd.status} ${overlapEnd.body.error}`,
+    );
+    const overlapStart = await api(managerToken, 'PATCH', `/service-contracts/${renewalId}`, { startsAt: iso(begunLonger) });
+    check(
+      'nor a renewal started on or before the day the contract it renews ends',
+      overlapStart.status === 400 &&
+        String(overlapStart.body.error).includes(begunCreated.body.number) &&
+        String(overlapStart.body.error).includes('renews'),
+      `${overlapStart.status} ${overlapStart.body.error}`,
+    );
+    const laterStart = new Date(renewalStart);
+    laterStart.setUTCDate(laterStart.getUTCDate() + 10);
+    const renewalLater = await api(managerToken, 'PATCH', `/service-contracts/${renewalId}`, { startsAt: iso(laterStart) });
+    check(
+      'while a renewal moved later, leaving a gap, saves',
+      renewalLater.status === 200 && iso(new Date(renewalLater.body.startsAt)) === iso(laterStart),
+      `${renewalLater.status} ${renewalLater.body.error ?? ''}`,
+    );
+
+    // A save worked out from a stale read is a 409, never a silent overwrite.
+    const formOpened = await api(managerToken, 'GET', `/service-contracts/${bcId}`);
+    const firstSave = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, {
+      responseTime: `${TAG} four hours`,
+      updatedAt: formOpened.body.updatedAt,
+    });
+    const staleSave = await api(managerToken, 'PATCH', `/service-contracts/${bcId}`, {
+      responseTime: `${TAG} next week`,
+      updatedAt: formOpened.body.updatedAt,
+    });
+    const afterStale = await prisma.serviceContract.findUnique({ where: { id: bcId } });
+    check(
+      'a form saved over a change made since it was opened is refused with a 409, and the change stands',
+      firstSave.status === 200 &&
+        firstSave.body.updatedAt !== formOpened.body.updatedAt &&
+        staleSave.status === 409 &&
+        afterStale?.responseTime === `${TAG} four hours`,
+      `${firstSave.status} ${staleSave.status} ${staleSave.body.error} ${afterStale?.responseTime}`,
+    );
+
     // A report cannot be submitted half-filled, or unsigned.
     const draft = await api(engineerToken, 'POST', '/service-reports', {
       kind: 'PREVENTIVE_MAINTENANCE',

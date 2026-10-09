@@ -59,6 +59,8 @@ export interface Invoice {
   ewtCertificateNo: string | null;
   ewtCertificateAt: string | null;
   notes: string | null;
+  voidedAt: string | null;
+  voidReason: string | null;
   customer: { id: string; code: string; name: string };
   job: { id: string; number: string; name: string } | null;
   progressBilling: { id: string; number: string; billingNo: number } | null;
@@ -315,10 +317,10 @@ export function Receivables() {
       />
 
       {raising && (
-        <RaiseInvoiceModal
+        <InvoiceModal
           billing={raising}
           onClose={() => setRaising(null)}
-          onRaised={(id) => {
+          onSaved={(id) => {
             setRaising(null);
             setReload((r) => r + 1);
             navigate(`/g-fin/ar/${id}`);
@@ -329,21 +331,49 @@ export function Receivables() {
   );
 }
 
-function RaiseInvoiceModal({
+/** Whole days from one stored date to another — terms, read back off an invoice's dates. */
+function daysFrom(from: string, to: string): number {
+  const ms = Date.parse(`${to.slice(0, 10)}T00:00:00Z`) - Date.parse(`${from.slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.max(0, Math.round(ms / 86_400_000)) : 0;
+}
+
+const toCents = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Raising an invoice from an approved billing or — with `existing` —
+ * modifying a draft invoice (`PUT /invoices/:id`). A billing's invoice
+ * carries the billing's figures, so only its dates, terms, PO reference and
+ * notes are offered. A manual one (a job order's) is re-entered whole: its
+ * lines here, its tax recomputed by the server at the rates it was raised
+ * with — the figures shown are the same arithmetic, for reading.
+ */
+function InvoiceModal({
   billing,
+  existing,
   onClose,
-  onRaised,
+  onSaved,
 }: {
-  billing: UninvoicedBilling;
+  billing?: UninvoicedBilling;
+  /** A draft invoice to modify. */
+  existing?: Invoice;
   onClose: () => void;
-  onRaised: (id: string) => void;
+  onSaved: (id: string) => void;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [terms, setTerms] = useState(30);
+  const [terms, setTerms] = useState(existing ? daysFrom(existing.invoiceDate, existing.dueDate) : 30);
   const today = todayLocal();
-  const [form, setForm] = useState({ invoiceDate: today, poReference: '', notes: '' });
+  const [form, setForm] = useState({
+    invoiceDate: existing?.invoiceDate.slice(0, 10) ?? today,
+    poReference: existing?.poReference ?? '',
+    notes: existing?.notes ?? '',
+  });
+  // A manual invoice's lines are its figures; a billing's are the billing's.
+  const manual = !!existing && !existing.progressBilling;
+  const [lines, setLines] = useState(
+    existing ? existing.lines.map((l) => ({ description: l.description, detail: l.detail ?? '', amount: l.amount })) : [],
+  );
 
   const dueDate = (() => {
     const d = new Date(`${form.invoiceDate}T00:00:00Z`);
@@ -351,55 +381,107 @@ function RaiseInvoiceModal({
     return d.toISOString().slice(0, 10);
   })();
 
-  async function raise() {
+  const gross = toCents(lines.reduce((s, l) => s + (l.amount || 0), 0));
+  const figures = existing
+    ? manual
+      ? (() => {
+          const vat = toCents(gross * existing.vatRate);
+          const ewt = toCents(gross * existing.ewtRate);
+          return { invoiceTotal: toCents(gross + vat), netCollectible: toCents(gross + vat - ewt) };
+        })()
+      : { invoiceTotal: existing.invoiceTotal, netCollectible: existing.netCollectible }
+    : { invoiceTotal: billing?.invoiceTotal ?? 0, netCollectible: billing?.netCollectible ?? 0 };
+  const valid = !manual || (gross > 0 && lines.every((l) => !l.amount || l.description.trim()));
+
+  async function save() {
     setBusy(true);
     setError(null);
+    const header = {
+      invoiceDate: form.invoiceDate,
+      dueDate,
+      terms: `${terms} days`,
+      poReference: form.poReference || null,
+      notes: form.notes || null,
+    };
     try {
-      const created = await api.post<{ id: string }>(`/invoices/from-billing/${billing.id}`, {
-        invoiceDate: form.invoiceDate,
-        dueDate,
-        terms: `${terms} days`,
-        poReference: form.poReference || null,
-        notes: form.notes || null,
-      });
-      toast('ok', 'Invoice raised — issue it when it goes to the customer');
-      onRaised(created.id);
+      if (existing) {
+        await api.put(
+          `/invoices/${existing.id}`,
+          manual
+            ? {
+                ...header,
+                lines: lines
+                  .filter((l) => l.description.trim() && l.amount)
+                  .map((l) => ({ description: l.description, detail: l.detail || null, amount: l.amount })),
+              }
+            : header,
+        );
+        toast('ok', 'Saved');
+        onSaved(existing.id);
+      } else if (billing) {
+        const created = await api.post<{ id: string }>(`/invoices/from-billing/${billing.id}`, header);
+        toast('ok', 'Invoice raised — issue it when it goes to the customer');
+        onSaved(created.id);
+      }
     } catch (err) {
       setError(err);
       setBusy(false);
     }
   }
 
+  const customerName = existing?.customer.name ?? billing?.job.customer.name ?? '';
+  const project = existing?.job ?? billing?.job ?? null;
+
   return (
     <Modal
-      title={`New invoice from ${billing.number}`}
+      title={existing ? `Modify invoice ${existing.number}` : `New invoice from ${billing?.number ?? 'billing'}`}
       onClose={onClose}
+      wide={manual}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={raise} disabled={busy}>
-            {busy ? 'Raising…' : 'Raise invoice'}
+          <button className="btn btn-primary" onClick={save} disabled={busy || !valid}>
+            {existing ? (busy ? 'Saving…' : 'Save') : busy ? 'Raising…' : 'Raise invoice'}
           </button>
         </ModalFoot>
       }
     >
       <ErrorBox error={error} />
-      <div className="alert info">
-        Every figure is carried from the billing — the gross, both tax rates and the line
-        breakdown. Nothing is recomputed, so an invoice raised months later still prints the tax it
-        was billed under.
-      </div>
+      {manual ? (
+        <div className="alert info">
+          VAT and EWT are recomputed from the lines at the rates this invoice was raised with —{' '}
+          {(existing.vatRate * 100).toFixed(0)}% and {(existing.ewtRate * 100).toFixed(0)}%.
+          {existing.jobOrder && <> It bills job order {existing.jobOrder.number}, which does not change.</>}
+        </div>
+      ) : existing ? (
+        <div className="alert info">
+          The figures are {existing.progressBilling?.number ?? 'the billing'}&rsquo;s and do not change here —
+          only the dates, terms, PO reference and notes do.
+        </div>
+      ) : (
+        <div className="alert info">
+          Every figure is carried from the billing — the gross, both tax rates and the line
+          breakdown. Nothing is recomputed, so an invoice raised months later still prints the tax it
+          was billed under.
+        </div>
+      )}
 
       <dl className="kv">
         <dt>Customer</dt>
-        <dd>{billing.job.customer.name}</dd>
+        <dd>{customerName}</dd>
         <dt>Project</dt>
         <dd>
-          <span className="mono">{billing.job.number}</span> — {billing.job.name}
+          {project ? (
+            <>
+              <span className="mono">{project.number}</span> — {project.name}
+            </>
+          ) : (
+            <span className="faint">none</span>
+          )}
         </dd>
         <dt>Invoice total</dt>
-        <dd className="mono">{formatMoney(billing.invoiceTotal)}</dd>
+        <dd className="mono">{formatMoney(figures.invoiceTotal)}</dd>
         <dt>Collectible</dt>
-        <dd className="mono">{formatMoney(billing.netCollectible)}</dd>
+        <dd className="mono">{formatMoney(figures.netCollectible)}</dd>
       </dl>
 
       <div className="grid grid-2 fin-gap-top">
@@ -427,6 +509,91 @@ function RaiseInvoiceModal({
           onChange={(e) => setForm({ ...form, poReference: e.target.value })}
         />
       </Field>
+
+      {manual && (
+        <>
+          <h4 className="fin-section-title">Lines</h4>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th>Detail</th>
+                  <th className="right">Amount (before VAT)</th>
+                  <th className="fin-col-tight" />
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l, i) => {
+                  const update = (patch: Partial<typeof l>) => {
+                    const next = [...lines];
+                    next[i] = { ...l, ...patch };
+                    setLines(next);
+                  };
+                  return (
+                    <tr key={i}>
+                      <td>
+                        <input
+                          aria-label={`Line ${i + 1} description`}
+                          value={l.description}
+                          onChange={(e) => update({ description: e.target.value })}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          aria-label={`Line ${i + 1} detail`}
+                          value={l.detail}
+                          onChange={(e) => update({ detail: e.target.value })}
+                        />
+                      </td>
+                      <td>
+                        <NumberInput
+                          kind="money"
+                          step="0.01"
+                          aria-label={`Line ${i + 1} amount`}
+                          className="fin-amount-input"
+                          value={l.amount}
+                          onChange={(e) => update({ amount: Number(e.target.value) })}
+                        />
+                      </td>
+                      <td className="right">
+                        {lines.length > 1 && (
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            aria-label={`Remove line ${i + 1}`}
+                            onClick={() => setLines(lines.filter((_, j) => j !== i))}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th colSpan={2} className="right">
+                    Gross
+                  </th>
+                  <th className="right mono">{formatMoney(gross)}</th>
+                  <th />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <button
+            className="btn btn-sm fin-gap-top-sm"
+            onClick={() => setLines([...lines, { description: '', detail: '', amount: 0 }])}
+          >
+            + Add line
+          </button>
+        </>
+      )}
+
+      <Field label="Notes">
+        <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
     </Modal>
   );
 }
@@ -441,6 +608,7 @@ export function InvoiceDetail() {
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
   const [certificate, setCertificate] = useState(false);
+  const [editing, setEditing] = useState(false);
   const confirm = useConfirm();
 
   const load = useCallback(async () => {
@@ -464,6 +632,22 @@ export function InvoiceDetail() {
     toast('ok', 'Issued — it is now a receivable');
     await load();
   }
+
+  async function cancel(reason: string) {
+    await api.post(`/invoices/${id}/cancel`, { reason });
+    toast('ok', 'Cancelled');
+    await load();
+  }
+
+  // Mirror the routes: Modify a draft; cancel anything not cancelled with no
+  // money applied to it — both for whoever may edit every invoice.
+  const canModify = row.status === 'DRAFT' && can('gfin.ar.edit_all');
+  const canCancel = row.status !== 'CANCELLED' && !row.allocations?.length && can('gfin.ar.edit_all');
+  const releases = row.progressBilling
+    ? ` ${row.progressBilling.number} goes back to be invoiced again.`
+    : row.jobOrder
+      ? ` Job order ${row.jobOrder.number} can be invoiced again.`
+      : '';
 
   return (
     <div>
@@ -539,13 +723,33 @@ export function InvoiceDetail() {
               hint: 'The certificate for the EWT withheld at source',
               onSelect: () => setCertificate(true),
             },
+          canCancel && {
+            label: 'Cancel invoice',
+            danger: true,
+            confirm: {
+              title: `Cancel ${row.number}?`,
+              body: `${row.status === 'DRAFT' ? 'It was never issued.' : 'It stops being a receivable.'}${releases}`,
+              confirmLabel: 'Cancel invoice',
+              reason: 'required',
+              reasonLabel: 'Why? (kept on the invoice)',
+              minReason: 3,
+              onConfirm: cancel,
+            },
+          },
         ]}
+        modify={canModify ? () => setEditing(true) : undefined}
         confirm={confirm}
       />
 
       <ErrorBox error={error} />
 
-      {row.outstanding > 0 && row.daysOverdue > 0 && (
+      {row.status === 'CANCELLED' && (
+        <div className="alert warn">
+          Cancelled{row.voidedAt && <> on {formatDate(row.voidedAt)}</>}
+          {row.voidReason && <> — {row.voidReason}</>}.
+        </div>
+      )}
+      {row.status !== 'CANCELLED' && row.outstanding > 0 && row.daysOverdue > 0 && (
         <div className="alert warn">
           {row.daysOverdue} days past due. {formatMoney(row.outstanding)} outstanding.
         </div>
@@ -681,6 +885,17 @@ export function InvoiceDetail() {
           onClose={() => setPaying(false)}
           onSaved={() => {
             setPaying(false);
+            load();
+          }}
+        />
+      )}
+
+      {editing && (
+        <InvoiceModal
+          existing={row}
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
             load();
           }}
         />

@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import {
   Checkbox,
@@ -345,12 +346,27 @@ export function Payables() {
   );
 }
 
+/** Whole days from one stored date to another — a bill's terms, read back off its dates. */
+function daysFrom(from: string, to: string): number {
+  const ms = Date.parse(`${to.slice(0, 10)}T00:00:00Z`) - Date.parse(`${from.slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.max(0, Math.round(ms / 86_400_000)) : 0;
+}
+
+/**
+ * Entering a supplier bill — blank, or from a receiving in the queue — or,
+ * with `existing`, modifying a draft one (`PUT /supplier-bills/:id`). A bill
+ * against an order keeps its order and receiving: that receiving is what
+ * stops approval charging the project a second time.
+ */
 function NewBillModal({
   from,
+  existing,
   onClose,
   onCreated,
 }: {
   from: UnbilledReceiving | null;
+  /** A draft bill to modify. */
+  existing?: Bill;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -368,24 +384,34 @@ function NewBillModal({
   } | null>(null);
 
   const today = todayLocal();
+  // A bill entered VAT-inclusive stores its lines as typed and its subtotal
+  // with the VAT backed out — so the two differ exactly when it was.
+  const existingLineTotal = existing ? existing.lines.reduce((s, l) => s + l.amount, 0) : 0;
   const [form, setForm] = useState({
-    supplierId: from?.order.supplier.id ?? '',
-    jobId: from?.order.job?.id ?? '',
-    costCategoryId: '',
-    supplierInvoiceNo: from?.invoiceRefNo ?? '',
-    billDate: today,
-    terms: 30,
-    vatInclusive: false,
-    ewtRate: 0,
-    notes: '',
+    supplierId: existing?.supplier.id ?? from?.order.supplier.id ?? '',
+    jobId: existing?.job?.id ?? from?.order.job?.id ?? '',
+    costCategoryId: existing?.costCategory?.id ?? '',
+    supplierInvoiceNo: existing?.supplierInvoiceNo ?? from?.invoiceRefNo ?? '',
+    billDate: existing?.billDate.slice(0, 10) ?? today,
+    terms: existing ? daysFrom(existing.billDate, existing.dueDate) : 30,
+    vatInclusive: existing ? Math.abs(existing.subtotal - existingLineTotal) > 0.005 : false,
+    ewtRate: existing?.ewtRate ?? 0,
+    notes: existing?.notes ?? '',
   });
-  const [lines, setLines] = useState([
-    {
-      description: from ? `Goods received on ${from.number}` : '',
-      quantity: 1,
-      unitPrice: from?.receivedValue ?? 0,
-    },
-  ]);
+  const [lines, setLines] = useState(
+    existing
+      ? existing.lines.map((l) => ({ description: l.description, quantity: l.quantity, unitPrice: l.unitPrice }))
+      : [
+          {
+            description: from ? `Goods received on ${from.number}` : '',
+            quantity: 1,
+            unitPrice: from?.receivedValue ?? 0,
+          },
+        ],
+  );
+  // What the bill is matched to: the queue's receiving, or the draft's own.
+  const matchedTo = from?.number ?? existing?.receiving?.number ?? null;
+  const onOrder = !!from || !!existing?.order;
 
   useEffect(() => {
     api.get<{ rows: { id: string; name: string }[] }>('/suppliers?pageSize=200').then((d) => setSuppliers(d.rows)).catch(() => {});
@@ -397,12 +423,19 @@ function NewBillModal({
       )
       .then((s) => {
         setSettings(s);
-        setForm((f) => ({ ...f, terms: s.defaultTermsDays }));
+        // A draft keeps the terms its own dates say.
+        if (!existing) setForm((f) => ({ ...f, terms: s.defaultTermsDays }));
       })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const vatRate = settings?.vatRate ?? 0.12;
+  // A draft keeps the VAT rate it was entered with; a new bill takes today's.
+  const vatRate = existing?.vatRate ?? settings?.vatRate ?? 0.12;
+  const goodsRate = settings?.supplierEwtGoods ?? 0.01;
+  const servicesRate = settings?.supplierEwtServices ?? 0.02;
+  // A rate the settings no longer offer stays choosable on the draft that has it.
+  const otherRate = form.ewtRate > 0 && form.ewtRate !== goodsRate && form.ewtRate !== servicesRate ? form.ewtRate : null;
   const lineTotal = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
   const subtotal = form.vatInclusive ? lineTotal / (1 + vatRate) : lineTotal;
   const vatAmount = subtotal * vatRate;
@@ -420,23 +453,27 @@ function NewBillModal({
     setBusy(true);
     setError(null);
     try {
-      const created = await api.post<{ id: string }>('/supplier-bills', {
+      const body = {
         supplierId: form.supplierId,
-        orderId: from?.order.id ?? null,
-        receivingId: from?.id ?? null,
+        orderId: existing ? existing.order?.id ?? null : from?.order.id ?? null,
+        receivingId: existing ? existing.receiving?.id ?? null : from?.id ?? null,
         jobId: form.jobId || null,
         costCategoryId: form.costCategoryId || null,
         supplierInvoiceNo: form.supplierInvoiceNo || null,
         billDate: form.billDate,
         dueDate,
         terms: `${form.terms} days`,
+        ...(existing ? { vatRate: existing.vatRate } : {}),
         vatInclusive: form.vatInclusive,
         ewtRate: form.ewtRate,
         notes: form.notes || null,
         lines: lines.filter((l) => l.description.trim() && l.unitPrice !== 0),
-      });
-      toast('ok', 'Bill entered — submit it for approval next');
-      onCreated(created.id);
+      };
+      const saved = existing
+        ? await api.put<{ id: string }>(`/supplier-bills/${existing.id}`, body)
+        : await api.post<{ id: string }>('/supplier-bills', body);
+      toast('ok', existing ? 'Saved' : 'Bill entered — submit it for approval next');
+      onCreated(saved.id);
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -445,7 +482,13 @@ function NewBillModal({
 
   return (
     <Modal
-      title={from ? `New supplier bill for ${from.number}` : 'New supplier bill'}
+      title={
+        existing
+          ? `Modify supplier bill ${existing.number}`
+          : from
+            ? `New supplier bill for ${from.number}`
+            : 'New supplier bill'
+      }
       onClose={onClose}
       wide
       footer={
@@ -462,9 +505,9 @@ function NewBillModal({
     >
       <ErrorBox error={error} />
 
-      {from ? (
+      {matchedTo ? (
         <div className="alert info">
-          This bill is matched to <span className="mono">{from.number}</span>. The goods were
+          This bill is matched to <span className="mono">{matchedTo}</span>. The goods were
           already charged to the project when they arrived, so approving this bill makes it
           payable and charges nothing further.
         </div>
@@ -481,7 +524,8 @@ function NewBillModal({
           <select
             value={form.supplierId}
             onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
-            disabled={!!from}
+            // The order fixes the supplier.
+            disabled={onOrder}
           >
             <option value="">— choose —</option>
             {suppliers.map((s) => (
@@ -519,7 +563,7 @@ function NewBillModal({
       </div>
 
       <div className="grid grid-2">
-        <Field label="Project" hint={from ? 'Carried from the order' : 'Leave empty for overheads'}>
+        <Field label="Project" hint={onOrder ? 'Carried from the order' : 'Leave empty for overheads'}>
           <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
             <option value="">— none —</option>
             {jobs.map((j) => (
@@ -635,13 +679,13 @@ function NewBillModal({
               onChange={(e) => setForm({ ...form, ewtRate: Number(e.target.value) })}
             >
               <option value={0}>None</option>
-              <option value={settings?.supplierEwtGoods ?? 0.01}>
-                Goods — {((settings?.supplierEwtGoods ?? 0.01) * 100).toFixed(0)}%
-              </option>
-              <option value={settings?.supplierEwtServices ?? 0.02}>
-                Services / subcontract — {((settings?.supplierEwtServices ?? 0.02) * 100).toFixed(0)}%
-              </option>
+              <option value={goodsRate}>Goods — {(goodsRate * 100).toFixed(0)}%</option>
+              <option value={servicesRate}>Services / subcontract — {(servicesRate * 100).toFixed(0)}%</option>
+              {otherRate !== null && <option value={otherRate}>As entered — {(otherRate * 100).toFixed(2)}%</option>}
             </select>
+          </Field>
+          <Field label="Notes">
+            <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
           </Field>
         </div>
 
@@ -679,8 +723,10 @@ export function BillDetail() {
   const [row, setRow] = useState<Bill | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
+  const [editing, setEditing] = useState(false);
   // Bumped after a submit, so the approval chain under the header shows the new request.
   const [reload, setReload] = useState(0);
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     try {
@@ -707,6 +753,17 @@ export function BillDetail() {
       setError(err);
     }
   }
+
+  // Thrown, not caught: the confirm bar shows the refusal and stays open.
+  async function cancel(reason: string) {
+    await api.post(`/supplier-bills/${id}/cancel`, { reason });
+    toast('ok', 'Cancelled');
+    await load();
+  }
+
+  // Both mirror the routes: a draft, by whoever may edit every bill.
+  const canModify = row.status === 'DRAFT' && can('gfin.ap.edit_all');
+  const canCancel = row.status === 'DRAFT' && can('gfin.ap.edit_all');
 
   return (
     <div>
@@ -747,6 +804,23 @@ export function BillDetail() {
             )}
           </>
         }
+        more={[
+          canCancel && {
+            label: 'Cancel bill',
+            danger: true,
+            confirm: {
+              title: `Cancel ${row.number}?`,
+              body: 'Nothing has been approved, charged or paid on it. The reason is kept on its notes.',
+              confirmLabel: 'Cancel bill',
+              reason: 'required',
+              reasonLabel: 'Why?',
+              minReason: 3,
+              onConfirm: cancel,
+            },
+          },
+        ]}
+        modify={canModify ? () => setEditing(true) : undefined}
+        confirm={confirm}
       />
 
       <DocumentApproval documentType="supplier_bill" documentId={row.id} reloadToken={reload} />
@@ -859,6 +933,16 @@ export function BillDetail() {
               <dd className="mono">
                 <strong>{formatMoney(row.outstanding)}</strong>
               </dd>
+              {row.notes && (
+                <>
+                  <dt>Notes</dt>
+                  <dd>
+                    {row.notes.split('\n').map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </dd>
+                </>
+              )}
             </dl>
           </div>
 
@@ -890,6 +974,18 @@ export function BillDetail() {
           </div>
         </div>
       </div>
+
+      {editing && (
+        <NewBillModal
+          from={null}
+          existing={row}
+          onClose={() => setEditing(false)}
+          onCreated={() => {
+            setEditing(false);
+            load();
+          }}
+        />
+      )}
 
       {paying && (
         <RecordPaymentModal

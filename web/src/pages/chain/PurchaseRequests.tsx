@@ -197,13 +197,13 @@ export function PurchaseRequests() {
       />
 
       {creating && (
-        <NewPrModal
+        <PrModal
           presetJobId={presetJobId}
           onClose={() => {
             setCreating(false);
             clearPrefill();
           }}
-          onCreated={(id) => {
+          onSaved={(id) => {
             setCreating(false);
             setReload((r) => r + 1);
             navigate(`${base}/${id}`);
@@ -214,15 +214,28 @@ export function PurchaseRequests() {
   );
 }
 
-function NewPrModal({
-  presetJobId,
+/** A date from the API as the `YYYY-MM-DD` a date input wants. */
+function dateInput(value: string | null): string {
+  return value ? value.slice(0, 10) : '';
+}
+
+/**
+ * New purchase request, or — given `existing` — Modify one while it is a
+ * draft. Everything on the header may change, under the create route's rules:
+ * a project request names its project, a stock one its warehouse.
+ */
+function PrModal({
+  presetJobId = null,
+  existing,
   onClose,
-  onCreated,
+  onSaved,
 }: {
   /** From `?jobId=`: a direct-to-job request for this project, not re-pickable. */
-  presetJobId: string | null;
+  presetJobId?: string | null;
+  /** The draft being modified; absent for a new request. */
+  existing?: PrDetail;
   onClose: () => void;
-  onCreated: (id: string) => void;
+  onSaved: (id: string) => void;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -230,15 +243,27 @@ function NewPrModal({
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [presetJob, setPresetJob] = useState<{ number: string; name: string } | null>(null);
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
-  const [form, setForm] = useState({
-    kind: 'DIRECT_TO_JOB',
-    jobId: presetJobId ?? '',
-    warehouseId: '',
-    purpose: '',
-    // A week out: most requests are wanted soon, and a blank date is the one
-    // nobody chases.
-    neededBy: daysFromToday(7),
-  });
+  const [form, setForm] = useState(() =>
+    existing
+      ? {
+          kind: existing.kind,
+          jobId: existing.job?.id ?? '',
+          warehouseId: existing.warehouse?.id ?? '',
+          purpose: existing.purpose,
+          neededBy: dateInput(existing.neededBy),
+          notes: existing.notes ?? '',
+        }
+      : {
+          kind: 'DIRECT_TO_JOB',
+          jobId: presetJobId ?? '',
+          warehouseId: '',
+          purpose: '',
+          // A week out: most requests are wanted soon, and a blank date is the
+          // one nobody chases.
+          neededBy: daysFromToday(7),
+          notes: '',
+        },
+  );
 
   useEffect(() => {
     api
@@ -252,19 +277,27 @@ function NewPrModal({
     api.get<{ id: string; name: string }[]>('/warehouses').then(setWarehouses).catch(() => {});
   }, [presetJobId]);
 
-  async function create() {
+  async function save() {
     setBusy(true);
     setError(null);
+    const body = {
+      kind: form.kind,
+      jobId: form.jobId || null,
+      warehouseId: form.warehouseId || null,
+      purpose: form.purpose,
+      neededBy: form.neededBy || null,
+      notes: form.notes || null,
+    };
     try {
-      const created = await api.post<{ id: string }>('/purchase-requests', {
-        kind: form.kind,
-        jobId: form.jobId || null,
-        warehouseId: form.warehouseId || null,
-        purpose: form.purpose,
-        neededBy: form.neededBy || null,
-      });
-      toast('ok', 'Request created — add the lines next');
-      onCreated(created.id);
+      if (existing) {
+        await api.patch(`/purchase-requests/${existing.id}`, body);
+        toast('ok', `${existing.number} updated`);
+        onSaved(existing.id);
+      } else {
+        const created = await api.post<{ id: string }>('/purchase-requests', body);
+        toast('ok', 'Request created — add the lines next');
+        onSaved(created.id);
+      }
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -272,17 +305,22 @@ function NewPrModal({
   }
 
   const direct = form.kind === 'DIRECT_TO_JOB';
+  // The request's own project stays pickable even when the lookup leaves it
+  // out (a closed project).
+  const jobOptions =
+    existing?.job && !jobs.some((j) => j.id === existing.job!.id) ? [existing.job, ...jobs] : jobs;
+  const lineCount = existing?.items.length ?? 0;
 
   return (
     <Modal
-      title="New purchase request"
+      title={existing ? `Modify purchase request ${existing.number}` : 'New purchase request'}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
-            onClick={create}
-            disabled={busy || form.purpose.length < 3 || (direct ? !form.jobId : !form.warehouseId)}
+            onClick={save}
+            disabled={busy || form.purpose.trim().length < 3 || (direct ? !form.jobId : !form.warehouseId)}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
@@ -298,7 +336,7 @@ function NewPrModal({
               type="button"
               className={direct ? 'active' : ''}
               aria-pressed={direct}
-              onClick={() => setForm({ ...form, kind: 'DIRECT_TO_JOB', warehouseId: '' })}
+              onClick={() => setForm({ ...form, kind: 'DIRECT_TO_JOB', warehouseId: existing ? form.warehouseId : '' })}
             >
               A project
             </button>
@@ -318,6 +356,13 @@ function NewPrModal({
         {direct
           ? 'This commits the project’s budget when approved, and charges it when the goods arrive.'
           : 'This buys for the warehouse. No project is charged until the stock is issued to one.'}
+        {existing && direct && existing.kind !== 'DIRECT_TO_JOB' && lineCount > 0 && (
+          <>
+            {' '}
+            Every line needs a budget line: one from the item master takes its item’s, any other
+            must be given one first.
+          </>
+        )}
       </div>
 
       {presetJobId ? (
@@ -331,7 +376,7 @@ function NewPrModal({
         <Field label="Project">
           <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
             <option value="">— choose —</option>
-            {jobs.map((j) => (
+            {jobOptions.map((j) => (
               <option key={j.id} value={j.id}>
                 {j.number} — {j.name}
               </option>
@@ -384,6 +429,9 @@ function NewPrModal({
           onChange={(e) => setForm({ ...form, neededBy: e.target.value })}
         />
       </Field>
+      <Field label="Notes" hint="Printed on the request">
+        <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
     </Modal>
   );
 }
@@ -413,7 +461,10 @@ interface PrDetail {
   neededBy: string | null;
   notes: string | null;
   createdAt: string;
+  /** DRAFT and the caller may change it (its requester, or edit_all). */
   canEdit: boolean;
+  /** PENDING_APPROVAL and the caller may pull it back to draft. */
+  canWithdraw: boolean;
   estimatedTotal: number;
   job: { id: string; number: string; name: string } | null;
   warehouse: { id: string; name: string } | null;
@@ -435,7 +486,9 @@ export function PurchaseRequestDetail() {
   const [pr, setPr] = useState<PrDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  const [adding, setAdding] = useState(false);
+  const [modifying, setModifying] = useState(false);
+  /** A line being modified, or 'new' for "+ Add line". */
+  const [lineEditing, setLineEditing] = useState<PrItem | 'new' | null>(null);
   // Bumped on every reload so the approval chain re-reads after a submit —
   // the chain lives behind its own endpoint and will not know otherwise.
   const [reload, setReload] = useState(0);
@@ -518,16 +571,16 @@ export function PurchaseRequestDetail() {
     : {};
 
   const addLineButton = pr.canEdit ? (
-    <button className="btn btn-sm" onClick={() => setAdding(true)}>
+    <button className="btn btn-sm" onClick={() => setLineEditing('new')}>
       + Add line
     </button>
   ) : null;
 
   /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
-  async function removeLine(line: PrItem) {
+  async function withdraw() {
     if (!pr) return;
-    await api.del(`/purchase-requests/${pr.id}/items/${line.id}`);
-    toast('ok', 'Line removed');
+    await api.post(`/purchase-requests/${pr.id}/withdraw`);
+    toast('ok', `${pr.number} is a draft again`);
     await load();
   }
 
@@ -579,7 +632,7 @@ export function PurchaseRequestDetail() {
         }
         actions={
           <>
-            {pr.canEdit && pr.items.length > 0 && (
+            {pr.canEdit && can('gchain.purchase_requests.create') && pr.items.length > 0 && (
               <button className="btn btn-primary" onClick={submit}>
                 Submit for approval
               </button>
@@ -598,6 +651,17 @@ export function PurchaseRequestDetail() {
         }
         print={`/api/purchase-requests/${pr.id}/pdf`}
         more={[
+          pr.canWithdraw && {
+            label: 'Pull back and edit',
+            hint: 'Withdraws it from the approver',
+            confirm: {
+              title: `Pull ${pr.number} back to draft?`,
+              body: 'Its approval is withdrawn and the approvers are told. Submit it again once it is changed.',
+              confirmLabel: 'Pull back',
+              tone: 'primary',
+              onConfirm: withdraw,
+            },
+          },
           mayDelete && {
             label: 'Delete',
             danger: true,
@@ -609,6 +673,7 @@ export function PurchaseRequestDetail() {
             },
           },
         ]}
+        modify={pr.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
 
@@ -618,7 +683,8 @@ export function PurchaseRequestDetail() {
 
       {pr.status === 'PENDING_APPROVAL' && (
         <div className="alert info">
-          With the approver. It cannot be changed until they decide.
+          With the approver. It cannot be changed until they decide
+          {pr.canWithdraw ? ' — or pull it back from ⋯ to change it.' : '.'}
         </div>
       )}
       {pr.status === 'APPROVED' && pr.kind === 'DIRECT_TO_JOB' && (
@@ -670,19 +736,14 @@ export function PurchaseRequestDetail() {
                     <td className="right mono faint">{i.orderedQty || '—'}</td>
                     {pr.canEdit && (
                       <td>
+                        {/* Removing the line is in its modal, behind a question. */}
                         <div className="proc-row-actions">
                           <button
                             className="btn btn-sm"
-                            aria-label={`Remove ${i.description}`}
-                            onClick={() =>
-                              confirm.ask({
-                                title: `Remove ${i.description} from ${pr.number}?`,
-                                confirmLabel: 'Remove',
-                                onConfirm: () => removeLine(i),
-                              })
-                            }
+                            aria-label={`Modify ${i.description}`}
+                            onClick={() => setLineEditing(i)}
                           >
-                            Remove
+                            Modify
                           </button>
                         </div>
                       </td>
@@ -703,6 +764,13 @@ export function PurchaseRequestDetail() {
           </div>
         )}
       </div>
+
+      {pr.notes && (
+        <div className="card proc-card">
+          <h3 className="card-title">Notes</h3>
+          <p className="activity-notes">{pr.notes}</p>
+        </div>
+      )}
 
       {pr.job && Object.keys(pr.budget).length > 0 && (
         <div className="card proc-card">
@@ -784,12 +852,24 @@ export function PurchaseRequestDetail() {
         </div>
       )}
 
-      {adding && (
-        <AddLineModal
-          pr={pr}
-          onClose={() => setAdding(false)}
+      {modifying && (
+        <PrModal
+          existing={pr}
+          onClose={() => setModifying(false)}
           onSaved={() => {
-            setAdding(false);
+            setModifying(false);
+            void load();
+          }}
+        />
+      )}
+
+      {lineEditing && (
+        <PrLineModal
+          pr={pr}
+          line={lineEditing === 'new' ? null : lineEditing}
+          onClose={() => setLineEditing(null)}
+          onSaved={() => {
+            setLineEditing(null);
             void load();
           }}
         />
@@ -798,7 +878,23 @@ export function PurchaseRequestDetail() {
   );
 }
 
-function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => void; onSaved: () => void }) {
+/**
+ * Add or modify one line of a draft request. A project request's line must
+ * name its budget line — the server refuses one without; a stock line may
+ * carry one too, ready for the request being charged to a project later.
+ */
+function PrLineModal({
+  pr,
+  line,
+  onClose,
+  onSaved,
+}: {
+  pr: PrDetail;
+  line: PrItem | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [items, setItems] = useState<
@@ -806,12 +902,12 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
   >([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [form, setForm] = useState({
-    itemId: '',
-    costCategoryId: '',
-    description: '',
-    quantity: '1',
-    unit: 'pcs',
-    estimatedCost: '',
+    itemId: line?.item?.id ?? '',
+    costCategoryId: line?.costCategory?.id ?? '',
+    description: line?.description ?? '',
+    quantity: line ? String(line.quantity) : '1',
+    unit: line?.unit ?? 'pcs',
+    estimatedCost: line ? String(line.estimatedCost) : '',
   });
 
   useEffect(() => {
@@ -833,15 +929,17 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
   async function save() {
     setBusy(true);
     setError(null);
+    const body = {
+      itemId: form.itemId || null,
+      costCategoryId: form.costCategoryId || null,
+      description: form.description.trim(),
+      quantity: Number(form.quantity),
+      unit: form.unit.trim() || 'pcs',
+      estimatedCost: Number(form.estimatedCost || 0),
+    };
     try {
-      await api.post(`/purchase-requests/${pr.id}/items`, {
-        itemId: form.itemId || null,
-        costCategoryId: form.costCategoryId || null,
-        description: form.description,
-        quantity: Number(form.quantity),
-        unit: form.unit,
-        estimatedCost: Number(form.estimatedCost || 0),
-      });
+      if (line) await api.patch(`/purchase-requests/${pr.id}/items/${line.id}`, body);
+      else await api.post(`/purchase-requests/${pr.id}/items`, body);
       onSaved();
     } catch (err) {
       setError(err);
@@ -850,20 +948,37 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
   }
 
   const amount = (Number(form.quantity) || 0) * (Number(form.estimatedCost) || 0);
+  const direct = pr.kind === 'DIRECT_TO_JOB';
   // The server refuses a direct-to-job line with no budget line; say so here
   // rather than let the button through to a refusal.
-  const needsCategory = pr.kind === 'DIRECT_TO_JOB' && !form.costCategoryId;
+  const needsCategory = direct && !form.costCategoryId;
 
   return (
     <Modal
-      title="Add line"
+      title={line ? 'Modify line' : 'Add line'}
       onClose={onClose}
       footer={
-        <ModalFoot onCancel={onClose} busy={busy}>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            line
+              ? {
+                  label: 'Remove',
+                  question: `Remove ${line.description} from ${pr.number}?`,
+                  onConfirm: async () => {
+                    await api.del(`/purchase-requests/${pr.id}/items/${line.id}`);
+                    toast('ok', 'Line removed');
+                    onSaved();
+                  },
+                }
+              : undefined
+          }
+        >
           <button
             className="btn btn-primary"
             onClick={save}
-            disabled={busy || !form.description || needsCategory || !(Number(form.quantity) > 0)}
+            disabled={busy || !form.description.trim() || needsCategory || !(Number(form.quantity) > 0)}
             title={needsCategory ? 'Choose the budget line first' : undefined}
           >
             {busy ? 'Saving…' : 'Save'}
@@ -885,21 +1000,26 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
       <Field label="Description">
         <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
       </Field>
-      {pr.kind === 'DIRECT_TO_JOB' && (
-        <Field label="Budget line" hint="Required — which part of the project budget this comes out of">
-          <select
-            value={form.costCategoryId}
-            onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
-          >
-            <option value="">— choose —</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
+      <Field
+        label="Budget line"
+        hint={
+          direct
+            ? 'Required — which part of the project budget this comes out of'
+            : 'Optional — needed only if this request is later charged to a project'
+        }
+      >
+        <select
+          value={form.costCategoryId}
+          onChange={(e) => setForm({ ...form, costCategoryId: e.target.value })}
+        >
+          <option value="">{direct ? '— choose —' : '— none —'}</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </Field>
       <div className="grid grid-3">
         <Field label="Quantity">
           <NumberInput

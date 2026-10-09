@@ -424,7 +424,11 @@ async function main() {
   const mine = (work.body.assignedToMe as { kind: string; id: string; link: string; overdue?: boolean }[]).filter((r) => r.kind === 'cad_job_order');
   check('My Work shows the designer the request on their board, overdue', mine.length === 1 && mine[0].id === id2 && mine[0].overdue === true && mine[0].link === `/g-ops/cad-job-orders/${id2}`, JSON.stringify(mine));
   const leadWork = await http(leadT, 'GET', '/my-work');
-  const queue = (leadWork.body.assignedToMe as { kind: string; id: string }[]).filter((r) => r.kind === 'cad_job_order');
+  // The lead's queue holds every unassigned request in the database; this
+  // script's own (tagged) are the ones it can speak for.
+  const queue = (leadWork.body.assignedToMe as { kind: string; id: string; title: string }[]).filter(
+    (r) => r.kind === 'cad_job_order' && r.title.includes(TAG),
+  );
   check('and the lead the one waiting for a designer', queue.length === 1 && queue[0].id === id3, JSON.stringify(queue));
 
   const cancelled = await http(requestorT, 'POST', `/cad-job-orders/${id3}/cancel`, { reason: 'Customer withdrew' });

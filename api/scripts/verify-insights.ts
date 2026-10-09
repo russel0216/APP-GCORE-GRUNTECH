@@ -436,6 +436,16 @@ async function main() {
     budget: 266_666.67,
     incurred: 111_111.11,
   });
+  // A billing approved and never invoiced: cash a decision away, waiting on
+  // US. The cash forecast's "our move" needs one of its own — it used to rely
+  // on whatever the database already held.
+  await makeJob({
+    name: 'Waiting on us',
+    contract: 200_000,
+    budget: 150_000,
+    incurred: 60_000,
+    billed: 80_000,
+  });
 
   // ══ Profitability ════════════════════════════════════════════════════════
   console.log('\nProject profitability');

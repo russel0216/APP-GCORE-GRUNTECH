@@ -608,11 +608,13 @@ async function httpCases(ctx: {
   // ── Sub-industries ────────────────────────────────────────────────────────
   const subs = await http(outsiderT, 'GET', '/reference/sub-industries?active=true');
   const subRows = (subs.body as unknown as { id: string; name: string; isSystem: boolean }[]) ?? [];
-  const hospitalSub = subRows.find((s) => s.name === 'Hospital')!;
-  const manufacturingSub = subRows.find((s) => s.name === 'Manufacturing')!;
+  // The owner's twenty-six since 2026-10-09 (shared/subIndustries.ts):
+  // Hospital became Healthcare, and Manufacturing was retired.
+  const hospitalSub = subRows.find((s) => s.name === 'Healthcare')!;
+  const manufacturingSub = subRows.find((s) => s.name === 'Heavy Industry')!;
   check(
-    'any signed-in user reads the sub-industry list, the owner’s eleven among them',
-    subs.status === 200 && !!hospitalSub && !!manufacturingSub && subRows.filter((s) => s.isSystem).length >= 11,
+    'any signed-in user reads the sub-industry list, the owner’s twenty-six among them',
+    subs.status === 200 && !!hospitalSub && !!manufacturingSub && subRows.filter((s) => s.isSystem).length >= 26,
     subs.text.slice(0, 120),
   );
   check('a standard sub-industry cannot be deleted', (await http(adminT, 'DELETE', `/reference/sub-industries/${hospitalSub.id}`)).status === 400);
@@ -664,7 +666,7 @@ async function httpCases(ctx: {
   check('a customer is created with its sub-industry', hospital.status === 201 && hospital.body.subIndustryId === hospitalSub.id, hospital.text.slice(0, 160));
   const hospitalId = String(hospital.body.id ?? '');
   const createdAudit = await prisma.auditLog.findFirst({ where: { entityType: 'customer', entityId: hospitalId, action: 'CREATED' } });
-  check('the audit line names the sub-industry', (createdAudit?.summary ?? '').includes('(Hospital)'), createdAudit?.summary ?? '');
+  check('the audit line names the sub-industry', (createdAudit?.summary ?? '').includes('(Healthcare)'), createdAudit?.summary ?? '');
 
   const cleared = await http(clerkT, 'PATCH', `/customers/${hospitalId}`, { subIndustryId: null });
   check('a sub-industry can be cleared again', cleared.status === 200 && cleared.body.subIndustryId === null, cleared.text.slice(0, 120));
@@ -720,7 +722,7 @@ async function httpCases(ctx: {
   );
   check(
     'and the sub-industry rides on the record',
-    (asAdmin.body.subIndustry as { name?: string } | null)?.name === 'Hospital',
+    (asAdmin.body.subIndustry as { name?: string } | null)?.name === 'Healthcare',
   );
 
   // ── Supplier 360, same rule ───────────────────────────────────────────────

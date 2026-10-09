@@ -22,10 +22,11 @@ import {
   onApprovalSettled,
   approversForStep,
   cancelOpenRequest,
+  pickWorkflow,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
-import { can, type ResolvedUser } from '../permissions/resolve';
+import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
 import { describeFace, faceEngineReady } from '../shared/face';
@@ -86,6 +87,96 @@ async function mayReadHrRecord(
   const mine = await myEmployee(me.id);
   if (mine && mine.id === ownerEmployeeId) return true;
   return isApproverOf(me.id, documentTypes, documentId);
+}
+
+/**
+ * Refuses, before anything is written, exactly what `submitForApproval` would
+ * refuse — no active workflow for the amount, or a first step that routes to
+ * nobody or only to the requester — and nothing more. It asks the engine's own
+ * `pickWorkflow` and `approversForStep` under the engine's two conditions, so
+ * overtime is held to the rule leave and every other document are held to at
+ * submission (a "Reports to" who has since been deactivated is the engine's
+ * business, not a refusal of HR's own). Read-only: a filing it refuses burns
+ * no number, and a filing being changed is never withdrawn from its approver
+ * only to find it cannot be sent again.
+ */
+async function assertRoutable(documentType: string, amount: number | null, requesterId: string) {
+  const workflow = await pickWorkflow(documentType, amount);
+  if (!workflow || !workflow.steps.length) {
+    throw badRequest(
+      `No approval workflow is configured for "${documentType}". Set one up in Admin › Approval Workflows.`,
+    );
+  }
+  const first = workflow.steps[0];
+  const approvers = await approversForStep(first, requesterId);
+  const stuck = !approvers.length || approvers.every((id) => id === requesterId);
+  if (!stuck) return;
+
+  // The real cause, where it is a person's "Reports to" rather than the route.
+  let fix = approvers.length
+    ? 'Add another approver to that step in Admin › Approval Workflows.'
+    : 'Check that someone holds that role in Admin › Approval Workflows.';
+  if (first.approverType === 'SUPERVISOR') {
+    const requester = await prisma.user.findUnique({ where: { id: requesterId }, select: { supervisorId: true } });
+    fix =
+      requester?.supervisorId === requesterId
+        ? 'Their "Reports to" names themselves — ask an administrator to set it in Admin › Users.'
+        : 'They have no "Reports to", and nobody else holds the role it falls back to — ask an administrator to set ' +
+          '"Reports to" in Admin › Users.';
+  }
+  throw badRequest(
+    approvers.length
+      ? `"${workflow.name}" routes step 1 ("${first.name}") only to the person who filed it, and nobody may approve their own filing. ${fix}`
+      : `"${workflow.name}" routes step 1 ("${first.name}") to nobody. ${fix}`,
+  );
+}
+
+/** What a pull-back or a change says when a decision got there first. */
+const DECIDED_MEANWHILE = 'It was decided a moment ago — reload to see where it stands';
+
+/**
+ * Whether a decision reached the document's latest request: approved,
+ * rejected, or returned (which the engine closes CANCELLED with a RETURNED
+ * action) — as against withdrawn, or never opened at all.
+ *
+ * Asked when `cancelOpenRequest` found nothing open on a document that still
+ * reads as waiting. Either a decision got there first (its subscriber is about
+ * to apply it, so the change must stand aside), or the document was STRANDED:
+ * filed while the engine refused it, before the filing routes put a refusal
+ * back, so it reads "awaiting" with nobody asked. A stranded one has nothing
+ * to withdraw and nothing to wait for, so the change goes ahead.
+ */
+async function decisionLanded(
+  documentType: string,
+  documentId: string,
+  tx: Prisma.TransactionClient,
+): Promise<boolean> {
+  const last = await tx.approvalRequest.findFirst({
+    where: { documentType, documentId },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { status: true, actions: { where: { action: 'RETURNED' }, select: { id: true }, take: 1 } },
+  });
+  if (!last) return false;
+  return last.status === 'APPROVED' || last.status === 'REJECTED' || (last.status === 'CANCELLED' && last.actions.length > 0);
+}
+
+/**
+ * Withdraws a waiting document's open request, in the caller's transaction,
+ * and refuses (rolling the caller's claim back) when a decision got there
+ * first. Returns false for a STRANDED document — nothing was open, and no
+ * decision is coming — so the caller can say so.
+ */
+async function withdrawOrRefuse(
+  documentType: string,
+  documentId: string,
+  tx: Prisma.TransactionClient,
+  reason: string,
+  actorId: string,
+): Promise<boolean> {
+  const withdrawn = await cancelOpenRequest(documentType, documentId, tx, reason, actorId);
+  if (withdrawn.length) return true;
+  if (await decisionLanded(documentType, documentId, tx)) throw badRequest(DECIDED_MEANWHILE);
+  return false;
 }
 
 /** Has acted on, or is eligible to act on the current step of, this document. */
@@ -852,6 +943,7 @@ leaveRoutes.get(
     if (!readable) throw forbidden('That is someone else’s leave request');
 
     const own = request.employee.userId === me.id;
+    const editable = canEditRecord(me, 'ghr', 'leave', request.employee.userId);
     const { userId: _userId, ...employee } = request.employee;
     res.json({
       ...request,
@@ -863,6 +955,10 @@ leaveRoutes.get(
         request.status !== 'CANCELLED' &&
         request.status !== 'REJECTED' &&
         (own || me.isSuperAdmin || me.permissions.has('ghr.leave.edit_all')),
+      // PUT /:id, POST /:id/submit and POST /:id/withdraw, likewise.
+      canModify: request.status === 'DRAFT' && editable,
+      canSubmit: request.status === 'DRAFT' && can(me, 'ghr.leave.create') && (own || me.isSuperAdmin),
+      canWithdraw: request.status === 'PENDING_APPROVAL' && editable,
     });
   }),
 );
@@ -906,41 +1002,99 @@ leaveRoutes.post(
   }),
 );
 
+type LeaveBody = z.infer<typeof leaveSchema>;
+
+/**
+ * What a leave request's type and dates must pass — on filing and on every
+ * change to a draft, so a modified request is held to exactly the rules the
+ * new one was. `exceptId` leaves the request itself out of the clash check.
+ */
+async function checkLeave(body: LeaveBody, employeeId: string, exceptId?: string) {
+  const settings = await hrSettings();
+  const start = asDate(body.startDate) as Date;
+  const end = asDate(body.endDate) as Date;
+  const days = leaveDays(start, end, body.startTime || null, body.endTime || null, settings);
+  if (days <= 0) throw badRequest('That range contains no working days');
+
+  const type = await prisma.leaveType.findUnique({ where: { id: body.leaveTypeId } });
+  if (!type) throw notFound('Leave type not found');
+  if (type.requiresProof && !body.proofNote) {
+    throw badRequest(`${type.name} needs supporting documentation — note what you are attaching`);
+  }
+
+  await refuseClash(employeeId, start, end, exceptId);
+  return { start, end, days, type };
+}
+
+/**
+ * Overlapping leave is almost always a mistake, and silently allowing it makes
+ * the balance wrong. Only requests with an approver or approved count: a draft
+ * is with nobody, which is why submitting runs this again.
+ */
+async function refuseClash(employeeId: string, start: Date, end: Date, exceptId?: string) {
+  const clash = await prisma.leaveRequest.findFirst({
+    where: {
+      employeeId,
+      status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+      startDate: { lte: end },
+      endDate: { gte: start },
+      ...(exceptId ? { id: { not: exceptId } } : {}),
+    },
+  });
+  if (clash) {
+    throw badRequest(`${clash.number} already covers some of those dates`);
+  }
+}
+
+/** A stored request, as the body that filed it — so a submission is held to the filing's own rules. */
+function leaveBodyOf(r: {
+  leaveTypeId: string;
+  startDate: Date;
+  endDate: Date;
+  startTime: string | null;
+  endTime: string | null;
+  reason: string;
+  proofNote: string | null;
+}): LeaveBody {
+  return {
+    leaveTypeId: r.leaveTypeId,
+    // A DATE column is UTC midnight of its day, so its ISO date is that day.
+    startDate: r.startDate.toISOString().slice(0, 10),
+    endDate: r.endDate.toISOString().slice(0, 10),
+    startTime: r.startTime,
+    endTime: r.endTime,
+    reason: r.reason,
+    proofNote: r.proofNote,
+  };
+}
+
+/**
+ * A leave request the caller may change: the employee's own (edit_own), or
+ * anybody's with edit_all — `canEditRecord`, on the login behind the employee.
+ */
+async function leaveForEdit(me: ResolvedUser, id: string) {
+  const request = await prisma.leaveRequest.findUnique({
+    where: { id },
+    include: { employee: true, leaveType: true },
+  });
+  if (!request) throw notFound('Leave request not found');
+  if (!canEditRecord(me, 'ghr', 'leave', request.employee.userId)) {
+    throw forbidden('That is someone else’s leave request');
+  }
+  return request;
+}
+
 leaveRoutes.post(
   '/',
   require_('ghr.leave.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(leaveSchema, req.body);
-    const settings = await hrSettings();
 
     const mine = await myEmployee(me.id);
     if (!mine) throw badRequest('Your account is not linked to an employee record');
 
-    const start = new Date(body.startDate);
-    const end = new Date(body.endDate);
-    const days = leaveDays(start, end, body.startTime || null, body.endTime || null, settings);
-    if (days <= 0) throw badRequest('That range contains no working days');
-
-    const type = await prisma.leaveType.findUnique({ where: { id: body.leaveTypeId } });
-    if (!type) throw notFound('Leave type not found');
-    if (type.requiresProof && !body.proofNote) {
-      throw badRequest(`${type.name} needs supporting documentation — note what you are attaching`);
-    }
-
-    // Overlapping leave is almost always a mistake, and silently allowing it
-    // makes the balance wrong.
-    const clash = await prisma.leaveRequest.findFirst({
-      where: {
-        employeeId: mine.id,
-        status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
-        startDate: { lte: end },
-        endDate: { gte: start },
-      },
-    });
-    if (clash) {
-      throw badRequest(`${clash.number} already covers some of those dates`);
-    }
+    const { start, end, days, type } = await checkLeave(body, mine.id);
 
     const request = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('leave_request', tx);
@@ -990,24 +1144,52 @@ leaveRoutes.post(
       throw forbidden('That is someone else’s leave request');
     }
 
-    await prisma.leaveRequest.update({
-      where: { id: request.id },
-      data: { status: 'PENDING_APPROVAL' },
+    // Every rule the filing passed, again, on the draft as it is stored: the
+    // clash check ignores drafts, so two drafts for the same days — or one
+    // pulled back while another was filed over its days — would otherwise
+    // both reach an approver, and both draw the balance. The days are counted
+    // again too (a draft may predate a change to the working week), and what
+    // is counted now is what the approver is asked and the balance draws.
+    const { days, type } = await checkLeave(leaveBodyOf(request), request.employeeId, request.id);
+
+    // Claimed on the draft exactly as it was read — `updatedAt` too — so a
+    // change saved a moment ago and this submission cannot both land: the
+    // approver is never sent a subject the record no longer says.
+    const claimed = await prisma.leaveRequest.updateMany({
+      where: { id: request.id, status: 'DRAFT', updatedAt: request.updatedAt },
+      data: { status: 'PENDING_APPROVAL', days: D(days) },
     });
+    if (!claimed.count) {
+      const now = await prisma.leaveRequest.findUnique({ where: { id: request.id }, select: { status: true } });
+      throw badRequest(
+        now?.status === 'DRAFT'
+          ? 'It was changed a moment ago — reload to see the change, then submit it'
+          : 'This request has already been submitted',
+      );
+    }
 
     try {
+      // Once more, now this one is claimed: two overlapping drafts submitted
+      // at the same moment each see the other here, so both cannot pass.
+      await refuseClash(request.employeeId, request.startDate, request.endDate, request.id);
       await submitForApproval({
         documentType: 'leave_request',
         documentId: request.id,
         documentNumber: request.number,
-        subject: `${request.employee.firstName} ${request.employee.lastName} — ${num(request.days)} day(s) ${request.leaveType.name}`,
+        subject: `${request.employee.firstName} ${request.employee.lastName} — ${days} day(s) ${type.name}`,
         link: `/g-hr/leave/${request.id}`,
-        requesterId: me.id,
+        // The employee's own login, whoever pressed the button: a super admin
+        // sending somebody's draft on must not leave that person free to
+        // approve their own leave.
+        requesterId: request.employee.userId ?? me.id,
       });
     } catch (err) {
-      // No workflow, or nobody to route to: the request goes back to DRAFT
-      // rather than reading "pending" with no approval behind it.
-      await prisma.leaveRequest.update({ where: { id: request.id }, data: { status: 'DRAFT' } });
+      // A clash, no workflow, or nobody to route to: the request goes back to
+      // DRAFT rather than reading "pending" with no approval behind it.
+      await prisma.leaveRequest.updateMany({
+        where: { id: request.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT', days: request.days },
+      });
       throw err;
     }
 
@@ -1025,9 +1207,133 @@ leaveRoutes.post(
 );
 
 /**
- * A decision that reaches a filing after it moved on — cancelled while the
- * last approver was deciding — changes nothing. The engine keeps the decision
- * as its record of fact; the filing's trail says why it did not follow.
+ * Changing a draft. Only a DRAFT: a submitted request's dates and days are
+ * what the approver is deciding on, so it is pulled back first (below). The
+ * days are counted again and every check the filing passed is run again —
+ * zero working days, the type's proof, a clash with another request — with
+ * the request itself left out of the clash. Claimed on DRAFT, so a
+ * submission that lands first wins and this change is refused.
+ */
+leaveRoutes.put(
+  '/:id',
+  requireAny('ghr.leave.edit_own', 'ghr.leave.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(leaveSchema, req.body);
+    const existing = await leaveForEdit(me, req.params.id);
+    if (existing.status !== 'DRAFT') {
+      throw badRequest(
+        existing.status === 'PENDING_APPROVAL'
+          ? 'Only a draft can be changed — pull this one back from the approver first'
+          : `Only a draft can be changed — this one is ${existing.status.toLowerCase().replace(/_/g, ' ')}`,
+      );
+    }
+
+    const { start, end, days, type } = await checkLeave(body, existing.employeeId, existing.id);
+    const fields = {
+      leaveTypeId: body.leaveTypeId,
+      startDate: start,
+      startTime: body.startTime || null,
+      endDate: end,
+      endTime: body.endTime || null,
+      days: D(days),
+      reason: body.reason,
+      proofNote: body.proofNote || null,
+    };
+    // Claimed on the draft as it was read, `updatedAt` too: a submission or
+    // another change that lands first wins, and the trail's "before" below is
+    // never a version somebody else had already replaced.
+    const claimed = await prisma.leaveRequest.updateMany({
+      where: { id: existing.id, status: 'DRAFT', updatedAt: existing.updatedAt },
+      data: fields,
+    });
+    if (!claimed.count) {
+      const now = await prisma.leaveRequest.findUnique({ where: { id: existing.id }, select: { status: true } });
+      throw badRequest(
+        now?.status === 'DRAFT'
+          ? 'It was changed a moment ago — reload to see that change before making yours'
+          : 'It was submitted a moment ago — reload to see where it stands',
+      );
+    }
+    const updated = await prisma.leaveRequest.findUniqueOrThrow({ where: { id: existing.id } });
+
+    const facts = (r: typeof existing | typeof updated) => ({
+      leaveTypeId: r.leaveTypeId,
+      startDate: r.startDate,
+      startTime: r.startTime,
+      endDate: r.endDate,
+      endTime: r.endTime,
+      days: num(r.days),
+      reason: r.reason,
+      proofNote: r.proofNote,
+    });
+    await audit(
+      {
+        entityType: 'leave_request',
+        entityId: existing.id,
+        action: 'UPDATED',
+        summary: `${existing.number} changed — ${days} day(s) of ${type.name}`,
+        before: facts(existing),
+        after: facts(updated),
+      },
+      req,
+    );
+    res.json({ ...updated, days: num(updated.days) });
+  }),
+);
+
+/**
+ * Pulling a request back from the approver to change it, as a sales order
+ * is: claimed PENDING_APPROVAL → DRAFT, and the open request withdrawn
+ * through the engine in the same transaction — the approver is told. When
+ * nothing was withdrawn because a decision got there first, the whole
+ * pull-back rolls back and the decision is applied as it stands; when
+ * nothing was open and no decision came (`withdrawOrRefuse`), it goes ahead.
+ */
+leaveRoutes.post(
+  '/:id/withdraw',
+  requireAny('ghr.leave.edit_own', 'ghr.leave.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const request = await leaveForEdit(me, req.params.id);
+    if (request.status !== 'PENDING_APPROVAL') {
+      throw badRequest('This request is not with the approver — nothing to pull back');
+    }
+
+    const withdrawn = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.leaveRequest.updateMany({
+        where: { id: request.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      if (!claimed.count) throw badRequest(DECIDED_MEANWHILE);
+      return withdrawOrRefuse('leave_request', request.id, tx, `pulled back to draft by ${me.name}`, me.id);
+    });
+
+    await audit(
+      {
+        entityType: 'leave_request',
+        entityId: request.id,
+        action: 'UPDATED',
+        summary: `${request.number} pulled back to draft${withdrawn ? '' : ' — nothing was with an approver'}`,
+      },
+      req,
+    );
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+/** How a filing's trail names where it had moved on to, where the state's own name would mislead. */
+const MOVED_ON: Record<string, string> = {
+  DRAFT: 'pulled back to draft',
+  // Only an actual filing's decision can find PRIOR_APPROVED: the hours were pulled back.
+  PULLED_BACK: 'pulled back',
+};
+
+/**
+ * A decision that reaches a filing after it moved on — cancelled or pulled
+ * back while the last approver was deciding — changes nothing. The engine
+ * keeps the decision as its record of fact; the filing's trail says why it
+ * did not follow.
  */
 async function decidedTooLate(
   entityType: 'leave_request' | 'overtime_request',
@@ -1040,7 +1346,7 @@ async function decidedTooLate(
     entityType,
     entityId,
     action: 'UPDATED',
-    summary: `${what} was ${outcome.toLowerCase()} after it was ${movedOn.toLowerCase().replace(/_/g, ' ')} — not applied`,
+    summary: `${what} was ${outcome.toLowerCase()} after it was ${MOVED_ON[movedOn] ?? movedOn.toLowerCase().replace(/_/g, ' ')} — not applied`,
   });
 }
 
@@ -1284,7 +1590,7 @@ overtimeRoutes.get(
       where: { id: req.params.id },
       include: {
         employee: {
-          select: { id: true, employeeNo: true, firstName: true, lastName: true, position: true },
+          select: { id: true, employeeNo: true, firstName: true, lastName: true, position: true, userId: true },
         },
         job: { select: { id: true, number: true, name: true } },
         costCategory: { select: { id: true, name: true } },
@@ -1307,8 +1613,11 @@ overtimeRoutes.get(
 
     const rate = await overtimeRate(ot.employeeId);
     const own = (await myEmployee(me.id))?.id === ot.employeeId;
+    const editable = canEditRecord(me, 'ghr', 'overtime', ot.employee.userId);
+    const { userId: _userId, ...employee } = ot.employee;
     res.json({
       ...presentOt(ot),
+      employee,
       rate,
       // The variance the approver has to acknowledge.
       variance:
@@ -1323,6 +1632,13 @@ overtimeRoutes.get(
         ot.stage !== 'APPROVED' &&
         ot.stage !== 'CANCELLED' &&
         (own || me.isSuperAdmin || me.permissions.has('ghr.overtime.edit_all')),
+      // PUT /:id and POST /:id/withdraw, likewise. The actual hours are pulled
+      // back only by whoever may file them again.
+      canModify: ot.stage === 'PRIOR' && editable,
+      canWithdraw: ot.stage === 'ACTUAL_FILED' && editable && (own || me.isSuperAdmin),
+      // The viewer's own filing — a form modifying somebody else's speaks of
+      // them, and prices at their rate (`rate`), never the viewer's.
+      own,
     });
   }),
 );
@@ -1336,6 +1652,75 @@ const priorSchema = z.object({
   jobId: z.string().optional().nullable(),
   costCategoryId: z.string().optional().nullable(),
 });
+
+type PriorBody = z.infer<typeof priorSchema>;
+
+/**
+ * Where a filing's cost would be charged, checked on every route that writes
+ * it — the prior filing, a change to it, and the actual hours: the project
+ * must exist and still take overtime (the `/chargeable` rule), except the one
+ * the filing already names, which it may keep; the budget line must exist.
+ * Unchecked, a stray id was a foreign-key 500, and a closed project took cost.
+ */
+async function checkCharge(jobId: string | null, costCategoryId: string | null, keepJobId: string | null = null) {
+  if (jobId && jobId !== keepJobId) {
+    const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } });
+    if (!job) throw badRequest('That project does not exist');
+    if (job.status === 'CANCELLED' || job.status === 'TURNED_OVER') {
+      throw badRequest('That project no longer takes overtime — it is closed');
+    }
+  }
+  if (costCategoryId && !(await prisma.costCategory.findUnique({ where: { id: costCategoryId }, select: { id: true } }))) {
+    throw badRequest('That budget line does not exist');
+  }
+}
+
+/**
+ * The planned side of a filing, checked — on filing and on every change
+ * before authorisation, so a changed filing is held to the new one's rules.
+ * The project must still take overtime (the `/chargeable` rule), except the
+ * one the filing already names, which a change may keep.
+ */
+async function priorFields(body: PriorBody, keepJobId: string | null = null) {
+  const settings = await hrSettings();
+  const date = asDate(body.date) as Date;
+  const hours = overtimeHours(body.plannedStart, body.plannedEnd, body.dinnerBreak, settings);
+  if (hours <= 0) throw badRequest('That range is zero hours once the break is deducted');
+
+  const jobId = body.jobId || null;
+  const costCategoryId = body.costCategoryId || null;
+  await checkCharge(jobId, costCategoryId, keepJobId);
+
+  return {
+    hours,
+    data: {
+      date,
+      plannedStart: body.plannedStart,
+      plannedEnd: body.plannedEnd,
+      estimatedHours: D(hours),
+      dinnerBreak: body.dinnerBreak,
+      reason: body.reason,
+      jobId,
+      costCategoryId,
+    },
+  };
+}
+
+/**
+ * An overtime filing the caller may change: the employee's own (edit_own), or
+ * anybody's with edit_all — `canEditRecord`, on the login behind the employee.
+ */
+async function overtimeForEdit(me: ResolvedUser, id: string) {
+  const ot = await prisma.overtimeRequest.findUnique({ where: { id }, include: { employee: true } });
+  if (!ot) throw notFound('Overtime request not found');
+  if (!canEditRecord(me, 'ghr', 'overtime', ot.employee.userId)) {
+    throw forbidden('That is someone else’s overtime');
+  }
+  return ot;
+}
+
+const priorSubject = (employee: { firstName: string; lastName: string }, hours: number, date: string) =>
+  `${employee.firstName} ${employee.lastName} — ${hours}h prior approval for ${date}`;
 
 /** Preview the hours a prior filing would claim, before it is filed. */
 overtimeRoutes.post(
@@ -1383,40 +1768,36 @@ overtimeRoutes.post(
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(priorSchema, req.body);
-    const settings = await hrSettings();
 
     const mine = await myEmployee(me.id);
     if (!mine) throw badRequest('Your account is not linked to an employee record');
 
-    const hours = overtimeHours(body.plannedStart, body.plannedEnd, body.dinnerBreak, settings);
-    if (hours <= 0) throw badRequest('That range is zero hours once the break is deducted');
+    const { hours, data } = await priorFields(body);
+    // Before the number: a filing the engine would refuse burns none.
+    await assertRoutable('overtime_prior', null, me.id);
 
     const ot = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('overtime_request', tx);
-      return tx.overtimeRequest.create({
-        data: {
-          number,
-          employeeId: mine.id,
-          date: new Date(body.date),
-          plannedStart: body.plannedStart,
-          plannedEnd: body.plannedEnd,
-          estimatedHours: D(hours),
-          dinnerBreak: body.dinnerBreak,
-          reason: body.reason,
-          jobId: body.jobId || null,
-          costCategoryId: body.costCategoryId || null,
-        },
-      });
+      return tx.overtimeRequest.create({ data: { number, employeeId: mine.id, ...data } });
     });
 
-    await submitForApproval({
-      documentType: 'overtime_prior',
-      documentId: ot.id,
-      documentNumber: ot.number,
-      subject: `${mine.firstName} ${mine.lastName} — ${hours}h prior approval for ${body.date}`,
-      link: `/g-hr/overtime/${ot.id}`,
-      requesterId: me.id,
-    });
+    try {
+      await submitForApproval({
+        documentType: 'overtime_prior',
+        documentId: ot.id,
+        documentNumber: ot.number,
+        subject: priorSubject(mine, hours, body.date),
+        link: `/g-hr/overtime/${ot.id}`,
+        requesterId: me.id,
+      });
+    } catch (err) {
+      // Refused after all (the workflow changed under the check above). A
+      // prior filing has no draft to fall back to, and one reading "awaiting
+      // authorisation" with nobody asked is the fault, so it goes: nothing
+      // was recorded against it yet.
+      await prisma.overtimeRequest.delete({ where: { id: ot.id } }).catch(() => {});
+      throw err;
+    }
 
     await audit(
       {
@@ -1428,6 +1809,118 @@ overtimeRoutes.post(
       req,
     );
     res.status(201).json(presentOt(ot));
+  }),
+);
+
+/**
+ * Changing a filing before it is authorised: the day, the planned times, the
+ * reason, the project. The supervisor is deciding on exactly those, so the
+ * change is not slipped under them — one transaction claims the filing
+ * (still PRIOR), withdraws its request through the engine (they are told)
+ * and writes the change; it is then sent again from the first step. When
+ * nothing was withdrawn because a decision got there first, the change rolls
+ * back; a filing stranded with nobody asked is simply sent. Once authorised (PRIOR_APPROVED) the planned times are what was
+ * approved: cancel and file again. The actual hours change by pulling them
+ * back (POST /:id/withdraw) and filing them again.
+ */
+overtimeRoutes.put(
+  '/:id',
+  requireAny('ghr.overtime.edit_own', 'ghr.overtime.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(priorSchema, req.body);
+    const ot = await overtimeForEdit(me, req.params.id);
+    if (ot.stage !== 'PRIOR') {
+      throw badRequest(
+        ot.stage === 'PRIOR_APPROVED'
+          ? 'This overtime was authorised as planned, so the plan is what was approved — cancel it and file again to change it.'
+          : ot.stage === 'ACTUAL_FILED'
+            ? 'The actual hours are with the approver — pull them back to change them.'
+            : `This overtime is ${ot.stage.toLowerCase().replace(/_/g, ' ')} and cannot be changed.`,
+      );
+    }
+
+    const { hours, data } = await priorFields(body, ot.jobId);
+    // Sent again in the employee's name, whoever changed it, so the
+    // self-approval rule still keeps them off their own filing.
+    const requesterId = ot.employee.userId ?? me.id;
+    // Before anything is withdrawn: a change that could not be sent again
+    // must not take the filing away from its approver.
+    await assertRoutable('overtime_prior', null, requesterId);
+
+    // `withdrew` is false for a filing stranded with nobody asked (filed
+    // while the engine refused it): nothing to take back, so it is simply sent.
+    const { updated, withdrew } = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.overtimeRequest.updateMany({
+        where: { id: ot.id, stage: 'PRIOR', updatedAt: ot.updatedAt },
+        data,
+      });
+      if (!claimed.count) {
+        // Still waiting, so somebody else's change got there first; else decided.
+        const now = await tx.overtimeRequest.findUnique({ where: { id: ot.id }, select: { stage: true } });
+        throw badRequest(
+          now?.stage === 'PRIOR' ? 'It was changed a moment ago — reload to see that change before making yours' : DECIDED_MEANWHILE,
+        );
+      }
+      const withdrew = await withdrawOrRefuse('overtime_prior', ot.id, tx, `changed by ${me.name} and sent again`, me.id);
+      return { updated: await tx.overtimeRequest.findUniqueOrThrow({ where: { id: ot.id } }), withdrew };
+    });
+
+    try {
+      await submitForApproval({
+        documentType: 'overtime_prior',
+        documentId: ot.id,
+        documentNumber: ot.number,
+        subject: priorSubject(ot.employee, hours, body.date),
+        link: `/g-hr/overtime/${ot.id}`,
+        requesterId,
+      });
+    } catch (err) {
+      // Refused after all (the workflow changed under the check above). A
+      // filing "awaiting authorisation" with nobody asked is the fault, so
+      // it is cancelled, and the trail and the answer say why.
+      const why = err instanceof Error ? err.message : String(err);
+      const cancelled = await prisma.overtimeRequest.updateMany({
+        where: { id: ot.id, stage: 'PRIOR' },
+        data: { stage: 'CANCELLED' },
+      });
+      if (cancelled.count) {
+        await audit(
+          {
+            entityType: 'overtime_request',
+            entityId: ot.id,
+            action: 'CANCELLED',
+            summary: `${ot.number} changed but could not be sent again (${why}) — cancelled`,
+          },
+          req,
+        );
+      }
+      throw badRequest(`${why} — ${ot.number} could not be sent again, so it is cancelled. File it again once that is fixed.`);
+    }
+
+    await audit(
+      {
+        entityType: 'overtime_request',
+        entityId: ot.id,
+        action: 'UPDATED',
+        summary: withdrew
+          ? `${ot.number} changed before authorisation — ${hours}h estimated, sent again`
+          : `${ot.number} changed before authorisation — ${hours}h estimated, sent for authorisation (nothing was with an approver)`,
+        before: {
+          date: ot.date,
+          plannedStart: ot.plannedStart,
+          plannedEnd: ot.plannedEnd,
+          estimatedHours: num(ot.estimatedHours),
+          dinnerBreak: ot.dinnerBreak,
+          reason: ot.reason,
+          jobId: ot.jobId,
+          costCategoryId: ot.costCategoryId,
+        },
+        after: { ...data, estimatedHours: hours },
+      },
+      req,
+    );
+    res.json(presentOt(updated));
   }),
 );
 
@@ -1518,8 +2011,25 @@ overtimeRoutes.post(
       );
     }
 
-    const updated = await prisma.overtimeRequest.update({
-      where: { id: ot.id },
+    // A project or budget line named now is held to the prior filing's rule.
+    await checkCharge(
+      body.jobId !== undefined ? body.jobId || null : null,
+      body.costCategoryId !== undefined ? body.costCategoryId || null : null,
+      ot.jobId,
+    );
+
+    const rate = await overtimeRate(ot.employeeId);
+    const amount = cents(hours * rate.hourlyRate * rate.multiplier);
+    // The employee's own login, whoever filed it (a super admin may), so the
+    // self-approval rule keeps them off their own hours.
+    const requesterId = ot.employee.userId ?? me.id;
+    // Before anything is written: the amount picks the route.
+    await assertRoutable('overtime_request', amount, requesterId);
+
+    // Claimed on PRIOR_APPROVED, so a cancel or a second filing that lands
+    // first wins.
+    const claimed = await prisma.overtimeRequest.updateMany({
+      where: { id: ot.id, stage: 'PRIOR_APPROVED' },
       data: {
         stage: 'ACTUAL_FILED',
         actualStart: body.actualStart,
@@ -1531,21 +2041,39 @@ overtimeRoutes.post(
         ...(body.costCategoryId !== undefined ? { costCategoryId: body.costCategoryId || null } : {}),
       },
     });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+    const updated = await prisma.overtimeRequest.findUniqueOrThrow({ where: { id: ot.id } });
 
-    const rate = await overtimeRate(ot.employeeId);
-    const amount = cents(hours * rate.hourlyRate * rate.multiplier);
-
-    await submitForApproval({
-      documentType: 'overtime_request',
-      documentId: ot.id,
-      documentNumber: ot.number,
-      subject: `${ot.employee.firstName} ${ot.employee.lastName} — ${hours}h actual${
-        Math.abs(variance) > 0.01 ? ` (${variance > 0 ? '+' : ''}${variance}h vs estimate)` : ''
-      }`,
-      amount,
-      link: `/g-hr/overtime/${ot.id}`,
-      requesterId: me.id,
-    });
+    try {
+      await submitForApproval({
+        documentType: 'overtime_request',
+        documentId: ot.id,
+        documentNumber: ot.number,
+        subject: `${ot.employee.firstName} ${ot.employee.lastName} — ${hours}h actual${
+          Math.abs(variance) > 0.01 ? ` (${variance > 0 ? '+' : ''}${variance}h vs estimate)` : ''
+        }`,
+        amount,
+        link: `/g-hr/overtime/${ot.id}`,
+        requesterId,
+      });
+    } catch (err) {
+      // Refused after all: back to authorised-and-not-filed, as it was,
+      // rather than "awaiting approval" with no approval behind it.
+      await prisma.overtimeRequest.updateMany({
+        where: { id: ot.id, stage: 'ACTUAL_FILED' },
+        data: {
+          stage: 'PRIOR_APPROVED',
+          actualStart: ot.actualStart,
+          actualEnd: ot.actualEnd,
+          actualHours: ot.actualHours,
+          dinnerBreak: ot.dinnerBreak,
+          varianceNote: ot.varianceNote,
+          jobId: ot.jobId,
+          costCategoryId: ot.costCategoryId,
+        },
+      });
+      throw err;
+    }
 
     await audit(
       {
@@ -1559,6 +2087,57 @@ overtimeRoutes.post(
       req,
     );
     res.json(presentOt(updated));
+  }),
+);
+
+/**
+ * Pulling the actual hours back from the approvers to change them: claimed
+ * ACTUAL_FILED → PRIOR_APPROVED (authorised, hours not yet filed), and the
+ * open request withdrawn through the engine in the same transaction — the
+ * approvers are told. The filed hours are cleared, so nothing reads them as
+ * filed (the trail keeps them); filing them again is the change. Only
+ * whoever may file them again may pull them back. When nothing was
+ * withdrawn because a decision got there first, the pull-back rolls back;
+ * hours stranded with nobody asked come back all the same.
+ */
+overtimeRoutes.post(
+  '/:id/withdraw',
+  requireAny('ghr.overtime.edit_own', 'ghr.overtime.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const ot = await overtimeForEdit(me, req.params.id);
+    if (ot.employee.userId !== me.id && !me.isSuperAdmin) {
+      throw forbidden('Only the person who filed the hours can pull them back — cancel it instead');
+    }
+    if (ot.stage !== 'ACTUAL_FILED') {
+      throw badRequest(
+        ot.stage === 'PRIOR'
+          ? 'The prior filing is still with the approver — modify it instead; it is sent again on saving.'
+          : 'Only actual hours awaiting approval can be pulled back.',
+      );
+    }
+
+    const withdrew = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.overtimeRequest.updateMany({
+        where: { id: ot.id, stage: 'ACTUAL_FILED' },
+        data: { stage: 'PRIOR_APPROVED', actualStart: null, actualEnd: null, actualHours: null, varianceNote: null },
+      });
+      if (!claimed.count) throw badRequest(DECIDED_MEANWHILE);
+      return withdrawOrRefuse('overtime_request', ot.id, tx, `pulled back by ${me.name}`, me.id);
+    });
+
+    await audit(
+      {
+        entityType: 'overtime_request',
+        entityId: ot.id,
+        action: 'UPDATED',
+        summary: `${ot.number} actual hours pulled back (${num(ot.actualHours)}h, ${ot.actualStart}–${ot.actualEnd}) — to be filed again${
+          withdrew ? '' : ' (nothing was with an approver)'
+        }`,
+      },
+      req,
+    );
+    res.json({ ok: true, stage: 'PRIOR_APPROVED' });
   }),
 );
 
@@ -1578,8 +2157,12 @@ onApprovalSettled('overtime_request', async (approval, outcome) => {
     include: { employee: true, job: true, costCategory: true },
   });
   if (!ot) return;
-  const stageNow = async () =>
-    (await prisma.overtimeRequest.findUnique({ where: { id: ot.id }, select: { stage: true } }))?.stage ?? ot.stage;
+  // A filing back at PRIOR_APPROVED had its hours pulled back (POST /:id/withdraw).
+  const stageNow = async () => {
+    const stage =
+      (await prisma.overtimeRequest.findUnique({ where: { id: ot.id }, select: { stage: true } }))?.stage ?? ot.stage;
+    return stage === 'PRIOR_APPROVED' ? 'PULLED_BACK' : stage;
+  };
 
   if (outcome !== 'APPROVED') {
     const claimed = await prisma.overtimeRequest.updateMany({

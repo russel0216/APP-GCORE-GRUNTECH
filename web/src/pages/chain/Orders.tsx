@@ -115,6 +115,10 @@ interface CanvassDetailData {
   status: string;
   notes: string | null;
   lowestSupplierId: string | null;
+  /** OPEN and the caller may change its notes (whoever opened it, or edit_all). */
+  canEdit: boolean;
+  /** OPEN and the caller holds edit_all: add, modify, quote, remove and award suppliers. */
+  canEditSuppliers: boolean;
   request: {
     id: string;
     number: string;
@@ -127,6 +131,7 @@ interface CanvassDetailData {
     isSelected: boolean;
     leadTimeDays: number | null;
     terms: string | null;
+    remarks: string | null;
     total: number;
     quotedCount: number;
     complete: boolean;
@@ -146,7 +151,8 @@ export function CanvassDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [adding, setAdding] = useState(false);
-  const [quoting, setQuoting] = useState<CanvassDetailData['suppliers'][number] | null>(null);
+  const [modifying, setModifying] = useState(false);
+  const [editingRow, setEditingRow] = useState<CanvassDetailData['suppliers'][number] | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -176,7 +182,8 @@ export function CanvassDetail() {
   }
 
   const winner = canvass.suppliers.find((s) => s.isSelected);
-  const mayEdit = canvass.status === 'OPEN' && can('gchain.canvass.edit_all');
+  // The API's own rule: an open canvass, and edit_all, for its supplier rows.
+  const mayEdit = canvass.canEditSuppliers;
 
   const addSupplierButton = mayEdit ? (
     <button className="btn btn-sm" onClick={() => setAdding(true)}>
@@ -226,10 +233,18 @@ export function CanvassDetail() {
             </button>
           )
         }
+        modify={canvass.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
 
       <ErrorBox error={error} />
+
+      {canvass.notes && (
+        <div className="card proc-card">
+          <h3 className="card-title">Notes</h3>
+          <p className="activity-notes">{canvass.notes}</p>
+        </div>
+      )}
 
       {canvass.suppliers.length > 0 && canvass.suppliers.length < 3 && canvass.status === 'OPEN' && (
         <div className="alert info">
@@ -327,6 +342,18 @@ export function CanvassDetail() {
                     </td>
                   ))}
                 </tr>
+                {canvass.suppliers.some((s) => s.remarks) && (
+                  <tr>
+                    <td colSpan={3} className="right faint">
+                      Remarks
+                    </td>
+                    {canvass.suppliers.map((s) => (
+                      <td key={s.id} className="right faint">
+                        {s.remarks ?? '—'}
+                      </td>
+                    ))}
+                  </tr>
+                )}
                 {mayEdit && (
                   <tr>
                     <td colSpan={3} />
@@ -335,10 +362,10 @@ export function CanvassDetail() {
                         <div className="proc-row-actions">
                           <button
                             className="btn btn-sm"
-                            aria-label={`Quote from ${s.supplier.name}`}
-                            onClick={() => setQuoting(s)}
+                            aria-label={`Modify ${s.supplier.name}`}
+                            onClick={() => setEditingRow(s)}
                           >
-                            Quote
+                            Modify
                           </button>
                           <button
                             className="btn btn-sm"
@@ -392,14 +419,26 @@ export function CanvassDetail() {
         />
       )}
 
-      {quoting && (
-        <QuoteModal
+      {editingRow && (
+        <SupplierRowModal
           canvassId={canvass.id}
-          supplierRow={quoting}
+          supplierRow={editingRow}
           items={canvass.request.items}
-          onClose={() => setQuoting(null)}
+          onClose={() => setEditingRow(null)}
           onSaved={() => {
-            setQuoting(null);
+            setEditingRow(null);
+            void load();
+          }}
+        />
+      )}
+
+      {modifying && (
+        <CanvassNotesModal
+          canvass={canvass}
+          onClose={() => setModifying(false)}
+          onSaved={() => {
+            setModifying(false);
+            toast('ok', `${canvass.number} updated`);
             void load();
           }}
         />
@@ -485,7 +524,62 @@ function AddSupplierModal({
   );
 }
 
-function QuoteModal({
+/**
+ * The canvass's own notes, while it is open. Which request it canvasses is
+ * what it is, and an award is the decision on record, so nothing else on the
+ * header changes.
+ */
+function CanvassNotesModal({
+  canvass,
+  onClose,
+  onSaved,
+}: {
+  canvass: CanvassDetailData;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [notes, setNotes] = useState(canvass.notes ?? '');
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/canvasses/${canvass.id}`, { notes: notes.trim() || null });
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Modify canvass ${canvass.number}`}
+      onClose={onClose}
+      footer={
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button className="btn btn-primary" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </ModalFoot>
+      }
+    >
+      <ErrorBox error={error} />
+      <Field label="Notes" hint="What was asked of the suppliers, by when, and anything the award should weigh">
+        <textarea rows={5} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+    </Modal>
+  );
+}
+
+/**
+ * One supplier on an open canvass: their lead time, terms and remarks, and
+ * the price they quoted per line. Saved as two calls — the row, then the
+ * quote — and removing the supplier is in the foot, behind a question.
+ */
+function SupplierRowModal({
   canvassId,
   supplierRow,
   items,
@@ -501,6 +595,11 @@ function QuoteModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [row, setRow] = useState({
+    leadTimeDays: supplierRow.leadTimeDays == null ? '' : String(supplierRow.leadTimeDays),
+    terms: supplierRow.terms ?? '',
+    remarks: supplierRow.remarks ?? '',
+  });
   const [prices, setPrices] = useState<Record<string, string>>(() =>
     Object.fromEntries(
       items.map((i) => [
@@ -514,6 +613,16 @@ function QuoteModal({
     setBusy(true);
     setError(null);
     try {
+      const leadTimeDays = row.leadTimeDays === '' ? null : Number(row.leadTimeDays);
+      const terms = row.terms.trim() || null;
+      const remarks = row.remarks.trim() || null;
+      if (
+        leadTimeDays !== supplierRow.leadTimeDays ||
+        terms !== supplierRow.terms ||
+        remarks !== supplierRow.remarks
+      ) {
+        await api.patch(`/canvasses/${canvassId}/suppliers/${supplierRow.id}`, { leadTimeDays, terms, remarks });
+      }
       await api.put(`/canvasses/${canvassId}/suppliers/${supplierRow.id}/quotes`, {
         quotes: Object.entries(prices)
           .filter(([, v]) => v !== '')
@@ -531,7 +640,7 @@ function QuoteModal({
   return (
     <Modal
       wide
-      title={`${supplierRow.quotes.length ? 'Modify' : 'Add'} quote from ${supplierRow.supplier.name}`}
+      title={`Modify supplier ${supplierRow.supplier.name}`}
       onClose={onClose}
       footer={
         <ModalFoot
@@ -556,6 +665,25 @@ function QuoteModal({
       }
     >
       <ErrorBox error={error} />
+      <div className="grid grid-2">
+        <Field label="Lead time (days)">
+          <NumberInput
+            kind="count"
+            min="0"
+            value={row.leadTimeDays}
+            onChange={(e) => setRow({ ...row, leadTimeDays: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="Terms"
+          hint={supplierRow.supplier.paymentTerms ? `Supplier default: ${supplierRow.supplier.paymentTerms}` : undefined}
+        >
+          <input value={row.terms} onChange={(e) => setRow({ ...row, terms: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Remarks">
+        <input value={row.remarks} onChange={(e) => setRow({ ...row, remarks: e.target.value })} />
+      </Field>
       <p className="muted">
         Leave a line blank if they did not quote it. An incomplete quote is excluded from the
         lowest-total comparison, because it is not a like-for-like offer.

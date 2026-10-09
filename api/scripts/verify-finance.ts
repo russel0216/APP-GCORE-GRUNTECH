@@ -412,9 +412,12 @@ async function main() {
   await throwaway('zzfin_none', []);
   await throwaway('zzfin_projects', ['gops.projects.view_all']);
   await throwaway('zzfin_claimant', ['gfin.expenses.create']);
+  // Enters supplier bills and nothing more: entering is not modifying.
+  await throwaway('zzfin_apclerk', ['gfin.ap.view_all', 'gfin.ap.create']);
   const stranger = await makeUser('ZZ Stranger', 'none@verifyf.local', ['zzfin_none']);
   const projectViewer = await makeUser('ZZ Project Viewer', 'projects@verifyf.local', ['zzfin_projects']);
   const claimant = await makeUser('ZZ Claimant', 'claimant@verifyf.local', ['zzfin_claimant']);
+  const apClerk = await makeUser('ZZ AP Clerk', 'apclerk@verifyf.local', ['zzfin_apclerk']);
   const todayIso = dayKey(new Date()).toISOString().slice(0, 10);
 
   const customer = await prisma.customer.create({
@@ -559,6 +562,9 @@ async function main() {
       receivingId: receiving.id,
       jobId: job.id,
       costCategoryId: materials.id,
+      // Pending, as the submit route leaves it: the settlement claims only a
+      // bill still PENDING_APPROVAL, and these are submitted directly below.
+      status: 'PENDING_APPROVAL',
       supplierInvoiceNo: `${TAG}-SI-001`,
       billDate: dayKey(new Date()),
       dueDate: addDays(dayKey(new Date()), 30),
@@ -604,6 +610,7 @@ async function main() {
       supplierId: supplier.id,
       jobId: job.id,
       costCategoryId: subcontract.id,
+      status: 'PENDING_APPROVAL',
       supplierInvoiceNo: `${TAG}-SI-002`,
       billDate: dayKey(new Date()),
       dueDate: addDays(dayKey(new Date()), 30),
@@ -653,6 +660,7 @@ async function main() {
   const rejectedBill = await prisma.supplierBill.create({
     data: {
       number: await nextNumber('supplier_bill'),
+      status: 'PENDING_APPROVAL',
       supplierId: supplier.id,
       jobId: job.id,
       costCategoryId: subcontract.id,
@@ -1693,11 +1701,15 @@ async function main() {
     const liqList = await fin('GET', `/expense-claims?kind=liquidation&budgetRequestId=${raisedId}`);
     check('the Expenses register filters liquidations by budget request', liqList.status === 200 && liqList.body.rows.length === 1 && liqList.body.rows[0].id === liq.body.id, String(liqList.status));
     const brPdf = await fin('GET', `/budget-requests/${raisedId}/pdf`);
-    const brText = brPdf.bytes ? pdfText(brPdf.bytes) : '';
+    // Whitespace folded: a long sign-off role wraps onto a second line in the
+    // quotation dress ("APPROVED BY — PROJECT / MANAGER").
+    const brText = (brPdf.bytes ? pdfText(brPdf.bytes) : '').replace(/\s+/g, ' ');
     check(
       'the request prints with its sign-offs and who received the cash',
       brPdf.status === 200 &&
-        brText.includes('Budget Request') &&
+        // Case-blind: G-OPS paper wears the quotation template's dress, which
+        // names the document in capitals.
+        brText.toUpperCase().includes('BUDGET REQUEST') &&
         brText.toUpperCase().includes('PROJECT MANAGER') &&
         brText.toUpperCase().includes('RECEIVED BY'),
       `${brPdf.status} ${brText.replace(/\n/g, ' | ').slice(0, 400)}`,
@@ -1796,6 +1808,33 @@ async function main() {
       'one live liquidation per advance',
       secondLiq.status === 400 && String(secondLiq.body.error).includes('already being liquidated'),
       `${secondLiq.status} ${JSON.stringify(secondLiq.body).slice(0, 140)}`,
+    );
+
+    // Modifying a draft liquidation keeps what it accounts for (Phase 2).
+    const liqElsewhere = await eng('PUT', `/expense-claims/${firstLiq.body.id}`, {
+      advanceId: a4.id,
+      jobId: 'zz-some-other-project',
+      purpose: `${TAG} liquidating`,
+      lines: receipt1,
+    });
+    check(
+      'modifying a liquidation cannot move its cost to a different project',
+      liqElsewhere.status === 400 && String(liqElsewhere.body.error).includes('different project'),
+      `${liqElsewhere.status} ${JSON.stringify(liqElsewhere.body).slice(0, 140)}`,
+    );
+    const liqModified = await eng('PUT', `/expense-claims/${firstLiq.body.id}`, {
+      purpose: `${TAG} liquidating, corrected`,
+      lines: [...receipt1, { spentOn: todayIso, description: 'Toll', receiptNo: 'OR-10', amount: 120 }],
+    });
+    check(
+      'modified with no advance named, a liquidation keeps its advance, project and budget line',
+      liqModified.status === 200 &&
+        liqModified.body.advance?.id === a4.id &&
+        liqModified.body.jobId === job.id &&
+        liqModified.body.costCategoryId === subcontract.id &&
+        liqModified.body.kind === 'liquidation' &&
+        money(liqModified.body.total, 2_620),
+      `${liqModified.status} ${JSON.stringify(liqModified.body).slice(0, 200)}`,
     );
 
     // (7) Cancelling, and reversing a release.
@@ -1909,6 +1948,385 @@ async function main() {
       JSON.stringify(advanceTrail.map((a) => a.summary)),
     );
 
+    // ══ Modifying a claim, and pulling one back (Phase 2) ═══════════════════
+    console.log('\nModifying an expense claim (over HTTP)');
+    const mLine = (description: string, amount: number) => ({ spentOn: todayIso, description, receiptNo: `OR-${description}`, amount });
+    const mDraft = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} to modify`,
+      jobId: job.id,
+      costCategoryId: subcontract.id,
+      lines: [mLine('Fare', 1_000)],
+    });
+    const mId = String(mDraft.body.id ?? '');
+    const mBody = {
+      purpose: `${TAG} modified trip`,
+      jobId: job.id,
+      costCategoryId: subcontract.id,
+      lines: [mLine('Fare', 1_200), mLine('Meals', 350.5)],
+    };
+    const mPut = await eng('PUT', `/expense-claims/${mId}`, mBody);
+    const mLines = await prisma.expenseClaimLine.count({ where: { claimId: mId } });
+    check(
+      'the claimant modifies a draft: the receipts are replaced and the total recomputed',
+      mPut.status === 200 &&
+        mPut.body.number === mDraft.body.number &&
+        mPut.body.purpose === `${TAG} modified trip` &&
+        mPut.body.claimedBy?.id === engineer.id &&
+        money(mPut.body.total, 1_550.5) &&
+        mLines === 2,
+      `${mPut.status} ${JSON.stringify(mPut.body).slice(0, 160)} · ${mLines} lines`,
+    );
+    const mAudit = await prisma.auditLog.findFirst({ where: { entityType: 'expense_claim', entityId: mId, action: 'UPDATED' } });
+    check('and the change is audited', !!mAudit?.summary?.includes('modified'), mAudit?.summary ?? 'no row');
+    const mNotTheirs = await manager('PUT', `/expense-claims/${mId}`, mBody);
+    check('a colleague who may edit their own claims cannot modify somebody else’s', mNotTheirs.status === 403, String(mNotTheirs.status));
+    const mNoRight = await as(claimant)('PUT', `/expense-claims/${mId}`, mBody);
+    check('the right to file a claim is not the right to modify one', mNoRight.status === 403, String(mNoRight.status));
+    const mFinance = await fin('PUT', `/expense-claims/${mId}`, mBody);
+    check('finance, who may edit every claim, may modify a draft', mFinance.status === 200, `${mFinance.status} ${JSON.stringify(mFinance.body).slice(0, 120)}`);
+    const mRepoint = await eng('PUT', `/expense-claims/${mId}`, { ...mBody, advanceId: a4.id });
+    check(
+      'a claim does not become a liquidation on Modify',
+      mRepoint.status === 400 && String(mRepoint.body.error).includes('liquidation'),
+      `${mRepoint.status} ${JSON.stringify(mRepoint.body).slice(0, 140)}`,
+    );
+
+    const mSubmit = await eng('POST', `/expense-claims/${mId}/submit`);
+    const mPending = await eng('PUT', `/expense-claims/${mId}`, mBody);
+    check(
+      'a claim with the approver refuses Modify — it is pulled back first',
+      mSubmit.status === 200 && mPending.status === 400 && String(mPending.body.error).includes('pull it back'),
+      `${mSubmit.status} / ${mPending.status} ${JSON.stringify(mPending.body).slice(0, 140)}`,
+    );
+    const mRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: mId, status: 'PENDING' } });
+    const mApproverPull = await manager('POST', `/expense-claims/${mId}/withdraw`);
+    check('the approver cannot pull the claimant’s claim back', mApproverPull.status === 403, String(mApproverPull.status));
+    const mPulled = await eng('POST', `/expense-claims/${mId}/withdraw`);
+    const mClosed = mRequest ? await prisma.approvalRequest.findUnique({ where: { id: mRequest.id } }) : null;
+    const mAfterPull = await prisma.expenseClaim.findUnique({ where: { id: mId } });
+    check(
+      'the claimant pulls it back: a draft again, its request CANCELLED',
+      mPulled.status === 200 && mAfterPull?.status === 'DRAFT' && mClosed?.status === 'CANCELLED',
+      `${mPulled.status} claim ${mAfterPull?.status}, request ${mClosed?.status ?? 'none was open'}`,
+    );
+    check('and out of the approver’s queue', !!mRequest && !(await pendingFor(pm.id)).some((r) => r.id === mRequest.id));
+    const mTold = await prisma.notification.findFirst({
+      where: { type: 'approval.withdrawn', userId: pm.id, link: `/g-fin/expenses/${mId}` },
+    });
+    check('the approver is told it was pulled back, and by whom', !!mTold?.body?.includes(`pulled back to draft by ${engineer.name}`), mTold?.body ?? 'nothing');
+    if (mRequest) {
+      await expectRejection(
+        'a decision on the withdrawn request is refused by the engine',
+        () => act({ requestId: mRequest.id, userId: pm.id, action: 'APPROVED' }),
+        'no longer open',
+      );
+    }
+    // The race the conditional claim exists for: a decision that reaches the
+    // subscriber after the pull-back. It must change nothing.
+    if (mClosed) await settleExpense(mClosed, 'APPROVED');
+    const mLate = await prisma.expenseClaim.findUnique({ where: { id: mId } });
+    const mPosted = await prisma.jobCostEntry.count({ where: { sourceType: 'expense_claim', sourceId: mId } });
+    const mNotApplied = await prisma.auditLog.findFirst({
+      where: { entityType: 'expense_claim', entityId: mId, summary: { contains: 'not applied' } },
+    });
+    check(
+      'a late approval changes nothing: still a draft, nothing charged, and the trail says why',
+      mLate?.status === 'DRAFT' && mPosted === 0 && !!mNotApplied,
+      `${mLate?.status}, ${mPosted} ledger rows, ${mNotApplied?.summary ?? 'no trail'}`,
+    );
+    const mAgain = await eng('POST', `/expense-claims/${mId}/withdraw`);
+    check('a draft has nothing to pull back', mAgain.status === 400, String(mAgain.status));
+    const mFixed = await eng('PUT', `/expense-claims/${mId}`, { ...mBody, lines: [mLine('Fare', 1_200)] });
+    const mResubmit = await eng('POST', `/expense-claims/${mId}/submit`);
+    const mNewRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: mId, status: 'PENDING' } });
+    check(
+      'modified again and resubmitted, it goes on a fresh request at the new amount',
+      mFixed.status === 200 &&
+        mResubmit.status === 200 &&
+        !!mNewRequest &&
+        mNewRequest.id !== mRequest?.id &&
+        money(num(mNewRequest.amount), 1_200),
+      `${mFixed.status} / ${mResubmit.status} / ${mNewRequest?.id} ${num(mNewRequest?.amount)}`,
+    );
+    const mReceipts = await prisma.attachment.count({ where: { entityType: 'expense_claim', entityId: mId } });
+    const mStrangerFiles = await as(stranger)('GET', `/attachments/expense_claim/${mId}`);
+    const mOwnFiles = await eng('GET', `/attachments/expense_claim/${mId}`);
+    check(
+      'a claim’s receipts are the claim’s: a stranger cannot list them, the claimant can',
+      mStrangerFiles.status === 404 && mOwnFiles.status === 200 && Array.isArray(mOwnFiles.body) && mOwnFiles.body.length === mReceipts,
+      `${mStrangerFiles.status} / ${mOwnFiles.status}`,
+    );
+    const mFinanceFiles = await fin('GET', `/attachments/expense_claim/${mId}`);
+    check(
+      'and so can finance, who reads every claim',
+      mFinanceFiles.status === 200 && Array.isArray(mFinanceFiles.body) && mFinanceFiles.body.length === mReceipts,
+      String(mFinanceFiles.status),
+    );
+
+    // A decision that landed a moment before a pull-back or a cancel: act()
+    // has committed it, its subscriber has not run yet. It stands — both are
+    // refused and roll back — and the settlement applies when it arrives.
+    const dClaim = await eng('POST', '/expense-claims', { purpose: `${TAG} decided first`, lines: [mLine('Taxi', 400)] });
+    const dId = String(dClaim.body.id ?? '');
+    const dSubmit = await eng('POST', `/expense-claims/${dId}/submit`);
+    const dOpen = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: dId, status: 'PENDING' } });
+    const dDecided = dOpen
+      ? await prisma.approvalRequest.update({ where: { id: dOpen.id }, data: { status: 'APPROVED', closedAt: new Date() } })
+      : null;
+    const dPull = await eng('POST', `/expense-claims/${dId}/withdraw`);
+    const dCancel = await eng('POST', `/expense-claims/${dId}/cancel`);
+    const dHeld = await prisma.expenseClaim.findUnique({ where: { id: dId } });
+    const dRequestHeld = dOpen ? await prisma.approvalRequest.findUnique({ where: { id: dOpen.id } }) : null;
+    check(
+      'a decision that landed first stands: pulling back and cancelling are refused, the claim still pending, its request still approved',
+      dSubmit.status === 200 &&
+        !!dDecided &&
+        dPull.status === 400 &&
+        String(dPull.body.error).includes('decided') &&
+        dCancel.status === 400 &&
+        String(dCancel.body.error).includes('decided') &&
+        dHeld?.status === 'PENDING_APPROVAL' &&
+        dRequestHeld?.status === 'APPROVED',
+      `${dSubmit.status} / pull ${dPull.status} ${JSON.stringify(dPull.body).slice(0, 100)} / cancel ${dCancel.status} ${JSON.stringify(dCancel.body).slice(0, 100)} / claim ${dHeld?.status}, request ${dRequestHeld?.status}`,
+    );
+    if (dDecided) await settleExpense(dDecided, 'APPROVED');
+    const dApplied = await prisma.expenseClaim.findUnique({ where: { id: dId } });
+    check(
+      'and the settlement it carries applies when it arrives',
+      dApplied?.status === 'APPROVED' && !!dApplied.approvedAt,
+      String(dApplied?.status),
+    );
+
+    // Pending with nothing open and nothing decided — a submit still making
+    // its request, or one that died half-way: a cancel is not refused for ever.
+    const sClaim = await eng('POST', '/expense-claims', { purpose: `${TAG} nothing open`, lines: [mLine('Parking', 150)] });
+    const sId = String(sClaim.body.id ?? '');
+    const sSubmit = await eng('POST', `/expense-claims/${sId}/submit`);
+    await prisma.approvalRequest.updateMany({
+      where: { documentType: 'expense', documentId: sId, status: 'PENDING' },
+      data: { status: 'CANCELLED', closedAt: new Date() },
+    });
+    const sCancel = await eng('POST', `/expense-claims/${sId}/cancel`);
+    const sAfter = await prisma.expenseClaim.findUnique({ where: { id: sId } });
+    check(
+      'a pending claim with nothing open and nothing decided can still be cancelled',
+      sSubmit.status === 200 && sCancel.status === 200 && sAfter?.status === 'CANCELLED',
+      `${sSubmit.status} / ${sCancel.status} ${JSON.stringify(sCancel.body).slice(0, 120)} → ${sAfter?.status}`,
+    );
+
+    // ══ Modifying and cancelling a supplier bill (Phase 2) ══════════════════
+    console.log('\nModifying a supplier bill (over HTTP)');
+    const bLine = (description: string, quantity: number, unitPrice: number) => ({ description, quantity, unitPrice });
+    const bEntered = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      jobId: job.id,
+      costCategoryId: subcontract.id,
+      supplierInvoiceNo: `${TAG}-SI-M1`,
+      lines: [bLine('Hauling', 1, 10_000)],
+    });
+    const bId = String(bEntered.body.id ?? '');
+    check(
+      'a bill is entered as a draft with nothing received behind it',
+      bEntered.status === 201 && bEntered.body.status === 'DRAFT' && bEntered.body.receivingId === null,
+      `${bEntered.status} ${JSON.stringify(bEntered.body).slice(0, 140)}`,
+    );
+    // The supplier's real invoice was for the piping on the order, and freight.
+    const bBody = {
+      supplierId: supplier.id,
+      orderId: order.id,
+      costCategoryId: materials.id,
+      supplierInvoiceNo: `${TAG}-SI-M1`,
+      vatRate: 0.12,
+      ewtRate: 0.01,
+      lines: [bLine('Pipe', 10, 1_000), bLine('Freight', 2, 250.5)],
+    };
+    const bPut = await fin('PUT', `/supplier-bills/${bId}`, bBody);
+    const bLines = await prisma.supplierBillLine.count({ where: { billId: bId } });
+    check(
+      'finance modifies the draft: lines replaced, the money recomputed to the centavo',
+      bPut.status === 200 &&
+        bLines === 2 &&
+        money(bPut.body.subtotal, 10_501) &&
+        money(bPut.body.vatAmount, 1_260.12) &&
+        money(bPut.body.total, 11_761.12) &&
+        money(bPut.body.ewtAmount, 105.01) &&
+        money(bPut.body.netPayable, 11_656.11),
+      `${bPut.status} ${JSON.stringify(bPut.body).slice(0, 200)} · ${bLines} lines`,
+    );
+    check(
+      'naming the order lends the bill its receiving and project — what stops a second charge at approval',
+      bPut.body.receivingId === receiving.id && bPut.body.jobId === job.id,
+      `receiving ${bPut.body.receivingId}, job ${bPut.body.jobId}`,
+    );
+    // A field Modify leaves out keeps what is stored — the withholding rate
+    // above all, which the entry form would default to none.
+    const bKept = await fin('PUT', `/supplier-bills/${bId}`, { lines: bBody.lines });
+    check(
+      'modified with only its lines, the bill keeps its supplier, order, receiving, project, budget line, invoice number and withholding',
+      bKept.status === 200 &&
+        bKept.body.supplierId === supplier.id &&
+        bKept.body.orderId === order.id &&
+        bKept.body.receivingId === receiving.id &&
+        bKept.body.jobId === job.id &&
+        bKept.body.costCategoryId === materials.id &&
+        bKept.body.supplierInvoiceNo === `${TAG}-SI-M1` &&
+        money(bKept.body.ewtRate, 0.01) &&
+        money(bKept.body.netPayable, 11_656.11),
+      `${bKept.status} ${JSON.stringify(bKept.body).slice(0, 240)}`,
+    );
+    const bInclusive = await fin('PUT', `/supplier-bills/${bId}`, { lines: bBody.lines, vatInclusive: true });
+    const bInclusiveKept = await fin('PUT', `/supplier-bills/${bId}`, { lines: bBody.lines });
+    check(
+      'and prices entered VAT-inclusive are still read that way when Modify does not say',
+      bInclusive.status === 200 &&
+        money(bInclusive.body.subtotal, 9_375.89) &&
+        bInclusiveKept.status === 200 &&
+        money(bInclusiveKept.body.subtotal, 9_375.89),
+      `${bInclusive.status} ${bInclusive.body.subtotal} / ${bInclusiveKept.status} ${bInclusiveKept.body.subtotal}`,
+    );
+    const bExclusive = await fin('PUT', `/supplier-bills/${bId}`, { ...bBody, vatInclusive: false });
+    check(
+      'until a body says otherwise',
+      bExclusive.status === 200 && money(bExclusive.body.subtotal, 10_501) && money(bExclusive.body.netPayable, 11_656.11),
+      `${bExclusive.status} ${bExclusive.body.subtotal}`,
+    );
+    const order2 = await prisma.purchaseOrder.create({
+      data: {
+        number: await nextNumber('purchase_order'),
+        status: 'ISSUED',
+        kind: 'DIRECT_TO_JOB',
+        supplierId: supplier.id,
+        jobId: job.id,
+        warehouseId: warehouse.id,
+        createdById: procurement.id,
+        notes: `${TAG} second order`,
+        subtotal: D(0),
+        vatAmount: D(0),
+        total: D(0),
+        issuedAt: new Date(),
+      },
+    });
+    const bOtherOrder = await fin('PUT', `/supplier-bills/${bId}`, { ...bBody, orderId: order2.id, receivingId: receiving.id });
+    check(
+      'goods received against a different order are refused',
+      bOtherOrder.status === 400 && String(bOtherOrder.body.error).includes('different order'),
+      `${bOtherOrder.status} ${JSON.stringify(bOtherOrder.body).slice(0, 140)}`,
+    );
+    const otherSupplier = await prisma.supplier.create({ data: { code: `${TAG}-S2`, name: `${TAG} Other Supply` } });
+    const bWrongOrder = await fin('PUT', `/supplier-bills/${bId}`, { ...bBody, supplierId: otherSupplier.id });
+    check(
+      'an order placed with another supplier is refused',
+      bWrongOrder.status === 400 && String(bWrongOrder.body.error).includes('different supplier'),
+      `${bWrongOrder.status} ${JSON.stringify(bWrongOrder.body).slice(0, 140)}`,
+    );
+    const bWrongGoods = await fin('PUT', `/supplier-bills/${bId}`, {
+      ...bBody,
+      supplierId: otherSupplier.id,
+      orderId: null,
+      receivingId: receiving.id,
+    });
+    check(
+      'and so are goods received from another supplier',
+      bWrongGoods.status === 400 && String(bWrongGoods.body.error).includes('different supplier'),
+      `${bWrongGoods.status} ${JSON.stringify(bWrongGoods.body).slice(0, 140)}`,
+    );
+    const bClerk = await as(apClerk)('PUT', `/supplier-bills/${bId}`, bBody);
+    check('entering bills is not the right to modify them', bClerk.status === 403, String(bClerk.status));
+
+    const bSubmit = await fin('POST', `/supplier-bills/${bId}/submit`);
+    const bPending = await fin('PUT', `/supplier-bills/${bId}`, bBody);
+    const bPendingCancel = await fin('POST', `/supplier-bills/${bId}/cancel`, { reason: 'entered twice' });
+    check(
+      'a bill with the approver refuses Modify and cancel',
+      bSubmit.status === 200 && bPending.status === 400 && bPendingCancel.status === 400,
+      `${bSubmit.status} / ${bPending.status} / ${bPendingCancel.status}`,
+    );
+    const bRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'supplier_bill', documentId: bId, status: 'PENDING' } });
+    if (bRequest) await settle(bRequest.id);
+    const bApproved = await prisma.supplierBill.findUnique({ where: { id: bId } });
+    const bLedger = await prisma.jobCostEntry.count({ where: { sourceType: 'supplier_bill', sourceId: bId } });
+    check(
+      'approved, the bill matched on Modify charges the project nothing — the receiving already did',
+      bApproved?.status === 'APPROVED' && bApproved.postedToJob === false && bLedger === 0,
+      `${bApproved?.status}, posted ${bApproved?.postedToJob}, ${bLedger} ledger rows`,
+    );
+
+    // A decision that finds the bill no longer pending changes nothing.
+    const bLate = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      jobId: job.id,
+      costCategoryId: subcontract.id,
+      lines: [bLine('Service call', 1, 5_000)],
+    });
+    const bLateId = String(bLate.body.id ?? '');
+    await fin('POST', `/supplier-bills/${bLateId}/submit`);
+    const bLateRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'supplier_bill', documentId: bLateId, status: 'PENDING' } });
+    // As if it had left PENDING a moment before the decision landed.
+    await prisma.supplierBill.update({ where: { id: bLateId }, data: { status: 'DRAFT' } });
+    if (bLateRequest) await settle(bLateRequest.id);
+    const bLateAfter = await prisma.supplierBill.findUnique({ where: { id: bLateId } });
+    const bLateLedger = await prisma.jobCostEntry.count({ where: { sourceType: 'supplier_bill', sourceId: bLateId } });
+    const bLateTrail = await prisma.auditLog.findFirst({
+      where: { entityType: 'supplier_bill', entityId: bLateId, summary: { contains: 'not applied' } },
+    });
+    check(
+      'an approval that finds the bill no longer pending applies nothing, posts nothing, and says so',
+      !!bLateRequest && bLateAfter?.status === 'DRAFT' && bLateLedger === 0 && !!bLateTrail,
+      `${bLateAfter?.status}, ${bLateLedger} ledger rows, ${bLateTrail?.summary ?? 'no trail'}`,
+    );
+
+    const bSpare = await fin('POST', '/supplier-bills', {
+      supplierId: supplier.id,
+      notes: 'Entered from the email copy',
+      lines: [bLine('Hauling', 1, 2_000)],
+    });
+    const bSpareId = String(bSpare.body.id ?? '');
+    // The engine refusing a submit — here because a request is already open
+    // for the bill — leaves it a draft, never pending with nothing behind it.
+    const bStray = await prisma.approvalRequest.create({
+      data: {
+        documentType: 'supplier_bill',
+        documentId: bSpareId,
+        subject: `${TAG} left behind`,
+        requesterId: finance.id,
+        status: 'PENDING',
+        currentSequence: 1,
+      },
+    });
+    const bRefused = await fin('POST', `/supplier-bills/${bSpareId}/submit`);
+    const bAfterRefusal = await prisma.supplierBill.findUnique({ where: { id: bSpareId } });
+    check(
+      'a submit the engine refuses puts the bill back to draft',
+      bRefused.status === 400 && String(bRefused.body.error).includes('already awaiting') && bAfterRefusal?.status === 'DRAFT',
+      `${bRefused.status} ${JSON.stringify(bRefused.body).slice(0, 120)} → ${bAfterRefusal?.status}`,
+    );
+    const bShort = await fin('POST', `/supplier-bills/${bSpareId}/cancel`, { reason: 'no' });
+    check('cancelling a draft bill asks why', bShort.status === 400, String(bShort.status));
+    const bClerkCancel = await as(apClerk)('POST', `/supplier-bills/${bSpareId}/cancel`, { reason: 'entered twice' });
+    check('and is not the A/P clerk’s to do', bClerkCancel.status === 403, String(bClerkCancel.status));
+    const bCancel = await fin('POST', `/supplier-bills/${bSpareId}/cancel`, { reason: 'entered twice' });
+    const bCancelled = await prisma.supplierBill.findUnique({ where: { id: bSpareId } });
+    const bCancelTrail = await prisma.auditLog.findFirst({ where: { entityType: 'supplier_bill', entityId: bSpareId, action: 'CANCELLED' } });
+    check(
+      'finance cancels a draft bill: CANCELLED, the reason kept on its notes and in the trail',
+      bCancel.status === 200 &&
+        bCancelled?.status === 'CANCELLED' &&
+        !!bCancelled.notes?.startsWith('Entered from the email copy') &&
+        !!bCancelled.notes?.includes('Cancelled: entered twice') &&
+        !!bCancelTrail?.summary?.includes('entered twice'),
+      `${bCancel.status} ${bCancelled?.status} ${JSON.stringify(bCancelled?.notes)} ${bCancelTrail?.summary}`,
+    );
+    const bStrayAfter = await prisma.approvalRequest.findUnique({ where: { id: bStray.id } });
+    check('and the request a refused submit left open is withdrawn with it', bStrayAfter?.status === 'CANCELLED', String(bStrayAfter?.status));
+    const bCancelAgain = await fin('POST', `/supplier-bills/${bSpareId}/cancel`, { reason: 'entered twice' });
+    const bCancelledEdit = await fin('PUT', `/supplier-bills/${bSpareId}`, { supplierId: supplier.id, lines: [bLine('Hauling', 1, 2_000)] });
+    check(
+      'a cancelled bill is neither cancelled again nor modified',
+      bCancelAgain.status === 400 && bCancelledEdit.status === 400,
+      `${bCancelAgain.status} / ${bCancelledEdit.status}`,
+    );
+
+    console.log('\nCash advances — the project view, refunds and the paper (over HTTP)');
     // The project view, and who may see it.
     const forJob = await eng('GET', `/cash-advances/for-job/${job.id}`);
     check(
@@ -2051,6 +2469,146 @@ async function main() {
       'and only once',
       againInv.status === 400 && String(againInv.body.error).includes('already invoiced'),
       `${againInv.status} ${JSON.stringify(againInv.body).slice(0, 140)}`,
+    );
+
+    // ══ Modifying and cancelling an invoice (Phase 2) ═══════════════════════
+    console.log('\nModifying an invoice (over HTTP)');
+    const iId = String(doneInv.body.id ?? '');
+    const iDue = ymd(addDays(dayKey(new Date()), 45));
+    const iLines = [
+      { description: `${doneOrder.number} — service call`, amount: 15_000 },
+      { description: 'Parts', amount: 5_000 },
+    ];
+    const iPut = await fin('PUT', `/invoices/${iId}`, { dueDate: iDue, poReference: `${TAG}-PO-78`, notes: 'Corrected', lines: iLines });
+    const iTax = taxBreakdown(20_000, Number(doneInv.body.vatRate), Number(doneInv.body.ewtRate));
+    check(
+      'a draft job-order invoice is re-entered: lines replaced, tax recomputed at its own rates',
+      iPut.status === 200 &&
+        iPut.body.lines?.length === 2 &&
+        money(iPut.body.grossAmount, 20_000) &&
+        money(iPut.body.vatRate, doneInv.body.vatRate) &&
+        money(iPut.body.netCollectible, iTax.netCollectible) &&
+        iPut.body.poReference === `${TAG}-PO-78` &&
+        String(iPut.body.dueDate).slice(0, 10) === iDue &&
+        iPut.body.jobOrderId === doneOrder.id &&
+        iPut.body.customer?.id === customer.id,
+      `${iPut.status} ${JSON.stringify(iPut.body).slice(0, 200)}`,
+    );
+    const iRepoint = await fin('PUT', `/invoices/${iId}`, { jobOrderId: openOrder.id, lines: iLines });
+    check(
+      'the job order it bills does not change',
+      iRepoint.status === 400 && String(iRepoint.body.error).includes('job order'),
+      `${iRepoint.status} ${JSON.stringify(iRepoint.body).slice(0, 140)}`,
+    );
+    const iOtherCustomer = await fin('PUT', `/invoices/${iId}`, { customerId: 'zz-somebody-else', lines: iLines });
+    check(
+      'nor does the customer of a job order’s invoice',
+      iOtherCustomer.status === 400 && String(iOtherCustomer.body.error).includes('customer'),
+      `${iOtherCustomer.status} ${JSON.stringify(iOtherCustomer.body).slice(0, 140)}`,
+    );
+    const iBackwards = await fin('PUT', `/invoices/${iId}`, { invoiceDate: '2026-09-30', dueDate: '2026-09-01', lines: iLines });
+    check(
+      'a due date before the invoice date is refused on Modify too',
+      iBackwards.status === 400 && String(iBackwards.body.error).includes('before the invoice date'),
+      `${iBackwards.status} ${JSON.stringify(iBackwards.body).slice(0, 140)}`,
+    );
+    const iNosy = await eng('PUT', `/invoices/${iId}`, { lines: iLines });
+    check('nobody without A/R edit rights may modify an invoice', iNosy.status === 403, String(iNosy.status));
+
+    // Cancelling it lets the job order go, so the corrected one can be raised.
+    const iShort = await fin('POST', `/invoices/${iId}/cancel`, { reason: 'no' });
+    check('cancelling an invoice asks why', iShort.status === 400, String(iShort.status));
+    const iCancel = await fin('POST', `/invoices/${iId}/cancel`, { reason: 'wrong amount' });
+    const iCancelled = await prisma.invoice.findUnique({ where: { id: iId } });
+    const iTrail = await prisma.auditLog.findFirst({ where: { entityType: 'invoice', entityId: iId, action: 'CANCELLED' } });
+    check(
+      'cancelling a job order’s invoice lets the order go, and the trail says so',
+      iCancel.status === 200 &&
+        iCancelled?.status === 'CANCELLED' &&
+        iCancelled.jobOrderId === null &&
+        iCancelled.voidReason === 'wrong amount' &&
+        !!iTrail?.summary?.includes(doneOrder.number),
+      `${iCancel.status} ${iCancelled?.status} jobOrder ${iCancelled?.jobOrderId} · ${iTrail?.summary}`,
+    );
+    const iReraised = await billOrder(doneOrder.id, doneOrder.number);
+    check(
+      'so the job order can be invoiced again',
+      iReraised.status === 201 && iReraised.body.jobOrderId === doneOrder.id,
+      `${iReraised.status} ${JSON.stringify(iReraised.body).slice(0, 140)}`,
+    );
+    const iCancelledEdit = await fin('PUT', `/invoices/${iId}`, { lines: iLines });
+    check('a cancelled invoice is not modified', iCancelledEdit.status === 400, String(iCancelledEdit.status));
+    const iCancelAgain = await fin('POST', `/invoices/${iId}/cancel`, { reason: 'wrong amount' });
+    check(
+      'nor cancelled a second time',
+      iCancelAgain.status === 400 && String(iCancelAgain.body.error).includes('Already cancelled'),
+      `${iCancelAgain.status} ${JSON.stringify(iCancelAgain.body).slice(0, 120)}`,
+    );
+
+    // An invoice raised from a billing changes its header, never its figures.
+    const report2 = await prisma.progressReport.create({
+      data: {
+        number: await nextNumber('progress_report'),
+        jobId: job.id,
+        reportNo: 2,
+        status: 'APPROVED',
+        periodFrom: dayKey(new Date()),
+        periodTo: dayKey(new Date()),
+        preparedById: engineer.id,
+        accomplishment: `${TAG} 60% complete`,
+      },
+    });
+    const billing2Tax = taxBreakdown(100_000, 0.12, 0.02);
+    const billing2 = await prisma.progressBilling.create({
+      data: {
+        number: await nextNumber('progress_billing'),
+        jobId: job.id,
+        billingNo: 2,
+        status: 'APPROVED',
+        progressReportId: report2.id,
+        billingDate: dayKey(new Date()),
+        grossAmount: D(billing2Tax.grossAmount),
+        vatRate: D(0.12),
+        vatAmount: D(billing2Tax.vatAmount),
+        ewtRate: D(0.02),
+        ewtAmount: D(billing2Tax.ewtAmount),
+        invoiceTotal: D(billing2Tax.invoiceTotal),
+        netCollectible: D(billing2Tax.netCollectible),
+        approvedAt: new Date(),
+      },
+    });
+    const fbRaised = await fin('POST', `/invoices/from-billing/${billing2.id}`, {});
+    const fbId = String(fbRaised.body.id ?? '');
+    const fbFigures = await fin('PUT', `/invoices/${fbId}`, { lines: [{ description: 'More', amount: 1 }] });
+    check(
+      'a billing’s invoice refuses new figures, naming the billing they come from',
+      fbRaised.status === 201 && fbFigures.status === 400 && String(fbFigures.body.error).includes(billing2.number),
+      `${fbRaised.status} / ${fbFigures.status} ${JSON.stringify(fbFigures.body).slice(0, 160)}`,
+    );
+    const fbHeader = await fin('PUT', `/invoices/${fbId}`, { dueDate: iDue, poReference: `${TAG}-PO-90`, notes: 'Per their A/P clerk' });
+    check(
+      'and takes a new due date, PO reference and notes with its figures untouched',
+      fbHeader.status === 200 &&
+        String(fbHeader.body.dueDate).slice(0, 10) === iDue &&
+        fbHeader.body.poReference === `${TAG}-PO-90` &&
+        money(fbHeader.body.grossAmount, 100_000) &&
+        money(fbHeader.body.netCollectible, billing2Tax.netCollectible) &&
+        fbHeader.body.lines?.length === fbRaised.body.lines?.length,
+      `${fbHeader.status} ${JSON.stringify(fbHeader.body).slice(0, 200)}`,
+    );
+    const fbIssue = await fin('POST', `/invoices/${fbId}/issue`);
+    const fbIssued = await fin('PUT', `/invoices/${fbId}`, { notes: 'too late' });
+    check(
+      'an issued invoice refuses Modify',
+      fbIssue.status === 200 && fbIssued.status === 400 && String(fbIssued.body.error).includes('Only a draft'),
+      `${fbIssue.status} / ${fbIssued.status} ${JSON.stringify(fbIssued.body).slice(0, 140)}`,
+    );
+    const fbCancel = await fin('POST', `/invoices/${fbId}/cancel`, { reason: 'customer asked for a split' });
+    const billing2After = await prisma.progressBilling.findUnique({ where: { id: billing2.id }, include: { invoice: true } });
+    check(
+      'cancelling it puts the billing back to be invoiced again',
+      fbCancel.status === 200 && billing2After?.status === 'APPROVED' && billing2After.invoice === null,
+      `${fbCancel.status} ${billing2After?.status} ${billing2After?.invoice?.number ?? 'no invoice'}`,
     );
 
     // The customer-facing invoice prints.

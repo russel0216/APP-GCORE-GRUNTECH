@@ -19,7 +19,7 @@ import {
   type Tone,
 } from '../../components/ui';
 import type { Asset } from './InstalledBase';
-import { monthOf, todayLocal } from '../../lib/day';
+import { monthOf, parseDay, todayLocal } from '../../lib/day';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -253,20 +253,35 @@ export function ServiceContracts() {
   );
 }
 
+/** A machine the cover can name: the installed base's row, or one already on the contract. */
+type Coverable = Pick<Asset, 'id' | 'code' | 'name' | 'serialNo'> & { site?: { name: string } | null };
+
+/**
+ * Sets a service job's cover (new) or changes a contract's (`existing`).
+ * Modify is offered only where the PATCH works (`canEdit`): a DRAFT changes
+ * freely; an ACTIVE one too, and moving its term or frequency re-plans the
+ * schedule in the same save — said in the form before it is saved. Once an
+ * active contract's visits have begun, the server lets only its end move (to
+ * today or later, and not before a visit already attended); the form holds
+ * the start and the frequency still and says why, rather than letting a save
+ * be refused.
+ */
 function CoverModal({
   job,
+  existing,
   onClose,
   onSaved,
 }: {
   job: UnconfiguredJob;
+  existing?: ContractDetail;
   onClose: () => void;
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const [assets, setAssets] = useState<Coverable[]>([]);
+  const [chosen, setChosen] = useState<Set<string>>(() => new Set(existing?.assets.map((a) => a.id) ?? []));
   const [settings, setSettings] = useState<{ defaultFrequencyMonths: number } | null>(null);
 
   const today = todayLocal();
@@ -277,20 +292,38 @@ function CoverModal({
     return d.toISOString().slice(0, 10);
   })();
 
-  const [form, setForm] = useState({
-    startsAt: today,
-    endsAt: oneYear,
-    frequencyMonths: 3,
-    responseTime: '',
-    exclusions: '',
-    coverageNotes: '',
-  });
+  const [form, setForm] = useState(() =>
+    existing
+      ? {
+          startsAt: existing.startsAt.slice(0, 10),
+          endsAt: existing.endsAt.slice(0, 10),
+          frequencyMonths: existing.frequencyMonths,
+          responseTime: existing.responseTime ?? '',
+          exclusions: existing.exclusions ?? '',
+          coverageNotes: existing.coverageNotes ?? '',
+        }
+      : {
+          startsAt: today,
+          endsAt: oneYear,
+          frequencyMonths: 3,
+          responseTime: '',
+          exclusions: '',
+          coverageNotes: '',
+        },
+  );
 
+  const covered = existing?.assets;
   useEffect(() => {
     api
       .get<{ rows: Asset[] }>(`/installed-assets?pageSize=200&customerId=${job.customer.id}&status=ACTIVE`)
-      .then((d) => setAssets(d.rows))
-      .catch(() => {});
+      .then((d) => {
+        // A machine already covered stays offered even if it has since left
+        // the active register, so a modify never drops it unasked.
+        const listed = new Set(d.rows.map((a) => a.id));
+        setAssets([...d.rows, ...(covered ?? []).filter((a) => !listed.has(a.id))]);
+      })
+      .catch(() => setAssets(covered ?? []));
+    if (existing) return;
     api
       .get<{ defaultFrequencyMonths: number }>('/aftermarket/settings')
       .then((s) => {
@@ -298,7 +331,39 @@ function CoverModal({
         setForm((f) => ({ ...f, frequencyMonths: s.defaultFrequencyMonths }));
       })
       .catch(() => {});
-  }, [job.customer.id]);
+  }, [job.customer.id, covered, existing]);
+
+  // An active contract's schedule is re-planned when its term or frequency moves.
+  const active = existing?.status === 'ACTIVE';
+  const replans =
+    active &&
+    (form.startsAt !== existing.startsAt.slice(0, 10) ||
+      form.endsAt !== existing.endsAt.slice(0, 10) ||
+      form.frequencyMonths !== existing.frequencyMonths);
+
+  // The server's rule (planReplan): once a generated visit has come due — or
+  // been made or missed — only the end of an active contract moves, to today
+  // or later and never before a visit already attended. The visits arrive in
+  // due-date order, so the first found is the earliest.
+  const generated = existing?.visits.filter((v) => v.sequence !== null) ?? [];
+  const isAttended = (status: string) => status === 'COMPLETED' || status === 'MISSED';
+  const begun = active
+    ? generated.find((v) => v.dueDate.slice(0, 10) < today || isAttended(v.status))
+    : undefined;
+  const lastAttended = generated
+    .filter((v) => isAttended(v.status))
+    .map((v) => v.dueDate.slice(0, 10))
+    .sort()
+    .pop();
+  const earliestEnd = active ? (lastAttended && lastAttended > today ? lastAttended : today) : undefined;
+  const endTooEarly = !!earliestEnd && !!form.endsAt && form.endsAt < earliestEnd;
+  const begunSays = begun
+    ? begun.status === 'COMPLETED'
+      ? 'has been made'
+      : begun.status === 'MISSED'
+        ? 'was missed'
+        : 'has come due'
+    : '';
 
   // The same arithmetic the server will do, so the count is not a surprise.
   const plannedCount = (() => {
@@ -322,17 +387,36 @@ function CoverModal({
   async function save() {
     setBusy(true);
     setError(null);
+    const cover = {
+      startsAt: form.startsAt,
+      endsAt: form.endsAt,
+      frequencyMonths: form.frequencyMonths,
+      responseTime: form.responseTime || null,
+      exclusions: form.exclusions || null,
+      coverageNotes: form.coverageNotes || null,
+      assetIds: [...chosen],
+    };
     try {
-      const created = await api.post<{ id: string }>('/service-contracts', {
-        jobId: job.id,
-        startsAt: form.startsAt,
-        endsAt: form.endsAt,
-        frequencyMonths: form.frequencyMonths,
-        responseTime: form.responseTime || null,
-        exclusions: form.exclusions || null,
-        coverageNotes: form.coverageNotes || null,
-        assetIds: [...chosen],
-      });
+      if (existing) {
+        const saved = await api.patch<{
+          id: string;
+          regenerated: { created: number; kept: number; carried: number } | null;
+        }>(
+          `/service-contracts/${existing.id}`,
+          // The version the form was opened on: a save over a later change is refused.
+          { ...cover, updatedAt: existing.updatedAt },
+        );
+        const r = saved.regenerated;
+        toast(
+          'ok',
+          r
+            ? `Cover saved — schedule re-planned: ${r.carried} visit(s) kept their day, ${r.created - r.carried} written from the plan, ${r.kept} attended kept`
+            : 'Cover saved',
+        );
+        onSaved(existing.id);
+        return;
+      }
+      const created = await api.post<{ id: string }>('/service-contracts', { jobId: job.id, ...cover });
       toast('ok', 'Cover set — activate it to write the schedule');
       onSaved(created.id);
     } catch (err) {
@@ -343,12 +427,12 @@ function CoverModal({
 
   return (
     <Modal
-      title={`New service contract for ${job.number}`}
+      title={existing ? `Modify service contract ${existing.number}` : `New service contract for ${job.number}`}
       onClose={onClose}
       wide
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || chosen.size === 0}>
+          <button className="btn btn-primary" onClick={save} disabled={busy || chosen.size === 0 || endTooEarly}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
@@ -357,26 +441,59 @@ function CoverModal({
       <ErrorBox error={error} />
 
       <div className="grid grid-3">
-        <Field label="Cover starts">
+        <Field
+          label="Cover starts"
+          hint={
+            begun
+              ? 'Fixed — the visits have begun'
+              : existing?.renewedFrom
+                ? `Renews ${existing.renewedFrom.number}, which covers to ${formatDate(existing.renewedFrom.endsAt)}`
+                : undefined
+          }
+        >
           <input
             type="date"
             value={form.startsAt}
+            disabled={!!begun}
             onChange={(e) => setForm({ ...form, startsAt: e.target.value })}
           />
         </Field>
-        <Field label="Cover ends">
+        <Field
+          label="Cover ends"
+          error={
+            endTooEarly && earliestEnd
+              ? earliestEnd === today
+                ? 'An active contract ends today at the earliest'
+                : `A visit due ${formatDate(parseDay(earliestEnd))} has been attended — end on or after it`
+              : null
+          }
+          hint={
+            existing?.renewedTo
+              ? `Renewed as ${existing.renewedTo.number}, which takes over on ${formatDate(existing.renewedTo.startsAt)}`
+              : undefined
+          }
+        >
           <input
             type="date"
             value={form.endsAt}
+            min={earliestEnd}
             onChange={(e) => setForm({ ...form, endsAt: e.target.value })}
           />
         </Field>
-        <Field label="Visit every (months)" hint={settings ? `${plannedCount} visits planned` : undefined}>
+        <Field
+          label="Visit every (months)"
+          hint={
+            settings || existing
+              ? `${plannedCount} visits planned${begun ? ' · fixed — the visits have begun' : ''}`
+              : undefined
+          }
+        >
           <NumberInput
             kind="count"
             min={1}
             max={24}
             value={form.frequencyMonths}
+            disabled={!!begun}
             onChange={(e) => setForm({ ...form, frequencyMonths: Number(e.target.value) })}
           />
         </Field>
@@ -387,6 +504,28 @@ function CoverModal({
         nothing to maintain on day one. A visit that would fall after the end date is dropped
         rather than squeezed in.
       </div>
+
+      {begun && earliestEnd && (
+        <div className="alert info">
+          Visit {begun.number} (due {formatDate(begun.dueDate)}) {begunSays}, so this contract&rsquo;s
+          schedule has begun: only its end date can move now — to{' '}
+          {formatDate(parseDay(earliestEnd))} or later. Renew the contract to change when cover
+          starts or how often it is visited.
+        </div>
+      )}
+
+      {replans && (
+        <div className="alert warn">
+          Saving re-plans the visits still to come; no visit is written on a day that has passed.
+          Completed and missed visits stay as the record, and call-outs are never touched. A visit
+          the new plan leaves on its day keeps its engineer, notes and status — a cancelled one
+          stays cancelled, one moved by hand keeps its day — but is written again under a new
+          visit number.
+          {!begun && ' A visit the new plan moves to another day is booked afresh, with no engineer.'}{' '}
+          Visits after the new end are removed. The contract&rsquo;s history lists every visit
+          replaced, by its old number.
+        </div>
+      )}
 
       <div className="grid grid-2">
         <Field label="Response time promised" hint='Free text — "next working day" is as common as a number'>
@@ -402,6 +541,14 @@ function CoverModal({
           />
         </Field>
       </div>
+
+      <Field label="Notes on the cover">
+        <textarea
+          rows={2}
+          value={form.coverageNotes}
+          onChange={(e) => setForm({ ...form, coverageNotes: e.target.value })}
+        />
+      </Field>
 
       <h4 className="svc-subhead">
         What is covered — {chosen.size} of {assets.length} selected
@@ -470,6 +617,10 @@ interface ContractDetail extends Contract {
   renewedFrom: { id: string; number: string; endsAt: string } | null;
   renewedTo: { id: string; number: string; startsAt: string } | null;
   progress: { planned: number; completed: number; missed: number; remaining: number };
+  /** The PATCH's own rule: a DRAFT or ACTIVE contract, and its PM (edit_own) or edit_all. */
+  canEdit: boolean;
+  /** Sent back with a modify, so a save over a later change is refused (409). */
+  updatedAt: string;
 }
 
 export function ContractDetail() {
@@ -481,6 +632,7 @@ export function ContractDetail() {
   const [row, setRow] = useState<ContractDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const [modifying, setModifying] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -612,8 +764,28 @@ export function ContractDetail() {
               },
             },
         ]}
+        modify={row.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
+
+      {modifying && (
+        <CoverModal
+          job={{
+            id: row.job.id,
+            number: row.job.number,
+            name: row.job.name,
+            contractValue: row.job.contractValue,
+            customer: { id: row.job.customer.id, name: row.job.customer.name },
+            site: row.job.site,
+          }}
+          existing={row}
+          onClose={() => setModifying(false)}
+          onSaved={() => {
+            setModifying(false);
+            load();
+          }}
+        />
+      )}
 
       {row.renewedFrom && (
         <div className="alert info">

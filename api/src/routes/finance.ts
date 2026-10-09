@@ -20,6 +20,8 @@ import {
   forbidden,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { can, canEditRecord } from '../permissions/resolve';
+import { registerAttachmentGuard } from '../shared/attachments';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
@@ -276,6 +278,15 @@ invoiceRoutes.get(
   }),
 );
 
+/** An invoice's own header — what a billing's invoice may set, raised or modified. */
+const invoiceHeaderSchema = z.object({
+  invoiceDate: z.string().optional(),
+  dueDate: z.string().optional(),
+  terms: z.string().optional().nullable(),
+  poReference: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
 /**
  * Raising an invoice from an approved progress billing.
  *
@@ -290,16 +301,7 @@ invoiceRoutes.post(
   require_('gfin.ar.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        invoiceDate: z.string().optional(),
-        dueDate: z.string().optional(),
-        terms: z.string().optional().nullable(),
-        poReference: z.string().optional().nullable(),
-        notes: z.string().optional().nullable(),
-      }),
-      req.body,
-    );
+    const body = parseBody(invoiceHeaderSchema, req.body);
 
     const billing = await prisma.progressBilling.findUnique({
       where: { id: req.params.billingId },
@@ -403,6 +405,40 @@ const manualInvoiceSchema = z.object({
     .min(1, 'An invoice needs at least one line'),
 });
 
+/**
+ * A manual invoice's money, from its lines — the one rule for raising one and
+ * for modifying a draft. Each line is taken to the centavo first, so the gross
+ * is exactly the sum of the lines stored under it.
+ */
+function manualInvoiceMoney(
+  lines: { description: string; detail?: string | null; amount: number }[],
+  vatRate: number,
+  ewtRate: number,
+) {
+  const rows = lines.map((l, i) => ({
+    sortOrder: i,
+    description: l.description,
+    detail: l.detail || null,
+    amount: cents(l.amount),
+  }));
+  const gross = cents(rows.reduce((s, l) => s + l.amount, 0));
+  if (gross <= 0) throw badRequest('The invoice total must be more than zero');
+  const tax = taxBreakdown(gross, vatRate, ewtRate);
+  return {
+    tax,
+    figures: {
+      grossAmount: D(tax.grossAmount),
+      vatRate: D(tax.vatRate),
+      vatAmount: D(tax.vatAmount),
+      ewtRate: D(tax.ewtRate),
+      ewtAmount: D(tax.ewtAmount),
+      invoiceTotal: D(tax.invoiceTotal),
+      netCollectible: D(tax.netCollectible),
+    },
+    lines: rows.map((l) => ({ ...l, amount: D(l.amount) })),
+  };
+}
+
 invoiceRoutes.post(
   '/',
   require_('gfin.ar.create'),
@@ -446,10 +482,7 @@ invoiceRoutes.post(
     if (!body.customerId) throw badRequest('Which customer?');
     const customerId = body.customerId;
 
-    const gross = cents(body.lines.reduce((s, l) => s + l.amount, 0));
-    if (gross <= 0) throw badRequest('The invoice total must be more than zero');
-
-    const tax = taxBreakdown(gross, body.vatRate ?? rates.vatRate, body.ewtRate ?? rates.ewtRate);
+    const money = manualInvoiceMoney(body.lines, body.vatRate ?? rates.vatRate, body.ewtRate ?? rates.ewtRate);
     const invoiceDate = body.invoiceDate ? asDate(body.invoiceDate, 'Invoice date') : dayKey(new Date());
     const dueDate = body.dueDate
       ? asDate(body.dueDate, 'Due date')
@@ -468,23 +501,10 @@ invoiceRoutes.post(
           dueDate,
           terms: body.terms ?? `${settings.defaultTermsDays} days`,
           poReference: body.poReference || null,
-          grossAmount: D(tax.grossAmount),
-          vatRate: D(tax.vatRate),
-          vatAmount: D(tax.vatAmount),
-          ewtRate: D(tax.ewtRate),
-          ewtAmount: D(tax.ewtAmount),
-          invoiceTotal: D(tax.invoiceTotal),
-          netCollectible: D(tax.netCollectible),
+          ...money.figures,
           notes: body.notes || null,
           createdById: me.id,
-          lines: {
-            create: body.lines.map((l, i) => ({
-              sortOrder: i,
-              description: l.description,
-              detail: l.detail || null,
-              amount: D(l.amount),
-            })),
-          },
+          lines: { create: money.lines },
         },
         include: invoiceInclude,
       });
@@ -500,6 +520,123 @@ invoiceRoutes.post(
       req,
     );
     res.status(201).json(presentInvoice(invoice));
+  }),
+);
+
+/** What a billing's invoice never takes on Modify: its figures and whom they bill. */
+const BILLING_CARRIED = ['customerId', 'jobId', 'jobOrderId', 'vatRate', 'ewtRate', 'lines'] as const;
+
+/**
+ * Modifying a draft invoice (2026-10-09, Phase 2 of the button standard).
+ *
+ * Only while DRAFT: once issued it is a receivable the customer holds, and a
+ * wrong one is cancelled and raised again. An invoice raised FROM a progress
+ * billing carries the billing's figures (Phase 7: carried, never
+ * recomputed), so only its dates, terms, PO reference and notes change here —
+ * any figure in the body is a 400 naming the billing. A manual invoice (a job
+ * order's, or a standalone one) is re-entered whole: lines replaced, tax
+ * recomputed — at the rates it was raised with unless the body names others,
+ * never today's Settings quietly. The job order it bills never changes, nor
+ * does that invoice's customer. A field left out keeps what is stored.
+ * Claimed on DRAFT, so an Issue that lands first wins.
+ */
+invoiceRoutes.put(
+  '/:id',
+  require_('gfin.ar.edit_all'),
+  handler(async (req, res) => {
+    const existing = await prisma.invoice.findUnique({
+      where: { id: req.params.id },
+      include: {
+        progressBilling: { select: { number: true } },
+        jobOrder: { select: { number: true } },
+      },
+    });
+    if (!existing) throw notFound('Invoice not found');
+    if (existing.status !== 'DRAFT') {
+      throw badRequest('Only a draft invoice can be modified — once issued, cancel it and raise another');
+    }
+    const raw = (req.body ?? {}) as Record<string, unknown>;
+    const fromBilling = !!existing.progressBillingId;
+    if (fromBilling) {
+      const carried = BILLING_CARRIED.filter((key) => raw[key] !== undefined);
+      if (carried.length) {
+        throw badRequest(
+          `${existing.number} carries the figures of ${existing.progressBilling?.number ?? 'its billing'} — only its dates, terms, PO reference and notes change here (not ${carried.join(', ')})`,
+        );
+      }
+    } else if (raw.jobOrderId !== undefined && raw.jobOrderId !== existing.jobOrderId) {
+      throw badRequest('The job order an invoice bills does not change — cancel this one and raise another');
+    }
+
+    const header = parseBody(invoiceHeaderSchema, raw);
+    const invoiceDate = header.invoiceDate ? asDate(header.invoiceDate, 'Invoice date') : existing.invoiceDate;
+    const dueDate = header.dueDate ? asDate(header.dueDate, 'Due date') : existing.dueDate;
+    if (dueDate < invoiceDate) throw badRequest('The due date is before the invoice date');
+    const headerData = {
+      invoiceDate,
+      dueDate,
+      terms: header.terms === undefined ? existing.terms : header.terms || null,
+      poReference: header.poReference === undefined ? existing.poReference : header.poReference || null,
+      notes: header.notes === undefined ? existing.notes : header.notes || null,
+    };
+
+    let manual: ReturnType<typeof manualInvoiceMoney> | null = null;
+    let customerId = existing.customerId;
+    let jobId = existing.jobId;
+    if (!fromBilling) {
+      const body = parseBody(manualInvoiceSchema.omit({ jobOrderId: true }), raw);
+      customerId = body.customerId ?? existing.customerId;
+      if (customerId !== existing.customerId) {
+        if (existing.jobOrderId) {
+          throw badRequest(`${existing.number} bills job order ${existing.jobOrder?.number} — it is that order's customer's`);
+        }
+        const known = await prisma.customer.findUnique({ where: { id: customerId }, select: { id: true } });
+        if (!known) throw badRequest('That customer does not exist');
+      }
+      jobId = body.jobId === undefined ? existing.jobId : body.jobId || null;
+      if (jobId && jobId !== existing.jobId) {
+        const known = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+        if (!known) throw badRequest('That project does not exist');
+      }
+      manual = manualInvoiceMoney(body.lines, body.vatRate ?? num(existing.vatRate), body.ewtRate ?? num(existing.ewtRate));
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.invoice.updateMany({
+        where: { id: existing.id, status: 'DRAFT' },
+        data: { ...headerData, ...(manual ? { customerId, jobId, ...manual.figures } : {}) },
+      });
+      if (!claimed.count) throw badRequest('It was issued or cancelled a moment ago — reload to see where it stands');
+      if (manual) {
+        await tx.invoiceLine.deleteMany({ where: { invoiceId: existing.id } });
+        await tx.invoiceLine.createMany({ data: manual.lines.map((l) => ({ ...l, invoiceId: existing.id })) });
+      }
+      return tx.invoice.findUniqueOrThrow({ where: { id: existing.id }, include: invoiceInclude });
+    });
+
+    await audit(
+      {
+        entityType: 'invoice',
+        entityId: existing.id,
+        action: 'UPDATED',
+        summary: manual
+          ? `${existing.number} modified — ${num(updated.netCollectible)} collectible (was ${num(existing.netCollectible)})`
+          : `${existing.number} modified — dates, terms, PO reference or notes; the figures stay ${existing.progressBilling?.number ?? 'the billing'}'s`,
+        before: {
+          invoiceDate: existing.invoiceDate,
+          dueDate: existing.dueDate,
+          terms: existing.terms,
+          poReference: existing.poReference,
+          ...(manual ? { customerId: existing.customerId, jobId: existing.jobId, netCollectible: num(existing.netCollectible) } : {}),
+        },
+        after: {
+          ...headerData,
+          ...(manual ? { customerId, jobId, netCollectible: manual.tax.netCollectible } : {}),
+        },
+      },
+      req,
+    );
+    res.json(presentInvoice(updated));
   }),
 );
 
@@ -591,14 +728,23 @@ invoiceRoutes.post(
     if (invoice.status === 'CANCELLED') throw badRequest('Already cancelled');
 
     await prisma.$transaction(async (tx) => {
-      await tx.invoice.update({
-        where: { id: invoice.id },
-        data: { status: 'CANCELLED', voidedAt: new Date(), voidReason: body.reason },
+      // Claimed, so two cancels cannot both put the billing back.
+      const claimed = await tx.invoice.updateMany({
+        where: { id: invoice.id, status: { not: 'CANCELLED' } },
+        data: {
+          status: 'CANCELLED',
+          voidedAt: new Date(),
+          voidReason: body.reason,
+          // The billing or job order it billed is let go, so either can be
+          // invoiced again — the point of cancelling is usually that the
+          // invoice was wrong, not the work. Both links are unique: kept, they
+          // would block the corrected invoice for good.
+          progressBillingId: null,
+          jobOrderId: null,
+        },
       });
-      // The billing goes back to approved so it can be invoiced again — the
-      // point of cancelling is usually that the invoice was wrong, not the work.
+      if (!claimed.count) throw badRequest('Already cancelled');
       if (invoice.progressBillingId) {
-        await tx.invoice.update({ where: { id: invoice.id }, data: { progressBillingId: null } });
         await tx.progressBilling.update({
           where: { id: invoice.progressBillingId },
           data: { status: 'APPROVED' },
@@ -606,12 +752,21 @@ invoiceRoutes.post(
       }
     });
 
+    const jobOrder = invoice.jobOrderId
+      ? await prisma.jobOrder.findUnique({ where: { id: invoice.jobOrderId }, select: { number: true } })
+      : null;
+    const billing = invoice.progressBillingId
+      ? await prisma.progressBilling.findUnique({ where: { id: invoice.progressBillingId }, select: { number: true } })
+      : null;
     await audit(
       {
         entityType: 'invoice',
         entityId: invoice.id,
         action: 'CANCELLED',
-        summary: `${invoice.number} cancelled — ${body.reason}`,
+        summary:
+          `${invoice.number} cancelled — ${body.reason}` +
+          (billing ? `; billing ${billing.number} released to be invoiced again` : '') +
+          (jobOrder ? `; job order ${jobOrder.number} released to be invoiced again` : ''),
       },
       req,
     );
@@ -787,6 +942,101 @@ const billSchema = z.object({
     .min(1, 'A bill needs at least one line'),
 });
 
+type BillBody = z.infer<typeof billSchema>;
+
+/**
+ * A bill's money, from its lines — the one rule for entering a bill and for
+ * modifying a draft one. Each line is taken to the centavo first, so the
+ * figures are the sum of what is stored under them.
+ */
+function billMoney(body: Pick<BillBody, 'lines' | 'vatInclusive' | 'ewtRate'>, vatRate: number) {
+  const lines = body.lines.map((l, i) => ({
+    sortOrder: i,
+    description: l.description,
+    quantity: l.quantity,
+    unitPrice: l.unitPrice,
+    amount: cents(l.quantity * l.unitPrice),
+  }));
+  const lineTotal = cents(lines.reduce((s, l) => s + l.amount, 0));
+  if (lineTotal <= 0) throw badRequest('The bill total must be more than zero');
+
+  // A supplier's invoice may quote VAT-inclusive prices. Back it out rather
+  // than adding VAT on top of VAT.
+  const subtotal = body.vatInclusive ? cents(lineTotal / (1 + vatRate)) : lineTotal;
+  const vatAmount = cents(subtotal * vatRate);
+  const total = cents(subtotal + vatAmount);
+  // Withheld on the subtotal, never on the VAT — the same rule as the
+  // receivable side, in the other direction.
+  const ewtAmount = cents(subtotal * body.ewtRate);
+  const netPayable = cents(total - ewtAmount);
+  return {
+    total,
+    netPayable,
+    figures: {
+      subtotal: D(subtotal),
+      vatRate: D(vatRate),
+      vatAmount: D(vatAmount),
+      total: D(total),
+      ewtRate: D(body.ewtRate),
+      ewtAmount: D(ewtAmount),
+      netPayable: D(netPayable),
+    },
+    lines: lines.map((l) => ({ ...l, quantity: D(l.quantity), unitPrice: D(l.unitPrice), amount: D(l.amount) })),
+  };
+}
+
+/**
+ * Which supplier, order, receiving and project a bill belongs to — checked
+ * the same way on entry and on Modify.
+ *
+ * The job comes from the order where none is given — the point of raising a
+ * bill against an order is not retyping it. And the RECEIVING is what stops
+ * the bill charging the project a second time at approval: an order with
+ * goods received always lends the bill one, and a receiving named outright
+ * must be of that order and that supplier.
+ */
+async function billLinks(input: {
+  supplierId: string;
+  orderId: string | null;
+  receivingId: string | null;
+  jobId: string | null;
+}) {
+  const supplier = await prisma.supplier.findUnique({ where: { id: input.supplierId }, select: { id: true } });
+  if (!supplier) throw badRequest('That supplier does not exist');
+
+  let jobId = input.jobId;
+  let receivingId = input.receivingId;
+  if (input.orderId) {
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: input.orderId },
+      include: { receivings: { select: { id: true }, orderBy: { receivedDate: 'desc' } } },
+    });
+    if (!order) throw notFound('Purchase order not found');
+    if (order.supplierId !== input.supplierId) {
+      throw badRequest('That order belongs to a different supplier');
+    }
+    if (!jobId) jobId = order.jobId;
+    // If the goods have been received and nobody said which receiving, take
+    // the latest: what matters is that a receiving EXISTS, because that is
+    // what stops the bill posting cost a second time.
+    if (!receivingId && order.receivings.length) receivingId = order.receivings[0].id;
+  }
+  if (receivingId) {
+    const receiving = await prisma.receiving.findUnique({
+      where: { id: receivingId },
+      select: { orderId: true, order: { select: { supplierId: true } } },
+    });
+    if (!receiving) throw notFound('Receiving not found');
+    if (input.orderId && receiving.orderId !== input.orderId) {
+      throw badRequest('That receiving is against a different order');
+    }
+    if (receiving.order.supplierId !== input.supplierId) {
+      throw badRequest('Those goods came from a different supplier');
+    }
+  }
+  return { orderId: input.orderId, receivingId, jobId };
+}
+
 billRoutes.post(
   '/',
   require_('gfin.ap.create'),
@@ -796,26 +1046,7 @@ billRoutes.post(
     const settings = await financeSettings();
     const rates = await currentRates();
 
-    const vatRate = body.vatRate ?? rates.vatRate;
-    const lines = body.lines.map((l, i) => ({
-      sortOrder: i,
-      description: l.description,
-      quantity: l.quantity,
-      unitPrice: l.unitPrice,
-      amount: cents(l.quantity * l.unitPrice),
-    }));
-    const lineTotal = cents(lines.reduce((s, l) => s + l.amount, 0));
-    if (lineTotal <= 0) throw badRequest('The bill total must be more than zero');
-
-    // A supplier's invoice may quote VAT-inclusive prices. Back it out rather
-    // than adding VAT on top of VAT.
-    const subtotal = body.vatInclusive ? cents(lineTotal / (1 + vatRate)) : lineTotal;
-    const vatAmount = cents(subtotal * vatRate);
-    const total = cents(subtotal + vatAmount);
-    // Withheld on the subtotal, never on the VAT — the same rule as the
-    // receivable side, in the other direction.
-    const ewtAmount = cents(subtotal * body.ewtRate);
-    const netPayable = cents(total - ewtAmount);
+    const money = billMoney(body, body.vatRate ?? rates.vatRate);
 
     const billDate = body.billDate ? asDate(body.billDate, 'Bill date') : dayKey(new Date());
     const dueDate = body.dueDate
@@ -823,25 +1054,12 @@ billRoutes.post(
       : addDays(billDate, settings.defaultTermsDays);
     if (dueDate < billDate) throw badRequest('The due date is before the bill date');
 
-    // Inherit the job and category from the order where they are not given —
-    // the point of raising a bill against an order is not retyping it.
-    let jobId = body.jobId ?? null;
-    let receivingId = body.receivingId ?? null;
-    if (body.orderId) {
-      const order = await prisma.purchaseOrder.findUnique({
-        where: { id: body.orderId },
-        include: { receivings: { select: { id: true }, orderBy: { receivedDate: 'desc' } } },
-      });
-      if (!order) throw notFound('Purchase order not found');
-      if (order.supplierId !== body.supplierId) {
-        throw badRequest('That order belongs to a different supplier');
-      }
-      if (!jobId) jobId = order.jobId;
-      // If the goods have been received and nobody said which receiving, take
-      // the latest: what matters is that a receiving EXISTS, because that is
-      // what stops the bill posting cost a second time.
-      if (!receivingId && order.receivings.length) receivingId = order.receivings[0].id;
-    }
+    const links = await billLinks({
+      supplierId: body.supplierId,
+      orderId: body.orderId || null,
+      receivingId: body.receivingId || null,
+      jobId: body.jobId || null,
+    });
 
     const bill = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('supplier_bill', tx);
@@ -849,24 +1067,16 @@ billRoutes.post(
         data: {
           number,
           supplierId: body.supplierId,
-          orderId: body.orderId || null,
-          receivingId,
-          jobId,
+          ...links,
           costCategoryId: body.costCategoryId || null,
           supplierInvoiceNo: body.supplierInvoiceNo || null,
           billDate,
           dueDate,
           terms: body.terms ?? `${settings.defaultTermsDays} days`,
-          subtotal: D(subtotal),
-          vatRate: D(vatRate),
-          vatAmount: D(vatAmount),
-          total: D(total),
-          ewtRate: D(body.ewtRate),
-          ewtAmount: D(ewtAmount),
-          netPayable: D(netPayable),
+          ...money.figures,
           notes: body.notes || null,
           createdById: me.id,
-          lines: { create: lines.map((l) => ({ ...l, quantity: D(l.quantity), unitPrice: D(l.unitPrice), amount: D(l.amount) })) },
+          lines: { create: money.lines },
         },
         include: billInclude,
       });
@@ -877,11 +1087,178 @@ billRoutes.post(
         entityType: 'supplier_bill',
         entityId: bill.id,
         action: 'CREATED',
-        summary: `${bill.number} from ${bill.supplier.name} — ${total} total, ${netPayable} payable`,
+        summary: `${bill.number} from ${bill.supplier.name} — ${money.total} total, ${money.netPayable} payable`,
       },
       req,
     );
     res.status(201).json(presentBill(bill));
+  }),
+);
+
+/**
+ * What Modify takes for a bill: the entry form, with every field but the
+ * lines optional — a field the body leaves out keeps what is stored, where
+ * the entry form would default it (no withholding, VAT-exclusive prices).
+ */
+const billModifySchema = billSchema.extend({
+  supplierId: z.string().min(1, 'Which supplier?').optional(),
+  vatInclusive: z.boolean().optional(),
+  ewtRate: z.number().min(0).max(1).optional(),
+});
+
+/**
+ * Modifying a draft bill (2026-10-09, Phase 2 of the button standard).
+ *
+ * Only while DRAFT: submitting snapshots the amount the approval route was
+ * picked by, so a bill with the approver is not edited under them. The lines
+ * are always sent and replace the bill's; the money is recomputed by
+ * `billMoney()` at the VAT rate the bill was entered with unless the body
+ * names another. Every other field the body leaves out keeps what is stored
+ * — the supplier, the withholding rate, whether the prices include VAT
+ * (read off the stored subtotal against its lines), the project, the budget
+ * line, the supplier's invoice number, dates, terms and notes; a null clears
+ * it. The supplier, order and receiving are re-checked by `billLinks()`, so a
+ * bill against received goods keeps a receiving and still charges nothing at
+ * approval (a cleared receiving on an order with goods received is lent one
+ * back). Claimed on DRAFT, so a submit that lands first wins.
+ */
+billRoutes.put(
+  '/:id',
+  require_('gfin.ap.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(billModifySchema, req.body);
+    const existing = await prisma.supplierBill.findUnique({
+      where: { id: req.params.id },
+      include: { lines: { select: { amount: true } } },
+    });
+    if (!existing) throw notFound('Supplier bill not found');
+    if (existing.status !== 'DRAFT') {
+      throw badRequest(
+        existing.status === 'PENDING_APPROVAL'
+          ? 'Only a draft bill can be modified — this one is with the approver'
+          : `Only a draft bill can be modified — this one is ${existing.status.toLowerCase().replace(/_/g, ' ')}`,
+      );
+    }
+
+    // A bill entered VAT-inclusive stores its lines as typed and its subtotal
+    // with the VAT backed out — so the two differ exactly when it was.
+    const storedLineTotal = cents(existing.lines.reduce((s, l) => s + num(l.amount), 0));
+    const storedInclusive = Math.abs(num(existing.subtotal) - storedLineTotal) > 0.005;
+    const keep = <T,>(sent: T | null | undefined, stored: T | null): T | null =>
+      sent === undefined ? stored : sent || null;
+
+    const supplierId = body.supplierId ?? existing.supplierId;
+    const money = billMoney(
+      {
+        lines: body.lines,
+        vatInclusive: body.vatInclusive ?? storedInclusive,
+        ewtRate: body.ewtRate ?? num(existing.ewtRate),
+      },
+      body.vatRate ?? num(existing.vatRate),
+    );
+    const billDate = body.billDate ? asDate(body.billDate, 'Bill date') : existing.billDate;
+    const dueDate = body.dueDate ? asDate(body.dueDate, 'Due date') : existing.dueDate;
+    if (dueDate < billDate) throw badRequest('The due date is before the bill date');
+
+    const links = await billLinks({
+      supplierId,
+      orderId: keep(body.orderId, existing.orderId),
+      receivingId: keep(body.receivingId, existing.receivingId),
+      jobId: keep(body.jobId, existing.jobId),
+    });
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.supplierBill.updateMany({
+        where: { id: existing.id, status: 'DRAFT' },
+        data: {
+          supplierId,
+          ...links,
+          costCategoryId: keep(body.costCategoryId, existing.costCategoryId),
+          supplierInvoiceNo: keep(body.supplierInvoiceNo, existing.supplierInvoiceNo),
+          billDate,
+          dueDate,
+          terms: keep(body.terms, existing.terms),
+          ...money.figures,
+          notes: keep(body.notes, existing.notes),
+        },
+      });
+      if (!claimed.count) throw badRequest('It was submitted a moment ago — reload to see where it stands');
+      await tx.supplierBillLine.deleteMany({ where: { billId: existing.id } });
+      await tx.supplierBillLine.createMany({ data: money.lines.map((l) => ({ ...l, billId: existing.id })) });
+      return tx.supplierBill.findUniqueOrThrow({ where: { id: existing.id }, include: billInclude });
+    });
+
+    await audit(
+      {
+        entityType: 'supplier_bill',
+        entityId: existing.id,
+        action: 'UPDATED',
+        summary:
+          `${existing.number} modified — ${money.total} total, ${money.netPayable} payable` +
+          (updated.receiving ? `; matched to ${updated.receiving.number}, so approval charges nothing` : ''),
+        before: {
+          supplierId: existing.supplierId,
+          orderId: existing.orderId,
+          receivingId: existing.receivingId,
+          jobId: existing.jobId,
+          costCategoryId: existing.costCategoryId,
+          total: num(existing.total),
+          netPayable: num(existing.netPayable),
+        },
+        after: {
+          supplierId: updated.supplierId,
+          orderId: updated.orderId,
+          receivingId: updated.receivingId,
+          jobId: updated.jobId,
+          costCategoryId: updated.costCategoryId,
+          total: money.total,
+          netPayable: money.netPayable,
+        },
+      },
+      req,
+    );
+    res.json(presentBill(updated));
+  }),
+);
+
+/**
+ * Cancelling a draft bill — one entered in error, or that the supplier
+ * withdrew. Only a draft: nothing has been decided, posted or paid on it. The
+ * bill has no column of its own for the reason, so it is kept on its notes
+ * and in the trail. Claimed on DRAFT, so a submit that lands first wins.
+ */
+billRoutes.post(
+  '/:id/cancel',
+  require_('gfin.ap.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Why?') }), req.body ?? {});
+    const bill = await prisma.supplierBill.findUnique({ where: { id: req.params.id } });
+    if (!bill) throw notFound('Supplier bill not found');
+    if (bill.status !== 'DRAFT') {
+      throw badRequest(
+        bill.status === 'CANCELLED'
+          ? 'Already cancelled'
+          : 'Only a draft bill can be cancelled — this one has gone for approval',
+      );
+    }
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.supplierBill.updateMany({
+        where: { id: bill.id, status: 'DRAFT' },
+        data: { status: 'CANCELLED', notes: `${bill.notes ? `${bill.notes}\n` : ''}Cancelled: ${body.reason}` },
+      });
+      if (!claimed.count) throw badRequest('It was submitted a moment ago — reload to see where it stands');
+      // A draft has nothing open with an approver; one left behind by a
+      // refused submit goes with it, through the engine.
+      await cancelOpenRequest('supplier_bill', bill.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+    });
+
+    await audit(
+      { entityType: 'supplier_bill', entityId: bill.id, action: 'CANCELLED', summary: `${bill.number} cancelled — ${body.reason}` },
+      req,
+    );
+    res.json({ ok: true });
   }),
 );
 
@@ -897,21 +1274,61 @@ billRoutes.post(
     if (!bill) throw notFound('Supplier bill not found');
     if (bill.status !== 'DRAFT') throw badRequest('This bill has already been submitted');
 
-    await prisma.supplierBill.update({ where: { id: bill.id }, data: { status: 'PENDING_APPROVAL' } });
-
-    await submitForApproval({
-      documentType: 'supplier_bill',
-      documentId: bill.id,
-      documentNumber: bill.number,
-      subject: `${bill.supplier.name} — ${bill.supplierInvoiceNo ?? bill.number}`,
-      amount: num(bill.total),
-      link: `/g-fin/ap/${bill.id}`,
-      requesterId: me.id,
+    // Claimed on the bill exactly as read — still a draft, and not modified
+    // since (`updatedAt`, which every write to a bill moves). The request
+    // below snapshots this read's amount and subject, and the route is picked
+    // by that amount, so a Modify or a cancel that lands between the read and
+    // the claim refuses the submit rather than sending stale figures.
+    const claimed = await prisma.supplierBill.updateMany({
+      where: { id: bill.id, status: 'DRAFT', updatedAt: bill.updatedAt },
+      data: { status: 'PENDING_APPROVAL' },
     });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
 
+    try {
+      await submitForApproval({
+        documentType: 'supplier_bill',
+        documentId: bill.id,
+        documentNumber: bill.number,
+        subject: `${bill.supplier.name} — ${bill.supplierInvoiceNo ?? bill.number}`,
+        amount: num(bill.total),
+        link: `/g-fin/ap/${bill.id}`,
+        requesterId: me.id,
+      });
+    } catch (err) {
+      // The engine refused (no workflow, nobody to approve). The bill goes
+      // back to DRAFT rather than sitting PENDING with no request behind it.
+      await prisma.supplierBill.updateMany({
+        where: { id: bill.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      throw err;
+    }
+
+    await audit(
+      { entityType: 'supplier_bill', entityId: bill.id, action: 'SUBMITTED', summary: `${bill.number} sent for approval` },
+      req,
+    );
     res.json({ ok: true });
   }),
 );
+
+/**
+ * A decision that finds the bill no longer pending changes nothing. A repeat
+ * on a bill already settled says nothing; one on a bill that went back to
+ * draft or was cancelled meanwhile is written down, so the trail explains
+ * why the approval history and the bill disagree.
+ */
+async function billNotApplied(billId: string, outcome: ApprovalOutcome) {
+  const bill = await prisma.supplierBill.findUnique({ where: { id: billId }, select: { number: true, status: true } });
+  if (!bill || (bill.status !== 'DRAFT' && bill.status !== 'CANCELLED')) return;
+  await audit({
+    entityType: 'supplier_bill',
+    entityId: billId,
+    action: 'UPDATED',
+    summary: `${bill.number} ${outcome === 'APPROVED' ? 'approved' : 'rejected'} after it was ${bill.status === 'DRAFT' ? 'put back to draft' : 'cancelled'} — not applied`,
+  });
+}
 
 /**
  * An approved bill posts job cost ONLY when nothing has already incurred it.
@@ -924,6 +1341,9 @@ billRoutes.post(
  *
  * Getting this wrong charges a project twice for the same peso, which is the
  * single most common defect in this codebase's problem space.
+ *
+ * The outcome is applied only while the bill is still PENDING_APPROVAL — a
+ * conditional claim, so a repeated settlement posts nothing the second time.
  */
 onApprovalSettled('supplier_bill', async (approval, outcome) => {
   const bill = await prisma.supplierBill.findUnique({
@@ -931,9 +1351,14 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
     include: { supplier: true, job: true, receiving: true },
   });
   if (!bill) return;
+  if (bill.status !== 'PENDING_APPROVAL') return billNotApplied(bill.id, outcome);
 
   if (outcome !== 'APPROVED') {
-    await prisma.supplierBill.update({ where: { id: bill.id }, data: { status: 'CANCELLED' } });
+    const claimed = await prisma.supplierBill.updateMany({
+      where: { id: bill.id, status: 'PENDING_APPROVAL' },
+      data: { status: 'CANCELLED' },
+    });
+    if (!claimed.count) return billNotApplied(bill.id, outcome);
     await audit({
       entityType: 'supplier_bill',
       entityId: bill.id,
@@ -946,9 +1371,9 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
   const alreadyIncurred = bill.receivingId !== null;
   const postable = !alreadyIncurred && bill.jobId && bill.costCategoryId && num(bill.subtotal) > 0;
 
-  await prisma.$transaction(async (tx) => {
-    await tx.supplierBill.update({
-      where: { id: bill.id },
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.supplierBill.updateMany({
+      where: { id: bill.id, status: 'PENDING_APPROVAL' },
       data: {
         status: 'APPROVED',
         approvedAt: new Date(),
@@ -956,6 +1381,7 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
         postedAt: postable ? new Date() : null,
       },
     });
+    if (!claimed.count) return false;
 
     if (postable) {
       // Net of VAT: input VAT is recoverable, so the project bears the
@@ -971,7 +1397,9 @@ onApprovalSettled('supplier_bill', async (approval, outcome) => {
         description: `${bill.supplier.name} — ${bill.supplierInvoiceNo ?? 'bill'}`,
       });
     }
+    return true;
   });
+  if (!applied) return billNotApplied(bill.id, outcome);
 
   await audit({
     entityType: 'supplier_bill',
@@ -1028,6 +1456,27 @@ billRoutes.get(
 
 export const expenseRoutes = Router();
 expenseRoutes.use(authenticate);
+
+/**
+ * The receipts on a claim are the claim's. Reading them (listing, serving) is
+ * the same door as GET /:id — the claimant, or whoever reads every claim
+ * (super admins pass the engine's own check); knowing a file's id is not the
+ * same right as seeing the claim. Changing them is Modify's door: a DRAFT, by
+ * the claimant with `edit_own` or by `edit_all` — the receipts are what the
+ * approver decides on, so they do not change under a submitted claim.
+ *
+ * The shared guard does not yet say which it is asked: it answers listing,
+ * serving and uploading alike, and DELETE /attachments/:id asks only whether
+ * the caller uploaded the file. Until `AttachmentGuard` passes the intent —
+ * 'write' from `guardRecord` on POST and from that DELETE — every call reads
+ * as 'read', and only the page holds uploads to a draft.
+ */
+registerAttachmentGuard('expense_claim', async (user, id, mode: 'read' | 'write' = 'read') => {
+  const claim = await prisma.expenseClaim.findUnique({ where: { id }, select: { claimedById: true, status: true } });
+  if (!claim) return false;
+  if (mode === 'write') return claim.status === 'DRAFT' && canEditRecord(user, 'gfin', 'expenses', claim.claimedById);
+  return claim.claimedById === user.id || can(user, 'gfin.expenses.view_all');
+});
 
 export const claimInclude = {
   claimedBy: { select: { id: true, name: true, email: true } },
@@ -1209,6 +1658,26 @@ const claimSchema = z.object({
     .min(1, 'A claim needs at least one line'),
 });
 
+/**
+ * A claim's receipts and their total — the one rule for filing a claim and
+ * for modifying a draft. Each line is taken to the centavo first, so the total
+ * is exactly the sum of the lines stored under it.
+ */
+function claimLines(input: z.infer<typeof claimSchema>['lines']) {
+  const rows = input.map((l, i) => ({
+    sortOrder: i,
+    spentOn: asDate(l.spentOn, 'Spent on'),
+    description: l.description,
+    category: l.category || null,
+    receiptNo: l.receiptNo || null,
+    amount: cents(l.amount),
+  }));
+  return {
+    total: cents(rows.reduce((s, l) => s + l.amount, 0)),
+    lines: rows.map((l) => ({ ...l, amount: D(l.amount) })),
+  };
+}
+
 expenseRoutes.post(
   '/',
   require_('gfin.expenses.create'),
@@ -1292,7 +1761,7 @@ expenseRoutes.post(
       advanceNumber = request.number;
     }
 
-    const total = cents(body.lines.reduce((s, l) => s + l.amount, 0));
+    const { total, lines } = claimLines(body.lines);
     const claim = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('expense', tx);
       return tx.expenseClaim.create({
@@ -1307,16 +1776,7 @@ expenseRoutes.post(
           purpose: body.purpose,
           total: D(total),
           notes: body.notes || null,
-          lines: {
-            create: body.lines.map((l, i) => ({
-              sortOrder: i,
-              spentOn: asDate(l.spentOn, 'Spent on'),
-              description: l.description,
-              category: l.category || null,
-              receiptNo: l.receiptNo || null,
-              amount: D(l.amount),
-            })),
-          },
+          lines: { create: lines },
         },
         include: claimInclude,
       });
@@ -1334,6 +1794,175 @@ expenseRoutes.post(
       req,
     );
     res.status(201).json(presentClaim(claim));
+  }),
+);
+
+/**
+ * Modifying a draft claim (2026-10-09, Phase 2 of the button standard).
+ *
+ * The claimant's, or `edit_all`'s, and only while DRAFT — submitting
+ * snapshots the amount the approval route was picked by, so a claim with the
+ * approver is pulled back first (`/withdraw`). The body is the filing form's,
+ * whole: the receipts are replaced and the total recomputed in one
+ * transaction. A liquidation keeps the advance or budget request it accounts
+ * for, and with it that source's project and budget line — the cost lands
+ * where the cash was approved to land, exactly as when it was filed. Claimed
+ * on DRAFT, so a submit that lands first wins.
+ */
+expenseRoutes.put(
+  '/:id',
+  requireAny('gfin.expenses.edit_own', 'gfin.expenses.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(claimSchema, req.body);
+    const existing = await prisma.expenseClaim.findUnique({
+      where: { id: req.params.id },
+      include: {
+        advance: { select: { number: true, jobId: true, costCategoryId: true } },
+        budgetRequest: { select: { number: true, jobId: true, costCategoryId: true } },
+      },
+    });
+    if (!existing) throw notFound('Expense claim not found');
+    if (!canEditRecord(me, 'gfin', 'expenses', existing.claimedById)) {
+      throw forbidden('Only the person who filed this claim can change it');
+    }
+    if (existing.status !== 'DRAFT') {
+      throw badRequest(
+        existing.status === 'PENDING_APPROVAL'
+          ? 'Only a draft can be changed — this one is with the approver; pull it back to draft first'
+          : `Only a draft can be changed — this one is ${existing.status.toLowerCase().replace(/_/g, ' ')}`,
+      );
+    }
+
+    // What a liquidation accounts for was checked when it was filed (released,
+    // the filer's own, one live liquidation), and Modify never re-points it.
+    const source = existing.advance ?? existing.budgetRequest;
+    if (
+      (body.advanceId || existing.advanceId) !== existing.advanceId ||
+      (body.budgetRequestId || existing.budgetRequestId) !== existing.budgetRequestId
+    ) {
+      throw badRequest(
+        source
+          ? `This liquidation accounts for ${source.number} — cancel it and file another to account for something else`
+          : 'A claim does not become a liquidation on Modify — file the liquidation from the advance or budget request',
+      );
+    }
+
+    let jobId: string | null;
+    let costCategoryId: string | null;
+    if (source) {
+      if (body.jobId && source.jobId && body.jobId !== source.jobId) {
+        throw badRequest(`${source.number} was approved against a different project — the liquidation charges that one`);
+      }
+      jobId = source.jobId;
+      costCategoryId = source.costCategoryId;
+    } else {
+      jobId = body.jobId || null;
+      costCategoryId = body.costCategoryId || null;
+      if (jobId && jobId !== existing.jobId) {
+        const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } });
+        if (!job || job.status === 'CANCELLED') throw badRequest('That project cannot be charged');
+      }
+    }
+
+    const { total, lines } = claimLines(body.lines);
+    const claimDate = body.claimDate ? asDate(body.claimDate, 'Claim date') : existing.claimDate;
+    const updated = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.expenseClaim.updateMany({
+        where: { id: existing.id, status: 'DRAFT' },
+        data: {
+          jobId,
+          costCategoryId,
+          claimDate,
+          purpose: body.purpose,
+          total: D(total),
+          notes: body.notes === undefined ? existing.notes : body.notes || null,
+        },
+      });
+      if (!claimed.count) throw badRequest('It was submitted a moment ago — reload to see where it stands');
+      await tx.expenseClaimLine.deleteMany({ where: { claimId: existing.id } });
+      await tx.expenseClaimLine.createMany({ data: lines.map((l) => ({ ...l, claimId: existing.id })) });
+      return tx.expenseClaim.findUniqueOrThrow({ where: { id: existing.id }, include: claimInclude });
+    });
+
+    await audit(
+      {
+        entityType: 'expense_claim',
+        entityId: existing.id,
+        action: 'UPDATED',
+        summary: source
+          ? `${existing.number} modified — ${total} liquidated against ${source.number} for ${body.purpose}`
+          : `${existing.number} modified — ${total} claimed for ${body.purpose}`,
+        before: { purpose: existing.purpose, total: num(existing.total), jobId: existing.jobId, costCategoryId: existing.costCategoryId },
+        after: { purpose: body.purpose, total, jobId, costCategoryId },
+      },
+      req,
+    );
+    res.json(presentClaim(updated));
+  }),
+);
+
+/**
+ * Why a claim read PENDING_APPROVAL had no open request to withdraw. Either
+ * the approver decided it a moment ago — its latest request closed APPROVED
+ * or REJECTED, and the settlement is on its way — and then the decision
+ * stands and the caller rolls back; or nothing has been decided: the claim is
+ * still being submitted (its request not made yet), or a submit died
+ * half-way. Then the caller may go ahead, and a submit still running
+ * withdraws the request it makes once it finds the claim has moved on (see
+ * `/submit`), so a claim that is not waiting never leaves one in a queue.
+ */
+async function claimDecided(tx: Prisma.TransactionClient, claimId: string): Promise<boolean> {
+  const latest = await tx.approvalRequest.findFirst({
+    where: { documentType: 'expense', documentId: claimId },
+    orderBy: { createdAt: 'desc' },
+    select: { status: true },
+  });
+  return latest?.status === 'APPROVED' || latest?.status === 'REJECTED';
+}
+
+/**
+ * Pulling a claim back from the approver to change it — the sales order's
+ * shape. The claim is claimed PENDING_APPROVAL → DRAFT and its request
+ * withdrawn through the engine in the same transaction, which tells the
+ * approvers. If nothing was open to withdraw because a decision landed a
+ * moment before (`claimDecided`), the decision stands: the transaction rolls
+ * back and the settlement it carries goes through.
+ */
+expenseRoutes.post(
+  '/:id/withdraw',
+  requireAny('gfin.expenses.edit_own', 'gfin.expenses.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const claim = await prisma.expenseClaim.findUnique({ where: { id: req.params.id } });
+    if (!claim) throw notFound('Expense claim not found');
+    if (!canEditRecord(me, 'gfin', 'expenses', claim.claimedById)) {
+      throw forbidden('Only the person who filed this claim can pull it back');
+    }
+    if (claim.status !== 'PENDING_APPROVAL') throw badRequest('This claim is not with the approver — nothing to pull back');
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.expenseClaim.updateMany({
+        where: { id: claim.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      const withdrawn = await cancelOpenRequest('expense', claim.id, tx, `pulled back to draft by ${me.name}`, me.id);
+      if (!withdrawn.length && (await claimDecided(tx, claim.id))) {
+        throw badRequest('The approver decided it a moment ago — reload to see where it stands');
+      }
+    });
+
+    await audit(
+      {
+        entityType: 'expense_claim',
+        entityId: claim.id,
+        action: 'UPDATED',
+        summary: `${claim.number} pulled back from approval to draft`,
+      },
+      req,
+    );
+    res.json({ ok: true, status: 'DRAFT' });
   }),
 );
 
@@ -1359,7 +1988,18 @@ expenseRoutes.post(
       );
     }
 
-    await prisma.expenseClaim.update({ where: { id: claim.id }, data: { status: 'PENDING_APPROVAL' } });
+    // Claimed on the claim exactly as read — still a draft, and not modified
+    // since (`updatedAt`, which every write to a claim moves; a Modify writes
+    // its receipts in the same transaction as the header). The receipt check
+    // above ran on this read, the request below snapshots its total and
+    // purpose, and the route is picked by that total — so a Modify or a
+    // cancel that lands between the read and the claim refuses the submit
+    // rather than sending stale figures.
+    const claimed = await prisma.expenseClaim.updateMany({
+      where: { id: claim.id, status: 'DRAFT', updatedAt: claim.updatedAt },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
 
     try {
       await submitForApproval({
@@ -1376,13 +2016,59 @@ expenseRoutes.post(
     } catch (err) {
       // The engine refused (no workflow, a self-approval trap). The claim goes
       // back to DRAFT rather than sitting PENDING with no request behind it.
-      await prisma.expenseClaim.update({ where: { id: claim.id }, data: { status: 'DRAFT' } });
+      await prisma.expenseClaim.updateMany({ where: { id: claim.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
       throw err;
     }
 
+    // A cancel or a pull-back that landed while the request was being made
+    // found nothing open to withdraw, and went ahead (`claimDecided`). Tested
+    // under the claim's row lock, which either of them holds until it
+    // commits: if the claim is no longer pending, the request just made is
+    // withdrawn through the engine, so it never sits in a queue for a claim
+    // that is not waiting on it.
+    const movedOn = await prisma.$transaction(async (tx) => {
+      const [row] = await tx.$queryRaw<{ status: string }[]>`
+        SELECT status::text AS status FROM "ExpenseClaim" WHERE id = ${claim.id} FOR UPDATE`;
+      if (row?.status === 'PENDING_APPROVAL') return null;
+      await cancelOpenRequest(
+        'expense',
+        claim.id,
+        tx,
+        `the claim was ${row?.status === 'DRAFT' ? 'pulled back to draft' : 'cancelled'} while it was being submitted`,
+        me.id,
+      );
+      return row?.status ?? 'DELETED';
+    });
+    if (movedOn) {
+      throw badRequest(
+        `It was ${movedOn === 'DRAFT' ? 'pulled back to draft' : 'cancelled'} a moment ago — reload to see where it stands`,
+      );
+    }
+
+    await audit(
+      { entityType: 'expense_claim', entityId: claim.id, action: 'SUBMITTED', summary: `${claim.number} sent for approval` },
+      req,
+    );
     res.json({ ok: true });
   }),
 );
+
+/**
+ * A decision that finds the claim no longer pending changes nothing. A repeat
+ * on a claim already settled says nothing (the "settling twice" rule); one on
+ * a claim pulled back to draft or cancelled meanwhile is written down, so the
+ * trail explains why the approval history and the claim disagree.
+ */
+async function claimNotApplied(claimId: string, outcome: ApprovalOutcome) {
+  const claim = await prisma.expenseClaim.findUnique({ where: { id: claimId }, select: { number: true, status: true } });
+  if (!claim || (claim.status !== 'DRAFT' && claim.status !== 'CANCELLED')) return;
+  await audit({
+    entityType: 'expense_claim',
+    entityId: claimId,
+    action: 'UPDATED',
+    summary: `${claim.number} ${outcome === 'APPROVED' ? 'approved' : 'rejected'} after it was ${claim.status === 'DRAFT' ? 'pulled back to draft' : 'cancelled'} — not applied`,
+  });
+}
 
 /**
  * An approved claim is money owed to a person, and cost owed by a job.
@@ -1393,6 +2079,11 @@ expenseRoutes.post(
  * the EXCESS over the advance (SETTLED outright when there is none), and the
  * advance is re-derived so unspent cash reads as REFUND_DUE.
  *
+ * The outcome is applied only while the claim is still PENDING_APPROVAL, by a
+ * conditional claim in the same transaction as the cost — so a decision that
+ * lands after a pull-back or a cancel changes nothing, and a repeated
+ * settlement posts nothing the second time.
+ *
  * Exported so a test can call it twice: the status guard is what makes a
  * repeated settlement post nothing the second time.
  */
@@ -1402,12 +2093,16 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
     include: { claimedBy: true, job: true, advance: true, budgetRequest: true },
   });
   if (!claim) return;
-  if (claim.status !== 'PENDING_APPROVAL') return;
+  if (claim.status !== 'PENDING_APPROVAL') return claimNotApplied(claim.id, outcome);
   // What this liquidation accounts for, if anything: the advance or the request.
   const source = claim.advance ?? claim.budgetRequest;
 
   if (outcome !== 'APPROVED') {
-    await prisma.expenseClaim.update({ where: { id: claim.id }, data: { status: 'REJECTED' } });
+    const claimed = await prisma.expenseClaim.updateMany({
+      where: { id: claim.id, status: 'PENDING_APPROVAL' },
+      data: { status: 'REJECTED' },
+    });
+    if (!claimed.count) return claimNotApplied(claim.id, outcome);
     await audit({
       entityType: 'expense_claim',
       entityId: claim.id,
@@ -1423,9 +2118,9 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
   const released = source ? num(source.amountReleased) : 0;
   const refundDue = source ? cents(Math.max(0, released - total)) : 0;
 
-  await prisma.$transaction(async (tx) => {
-    await tx.expenseClaim.update({
-      where: { id: claim.id },
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.expenseClaim.updateMany({
+      where: { id: claim.id, status: 'PENDING_APPROVAL' },
       data: {
         // A liquidation the cash fully covered owes the person nothing; it
         // is settled the moment it is approved.
@@ -1435,6 +2130,7 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
         postedAt: postable ? new Date() : null,
       },
     });
+    if (!claimed.count) return false;
     if (postable) {
       await postJobCost(tx, {
         jobId: claim.jobId!,
@@ -1451,7 +2147,9 @@ export const settleExpense = async (approval: ApprovalRequest, outcome: Approval
     }
     if (claim.advanceId) await refreshAdvance(tx, claim.advanceId);
     if (claim.budgetRequestId) await refreshBudgetRequest(tx, claim.budgetRequestId);
+    return true;
   });
+  if (!applied) return claimNotApplied(claim.id, outcome);
 
   const what = claim.advance ? 'advanced' : 'released';
   const body = !source
@@ -1508,10 +2206,23 @@ expenseRoutes.post(
     if (claim.allocations.length) throw badRequest('This claim has already been reimbursed');
 
     await prisma.$transaction(async (tx) => {
-      await tx.expenseClaim.update({ where: { id: claim.id }, data: { status: 'CANCELLED' } });
+      // Claimed in the status it was read in, never simply written: a
+      // decision the subscriber applied meanwhile (an approved claim has
+      // posted its cost and refreshed its advance) or a submit that took the
+      // draft refuses the cancel rather than being written over.
+      const claimed = await tx.expenseClaim.updateMany({
+        where: { id: claim.id, status: claim.status },
+        data: { status: 'CANCELLED' },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
       // Still with the approver: withdrawn through the engine, so it leaves
-      // their queue and they are told.
-      await cancelOpenRequest('expense', claim.id, tx, `cancelled by ${me.name}`, me.id);
+      // their queue and they are told. Nothing open while it reads pending
+      // means a decision landed a moment ago — it stands, and this rolls back
+      // — or it is still being submitted, which that submit sorts out.
+      const withdrawn = await cancelOpenRequest('expense', claim.id, tx, `cancelled by ${me.name}`, me.id);
+      if (claim.status === 'PENDING_APPROVAL' && !withdrawn.length && (await claimDecided(tx, claim.id))) {
+        throw badRequest('The approver decided it a moment ago — reload to see where it stands');
+      }
     });
     await audit(
       { entityType: 'expense_claim', entityId: claim.id, action: 'CANCELLED', summary: `${claim.number} cancelled` },

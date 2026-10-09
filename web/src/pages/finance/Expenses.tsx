@@ -264,19 +264,28 @@ export interface LiquidatingAdvance {
 
 /**
  * Filing a claim, or — with `advance` or `budgetRequest` — liquidating a cash
- * advance or a budget request (project cash).
+ * advance or a budget request (project cash). With `existing`, modifying a
+ * draft one (`PUT /expense-claims/:id`): the same form, holding the claim.
  *
  * A liquidation takes its project and budget line from what it accounts for
- * and cannot change them: the cost lands where it was approved to land.
+ * and cannot change them: the cost lands where it was approved to land. A
+ * modified liquidation keeps what it accounts for — the server refuses
+ * anything else.
  */
 export function NewClaimModal({
   advance: advanceProp,
   budgetRequest,
+  existing,
+  canSubmit = true,
   onClose,
   onCreated,
 }: {
   advance?: LiquidatingAdvance;
   budgetRequest?: LiquidatingAdvance;
+  /** A draft claim to modify. */
+  existing?: Claim;
+  /** Only the claimant (or a super admin) submits; finance modifying somebody's draft only saves. */
+  canSubmit?: boolean;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -286,22 +295,45 @@ export function NewClaimModal({
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   // What the receipts account for, whichever it is; the form reads one thing.
-  const advance = advanceProp ?? budgetRequest;
-  const cashWord = advanceProp ? 'advance' : 'budget request';
+  // A draft liquidation being modified names it on the claim itself.
+  const existingSource = existing ? existing.advance ?? existing.budgetRequest : null;
+  const advance: LiquidatingAdvance | undefined =
+    advanceProp ??
+    budgetRequest ??
+    (existing && existingSource
+      ? {
+          id: existingSource.id,
+          number: existingSource.number,
+          amountReleased: existingSource.amountReleased,
+          purpose: existing.purpose,
+          job: existing.job,
+          costCategory: existing.costCategory,
+        }
+      : undefined);
+  const liquidating = !!advance;
+  const cashWord = (existing ? !!existing.advance : !!advanceProp) ? 'advance' : 'budget request';
 
   const today = todayLocal();
   const [form, setForm] = useState({
-    claimDate: today,
-    purpose: advance ? `Liquidation of ${advance.number} — ${advance.purpose}` : '',
-    jobId: '',
-    costCategoryId: '',
+    claimDate: existing?.claimDate.slice(0, 10) ?? today,
+    purpose: existing?.purpose ?? (advance ? `Liquidation of ${advance.number} — ${advance.purpose}` : ''),
+    jobId: existing?.job?.id ?? '',
+    costCategoryId: existing?.costCategory?.id ?? '',
   });
-  const [lines, setLines] = useState([
-    { spentOn: today, description: '', category: '', receiptNo: '', amount: 0 },
-  ]);
+  const [lines, setLines] = useState(
+    existing
+      ? existing.lines.map((l) => ({
+          spentOn: l.spentOn.slice(0, 10),
+          description: l.description,
+          category: l.category ?? '',
+          receiptNo: l.receiptNo ?? '',
+          amount: l.amount,
+        }))
+      : [{ spentOn: today, description: '', category: '', receiptNo: '', amount: 0 }],
+  );
 
   useEffect(() => {
-    if (advance) return;
+    if (liquidating) return;
     // Not /jobs/lookup: naming the project you spent money on is not the same
     // right as project-management access, and the filing roles hold none.
     api
@@ -311,7 +343,7 @@ export function NewClaimModal({
         setCategories(r.categories);
       })
       .catch(() => {});
-  }, [advance]);
+  }, [liquidating]);
 
   const total = lines.reduce((s, l) => s + (l.amount || 0), 0);
   const missingReceipts = lines.filter((l) => l.description.trim() && !l.receiptNo.trim()).length;
@@ -320,27 +352,30 @@ export function NewClaimModal({
   async function create(submitNow: boolean) {
     setBusy(true);
     setError(null);
+    const body = {
+      claimDate: form.claimDate,
+      purpose: form.purpose,
+      advanceId: existing ? existing.advance?.id ?? null : advanceProp?.id ?? null,
+      budgetRequestId: existing ? existing.budgetRequest?.id ?? null : budgetRequest?.id ?? null,
+      jobId: advance ? advance.job?.id ?? null : form.jobId || null,
+      costCategoryId: advance ? advance.costCategory?.id ?? null : form.jobId ? form.costCategoryId || null : null,
+      lines: lines
+        .filter((l) => l.description.trim() && l.amount > 0)
+        .map((l) => ({
+          spentOn: l.spentOn,
+          description: l.description,
+          category: l.category || null,
+          receiptNo: l.receiptNo || null,
+          amount: l.amount,
+        })),
+    };
     try {
-      const created = await api.post<{ id: string }>('/expense-claims', {
-        claimDate: form.claimDate,
-        purpose: form.purpose,
-        advanceId: advanceProp?.id ?? null,
-        budgetRequestId: budgetRequest?.id ?? null,
-        jobId: advance ? advance.job?.id ?? null : form.jobId || null,
-        costCategoryId: advance ? advance.costCategory?.id ?? null : form.jobId ? form.costCategoryId || null : null,
-        lines: lines
-          .filter((l) => l.description.trim() && l.amount > 0)
-          .map((l) => ({
-            spentOn: l.spentOn,
-            description: l.description,
-            category: l.category || null,
-            receiptNo: l.receiptNo || null,
-            amount: l.amount,
-          })),
-      });
-      if (submitNow) await api.post(`/expense-claims/${created.id}/submit`);
-      toast('ok', submitNow ? 'Submitted for approval' : 'Saved as a draft');
-      onCreated(created.id);
+      const saved = existing
+        ? await api.put<{ id: string }>(`/expense-claims/${existing.id}`, body)
+        : await api.post<{ id: string }>('/expense-claims', body);
+      if (submitNow) await api.post(`/expense-claims/${saved.id}/submit`);
+      toast('ok', submitNow ? 'Submitted for approval' : existing ? 'Saved' : 'Saved as a draft');
+      onCreated(saved.id);
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -351,21 +386,33 @@ export function NewClaimModal({
 
   return (
     <Modal
-      title={advance ? `Liquidate ${advance.number}` : 'New expense claim'}
+      title={
+        existing
+          ? `Modify ${liquidating ? 'liquidation' : 'expense claim'} ${existing.number}`
+          : advance
+            ? `Liquidate ${advance.number}`
+            : 'New expense claim'
+      }
       onClose={onClose}
       wide
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn" onClick={() => create(false)} disabled={busy || !valid}>
-            Save draft
-          </button>
           <button
-            className="btn btn-primary"
-            onClick={() => create(true)}
-            disabled={busy || !valid || missingReceipts > 0}
+            className={canSubmit ? 'btn' : 'btn btn-primary'}
+            onClick={() => create(false)}
+            disabled={busy || !valid}
           >
-            {busy ? 'Submitting…' : 'Submit for approval'}
+            {existing ? 'Save' : 'Save draft'}
           </button>
+          {canSubmit && (
+            <button
+              className="btn btn-primary"
+              onClick={() => create(true)}
+              disabled={busy || !valid || missingReceipts > 0}
+            >
+              {busy ? 'Submitting…' : 'Submit for approval'}
+            </button>
+          )}
         </ModalFoot>
       }
     >
@@ -563,6 +610,7 @@ export function ExpenseClaimDetail() {
   const [row, setRow] = useState<Claim | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [reload, setReload] = useState(0);
   const confirm = useConfirm();
 
@@ -589,6 +637,11 @@ export function ExpenseClaimDetail() {
   const own = row.claimedBy.id === me?.user.id;
   // The server lets a super admin act on anybody's draft; the buttons agree.
   const mine = own || !!me?.user.isSuperAdmin;
+  // Modify and pull back mirror the routes: the claimant with edit_own, or edit_all.
+  const editAll = !!me?.user.isSuperAdmin || can('gfin.expenses.edit_all');
+  const mayEdit = (own && can('gfin.expenses.edit_own')) || editAll;
+  const canModify = row.status === 'DRAFT' && mayEdit;
+  const canPullBack = row.status === 'PENDING_APPROVAL' && mayEdit;
 
   async function submit() {
     try {
@@ -607,6 +660,15 @@ export function ExpenseClaimDetail() {
     toast('ok', 'Cancelled');
     setReload((r) => r + 1);
     await load();
+  }
+
+  // Back to a draft, its request withdrawn, then straight into Modify.
+  async function pullBack() {
+    await api.post(`/expense-claims/${id}/withdraw`);
+    toast('ok', 'Back to a draft — the approvers were told');
+    setReload((r) => r + 1);
+    await load();
+    setEditing(true);
   }
 
   const open = row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL';
@@ -662,6 +724,17 @@ export function ExpenseClaimDetail() {
         }
         print={`/api/expense-claims/${row.id}/pdf`}
         more={[
+          canPullBack && {
+            label: 'Pull back and edit',
+            hint: 'Back to a draft; the approvers are told',
+            confirm: {
+              title: `Pull ${row.number} back to draft?`,
+              body: 'The approval request is withdrawn and the approvers are told. Submit it again once it is right.',
+              confirmLabel: 'Pull back and edit',
+              tone: 'primary',
+              onConfirm: pullBack,
+            },
+          },
           open &&
             (mine || can('gfin.expenses.edit_all')) && {
               label: `Cancel ${kindWord}`,
@@ -677,6 +750,7 @@ export function ExpenseClaimDetail() {
               },
             },
         ]}
+        modify={canModify ? () => setEditing(true) : undefined}
         confirm={confirm}
       />
 
@@ -837,8 +911,22 @@ export function ExpenseClaimDetail() {
         entityId={row.id}
         title="Receipts"
         hint="Scans or photos of the ORs listed above."
-        canEdit={own && open}
+        // Receipts change with the claim: on a draft, by whoever may modify it.
+        canEdit={canModify}
       />
+
+      {editing && (
+        <NewClaimModal
+          existing={row}
+          canSubmit={mine}
+          onClose={() => setEditing(false)}
+          onCreated={() => {
+            setEditing(false);
+            setReload((r) => r + 1);
+            load();
+          }}
+        />
+      )}
 
       {paying && (
         <RecordPaymentModal

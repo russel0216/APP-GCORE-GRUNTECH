@@ -18,10 +18,11 @@ import {
   notFound,
   badRequest,
   forbidden,
+  conflict,
   idsFilter,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import type { ResolvedUser } from '../permissions/resolve';
+import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { formatShortDate, renderDocument } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
@@ -684,6 +685,10 @@ contractRoutes.get(
   '/:id',
   requireAny('gops.service_contracts.view_all', 'gops.service_contracts.view_own'),
   handler(async (req, res) => {
+    // Swept first, as the list is: a contract past its end date reads EXPIRED
+    // here too, and `canEdit` below must not offer Modify on one.
+    await sweepOverdue();
+    const me = currentUser(req);
     const settings = await aftermarketSettings();
     const row = await prisma.serviceContract.findUnique({
       where: { id: req.params.id },
@@ -706,6 +711,8 @@ contractRoutes.get(
     const completed = row.visits.filter((v) => v.status === 'COMPLETED').length;
     res.json({
       ...presentContract(row as unknown as ContractRow, settings.expiryWarningDays),
+      // The PATCH's own rule, so the page offers Modify exactly where it works.
+      canEdit: mayModifyContract(me, row.status, row.job.projectManager?.id ?? null),
       visits: row.visits,
       renewedFrom: row.renewedFrom,
       renewedTo: row.renewedTo,
@@ -842,10 +849,16 @@ contractRoutes.post(
   handler(async (req, res) => {
     const contract = await prisma.serviceContract.findUnique({ where: { id: req.params.id } });
     if (!contract) throw notFound('Service contract not found');
+    // A draft has no agreed schedule (activation writes it), and an expired,
+    // renewed or cancelled one has nothing left to plan.
+    if (contract.status !== 'ACTIVE') {
+      throw badRequest('Only an active contract has a schedule to regenerate');
+    }
 
-    const result = await prisma.$transaction((tx) =>
-      regenerateSchedule(tx, contract.id, (t) => nextNumber('service_visit', t)),
-    );
+    const result = await prisma.$transaction(async (tx) => {
+      await assertNoReportOnReplannedVisits(tx, contract.id);
+      return regenerateSchedule(tx, contract.id, (t) => nextNumber('service_visit', t));
+    });
 
     await audit(
       {
@@ -860,41 +873,431 @@ contractRoutes.post(
   }),
 );
 
+/**
+ * Re-planning deletes the generated visits nobody has attended. One that
+ * already has a report written against it (a draft from site, one awaiting
+ * approval, one returned) would lose its visit — the report's link is SetNull —
+ * and could then never complete anything. So re-planning is refused until
+ * that report is finished, which completes the visit and keeps it.
+ */
+async function assertNoReportOnReplannedVisits(tx: Prisma.TransactionClient, contractId: string) {
+  const held = await tx.serviceVisit.findFirst({
+    where: {
+      contractId,
+      sequence: { not: null },
+      status: { in: ['SCHEDULED', 'CANCELLED'] },
+      report: { isNot: null },
+    },
+    select: { number: true, report: { select: { number: true } } },
+    orderBy: { dueDate: 'asc' },
+  });
+  if (held) {
+    throw badRequest(
+      `Visit ${held.number} already has report ${held.report?.number} written against it. Re-planning would delete the visit and leave the report with nothing to complete — finish that report first.`,
+    );
+  }
+}
+
+/**
+ * Only a DRAFT or an ACTIVE contract's cover changes. An expired, renewed or
+ * cancelled one is the record of the cover that was given — renewing is how
+ * cover continues.
+ */
+const MODIFIABLE_CONTRACT: ReadonlySet<ContractStatus> = new Set<ContractStatus>(['DRAFT', 'ACTIVE']);
+
+const CLOSED_CONTRACT: Partial<Record<ContractStatus, string>> = {
+  EXPIRED: 'This contract has expired — its cover is the record of what was given. Renew it to continue cover.',
+  RENEWED: 'This contract was renewed — change the renewal instead.',
+  CANCELLED: 'A cancelled contract cannot be changed.',
+};
+
+/**
+ * Who may change a contract's cover. The owner is the job's project manager —
+ * the same "own" the list narrows to — and `edit_all` changes any. The page's
+ * `canEdit` is this function, so Modify shows exactly where the PATCH works.
+ */
+function mayModifyContract(me: ResolvedUser, status: ContractStatus, projectManagerId: string | null): boolean {
+  return MODIFIABLE_CONTRACT.has(status) && canEditRecord(me, 'gops', 'service_contracts', projectManagerId);
+}
+
+/** What the audit trail keeps of a contract's cover, before and after a change. */
+function coverSnapshot(c: {
+  startsAt: Date;
+  endsAt: Date;
+  frequencyMonths: number;
+  responseTime: string | null;
+  exclusions: string | null;
+  coverageNotes: string | null;
+  assetIds: string[];
+}) {
+  return {
+    startsAt: c.startsAt.toISOString().slice(0, 10),
+    endsAt: c.endsAt.toISOString().slice(0, 10),
+    frequencyMonths: c.frequencyMonths,
+    responseTime: c.responseTime,
+    exclusions: c.exclusions,
+    coverageNotes: c.coverageNotes,
+    assetIds: [...c.assetIds].sort(),
+  };
+}
+
+const contractPatchSchema = contractSchema
+  .omit({ jobId: true, renewedFromId: true })
+  .partial()
+  .extend({
+    /** The contract's `updatedAt` as the form loaded it: saving over a later change is a 409. */
+    updatedAt: z.string().optional(),
+  });
+
+/** A stored DATE as people read it — "Jul 1, 2026". A DATE is UTC midnight, so it is read in UTC. */
+const dayLabel = (d: Date) =>
+  new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }).format(d);
+
+/** Attended visits: the record of what happened, never rewritten by a re-plan. */
+const ATTENDED: ReadonlySet<VisitStatus> = new Set<VisitStatus>(['COMPLETED', 'MISSED']);
+
+/** A generated visit (one with a `sequence`) as a re-plan sees it. */
+interface GeneratedVisit {
+  id: string;
+  number: string;
+  sequence: number | null;
+  dueDate: Date;
+  status: VisitStatus;
+  assignedToId: string | null;
+  notes: string | null;
+}
+
+interface CoverTerm {
+  startsAt: Date;
+  endsAt: Date;
+  frequencyMonths: number;
+}
+
+/** What the audit trail keeps of a visit a re-plan replaced or wrote. */
+const visitTrail = (v: GeneratedVisit) => ({
+  number: v.number,
+  sequence: v.sequence,
+  dueDate: v.dueDate.toISOString().slice(0, 10),
+  status: v.status,
+  assignedToId: v.assignedToId,
+});
+
+/**
+ * Decides, before anything is written, what re-planning an ACTIVE contract
+ * from `was` onto `next` may do — and refuses what would write a false record.
+ *
+ * `regenerateSchedule` writes every planned visit nobody attended, whatever
+ * its date. On a schedule that has begun, that writes visits on days already
+ * gone, which show as overdue and which the sweep then marks MISSED: a record
+ * of work the company never failed to do. So:
+ *
+ *   1. Once any generated visit has come due — or been made or missed — the
+ *      start and the frequency are what the visits were planned and attended
+ *      on. Only the end date may move; renewing is how the rest changes.
+ *   2. The new term keeps every attended visit inside it.
+ *   3. A visit the new plan leaves on its day is CARRIED: written back as it
+ *      was — a cancelled one stays cancelled with its reason, a day moved by
+ *      hand stays moved, the engineer and notes stay. Anything else the
+ *      re-plan would write on a day that has passed is refused, naming it.
+ *
+ * `generated` is in due-date order; `today` is Manila's day. Returns the
+ * visits to carry.
+ */
+function planReplan(was: CoverTerm, next: CoverTerm, generated: GeneratedVisit[], today: Date): GeneratedVisit[] {
+  const begun = generated.find((v) => v.dueDate < today || ATTENDED.has(v.status));
+  if (
+    begun &&
+    (was.startsAt.getTime() !== next.startsAt.getTime() || was.frequencyMonths !== next.frequencyMonths)
+  ) {
+    const what =
+      begun.status === 'COMPLETED' ? 'has been made' : begun.status === 'MISSED' ? 'was missed' : 'has come due';
+    throw badRequest(
+      `Visit ${begun.number} (due ${dayLabel(begun.dueDate)}) ${what}, so this contract's schedule has begun: only its end date can move now. Renew the contract to change when cover starts or how often it is visited.`,
+    );
+  }
+
+  const wasPlan = new Map(
+    planSchedule(was.startsAt, was.endsAt, was.frequencyMonths).map((p) => [p.sequence, p.dueDate.getTime()]),
+  );
+  const plan = planSchedule(next.startsAt, next.endsAt, next.frequencyMonths);
+
+  for (const v of generated) {
+    if (!ATTENDED.has(v.status)) continue;
+    if (v.dueDate > next.endsAt || (v.sequence ?? 0) > plan.length) {
+      const plannedOn = wasPlan.get(v.sequence ?? 0);
+      const needs = plannedOn && plannedOn > v.dueDate.getTime() ? new Date(plannedOn) : v.dueDate;
+      throw badRequest(
+        `Visit ${v.number} (due ${dayLabel(v.dueDate)}) ${v.status === 'COMPLETED' ? 'has been made' : 'was missed'} — it is the record of this contract's cover, so the term must still include it. End the contract on ${dayLabel(needs)} or later.`,
+      );
+    }
+  }
+
+  const held = new Set(generated.filter((v) => ATTENDED.has(v.status)).map((v) => v.sequence));
+  const open = new Map(generated.filter((v) => !ATTENDED.has(v.status)).map((v) => [v.sequence, v]));
+  const carried: GeneratedVisit[] = [];
+  for (const p of plan) {
+    if (held.has(p.sequence)) continue;
+    const old = open.get(p.sequence);
+    if (old && (wasPlan.get(p.sequence) === p.dueDate.getTime() || old.dueDate.getTime() === p.dueDate.getTime())) {
+      carried.push(old);
+    } else if (p.dueDate < today) {
+      throw badRequest(
+        `Re-planning would write visit ${p.sequence} on ${dayLabel(p.dueDate)}, a day that has passed — it would read as a visit nobody made. Keep the start and the frequency and move only the end date, or renew the contract.`,
+      );
+    }
+  }
+  return carried;
+}
+
+/**
+ * Modify the cover.
+ *
+ *   · DRAFT — every term, and the planned count follows the new term.
+ *   · ACTIVE — the wording and the machines freely (it must still cover at
+ *     least one: a schedule against nothing sends engineers to look at air).
+ *     A change of start, end or frequency re-plans the schedule IN THE SAME
+ *     TRANSACTION through `regenerateSchedule`, under `planReplan`'s rules:
+ *     once a visit has come due only the end date moves, and to today or
+ *     later; attended visits stay inside the term; a visit left on its day is
+ *     carried as it was; nothing is written on a day that has passed.
+ *     Completed and missed visits and call-outs are never touched.
+ *   · EXPIRED / RENEWED / CANCELLED — refused.
+ *   · A renewal chain never overlaps: a renewed contract's end stays before
+ *     its renewal starts, a renewal's start after the contract it renews ends
+ *     (a cancelled one excepted), so no machine is under two contracts at once.
+ *
+ * The contract is claimed with a conditional update on its status AND its
+ * `updatedAt`, so any change landing between the read and the write — an
+ * activation, the expiry sweep, another modify — turns this into a 409
+ * rather than a save worked out from a stale read. A form that sends the
+ * `updatedAt` it loaded gets the same 409 for a change made while it was open.
+ *
+ * Re-planned visits are written again with new ids and numbers (until
+ * `regenerateSchedule` updates in place), so the audit row lists every visit
+ * replaced and every visit written, beside the cover before and after.
+ */
 contractRoutes.patch(
   '/:id',
-  require_('gops.service_contracts.edit_all'),
+  requireAny('gops.service_contracts.edit_own', 'gops.service_contracts.edit_all'),
   handler(async (req, res) => {
-    const body = parseBody(contractSchema.omit({ jobId: true }).partial(), req.body);
-    const contract = await prisma.serviceContract.findUnique({ where: { id: req.params.id } });
+    const me = currentUser(req);
+    const body = parseBody(contractPatchSchema, req.body);
+    // The status guard reads the truth: a contract past its end is EXPIRED.
+    await sweepOverdue();
+    const contract = await prisma.serviceContract.findUnique({
+      where: { id: req.params.id },
+      include: {
+        job: { select: { customerId: true, projectManagerId: true } },
+        assets: { select: { assetId: true } },
+        renewedTo: { select: { number: true, startsAt: true, status: true } },
+        renewedFrom: { select: { number: true, endsAt: true, status: true } },
+      },
+    });
     if (!contract) throw notFound('Service contract not found');
+    if (!canEditRecord(me, 'gops', 'service_contracts', contract.job.projectManagerId)) {
+      throw forbidden("Only the project manager on this contract's job, or whoever manages every contract, can change its cover");
+    }
+    if (!MODIFIABLE_CONTRACT.has(contract.status)) {
+      throw badRequest(CLOSED_CONTRACT[contract.status] ?? 'This contract cannot be changed');
+    }
+    if (body.updatedAt && new Date(body.updatedAt).getTime() !== contract.updatedAt.getTime()) {
+      throw conflict('This contract was changed after you opened it — reload it and make your change again');
+    }
 
+    const today = dayKey(new Date());
     const startsAt = body.startsAt ? asDate(body.startsAt, 'Start date') : contract.startsAt;
     const endsAt = body.endsAt ? asDate(body.endsAt, 'End date') : contract.endsAt;
+    const frequencyMonths = body.frequencyMonths ?? contract.frequencyMonths;
     if (endsAt <= startsAt) throw badRequest('The contract ends before it starts');
+    if (contract.status === 'ACTIVE' && endsAt < today) {
+      throw badRequest(
+        `An active contract cannot end before today (${dayLabel(today)}) — end it today at the earliest.`,
+      );
+    }
+    // Nothing in the app sets RENEWED: a renewed contract stays ACTIVE until
+    // it runs out, beside a renewal that starts the day after. The two terms
+    // must not overlap, or coverageFor() picks either contract for a machine.
+    const renewal = contract.renewedTo;
+    if (
+      renewal &&
+      renewal.status !== 'CANCELLED' &&
+      endsAt.getTime() !== contract.endsAt.getTime() &&
+      endsAt >= renewal.startsAt
+    ) {
+      throw badRequest(
+        `This contract was renewed as ${renewal.number}, which takes over on ${dayLabel(renewal.startsAt)} — end it before then, or change the renewal instead, so no machine is under two contracts at once.`,
+      );
+    }
+    const renewed = contract.renewedFrom;
+    if (
+      renewed &&
+      renewed.status !== 'CANCELLED' &&
+      startsAt.getTime() !== contract.startsAt.getTime() &&
+      startsAt <= renewed.endsAt
+    ) {
+      throw badRequest(
+        `This contract renews ${renewed.number}, which covers to ${dayLabel(renewed.endsAt)} — start it after that, so no machine is under two contracts at once.`,
+      );
+    }
+    const planned = planSchedule(startsAt, endsAt, frequencyMonths);
 
-    const updated = await prisma.$transaction(async (tx) => {
-      if (body.assetIds) {
-        await tx.serviceContractAsset.deleteMany({ where: { contractId: contract.id } });
-        await tx.serviceContractAsset.createMany({
-          data: body.assetIds.map((assetId) => ({ contractId: contract.id, assetId })),
+    const hadAssets = contract.assets.map((a) => a.assetId);
+    const assetIds = body.assetIds ? [...new Set(body.assetIds)] : null;
+    if (assetIds && assetIds.length === 0 && contract.status === 'ACTIVE') {
+      throw badRequest(
+        'An active contract must cover at least one machine — a schedule against nothing would send engineers to look at air.',
+      );
+    }
+    if (assetIds) {
+      const had = new Set(hadAssets);
+      const added = assetIds.filter((id) => !had.has(id));
+      if (added.length) {
+        const found = await prisma.installedAsset.findMany({
+          where: { id: { in: added } },
+          select: { id: true, code: true, customerId: true },
         });
+        if (found.length !== added.length) throw badRequest('One of the machines is not in the installed base');
+        const foreign = found.find((a) => a.customerId !== contract.job.customerId);
+        if (foreign) {
+          throw badRequest(`${foreign.code} belongs to another customer — a contract covers its own customer's equipment`);
+        }
       }
-      return tx.serviceContract.update({
-        where: { id: contract.id },
+    }
+
+    const text = (value: string | null | undefined, was: string | null) =>
+      value === undefined ? was : value?.trim() || null;
+    const before = coverSnapshot({ ...contract, assetIds: hadAssets });
+    const after = coverSnapshot({
+      startsAt,
+      endsAt,
+      frequencyMonths,
+      responseTime: text(body.responseTime, contract.responseTime),
+      exclusions: text(body.exclusions, contract.exclusions),
+      coverageNotes: text(body.coverageNotes, contract.coverageNotes),
+      assetIds: assetIds ?? hadAssets,
+    });
+
+    const changed: string[] = [];
+    if (before.startsAt !== after.startsAt || before.endsAt !== after.endsAt) {
+      changed.push(`term ${after.startsAt} → ${after.endsAt}`);
+    }
+    if (before.frequencyMonths !== after.frequencyMonths) changed.push(`every ${after.frequencyMonths} month(s)`);
+    if (before.responseTime !== after.responseTime) changed.push('response time');
+    if (before.exclusions !== after.exclusions) changed.push('exclusions');
+    if (before.coverageNotes !== after.coverageNotes) changed.push('notes');
+    const assetsChanged = before.assetIds.join(',') !== after.assetIds.join(',');
+    if (assetsChanged) changed.push(`${after.assetIds.length} machine(s) covered`);
+
+    const scheduleMoved =
+      before.startsAt !== after.startsAt ||
+      before.endsAt !== after.endsAt ||
+      before.frequencyMonths !== after.frequencyMonths;
+    const replan = contract.status === 'ACTIVE' && scheduleMoved;
+
+    const { updated, regenerated } = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.serviceContract.updateMany({
+        where: { id: contract.id, status: contract.status, updatedAt: contract.updatedAt },
         data: {
           startsAt,
           endsAt,
-          ...(body.frequencyMonths ? { frequencyMonths: body.frequencyMonths } : {}),
-          ...(body.responseTime !== undefined ? { responseTime: body.responseTime || null } : {}),
-          ...(body.exclusions !== undefined ? { exclusions: body.exclusions || null } : {}),
-          ...(body.coverageNotes !== undefined ? { coverageNotes: body.coverageNotes || null } : {}),
+          frequencyMonths,
+          responseTime: after.responseTime,
+          exclusions: after.exclusions,
+          coverageNotes: after.coverageNotes,
+          // A draft's count follows its term; an active one's is written by
+          // the re-plan below, from the same arithmetic.
+          ...(contract.status === 'DRAFT' ? { plannedVisits: planned.length } : {}),
+          // Set by hand so the claim always moves it: the next modify's claim
+          // is conditioned on it.
+          updatedAt: new Date(),
         },
+      });
+      if (claimed.count === 0) {
+        throw conflict('This contract changed while you were editing it — reload it and try again');
+      }
+
+      if (assetIds && assetsChanged) {
+        await tx.serviceContractAsset.deleteMany({ where: { contractId: contract.id } });
+        await tx.serviceContractAsset.createMany({
+          data: assetIds.map((assetId) => ({ contractId: contract.id, assetId })),
+        });
+      }
+
+      let regenerated: { created: number; kept: number; carried: number } | null = null;
+      let replaced: GeneratedVisit[] = [];
+      let written: GeneratedVisit[] = [];
+      if (replan) {
+        const visitFields = {
+          id: true,
+          number: true,
+          sequence: true,
+          dueDate: true,
+          status: true,
+          assignedToId: true,
+          notes: true,
+        } as const;
+        const generated = await tx.serviceVisit.findMany({
+          where: { contractId: contract.id, sequence: { not: null } },
+          select: visitFields,
+          orderBy: [{ dueDate: 'asc' }, { sequence: 'asc' }],
+        });
+        const carried = planReplan(contract, { startsAt, endsAt, frequencyMonths }, generated, today);
+        await assertNoReportOnReplannedVisits(tx, contract.id);
+        replaced = generated.filter((v) => !ATTENDED.has(v.status));
+
+        const result = await regenerateSchedule(tx, contract.id, (t) => nextNumber('service_visit', t));
+        // regenerateSchedule writes every unattended visit afresh; a carried
+        // one gets back what it was — status, day, engineer, notes.
+        for (const visit of carried) {
+          const restored = await tx.serviceVisit.updateMany({
+            where: { contractId: contract.id, sequence: visit.sequence, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+            data: {
+              status: visit.status,
+              dueDate: visit.dueDate,
+              assignedToId: visit.assignedToId,
+              notes: visit.notes,
+            },
+          });
+          if (restored.count !== 1) {
+            throw new Error(`Re-planning ${contract.number} could not carry visit ${visit.number} over`);
+          }
+        }
+        regenerated = { ...result, carried: carried.length };
+        written = await tx.serviceVisit.findMany({
+          where: { contractId: contract.id, sequence: { not: null }, status: { in: ['SCHEDULED', 'CANCELLED'] } },
+          select: visitFields,
+          orderBy: { sequence: 'asc' },
+        });
+      }
+
+      if (changed.length) {
+        await audit(
+          {
+            entityType: 'service_contract',
+            entityId: contract.id,
+            action: 'UPDATED',
+            summary:
+              `${contract.number} cover changed — ${changed.join(', ')}` +
+              (regenerated
+                ? `; schedule re-planned — ${regenerated.created} visit(s) written (${regenerated.carried} carried as they were, under new numbers), ${regenerated.kept} attended visit(s) kept`
+                : ''),
+            before: replan ? { ...before, visits: replaced.map(visitTrail) } : before,
+            after: replan ? { ...after, visits: written.map(visitTrail) } : after,
+          },
+          req,
+          tx,
+        );
+      }
+
+      const updated = await tx.serviceContract.findUniqueOrThrow({
+        where: { id: contract.id },
         include: contractInclude,
       });
+      return { updated, regenerated };
     });
 
     const settings = await aftermarketSettings();
-    res.json(presentContract(updated, settings.expiryWarningDays));
+    res.json({ ...presentContract(updated, settings.expiryWarningDays), regenerated });
   }),
 );
 

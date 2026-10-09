@@ -239,7 +239,21 @@ function usePreview(start: string, end: string, dinnerBreak: boolean) {
   return preview;
 }
 
-function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: string) => void }) {
+/**
+ * "New overtime request", and — handed `existing`, a filing still awaiting
+ * authorisation — "Modify overtime request …" (PUT /overtime/:id). Saving a
+ * change withdraws the request the supervisor has and sends the changed one
+ * again, so the act is still "Submit for approval".
+ */
+function PriorModal({
+  existing,
+  onClose,
+  onFiled,
+}: {
+  existing?: OtDetail;
+  onClose: () => void;
+  onFiled: (id: string) => void;
+}) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -247,13 +261,13 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
 
   const [form, setForm] = useState({
-    date: todayLocal(),
-    plannedStart: '17:00',
-    plannedEnd: '20:00',
-    dinnerBreak: true,
-    reason: '',
-    jobId: '',
-    costCategoryId: '',
+    date: existing?.date.slice(0, 10) ?? todayLocal(),
+    plannedStart: existing?.plannedStart ?? '17:00',
+    plannedEnd: existing?.plannedEnd ?? '20:00',
+    dinnerBreak: existing?.dinnerBreak ?? true,
+    reason: existing?.reason ?? '',
+    jobId: existing?.job?.id ?? '',
+    costCategoryId: existing?.costCategory?.id ?? '',
   });
 
   useEffect(() => {
@@ -264,37 +278,66 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
         defaults?: { jobId: string | null; costCategoryId: string | null };
       }>('/overtime/chargeable')
       .then((d) => {
-        setJobs(d.jobs);
-        setCategories(d.categories);
+        // A filing being modified keeps the project and budget line it names,
+        // even one no longer offered to a new filing.
+        const keepJob = existing?.job && !d.jobs.some((j) => j.id === existing.job?.id) ? [existing.job] : [];
+        const keepCategory =
+          existing?.costCategory && !d.categories.some((c) => c.id === existing.costCategory?.id)
+            ? [existing.costCategory]
+            : [];
+        setJobs([...keepJob, ...d.jobs]);
+        setCategories([...keepCategory, ...d.categories]);
         // The job and budget line of this person's last filing, while that job
         // is still open — overtime runs in streaks on one job. Only filled in
-        // if the person has not already picked something.
+        // on a new filing, and only if the person has not already picked one.
+        if (existing) return;
         setForm((f) => ({
           ...f,
           jobId: f.jobId || d.defaults?.jobId || '',
           costCategoryId: f.costCategoryId || d.defaults?.costCategoryId || '',
         }));
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => {
+        // Somebody modifying a filing without the right to file one (HR, say)
+        // cannot read the chargeable list: the filing's own still show.
+        if (!existing) return;
+        setJobs(existing.job ? [existing.job] : []);
+        setCategories(existing.costCategory ? [existing.costCategory] : []);
+      });
+  }, [existing]);
 
   const preview = usePreview(form.plannedStart, form.plannedEnd, form.dinnerBreak);
+  // The preview prices at the VIEWER's rate. A filing being modified is priced
+  // at its employee's, which the record carries — the same for one's own, and
+  // the only right figure when HR changes somebody else's.
+  const ownFiling = !existing || existing.own;
+  const rate = existing ? existing.rate : (preview?.rate ?? null);
+  const amount = !preview
+    ? null
+    : !existing
+      ? preview.amount
+      : rate && !rate.missingRate
+        ? Math.round(preview.hours * rate.hourlyRate * rate.multiplier * 100) / 100
+        : null;
 
   async function file() {
     setBusy(true);
     setError(null);
+    const body = {
+      date: form.date,
+      plannedStart: form.plannedStart,
+      plannedEnd: form.plannedEnd,
+      dinnerBreak: form.dinnerBreak,
+      reason: form.reason,
+      jobId: form.jobId || null,
+      costCategoryId: form.jobId ? form.costCategoryId || null : null,
+    };
     try {
-      const created = await api.post<{ id: string }>('/overtime', {
-        date: form.date,
-        plannedStart: form.plannedStart,
-        plannedEnd: form.plannedEnd,
-        dinnerBreak: form.dinnerBreak,
-        reason: form.reason,
-        jobId: form.jobId || null,
-        costCategoryId: form.jobId ? form.costCategoryId || null : null,
-      });
-      toast('ok', 'Sent to your supervisor for authorisation');
-      onFiled(created.id);
+      const saved = existing
+        ? await api.put<{ id: string }>(`/overtime/${existing.id}`, body)
+        : await api.post<{ id: string }>('/overtime', body);
+      toast('ok', existing ? 'Changed and sent again for authorisation' : 'Sent to your supervisor for authorisation');
+      onFiled(saved.id);
     } catch (err) {
       setError(err);
       setBusy(false);
@@ -303,7 +346,7 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
 
   return (
     <Modal
-      title="New overtime request"
+      title={existing ? `Modify overtime request ${existing.number}` : 'New overtime request'}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
@@ -319,8 +362,9 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
     >
       <ErrorBox error={error} />
       <div className="alert info">
-        This is the authorisation to stay, not a claim. Nothing is charged to a project until you
-        file the hours you actually worked and both approvals are in.
+        {existing
+          ? 'Not authorised yet, so the plan can still change. Saving withdraws the request with the supervisor — they are told — and sends the changed one in its place.'
+          : 'This is the authorisation to stay, not a claim. Nothing is charged to a project until you file the hours you actually worked and both approvals are in.'}
       </div>
 
       <Field label="Which day?">
@@ -360,14 +404,19 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
         <div className="alert info hraud-gap-above">
           <strong>{preview.hours}</strong> hour{preview.hours === 1 ? '' : 's'}
           {preview.breakDeducted && preview.hours > 0 && ' after the break'}.
-          {preview.rate?.missingRate ? (
-            <> Your daily rate is not on file, so no project cost can be worked out — HR sets that.</>
+          {rate?.missingRate ? (
+            <>
+              {' '}
+              {ownFiling ? 'Your' : `${existing?.employee.firstName}’s`} daily rate is not on file, so no
+              project cost can be worked out — HR sets that.
+            </>
           ) : (
-            preview.amount != null && (
+            amount != null && (
               <>
                 {' '}
-                At {preview.settings.overtimeMultiplier}× the burdened hourly rate that is{' '}
-                <strong>{formatMoney(preview.amount)}</strong> against the project.
+                At {rate?.multiplier ?? preview.settings.overtimeMultiplier}×{' '}
+                {ownFiling ? 'the' : `${existing?.employee.firstName}’s`} burdened hourly rate that is{' '}
+                <strong>{formatMoney(amount)}</strong> against the project.
               </>
             )
           )}
@@ -423,9 +472,19 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
 type OtDetail = OtRow & {
   rate: Preview['rate'];
   variance: number | null;
+  /** Each mirrors its route, so a button is never offered that the route refuses. */
   canFileActual: boolean;
   canCancel: boolean;
+  /** PUT /overtime/:id — awaiting authorisation (PRIOR), the employee's own or edit_all. */
+  canModify: boolean;
+  /** POST /overtime/:id/withdraw — actual hours awaiting approval, whoever may file them again. */
+  canWithdraw: boolean;
+  /** The viewer's own filing; `rate` is always the employee's, whoever reads it. */
+  own: boolean;
 };
+
+/** What the actual-hours form starts on: the hours just pulled back, to change. */
+type ActualPrefill = Pick<OtRow, 'actualStart' | 'actualEnd' | 'dinnerBreak' | 'varianceNote'>;
 
 /** Stages at which the actual filing has been made, so its chain exists. */
 const ACTUAL_FILED_STAGES = ['ACTUAL_FILED', 'APPROVED'];
@@ -438,6 +497,8 @@ export function OvertimeDetail() {
   const [row, setRow] = useState<OtDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [filingActual, setFilingActual] = useState(false);
+  const [prefill, setPrefill] = useState<ActualPrefill | null>(null);
+  const [modifying, setModifying] = useState(false);
   const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
@@ -462,11 +523,27 @@ export function OvertimeDetail() {
   const actualFiled = ACTUAL_FILED_STAGES.includes(row.stage) || row.actualHours != null;
   const employeeName = `${row.employee.firstName} ${row.employee.lastName}`;
 
-  /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
+  /** Asked in the confirm bar first; a refusal is shown there, so these throw. */
   async function cancel() {
     await api.post(`/overtime/${id}/cancel`);
     toast('ok', 'Cancelled');
     load();
+  }
+
+  /** The hours come back off the approvers' desks; the form opens on them, to change. */
+  async function withdraw() {
+    if (!row) return;
+    const filed: ActualPrefill = {
+      actualStart: row.actualStart,
+      actualEnd: row.actualEnd,
+      dinnerBreak: row.dinnerBreak,
+      varianceNote: row.varianceNote,
+    };
+    await api.post(`/overtime/${id}/withdraw`);
+    toast('ok', 'Pulled back — change the hours and file them again');
+    await load();
+    setPrefill(filed);
+    setFilingActual(true);
   }
 
   return (
@@ -503,12 +580,29 @@ export function OvertimeDetail() {
         }
         actions={
           row.canFileActual && (
-            <button className="btn btn-primary" onClick={() => setFilingActual(true)}>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                setPrefill(null);
+                setFilingActual(true);
+              }}
+            >
               File the actual hours
             </button>
           )
         }
         more={[
+          row.canWithdraw && {
+            label: 'Pull back and edit',
+            hint: 'Withdraw the actual hours from the approvers, to change and file them again',
+            confirm: {
+              title: `Pull the hours on ${row.number} back?`,
+              body: 'They are withdrawn from the approvers — who are told — and nothing is charged until you file them again and every step approves.',
+              confirmLabel: 'Pull back',
+              tone: 'primary',
+              onConfirm: withdraw,
+            },
+          },
           row.canCancel && {
             label: 'Cancel overtime',
             danger: true,
@@ -523,6 +617,7 @@ export function OvertimeDetail() {
             },
           },
         ]}
+        modify={row.canModify ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
 
@@ -537,7 +632,8 @@ export function OvertimeDetail() {
       {row.stage === 'PRIOR_APPROVED' && (
         <div className="alert ok">
           Authorised. This is your evidence that the overtime was directed. File the hours you
-          actually worked once the work is done.
+          actually worked once the work is done. The plan is what was approved: to change it, cancel
+          this one and file again.
         </div>
       )}
       {row.stage === 'ACTUAL_FILED' && (
@@ -676,9 +772,22 @@ export function OvertimeDetail() {
       {filingActual && (
         <ActualModal
           row={row}
+          prefill={prefill}
           onClose={() => setFilingActual(false)}
           onFiled={() => {
             setFilingActual(false);
+            setPrefill(null);
+            load();
+          }}
+        />
+      )}
+
+      {modifying && (
+        <PriorModal
+          existing={row}
+          onClose={() => setModifying(false)}
+          onFiled={() => {
+            setModifying(false);
             load();
           }}
         />
@@ -689,10 +798,13 @@ export function OvertimeDetail() {
 
 function ActualModal({
   row,
+  prefill,
   onClose,
   onFiled,
 }: {
   row: OtRow;
+  /** The hours just pulled back: the form is then the modify of them. */
+  prefill?: ActualPrefill | null;
   onClose: () => void;
   onFiled: () => void;
 }) {
@@ -700,10 +812,10 @@ function ActualModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
-    actualStart: row.plannedStart,
-    actualEnd: row.plannedEnd,
-    dinnerBreak: row.dinnerBreak,
-    varianceNote: '',
+    actualStart: prefill?.actualStart ?? row.plannedStart,
+    actualEnd: prefill?.actualEnd ?? row.plannedEnd,
+    dinnerBreak: prefill?.dinnerBreak ?? row.dinnerBreak,
+    varianceNote: prefill?.varianceNote ?? '',
   });
 
   const preview = usePreview(form.actualStart, form.actualEnd, form.dinnerBreak);
@@ -730,7 +842,7 @@ function ActualModal({
 
   return (
     <Modal
-      title="File the actual hours"
+      title={prefill ? `Modify actual hours ${row.number}` : 'File the actual hours'}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>

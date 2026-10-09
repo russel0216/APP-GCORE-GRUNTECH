@@ -1325,6 +1325,887 @@ async function main() {
     const again2 = await api(workerToken, 'POST', `/overtime/${unauthorised.id}/cancel`);
     check('cancelling twice is refused', again2.status === 400, String(again2.status));
 
+    // ══ Modify and pull back (Phase 2) ═══════════════════════════════════
+    // A leave DRAFT is changed under the rules it was filed under; a pending
+    // one is pulled back to draft first, through the engine. A prior filing
+    // is changed while it waits on the supervisor — withdrawn and sent again
+    // in one go; once authorised its plan is fixed. The actual hours are
+    // pulled back and filed again. A decision that lands after any of it
+    // changes nothing.
+    console.log('\nModify and pull back (over HTTP)');
+
+    const editorRole = await makeRole('zzhr_editor', `${TAG} Editor`, ['ghr.leave.edit_own', 'ghr.overtime.edit_own']);
+    await prisma.userRole.create({ data: { userId: worker.id, roleId: editorRole.id } });
+    const proofType = await prisma.leaveType.create({
+      data: { code: `${TAG}SL`, name: `${TAG} Sick`, daysPerYear: D(5), requiresProof: true },
+    });
+    const withdrawnNotice = (link: string, body: string) =>
+      prisma.notification.findFirst({ where: { userId: supervisor.id, type: 'approval.withdrawn', link, body } });
+    const openRequest = (documentType: string, documentId: string) =>
+      prisma.approvalRequest.findFirst({ where: { documentType, documentId, status: 'PENDING' } });
+    const leaveBody = (over: Record<string, unknown> = {}) => ({
+      leaveTypeId: leaveType.id,
+      startDate: '2026-11-02',
+      endDate: '2026-11-04',
+      reason: `${TAG} changed plans`,
+      ...over,
+    });
+
+    // ── Leave: a draft ──
+    const draft = await api(workerToken, 'POST', '/leave', leaveBody({ endDate: '2026-11-03', reason: `${TAG} draft to change` }));
+    const draftId = String(draft.body.id ?? '');
+    const draftNumber = String(draft.body.number ?? '');
+    const draftRead = await api(workerToken, 'GET', `/leave/${draftId}`);
+    check(
+      'a leave draft offers its owner Modify and Submit, and no pull-back',
+      draft.status === 201 &&
+        draftRead.body.canModify === true &&
+        draftRead.body.canSubmit === true &&
+        draftRead.body.canWithdraw === false,
+      JSON.stringify({ m: draftRead.body.canModify, s: draftRead.body.canSubmit, w: draftRead.body.canWithdraw }),
+    );
+
+    const noRight = await api(colleagueToken, 'PUT', `/leave/${draftId}`, leaveBody());
+    check('PUT /leave/:id — somebody holding no edit right is refused (403)', noRight.status === 403, String(noRight.status));
+    await prisma.userRole.create({ data: { userId: colleague.id, roleId: editorRole.id } });
+    const notTheirs = await api(colleagueToken, 'PUT', `/leave/${draftId}`, leaveBody());
+    check(
+      "a colleague holding edit_own cannot change someone else's draft (403)",
+      notTheirs.status === 403 && String(notTheirs.body.error).includes('someone else'),
+      `${notTheirs.status} ${JSON.stringify(notTheirs.body).slice(0, 120)}`,
+    );
+
+    const weekend = await api(workerToken, 'PUT', `/leave/${draftId}`, leaveBody({ startDate: '2026-11-07', endDate: '2026-11-08' }));
+    check(
+      'a change to a weekend is refused — no working days',
+      weekend.status === 400 && String(weekend.body.error).includes('no working days'),
+      `${weekend.status} ${JSON.stringify(weekend.body).slice(0, 120)}`,
+    );
+    const clashing = await api(workerToken, 'PUT', `/leave/${draftId}`, leaveBody({ startDate: '2026-09-21', endDate: '2026-09-21' }));
+    check(
+      'a change onto days an approved request covers is refused',
+      clashing.status === 400 && String(clashing.body.error).includes('already covers'),
+      `${clashing.status} ${JSON.stringify(clashing.body).slice(0, 120)}`,
+    );
+    const unproven = await api(workerToken, 'PUT', `/leave/${draftId}`, leaveBody({ leaveTypeId: proofType.id }));
+    check(
+      'a change to a type that needs proof, with none noted, is refused',
+      unproven.status === 400 && String(unproven.body.error).includes('supporting documentation'),
+      `${unproven.status} ${JSON.stringify(unproven.body).slice(0, 120)}`,
+    );
+
+    const changed = await api(workerToken, 'PUT', `/leave/${draftId}`, leaveBody());
+    const changedRow = await prisma.leaveRequest.findUnique({ where: { id: draftId } });
+    check(
+      'the owner changes the draft: the days are counted again (Mon–Wed is 3)',
+      changed.status === 200 && changed.body.days === 3 && num(changedRow?.days) === 3 && changedRow?.reason === `${TAG} changed plans`,
+      `${changed.status} ${JSON.stringify(changed.body).slice(0, 140)}`,
+    );
+    check(
+      'the change is audited, with what it was and what it became',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'leave_request',
+          entityId: draftId,
+          action: 'UPDATED',
+          summary: `${draftNumber} changed — 3 day(s) of ${leaveType.name}`,
+          actorId: worker.id,
+        },
+      })),
+    );
+    const byHr = await api(hrToken, 'PUT', `/leave/${draftId}`, leaveBody({ reason: `${TAG} corrected by HR` }));
+    check('HR (edit_all) may change somebody else’s draft', byHr.status === 200, `${byHr.status} ${JSON.stringify(byHr.body).slice(0, 120)}`);
+
+    // ── Leave: submitted, so pulled back first ──
+    const sent = await api(workerToken, 'POST', `/leave/${draftId}/submit`);
+    const sentRead = await api(workerToken, 'GET', `/leave/${draftId}`);
+    check(
+      'once submitted it offers the pull-back instead of Modify and Submit',
+      sent.status === 200 && sentRead.body.canModify === false && sentRead.body.canSubmit === false && sentRead.body.canWithdraw === true,
+      `${sent.status} ${JSON.stringify({ m: sentRead.body.canModify, s: sentRead.body.canSubmit, w: sentRead.body.canWithdraw })}`,
+    );
+    const pendingPut = await api(workerToken, 'PUT', `/leave/${draftId}`, leaveBody());
+    check(
+      'a submitted request cannot be changed — it is pulled back first',
+      pendingPut.status === 400 && String(pendingPut.body.error).includes('pull this one back'),
+      `${pendingPut.status} ${JSON.stringify(pendingPut.body).slice(0, 120)}`,
+    );
+    const leaveOpen = await openRequest('leave_request', draftId);
+    const strangerPull = await api(colleagueToken, 'POST', `/leave/${draftId}/withdraw`);
+    check("a colleague cannot pull back someone else's request (403)", strangerPull.status === 403, String(strangerPull.status));
+
+    const pulled = await api(workerToken, 'POST', `/leave/${draftId}/withdraw`);
+    const pulledRow = await prisma.leaveRequest.findUnique({ where: { id: draftId } });
+    const pulledRequest = leaveOpen ? await prisma.approvalRequest.findUnique({ where: { id: leaveOpen.id } }) : null;
+    check(
+      'POST /leave/:id/withdraw — the request goes back to DRAFT',
+      pulled.status === 200 && pulledRow?.status === 'DRAFT',
+      `${pulled.status} ${pulledRow?.status}`,
+    );
+    check(
+      'and its approval request closes CANCELLED, out of the queue',
+      pulledRequest?.status === 'CANCELLED' &&
+        !!pulledRequest.closedAt &&
+        !(await pendingFor(supervisor.id)).some((r) => r.id === leaveOpen?.id),
+      pulledRequest?.status,
+    );
+    check(
+      'the supervisor is told it was pulled back, and by whom',
+      !!(await withdrawnNotice(`/g-hr/leave/${draftId}`, `${draftNumber} — pulled back to draft by ${worker.name}`)),
+    );
+    check(
+      'the pull-back is audited on the request',
+      !!(await prisma.auditLog.findFirst({
+        where: { entityType: 'leave_request', entityId: draftId, summary: `${draftNumber} pulled back to draft` },
+      })),
+    );
+    const usedBeforeLateDecision = (await leaveBalance(employee.id, leaveType.id, 2026)).used;
+    await expectRejection(
+      'a decision arriving after the pull-back is refused by the engine',
+      () => act({ requestId: leaveOpen!.id, userId: supervisor.id, action: 'APPROVED' }),
+      'no longer open',
+    );
+    const afterLateDecision = await prisma.leaveRequest.findUnique({ where: { id: draftId } });
+    check(
+      'and changes nothing: still DRAFT, no days drawn',
+      afterLateDecision?.status === 'DRAFT' && (await leaveBalance(employee.id, leaveType.id, 2026)).used === usedBeforeLateDecision,
+      afterLateDecision?.status,
+    );
+    const pullTwice = await api(workerToken, 'POST', `/leave/${draftId}/withdraw`);
+    check(
+      'a draft has nothing to pull back',
+      pullTwice.status === 400 && String(pullTwice.body.error).includes('nothing to pull back'),
+      `${pullTwice.status} ${JSON.stringify(pullTwice.body).slice(0, 120)}`,
+    );
+    const resent = await api(workerToken, 'PUT', `/leave/${draftId}`, leaveBody({ endDate: '2026-11-03' }));
+    const resubmitted = await api(workerToken, 'POST', `/leave/${draftId}/submit`);
+    const fresh = await openRequest('leave_request', draftId);
+    check(
+      'changed again and resubmitted, it is asked afresh, at the new figure',
+      resent.status === 200 &&
+        resubmitted.status === 200 &&
+        !!fresh &&
+        fresh.id !== leaveOpen?.id &&
+        fresh.requesterId === worker.id &&
+        fresh.subject.includes('— 2 day(s)'),
+      `${resent.status}/${resubmitted.status} ${fresh?.subject}`,
+    );
+
+    // The pull-back claims the request first: its approval, landing after,
+    // must not bring it back APPROVED or draw the days.
+    const raced = await fileLeave('2026-11-16', '2026-11-16', 1);
+    await prisma.leaveRequest.update({ where: { id: raced.request.id }, data: { status: 'DRAFT' } });
+    const usedBeforeRace = (await leaveBalance(employee.id, leaveType.id, 2026)).used;
+    await act({ requestId: raced.approval.id, userId: supervisor.id, action: 'APPROVED' });
+    const racedAfter = await prisma.leaveRequest.findUnique({ where: { id: raced.request.id } });
+    check(
+      'a leave pulled back while its approval was decided stays DRAFT and draws nothing',
+      racedAfter?.status === 'DRAFT' && (await leaveBalance(employee.id, leaveType.id, 2026)).used === usedBeforeRace,
+      racedAfter?.status,
+    );
+    check(
+      'its trail says the approval came after the pull-back',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'leave_request',
+          entityId: raced.request.id,
+          summary: `${raced.request.number} was approved after it was pulled back to draft — not applied`,
+        },
+      })),
+    );
+    // A decision that claimed the request first — approved, its subscriber
+    // not yet run: nothing to withdraw, so the pull-back rolls back and the
+    // decision is left to apply.
+    const decidedFirst = await prisma.leaveRequest.create({
+      data: {
+        number: await nextNumber('leave_request'),
+        employeeId: employee.id,
+        leaveTypeId: leaveType.id,
+        startDate: day('2026-11-23'),
+        endDate: day('2026-11-23'),
+        days: D(1),
+        reason: `${TAG} decided first`,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+    const decidedAsk = (documentType: string, documentId: string, number: string, returned = false) =>
+      prisma.approvalRequest.create({
+        data: {
+          documentType,
+          documentId,
+          documentNumber: number,
+          subject: `${TAG} decided a moment ago`,
+          requesterId: worker.id,
+          // A return closes the request CANCELLED, as a withdrawal does; the
+          // RETURNED action on it is what tells the two apart.
+          status: returned ? 'CANCELLED' : 'APPROVED',
+          closedAt: new Date(),
+          actions: {
+            create: { sequence: 1, approverId: supervisor.id, action: returned ? 'RETURNED' : 'APPROVED' },
+          },
+        },
+      });
+    await decidedAsk('leave_request', decidedFirst.id, decidedFirst.number);
+    const tooLate = await api(workerToken, 'POST', `/leave/${decidedFirst.id}/withdraw`);
+    const decidedFirstAfter = await prisma.leaveRequest.findUnique({ where: { id: decidedFirst.id } });
+    check(
+      'when nothing was left to withdraw the pull-back is refused and rolled back',
+      tooLate.status === 400 && String(tooLate.body.error).includes('decided a moment ago') && decidedFirstAfter?.status === 'PENDING_APPROVAL',
+      `${tooLate.status} ${decidedFirstAfter?.status}`,
+    );
+    const returnedFirst = await prisma.leaveRequest.create({
+      data: {
+        number: await nextNumber('leave_request'),
+        employeeId: employee.id,
+        leaveTypeId: leaveType.id,
+        startDate: day('2026-11-24'),
+        endDate: day('2026-11-24'),
+        days: D(1),
+        reason: `${TAG} returned first`,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+    await decidedAsk('leave_request', returnedFirst.id, returnedFirst.number, true);
+    const returnedPull = await api(workerToken, 'POST', `/leave/${returnedFirst.id}/withdraw`);
+    const returnedAfter = await prisma.leaveRequest.findUnique({ where: { id: returnedFirst.id } });
+    check(
+      'a request RETURNED a moment ago (closed CANCELLED, the return on it) is a decision too: refused',
+      returnedPull.status === 400 && String(returnedPull.body.error).includes('decided a moment ago') && returnedAfter?.status === 'PENDING_APPROVAL',
+      `${returnedPull.status} ${returnedAfter?.status}`,
+    );
+    // Stranded: reads PENDING_APPROVAL, yet no request was ever opened — so
+    // nothing is coming, and the pull-back must not claim a decision did.
+    const strandedLeave = await prisma.leaveRequest.create({
+      data: {
+        number: await nextNumber('leave_request'),
+        employeeId: employee.id,
+        leaveTypeId: leaveType.id,
+        startDate: day('2026-11-25'),
+        endDate: day('2026-11-25'),
+        days: D(1),
+        reason: `${TAG} stranded`,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+    const strandedPull = await api(workerToken, 'POST', `/leave/${strandedLeave.id}/withdraw`);
+    const strandedLeaveAfter = await prisma.leaveRequest.findUnique({ where: { id: strandedLeave.id } });
+    check(
+      'a request stranded with nobody asked comes back to draft all the same',
+      strandedPull.status === 200 && strandedLeaveAfter?.status === 'DRAFT',
+      `${strandedPull.status} ${strandedLeaveAfter?.status} ${JSON.stringify(strandedPull.body).slice(0, 100)}`,
+    );
+    check(
+      'and its trail says nothing was with an approver',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'leave_request',
+          entityId: strandedLeave.id,
+          summary: `${strandedLeave.number} pulled back to draft — nothing was with an approver`,
+        },
+      })),
+    );
+
+    // ── Overtime: the prior filing, changed while it waits ──
+    const plan = (over: Record<string, unknown> = {}) => ({
+      date: '2026-11-05',
+      plannedStart: '17:00',
+      plannedEnd: '20:00',
+      dinnerBreak: false,
+      reason: `${TAG} plan to change`,
+      ...over,
+    });
+    const filedOt = await api(workerToken, 'POST', '/overtime', plan());
+    const otId = String(filedOt.body.id ?? '');
+    const otNumber = String(filedOt.body.number ?? '');
+    const otLink = `/g-hr/overtime/${otId}`;
+    const firstAsk = await openRequest('overtime_prior', otId);
+    const otRead = await api(workerToken, 'GET', `/overtime/${otId}`);
+    check(
+      'a filing awaiting authorisation offers its owner Modify, and no pull-back',
+      filedOt.status === 201 && otRead.body.canModify === true && otRead.body.canWithdraw === false,
+      `${filedOt.status} ${JSON.stringify({ m: otRead.body.canModify, w: otRead.body.canWithdraw })}`,
+    );
+    const pullPrior = await api(workerToken, 'POST', `/overtime/${otId}/withdraw`);
+    check(
+      'a prior filing is modified, not pulled back',
+      pullPrior.status === 400 && String(pullPrior.body.error).includes('modify it instead'),
+      `${pullPrior.status} ${JSON.stringify(pullPrior.body).slice(0, 120)}`,
+    );
+    const otStranger = await api(colleagueToken, 'PUT', `/overtime/${otId}`, plan());
+    check("PUT /overtime/:id — a colleague cannot change someone else's filing (403)", otStranger.status === 403, String(otStranger.status));
+    // Exactly the dinner break, with the break taken: nothing left to work.
+    const zero = await api(
+      workerToken,
+      'PUT',
+      `/overtime/${otId}`,
+      plan({ plannedStart: settings.dinnerBreakStart, plannedEnd: settings.dinnerBreakEnd, dinnerBreak: true }),
+    );
+    const noJob = await api(workerToken, 'PUT', `/overtime/${otId}`, plan({ jobId: 'does-not-exist' }));
+    check(
+      'a change to zero hours, or onto a project that does not exist, is refused',
+      zero.status === 400 &&
+        String(zero.body.error).includes('zero hours') &&
+        noJob.status === 400 &&
+        String(noJob.body.error).includes('does not exist'),
+      `${zero.status} / ${noJob.status} ${JSON.stringify(noJob.body).slice(0, 100)}`,
+    );
+
+    // The supervisor is about to be unreachable: the change is refused before
+    // the filing is taken off their desk.
+    await prisma.user.update({ where: { id: worker.id }, data: { supervisorId: worker.id } });
+    const unroutable = await api(workerToken, 'PUT', `/overtime/${otId}`, plan({ plannedEnd: '21:00' }));
+    await prisma.user.update({ where: { id: worker.id }, data: { supervisorId: supervisor.id } });
+    const stillAsked = firstAsk ? await prisma.approvalRequest.findUnique({ where: { id: firstAsk.id } }) : null;
+    const stillPlanned = await prisma.overtimeRequest.findUnique({ where: { id: otId } });
+    check(
+      'a change that could not be sent again is refused before anything is withdrawn',
+      unroutable.status === 400 && stillAsked?.status === 'PENDING' && num(stillPlanned?.estimatedHours) === 3,
+      `${unroutable.status} ${stillAsked?.status} ${num(stillPlanned?.estimatedHours)}h`,
+    );
+
+    const asksBefore = await prisma.notification.count({ where: { userId: supervisor.id, type: 'approval.required', link: otLink } });
+    const otChanged = await api(workerToken, 'PUT', `/overtime/${otId}`, plan({ plannedEnd: '21:00', reason: `${TAG} plan changed` }));
+    const otChangedRow = await prisma.overtimeRequest.findUnique({ where: { id: otId } });
+    const firstAskAfter = firstAsk ? await prisma.approvalRequest.findUnique({ where: { id: firstAsk.id } }) : null;
+    const secondAsk = await openRequest('overtime_prior', otId);
+    check(
+      'the owner changes it: the estimate is worked out again (17:00–21:00 is 4h), still awaiting authorisation',
+      otChanged.status === 200 && otChangedRow?.stage === 'PRIOR' && num(otChangedRow.estimatedHours) === 4,
+      `${otChanged.status} ${otChangedRow?.stage} ${num(otChangedRow?.estimatedHours)}h ${JSON.stringify(otChanged.body).slice(0, 100)}`,
+    );
+    check(
+      'the request the supervisor had is withdrawn (CANCELLED), and they are told why',
+      firstAskAfter?.status === 'CANCELLED' &&
+        !!(await withdrawnNotice(otLink, `${otNumber} — changed by ${worker.name} and sent again`)),
+      firstAskAfter?.status,
+    );
+    check(
+      'and it is sent again from the first step, at the new figure, in the employee’s name',
+      !!secondAsk &&
+        secondAsk.id !== firstAsk?.id &&
+        secondAsk.requesterId === worker.id &&
+        secondAsk.subject.includes('4h prior approval') &&
+        (await prisma.notification.count({ where: { userId: supervisor.id, type: 'approval.required', link: otLink } })) === asksBefore + 1,
+      secondAsk?.subject,
+    );
+    check(
+      'the change is audited',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'overtime_request',
+          entityId: otId,
+          action: 'UPDATED',
+          summary: `${otNumber} changed before authorisation — 4h estimated, sent again`,
+        },
+      })),
+    );
+    await expectRejection(
+      'the withdrawn request can no longer be decided',
+      () => act({ requestId: firstAsk!.id, userId: supervisor.id, action: 'APPROVED' }),
+      'no longer open',
+    );
+    const otAfterLate = await prisma.overtimeRequest.findUnique({ where: { id: otId } });
+    check('so the change stands: still awaiting authorisation, never authorised', otAfterLate?.stage === 'PRIOR' && otAfterLate.priorApprovedAt === null);
+
+    // Authorised: the plan is now what was approved.
+    await act({ requestId: secondAsk!.id, userId: supervisor.id, action: 'APPROVED' });
+    const authorisedPut = await api(workerToken, 'PUT', `/overtime/${otId}`, plan({ plannedEnd: '22:00' }));
+    const authorisedRead = await api(workerToken, 'GET', `/overtime/${otId}`);
+    check(
+      'once authorised the plan cannot be changed — cancel and file again',
+      authorisedPut.status === 400 && String(authorisedPut.body.error).includes('authorised as planned') && authorisedRead.body.canModify === false,
+      `${authorisedPut.status} ${JSON.stringify(authorisedPut.body).slice(0, 120)}`,
+    );
+
+    // ── Overtime: the actual hours, pulled back and filed again ──
+    const filedActual = await api(workerToken, 'POST', `/overtime/${otId}/actual`, { actualStart: '17:00', actualEnd: '21:00' });
+    const actualAsk = await openRequest('overtime_request', otId);
+    const actualRead = await api(workerToken, 'GET', `/overtime/${otId}`);
+    check(
+      'filed actual hours offer their owner the pull-back, and no Modify',
+      filedActual.status === 200 && actualRead.body.canWithdraw === true && actualRead.body.canModify === false,
+      `${filedActual.status} ${JSON.stringify({ m: actualRead.body.canModify, w: actualRead.body.canWithdraw })}`,
+    );
+    const actualPut = await api(workerToken, 'PUT', `/overtime/${otId}`, plan());
+    check(
+      'filed hours are not changed in place — they are pulled back',
+      actualPut.status === 400 && String(actualPut.body.error).includes('pull them back'),
+      `${actualPut.status} ${JSON.stringify(actualPut.body).slice(0, 120)}`,
+    );
+    const hrPull = await api(hrToken, 'POST', `/overtime/${otId}/withdraw`);
+    const colleaguePull = await api(colleagueToken, 'POST', `/overtime/${otId}/withdraw`);
+    check(
+      'only whoever may file them again pulls them back — not HR, not a colleague (403)',
+      hrPull.status === 403 && colleaguePull.status === 403,
+      `${hrPull.status} / ${colleaguePull.status}`,
+    );
+    const otPulled = await api(workerToken, 'POST', `/overtime/${otId}/withdraw`);
+    const otPulledRow = await prisma.overtimeRequest.findUnique({ where: { id: otId } });
+    const actualAskAfter = actualAsk ? await prisma.approvalRequest.findUnique({ where: { id: actualAsk.id } }) : null;
+    check(
+      'POST /overtime/:id/withdraw — back to authorised, the filed hours cleared',
+      otPulled.status === 200 && otPulledRow?.stage === 'PRIOR_APPROVED' && otPulledRow.actualHours === null && otPulledRow.actualStart === null,
+      `${otPulled.status} ${otPulledRow?.stage} ${otPulledRow?.actualHours}`,
+    );
+    check(
+      'its request closes CANCELLED, and the supervisor is told',
+      actualAskAfter?.status === 'CANCELLED' && !!(await withdrawnNotice(otLink, `${otNumber} — pulled back by ${worker.name}`)),
+      actualAskAfter?.status,
+    );
+    check(
+      'the pull-back is audited with the hours it took back',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'overtime_request',
+          entityId: otId,
+          summary: `${otNumber} actual hours pulled back (4h, 17:00–21:00) — to be filed again`,
+        },
+      })),
+    );
+    await expectRejection(
+      'a decision arriving after the pull-back is refused by the engine',
+      () => act({ requestId: actualAsk!.id, userId: supervisor.id, action: 'APPROVED' }),
+      'no longer open',
+    );
+    const refiled = await api(workerToken, 'POST', `/overtime/${otId}/actual`, {
+      actualStart: '17:00',
+      actualEnd: '20:00',
+      varianceNote: `${TAG} finished early`,
+    });
+    const refiledRow = await prisma.overtimeRequest.findUnique({ where: { id: otId } });
+    check(
+      'the hours are filed again — the change — and nothing has posted',
+      refiled.status === 200 &&
+        refiledRow?.stage === 'ACTUAL_FILED' &&
+        num(refiledRow.actualHours) === 3 &&
+        (await prisma.jobCostEntry.count({ where: { sourceType: 'overtime_request', sourceId: otId } })) === 0,
+      `${refiled.status} ${refiledRow?.stage} ${num(refiledRow?.actualHours)}h`,
+    );
+
+    // The pull-back claims the filing first: the hours' final approval,
+    // landing after, must post nothing.
+    const racedOt = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-11-06'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(2),
+        stage: 'ACTUAL_FILED',
+        actualStart: '17:00',
+        actualEnd: '20:00',
+        actualHours: D(2),
+        reason: `${TAG} pulled back while HR decided`,
+        jobId: job.id,
+        costCategoryId: labour.id,
+      },
+    });
+    const racedAsk = await submitForApproval({
+      documentType: 'overtime_request',
+      documentId: racedOt.id,
+      documentNumber: racedOt.number,
+      subject: `${TAG} pulled back`,
+      requesterId: worker.id,
+    });
+    await act({ requestId: racedAsk.id, userId: supervisor.id, action: 'APPROVED' });
+    await prisma.overtimeRequest.update({ where: { id: racedOt.id }, data: { stage: 'PRIOR_APPROVED' } });
+    await act({ requestId: racedAsk.id, userId: hrOfficer.id, action: 'APPROVED' });
+    const racedOtAfter = await prisma.overtimeRequest.findUnique({ where: { id: racedOt.id } });
+    check(
+      'hours pulled back while HR decided stay pulled back, and post no cost',
+      racedOtAfter?.stage === 'PRIOR_APPROVED' &&
+        racedOtAfter.amount === null &&
+        (await prisma.jobCostEntry.count({ where: { sourceType: 'overtime_request', sourceId: racedOt.id } })) === 0,
+      racedOtAfter?.stage,
+    );
+    check(
+      'its trail says the approval came after the pull-back',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'overtime_request',
+          entityId: racedOt.id,
+          summary: `${racedOt.number} was approved after it was pulled back — not applied`,
+        },
+      })),
+    );
+    const notPending = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-11-09'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(3),
+        stage: 'ACTUAL_FILED',
+        actualStart: '17:00',
+        actualEnd: '20:00',
+        actualHours: D(3),
+        reason: `${TAG} decided before the pull-back`,
+      },
+    });
+    await decidedAsk('overtime_request', notPending.id, notPending.number);
+    const otTooLate = await api(workerToken, 'POST', `/overtime/${notPending.id}/withdraw`);
+    const notPendingAfter = await prisma.overtimeRequest.findUnique({ where: { id: notPending.id } });
+    check(
+      'when nothing was left to withdraw the pull-back is refused and rolled back',
+      otTooLate.status === 400 &&
+        String(otTooLate.body.error).includes('decided a moment ago') &&
+        notPendingAfter?.stage === 'ACTUAL_FILED' &&
+        num(notPendingAfter.actualHours) === 3,
+      `${otTooLate.status} ${notPendingAfter?.stage}`,
+    );
+    // Stranded: filed while the engine refused it, before the filing routes
+    // put a refusal back — "awaiting approval" with nobody asked.
+    const strandedHours = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-11-11'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(3),
+        stage: 'ACTUAL_FILED',
+        actualStart: '17:00',
+        actualEnd: '20:00',
+        actualHours: D(3),
+        reason: `${TAG} hours stranded`,
+      },
+    });
+    const strandedHoursPull = await api(workerToken, 'POST', `/overtime/${strandedHours.id}/withdraw`);
+    const strandedHoursAfter = await prisma.overtimeRequest.findUnique({ where: { id: strandedHours.id } });
+    check(
+      'hours stranded with nobody asked come back to authorised all the same, to be filed again',
+      strandedHoursPull.status === 200 && strandedHoursAfter?.stage === 'PRIOR_APPROVED' && strandedHoursAfter.actualHours === null,
+      `${strandedHoursPull.status} ${strandedHoursAfter?.stage} ${JSON.stringify(strandedHoursPull.body).slice(0, 100)}`,
+    );
+    check(
+      'and the trail says nothing was with an approver',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'overtime_request',
+          entityId: strandedHours.id,
+          summary: { contains: '(nothing was with an approver)' },
+        },
+      })),
+    );
+    // The prior filing likewise: decided a moment ago, it stands; stranded,
+    // the change is simply sent.
+    const priorDecided = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-11-12'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(3),
+        dinnerBreak: false,
+        stage: 'PRIOR',
+        reason: `${TAG} prior decided first`,
+      },
+    });
+    await decidedAsk('overtime_prior', priorDecided.id, priorDecided.number);
+    const priorDecidedPut = await api(
+      workerToken,
+      'PUT',
+      `/overtime/${priorDecided.id}`,
+      plan({ date: '2026-11-12', plannedEnd: '21:00', reason: `${TAG} prior decided first` }),
+    );
+    const priorDecidedAfter = await prisma.overtimeRequest.findUnique({ where: { id: priorDecided.id } });
+    check(
+      'a change to a prior filing decided a moment ago is refused, and nothing is written',
+      priorDecidedPut.status === 400 &&
+        String(priorDecidedPut.body.error).includes('decided a moment ago') &&
+        priorDecidedAfter?.plannedEnd === '20:00' &&
+        !(await openRequest('overtime_prior', priorDecided.id)),
+      `${priorDecidedPut.status} ${priorDecidedAfter?.plannedEnd}`,
+    );
+    const strandedPrior = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: employee.id,
+        date: day('2026-11-13'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(3),
+        dinnerBreak: false,
+        stage: 'PRIOR',
+        reason: `${TAG} prior stranded`,
+      },
+    });
+    const strandedPriorPut = await api(
+      workerToken,
+      'PUT',
+      `/overtime/${strandedPrior.id}`,
+      plan({ date: '2026-11-13', plannedEnd: '21:00', reason: `${TAG} prior stranded` }),
+    );
+    const strandedPriorAsk = await openRequest('overtime_prior', strandedPrior.id);
+    check(
+      'a prior filing stranded with nobody asked is changed and sent — for the first time',
+      strandedPriorPut.status === 200 &&
+        !!strandedPriorAsk &&
+        strandedPriorAsk.requesterId === worker.id &&
+        strandedPriorAsk.subject.includes('4h prior approval'),
+      `${strandedPriorPut.status} ${strandedPriorAsk?.subject} ${JSON.stringify(strandedPriorPut.body).slice(0, 100)}`,
+    );
+    check(
+      'and its trail says nothing was with an approver',
+      !!(await prisma.auditLog.findFirst({
+        where: {
+          entityType: 'overtime_request',
+          entityId: strandedPrior.id,
+          summary: `${strandedPrior.number} changed before authorisation — 4h estimated, sent for authorisation (nothing was with an approver)`,
+        },
+      })),
+    );
+
+    // ── A filing the engine refuses is put back, and burns no number ──
+    // Someone who reports to themselves: step 1 would route only to them.
+    const loner = await makeUser('ZZ Loner', 'loner@verifyhr.local', [workerRole.id, editorRole.id]);
+    await prisma.user.update({ where: { id: loner.id }, data: { supervisorId: loner.id } });
+    const lonerEmployee = await prisma.employee.create({
+      data: { employeeNo: `${TAG}-005`, firstName: 'Lone', lastName: 'Ranger', userId: loner.id },
+    });
+    const lonerToken = signToken(loner.id, loner.email);
+    const lonerOt = await api(lonerToken, 'POST', '/overtime', plan({ reason: `${TAG} nobody to ask` }));
+    check(
+      'POST /overtime the engine would refuse is refused before anything is written — naming the real cause, their "Reports to"',
+      lonerOt.status === 400 &&
+        String(lonerOt.body.error).includes('"Reports to" names themselves') &&
+        (await prisma.overtimeRequest.count({ where: { employeeId: lonerEmployee.id } })) === 0,
+      `${lonerOt.status} ${JSON.stringify(lonerOt.body).slice(0, 120)}`,
+    );
+    const lonerAuthorised = await prisma.overtimeRequest.create({
+      data: {
+        number: await nextNumber('overtime_request'),
+        employeeId: lonerEmployee.id,
+        date: day('2026-11-10'),
+        plannedStart: '17:00',
+        plannedEnd: '20:00',
+        estimatedHours: D(3),
+        dinnerBreak: false,
+        stage: 'PRIOR_APPROVED',
+        reason: `${TAG} authorised, nobody for the hours`,
+      },
+    });
+    const lonerActual = await api(lonerToken, 'POST', `/overtime/${lonerAuthorised.id}/actual`, { actualStart: '17:00', actualEnd: '20:00' });
+    const lonerActualAfter = await prisma.overtimeRequest.findUnique({ where: { id: lonerAuthorised.id } });
+    check(
+      'actual hours the engine would refuse leave the filing authorised and unfiled',
+      lonerActual.status === 400 && lonerActualAfter?.stage === 'PRIOR_APPROVED' && lonerActualAfter.actualHours === null,
+      `${lonerActual.status} ${lonerActualAfter?.stage}`,
+    );
+    const lonerLeave = await api(lonerToken, 'POST', '/leave', leaveBody({ reason: `${TAG} nobody to ask` }));
+    const lonerLeaveId = String(lonerLeave.body.id ?? '');
+    const lonerSubmit = await api(lonerToken, 'POST', `/leave/${lonerLeaveId}/submit`);
+    const lonerLeaveRead = await api(lonerToken, 'GET', `/leave/${lonerLeaveId}`);
+    check(
+      'a leave submission the engine refuses stays a DRAFT, still offering Submit and Modify',
+      lonerSubmit.status === 400 &&
+        lonerLeaveRead.body.status === 'DRAFT' &&
+        lonerLeaveRead.body.canSubmit === true &&
+        lonerLeaveRead.body.canModify === true,
+      `${lonerSubmit.status} ${lonerLeaveRead.body.status}`,
+    );
+
+    // ── Submitting a leave draft runs the filing's rules again ──
+    // The clash check ignores drafts, so two drafts for the same days could
+    // otherwise both reach an approver — and, both approved, both draw.
+    console.log('\nSubmitting re-checks; the employee is the requester (over HTTP)');
+    const twinA = await api(workerToken, 'POST', '/leave', leaveBody({ startDate: '2026-12-01', endDate: '2026-12-02', reason: `${TAG} twin A` }));
+    const twinB = await api(workerToken, 'POST', '/leave', leaveBody({ startDate: '2026-12-01', endDate: '2026-12-02', reason: `${TAG} twin B` }));
+    const twinAId = String(twinA.body.id ?? '');
+    const twinBId = String(twinB.body.id ?? '');
+    check('two drafts for the same days are both saved — a draft is with nobody', twinA.status === 201 && twinB.status === 201);
+    const sendA = await api(workerToken, 'POST', `/leave/${twinAId}/submit`);
+    const sendB = await api(workerToken, 'POST', `/leave/${twinBId}/submit`);
+    const twinBRow = await prisma.leaveRequest.findUnique({ where: { id: twinBId } });
+    check(
+      'the first submitted goes; the second is refused — the first already covers those days — and stays a DRAFT',
+      sendA.status === 200 &&
+        sendB.status === 400 &&
+        String(sendB.body.error).includes(`${twinA.body.number} already covers`) &&
+        twinBRow?.status === 'DRAFT' &&
+        !(await openRequest('leave_request', twinBId)),
+      `${sendA.status}/${sendB.status} ${twinBRow?.status} ${JSON.stringify(sendB.body).slice(0, 120)}`,
+    );
+    // Pulled back, the first frees its days: the second is sent over them, and
+    // the first can then not be sent again on top of it.
+    const pullA = await api(workerToken, 'POST', `/leave/${twinAId}/withdraw`);
+    const sendB2 = await api(workerToken, 'POST', `/leave/${twinBId}/submit`);
+    const sendA2 = await api(workerToken, 'POST', `/leave/${twinAId}/submit`);
+    const twinARow = await prisma.leaveRequest.findUnique({ where: { id: twinAId } });
+    check(
+      'pull one back, send the other over its days, and the first is refused on resubmission — still a DRAFT',
+      pullA.status === 200 &&
+        sendB2.status === 200 &&
+        sendA2.status === 400 &&
+        String(sendA2.body.error).includes(`${twinB.body.number} already covers`) &&
+        twinARow?.status === 'DRAFT',
+      `${pullA.status}/${sendB2.status}/${sendA2.status} ${twinARow?.status}`,
+    );
+    // The days are counted again on submission: what the approver is asked
+    // for is what the record says and what the balance will draw.
+    await prisma.leaveRequest.update({
+      where: { id: twinAId },
+      data: { startDate: day('2026-12-07'), endDate: day('2026-12-09'), days: D(1) },
+    });
+    const sendA3 = await api(workerToken, 'POST', `/leave/${twinAId}/submit`);
+    const twinA3 = await prisma.leaveRequest.findUnique({ where: { id: twinAId } });
+    const twinAAsk = await openRequest('leave_request', twinAId);
+    check(
+      'a draft carrying a stale day count is counted again on submission (Mon–Wed is 3), and the approver is asked for 3',
+      sendA3.status === 200 && twinA3?.status === 'PENDING_APPROVAL' && num(twinA3.days) === 3 && !!twinAAsk?.subject.includes('— 3 day(s)'),
+      `${sendA3.status} ${num(twinA3?.days)} ${twinAAsk?.subject}`,
+    );
+
+    // A super admin sending somebody's draft on files it in the EMPLOYEE's
+    // name, so the employee can never approve their own leave.
+    const admin = await makeUser('ZZ Admin', 'admin@verifyhr.local', []);
+    await prisma.user.update({ where: { id: admin.id }, data: { isSuperAdmin: true } });
+    const adminToken = signToken(admin.id, admin.email);
+    const forAdmin = await api(workerToken, 'POST', '/leave', leaveBody({ startDate: '2026-12-14', endDate: '2026-12-14', reason: `${TAG} sent on by an admin` }));
+    const forAdminId = String(forAdmin.body.id ?? '');
+    const draftStamp = (await prisma.leaveRequest.findUnique({ where: { id: forAdminId } }))?.updatedAt;
+    await api(workerToken, 'PUT', `/leave/${forAdminId}`, leaveBody({ startDate: '2026-12-14', endDate: '2026-12-14', reason: `${TAG} sent on by an admin, changed` }));
+    const changedStamp = (await prisma.leaveRequest.findUnique({ where: { id: forAdminId } }))?.updatedAt;
+    check(
+      'a change moves the draft’s updatedAt — what the submission and the next change claim against',
+      !!draftStamp && !!changedStamp && changedStamp.getTime() > draftStamp.getTime(),
+    );
+    const adminSend = await api(adminToken, 'POST', `/leave/${forAdminId}/submit`);
+    const adminAsk = await openRequest('leave_request', forAdminId);
+    check(
+      'a super admin submitting the worker’s draft files it in the worker’s name',
+      adminSend.status === 200 && adminAsk?.requesterId === worker.id,
+      `${adminSend.status} ${adminAsk?.requesterId === admin.id ? 'the admin' : adminAsk?.requesterId}`,
+    );
+    await expectRejection(
+      'so the worker cannot approve it',
+      () => act({ requestId: adminAsk!.id, userId: worker.id, action: 'APPROVED' }),
+      'raised yourself',
+    );
+
+    // HR changing the worker's prior filing: sent again in the worker's name,
+    // and the worker is told it was taken off the supervisor's desk.
+    const hrEdit = await api(workerToken, 'POST', '/overtime', plan({ date: '2026-12-03', reason: `${TAG} HR corrects the plan` }));
+    const hrEditId = String(hrEdit.body.id ?? '');
+    const hrFirstAsk = await openRequest('overtime_prior', hrEditId);
+    const hrView = await api(hrToken, 'GET', `/overtime/${hrEditId}`);
+    const workerView = await api(workerToken, 'GET', `/overtime/${hrEditId}`);
+    check(
+      'the record says whose it is, and prices at the employee’s rate whoever reads it',
+      hrView.body.own === false &&
+        workerView.body.own === true &&
+        hrView.body.canModify === true &&
+        JSON.stringify(hrView.body.rate) === JSON.stringify(workerView.body.rate),
+      `${hrView.body.own}/${workerView.body.own} ${JSON.stringify(hrView.body.rate)}`,
+    );
+    const byHrOt = await api(hrToken, 'PUT', `/overtime/${hrEditId}`, plan({ date: '2026-12-03', plannedEnd: '21:00', reason: `${TAG} HR corrects the plan` }));
+    const hrSecondAsk = await openRequest('overtime_prior', hrEditId);
+    check(
+      'HR (edit_all) changes the worker’s filing, and it is sent again in the WORKER’s name',
+      byHrOt.status === 200 && !!hrSecondAsk && hrSecondAsk.id !== hrFirstAsk?.id && hrSecondAsk.requesterId === worker.id,
+      `${byHrOt.status} ${hrSecondAsk?.requesterId === hrOfficer.id ? 'HR' : hrSecondAsk?.requesterId} ${JSON.stringify(byHrOt.body).slice(0, 100)}`,
+    );
+    check(
+      'and the worker is told the request was withdrawn — somebody else changed it',
+      !!(await prisma.notification.findFirst({
+        where: {
+          userId: worker.id,
+          type: 'approval.withdrawn',
+          link: `/g-hr/overtime/${hrEditId}`,
+          body: `${hrEdit.body.number} — changed by ${hrOfficer.name} and sent again`,
+        },
+      })),
+    );
+    const plain = await makeUser('ZZ Plain', 'plain@verifyhr.local', [workerRole.id]);
+    const plainPut = await api(signToken(plain.id, plain.email), 'PUT', `/overtime/${hrEditId}`, plan({ date: '2026-12-03' }));
+    check('PUT /overtime/:id — somebody holding no edit right is refused (403)', plainPut.status === 403, String(plainPut.status));
+
+    // The actual hours: a super admin filing them files them in the worker's
+    // name; a project or budget line named with them is checked like a plan's.
+    const authorisedFor = async (date: string, reason: string) =>
+      prisma.overtimeRequest.create({
+        data: {
+          number: await nextNumber('overtime_request'),
+          employeeId: employee.id,
+          date: day(date),
+          plannedStart: '17:00',
+          plannedEnd: '20:00',
+          estimatedHours: D(3),
+          dinnerBreak: false,
+          stage: 'PRIOR_APPROVED',
+          reason,
+        },
+      });
+    const adminFiles = await authorisedFor('2026-12-04', `${TAG} hours filed by an admin`);
+    const adminActual = await api(adminToken, 'POST', `/overtime/${adminFiles.id}/actual`, { actualStart: '17:00', actualEnd: '20:00' });
+    const adminActualAsk = await openRequest('overtime_request', adminFiles.id);
+    check(
+      'a super admin filing the worker’s actual hours files them in the worker’s name',
+      adminActual.status === 200 && adminActualAsk?.requesterId === worker.id,
+      `${adminActual.status} ${adminActualAsk?.requesterId === admin.id ? 'the admin' : adminActualAsk?.requesterId}`,
+    );
+
+    const charged = await authorisedFor('2026-12-08', `${TAG} hours charged on filing`);
+    const strayJob = await api(workerToken, 'POST', `/overtime/${charged.id}/actual`, { actualStart: '17:00', actualEnd: '20:00', jobId: 'does-not-exist' });
+    const strayLine = await api(workerToken, 'POST', `/overtime/${charged.id}/actual`, {
+      actualStart: '17:00',
+      actualEnd: '20:00',
+      jobId: job.id,
+      costCategoryId: 'does-not-exist',
+    });
+    const jobStatus = (await prisma.job.findUniqueOrThrow({ where: { id: job.id } })).status;
+    await prisma.job.update({ where: { id: job.id }, data: { status: 'TURNED_OVER' } });
+    const closedJob = await api(workerToken, 'POST', `/overtime/${charged.id}/actual`, { actualStart: '17:00', actualEnd: '20:00', jobId: job.id });
+    await prisma.job.update({ where: { id: job.id }, data: { status: jobStatus } });
+    const chargedAfter = await prisma.overtimeRequest.findUnique({ where: { id: charged.id } });
+    check(
+      'POST /overtime/:id/actual — a project or budget line that does not exist is a 400, not a 500',
+      strayJob.status === 400 &&
+        String(strayJob.body.error).includes('project does not exist') &&
+        strayLine.status === 400 &&
+        String(strayLine.body.error).includes('budget line does not exist'),
+      `${strayJob.status} / ${strayLine.status} ${JSON.stringify(strayLine.body).slice(0, 100)}`,
+    );
+    check(
+      'and a closed project is refused — it takes no more overtime; the filing stays authorised and unfiled',
+      closedJob.status === 400 &&
+        String(closedJob.body.error).includes('no longer takes overtime') &&
+        chargedAfter?.stage === 'PRIOR_APPROVED' &&
+        chargedAfter.actualHours === null &&
+        chargedAfter.jobId === null &&
+        !(await openRequest('overtime_request', charged.id)),
+      `${closedJob.status} ${chargedAfter?.stage}`,
+    );
+    const chargedOk = await api(workerToken, 'POST', `/overtime/${charged.id}/actual`, {
+      actualStart: '17:00',
+      actualEnd: '20:00',
+      jobId: job.id,
+      costCategoryId: labour.id,
+    });
+    const chargedOkRow = await prisma.overtimeRequest.findUnique({ where: { id: charged.id } });
+    check(
+      'an open project and a real budget line are taken',
+      chargedOk.status === 200 && chargedOkRow?.jobId === job.id && chargedOkRow.costCategoryId === labour.id,
+      `${chargedOk.status} ${JSON.stringify(chargedOk.body).slice(0, 100)}`,
+    );
+
+    // The pre-check refuses exactly what the engine refuses, no more: a
+    // "Reports to" who has been deactivated is accepted by the engine for
+    // leave, so overtime is not refused for it either — the two agree.
+    await prisma.user.update({ where: { id: supervisor.id }, data: { isActive: false } });
+    const otAway = await api(workerToken, 'POST', '/overtime', plan({ date: '2026-12-10', reason: `${TAG} supervisor away` }));
+    const leaveAway = await api(workerToken, 'POST', '/leave', leaveBody({ startDate: '2026-12-10', endDate: '2026-12-10', reason: `${TAG} supervisor away` }));
+    const leaveAwaySend = await api(workerToken, 'POST', `/leave/${String(leaveAway.body.id ?? '')}/submit`);
+    await prisma.user.update({ where: { id: supervisor.id }, data: { isActive: true } });
+    check(
+      'with "Reports to" deactivated, overtime and leave agree — the engine accepts both, and so does the pre-check',
+      otAway.status === 201 && leaveAwaySend.status === 200,
+      `${otAway.status} / ${leaveAwaySend.status} ${JSON.stringify(otAway.body).slice(0, 120)}`,
+    );
+
     // The clock's "Ask HR to link it" becomes a link — for HR only.
     const unlinkedHr = await prisma.user.create({
       data: {

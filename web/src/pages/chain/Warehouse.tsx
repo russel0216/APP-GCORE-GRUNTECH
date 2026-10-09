@@ -97,18 +97,27 @@ export function Receivings() {
 export function ReceivingDetail() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
+  const toast = useToast();
   const [rec, setRec] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+  const [modifying, setModifying] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!id) return;
+    try {
+      setRec(await api.get<Record<string, unknown>>(`/receivings/${id}`));
+      setError(null);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
   useEffect(() => {
-    if (!id) return;
-    api
-      .get<Record<string, unknown>>(`/receivings/${id}`)
-      .then(setRec)
-      .catch(setError)
-      .finally(() => setLoading(false));
-  }, [id]);
+    void load();
+  }, [load]);
 
   if (loading) return <Loading />;
   if (!rec) return <ErrorBox error={error ?? new Error('Not found')} />;
@@ -137,6 +146,12 @@ export function ReceivingDetail() {
   }[];
 
   const warehouse = rec.warehouse as { name: string } | null;
+  const refs = {
+    number: String(rec.number),
+    deliveryRefNo: typeof rec.deliveryRefNo === 'string' ? rec.deliveryRefNo : null,
+    invoiceRefNo: typeof rec.invoiceRefNo === 'string' ? rec.invoiceRefNo : null,
+    notes: typeof rec.notes === 'string' ? rec.notes : null,
+  };
 
   return (
     <div>
@@ -159,6 +174,8 @@ export function ReceivingDetail() {
             · from <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link> · received{' '}
             {formatDate(String(rec.receivedDate))}
             {warehouse ? ` into ${warehouse.name}` : ''}
+            {refs.deliveryRefNo ? ` · DR ${refs.deliveryRefNo}` : ''}
+            {refs.invoiceRefNo ? ` · invoice ${refs.invoiceRefNo}` : ''}
             {bills.length > 0 && (
               <>
                 {' '}
@@ -186,6 +203,8 @@ export function ReceivingDetail() {
             </Link>
           )
         }
+        // Its references only: what arrived is the record.
+        modify={rec.canEdit === true ? () => setModifying(true) : undefined}
       />
 
       <ErrorBox error={error} />
@@ -195,6 +214,13 @@ export function ReceivingDetail() {
           ? `${formatMoney(Number(rec.value))} charged to ${order.job?.number ?? 'the project'}, and the same released from committed.`
           : `${formatMoney(Number(rec.value))} added to stock. No project has been charged — that happens at issuance.`}
       </div>
+
+      {refs.notes && (
+        <div className="card proc-card">
+          <h3 className="card-title">Notes</h3>
+          <p className="activity-notes">{refs.notes}</p>
+        </div>
+      )}
 
       <div className="card">
         <h3 className="card-title">Items received</h3>
@@ -237,7 +263,92 @@ export function ReceivingDetail() {
           </table>
         </div>
       </div>
+
+      {modifying && (
+        <ReceivingRefsModal
+          receivingId={String(rec.id)}
+          refs={refs}
+          onClose={() => setModifying(false)}
+          onSaved={() => {
+            setModifying(false);
+            toast('ok', `${refs.number} updated`);
+            void load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Modify a receiving report: its paper references and notes only. The lines,
+ * quantities, costs, warehouse and date moved stock and job cost, and stay as
+ * they were received.
+ */
+function ReceivingRefsModal({
+  receivingId,
+  refs,
+  onClose,
+  onSaved,
+}: {
+  receivingId: string;
+  refs: { number: string; deliveryRefNo: string | null; invoiceRefNo: string | null; notes: string | null };
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    deliveryRefNo: refs.deliveryRefNo ?? '',
+    invoiceRefNo: refs.invoiceRefNo ?? '',
+    notes: refs.notes ?? '',
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/receivings/${receivingId}`, {
+        deliveryRefNo: form.deliveryRefNo.trim() || null,
+        invoiceRefNo: form.invoiceRefNo.trim() || null,
+        notes: form.notes.trim() || null,
+      });
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Modify receiving ${refs.number}`}
+      onClose={onClose}
+      footer={
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button className="btn btn-primary" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </ModalFoot>
+      }
+    >
+      <ErrorBox error={error} />
+      <div className="alert info">
+        What arrived — the lines, quantities, costs, warehouse and date — is the record and stays as
+        received. Only the references and notes change here.
+      </div>
+      <div className="grid grid-2">
+        <Field label="Delivery receipt no.">
+          <input value={form.deliveryRefNo} onChange={(e) => setForm({ ...form, deliveryRefNo: e.target.value })} />
+        </Field>
+        <Field label="Supplier invoice no.">
+          <input value={form.invoiceRefNo} onChange={(e) => setForm({ ...form, invoiceRefNo: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Notes">
+        <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+    </Modal>
   );
 }
 
@@ -331,9 +442,9 @@ export function StockIssues() {
       />
 
       {creating && (
-        <NewIssueModal
+        <IssueModal
           onClose={() => setCreating(false)}
-          onCreated={(id) => {
+          onSaved={(id) => {
             setCreating(false);
             setReload((r) => r + 1);
             navigate(`/g-chain/stock-issuance/${id}`);
@@ -344,12 +455,45 @@ export function StockIssues() {
   );
 }
 
-function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
+/** The draft being modified, as the issue page holds it. */
+interface IssueHeader {
+  id: string;
+  number: string;
+  purpose: string;
+  issuedToName: string | null;
+  issueDate: string;
+  lineCount: number;
+  job: { id: string; number: string; name: string } | null;
+  warehouse: { id: string; name: string };
+}
+
+/**
+ * New stock issue, or — given `existing` — Modify a draft. Nothing has moved
+ * yet, so all of it may change: a new warehouse re-prices the lines at its
+ * average, and a project needs every line's cost bucket (the API says which
+ * item has none).
+ */
+function IssueModal({
+  existing,
+  onClose,
+  onSaved,
+}: {
+  existing?: IssueHeader;
+  onClose: () => void;
+  onSaved: (id: string) => void;
+}) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
-  const [form, setForm] = useState({ jobId: '', warehouseId: '', issuedToName: '', purpose: '' });
+  const [form, setForm] = useState({
+    jobId: existing?.job?.id ?? '',
+    warehouseId: existing?.warehouse.id ?? '',
+    issuedToName: existing?.issuedToName ?? '',
+    purpose: existing?.purpose ?? '',
+    issueDate: existing ? existing.issueDate.slice(0, 10) : '',
+  });
 
   useEffect(() => {
     api.get<typeof jobs>('/jobs/lookup').then(setJobs).catch(() => {});
@@ -357,38 +501,55 @@ function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       .get<typeof warehouses>('/warehouses')
       .then((w) => {
         setWarehouses(w);
-        if (w.length === 1) setForm((f) => ({ ...f, warehouseId: w[0].id }));
+        if (w.length === 1) setForm((f) => (f.warehouseId ? f : { ...f, warehouseId: w[0].id }));
       })
       .catch(() => {});
   }, []);
 
-  async function create() {
+  async function save() {
     setBusy(true);
     setError(null);
+    const body = {
+      jobId: form.jobId || null,
+      warehouseId: form.warehouseId,
+      issuedToName: form.issuedToName || null,
+      purpose: form.purpose,
+    };
     try {
-      const created = await api.post<{ id: string }>('/stock-issues', {
-        jobId: form.jobId || null,
-        warehouseId: form.warehouseId,
-        issuedToName: form.issuedToName || null,
-        purpose: form.purpose,
-      });
-      onCreated(created.id);
+      if (existing) {
+        await api.patch(`/stock-issues/${existing.id}`, { ...body, issueDate: form.issueDate || null });
+        toast('ok', `${existing.number} updated`);
+        onSaved(existing.id);
+      } else {
+        const created = await api.post<{ id: string }>('/stock-issues', body);
+        onSaved(created.id);
+      }
     } catch (err) {
       setError(err);
       setBusy(false);
     }
   }
 
+  // The issue's own project and warehouse stay pickable even when the
+  // lookups leave them out.
+  const jobOptions =
+    existing?.job && !jobs.some((j) => j.id === existing.job!.id) ? [existing.job, ...jobs] : jobs;
+  const warehouseOptions =
+    existing && !warehouses.some((w) => w.id === existing.warehouse.id)
+      ? [existing.warehouse, ...warehouses]
+      : warehouses;
+  const moving = !!existing && existing.lineCount > 0 && form.warehouseId !== existing.warehouse.id;
+
   return (
     <Modal
-      title="New stock issue"
+      title={existing ? `Modify stock issue ${existing.number}` : 'New stock issue'}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
-            onClick={create}
-            disabled={busy || !form.warehouseId || form.purpose.length < 3}
+            onClick={save}
+            disabled={busy || !form.warehouseId || form.purpose.trim().length < 3}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
@@ -396,10 +557,13 @@ function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       }
     >
       <ErrorBox error={error} />
-      <Field label="From warehouse">
+      <Field
+        label="From warehouse"
+        hint={moving ? 'The lines are re-priced at this warehouse’s average cost' : undefined}
+      >
         <select value={form.warehouseId} onChange={(e) => setForm({ ...form, warehouseId: e.target.value })}>
           <option value="">— choose —</option>
-          {warehouses.map((w) => (
+          {warehouseOptions.map((w) => (
             <option key={w.id} value={w.id}>
               {w.name}
             </option>
@@ -409,7 +573,7 @@ function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       <Field label="For project" hint="Leave blank for general use — no job is charged">
         <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
           <option value="">— none —</option>
-          {jobs.map((j) => (
+          {jobOptions.map((j) => (
             <option key={j.id} value={j.id}>
               {j.number} — {j.name}
             </option>
@@ -422,18 +586,25 @@ function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       <Field label="Purpose">
         <input value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} />
       </Field>
+      {existing && (
+        <Field label="Date">
+          <input type="date" value={form.issueDate} onChange={(e) => setForm({ ...form, issueDate: e.target.value })} />
+        </Field>
+      )}
     </Modal>
   );
 }
 
 export function StockIssueDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
   const [issue, setIssue] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [adding, setAdding] = useState(false);
+  const [modifying, setModifying] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -465,6 +636,10 @@ export function StockIssueDetail() {
     costCategory: { name: string } | null;
   }[];
   const isDraft = issue.status === 'DRAFT';
+  // The API's own rules: a draft, changed by the create or edit_all right and
+  // deleted by the delete right. Issued stock has moved.
+  const canEdit = issue.canEdit === true;
+  const canDelete = issue.canDelete === true;
   const number = String(issue.number);
   const issuedTo = typeof issue.issuedToName === 'string' && issue.issuedToName ? issue.issuedToName : null;
 
@@ -481,7 +656,13 @@ export function StockIssueDetail() {
     await load();
   }
 
-  const addItemButton = isDraft ? (
+  async function remove() {
+    await api.del(`/stock-issues/${id}`);
+    toast('ok', `${number} deleted`);
+    navigate('/g-chain/stock-issuance');
+  }
+
+  const addItemButton = canEdit ? (
     <button className="btn btn-sm" onClick={() => setAdding(true)}>
       + Add item
     </button>
@@ -534,6 +715,19 @@ export function StockIssueDetail() {
           )
         }
         print={`/api/stock-issues/${id}/pdf`}
+        more={[
+          canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${number}?`,
+              body: 'Nothing has left the store yet. It cannot be undone.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
+            },
+          },
+        ]}
+        modify={canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />
 
@@ -567,7 +761,7 @@ export function StockIssueDetail() {
                   <th className="right">Qty</th>
                   <th className="right">Unit cost</th>
                   <th className="right">Amount</th>
-                  {isDraft && <th className="proc-col-actions" aria-label="Actions" />}
+                  {canEdit && <th className="proc-col-actions" aria-label="Actions" />}
                 </tr>
               </thead>
               <tbody>
@@ -583,7 +777,7 @@ export function StockIssueDetail() {
                     </td>
                     <td className="right mono">{formatMoney(i.unitCost)}</td>
                     <td className="right mono">{formatMoney(i.amount)}</td>
-                    {isDraft && (
+                    {canEdit && (
                       <td>
                         <div className="proc-row-actions">
                           <button
@@ -611,13 +805,33 @@ export function StockIssueDetail() {
                   <td className="right mono">
                     <strong>{formatMoney(Number(issue.value))}</strong>
                   </td>
-                  {isDraft && <td />}
+                  {canEdit && <td />}
                 </tr>
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {modifying && (
+        <IssueModal
+          existing={{
+            id: String(id),
+            number,
+            purpose: String(issue.purpose),
+            issuedToName: issuedTo,
+            issueDate: String(issue.issueDate),
+            lineCount: items.length,
+            job,
+            warehouse,
+          }}
+          onClose={() => setModifying(false)}
+          onSaved={() => {
+            setModifying(false);
+            void load();
+          }}
+        />
+      )}
 
       {adding && (
         <AddIssueItemModal
@@ -839,7 +1053,7 @@ export function BorrowSlips() {
       />
 
       {creating && (
-        <NewBorrowModal
+        <BorrowModal
           onClose={() => setCreating(false)}
           onCreated={() => {
             setCreating(false);
@@ -851,7 +1065,102 @@ export function BorrowSlips() {
   );
 }
 
-function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+/** A slip being modified: what may still change while anything is out. */
+interface SlipHeader {
+  id: string;
+  number: string;
+  borrowerName: string;
+  dueAt: string;
+  purpose: string;
+  notes: string | null;
+}
+
+/**
+ * New borrow slip, or — given `existing` — Modify one while anything on it
+ * is still out: who has it, when it is due back, what for, the notes. The
+ * warehouse and the items are fixed once lent, because the stock has moved.
+ */
+function BorrowModal({
+  existing,
+  onClose,
+  onCreated,
+}: {
+  existing?: SlipHeader;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  if (existing) return <ModifySlipForm slip={existing} onClose={onClose} onSaved={onCreated} />;
+  return <NewSlipForm onClose={onClose} onCreated={onCreated} />;
+}
+
+function ModifySlipForm({ slip, onClose, onSaved }: { slip: SlipHeader; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    borrowerName: slip.borrowerName,
+    dueAt: slip.dueAt.slice(0, 10),
+    purpose: slip.purpose,
+    notes: slip.notes ?? '',
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/borrow-slips/${slip.id}`, {
+        borrowerName: form.borrowerName.trim(),
+        dueAt: form.dueAt,
+        purpose: form.purpose.trim(),
+        notes: form.notes.trim() || null,
+      });
+      toast('ok', `${slip.number} updated`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Modify borrow slip ${slip.number}`}
+      onClose={onClose}
+      footer={
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={busy || form.borrowerName.trim().length < 2 || !form.dueAt || form.purpose.trim().length < 3}
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </ModalFoot>
+      }
+    >
+      <ErrorBox error={error} />
+      <div className="alert info">
+        The warehouse and the items are fixed — the stock has already moved out of available.
+      </div>
+      <div className="grid grid-2">
+        <Field label="Borrower">
+          <input value={form.borrowerName} onChange={(e) => setForm({ ...form, borrowerName: e.target.value })} />
+        </Field>
+        <Field label="Due back">
+          <input type="date" value={form.dueAt} onChange={(e) => setForm({ ...form, dueAt: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Purpose">
+        <input value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} />
+      </Field>
+      <Field label="Notes">
+        <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+    </Modal>
+  );
+}
+
+function NewSlipForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -1015,6 +1324,7 @@ export function BorrowSlipDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [returns, setReturns] = useState<Record<string, string>>({});
+  const [modifying, setModifying] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -1048,6 +1358,7 @@ export function BorrowSlipDetail() {
   }[];
   const job = slip.job as { id: string; number: string } | null;
   const done = slip.status === 'RETURNED';
+  const notes = typeof slip.notes === 'string' && slip.notes ? slip.notes : null;
 
   async function receiveBack() {
     try {
@@ -1083,9 +1394,18 @@ export function BorrowSlipDetail() {
             · due {formatDate(String(slip.dueAt))}
           </>
         }
+        // While anything is still out (the API's rule): who, when due, what for.
+        modify={slip.canEdit === true ? () => setModifying(true) : undefined}
       />
 
       <ErrorBox error={error} />
+
+      {notes && (
+        <div className="card proc-card">
+          <h3 className="card-title">Notes</h3>
+          <p className="activity-notes">{notes}</p>
+        </div>
+      )}
 
       <div className="card">
         <h3 className="card-title">Items on loan</h3>
@@ -1143,6 +1463,24 @@ export function BorrowSlipDetail() {
           </div>
         )}
       </div>
+
+      {modifying && (
+        <BorrowModal
+          existing={{
+            id: String(slip.id),
+            number: String(slip.number),
+            borrowerName: String(slip.borrowerName),
+            dueAt: String(slip.dueAt),
+            purpose: String(slip.purpose),
+            notes,
+          }}
+          onClose={() => setModifying(false)}
+          onCreated={() => {
+            setModifying(false);
+            void load();
+          }}
+        />
+      )}
     </div>
   );
 }

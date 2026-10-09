@@ -442,8 +442,9 @@ async function main() {
   const lookup = await fetch(`${BASE}/users/lookup?q=${TAG}`, { headers: { Authorization: `Bearer ${tok.bystander}` } });
   const lookupRows = (await lookup.json()) as Record<string, unknown>[];
   check('a bystander without create can still look people up — it is a lookup, not admin', lookup.status === 200 && lookupRows.length >= 5, `${lookup.status} ${lookupRows.length}`);
-  check('no row carries a password hash or anything but the five fields',
-    lookupRows.every((r) => !('passwordHash' in r) && Object.keys(r).every((k) => ['id', 'name', 'email', 'position', 'department'].includes(k))));
+  // Six since 2026-10-08: the photo (an attachment id) for pickers that show faces.
+  check('no row carries a password hash or anything but the six fields',
+    lookupRows.every((r) => !('passwordHash' in r) && Object.keys(r).every((k) => ['id', 'name', 'email', 'position', 'department', 'photoPath'].includes(k))));
   const holding = await fetch(`${BASE}/users/lookup?q=${TAG}&holding=ghr.meetings.create`, { headers: { Authorization: `Bearer ${tok.bystander}` } });
   const holders = ((await holding.json()) as { id: string }[]).map((r) => r.id);
   check('holding= keeps the organiser and drops the DENY-overridden colleague and the viewer',

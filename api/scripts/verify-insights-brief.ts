@@ -252,8 +252,8 @@ async function main() {
   const ownQuotesUser = await makeUser('ZZINB Seller', `seller${MAIL}`, { roleIds: [ownQuotesRole.id] });
   const noFinExportUser = await makeUser('ZZINB Analyst', `analyst${MAIL}`, { roleIds: [noFinExportRole.id] });
 
-  const healthcare = await prisma.subIndustry.findFirst({ where: { name: 'Hospital' } });
-  if (!healthcare) throw new Error('The seeded Hospital sub-industry is missing — run npm run seed');
+  const healthcare = await prisma.subIndustry.findFirst({ where: { name: 'Healthcare' } });
+  if (!healthcare) throw new Error('The seeded Healthcare sub-industry is missing — run npm run seed');
 
   const hospital = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital`, subIndustryId: healthcare.id },
@@ -795,16 +795,16 @@ async function main() {
       activeIds.every((id) => inds.some((x) => x.id === id)) && inds[inds.length - 1]?.id === 'UNCLASSIFIED',
       inds.map((x) => x.name).join(', '),
     );
-    const hi = inds.find((x) => x.name === 'Hospital');
+    const hi = inds.find((x) => x.name === 'Healthcare');
     const openHi = await prisma.quotation.findMany({
-      where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] }, customer: { subIndustry: { name: 'Hospital' } } },
+      where: { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] }, customer: { subIndustry: { name: 'Healthcare' } } },
       select: { revisions: { select: { total: true, status: true, revision: true } } },
     });
     const hiLeads = await prisma.lead.count({
-      where: { createdAt: { gte: range.from, lte: range.to }, customer: { subIndustry: { name: 'Hospital' } } },
+      where: { createdAt: { gte: range.from, lte: range.to }, customer: { subIndustry: { name: 'Healthcare' } } },
     });
     check(
-      'the Hospital row equals the records read directly',
+      'the Healthcare row equals the records read directly',
       !!hi &&
         hi.leads === hiLeads &&
         money(hi.openValue, cents(openHi.reduce((s, q) => s + quotationValue(q.revisions), 0))) &&
@@ -827,7 +827,7 @@ async function main() {
     const plHeader = plCsv.text.replace(/^﻿/, '').split('\r\n')[0];
     check(
       'the pipeline CSV appends a Sub-industry column, then Groups — columns are appended, never reordered',
-      plCsv.status === 200 && plHeader.endsWith(',Lost reason,Sub-industry,Groups') && plCsv.text.includes('Hospital'),
+      plCsv.status === 200 && plHeader.endsWith(',Lost reason,Sub-industry,Groups') && plCsv.text.includes('Healthcare'),
       plHeader,
     );
   }

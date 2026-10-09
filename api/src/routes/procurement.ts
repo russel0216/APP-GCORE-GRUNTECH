@@ -17,8 +17,17 @@ import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
 import { nextNumber } from '../shared/numbering';
-import { submitForApproval, onApprovalSettled, approvalSignoffs } from '../shared/approvals';
-import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import {
+  submitForApproval,
+  onApprovalSettled,
+  approvalSignoffs,
+  approvalSlots,
+  routePreview,
+  cancelOpenRequest,
+  type ApprovalOutcome,
+  type ApprovalSlot,
+} from '../shared/approvals';
+import { renderDocument, formatMoney, formatDate, type PdfSection, type Signatory } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
 import {
   postJobCost,
@@ -179,11 +188,10 @@ purchaseRequestRoutes.get(
       ...presentPr(pr as unknown as Record<string, unknown>),
       orders: pr.orders.map((o) => ({ ...o, total: num(o.total) })),
       budget,
-      canEdit:
-        pr.status === 'DRAFT' &&
-        (me.isSuperAdmin ||
-          me.permissions.has('gchain.purchase_requests.edit_all') ||
-          (pr.requestedById === me.id && me.permissions.has('gchain.purchase_requests.edit_own'))),
+      // The routes' own rules (prForEdit, /withdraw): a draft is changed, and
+      // a pending one pulled back, by its requester or an edit_all holder.
+      canEdit: pr.status === 'DRAFT' && mayEditPr(me, pr),
+      canWithdraw: pr.status === 'PENDING_APPROVAL' && mayEditPr(me, pr),
     });
   }),
 );
@@ -197,21 +205,35 @@ const prSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
+/** The rights on the request's edit routes: its requester's, or anybody's. */
+const PR_EDIT = ['gchain.purchase_requests.edit_own', 'gchain.purchase_requests.edit_all'] as const;
+
+/** Who may change a draft request, or pull a pending one back: edit_all, or its requester holding edit_own (rule 7). */
+function mayEditPr(me: ResolvedUser, pr: { requestedById: string }): boolean {
+  return canEditRecord(me, 'gchain', 'purchase_requests', pr.requestedById);
+}
+
+/**
+ * The distinction that stops double-counting, held on create and on every
+ * change: a direct-to-job request must name its job, a stock replenishment
+ * its warehouse (and never a job).
+ */
+function checkPrTarget(kind: string, jobId: string | null | undefined, warehouseId: string | null | undefined) {
+  if (kind === 'DIRECT_TO_JOB' && !jobId) {
+    throw badRequest('A direct-to-job request must name the project it is for');
+  }
+  if (kind === 'STOCK_REPLENISHMENT' && !warehouseId) {
+    throw badRequest('A stock replenishment must name the warehouse it is for');
+  }
+}
+
 purchaseRequestRoutes.post(
   '/',
   require_('gchain.purchase_requests.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(prSchema, req.body);
-
-    // The distinction that stops double-counting: a direct-to-job request must
-    // name its job, a stock replenishment must not.
-    if (body.kind === 'DIRECT_TO_JOB' && !body.jobId) {
-      throw badRequest('A direct-to-job request must name the project it is for');
-    }
-    if (body.kind === 'STOCK_REPLENISHMENT' && !body.warehouseId) {
-      throw badRequest('A stock replenishment must name the warehouse it is for');
-    }
+    checkPrTarget(body.kind, body.jobId, body.warehouseId);
 
     const pr = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('purchase_request', tx);
@@ -244,40 +266,122 @@ purchaseRequestRoutes.post(
 
 async function prForEdit(req: Parameters<typeof currentUser>[0], id: string) {
   const me = currentUser(req);
-  const pr = await prisma.purchaseRequest.findUnique({ where: { id } });
+  const pr = await prisma.purchaseRequest.findUnique({
+    where: { id },
+    include: { items: { include: { item: { select: { name: true, costCategoryId: true } } } } },
+  });
   if (!pr) throw notFound('Purchase request not found');
   if (pr.status !== 'DRAFT') {
     throw badRequest(`${pr.number} is ${pr.status.toLowerCase().replace(/_/g, ' ')} and cannot be changed`);
   }
-  const mayEdit =
-    me.isSuperAdmin ||
-    me.permissions.has('gchain.purchase_requests.edit_all') ||
-    (pr.requestedById === me.id && me.permissions.has('gchain.purchase_requests.edit_own'));
-  if (!mayEdit) throw forbidden('This request belongs to someone else');
-  return pr;
+  if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
+  return { pr, me };
 }
 
+/**
+ * Modifying a draft request's header — including what it is for.
+ *
+ * The kind and the project may change, under the create route's rules: a
+ * direct-to-job request names its project and every line its budget line (a
+ * line with none takes its item's default category, or the change is
+ * refused); a stock replenishment names its warehouse and loses its project.
+ * Approval snapshots the amount and the subject, so only a DRAFT is changed —
+ * a pending one is pulled back first (POST /:id/withdraw).
+ */
 purchaseRequestRoutes.patch(
   '/:id',
-  require_('gchain.purchase_requests.edit_own'),
+  requireAny(...PR_EDIT),
   handler(async (req, res) => {
-    await prForEdit(req, req.params.id);
-    const body = parseBody(prSchema.partial(), req.body);
-
-    const pr = await prisma.purchaseRequest.update({
-      where: { id: req.params.id },
-      data: {
-        ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
-        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
-        ...(body.neededBy !== undefined ? { neededBy: asDate(body.neededBy) } : {}),
-        ...(body.warehouseId !== undefined ? { warehouseId: body.warehouseId || null } : {}),
-      },
-    });
-    await audit(
-      { entityType: 'purchase_request', entityId: pr.id, action: 'UPDATED', summary: `Modified ${pr.number}` },
-      req,
+    const { pr } = await prForEdit(req, req.params.id);
+    const body = parseBody(
+      z.object({
+        kind: z.enum(['DIRECT_TO_JOB', 'STOCK_REPLENISHMENT']).optional(),
+        jobId: z.string().optional().nullable(),
+        warehouseId: z.string().optional().nullable(),
+        purpose: z.string().trim().min(3, 'Say what this is for').optional(),
+        neededBy: z.string().optional().nullable(),
+        notes: z.string().optional().nullable(),
+      }),
+      req.body,
     );
-    res.json(pr);
+
+    const kind = body.kind ?? pr.kind;
+    const jobId =
+      kind === 'STOCK_REPLENISHMENT' ? null : body.jobId !== undefined ? body.jobId || null : pr.jobId;
+    const warehouseId = body.warehouseId !== undefined ? body.warehouseId || null : pr.warehouseId;
+    checkPrTarget(kind, jobId, warehouseId);
+
+    if (jobId && jobId !== pr.jobId) {
+      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { id: true } });
+      if (!job) throw badRequest('That project does not exist');
+    }
+    if (warehouseId && warehouseId !== pr.warehouseId) {
+      const warehouse = await prisma.warehouse.findUnique({ where: { id: warehouseId }, select: { id: true } });
+      if (!warehouse) throw badRequest('That warehouse does not exist');
+    }
+
+    // Charged to a project, every line must find its budget line — the
+    // item's own category where the line names an item that has one.
+    const categoryFills: { id: string; costCategoryId: string }[] = [];
+    if (kind === 'DIRECT_TO_JOB') {
+      const bare: string[] = [];
+      for (const line of pr.items) {
+        if (line.costCategoryId) continue;
+        if (line.item?.costCategoryId) categoryFills.push({ id: line.id, costCategoryId: line.item.costCategoryId });
+        else bare.push(line.description);
+      }
+      if (bare.length) {
+        throw badRequest(
+          `A direct-to-job request needs a budget line on every line, and ${bare.join(', ')} ` +
+            `${bare.length === 1 ? 'has' : 'have'} none. Give ${bare.length === 1 ? 'it' : 'them'} one, or remove ${
+              bare.length === 1 ? 'it' : 'them'
+            }, first.`,
+        );
+      }
+    }
+
+    const changed: string[] = [];
+    if (kind !== pr.kind) changed.push(kind === 'DIRECT_TO_JOB' ? 'now for a project' : 'now for warehouse stock');
+    if (jobId !== pr.jobId && kind === pr.kind) changed.push('project');
+    if (warehouseId !== pr.warehouseId) changed.push('warehouse');
+    if (body.purpose !== undefined && body.purpose !== pr.purpose) changed.push('purpose');
+    if (body.neededBy !== undefined && (asDate(body.neededBy)?.getTime() ?? null) !== (pr.neededBy?.getTime() ?? null)) {
+      changed.push('needed by');
+    }
+    if (body.notes !== undefined && (body.notes || null) !== pr.notes) changed.push('notes');
+    if (categoryFills.length) changed.push(`budget line filled on ${categoryFills.length} line${categoryFills.length === 1 ? '' : 's'}`);
+
+    await prisma.$transaction(async (tx) => {
+      // Claimed on DRAFT: a submit that landed since the read above wins.
+      const claimed = await tx.purchaseRequest.updateMany({
+        where: { id: pr.id, status: 'DRAFT' },
+        data: {
+          kind,
+          jobId,
+          warehouseId,
+          ...(body.purpose !== undefined ? { purpose: body.purpose } : {}),
+          ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+          ...(body.neededBy !== undefined ? { neededBy: asDate(body.neededBy) } : {}),
+        },
+      });
+      if (!claimed.count) throw badRequest(`${pr.number} was submitted a moment ago and cannot be changed`);
+      for (const fill of categoryFills) {
+        await tx.purchaseRequestItem.update({ where: { id: fill.id }, data: { costCategoryId: fill.costCategoryId } });
+      }
+      await audit(
+        {
+          entityType: 'purchase_request',
+          entityId: pr.id,
+          action: 'UPDATED',
+          summary: `Modified ${pr.number}${changed.length ? `: ${changed.join(', ')}` : ''}`,
+        },
+        req,
+        tx,
+      );
+    });
+
+    const full = await loadPr(pr.id);
+    res.json(presentPr(full as unknown as Record<string, unknown>));
   }),
 );
 
@@ -292,9 +396,9 @@ const prItemSchema = z.object({
 
 purchaseRequestRoutes.post(
   '/:id/items',
-  require_('gchain.purchase_requests.edit_own'),
+  requireAny(...PR_EDIT),
   handler(async (req, res) => {
-    const pr = await prForEdit(req, req.params.id);
+    const { pr } = await prForEdit(req, req.params.id);
     const body = parseBody(prItemSchema, req.body);
 
     if (pr.kind === 'DIRECT_TO_JOB' && !body.costCategoryId) {
@@ -332,9 +436,9 @@ purchaseRequestRoutes.post(
 
 purchaseRequestRoutes.patch(
   '/:id/items/:itemId',
-  require_('gchain.purchase_requests.edit_own'),
+  requireAny(...PR_EDIT),
   handler(async (req, res) => {
-    const pr = await prForEdit(req, req.params.id);
+    const { pr } = await prForEdit(req, req.params.id);
     const body = parseBody(prItemSchema.partial(), req.body);
     if (pr.kind === 'DIRECT_TO_JOB' && body.costCategoryId !== undefined && !body.costCategoryId) {
       throw badRequest('A direct-to-job line needs a cost category — it is how the cost finds its budget line');
@@ -377,9 +481,9 @@ purchaseRequestRoutes.patch(
 
 purchaseRequestRoutes.delete(
   '/:id/items/:itemId',
-  require_('gchain.purchase_requests.edit_own'),
+  requireAny(...PR_EDIT),
   handler(async (req, res) => {
-    const pr = await prForEdit(req, req.params.id);
+    const { pr } = await prForEdit(req, req.params.id);
     const existing = await prisma.purchaseRequestItem.findFirst({
       where: { id: req.params.itemId, requestId: req.params.id },
     });
@@ -406,6 +510,11 @@ purchaseRequestRoutes.delete(
  * PR that would push Available below zero is blocked, or requires a Budget
  * Request first" (model §5.2) — a budget nobody can exceed is the only kind
  * that means anything.
+ *
+ * Submitted in the REQUESTER's name, whoever pressed the button — otherwise an
+ * edit_all holder submitting it could approve the request someone else raised.
+ * A submit the engine refuses goes back to DRAFT, never PENDING with no
+ * approval behind it.
  */
 purchaseRequestRoutes.post(
   '/:id/submit',
@@ -417,6 +526,7 @@ purchaseRequestRoutes.post(
       include: { items: { include: { costCategory: true } }, job: true },
     });
     if (!pr) throw notFound('Purchase request not found');
+    if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
     if (pr.status !== 'DRAFT') throw badRequest('This request has already been submitted');
     if (!pr.items.length) throw badRequest('Add at least one line before submitting');
 
@@ -453,24 +563,120 @@ purchaseRequestRoutes.post(
       }
     }
 
-    await prisma.purchaseRequest.update({
-      where: { id: pr.id },
+    // Claimed on DRAFT, so two presses cannot both submit it.
+    const claimed = await prisma.purchaseRequest.updateMany({
+      where: { id: pr.id, status: 'DRAFT' },
       data: { status: 'PENDING_APPROVAL' },
     });
+    if (!claimed.count) throw badRequest('This request has already been submitted');
 
-    await submitForApproval({
-      documentType: 'purchase_request',
-      documentId: pr.id,
-      documentNumber: pr.number,
-      subject: `${pr.job ? `${pr.job.number} — ` : ''}${pr.purpose}`,
-      amount: total,
-      link: `/g-chain/purchase-requests/${pr.id}`,
-      requesterId: me.id,
+    try {
+      await submitForApproval({
+        documentType: 'purchase_request',
+        documentId: pr.id,
+        documentNumber: pr.number,
+        subject: `${pr.job ? `${pr.job.number} — ` : ''}${pr.purpose}`,
+        amount: total,
+        link: `/g-chain/purchase-requests/${pr.id}`,
+        requesterId: pr.requestedById,
+      });
+    } catch (err) {
+      // Refused (no workflow, nobody to approve, already open): back to a
+      // draft the requester can act on.
+      await prisma.purchaseRequest.updateMany({
+        where: { id: pr.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      throw err;
+    }
+
+    // Pulled back while the request above was being opened: the pull-back
+    // found nothing to withdraw, so the request opened here would sit on a
+    // draft — where no decision can land and every later submit is refused as
+    // "already awaiting approval". Withdrawn now, through the engine, under a
+    // claim on the draft so a fresh submit cannot slip in between.
+    const pulledBack = await prisma.$transaction(async (tx) => {
+      const stillDraft = await tx.purchaseRequest.updateMany({
+        where: { id: pr.id, status: 'DRAFT' },
+        data: { updatedAt: new Date() },
+      });
+      if (!stillDraft.count) return false;
+      await cancelOpenRequest('purchase_request', pr.id, tx, `pulled back to draft by ${me.name} while it was being submitted`, me.id);
+      return true;
     });
+    if (pulledBack) {
+      throw badRequest(`${pr.number} was pulled back to draft while it was being submitted — submit it again when it is ready`);
+    }
 
-    res.json({ ok: true });
+    await audit(
+      { entityType: 'purchase_request', entityId: pr.id, action: 'SUBMITTED', summary: `${pr.number} sent for approval` },
+      req,
+    );
+    res.json({ ok: true, status: 'PENDING_APPROVAL' });
   }),
 );
+
+/**
+ * Pulling a request back from the approver to change it, as a sales order can
+ * be: the claim is conditional, so a decision that lands first wins, and the
+ * open request is withdrawn through the engine in the same transaction, which
+ * tells the approvers. The same request returns to DRAFT — no number burned.
+ */
+purchaseRequestRoutes.post(
+  '/:id/withdraw',
+  requireAny(...PR_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const pr = await prisma.purchaseRequest.findUnique({ where: { id: req.params.id } });
+    if (!pr) throw notFound('Purchase request not found');
+    if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
+    if (pr.status !== 'PENDING_APPROVAL') {
+      throw badRequest('This request is not with the approver — nothing to pull back');
+    }
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseRequest.updateMany({
+        where: { id: pr.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      if (!claimed.count) throw badRequest('It was decided a moment ago — reload to see where it stands');
+      const withdrawn = await cancelOpenRequest('purchase_request', pr.id, tx, `pulled back to draft by ${me.name}`, me.id);
+      if (!withdrawn.length) {
+        // Nothing was open to withdraw. act() commits a final decision before
+        // its subscriber runs, so a request can read decided while this
+        // document still says pending: APPROVED, REJECTED, or CANCELLED by a
+        // return. That decision stands — the throw rolls the claim back and
+        // the subscriber applies it. Only a request stranded pending with no
+        // approval behind it (a submit the engine refused, before the submit
+        // reverted to draft) comes back with nothing to withdraw — or one
+        // whose submit is still opening its request, which the submit route
+        // then withdraws itself when it finds the document a draft.
+        const last = await tx.approvalRequest.findFirst({
+          where: { documentType: 'purchase_request', documentId: pr.id },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true, actions: { where: { action: 'RETURNED' }, select: { id: true }, take: 1 } },
+        });
+        if (last && (last.status === 'APPROVED' || last.status === 'REJECTED' || last.actions.length)) {
+          throw badRequest('It was decided a moment ago — reload to see where it stands');
+        }
+      }
+    });
+    await audit(
+      { entityType: 'purchase_request', entityId: pr.id, action: 'UPDATED', summary: `Pulled ${pr.number} back to draft` },
+      req,
+    );
+    res.json({ ok: true, status: 'DRAFT' });
+  }),
+);
+
+/** The trail's line for a decision that found its document no longer waiting for one. */
+async function notApplied(entityType: string, documentId: string, number: string, status: string, outcome: ApprovalOutcome) {
+  await audit({
+    entityType,
+    entityId: documentId,
+    action: outcome === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+    summary: `${number} ${outcome.toLowerCase()} after it was ${status.toLowerCase().replace(/_/g, ' ')} — not applied`,
+  });
+}
 
 /**
  * An approved direct-to-job request commits budget.
@@ -478,29 +684,43 @@ purchaseRequestRoutes.post(
  * This is the SOFT commitment — a promise to spend, at estimated prices. The
  * purchase order later replaces it with the firm figure at the price actually
  * agreed (model §5.1).
+ *
+ * Claimed on PENDING_APPROVAL with a conditional update, so a decision that
+ * lands after the request was pulled back to draft changes nothing — it
+ * commits no budget — and the trail says so. Exported so the test can settle
+ * a request that is no longer waiting.
  */
-onApprovalSettled('purchase_request', async (request, outcome) => {
-  const pr = await prisma.purchaseRequest.findUnique({
-    where: { id: request.documentId },
-    include: { items: true },
-  });
+export async function settlePurchaseRequest(documentId: string, outcome: ApprovalOutcome) {
+  const pr = await prisma.purchaseRequest.findUnique({ where: { id: documentId } });
   if (!pr) return;
 
   if (outcome !== 'APPROVED') {
-    await prisma.purchaseRequest.update({ where: { id: pr.id }, data: { status: 'REJECTED' } });
+    const claimed = await prisma.purchaseRequest.updateMany({
+      where: { id: pr.id, status: 'PENDING_APPROVAL' },
+      data: { status: 'REJECTED' },
+    });
+    if (!claimed.count) {
+      const now = await prisma.purchaseRequest.findUnique({ where: { id: pr.id }, select: { status: true } });
+      await notApplied('purchase_request', pr.id, pr.number, now?.status ?? pr.status, outcome);
+    }
     return;
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.purchaseRequest.update({
-      where: { id: pr.id },
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.purchaseRequest.updateMany({
+      where: { id: pr.id, status: 'PENDING_APPROVAL' },
       data: { status: 'APPROVED', approvedAt: new Date() },
     });
+    if (!claimed.count) return null;
 
-    if (pr.kind !== 'DIRECT_TO_JOB' || !pr.jobId) return;
+    // Read again under the claim: what is committed is the request as it
+    // stood when approved, never a kind or project read before it.
+    const now = await tx.purchaseRequest.findUniqueOrThrow({ where: { id: pr.id } });
+    if (now.kind !== 'DIRECT_TO_JOB' || !now.jobId) return now;
 
+    const items = await tx.purchaseRequestItem.findMany({ where: { requestId: pr.id } });
     const byCategory = new Map<string, number>();
-    for (const line of pr.items) {
+    for (const line of items) {
       if (!line.costCategoryId) continue;
       byCategory.set(
         line.costCategoryId,
@@ -509,28 +729,39 @@ onApprovalSettled('purchase_request', async (request, outcome) => {
     }
     for (const [costCategoryId, amount] of byCategory) {
       await postJobCost(tx, {
-        jobId: pr.jobId,
+        jobId: now.jobId,
         costCategoryId,
         state: 'COMMITTED',
         amount,
         sourceType: 'purchase_request',
-        sourceId: pr.id,
-        sourceNumber: pr.number,
-        description: `Approved request — ${pr.purpose}`,
-        createdById: pr.requestedById,
+        sourceId: now.id,
+        sourceNumber: now.number,
+        description: `Approved request — ${now.purpose}`,
+        createdById: now.requestedById,
       });
     }
+    return now;
   });
+
+  if (!applied) {
+    const now = await prisma.purchaseRequest.findUnique({ where: { id: pr.id }, select: { status: true } });
+    await notApplied('purchase_request', pr.id, pr.number, now?.status ?? pr.status, outcome);
+    return;
+  }
 
   await audit({
     entityType: 'purchase_request',
-    entityId: pr.id,
+    entityId: applied.id,
     action: 'APPROVED',
     summary:
-      pr.kind === 'DIRECT_TO_JOB'
-        ? `${pr.number} approved — budget committed`
-        : `${pr.number} approved`,
+      applied.kind === 'DIRECT_TO_JOB' && applied.jobId
+        ? `${applied.number} approved — budget committed`
+        : `${applied.number} approved`,
   });
+}
+
+onApprovalSettled('purchase_request', async (request, outcome) => {
+  await settlePurchaseRequest(request.documentId, outcome);
 });
 
 purchaseRequestRoutes.delete(
@@ -633,41 +864,84 @@ async function loadCanvass(id: string) {
   });
 }
 
+type LoadedCanvass = NonNullable<Awaited<ReturnType<typeof loadCanvass>>>;
+
+/** Who may change a canvass's own notes: edit_all, or whoever opened it holding edit_own (rule 7). */
+function mayEditCanvass(me: ResolvedUser, canvass: { createdById: string }): boolean {
+  return canEditRecord(me, 'gchain', 'canvass', canvass.createdById);
+}
+
+function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser) {
+  // Total per supplier for the lines they actually quoted, so the comparison
+  // is like for like.
+  const suppliers = canvass.suppliers.map((s) => {
+    const quoted = new Map(s.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
+    const total = canvass.request.items.reduce((sum, item) => {
+      const price = quoted.get(item.id);
+      return price === undefined ? sum : sum + num(item.quantity) * price;
+    }, 0);
+    return {
+      ...s,
+      quotes: s.quotes.map((qq) => ({ ...qq, unitPrice: num(qq.unitPrice) })),
+      quotedCount: s.quotes.length,
+      total: cents(total),
+      complete: s.quotes.length === canvass.request.items.length,
+    };
+  });
+
+  const complete = suppliers.filter((s) => s.complete && s.total > 0);
+  const lowest = complete.length
+    ? complete.reduce((best, s) => (s.total < best.total ? s : best))
+    : null;
+
+  const open = canvass.status === 'OPEN';
+  return {
+    ...canvass,
+    request: presentPr(canvass.request as unknown as Record<string, unknown>),
+    suppliers,
+    lowestSupplierId: lowest?.id ?? null,
+    // The routes' own rules: while OPEN, the notes are the opener's (or
+    // edit_all's), the supplier rows edit_all's. An award is the record.
+    canEdit: open && mayEditCanvass(me, canvass),
+    canEditSuppliers: open && can(me, 'gchain.canvass.edit_all'),
+  };
+}
+
 canvassRoutes.get(
   '/:id',
   requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
   handler(async (req, res) => {
     const canvass = await loadCanvass(req.params.id);
     if (!canvass) throw notFound('Canvass not found');
+    res.json(presentCanvass(canvass, currentUser(req)));
+  }),
+);
 
-    // Total per supplier for the lines they actually quoted, so the comparison
-    // is like for like.
-    const suppliers = canvass.suppliers.map((s) => {
-      const quoted = new Map(s.quotes.map((qq) => [qq.requestItemId, num(qq.unitPrice)]));
-      const total = canvass.request.items.reduce((sum, item) => {
-        const price = quoted.get(item.id);
-        return price === undefined ? sum : sum + num(item.quantity) * price;
-      }, 0);
-      return {
-        ...s,
-        quotes: s.quotes.map((qq) => ({ ...qq, unitPrice: num(qq.unitPrice) })),
-        quotedCount: s.quotes.length,
-        total: cents(total),
-        complete: s.quotes.length === canvass.request.items.length,
-      };
-    });
-
-    const complete = suppliers.filter((s) => s.complete && s.total > 0);
-    const lowest = complete.length
-      ? complete.reduce((best, s) => (s.total < best.total ? s : best))
-      : null;
-
-    res.json({
-      ...canvass,
-      request: presentPr(canvass.request as unknown as Record<string, unknown>),
-      suppliers,
-      lowestSupplierId: lowest?.id ?? null,
-    });
+/**
+ * Modifying a canvass: its notes, while it is OPEN. Which request it
+ * canvasses is what it is, and an award is the decision on record — so the
+ * header takes nothing else (a key it cannot change is refused, not ignored).
+ */
+canvassRoutes.patch(
+  '/:id',
+  requireAny('gchain.canvass.edit_own', 'gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ notes: z.string().nullable() }).strict(), req.body);
+    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id } });
+    if (!canvass) throw notFound('Canvass not found');
+    if (!mayEditCanvass(me, canvass)) throw forbidden('This canvass belongs to someone else');
+    if (canvass.status !== 'OPEN') {
+      throw badRequest(`${canvass.number} is ${canvass.status.toLowerCase()} — it stands as it was decided`);
+    }
+    const notes = body.notes?.trim() || null;
+    const claimed = await prisma.canvass.updateMany({ where: { id: canvass.id, status: 'OPEN' }, data: { notes } });
+    if (!claimed.count) throw badRequest(`${canvass.number} was awarded a moment ago — reload to see it`);
+    await audit(
+      { entityType: 'canvass', entityId: canvass.id, action: 'UPDATED', summary: `Modified ${canvass.number}: notes` },
+      req,
+    );
+    res.json(presentCanvass((await loadCanvass(canvass.id))!, me));
   }),
 );
 
@@ -731,7 +1005,7 @@ canvassRoutes.post(
     });
     if (clash) throw badRequest('That supplier is already on this canvass');
 
-    await prisma.canvassSupplier.create({
+    const row = await prisma.canvassSupplier.create({
       data: {
         canvassId: canvass.id,
         supplierId: body.supplierId,
@@ -739,7 +1013,12 @@ canvassRoutes.post(
         terms: body.terms || null,
         remarks: body.remarks || null,
       },
+      include: { supplier: { select: { name: true } } },
     });
+    await audit(
+      { entityType: 'canvass', entityId: canvass.id, action: 'UPDATED', summary: `Added ${row.supplier.name} to ${canvass.number}` },
+      req,
+    );
     const full = await loadCanvass(canvass.id);
     res.status(201).json(full);
   }),
@@ -781,15 +1060,79 @@ canvassRoutes.put(
   }),
 );
 
+/**
+ * A supplier row's own terms — lead time, payment terms, remarks — while the
+ * canvass is OPEN. Its prices go through PUT …/quotes; which supplier it is
+ * never changes (remove the row and add the other).
+ */
+canvassRoutes.patch(
+  '/:id/suppliers/:supplierRowId',
+  require_('gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(
+      z
+        .object({
+          leadTimeDays: z.number().int().min(0).optional().nullable(),
+          terms: z.string().optional().nullable(),
+          remarks: z.string().optional().nullable(),
+        })
+        .strict(),
+      req.body,
+    );
+    const row = await prisma.canvassSupplier.findFirst({
+      where: { id: req.params.supplierRowId, canvassId: req.params.id },
+      include: { canvass: true, supplier: { select: { name: true } } },
+    });
+    if (!row) throw notFound('Supplier not on this canvass');
+    if (row.canvass.status !== 'OPEN') throw badRequest('This canvass has been awarded — its quotes stand as they were');
+
+    // Claimed on the canvass still being OPEN: an award that lands first wins.
+    const claimed = await prisma.canvassSupplier.updateMany({
+      where: { id: row.id, canvass: { status: 'OPEN' } },
+      data: {
+        ...(body.leadTimeDays !== undefined ? { leadTimeDays: body.leadTimeDays } : {}),
+        ...(body.terms !== undefined ? { terms: body.terms?.trim() || null } : {}),
+        ...(body.remarks !== undefined ? { remarks: body.remarks?.trim() || null } : {}),
+      },
+    });
+    if (!claimed.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: row.canvassId,
+        action: 'UPDATED',
+        summary: `Modified ${row.supplier.name} on ${row.canvass.number}`,
+      },
+      req,
+    );
+    res.json(presentCanvass((await loadCanvass(row.canvassId))!, currentUser(req)));
+  }),
+);
+
+/** Removing a supplier from an OPEN canvass — never from an awarded one, whose winner the order was placed with. */
 canvassRoutes.delete(
   '/:id/suppliers/:supplierRowId',
   require_('gchain.canvass.edit_all'),
   handler(async (req, res) => {
     const row = await prisma.canvassSupplier.findFirst({
       where: { id: req.params.supplierRowId, canvassId: req.params.id },
+      include: { canvass: true, supplier: { select: { name: true } } },
     });
     if (!row) throw notFound('Supplier not on this canvass');
-    await prisma.canvassSupplier.delete({ where: { id: row.id } });
+    if (row.canvass.status !== 'OPEN') {
+      throw badRequest('This canvass has been awarded — its suppliers stand as they were');
+    }
+    const gone = await prisma.canvassSupplier.deleteMany({ where: { id: row.id, canvass: { status: 'OPEN' } } });
+    if (!gone.count) throw badRequest('This canvass was awarded a moment ago — reload to see it');
+    await audit(
+      {
+        entityType: 'canvass',
+        entityId: row.canvassId,
+        action: 'UPDATED',
+        summary: `Removed ${row.supplier.name} from ${row.canvass.number}`,
+      },
+      req,
+    );
     res.json({ ok: true });
   }),
 );
@@ -1387,19 +1730,38 @@ purchaseOrderRoutes.post(
     if (po.status !== 'DRAFT') throw badRequest('This order has already been submitted');
     if (!po.items.length) throw badRequest('Add at least one line before submitting');
 
-    await prisma.purchaseOrder.update({ where: { id: po.id }, data: { status: 'PENDING_APPROVAL' } });
-
-    await submitForApproval({
-      documentType: 'purchase_order',
-      documentId: po.id,
-      documentNumber: po.number,
-      subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
-      amount: num(po.total),
-      link: `/g-chain/purchase-orders/${po.id}`,
-      requesterId: me.id,
+    // Claimed on DRAFT, so two presses cannot both submit it.
+    const claimed = await prisma.purchaseOrder.updateMany({
+      where: { id: po.id, status: 'DRAFT' },
+      data: { status: 'PENDING_APPROVAL' },
     });
+    if (!claimed.count) throw badRequest('This order has already been submitted');
 
-    res.json({ ok: true });
+    try {
+      await submitForApproval({
+        documentType: 'purchase_order',
+        documentId: po.id,
+        documentNumber: po.number,
+        subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
+        amount: num(po.total),
+        link: `/g-chain/purchase-orders/${po.id}`,
+        requesterId: me.id,
+      });
+    } catch (err) {
+      // Refused (no workflow, nobody to approve, already open): back to a
+      // draft, never PENDING with no approval behind it.
+      await prisma.purchaseOrder.updateMany({
+        where: { id: po.id, status: 'PENDING_APPROVAL' },
+        data: { status: 'DRAFT' },
+      });
+      throw err;
+    }
+
+    await audit(
+      { entityType: 'purchase_order', entityId: po.id, action: 'SUBMITTED', summary: `${po.number} sent for approval` },
+      req,
+    );
+    res.json({ ok: true, status: 'PENDING_APPROVAL' });
   }),
 );
 
@@ -1410,27 +1772,39 @@ purchaseOrderRoutes.post(
  * with the order's figure at the price actually agreed. Without the release,
  * the same material would be committed twice — once as a request, once as an
  * order — and the project would look far more committed than it is.
+ *
+ * Claimed on PENDING_APPROVAL with a conditional update, so a decision that
+ * finds the order no longer waiting (already issued by a repeated settle, or
+ * back in draft) commits nothing twice and the trail says so. A rejection
+ * returns it to DRAFT for the buyer to change. Exported for the test.
  */
-onApprovalSettled('purchase_order', async (request, outcome) => {
-  const po = await prisma.purchaseOrder.findUnique({
-    where: { id: request.documentId },
-    include: { items: true, request: true },
-  });
+export async function settlePurchaseOrder(documentId: string, outcome: ApprovalOutcome) {
+  const po = await prisma.purchaseOrder.findUnique({ where: { id: documentId } });
   if (!po) return;
 
   if (outcome !== 'APPROVED') {
-    await prisma.purchaseOrder.update({ where: { id: po.id }, data: { status: 'DRAFT' } });
+    const claimed = await prisma.purchaseOrder.updateMany({
+      where: { id: po.id, status: 'PENDING_APPROVAL' },
+      data: { status: 'DRAFT' },
+    });
+    if (!claimed.count) {
+      const now = await prisma.purchaseOrder.findUnique({ where: { id: po.id }, select: { status: true } });
+      await notApplied('purchase_order', po.id, po.number, now?.status ?? po.status, outcome);
+    }
     return;
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.purchaseOrder.update({
-      where: { id: po.id },
+  const applied = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.purchaseOrder.updateMany({
+      where: { id: po.id, status: 'PENDING_APPROVAL' },
       data: { status: 'ISSUED', approvedAt: new Date(), issuedAt: new Date() },
     });
+    if (!claimed.count) return false;
+
+    const items = await tx.purchaseOrderItem.findMany({ where: { orderId: po.id } });
 
     // Mark the ordered quantities back on the request.
-    for (const line of po.items) {
+    for (const line of items) {
       if (!line.requestItemId) continue;
       const reqItem = await tx.purchaseRequestItem.findUnique({ where: { id: line.requestItemId } });
       if (!reqItem) continue;
@@ -1449,7 +1823,7 @@ onApprovalSettled('purchase_order', async (request, outcome) => {
       });
     }
 
-    if (po.kind !== 'DIRECT_TO_JOB' || !po.jobId) return;
+    if (po.kind !== 'DIRECT_TO_JOB' || !po.jobId) return true;
 
     // Release the request's soft commitment, then commit the firm figure.
     if (po.requestId) {
@@ -1463,7 +1837,7 @@ onApprovalSettled('purchase_order', async (request, outcome) => {
     }
 
     const byCategory = new Map<string, number>();
-    for (const line of po.items) {
+    for (const line of items) {
       if (!line.costCategoryId) continue;
       byCategory.set(
         line.costCategoryId,
@@ -1483,7 +1857,14 @@ onApprovalSettled('purchase_order', async (request, outcome) => {
         createdById: po.createdById,
       });
     }
+    return true;
   });
+
+  if (!applied) {
+    const now = await prisma.purchaseOrder.findUnique({ where: { id: po.id }, select: { status: true } });
+    await notApplied('purchase_order', po.id, po.number, now?.status ?? po.status, outcome);
+    return;
+  }
 
   await audit({
     entityType: 'purchase_order',
@@ -1491,6 +1872,10 @@ onApprovalSettled('purchase_order', async (request, outcome) => {
     action: 'APPROVED',
     summary: `${po.number} issued${po.kind === 'DIRECT_TO_JOB' ? ' — budget committed at order price' : ''}`,
   });
+}
+
+onApprovalSettled('purchase_order', async (request, outcome) => {
+  await settlePurchaseOrder(request.documentId, outcome);
 });
 
 purchaseOrderRoutes.delete(
@@ -1618,7 +2003,29 @@ purchaseRequestRoutes.get(
     const currency = company?.currency ?? 'PHP';
     const estimatedTotal = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
 
-    const prSignoffs = await approvalSignoffs('purchase_request', pr.id);
+    // Every step of the route, who signed it and when — "Pending" until they
+    // do. A draft has no sign-off standing: pulled back, its last request is
+    // CANCELLED but keeps the steps that had signed, and printing those would
+    // date an approval nobody now gives. So a draft prints the route
+    // submitting would take (a request of ₱50,000 or more takes three steps),
+    // every step Pending; anything else prints its latest request's steps.
+    const slots: ApprovalSlot[] =
+      pr.status === 'DRAFT'
+        ? ((await routePreview('purchase_request', estimatedTotal, pr.requestedById))?.steps ?? []).map((st) => ({
+            step: st.name,
+            assigned: st.approvers,
+          }))
+        : await approvalSlots('purchase_request', pr.id);
+    const stepSignatories: Signatory[] = slots.length
+      ? slots.map((sl) => {
+          const role = `Approved by — ${sl.step}`;
+          if (sl.name) return { role, name: sl.name, position: sl.position, at: sl.at };
+          // One person who may sign is named beside "Pending"; several are
+          // not, because a house-style sign-off is one line.
+          const who = sl.assigned ?? [];
+          return who.length === 1 ? { role, name: who[0].name, position: who[0].position } : { role };
+        })
+      : [{ role: 'Approved by' }];
 
     const pdf = await renderDocument({
       title: 'Purchase Request',
@@ -1661,10 +2068,7 @@ purchaseRequestRoutes.get(
       ],
       signatories: [
         { role: 'Requested by', name: pr.requestedBy.name, position: pr.requestedBy.position ?? undefined, at: pr.createdAt },
-        // A two-step workflow fills both slots; a one-step workflow fills the
-        // last one and leaves Checked by as the blank rule it always was.
-        { role: 'Checked by', ...(prSignoffs.length > 1 ? prSignoffs[0] : undefined) },
-        { role: 'Approved by', ...(prSignoffs.length > 1 ? prSignoffs[1] : prSignoffs[0]) },
+        ...stepSignatories,
       ],
     });
 
