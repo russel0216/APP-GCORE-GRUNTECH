@@ -81,31 +81,49 @@ export function SubIndustryLabel({ subIndustry }: { subIndustry: CustomerRow['su
   return <span>{subIndustry.name}</span>;
 }
 
-// ── Mass actions: Set sub-industry, active / inactive ───────────────────────
+// ── Mass actions: Set sub-industry, set team, active / inactive ─────────────
 
 /**
- * Reclassify the ticked customers, or mark them active or inactive — each the
- * ordinary PATCH /customers/:id, so the audit row and the rules (a
- * sub-industry must be active; a code never moves when the sub-industry
- * does) are the PATCH's. Whatever did not change stays ticked, with why.
+ * Reclassify the ticked customers, hand them to a team, or mark them active
+ * or inactive — each the ordinary PATCH /customers/:id, so the audit row and
+ * the rules (a sub-industry or team must be active; a code never moves when
+ * the filing does) are the PATCH's. Whatever did not change stays ticked,
+ * with why.
  */
-function CustomerBulkActions({ ctx, subIndustries }: { ctx: BulkContext<CustomerRow>; subIndustries: SubIndustry[] }) {
+function CustomerBulkActions({
+  ctx,
+  subIndustries,
+  teams,
+}: {
+  ctx: BulkContext<CustomerRow>;
+  subIndustries: SubIndustry[];
+  teams: Industry[];
+}) {
   const toast = useToast();
   const [action, setAction] = useState('');
   const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
   const [refused, setRefused] = useState<{ code: string; why: string }[]>([]);
 
   const industry = action.startsWith('industry:') ? subIndustries.find((i) => i.id === action.slice(9)) ?? null : null;
+  const team = action.startsWith('team:') ? teams.find((t) => t.id === action.slice(5)) ?? null : null;
   const active = action === 'active' ? true : action === 'inactive' ? false : null;
+  const same = (c: CustomerRow) =>
+    industry ? c.subIndustryId === industry.id : team ? c.industryId === team.id : c.isActive === active;
+  const already = industry ? `already ${industry.name}` : team ? `already ${team.code}` : `already ${active ? 'active' : 'inactive'}`;
   const plan = !action
     ? null
     : {
-        go: ctx.rows.filter((c) => (industry ? c.subIndustryId !== industry.id : c.isActive !== active)),
-        stay: ctx.rows
-          .filter((c) => (industry ? c.subIndustryId === industry.id : c.isActive === active))
-          .map((c) => ({ row: c, why: industry ? `already ${industry.name}` : `already ${active ? 'active' : 'inactive'}` })),
+        go: ctx.rows.filter((c) => !same(c)),
+        stay: ctx.rows.filter(same).map((c) => ({ row: c, why: already })),
       };
-  const what = industry ? `filed under ${industry.name}` : active ? 'marked active' : 'marked inactive';
+  const what = industry
+    ? `filed under ${industry.name}`
+    : team
+      ? `handed to ${team.code}`
+      : active
+        ? 'marked active'
+        : 'marked inactive';
+  const payload = industry ? { subIndustryId: industry.id } : team ? { industryId: team.id } : { isActive: active };
 
   async function apply() {
     if (!plan || !plan.go.length) return;
@@ -116,7 +134,7 @@ function CustomerBulkActions({ ctx, subIndustries }: { ctx: BulkContext<Customer
       setProgress({ done: i, of: plan.go.length });
       const row = plan.go[i];
       try {
-        await api.patch(`/customers/${row.id}`, industry ? { subIndustryId: industry.id } : { isActive: active });
+        await api.patch(`/customers/${row.id}`, payload);
         done++;
       } catch (err) {
         failed.push({ row, why: err instanceof ApiError ? err.message : 'could not be changed' });
@@ -135,7 +153,7 @@ function CustomerBulkActions({ ctx, subIndustries }: { ctx: BulkContext<Customer
   return (
     <>
       <select
-        aria-label="Reclassify, or mark active or inactive, the selected customers"
+        aria-label="Reclassify, hand to a team, or mark active or inactive, the selected customers"
         value={action}
         disabled={!!progress}
         onChange={(e) => {
@@ -143,13 +161,22 @@ function CustomerBulkActions({ ctx, subIndustries }: { ctx: BulkContext<Customer
           setRefused([]);
         }}
       >
-        <option value="">Set sub-industry or status…</option>
+        <option value="">Set sub-industry, team or status…</option>
         <optgroup label="Set sub-industry">
           {subIndustries
             .filter((i) => i.isActive)
             .map((i) => (
               <option key={i.id} value={`industry:${i.id}`}>
                 {i.name}
+              </option>
+            ))}
+        </optgroup>
+        <optgroup label="Set team">
+          {teams
+            .filter((t) => t.isActive)
+            .map((t) => (
+              <option key={t.id} value={`team:${t.id}`}>
+                {t.code} — {t.name}
               </option>
             ))}
         </optgroup>
@@ -170,7 +197,9 @@ function CustomerBulkActions({ ctx, subIndustries }: { ctx: BulkContext<Customer
             : plan.go.length
               ? industry
                 ? `File ${plan.go.length} under ${industry.name}`
-                : `Mark ${plan.go.length} ${active ? 'active' : 'inactive'}`
+                : team
+                  ? `Hand ${plan.go.length} to ${team.code}`
+                  : `Mark ${plan.go.length} ${active ? 'active' : 'inactive'}`
               : 'Nothing to change'}
         </button>
       )}
@@ -361,7 +390,7 @@ export function Customers() {
         printPath="/api/customers/pdf"
         selectable
         rowLabel={(c) => `${c.code} ${c.name}`}
-        bulkActions={mayEdit ? (ctx) => <CustomerBulkActions ctx={ctx} subIndustries={subIndustries ?? []} /> : undefined}
+        bulkActions={mayEdit ? (ctx) => <CustomerBulkActions ctx={ctx} subIndustries={subIndustries ?? []} teams={teams ?? []} /> : undefined}
         menuItems={
           can('gops.customers.create')
             ? [

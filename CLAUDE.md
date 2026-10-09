@@ -820,8 +820,9 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   industryId` is the Industry (team) master again, nullable, written by
   `POST`/`PATCH /customers` (`activeTeam()` refuses an inactive one), the
   form's "Team" select ("— open —"), the list's Team column (code, "Open"
-  while none) and `?team=` filter (an id or `none`), and Customer 360's
-  Company card. Nothing classifies a customer automatically — the owner
+  while none) and `?team=` filter (an id or `none`), the mass action
+  **Set team** beside Set sub-industry (the same `PATCH` per row), and
+  Customer 360's Company card. Nothing classifies a customer automatically — the owner
   asked for an online classification where possible, and it is not
   possible from the app, so both fields stay open for hand editing.
   Reclassifying never regenerates the customer code — identifiers do
