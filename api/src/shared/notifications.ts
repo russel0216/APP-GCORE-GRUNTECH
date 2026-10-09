@@ -42,6 +42,12 @@ export type NotificationType =
   | 'activity.responded'
   /** A birthday or work-anniversary greeting (shared/celebrations.ts). */
   | 'greeting'
+  /** CAD job orders (2026-10-09): a new request to the design team, an assignment, a revision, a comment, a change of status or priority. */
+  | 'cad.requested'
+  | 'cad.assigned'
+  | 'cad.revision'
+  | 'cad.comment'
+  | 'cad.updated'
   | 'system';
 
 export interface NotifyInput {

@@ -51,6 +51,7 @@ const DETAIL: Record<string, string> = {
   pm_report: '/g-ops/service-reports',
   inspection_report: '/g-ops/service-reports',
   job_order: '/g-ops/job-orders',
+  cad_job_order: '/g-ops/cad-job-orders',
   // HR
   leave_request: '/g-hr/leave',
   overtime_request: '/g-hr/overtime',

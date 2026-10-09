@@ -97,6 +97,7 @@ import { ServiceContracts, ContractDetail } from './pages/service/Contracts';
 import { ServiceReports, ServiceReportDetail, Renewals } from './pages/service/Reports';
 import { ServiceSchedule } from './pages/service/Schedule';
 import { JobOrders, JobOrderDetail } from './pages/service/JobOrders';
+import { CadJobOrders, CadJobOrderDetail } from './pages/delivery/CadJobOrders';
 import {
   ReportTemplates,
   AftermarketDashboard,
@@ -1197,6 +1198,24 @@ function Routed() {
           element={
             <GuardAny permissions={['gops.job_orders.view_all', 'gops.job_orders.view_own']}>
               <JobOrderDetail />
+            </GuardAny>
+          }
+        />
+        {/* CAD job orders (2026-10-09): the design team's queue — requests,
+            revisions, a comment thread. */}
+        <Route
+          path="/g-ops/cad-job-orders"
+          element={
+            <GuardAny permissions={['gops.cad_job_orders.view_all', 'gops.cad_job_orders.view_own']}>
+              <CadJobOrders />
+            </GuardAny>
+          }
+        />
+        <Route
+          path="/g-ops/cad-job-orders/:id"
+          element={
+            <GuardAny permissions={['gops.cad_job_orders.view_all', 'gops.cad_job_orders.view_own']}>
+              <CadJobOrderDetail />
             </GuardAny>
           }
         />

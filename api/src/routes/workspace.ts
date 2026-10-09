@@ -8,6 +8,8 @@ import { globalSearch, searchProviders, canSearch } from '../shared/search';
 import { act, approversForStep, historyFor, pendingFor } from '../shared/approvals';
 import {
   upload,
+  cadUpload,
+  isCadEntity,
   saveAttachment,
   attachmentPath,
   deleteAttachment,
@@ -356,7 +358,13 @@ function byUrgency(a: WorkRow, b: WorkRow): number {
  * Ten of each, oldest date first.
  */
 async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> {
-  const [leads, jobs, visits, tasks, jobOrders, slipped] = await Promise.all([
+  // The design team's queue (2026-10-09): what is on my drawing board, what
+  // I raised that waits on my review, and — for the Designer Lead — what
+  // nobody has taken yet. Open means not completed or cancelled; a request
+  // past its needed-by day is overdue.
+  const cadOpen = ['REQUESTED', 'IN_PROGRESS', 'FOR_REVIEW', 'CHANGES_REQUESTED', 'ON_HOLD'] as const;
+  const cadSelect = { id: true, number: true, title: true, status: true, priority: true, neededBy: true, customer: { select: { name: true } } } as const;
+  const [leads, jobs, visits, tasks, jobOrders, slipped, cadMine, cadReview, cadQueue] = await Promise.all([
     prisma.lead.findMany({
       where: { assignedToId: me.id, status: { notIn: ['WON', 'LOST'] } },
       orderBy: [{ nextActionDate: { sort: 'asc', nulls: 'last' } }, { updatedAt: 'desc' }],
@@ -408,6 +416,26 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
         customer: { select: { name: true } },
       },
     }),
+    prisma.cadJobOrder.findMany({
+      where: { assignedToId: me.id, status: { in: ['REQUESTED', 'IN_PROGRESS', 'CHANGES_REQUESTED'] } },
+      orderBy: [{ neededBy: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
+      take: TAKE,
+      select: cadSelect,
+    }),
+    prisma.cadJobOrder.findMany({
+      where: { requestedById: me.id, status: 'FOR_REVIEW' },
+      orderBy: { updatedAt: 'desc' },
+      take: TAKE,
+      select: cadSelect,
+    }),
+    can(me, 'gops.cad_job_orders.approve')
+      ? prisma.cadJobOrder.findMany({
+          where: { assignedToId: null, status: { in: [...cadOpen] } },
+          orderBy: [{ neededBy: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
+          take: TAKE,
+          select: cadSelect,
+        })
+      : Promise.resolve([]),
   ]);
 
   const rows: WorkRow[] = [
@@ -464,6 +492,33 @@ async function assignedTo(me: ResolvedUser, dayStart: Date): Promise<WorkRow[]> 
       when: r.startsAt,
       overdue: true,
       link: `/g-ops/calendar/activities/${r.id}`,
+    })),
+    ...cadMine.map((r) => ({
+      id: r.id,
+      kind: 'cad_job_order',
+      title: r.title,
+      subtitle: `${r.number} · ${r.customer.name} · ${humanise(r.status)}${r.priority === 'URGENT' || r.priority === 'HIGH' ? ` · ${r.priority}` : ''}`,
+      when: r.neededBy,
+      overdue: isOverdue(r.neededBy, dayStart),
+      link: `/g-ops/cad-job-orders/${r.id}`,
+    })),
+    ...cadReview.map((r) => ({
+      id: r.id,
+      kind: 'cad_job_order',
+      title: r.title,
+      subtitle: `${r.number} · ${r.customer.name} · drawing ready for your review`,
+      when: r.neededBy,
+      overdue: isOverdue(r.neededBy, dayStart),
+      link: `/g-ops/cad-job-orders/${r.id}`,
+    })),
+    ...cadQueue.map((r) => ({
+      id: r.id,
+      kind: 'cad_job_order',
+      title: r.title,
+      subtitle: `${r.number} · ${r.customer.name} · waiting for a designer`,
+      when: r.neededBy,
+      overdue: isOverdue(r.neededBy, dayStart),
+      link: `/g-ops/cad-job-orders/${r.id}`,
     })),
   ];
   return rows.sort(byUrgency);
@@ -718,7 +773,8 @@ attachmentRoutes.get(
 attachmentRoutes.post(
   '/:entityType/:entityId',
   guardRecord,
-  upload.array('files', 20),
+  // A CAD record's files take the CAD ceiling (MAX_CAD_UPLOAD_MB); everything else the ordinary one.
+  (req, res, next) => (isCadEntity(req.params.entityType) ? cadUpload : upload).array('files', 20)(req, res, next),
   handler(async (req, res) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (!files.length) throw badRequest('No files were uploaded');

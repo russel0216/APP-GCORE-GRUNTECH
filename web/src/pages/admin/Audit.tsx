@@ -146,6 +146,7 @@ export function Audit() {
               'payment',
               'service_report',
               'job_order',
+              'cad_job_order',
               'leave_request',
               'overtime_request',
               'clearance',

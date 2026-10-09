@@ -1,0 +1,195 @@
+/*
+  CAD job orders — the design team's queue (pages/delivery/CadJobOrders.tsx).
+
+  Loaded after styles.css. Tokens only: spacing from --s-*, type from --fs-*,
+  colour from the theme variables, so both themes follow and nothing here is
+  a literal colour or a pixel value.
+*/
+
+/* ── The detail page ─────────────────────────────────────────────────────── */
+
+.cad-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.cad-progress .meter {
+  flex: 1;
+}
+
+.cad-progress-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+
+.cad-progress-edit .field {
+  margin: 0;
+  width: 7rem;
+}
+
+/* An in-page panel for an action that needs a word: a reason, a note, a designer. */
+.cad-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--s-3);
+  margin-top: var(--s-3);
+  background: var(--surface-2);
+}
+
+.cad-panel-actions {
+  display: flex;
+  gap: var(--s-2);
+  justify-content: flex-end;
+  margin-top: var(--s-2);
+}
+
+/* ── Revisions ───────────────────────────────────────────────────────────── */
+
+.cad-revisions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.cad-revision {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--s-3);
+}
+
+.cad-revision.latest {
+  border-color: rgb(var(--info-rgb) / 0.5);
+}
+
+.cad-revision-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+}
+
+.cad-revision-head .cad-rev {
+  font-weight: 700;
+  font-size: var(--fs-lg);
+}
+
+.cad-revision-note {
+  margin: 0 0 var(--s-2);
+  white-space: pre-wrap;
+}
+
+.cad-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.cad-file {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: var(--s-1) var(--s-3);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+
+.cad-file:hover {
+  border-color: var(--neon);
+}
+
+.cad-file.pdf {
+  font-weight: 600;
+}
+
+.cad-file-size {
+  color: var(--faint);
+  font-size: var(--fs-xs);
+}
+
+/* ── The thread ──────────────────────────────────────────────────────────── */
+
+.cad-thread {
+  list-style: none;
+  margin: 0 0 var(--s-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.cad-comment {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--s-3);
+}
+
+.cad-comment-body {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--s-2) var(--s-3);
+  background: var(--surface-2);
+}
+
+.cad-comment.change .cad-comment-body {
+  border-color: rgb(var(--warn-rgb) / 0.6);
+}
+
+.cad-comment-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: baseline;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: var(--s-1);
+}
+
+.cad-comment-meta strong {
+  color: var(--text);
+}
+
+.cad-comment-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.cad-comment-text + .cad-files {
+  margin-top: var(--s-2);
+}
+
+.cad-compose textarea {
+  width: 100%;
+}
+
+.cad-compose-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+
+.cad-compose-foot .spacer {
+  flex: 1;
+}
+
+.cad-picked {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}

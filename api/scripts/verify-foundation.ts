@@ -239,7 +239,7 @@ async function main() {
     .find((m) => m.key === 'gops')!
     .submodules.filter((s) => s.group === 'Project Management' && !s.hidden)
     .map((s) => s.label);
-  check('Project Management shows Costing, Job Orders, Projects in that order', pmStrip.join() === 'Costing,Job Orders,Projects', pmStrip.join());
+  check('Project Management shows Costing, Job Orders, CAD J.O., Projects in that order', pmStrip.join() === 'Costing,Job Orders,CAD J.O.,Projects', pmStrip.join());
   // The Sales strip is the sales flow (2026-10-08, the owner's call).
   const salesStrip = menuFor(superUser)
     .find((m) => m.key === 'gops')!

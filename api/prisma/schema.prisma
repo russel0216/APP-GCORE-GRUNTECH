@@ -130,6 +130,11 @@ model User {
   jobOrdersEngineered JobOrder[]       @relation("JobOrderProjectEngineer")
   jobOrdersLed       JobOrder[]        @relation("JobOrderProjectLead")
   jobOrderSupport    JobOrderSupport[]
+  cadRequested       CadJobOrder[]     @relation("CadRequestedBy")
+  cadAssigned        CadJobOrder[]     @relation("CadAssignedTo")
+  cadCompleted       CadJobOrder[]     @relation("CadCompletedBy")
+  cadRevisions       CadRevision[]     @relation("CadRevisionSubmitter")
+  cadComments        CadComment[]      @relation("CadCommentAuthor")
 
   quoteLinesProvided   QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided      SalesOrderLine[] @relation("SoLineProvider")
@@ -565,6 +570,7 @@ model Customer {
   visits         ServiceVisit[]
   serviceReports ServiceReport[]
   jobOrders      JobOrder[]
+  cadJobOrders   CadJobOrder[]
   legacyQuotes   LegacyQuote[]
 
   createdAt   DateTime     @default(now())
@@ -1315,6 +1321,7 @@ model Quotation {
   revisions  QuotationRevision[]
   activities SalesActivity[]
   jobOrders  JobOrder[]
+  cadJobOrders CadJobOrder[]
 
   /// Set when this quotation was continued from a SCORO quote. The archive
   /// row points here, never the other way round.
@@ -1869,6 +1876,7 @@ model Job {
   serviceReports   ServiceReport[]   @relation("ServiceReportJob")
   jobOrders        JobOrder[]        @relation("JobOrderChargeTo")
   salesActivities  SalesActivity[]
+  cadJobOrders     CadJobOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2186,6 +2194,9 @@ model ApprovedPlan {
 
   uploadedById String
   uploadedBy   User   @relation("PlanUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  /// The CAD job order this plan was filed from, when it was (2026-10-09).
+  cadJobOrder CadJobOrder?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4144,6 +4155,7 @@ model JobOrder {
 
   visit   ServiceVisit?
   invoice Invoice?
+  cadJobOrders CadJobOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4268,4 +4280,154 @@ model ServiceReport {
   @@index([customerId])
   @@index([assetId])
   @@index([performedAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CAD JOB ORDERS (2026-10-09, the owner's call)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Where a CAD job order stands. Requested → In progress → For review (a
+/// revision was submitted) → Completed (the requestor accepts) or Changes
+/// requested (back to In progress for the next revision); On hold and
+/// Cancelled from either side. Overdue is derived from `neededBy`, never stored.
+enum CadJobOrderStatus {
+  REQUESTED
+  IN_PROGRESS
+  FOR_REVIEW
+  CHANGES_REQUESTED
+  COMPLETED
+  ON_HOLD
+  CANCELLED
+}
+
+enum CadPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+/// What kind of drawing is asked for — Layout plan, P&ID, single-line… Admin
+/// › Categories; the seeded rows are system rows (renamable, undeletable).
+model CadDrawingType {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0)
+  isSystem  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  requests CadJobOrder[]
+}
+
+/// A request to the design team for a drawing: the design team's one queue.
+/// Sales, project managers and engineers raise it for a customer, linked to
+/// the quotation, project or job order it is for; the Designer Lead
+/// dispatches it (or a designer takes it), the designer reports progress and
+/// submits REVISIONS (R0, R1 … each with its own files, never overwritten),
+/// and the requestor accepts or asks for changes in the comment thread. It
+/// carries no money and routes through no approval: it is work, not a
+/// decision.
+model CadJobOrder {
+  id          String            @id @default(cuid())
+  number      String            @unique
+  status      CadJobOrderStatus @default(REQUESTED)
+  /// Set by the design team, never by the requestor (the owner's call).
+  priority    CadPriority       @default(NORMAL)
+  /// 0–100, the designer's own estimate; 100 once a revision is submitted.
+  progressPct Int               @default(0)
+
+  title         String
+  drawingTypeId String?
+  drawingType   CadDrawingType? @relation(fields: [drawingTypeId], references: [id], onDelete: SetNull)
+  /// The complete details of what is wanted, in one box.
+  scope         String
+
+  customerId String
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  jobId      String?
+  job        Job?       @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  quotationId String?
+  quotation   Quotation? @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  jobOrderId  String?
+  jobOrder    JobOrder?  @relation(fields: [jobOrderId], references: [id], onDelete: SetNull)
+
+  requestedById String
+  requestedBy   User      @relation("CadRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  /// When the requestor needs the drawing. A DATE; overdue is derived from it.
+  neededBy      DateTime? @db.Date
+
+  assignedToId String?
+  assignedTo   User?     @relation("CadAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  assignedAt   DateTime?
+
+  holdReason    String?
+  /// Where it stood when it was put on hold, so Resume puts it back there.
+  statusBeforeHold CadJobOrderStatus?
+  cancelReason  String?
+  cancelledAt   DateTime?
+  completedAt   DateTime?
+  completedById String?
+  completedBy   User?     @relation("CadCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  /// What was said when the request was closed — the requestor's acceptance
+  /// note, or the designer's reason for closing it unanswered.
+  completionNote String?
+
+  /// The Approved Plan the accepted revision was filed as, on the linked project.
+  approvedPlanId String?       @unique
+  approvedPlan   ApprovedPlan? @relation(fields: [approvedPlanId], references: [id], onDelete: SetNull)
+
+  revisions CadRevision[]
+  comments  CadComment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, priority])
+  @@index([assignedToId, status])
+  @@index([requestedById, status])
+  @@index([customerId])
+  @@index([jobId])
+  @@index([neededBy])
+}
+
+/// One submission of the drawing: R0, R1, R2… Its files are attachments on
+/// `cad_revision`; a revision is never edited or overwritten, so every earlier
+/// one can still be opened — that is the traceability.
+model CadRevision {
+  id            String      @id @default(cuid())
+  cadJobOrderId String
+  cadJobOrder   CadJobOrder @relation(fields: [cadJobOrderId], references: [id], onDelete: Cascade)
+  /// 0 for R0.
+  sequence      Int
+  /// What changed, or what this first issue covers.
+  note          String
+  /// A link to a file too big to upload (a shared drive), http(s) only.
+  externalUrl   String?
+  submittedById String
+  submittedBy   User        @relation("CadRevisionSubmitter", fields: [submittedById], references: [id], onDelete: Restrict)
+  submittedAt   DateTime    @default(now())
+
+  comments CadComment[]
+
+  @@unique([cadJobOrderId, sequence])
+}
+
+/// The thread between the requestor and the designer: a change request, a
+/// clarification, a detail update. Permanent. May carry files (attachments on
+/// `cad_comment`) and may name the revision it is about.
+model CadComment {
+  id            String       @id @default(cuid())
+  cadJobOrderId String
+  cadJobOrder   CadJobOrder  @relation(fields: [cadJobOrderId], references: [id], onDelete: Cascade)
+  revisionId    String?
+  revision      CadRevision? @relation(fields: [revisionId], references: [id], onDelete: SetNull)
+  authorId      String
+  author        User         @relation("CadCommentAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  body          String
+  /// A comment that asked for changes, so the thread shows it as such.
+  isChangeRequest Boolean    @default(false)
+  createdAt     DateTime     @default(now())
+
+  @@index([cadJobOrderId, createdAt])
 }

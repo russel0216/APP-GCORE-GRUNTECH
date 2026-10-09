@@ -127,6 +127,12 @@ export const REGISTRY: ModuleDef[] = [
       // is a tab inside the project, and a link from the Projects page.
       { key: 'costing', group: 'Project Management', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
       { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_APPROVABLE, phase: 8, note: 'The project work order: sales raises it on a quotation, the project manager and the team leader approve, and approval builds the project' },
+      // The design team's queue (2026-10-09, the owner's call): a request for a
+      // drawing, with files, revisions and a comment thread. No approval
+      // route — "Approve" here is the Designer Lead's right to dispatch:
+      // assign and reassign requests, set priority on any, close any.
+      { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: OWNED_APPROVABLE, phase: 9,
+        note: 'Requests to the design team: files, revisions (R0, R1…), progress, priority and a comment thread. Edit All = the design team (progress, revisions, priority on what is assigned to them); Approve = the Designer Lead (assigns, reassigns, closes any).' },
       { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       { key: 'plans', group: 'Project Management', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, hidden: true, note: 'Managed from a project’s Approved Plans tab' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },

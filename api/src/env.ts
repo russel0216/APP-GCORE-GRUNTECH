@@ -36,6 +36,13 @@ export const env = {
   jwtExpiresIn: read('JWT_EXPIRES_IN') ?? '12h',
   uploadDir: read('UPLOAD_DIR') ?? path.resolve(__dirname, '..', 'uploads'),
   maxUploadMb: Number(read('MAX_UPLOAD_MB') ?? 25),
+  /**
+   * The ceiling for a CAD job order's files (2026-10-09): an AutoCAD drawing
+   * or a SketchUp model runs to tens of megabytes. 100 is what the Cloudflare
+   * tunnel lets through in one request; bigger goes as a split zip or as a
+   * link on the revision.
+   */
+  maxCadUploadMb: Number(read('MAX_CAD_UPLOAD_MB') ?? 100),
   corsOrigin,
   /**
    * Where the web app is reached from outside — printed into calendar files

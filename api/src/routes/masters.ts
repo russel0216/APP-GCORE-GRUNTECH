@@ -1578,3 +1578,91 @@ warehouseRoutes.delete(
     res.json({ ok: true });
   }),
 );
+
+// ── CAD drawing types ────────────────────────────────────────────────────────
+// What a CAD job order asks for (2026-10-09): Admin › Categories › Drawing
+// types. Same contract as the sub-industries: the seeded rows are system rows
+// (renamable, undeletable), and anyone signed in may read the list — the
+// request form needs it under gops.cad_job_orders.* alone.
+
+referenceRoutes.get(
+  '/cad-drawing-types',
+  handler(async (req, res) => {
+    const activeOnly = String(req.query.active ?? '') === 'true';
+    res.json(
+      await prisma.cadDrawingType.findMany({
+        where: activeOnly ? { isActive: true } : {},
+        include: { _count: { select: { requests: true } } },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }),
+    );
+  }),
+);
+
+const drawingTypeSchema = z.object({
+  name: z.string().trim().min(2, 'Give it a name').max(80),
+  sortOrder: z.number().int().default(0),
+  isActive: z.boolean().default(true),
+});
+
+async function drawingTypeNameTaken(name: string, exceptId?: string): Promise<boolean> {
+  const clash = await prisma.cadDrawingType.findFirst({
+    where: { name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+  return !!clash;
+}
+
+referenceRoutes.post(
+  '/cad-drawing-types',
+  require_('admin.categories.create'),
+  handler(async (req, res) => {
+    const body = parseBody(drawingTypeSchema, req.body);
+    if (await drawingTypeNameTaken(body.name)) throw conflict(`Drawing type "${body.name}" already exists`);
+    const created = await prisma.cadDrawingType.create({ data: body });
+    await audit(
+      { entityType: 'cad_drawing_type', entityId: created.id, action: 'CREATED', summary: `Created drawing type ${created.name}` },
+      req,
+    );
+    res.status(201).json(created);
+  }),
+);
+
+referenceRoutes.patch(
+  '/cad-drawing-types/:id',
+  require_('admin.categories.edit_all'),
+  handler(async (req, res) => {
+    const body = parseBody(drawingTypeSchema.partial(), req.body);
+    const before = await prisma.cadDrawingType.findUnique({ where: { id: req.params.id } });
+    if (!before) throw notFound('Drawing type not found');
+    if (body.name && body.name !== before.name && (await drawingTypeNameTaken(body.name, before.id))) {
+      throw conflict(`Drawing type "${body.name}" already exists`);
+    }
+    const updated = await prisma.cadDrawingType.update({ where: { id: before.id }, data: body });
+    await audit(
+      { entityType: 'cad_drawing_type', entityId: updated.id, action: 'UPDATED', summary: `Updated drawing type ${updated.name}`, before, after: updated },
+      req,
+    );
+    res.json(updated);
+  }),
+);
+
+referenceRoutes.delete(
+  '/cad-drawing-types/:id',
+  require_('admin.categories.delete'),
+  handler(async (req, res) => {
+    const row = await prisma.cadDrawingType.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { requests: true } } },
+    });
+    if (!row) throw notFound('Drawing type not found');
+    if (row.isSystem) throw badRequest('The standard drawing types cannot be deleted — deactivate one instead');
+    if (row._count.requests > 0) throw badRequest(`${row._count.requests} CAD job order(s) still carry this drawing type`);
+    await prisma.cadDrawingType.delete({ where: { id: row.id } });
+    await audit(
+      { entityType: 'cad_drawing_type', entityId: row.id, action: 'DELETED', summary: `Deleted drawing type ${row.name}`, before: row },
+      req,
+    );
+    res.json({ ok: true });
+  }),
+);

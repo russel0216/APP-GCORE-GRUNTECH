@@ -45,14 +45,48 @@ const ALLOWED = new Set([
   'image/vnd.dwg',
 ]);
 
+/**
+ * Drawing and model files, accepted by EXTENSION (2026-10-09, the CAD job
+ * order): a browser sends a SketchUp model, and often an AutoCAD drawing, as
+ * `application/octet-stream` or under a vendor type of its own, so a MIME
+ * list cannot admit them without admitting everything. Each of these is a
+ * document format a viewer opens, never something a browser would run.
+ */
+const CAD_EXTENSIONS = new Set([
+  '.dwg', '.dxf', '.dwt', '.dwf', '.dwfx',
+  '.skp', '.layout', '.skb',
+  '.rvt', '.rfa', '.ifc', '.nwd', '.nwc',
+  '.stp', '.step', '.igs', '.iges', '.stl', '.sat', '.x_t',
+  '.3ds', '.obj', '.fbx', '.dae', '.max', '.blend',
+  '.rar', '.7z',
+]);
+
+export function isCadFile(fileName: string): boolean {
+  return CAD_EXTENSIONS.has(path.extname(fileName).toLowerCase());
+}
+
+function accept(_req: unknown, file: Express.Multer.File, cb: multer.FileFilterCallback) {
+  if (ALLOWED.has(file.mimetype) || isCadFile(file.originalname)) return cb(null, true);
+  cb(new Error(`File type ${file.mimetype} is not allowed`));
+}
+
 export const upload = multer({
   storage,
   limits: { fileSize: env.maxUploadMb * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (ALLOWED.has(file.mimetype)) return cb(null, true);
-    cb(new Error(`File type ${file.mimetype} is not allowed`));
-  },
+  fileFilter: accept,
 });
+
+/** The same store with the CAD ceiling: a drawing or a model is many times the size of a photo. */
+export const cadUpload = multer({
+  storage,
+  limits: { fileSize: env.maxCadUploadMb * 1024 * 1024 },
+  fileFilter: accept,
+});
+
+/** Which uploads take the CAD ceiling: the files on a CAD job order, its revisions and its comments. */
+export function isCadEntity(entityType: string): boolean {
+  return entityType === 'cad_job_order' || entityType === 'cad_revision' || entityType === 'cad_comment';
+}
 
 export interface SaveAttachmentInput {
   entityType: string;

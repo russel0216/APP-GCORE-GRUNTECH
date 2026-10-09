@@ -218,13 +218,13 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,679 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
-masters 74, sales 425, costing 139, pipeline 86, calendar 96, numbering 46,
+**2,767 assertions across twenty-three scripts** (counted 2026-10-09): foundation 235,
+masters 76, sales 425, costing 139, pipeline 86, calendar 96, numbering 46,
 partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
-evaluations 130, academy 97, finance 189, aftermarket 175, archive 113,
+evaluations 130, academy 97, finance 189, aftermarket 175, cad 86, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -237,7 +237,7 @@ Phase 10's rules listed below.
 
 **Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
 API** (and the SMTP half of `verify-accounts`, which talks to a fake mail server
-it starts on 127.0.0.1). The other nineteen check route guards and responses over HTTP against
+it starts on 127.0.0.1). The other twenty check route guards and responses over HTTP against
 `http://localhost:5100`, and say so loudly — a failed "API is not reachable"
 line — rather than skipping them if the API is down or restarting (under
 `tsx watch` an edit elsewhere restarts it mid-run; rerun that script). All create
@@ -1401,6 +1401,103 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   the customer's acknowledgement slot last.
 - **Section photos** are attachments on `service_report` with entityId
   `<reportId>~<sectionKey>`; `GET /service-reports/:id` returns them by prefix.
+
+### CAD job orders: the design team's queue (2026-10-09)
+
+The owner's call: "an additional menu for CAD J.O. … optimize the design
+team, consolidating job orders: attach files, revision traceability, the
+designer updates the status by percentage, the requestor comments for
+changes, the designer sets the priority; there is a Designer Lead and a
+Designer Support; the output is always a PDF for the requestor".
+`/g-ops/cad-job-orders` under Project Management (Costing · Job Orders ·
+**CAD J.O.** · Projects — pinned by verify-foundation), `gops.cad_job_orders`,
+`routes/cadJobOrders.ts`, `pages/delivery/CadJobOrders.tsx`,
+`styles/cad.css`, numbering type `cad_job_order` (CJO), verify-cad.
+
+- **It is work, not a decision: no approval route, no money.** Nothing here
+  touches `shared/approvals.ts`. The rights are the registry's eight with
+  two of them given a meaning: **`edit_all` is the design team** (Designer
+  Lead and Designer Support, seeded roles `designer_lead` and `designer`;
+  assign both in Admin › Users) — progress, revisions and priority on what
+  is assigned to them, and taking an unassigned request; **`approve` is the
+  Designer Lead's dispatch right** — assign, reassign and unassign any,
+  close any. `edit_own` is the requestor on their own request (sales, sales
+  managers, project managers, project engineers and service engineers hold
+  `VIEW_OWN_SELF`); `view_all` is the design team, sales managers, PMs and
+  executives. `flags(me, row)` in the route is the one rule for every
+  button; the page draws what it says. The people picker is
+  `/users/lookup?holding=gops.cad_job_orders.edit_all`.
+- **The lifecycle**: REQUESTED → IN_PROGRESS (taken or assigned) →
+  FOR_REVIEW (a revision submitted; progress 100) → COMPLETED (the
+  requestor accepts; the designer or the lead may close it instead, WITH a
+  note) or CHANGES_REQUESTED (the requestor's comment, `isChangeRequest`,
+  pinned to the latest revision; reporting progress puts it back IN
+  PROGRESS) ; ON_HOLD from either side with a reason, and Resume returns it
+  to `statusBeforeHold`; CANCELLED by the requestor or the lead with a
+  reason. A completed or cancelled request is a record: no edits. Accept
+  and take are conditional `updateMany` claims. **Overdue is derived**
+  from `neededBy` (a DATE, Manila's day through `dayKey`), never stored;
+  the list's `?overdue=true`, the summary card and My Work all read it.
+- **Revisions are rows, never overwritten** (`CadRevision`, unique on
+  request + sequence: R0, R1 …), each with its note, an optional http(s)
+  `externalUrl` (`safeHttpUrl`) and its files as attachments on
+  `cad_revision`. **A revision must carry a PDF** — the owner's call, the
+  output to the requestor is always a PDF; the AutoCAD or SketchUp source
+  travels beside it. A refused upload `discard()`s what multer already
+  wrote, so nothing strays on disk (verify-cad counts the upload folder).
+- **CAD files are accepted by EXTENSION, and take their own ceiling.** A
+  browser sends a `.skp`, and often a `.dwg`, as `application/octet-stream`,
+  so `shared/attachments.ts` admits `CAD_EXTENSIONS` (dwg, dxf, skp, rvt,
+  ifc, step, 3ds, rar, 7z …) beside the MIME list — document formats a
+  viewer opens, never something a browser runs — and `cadUpload` carries
+  `MAX_CAD_UPLOAD_MB` (default **100**, the Cloudflare tunnel's limit per
+  request; bigger goes as a split zip or as the revision's external link).
+  The generic `/attachments/:entityType/:entityId` POST picks `cadUpload`
+  for `isCadEntity()` types. Such a file downloads under its name; PDFs and
+  images open as before.
+- **The thread is `CadComment`**: permanent, by anyone who may open the
+  request, with files (attachments on `cad_comment`) and optionally the
+  revision it is about. Every comment, revision, assignment and change of
+  status or priority tells the other side — the requestor and the designer,
+  never the person who did it — by bell (`cad.*` notification types) and by
+  email where SMTP is set (`tell()`; mail never fails the request). A new
+  request tells the whole design team (`designTeam()`: active holders of the
+  design right or the lead's through a role or an allow override; super
+  admins are not designers). **Attachment guards** on the three entity
+  types apply the request's own visibility (`mayOpen`: view_all, or the
+  requestor or the designer on it).
+- **One click files the accepted revision as an Approved Plan** on the
+  linked project (`POST /:id/file-plan`, once, `CadJobOrder.approvedPlanId`
+  unique): a FOR_APPROVAL plan with the request's number as drawing number,
+  `R<n>` as revision, the drawing type as discipline, and the revision's
+  files COPIED onto `approved_plan` — a copy, because deleting an attachment
+  row unlinks its bytes and the revision keeps its own. The plan is then the
+  project's to approve, as any other.
+- **Drawing types are data** (`CadDrawingType`, Admin › Categories ›
+  Drawing types, `/reference/cad-drawing-types`, `admin.categories.*` to
+  change, anyone signed in to read): `CAD_DRAWING_TYPES` in
+  `shared/cadDrawingTypes.ts` seeds the seven as system rows — renamable,
+  never deleted, switched off instead; a custom one in use is deactivated.
+- **The list is the shared layout**: `cadListWhere(me, q)` (`base` =
+  visibility + scope + search + `ids`; `where` adds the filters: status,
+  priority, open, overdue, unassigned, designer (`assignedToId`, or
+  `none`), requestor, drawing type, customer, project, quotation,
+  `neededFrom`/`neededTo`) feeds the rows, `cadListSummary(base)` (the
+  cards: open, waiting for a designer, in progress, for review, overdue,
+  completed) and the paper (`GET /cad-job-orders/pdf`, above `/:id`,
+  `?ids=`). Mine is "raised by me or on my board"; the design team opens on
+  All, everyone else on Mine. Mass actions for the lead: Assign to and Set
+  priority, each the ordinary call per row. The request's own PDF prints
+  the request, the scope, the revisions, the thread and three dated
+  sign-offs (requested, drawn, accepted — "Pending" until each happens).
+  Ctrl+K finds requests under the same visibility; **My Work** lists the
+  designer's open requests, the requestor's drawings awaiting review and,
+  for the lead, the queue nobody has taken.
+- **Priority is the design team's, never the requestor's** (the owner's
+  call): the requestor gives a needed-by date; the designer or the lead sets
+  Low / Normal / High / Urgent. Progress is a whole 0–100 reported by the
+  designer on it (`NumberInput kind="count"` with 25 / 50 / 75 / 100
+  buttons); a submitted revision sets it to 100.
 
 ### Budget requests: project cash (2026-10-07)
 

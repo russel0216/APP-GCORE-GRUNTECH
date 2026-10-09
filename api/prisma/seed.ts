@@ -11,6 +11,7 @@ import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGro
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { TEAMS, retireFirstIndustries } from '../src/shared/team';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
+import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -88,6 +89,8 @@ const ROLES: RoleSeed[] = [
       // Sales takes the service call and raises the job order for it.
       ...VIEW_OWN_SELF('gops', 'job_orders'),
       'gops.job_orders.export',
+      // And asks the design team for a drawing (2026-10-09).
+      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -122,6 +125,9 @@ const ROLES: RoleSeed[] = [
       ...VIEW_OWN_SELF('gops', 'job_orders'),
       'gops.job_orders.view_all',
       'gops.job_orders.export',
+      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+      'gops.cad_job_orders.view_all',
+      'gops.cad_job_orders.export',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'evaluations'),
@@ -199,6 +205,50 @@ const ROLES: RoleSeed[] = [
     ],
   },
   {
+    // The design team (2026-10-09, the owner's call: "there is Designer Lead,
+    // Designer Support"). The lead dispatches the CAD job orders — assigns and
+    // reassigns them, sets priority on any, closes any — which is what
+    // "Approve" on CAD J.O. means; both roles do the work on what is assigned
+    // to them: progress, revisions, priority. Assign both in Admin › Users.
+    key: 'designer_lead',
+    name: 'Designer Lead',
+    description: 'Runs the design team’s queue: assigns CAD job orders, sets priority, submits and closes drawings',
+    grants: [['gops', 'cad_job_orders']],
+    only: [
+      'gops.dashboard.view_all',
+      'gops.customers.view_all',
+      'gops.projects.view_all',
+      'gops.plans.view_all',
+      'gops.quotations.view_all',
+      'gops.job_orders.view_all',
+      'gops.partners.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+    ],
+  },
+  {
+    key: 'designer',
+    name: 'Designer Support',
+    description: 'Draws what the CAD job orders ask for: takes a request, reports progress, submits revisions',
+    only: [
+      'gops.dashboard.view_all',
+      'gops.cad_job_orders.view_own',
+      'gops.cad_job_orders.view_all',
+      'gops.cad_job_orders.edit_all',
+      'gops.cad_job_orders.export',
+      'gops.customers.view_all',
+      'gops.projects.view_all',
+      'gops.plans.view_all',
+      'gops.quotations.view_all',
+      'gops.job_orders.view_all',
+      'gops.partners.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+    ],
+  },
+  {
     key: 'project_manager',
     name: 'Project Manager',
     description: 'Runs projects — budget, procurement requests, progress and billing',
@@ -222,6 +272,8 @@ const ROLES: RoleSeed[] = [
       'gops.quotations.view_all',
       'gops.quote_archive.view_all',
       'gops.job_orders.view_all',
+      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
+      'gops.cad_job_orders.view_all',
       'gchain.purchase_requests.view_all',
       // A PM raises stock-replenishment requests too, not only direct-to-job
       // ones from the project workspace.
@@ -254,6 +306,8 @@ const ROLES: RoleSeed[] = [
       // Project cash: the team asks for it, so an engineer raises a budget
       // request on their project and sees their own.
       ...VIEW_OWN_SELF('gops', 'budget_requests'),
+      // Asks the design team for a drawing (2026-10-09).
+      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       'gops.budget_monitoring.view_all',
       'gops.customers.view_all',
       'gchain.inventory.view_all',
@@ -293,6 +347,7 @@ const ROLES: RoleSeed[] = [
       'gops.job_orders.view_all',
       'gops.job_orders.create',
       'gops.job_orders.edit_own',
+      ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -1285,6 +1340,10 @@ async function main() {
   // hand on the customer and optional. System rows: undeletable, renamable.
   const subIndustriesAdded = await seedSubIndustries();
   console.log(`  ✓ Sub-industries (${SUB_INDUSTRIES.length}${subIndustriesAdded ? `, ${subIndustriesAdded} added` : ''})`);
+
+  // What a CAD job order asks for (2026-10-09): the seven, system rows.
+  const drawingTypesAdded = await seedCadDrawingTypes();
+  console.log(`  ✓ Drawing types (${CAD_DRAWING_TYPES.length}${drawingTypesAdded ? `, ${drawingTypesAdded} added` : ''})`);
 
   // ── Warehouse ──────────────────────────────────────────────────────────────
   await prisma.warehouse.upsert({

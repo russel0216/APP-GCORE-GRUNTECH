@@ -81,6 +81,16 @@ export interface ActivityTypeDef {
   activityCount?: number;
 }
 
+/** What a CAD job order asks for (2026-10-09): Layout plan, P&ID…, with how many requests carry it. */
+export interface DrawingTypeDef {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isSystem: boolean;
+  isActive: boolean;
+  _count?: { requests: number };
+}
+
 export function Categories() {
   const { can } = useAuth();
   const toast = useToast();
@@ -98,17 +108,20 @@ export function Categories() {
   const [editingGroup, setEditingGroup] = useState<QuotationGroup | 'new' | null>(null);
   const [activityTypes, setActivityTypes] = useState<ActivityTypeDef[]>([]);
   const [editingType, setEditingType] = useState<ActivityTypeDef | 'new' | null>(null);
+  const [drawingTypes, setDrawingTypes] = useState<DrawingTypeDef[]>([]);
+  const [editingDrawingType, setEditingDrawingType] = useState<DrawingTypeDef | 'new' | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, i, ind, sub, g, at] = await Promise.all([
+      const [c, i, ind, sub, g, at, dt] = await Promise.all([
         api.get<CostCategory[]>('/reference/cost-categories'),
         api.get<ItemCategory[]>('/reference/item-categories'),
         api.get<Industry[]>('/reference/industries'),
         api.get<SubIndustry[]>('/reference/sub-industries'),
         api.get<QuotationGroup[]>('/reference/quotation-groups'),
         api.get<ActivityTypeDef[]>('/reference/activity-types'),
+        api.get<DrawingTypeDef[]>('/reference/cad-drawing-types'),
       ]);
       setCost(c);
       setItems(i);
@@ -116,6 +129,7 @@ export function Categories() {
       setSubIndustries(sub);
       setGroups(g);
       setActivityTypes(at);
+      setDrawingTypes(dt);
       setError(null);
     } catch (err) {
       setError(err);
@@ -508,6 +522,74 @@ export function Categories() {
         </p>
       </div>
 
+      {/*
+        Drawing types (2026-10-09): what a CAD job order asks for — Layout
+        plan, P&ID / schematic, single-line… The output to the requestor is
+        always a PDF; the type says what is drawn.
+      */}
+      <div className="card m-industries">
+        <div className="m-card-head">
+          <h3 className="card-title">Drawing types</h3>
+          {can('admin.categories.create') && (
+            <button className="btn btn-sm" onClick={() => setEditingDrawingType('new')}>
+              + Add
+            </button>
+          )}
+        </div>
+
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th className="right">CAD job orders</th>
+                <th>Status</th>
+                {mayEdit && <th className="m-col-action" />}
+              </tr>
+            </thead>
+            <tbody>
+              {drawingTypes.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    {t.name}
+                    {t.isSystem && <span className="faint"> · built-in</span>}
+                  </td>
+                  <td className="right">{(t._count?.requests ?? 0).toLocaleString('en-US')}</td>
+                  <td>
+                    <StatusBadge status={t.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
+                  </td>
+                  {mayEdit && (
+                    <td className="m-col-action">
+                      <button className="btn btn-sm" onClick={() => setEditingDrawingType(t)}>
+                        Modify
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="m-footnote">
+          What a CAD job order asks the design team for. The seven built-ins can be renamed but not
+          deleted; a type in use is deactivated rather than deleted, and the requests of that type keep
+          it. Whatever the type, the output to the requestor is a PDF.
+        </p>
+      </div>
+
+      {editingDrawingType && (
+        <DrawingTypeModal
+          type={editingDrawingType === 'new' ? null : editingDrawingType}
+          onClose={() => setEditingDrawingType(null)}
+          onSaved={() => {
+            setEditingDrawingType(null);
+            void load();
+            toast('ok', 'Saved');
+          }}
+        />
+      )}
+
       {editingType && (
         <ActivityTypeModal
           type={editingType === 'new' ? null : editingType}
@@ -869,6 +951,95 @@ function ActivityTypeModal({
         checked={form.isActive}
         onChange={(v) => setForm({ ...form, isActive: v })}
         label="Active — an inactive type stays on its activities but is not offered"
+      />
+    </Modal>
+  );
+}
+
+function DrawingTypeModal({
+  type,
+  onClose,
+  onSaved,
+}: {
+  type: DrawingTypeDef | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({
+    name: type?.name ?? '',
+    sortOrder: type?.sortOrder ?? 0,
+    isActive: type?.isActive ?? true,
+  });
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (type) await api.patch(`/reference/cad-drawing-types/${type.id}`, form);
+      else await api.post('/reference/cad-drawing-types', form);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!type) return;
+    setBusy(true);
+    try {
+      await api.del(`/reference/cad-drawing-types/${type.id}`);
+      onSaved();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  const inUse = type?._count?.requests ?? 0;
+
+  return (
+    <Modal
+      title={type ? `Modify ${type.name}` : 'Add drawing type'}
+      onClose={onClose}
+      footer={
+        <>
+          {type && !type.isSystem && inUse === 0 && can('admin.categories.delete') && (
+            <button className="btn btn-danger" onClick={remove} disabled={busy}>
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={busy || form.name.trim().length < 2}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBox error={error} />
+      {type && (type.isSystem || inUse > 0) && (
+        <div className="alert info">
+          {type.isSystem
+            ? 'A built-in type: rename it, or untick Active to stop offering it.'
+            : `${inUse === 1 ? 'One CAD job order is' : `${inUse.toLocaleString('en-US')} CAD job orders are`} of this type, so it cannot be deleted — untick Active to stop offering it.`}
+        </div>
+      )}
+      <Field label="Name" hint="e.g. Isometric, Equipment layout, Cable schedule">
+        <input value={form.name} autoFocus maxLength={80} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Sort order">
+        <NumberInput kind="count" value={form.sortOrder} onChange={(e) => setForm({ ...form, sortOrder: Number(e.target.value) })} />
+      </Field>
+      <Checkbox
+        checked={form.isActive}
+        onChange={(v) => setForm({ ...form, isActive: v })}
+        label="Active — an inactive type stays on its requests but is not offered"
       />
     </Modal>
   );
