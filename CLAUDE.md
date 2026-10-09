@@ -221,10 +221,10 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,678 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
+**2,679 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
 masters 74, sales 425, costing 139, pipeline 86, calendar 96, numbering 46,
 partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
-evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
+evaluations 130, academy 97, finance 189, aftermarket 175, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
@@ -1335,17 +1335,57 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   unique-constraint 500), and the report takes the visit's facts.
 - **A returned (REJECTED) service report is edited and resubmitted**; freezing it
   left its visit unable ever to complete.
-- **Job-order approval creates exactly one visit**, in the same transaction:
-  `settleJobOrder` is guarded on PENDING_APPROVAL and claims the row with a
-  conditional `updateMany`, so a double settle schedules nothing twice. The order
-  completes in the existing `onReportSettled` — no second path.
-- **Cover is `coverageFor(assetId, date)`**: CONTRACT, else WARRANTY, else
-  CHARGEABLE, from facts on the requested date. **A job order posts no cost**;
-  cost reaches its `jobId` through overtime, PRs, stock issues and claims.
-- **The amount taken from a quotation is its SUBTOTAL** — the invoice adds VAT,
-  so the total would tax the work twice.
+- **The job order is the PROJECT WORK ORDER** (2026-10-09, the owner's call;
+  a request for service work on a registered machine before that). Sales
+  raises it for a customer with its LINKS — the quotation (any one still on,
+  **one under negotiation included**), the sales order and/or the project —
+  the project's name, the contact and their number, the **target start and
+  target finish** (the working days between them are `workingDaysBetween()`
+  in `shared/day.ts`, computed and never stored; `requestedFor` mirrors the
+  start so one index serves both shapes), the **scope of work in one box**,
+  the amount, Customer PO, and the **personnel to send**: project manager,
+  project engineer, project lead (one each) and project support
+  (`JobOrderSupport`, any number). No equipment, no kind, no urgent flag,
+  no charge basis any more — `kind`, `urgent`, `assetId`, `chargeBasis`,
+  `contractId` stay on the table for the orders raised before, which print
+  without them. Linking a quotation fills the name, contact, number, site
+  and amount (`/job-orders/options` sends each quotation's net and whether a
+  costing stands behind it, and the customer's live sales orders); a sales
+  order must book the quotation the order keeps. "Mine" is what you raised
+  OR are sent on (`mineWhere`).
+- **The route is the project manager named ON THE ORDER, then the
+  salesperson's team leader**: seeded "Job order — project manager then
+  team leader" — step 1 the engine's PROJECT_MANAGER type reading the
+  request's own `projectManagerId` (`ApprovalRequest.projectManagerId`,
+  `ApprovalContext.projectManagerId`, read before the job's; `ctxOf(request)`
+  is what every engine read passes; `project_manager` role when none is
+  named or the PM raised it), step 2 SUPERVISOR falling back to
+  `sales_manager`. "Job order — service manager" is RETIRED.
+- **Approval BUILDS THE PROJECT** (the owner's choice over booking a visit):
+  `settleJobOrder` claims PENDING_APPROVAL → APPROVED with a conditional
+  `updateMany`, then — for an order with no project yet — reads the linked
+  quotation's value revision's `costingId`, checks it through
+  `costingForJob()` and writes the job through **`createJobRecord()`**, both
+  exported from `routes/jobs.ts` and the SAME code `POST /jobs` runs, so a
+  project comes to be one way: named as the order names it, `startDate` the
+  target start, `targetEndDate` the target finish, the order's PM as its
+  manager, the quotation revision linked only when APPROVED (a revision
+  under negotiation stands behind no job), the costing marked FINAL. An
+  order already linked to a project builds nothing; one whose quotation has
+  no usable costing is still approved — the decision stands — and its trail
+  and the requester's bell say why, for the project to be built by hand.
+  A double settle builds nothing twice (verify-aftermarket). **A job order
+  posts no cost**; cost reaches its project through overtime, PRs, stock
+  issues and claims. Orders raised as service calls before keep their
+  visit: the report on it still completes the order in `onReportSettled`.
+- **The amount is the linked document's NET** (the sales order's, else the
+  quotation's value revision's: subtotal less discount, before VAT — the
+  invoice adds VAT) unless somebody typed one.
 - **`/job-orders/options` feeds the form's pickers** behind the form's own
-  permission, because a salesperson holds no Installed Base permission.
+  permission; the people come from `/users/lookup`. The PDF prints the
+  project, the links and amount, the scope, the personnel, and the route's
+  steps as sign-offs through `approvalSlots` ("Pending" until signed) with
+  the customer's acknowledgement slot last.
 - **Section photos** are attachments on `service_report` with entityId
   `<reportId>~<sectionKey>`; `GET /service-reports/:id` returns them by prefix.
 

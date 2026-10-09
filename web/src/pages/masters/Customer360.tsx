@@ -153,11 +153,14 @@ interface JobOrderLine {
   status: string;
   kind: string;
   title: string;
+  projectName: string | null;
   urgent: boolean;
   chargeBasis: string;
   requestedFor: string;
+  targetFinish: string | null;
   amount: number | null;
   assignedTo: { id: string; name: string } | null;
+  projectManager: { id: string; name: string } | null;
 }
 
 /** A quote from the read-only SCORO archive. */
@@ -592,7 +595,7 @@ export function Customer360Page() {
           title="Job orders"
           count={jobOrders.length}
           empty="No service work has been requested for this customer."
-          head={['Number', 'Work', 'Needed by', 'Charged as', 'Engineer', 'Status']}
+          head={['Number', 'Project', 'Target', 'Amount', 'Project manager', 'Status']}
         >
           {jobOrders.map((j) => (
             <tr key={j.id}>
@@ -602,18 +605,15 @@ export function Customer360Page() {
                 </Link>
               </td>
               <td>
-                {j.title}
-                <span className="m-subname">
-                  {REPORT_KIND[j.kind] ?? humanise(j.kind)}
-                  {j.urgent ? ' · urgent' : ''}
-                </span>
+                {j.projectName ?? j.title}
+                {j.projectName && <span className="m-subname">{j.title}</span>}
               </td>
-              <td>{formatDate(j.requestedFor)}</td>
               <td>
-                {humanise(j.chargeBasis)}
-                {j.amount !== null && <span className="m-subname">{formatMoney(j.amount)}</span>}
+                {formatDate(j.requestedFor)}
+                {j.targetFinish ? ` → ${formatDate(j.targetFinish)}` : ''}
               </td>
-              <td>{j.assignedTo?.name ?? <span className="faint">unassigned</span>}</td>
+              <td>{j.amount !== null ? formatMoney(j.amount) : <span className="faint">—</span>}</td>
+              <td>{j.projectManager?.name ?? j.assignedTo?.name ?? <span className="faint">none named</span>}</td>
               <td>
                 <StatusBadge status={j.status} />
               </td>

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma, JobOrderStatus, ServiceKind, ChargeBasis } from '@prisma/client';
+import { Prisma, JobOrderStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -17,29 +17,37 @@ import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approvalSignoffs, type ApprovalOutcome } from '../shared/approvals';
-import { renderDocument, formatDate, formatMoney, type PdfSection } from '../shared/pdf';
+import { submitForApproval, onApprovalSettled, approvalSlots, type ApprovalOutcome } from '../shared/approvals';
+import { renderDocument, formatDate, formatMoney, type PdfSection, type Signatory } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
-import { coverageFor, dayKey, type Coverage } from '../shared/aftermarket';
-import { KIND_LABEL } from './aftermarket';
+import { dayKey } from '../shared/aftermarket';
+import { workingDaysBetween } from '../shared/day';
+import { valueRevision } from '../shared/pipeline';
+import { costingForJob, createJobRecord } from './jobs';
 
 /**
- * Job orders — a request for service work, usually from sales (model §4.5).
+ * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
+ * request for service work before that).
  *
- * The AUTHORISATION document of the aftermarket chain:
+ * Sales raises it for a customer, linked to the quotation (any open one —
+ * one under negotiation included), the sales order and/or the project it is
+ * for; it names the project, the contact and their number, the target start
+ * and finish (the working days between them computed, never stored), the
+ * scope of work in one box, the amount, and the people to send — project
+ * manager, project engineer, project lead, project support.
  *
- *   job order (asked, approved) → one visit (attended) → one report (evidence)
- *     → the order completes → a chargeable one is invoiced once.
+ * The route is the project manager named on the order, then the
+ * salesperson's team leader. APPROVAL BUILDS THE PROJECT from the costing
+ * behind the linked quotation's value revision, with the targets as its
+ * dates and the PM as its manager — the same `createJobRecord` as POST /jobs,
+ * so there is one way a project comes to be. An order already linked to a
+ * project is approved and builds nothing; one whose quotation has no usable
+ * costing is approved and says so, for the project to be built by hand once
+ * it is costed.
  *
- * It carries no cost of its own. Labour, parts and out-of-pocket reach its
- * `jobId` through overtime, PRs, stock issues and expense claims that quote
- * that job — warranty work on the project that sold the machine, contract
- * work on the contract's job. Posting an estimate here as well would count
- * the same work twice.
+ * It carries no cost of its own: cost reaches its project through overtime,
+ * PRs, stock issues and claims.
  */
-
-export { coverageFor };
-export type { Coverage };
 
 export const jobOrderRoutes = Router();
 jobOrderRoutes.use(authenticate);
@@ -58,18 +66,21 @@ function asDate(value: string, label: string): Date {
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 
+const person = { select: { id: true, name: true, position: true } } as const;
+
 const jobOrderInclude = {
   customer: { select: { id: true, code: true, name: true } },
   site: { select: { id: true, name: true, city: true } },
   contact: { select: { id: true, name: true, phone: true } },
-  asset: {
-    select: { id: true, code: true, name: true, model: true, serialNo: true, warrantyEndsAt: true },
-  },
-  contract: { select: { id: true, number: true, endsAt: true } },
-  job: { select: { id: true, number: true, name: true } },
-  quotation: { select: { id: true, number: true, subject: true } },
-  requestedBy: { select: { id: true, name: true, position: true } },
+  job: { select: { id: true, number: true, name: true, status: true } },
+  quotation: { select: { id: true, number: true, subject: true, outcome: true } },
+  salesOrder: { select: { id: true, number: true, status: true } },
+  requestedBy: person,
   assignedTo: { select: { id: true, name: true } },
+  projectManager: person,
+  projectEngineer: person,
+  projectLead: person,
+  support: { select: { user: person } },
   visit: {
     select: {
       id: true,
@@ -84,21 +95,42 @@ const jobOrderInclude = {
 
 type JobOrderRow = Prisma.JobOrderGetPayload<{ include: typeof jobOrderInclude }>;
 
+/** The target window: orders raised before the targets carry only the day they were wanted on. */
+function targets(row: { targetStart: Date | null; targetFinish: Date | null; requestedFor: Date }) {
+  const start = row.targetStart ?? row.requestedFor;
+  const finish = row.targetFinish ?? row.targetStart ?? row.requestedFor;
+  return { targetStart: start, targetFinish: finish, durationDays: workingDaysBetween(start, finish) };
+}
+
 function present(row: JobOrderRow) {
+  const { support, ...rest } = row;
   return {
-    ...row,
+    ...rest,
+    ...targets(row),
     amount: num(row.amount),
     billable: row.chargeBasis === 'CHARGEABLE',
+    support: support.map((s) => s.user),
   };
 }
 
-/** Somebody with only view_own sees the orders they raised or were sent to. */
+/** Somebody with only view_own sees the orders they raised or are sent on. */
 function onlyOwn(me: ResolvedUser): boolean {
   return !can(me, 'gops.job_orders.view_all');
 }
 
-function mayOpen(me: ResolvedUser, row: { requestedById: string; assignedToId: string | null }): boolean {
-  return !onlyOwn(me) || row.requestedById === me.id || row.assignedToId === me.id;
+function onIt(me: ResolvedUser, row: JobOrderRow): boolean {
+  return (
+    row.requestedById === me.id ||
+    row.assignedToId === me.id ||
+    row.projectManagerId === me.id ||
+    row.projectEngineerId === me.id ||
+    row.projectLeadId === me.id ||
+    row.support.some((s) => s.user.id === me.id)
+  );
+}
+
+function mayOpen(me: ResolvedUser, row: JobOrderRow): boolean {
+  return !onlyOwn(me) || onIt(me, row);
 }
 
 async function load(id: string): Promise<JobOrderRow> {
@@ -107,13 +139,26 @@ async function load(id: string): Promise<JobOrderRow> {
   return row;
 }
 
-const subjectOf = (row: {
-  kind: string;
-  urgent: boolean;
-  customer: { name: string };
-  asset: { name: string } | null;
-}) =>
-  `${KIND_LABEL[row.kind]} — ${row.customer.name}${row.asset ? ` — ${row.asset.name}` : ''}${row.urgent ? ' (URGENT)' : ''}`;
+const subjectOf = (row: { title: string; projectName: string | null; customer: { name: string } }) =>
+  `${row.projectName ?? row.title} — ${row.customer.name}`;
+
+/** Everyone the order sends, once each, never the person told the news already. */
+function crewOf(row: JobOrderRow, except: string | null = null): string[] {
+  const ids = [row.projectManagerId, row.projectEngineerId, row.projectLeadId, row.assignedToId, ...row.support.map((s) => s.user.id)];
+  return [...new Set(ids.filter((id): id is string => !!id && id !== except))];
+}
+
+/** Which of a viewer's orders "mine" means: raised by them, or sending them. */
+const mineWhere = (userId: string): Prisma.JobOrderWhereInput => ({
+  OR: [
+    { requestedById: userId },
+    { assignedToId: userId },
+    { projectManagerId: userId },
+    { projectEngineerId: userId },
+    { projectLeadId: userId },
+    { support: { some: { userId } } },
+  ],
+});
 
 // ── List ────────────────────────────────────────────────────────────────────
 
@@ -126,28 +171,21 @@ jobOrderRoutes.get(
     const where: Prisma.JobOrderWhereInput = {};
     const and: Prisma.JobOrderWhereInput[] = [];
 
-    // An engineer's "mine" is what is dispatched to them, as well as what
-    // they raised themselves.
-    if (onlyOwn(me) || q.scope === 'mine') {
-      and.push({ OR: [{ requestedById: me.id }, { assignedToId: me.id }] });
-    }
+    if (onlyOwn(me) || q.scope === 'mine') and.push(mineWhere(me.id));
 
     const status = asEnum(JobOrderStatus, q.filters.status);
     if (status) where.status = status;
     if (q.filters.open === 'true') where.status = 'APPROVED';
-    const kind = asEnum(ServiceKind, q.filters.kind);
-    if (kind) where.kind = kind;
-    const basis = asEnum(ChargeBasis, q.filters.chargeBasis);
-    if (basis) where.chargeBasis = basis;
-    // The unbilled-service queue finance works from.
+    // The unbilled queue finance works from.
     if (q.filters.unbilled === 'true') {
       where.chargeBasis = 'CHARGEABLE';
       where.status = 'COMPLETED';
       where.invoice = { is: null };
     }
-    for (const key of ['customerId', 'assetId', 'assignedToId', 'contractId', 'jobId', 'quotationId'] as const) {
+    for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId'] as const) {
       if (q.filters[key]) where[key] = q.filters[key];
     }
+    // requestedFor mirrors the target start, so one index serves both shapes.
     if (q.filters.from || q.filters.to) {
       where.requestedFor = {};
       if (q.filters.from) where.requestedFor.gte = asDate(q.filters.from, 'From');
@@ -158,8 +196,9 @@ jobOrderRoutes.get(
         OR: [
           { number: { contains: q.search, mode: 'insensitive' } },
           { title: { contains: q.search, mode: 'insensitive' } },
+          { projectName: { contains: q.search, mode: 'insensitive' } },
           { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-          { asset: { serialNo: { contains: q.search, mode: 'insensitive' } } },
+          { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
         ],
       });
     }
@@ -182,28 +221,14 @@ jobOrderRoutes.get(
 
 // ── Lookups for the form (above /:id — route order) ─────────────────────────
 
-/**
- * What covers this machine on this day — so the form can explain the charge
- * basis before anything is saved.
- */
-jobOrderRoutes.get(
-  '/coverage',
-  requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own', 'gops.job_orders.create'),
-  handler(async (req, res) => {
-    const assetId = typeof req.query.assetId === 'string' && req.query.assetId ? req.query.assetId : null;
-    const date = typeof req.query.date === 'string' && req.query.date ? asDate(req.query.date, 'Date') : dayKey(new Date());
-    res.json(await coverageFor(assetId, date));
-  }),
-);
+/** The net of a quotation revision: the lines before discount, less the discount — what the customer agreed to, before VAT. */
+const netOf = (r: { subtotal: Prisma.Decimal; discountAmount: Prisma.Decimal }) => Number(r.subtotal.sub(r.discountAmount));
 
 /**
- * The pickers the form needs, behind the form's own permission.
- *
- * A salesperson raising a breakdown call holds no Installed Base permission,
- * so the asset list cannot come from `/installed-assets`; and handing out the
- * whole customer master through a lookup would be wider than the form needs.
- * This returns the customer names, then — for one customer — its sites,
- * contacts, machines, quotations and jobs. Names and numbers only.
+ * The pickers the form needs, behind the form's own permission: the customer
+ * names, then — for one customer — its sites, contacts, quotations (any but a
+ * lost one, with what linking one would fill in), live sales orders and
+ * projects. Names, numbers and the agreed amounts only.
  */
 jobOrderRoutes.get(
   '/options',
@@ -220,7 +245,7 @@ jobOrderRoutes.get(
       res.json({ customers });
       return;
     }
-    const [sites, contacts, assets, quotations, jobs] = await Promise.all([
+    const [sites, contacts, quotations, salesOrders, jobs] = await Promise.all([
       prisma.customerSite.findMany({
         where: { customerId },
         select: { id: true, name: true, city: true },
@@ -231,119 +256,162 @@ jobOrderRoutes.get(
         select: { id: true, name: true, phone: true },
         orderBy: { name: 'asc' },
       }),
-      prisma.installedAsset.findMany({
-        where: { customerId, status: { not: 'DECOMMISSIONED' } },
-        select: { id: true, code: true, name: true, serialNo: true, siteId: true, warrantyEndsAt: true },
-        orderBy: { name: 'asc' },
-        take: 500,
-      }),
       prisma.quotation.findMany({
-        where: { customerId },
-        select: { id: true, number: true, subject: true, outcome: true },
+        where: { customerId, outcome: { not: 'LOST' } },
+        select: {
+          id: true,
+          number: true,
+          subject: true,
+          outcome: true,
+          contactId: true,
+          siteId: true,
+          revisions: { select: { status: true, revision: true, subtotal: true, discountAmount: true, costingId: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.salesOrder.findMany({
+        where: { customerId, status: { not: 'CANCELLED' } },
+        select: { id: true, number: true, status: true, quotationId: true, contactId: true, poNumber: true, subtotal: true, discountAmount: true },
         orderBy: { createdAt: 'desc' },
         take: 100,
       }),
       prisma.job.findMany({
         where: { customerId, status: { not: 'CANCELLED' } },
-        select: { id: true, number: true, name: true, type: true, status: true },
+        select: { id: true, number: true, name: true, type: true, status: true, projectManagerId: true },
         orderBy: { createdAt: 'desc' },
         take: 100,
       }),
     ]);
-    res.json({ sites, contacts, assets, quotations, jobs });
+    res.json({
+      sites,
+      contacts,
+      quotations: quotations.map((q) => {
+        const rev = valueRevision(q.revisions);
+        return {
+          id: q.id,
+          number: q.number,
+          subject: q.subject,
+          outcome: q.outcome,
+          contactId: q.contactId,
+          siteId: q.siteId,
+          amount: rev ? netOf(rev) : null,
+          /** Whether approval could build the project from it. */
+          costed: !!rev?.costingId,
+        };
+      }),
+      salesOrders: salesOrders.map((o) => ({
+        id: o.id,
+        number: o.number,
+        status: o.status,
+        quotationId: o.quotationId,
+        contactId: o.contactId,
+        poNumber: o.poNumber,
+        amount: netOf(o),
+      })),
+      jobs,
+    });
   }),
 );
 
 // ── Create and edit ─────────────────────────────────────────────────────────
 
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 const jobOrderSchema = z.object({
   customerId: z.string().min(1, 'Which customer?'),
   siteId: z.string().optional().nullable(),
   contactId: z.string().optional().nullable(),
-  assetId: z.string().optional().nullable(),
-  kind: z.enum(['COMMISSIONING', 'PREVENTIVE_MAINTENANCE', 'INSPECTION', 'CORRECTIVE']).default('CORRECTIVE'),
-  urgent: z.boolean().optional(),
-  title: z.string().trim().min(3, 'Say in a line what the job is'),
-  description: z.string().trim().min(5, 'What did the customer report or ask for?'),
-  scope: z.string().optional().nullable(),
-  requestedFor: z.string().min(1, 'When does the customer want it?'),
-  assignedToId: z.string().optional().nullable(),
-  chargeBasis: z.enum(['WARRANTY', 'CONTRACT', 'CHARGEABLE', 'GOODWILL']).optional(),
   quotationId: z.string().optional().nullable(),
-  customerPoNumber: z.string().trim().optional().nullable(),
-  amount: z.number().min(0).optional().nullable(),
+  salesOrderId: z.string().optional().nullable(),
   jobId: z.string().optional().nullable(),
+  projectName: z.string().trim().min(2, 'Name the project').max(300),
+  contactNumber: z.string().trim().max(60).optional().nullable(),
+  title: z.string().trim().min(3, 'Say in a line what the job is').max(300),
+  scope: z.string().trim().min(5, 'Describe the scope of work').max(20000),
+  targetStart: z.string().regex(DAY, 'Use a date'),
+  targetFinish: z.string().regex(DAY, 'Use a date'),
+  projectManagerId: z.string().optional().nullable(),
+  projectEngineerId: z.string().optional().nullable(),
+  projectLeadId: z.string().optional().nullable(),
+  supportIds: z.array(z.string()).max(50).optional(),
+  customerPoNumber: z.string().trim().max(120).optional().nullable(),
+  amount: z.number().min(0).optional().nullable(),
   notes: z.string().optional().nullable(),
 });
 
-/**
- * Cover, contract and charge-to job, decided together from the facts.
- *
- * CONTRACT needs an active contract that covers the machine on the day —
- * choosing it without one would charge the work to nothing. The job follows
- * the basis: the contract's job, the installing project, or the requester's
- * choice for chargeable and goodwill work.
- */
-export async function decideCover(input: {
-  assetId: string | null;
-  requestedFor: Date;
-  chargeBasis?: ChargeBasis;
-  jobId?: string | null;
-}) {
-  const coverage = await coverageFor(input.assetId, input.requestedFor);
-  const chargeBasis = input.chargeBasis ?? coverage.suggested;
-  if (chargeBasis === 'CONTRACT' && !coverage.contract) {
-    throw badRequest(
-      'No active service contract covers this machine on that date. Choose another basis, or put the machine under contract first.',
-    );
-  }
-  const contractId = chargeBasis === 'CONTRACT' ? coverage.contract!.id : null;
-  const jobId =
-    chargeBasis === 'CONTRACT'
-      ? coverage.contract!.jobId
-      : chargeBasis === 'WARRANTY'
-        ? (coverage.installingJob?.id ?? input.jobId ?? null)
-        : (input.jobId ?? null);
-  return { coverage, chargeBasis, contractId, jobId, underWarranty: coverage.underWarranty };
+/** The target window as DATEs, the finish no earlier than the start. */
+function window(startText: string, finishText: string) {
+  const targetStart = asDate(startText, 'Target start');
+  const targetFinish = asDate(finishText, 'Target finish');
+  if (targetFinish < targetStart) throw badRequest('The target finish is before the target start');
+  return { targetStart, targetFinish };
 }
 
-/** Checks that everything a body names belongs to the order's customer. */
-async function checkBelongs(customerId: string, body: {
-  siteId?: string | null;
-  contactId?: string | null;
-  assetId?: string | null;
-  quotationId?: string | null;
-  jobId?: string | null;
-}) {
-  const [asset, site, contact, quotation, job] = await Promise.all([
-    body.assetId ? prisma.installedAsset.findUnique({ where: { id: body.assetId }, select: { customerId: true } }) : null,
+/** Checks that everything a body names belongs to the order's customer, and that the people exist. */
+async function checkBelongs(
+  customerId: string,
+  body: {
+    siteId?: string | null;
+    contactId?: string | null;
+    quotationId?: string | null;
+    salesOrderId?: string | null;
+    jobId?: string | null;
+    projectManagerId?: string | null;
+    projectEngineerId?: string | null;
+    projectLeadId?: string | null;
+    supportIds?: string[];
+  },
+) {
+  const [site, contact, quotation, salesOrder, job] = await Promise.all([
     body.siteId ? prisma.customerSite.findUnique({ where: { id: body.siteId }, select: { customerId: true } }) : null,
     body.contactId ? prisma.customerContact.findUnique({ where: { id: body.contactId }, select: { customerId: true } }) : null,
-    body.quotationId ? prisma.quotation.findUnique({ where: { id: body.quotationId }, select: { customerId: true } }) : null,
+    body.quotationId ? prisma.quotation.findUnique({ where: { id: body.quotationId }, select: { customerId: true, outcome: true } }) : null,
+    body.salesOrderId
+      ? prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { customerId: true, quotationId: true, status: true } })
+      : null,
     body.jobId ? prisma.job.findUnique({ where: { id: body.jobId }, select: { customerId: true } }) : null,
   ]);
-  if (body.assetId && asset?.customerId !== customerId) throw badRequest('That machine is not at this customer');
   if (body.siteId && site?.customerId !== customerId) throw badRequest('That site is not this customer’s');
   if (body.contactId && contact?.customerId !== customerId) throw badRequest('That contact is not at this customer');
   if (body.quotationId && quotation?.customerId !== customerId) throw badRequest('That quotation is for another customer');
+  if (quotation?.outcome === 'LOST') throw badRequest('That quotation was lost — a job order books work that is still on');
+  if (body.salesOrderId && salesOrder?.customerId !== customerId) throw badRequest('That sales order is for another customer');
+  if (salesOrder?.status === 'CANCELLED') throw badRequest('That sales order was cancelled');
+  if (body.quotationId && salesOrder && salesOrder.quotationId !== body.quotationId) {
+    throw badRequest('That sales order books a different quotation');
+  }
   if (body.jobId && job?.customerId !== customerId) throw badRequest('That project is for another customer');
+
+  const peopleIds = [
+    ...new Set([body.projectManagerId, body.projectEngineerId, body.projectLeadId, ...(body.supportIds ?? [])].filter((id): id is string => !!id)),
+  ];
+  if (peopleIds.length) {
+    const found = await prisma.user.count({ where: { id: { in: peopleIds }, isActive: true } });
+    if (found !== peopleIds.length) throw badRequest('Somebody named to send is not an active login');
+  }
 }
 
 /**
- * The agreed price when a quotation is named and nobody typed one: its latest
- * APPROVED revision, else its latest — the same rule Insights and Customer 360
- * use. The SUBTOTAL, because the invoice adds VAT itself; the total would tax
- * the work twice. Less the quote-level discount: the stored subtotal is the
- * sum of the lines BEFORE discount, and the customer agreed to the price after.
+ * The agreed amount when nobody typed one: the sales order's net, else the
+ * quotation's value revision's net (approved, else latest) — before VAT,
+ * because the invoice adds it, and after the quote-level discount, because
+ * that is the price the customer agreed to.
  */
-async function quotedAmount(quotationId: string): Promise<number | null> {
-  const revisions = await prisma.quotationRevision.findMany({
-    where: { quotationId },
-    select: { status: true, subtotal: true, discountAmount: true, revision: true },
-    orderBy: { revision: 'desc' },
-  });
-  const chosen = revisions.find((r) => r.status === 'APPROVED') ?? revisions[0];
-  return chosen ? Number(chosen.subtotal.sub(chosen.discountAmount)) : null;
+async function agreedAmount(body: { salesOrderId?: string | null; quotationId?: string | null }): Promise<number | null> {
+  if (body.salesOrderId) {
+    const o = await prisma.salesOrder.findUnique({ where: { id: body.salesOrderId }, select: { subtotal: true, discountAmount: true } });
+    if (o) return netOf(o);
+  }
+  if (body.quotationId) {
+    const revisions = await prisma.quotationRevision.findMany({
+      where: { quotationId: body.quotationId },
+      select: { status: true, revision: true, subtotal: true, discountAmount: true },
+    });
+    const rev = valueRevision(revisions);
+    if (rev) return netOf(rev);
+  }
+  return null;
 }
 
 jobOrderRoutes.post(
@@ -353,41 +421,36 @@ jobOrderRoutes.post(
     const me = currentUser(req);
     const body = parseBody(jobOrderSchema, req.body);
     await checkBelongs(body.customerId, body);
-
-    const requestedFor = asDate(body.requestedFor, 'Requested for');
-    const cover = await decideCover({
-      assetId: body.assetId || null,
-      requestedFor,
-      chargeBasis: body.chargeBasis,
-      jobId: body.jobId || null,
-    });
-    const amount =
-      body.amount ?? (cover.chargeBasis === 'CHARGEABLE' && body.quotationId ? await quotedAmount(body.quotationId) : null);
+    const { targetStart, targetFinish } = window(body.targetStart, body.targetFinish);
+    const amount = body.amount ?? (await agreedAmount(body));
 
     const row = await prisma.$transaction(async (tx) => {
       const number = await nextNumber('job_order', tx);
       return tx.jobOrder.create({
         data: {
           number,
-          kind: body.kind,
-          urgent: body.urgent ?? false,
           customerId: body.customerId,
           siteId: body.siteId || null,
           contactId: body.contactId || null,
-          assetId: body.assetId || null,
-          title: body.title,
-          description: body.description,
-          scope: body.scope || null,
-          requestedFor,
-          chargeBasis: cover.chargeBasis,
-          underWarranty: cover.underWarranty,
-          contractId: cover.contractId,
-          jobId: cover.jobId,
           quotationId: body.quotationId || null,
+          salesOrderId: body.salesOrderId || null,
+          jobId: body.jobId || null,
+          projectName: body.projectName,
+          contactNumber: body.contactNumber?.trim() || null,
+          title: body.title,
+          description: body.scope,
+          scope: body.scope,
+          targetStart,
+          targetFinish,
+          requestedFor: targetStart,
+          chargeBasis: 'CHARGEABLE',
           customerPoNumber: body.customerPoNumber || null,
           amount: amount == null ? null : new Prisma.Decimal(amount),
           requestedById: me.id,
-          assignedToId: body.assignedToId || null,
+          projectManagerId: body.projectManagerId || null,
+          projectEngineerId: body.projectEngineerId || null,
+          projectLeadId: body.projectLeadId || null,
+          support: { create: [...new Set(body.supportIds ?? [])].map((userId) => ({ userId })) },
           notes: body.notes || null,
         },
         include: jobOrderInclude,
@@ -395,12 +458,7 @@ jobOrderRoutes.post(
     });
 
     await audit(
-      {
-        entityType: 'job_order',
-        entityId: row.id,
-        action: 'CREATED',
-        summary: `${row.number} — ${KIND_LABEL[row.kind]} at ${row.customer.name} (${row.chargeBasis.toLowerCase()})`,
-      },
+      { entityType: 'job_order', entityId: row.id, action: 'CREATED', summary: `${row.number} — ${subjectOf(row)}` },
       req,
     );
     res.status(201).json(present(row));
@@ -414,15 +472,18 @@ jobOrderRoutes.get(
     const me = currentUser(req);
     const row = await load(req.params.id);
     if (!mayOpen(me, row)) throw forbidden('That is someone else’s job order');
-    const coverage = await coverageFor(row.assetId, row.requestedFor).catch(() => null);
     const owner = canEditRecord(me, 'gops', 'job_orders', row.requestedById);
+    // Who would decide it, so the page can say where Submit sends it.
+    const route =
+      row.status === 'DRAFT' || row.status === 'REJECTED'
+        ? await approvalSlots('job_order', row.id, { amount: num(row.amount), requesterId: row.requestedById, projectManagerId: row.projectManagerId })
+        : [];
     res.json({
       ...present(row),
-      coverage,
       canEdit: owner && (row.status === 'DRAFT' || row.status === 'REJECTED'),
       canCancel: owner && ['DRAFT', 'REJECTED', 'APPROVED'].includes(row.status),
-      canAcknowledge:
-        (owner || row.assignedToId === me.id) && row.status !== 'DRAFT' && row.status !== 'CANCELLED',
+      canAcknowledge: (owner || onIt(me, row)) && row.status !== 'DRAFT' && row.status !== 'CANCELLED',
+      route: route.map((s) => ({ step: s.step, names: (s.assigned ?? []).map((p) => p.name) })),
     });
   }),
 );
@@ -445,48 +506,46 @@ jobOrderRoutes.patch(
     if (existing.status !== 'DRAFT' && existing.status !== 'REJECTED') {
       throw badRequest('This job order has gone for approval. Its content is what was decided on.');
     }
-    await checkBelongs(existing.customerId, body);
+    await checkBelongs(existing.customerId, {
+      ...body,
+      // A sales order must book the quotation the order keeps, when the body changes only one of them.
+      quotationId: body.quotationId !== undefined ? body.quotationId : existing.quotationId,
+      salesOrderId: body.salesOrderId !== undefined ? body.salesOrderId : existing.salesOrderId,
+    });
+    const current = targets(existing);
+    const dates = window(body.targetStart ?? isoDay(current.targetStart), body.targetFinish ?? isoDay(current.targetFinish));
 
-    const assetId = body.assetId !== undefined ? body.assetId || null : existing.assetId;
-    const requestedFor = body.requestedFor ? asDate(body.requestedFor, 'Requested for') : existing.requestedFor;
-    const recover =
-      body.assetId !== undefined || body.requestedFor !== undefined || body.chargeBasis !== undefined || body.jobId !== undefined;
-    const cover = recover
-      ? await decideCover({
-          assetId,
-          requestedFor,
-          chargeBasis: body.chargeBasis ?? (body.assetId !== undefined || body.requestedFor !== undefined ? undefined : existing.chargeBasis),
-          jobId: body.jobId !== undefined ? body.jobId || null : existing.jobId,
-        })
-      : null;
-
-    const updated = await prisma.jobOrder.update({
-      where: { id: existing.id },
-      data: {
-        ...(body.kind ? { kind: body.kind } : {}),
-        ...(body.urgent !== undefined ? { urgent: body.urgent } : {}),
-        ...(body.siteId !== undefined ? { siteId: body.siteId || null } : {}),
-        ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
-        ...(body.assetId !== undefined ? { assetId } : {}),
-        ...(body.title ? { title: body.title } : {}),
-        ...(body.description ? { description: body.description } : {}),
-        ...(body.scope !== undefined ? { scope: body.scope || null } : {}),
-        ...(body.requestedFor ? { requestedFor } : {}),
-        ...(body.assignedToId !== undefined ? { assignedToId: body.assignedToId || null } : {}),
-        ...(body.quotationId !== undefined ? { quotationId: body.quotationId || null } : {}),
-        ...(body.customerPoNumber !== undefined ? { customerPoNumber: body.customerPoNumber || null } : {}),
-        ...(body.amount !== undefined ? { amount: body.amount == null ? null : new Prisma.Decimal(body.amount) } : {}),
-        ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
-        ...(cover
-          ? {
-              chargeBasis: cover.chargeBasis,
-              underWarranty: cover.underWarranty,
-              contractId: cover.contractId,
-              jobId: cover.jobId,
-            }
-          : {}),
-      },
-      include: jobOrderInclude,
+    const updated = await prisma.$transaction(async (tx) => {
+      if (body.supportIds !== undefined) {
+        await tx.jobOrderSupport.deleteMany({ where: { jobOrderId: existing.id } });
+      }
+      return tx.jobOrder.update({
+        where: { id: existing.id },
+        data: {
+          ...(body.siteId !== undefined ? { siteId: body.siteId || null } : {}),
+          ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
+          ...(body.quotationId !== undefined ? { quotationId: body.quotationId || null } : {}),
+          ...(body.salesOrderId !== undefined ? { salesOrderId: body.salesOrderId || null } : {}),
+          ...(body.jobId !== undefined ? { jobId: body.jobId || null } : {}),
+          ...(body.projectName ? { projectName: body.projectName } : {}),
+          ...(body.contactNumber !== undefined ? { contactNumber: body.contactNumber?.trim() || null } : {}),
+          ...(body.title ? { title: body.title } : {}),
+          ...(body.scope ? { scope: body.scope, description: body.scope } : {}),
+          targetStart: dates.targetStart,
+          targetFinish: dates.targetFinish,
+          requestedFor: dates.targetStart,
+          ...(body.projectManagerId !== undefined ? { projectManagerId: body.projectManagerId || null } : {}),
+          ...(body.projectEngineerId !== undefined ? { projectEngineerId: body.projectEngineerId || null } : {}),
+          ...(body.projectLeadId !== undefined ? { projectLeadId: body.projectLeadId || null } : {}),
+          ...(body.supportIds !== undefined
+            ? { support: { create: [...new Set(body.supportIds)].map((userId) => ({ userId })) } }
+            : {}),
+          ...(body.customerPoNumber !== undefined ? { customerPoNumber: body.customerPoNumber || null } : {}),
+          ...(body.amount !== undefined ? { amount: body.amount == null ? null : new Prisma.Decimal(body.amount) } : {}),
+          ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+        },
+        include: jobOrderInclude,
+      });
     });
 
     await audit(
@@ -495,7 +554,7 @@ jobOrderRoutes.patch(
         entityId: updated.id,
         action: 'UPDATED',
         summary: `${updated.number} updated`,
-        before: { ...existing, amount: num(existing.amount) },
+        before: present(existing),
         after: present(updated),
       },
       req,
@@ -507,9 +566,10 @@ jobOrderRoutes.patch(
 // ── The lifecycle ───────────────────────────────────────────────────────────
 
 /**
- * Submitting. Deliberately NOT gated on a price: a breakdown call is often
- * time-and-materials, the PDF then prints "To be billed on completion", and
- * the invoice step is where an amount becomes compulsory.
+ * Submitting: to the project manager named on the order, then the
+ * salesperson's team leader. Not gated on a price — the amount is the
+ * quotation's unless somebody typed one, and the invoice step is where one
+ * becomes compulsory.
  */
 jobOrderRoutes.post(
   '/:id/submit',
@@ -532,9 +592,11 @@ jobOrderRoutes.post(
         documentId: row.id,
         documentNumber: row.number,
         subject: subjectOf(row),
-        amount: row.chargeBasis === 'CHARGEABLE' ? num(row.amount) : null,
+        amount: num(row.amount),
         link: `/g-ops/job-orders/${row.id}`,
         requesterId: me.id,
+        jobId: row.jobId,
+        projectManagerId: row.projectManagerId,
       });
     } catch (err) {
       // No workflow, or a workflow that routes only to the requester: put the
@@ -553,9 +615,9 @@ jobOrderRoutes.post(
 );
 
 /**
- * Cancelling. A pending order is withdrawn by its approver returning it — the
- * engine has no requester withdrawal, and this is not the place to invent
- * one. A completed order is a record of what happened.
+ * Cancelling. A pending order is withdrawn by its approver returning it. A
+ * completed order is a record of what happened; a project already built from
+ * an approved one stays — a project is cancelled from its own page.
  */
 jobOrderRoutes.post(
   '/:id/cancel',
@@ -568,7 +630,7 @@ jobOrderRoutes.post(
       throw forbidden('Only whoever raised this job order can cancel it');
     }
     if (row.status === 'COMPLETED') {
-      throw badRequest('This job order was completed and reported; its record is what happened.');
+      throw badRequest('This job order was completed; its record is what happened.');
     }
     if (row.status === 'PENDING_APPROVAL') {
       throw badRequest('It is with the approver. Ask them to return it, then cancel it.');
@@ -576,11 +638,9 @@ jobOrderRoutes.post(
     if (row.status === 'CANCELLED') throw badRequest('This job order is already cancelled');
 
     await prisma.$transaction(async (tx) => {
+      // An order raised as a service call before 2026-10-09 may still carry a visit.
       if (row.visit && row.visit.status === 'SCHEDULED') {
-        await tx.serviceVisit.update({
-          where: { id: row.visit.id },
-          data: { status: 'CANCELLED' },
-        });
+        await tx.serviceVisit.update({ where: { id: row.visit.id }, data: { status: 'CANCELLED' } });
       }
       await tx.jobOrder.update({
         where: { id: row.id },
@@ -588,21 +648,23 @@ jobOrderRoutes.post(
       });
     });
 
-    if (row.assignedToId && row.assignedToId !== me.id && row.status === 'APPROVED') {
-      await notify({
-        userId: row.assignedToId,
-        type: 'pm.due',
-        title: 'Job order cancelled',
-        body: `${row.number} — ${row.customer.name}: ${body.reason}`,
-        link: `/g-ops/job-orders/${row.id}`,
-      });
+    if (row.status === 'APPROVED') {
+      for (const userId of crewOf(row, me.id)) {
+        await notify({
+          userId,
+          type: 'pm.due',
+          title: 'Job order cancelled',
+          body: `${row.number} — ${subjectOf(row)}: ${body.reason}`,
+          link: `/g-ops/job-orders/${row.id}`,
+        });
+      }
     }
     await audit(
       {
         entityType: 'job_order',
         entityId: row.id,
         action: 'CANCELLED',
-        summary: `${row.number} cancelled — ${body.reason}${row.visit?.status === 'SCHEDULED' ? ` (visit ${row.visit.number} cancelled)` : ''}`,
+        summary: `${row.number} cancelled — ${body.reason}${row.job ? ` (project ${row.job.number} stays)` : ''}`,
       },
       req,
     );
@@ -622,8 +684,8 @@ jobOrderRoutes.patch(
     );
     const row = await load(req.params.id);
     const owner = canEditRecord(me, 'gops', 'job_orders', row.requestedById);
-    if (!owner && row.assignedToId !== me.id) {
-      throw forbidden('Only whoever raised the order or the engineer sent can record this');
+    if (!owner && !onIt(me, row)) {
+      throw forbidden('Only whoever raised the order or somebody sent on it can record this');
     }
     if (row.status === 'DRAFT' || row.status === 'CANCELLED') {
       throw badRequest('A draft or cancelled order has nothing for the customer to acknowledge');
@@ -646,13 +708,6 @@ jobOrderRoutes.patch(
   }),
 );
 
-const BASIS_PRINT: Record<string, (row: JobOrderRow) => string> = {
-  WARRANTY: () => 'Warranty — no charge',
-  CONTRACT: (r) => `Under contract ${r.contract?.number ?? ''} — no charge`.replace('  ', ' '),
-  CHARGEABLE: () => 'Chargeable',
-  GOODWILL: () => 'Goodwill — no charge',
-};
-
 jobOrderRoutes.get(
   '/:id/pdf',
   requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
@@ -660,110 +715,73 @@ jobOrderRoutes.get(
     const me = currentUser(req);
     const row = await load(req.params.id);
     if (!mayOpen(me, row)) throw forbidden('That is someone else’s job order');
-
-    const today = dayKey(new Date());
-    const warranty = row.asset?.warrantyEndsAt
-      ? row.asset.warrantyEndsAt >= today
-        ? `to ${formatDate(row.asset.warrantyEndsAt)}`
-        : `Expired ${formatDate(row.asset.warrantyEndsAt)}`
-      : row.asset
-        ? 'None recorded'
-        : '—';
+    const t = targets(row);
+    const nameOf = (p: { name: string; position: string | null } | null) => (p ? [p.name, p.position].filter(Boolean).join(' · ') : '—');
 
     const sections: PdfSection[] = [
       {
         kind: 'fields',
-        title: 'Request',
+        title: 'Project',
         columns: 2,
         fields: [
-          { label: 'Kind', value: KIND_LABEL[row.kind] },
-          { label: 'Priority', value: row.urgent ? 'Urgent' : 'Routine' },
-          { label: 'Requested for', value: formatDate(row.requestedFor) },
+          { label: 'Project name', value: row.projectName ?? row.title },
+          { label: 'Customer', value: row.customer.name },
+          { label: 'Site', value: row.site ? [row.site.name, row.site.city].filter(Boolean).join(', ') : '—' },
+          { label: 'Contact', value: row.contact?.name ?? '—' },
+          { label: 'Contact number', value: row.contactNumber ?? row.contact?.phone ?? '—' },
           { label: 'Requested by', value: row.requestedBy.name },
-          {
-            label: 'Contact',
-            value: row.contact ? [row.contact.name, row.contact.phone].filter(Boolean).join(' · ') : '—',
-          },
-          {
-            label: 'Equipment',
-            value: row.asset ? [row.asset.name, row.asset.model].filter(Boolean).join(' · ') : '—',
-          },
-          { label: 'Warranty', value: warranty },
-          {
-            label: 'Contract',
-            value: row.contract ? `${row.contract.number} · to ${formatDate(row.contract.endsAt)}` : '—',
-          },
+          { label: 'Target start', value: formatDate(t.targetStart) },
+          { label: 'Target finish', value: formatDate(t.targetFinish) },
+          { label: 'Duration', value: `${t.durationDays} working day${t.durationDays === 1 ? '' : 's'}` },
         ],
       },
-      { kind: 'text', title: 'Reported problem / request', body: row.description },
-    ];
-    if (row.scope) sections.push({ kind: 'text', title: 'Scope of work', body: row.scope });
-    sections.push(
       {
         kind: 'fields',
-        title: 'Charging',
+        title: 'Links and amount',
         columns: 2,
         fields: [
-          { label: 'Basis', value: BASIS_PRINT[row.chargeBasis](row) },
-          { label: 'Quotation', value: row.quotation?.number ?? '—' },
+          { label: 'Quotation', value: row.quotation ? `${row.quotation.number} — ${row.quotation.subject}` : '—' },
+          { label: 'Sales order', value: row.salesOrder?.number ?? '—' },
+          { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : '—' },
           { label: 'Customer PO', value: row.customerPoNumber ?? '—' },
-          {
-            label: 'Amount',
-            value:
-              row.chargeBasis === 'CHARGEABLE'
-                ? row.amount != null
-                  ? formatMoney(Number(row.amount))
-                  : 'To be billed on completion'
-                : '—',
-          },
-          { label: 'Charge to', value: row.job ? `${row.job.number} · ${row.job.name}` : '—' },
+          { label: 'Amount (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount)) : 'To be billed on completion' },
         ],
       },
+      { kind: 'text', title: 'Scope of work', body: row.scope ?? row.description },
       {
         kind: 'fields',
-        title: 'Dispatch',
-        columns: 3,
+        title: 'Personnel to send',
+        columns: 2,
         fields: [
-          { label: 'Engineer', value: row.assignedTo?.name ?? 'Not yet assigned' },
-          { label: 'Visit no.', value: row.visit?.number ?? '—' },
-          { label: 'Scheduled', value: row.visit ? formatDate(row.visit.dueDate) : '—' },
+          { label: 'Project manager', value: nameOf(row.projectManager) },
+          { label: 'Project engineer', value: nameOf(row.projectEngineer) },
+          { label: 'Project lead', value: nameOf(row.projectLead) },
+          { label: 'Project support', value: row.support.length ? row.support.map((s) => s.user.name).join(', ') : '—' },
         ],
       },
-    );
+    ];
     if (row.status === 'CANCELLED' && row.cancelReason) {
       sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
     }
 
-    const signoffs = await approvalSignoffs('job_order', row.id);
+    // Requested by, then each step of the route — the project manager, the
+    // team leader — "Pending" until it acts, then the customer's slot.
+    const slots = await approvalSlots('job_order', row.id, { amount: num(row.amount), requesterId: row.requestedById, projectManagerId: row.projectManagerId });
+    const signatories: Signatory[] = [
+      { role: 'Requested by', name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: row.createdAt },
+      ...(slots.length ? slots.map((s) => ({ role: s.step, name: s.name, position: s.position, at: s.at })) : [{ role: 'Approved by' }]),
+      { role: 'Acknowledged by (customer)', name: row.customerAcknowledgedBy ?? undefined, at: row.customerAcknowledgedAt },
+    ];
     const pdf = await renderDocument({
       title: 'Job Order',
       documentNumber: row.number,
       date: row.createdAt,
-      reference: `${row.customer.name}${row.site ? ` · ${row.site.name}` : ''}${
-        row.asset ? ` · ${row.asset.name}${row.asset.serialNo ? ` (S/N ${row.asset.serialNo})` : ''}` : ''
-      }`,
+      reference: `${row.projectName ?? row.title} — ${row.customer.name}`,
       sections,
-      signatories: [
-        {
-          role: 'Requested by',
-          name: row.requestedBy.name,
-          position: row.requestedBy.position ?? undefined,
-          at: row.createdAt,
-        },
-        { role: 'Approved by', ...(signoffs[0] ?? {}) },
-        {
-          role: 'Acknowledged by (customer)',
-          name: row.customerAcknowledgedBy ?? undefined,
-          at: row.customerAcknowledgedAt,
-        },
-      ],
-      footerNote: row.chargeBasis !== 'CHARGEABLE' ? 'No charge to the customer for this work.' : undefined,
+      signatories,
     });
 
-    await audit(
-      { entityType: 'job_order', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` },
-      req,
-    );
+    await audit({ entityType: 'job_order', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
     res.send(pdf);
@@ -773,77 +791,120 @@ jobOrderRoutes.get(
 // ── Approval ────────────────────────────────────────────────────────────────
 
 /**
- * The service manager's decision. Approval schedules exactly one visit — the
- * attendance record — numbered in the same transaction as the status change,
- * so a rollback burns no number. The visit has no `sequence`: it is not part
- * of any contract's generated plan, and regenerating a contract's schedule
- * leaves it alone.
+ * The route's last signature BUILDS THE PROJECT (2026-10-09, the owner's
+ * call): from the costing behind the linked quotation's value revision, named
+ * as the order names it, running from the target start to the target finish,
+ * with the order's project manager — through `createJobRecord`, the one way
+ * a project comes to be. The order's own status is claimed first with a
+ * conditional update, so a settle that arrives twice builds nothing twice.
  *
- * Guarded on status, so a settle that arrives twice schedules nothing twice.
+ * An order already linked to a project is approved and builds nothing. One
+ * whose quotation has no costing, or a costing that cannot yet carry a
+ * project (with the approver, no scope, a scope that does not add up), is
+ * still approved — the decision stands — and says why in its trail and to
+ * whoever raised it, for the project to be built by hand once the costing
+ * is ready.
  */
 export async function settleJobOrder(
   approval: { documentId: string },
   outcome: ApprovalOutcome,
 ): Promise<void> {
-  const jo = await prisma.jobOrder.findUnique({
-    where: { id: approval.documentId },
-    include: { customer: { select: { name: true } }, visit: { select: { id: true } } },
-  });
+  const jo = await prisma.jobOrder.findUnique({ where: { id: approval.documentId }, include: jobOrderInclude });
   if (!jo || jo.status !== 'PENDING_APPROVAL') return;
 
   if (outcome === 'REJECTED') {
     await prisma.jobOrder.update({ where: { id: jo.id }, data: { status: 'REJECTED' } });
-    await audit({
-      entityType: 'job_order',
-      entityId: jo.id,
-      action: 'REJECTED',
-      summary: `${jo.number} returned — no visit was scheduled`,
-    });
+    await audit({ entityType: 'job_order', entityId: jo.id, action: 'REJECTED', summary: `${jo.number} returned — no project was built` });
     return;
   }
 
-  const visit = await prisma.$transaction(async (tx) => {
-    const claimed = await tx.jobOrder.updateMany({
-      where: { id: jo.id, status: 'PENDING_APPROVAL' },
-      data: { status: 'APPROVED', approvedAt: new Date() },
-    });
-    if (claimed.count === 0 || jo.visit) return null;
-    return tx.serviceVisit.create({
-      data: {
-        number: await nextNumber('service_visit', tx),
-        kind: jo.kind,
-        status: 'SCHEDULED',
-        customerId: jo.customerId,
-        siteId: jo.siteId,
-        assetId: jo.assetId,
-        contractId: jo.chargeBasis === 'CONTRACT' ? jo.contractId : null,
-        sequence: null,
-        dueDate: jo.requestedFor,
-        assignedToId: jo.assignedToId,
-        notes: `${jo.number} — ${jo.title}`,
-        jobOrderId: jo.id,
-      },
-    });
+  const claimed = await prisma.jobOrder.updateMany({
+    where: { id: jo.id, status: 'PENDING_APPROVAL' },
+    data: { status: 'APPROVED', approvedAt: new Date() },
   });
-  if (!visit) return;
+  if (claimed.count === 0) return;
 
-  // The requester already hears from the engine; the engineer is the one
-  // person who would otherwise find out from the schedule.
-  if (jo.assignedToId) {
-    await notify({
-      userId: jo.assignedToId,
-      type: 'pm.due',
-      title: `${KIND_LABEL[jo.kind]} call assigned${jo.urgent ? ' — URGENT' : ''}`,
-      body: `${jo.customer.name} — ${jo.number}, due ${isoDay(jo.requestedFor)}`,
-      link: `/g-ops/job-orders/${jo.id}`,
+  let built: { id: string; number: string; name: string } | null = null;
+  let notBuilt: string | null = null;
+  if (jo.jobId) {
+    notBuilt = null;
+  } else if (!jo.quotationId) {
+    notBuilt = 'no quotation is linked, so there is no costing to build the project from';
+  } else {
+    try {
+      const revisions = await prisma.quotationRevision.findMany({
+        where: { quotationId: jo.quotationId },
+        select: { id: true, status: true, revision: true, costingId: true },
+      });
+      const rev = valueRevision(revisions);
+      if (!rev?.costingId) throw badRequest(`${jo.quotation?.number ?? 'the quotation'} has no costing behind it`);
+      const costing = await costingForJob(rev.costingId, jo.customerId);
+      const t = targets(jo);
+      built = await prisma.$transaction(async (tx) => {
+        const job = await createJobRecord(tx, costing, {
+          name: jo.projectName ?? jo.title,
+          type: 'PROJECT',
+          customerId: jo.customerId,
+          siteId: jo.siteId,
+          contactId: jo.contactId,
+          projectManagerId: jo.projectManagerId,
+          // A project built on a quotation still under negotiation keeps the
+          // link for later: only an APPROVED revision may stand behind a job.
+          quotationRevisionId: rev.status === 'APPROVED' ? rev.id : null,
+          customerPoNumber: jo.customerPoNumber,
+          startDate: t.targetStart,
+          targetEndDate: t.targetFinish,
+          notes: `Built from job order ${jo.number}`,
+          createdById: jo.requestedById,
+        });
+        await tx.jobOrder.update({ where: { id: jo.id }, data: { jobId: job.id } });
+        return { id: job.id, number: job.number, name: job.name };
+      });
+    } catch (err) {
+      notBuilt = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (built) {
+    await audit({
+      entityType: 'job',
+      entityId: built.id,
+      action: 'CONVERTED',
+      summary: `Created ${built.number} — ${built.name} from job order ${jo.number}`,
     });
   }
   await audit({
     entityType: 'job_order',
     entityId: jo.id,
     action: 'EXECUTED',
-    summary: `${jo.number} accepted — visit ${visit.number} scheduled for ${isoDay(jo.requestedFor)}`,
+    summary: built
+      ? `${jo.number} approved — project ${built.number} built, ${isoDay(targets(jo).targetStart)} to ${isoDay(targets(jo).targetFinish)}`
+      : jo.job
+        ? `${jo.number} approved for project ${jo.job.number}`
+        : `${jo.number} approved — no project built: ${notBuilt}`,
   });
+
+  // The requester hears from the engine; the people sent, and the requester
+  // when the project could not be built, hear from here.
+  const link = built ? `/g-ops/projects/${built.id}` : `/g-ops/job-orders/${jo.id}`;
+  for (const userId of crewOf(jo)) {
+    await notify({
+      userId,
+      type: 'pm.due',
+      title: `Job order ${jo.number} approved${built ? ` — project ${built.number}` : ''}`,
+      body: `${subjectOf(jo)}, ${isoDay(targets(jo).targetStart)} to ${isoDay(targets(jo).targetFinish)}`,
+      link,
+    });
+  }
+  if (!built && !jo.job) {
+    await notify({
+      userId: jo.requestedById,
+      type: 'pm.due',
+      title: `${jo.number} approved, but no project was built`,
+      body: `${notBuilt}. Build it from the quotation once it is costed.`,
+      link: `/g-ops/job-orders/${jo.id}`,
+    });
+  }
 }
 
 onApprovalSettled('job_order', settleJobOrder);
@@ -854,7 +915,7 @@ registerSearch({
   kind: 'job_order',
   label: 'Job orders',
   permission: ['gops.job_orders.view_all', 'gops.job_orders.view_own'],
-  ownWhere: (user) => ({ OR: [{ requestedById: user.id }, { assignedToId: user.id }] }),
+  ownWhere: (user) => mineWhere(user.id),
   search: async (term, _user, limit, own) => {
     const rows = await prisma.jobOrder.findMany({
       where: {
@@ -864,20 +925,20 @@ registerSearch({
             OR: [
               { number: { contains: term, mode: 'insensitive' } },
               { title: { contains: term, mode: 'insensitive' } },
+              { projectName: { contains: term, mode: 'insensitive' } },
               { customer: { name: { contains: term, mode: 'insensitive' } } },
-              { asset: { serialNo: { contains: term, mode: 'insensitive' } } },
             ],
           },
         ],
       },
       take: limit,
       orderBy: { createdAt: 'desc' },
-      select: { id: true, number: true, title: true, status: true, customer: { select: { name: true } } },
+      select: { id: true, number: true, title: true, projectName: true, status: true, customer: { select: { name: true } } },
     });
     return rows.map((r) => ({
       kind: 'job_order',
       id: r.id,
-      title: `${r.number} — ${r.title}`,
+      title: `${r.number} — ${r.projectName ?? r.title}`,
       subtitle: `${r.customer.name} · ${r.status.toLowerCase().replace(/_/g, ' ')}`,
       link: `/g-ops/job-orders/${r.id}`,
     }));

@@ -795,10 +795,18 @@ const WORKFLOWS: WorkflowSeed[] = [
   },
   {
     documentType: 'job_order',
-    // Raised by sales or an engineer taking the call; accepted by the person who
-    // owns the schedule and stands behind the charging decision.
-    name: 'Job order — service manager',
-    steps: [{ sequence: 1, name: 'Service Manager', approverType: 'ROLE', roleKey: 'service_manager' }],
+    // The project work order's route (2026-10-09, the owner's call: "creator
+    // sales › project manager › team leader"): the Project Manager named ON
+    // THE ORDER (the engine's PROJECT_MANAGER step, reading the request's own
+    // projectManagerId; the project managers' role when none is named or the
+    // PM raised it), then the salesperson's Team Leader — their "Reports to",
+    // the sales managers when none is set. "Job order — service manager" is
+    // RETIRED below.
+    name: 'Job order — project manager then team leader',
+    steps: [
+      { sequence: 1, name: 'Project Manager', approverType: 'PROJECT_MANAGER', roleKey: 'project_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+    ],
   },
   {
     // The requester is the LEAVER's own login whenever one exists, so step 1 is
@@ -1029,6 +1037,9 @@ async function main() {
     // The costing's one-step management approval gave way to the owner's
     // three-signature route (2026-10-09).
     'Costing — management approval',
+    // The job order became a project work order routed to its own project
+    // manager, then the team leader (2026-10-09).
+    'Job order — service manager',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });

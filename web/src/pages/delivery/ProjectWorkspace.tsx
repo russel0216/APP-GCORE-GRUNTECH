@@ -1414,7 +1414,7 @@ interface ServiceRead {
       }[]
     | null;
   jobOrders:
-    | { id: string; number: string; title: string; status: string; kind: string; requestedFor: string }[]
+    | { id: string; number: string; title: string; projectName: string | null; status: string; kind: string; requestedFor: string; targetFinish: string | null }[]
     | null;
 }
 
@@ -1620,8 +1620,7 @@ function ServiceTab({
                   <tr>
                     <th>Number</th>
                     <th>Title</th>
-                    <th>Kind</th>
-                    <th>Requested for</th>
+                    <th>Target</th>
                     <th>Status</th>
                   </tr>
                 </thead>
@@ -1631,9 +1630,11 @@ function ServiceTab({
                       <td>
                         <DocLink to={`/g-ops/job-orders/${o.id}`}>{o.number}</DocLink>
                       </td>
-                      <td>{o.title}</td>
-                      <td>{KIND_LABEL[o.kind] ?? o.kind}</td>
-                      <td>{formatDate(o.requestedFor)}</td>
+                      <td>{o.projectName ?? o.title}</td>
+                      <td>
+                        {formatDate(o.requestedFor)}
+                        {o.targetFinish ? ` → ${formatDate(o.targetFinish)}` : ''}
+                      </td>
                       <td>
                         <StatusBadge status={o.status} />
                       </td>

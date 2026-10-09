@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -6,8 +6,8 @@ import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
+import { PeoplePicker } from '../../components/PeoplePicker';
 import {
-  Checkbox,
   ErrorBox,
   Field,
   Loading,
@@ -18,31 +18,26 @@ import {
   useToast,
   type Tone,
 } from '../../components/ui';
-import { todayLocal } from '../../lib/day';
-import { KINDS, KIND_LABEL, NewReportModal, reportPermission } from './Reports';
+import { parseDay, todayLocal } from '../../lib/day';
+import { NewReportModal, reportPermission } from './Reports';
 import { VisitBadge } from './Schedule';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
- * Job orders — a request for service work: a breakdown call, an installation,
- * a paid PM outside contract, warranty work.
+ * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
+ * request for service work before that).
  *
- * Raised by whoever took the call (usually sales), accepted by the service
- * manager, and only then dispatched: approval books exactly one visit on the
- * Service Schedule. The engineer's approved report on that visit completes
- * the order, and a chargeable one is invoiced from here, once.
+ * Sales raises it for a customer, linked to the quotation (any open one —
+ * one under negotiation included), the sales order and/or the project; it
+ * names the project, the contact and their number, the target start and
+ * finish (the working days between them computed as they are typed), the
+ * scope of work in one box, the amount, and the people to send: project
+ * manager, project engineer, project lead, project support.
  *
- * The cover — warranty, contract, chargeable, goodwill — is decided from the
- * machine's records on the requested date and may be overridden; the fact
- * (was it under warranty?) is kept either way.
+ * The route is the project manager named on the order, then the
+ * salesperson's team leader; approval BUILDS THE PROJECT from the costing
+ * behind the linked quotation, with the targets as its dates.
  */
-
-export const CHARGE_BASES = [
-  { value: 'WARRANTY', label: 'Warranty' },
-  { value: 'CONTRACT', label: 'Contract' },
-  { value: 'CHARGEABLE', label: 'Chargeable' },
-  { value: 'GOODWILL', label: 'Goodwill' },
-];
 
 const BASIS_TONES: Record<string, Tone> = {
   WARRANTY: 'ok',
@@ -54,7 +49,7 @@ const BASIS_TONES: Record<string, Tone> = {
 const STATUSES = [
   { value: 'DRAFT', label: 'Draft' },
   { value: 'PENDING_APPROVAL', label: 'Pending approval' },
-  { value: 'APPROVED', label: 'Approved — scheduled' },
+  { value: 'APPROVED', label: 'Approved' },
   { value: 'COMPLETED', label: 'Completed' },
   { value: 'REJECTED', label: 'Returned' },
   { value: 'CANCELLED', label: 'Cancelled' },
@@ -64,16 +59,15 @@ const STATUSES = [
 const JOB_ORDER_TONES: Record<string, Tone> = { REJECTED: 'warn' };
 const statusLabel = (s: string) => (s === 'REJECTED' ? 'Returned' : undefined);
 
+/** Orders raised as service calls before 2026-10-09 still carry a charge basis; the installed base shows it. */
 export function BasisBadge({ basis }: { basis: string }) {
   return <StatusBadge status={basis} extra={BASIS_TONES} label={basis.toLowerCase()} />;
 }
 
-interface Coverage {
-  underWarranty: boolean;
-  warrantyEndsAt: string | null;
-  contract: { id: string; number: string; jobId: string; endsAt: string } | null;
-  installingJob: { id: string; number: string; name: string } | null;
-  suggested: string;
+interface Person {
+  id: string;
+  name: string;
+  position: string | null;
 }
 
 export interface JobOrderRow {
@@ -81,13 +75,16 @@ export interface JobOrderRow {
   number: string;
   status: string;
   kind: string;
-  urgent: boolean;
   title: string;
+  projectName: string | null;
+  contactNumber: string | null;
   description: string;
   scope: string | null;
+  targetStart: string;
+  targetFinish: string;
+  durationDays: number;
   requestedFor: string;
   chargeBasis: string;
-  underWarranty: boolean;
   billable: boolean;
   amount: number | null;
   customerPoNumber: string | null;
@@ -102,19 +99,15 @@ export interface JobOrderRow {
   customer: { id: string; code: string; name: string };
   site: { id: string; name: string; city: string | null } | null;
   contact: { id: string; name: string; phone: string | null } | null;
-  asset: {
-    id: string;
-    code: string;
-    name: string;
-    model: string | null;
-    serialNo: string | null;
-    warrantyEndsAt: string | null;
-  } | null;
-  contract: { id: string; number: string; endsAt: string } | null;
-  job: { id: string; number: string; name: string } | null;
-  quotation: { id: string; number: string; subject: string } | null;
-  requestedBy: { id: string; name: string; position: string | null };
+  job: { id: string; number: string; name: string; status: string } | null;
+  quotation: { id: string; number: string; subject: string; outcome: string } | null;
+  salesOrder: { id: string; number: string; status: string } | null;
+  requestedBy: Person;
   assignedTo: { id: string; name: string } | null;
+  projectManager: Person | null;
+  projectEngineer: Person | null;
+  projectLead: Person | null;
+  support: Person[];
   visit: {
     id: string;
     number: string;
@@ -126,11 +119,27 @@ export interface JobOrderRow {
 }
 
 interface JobOrderDetailRow extends JobOrderRow {
-  coverage: Coverage | null;
   canEdit: boolean;
   canCancel: boolean;
   canAcknowledge: boolean;
+  route: { step: string; names: string[] }[];
 }
+
+/** Working days (Mon–Fri) from one day to another, both counted; the API's `workingDaysBetween`. */
+function workingDays(from: string, to: string): number {
+  if (!from || !to) return 0;
+  const d = parseDay(from);
+  const end = parseDay(to).getTime();
+  let days = 0;
+  while (d.getTime() <= end) {
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) days++;
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+
+const daysLabel = (n: number) => `${n} working day${n === 1 ? '' : 's'}`;
 
 // ── The list ────────────────────────────────────────────────────────────────
 
@@ -138,15 +147,14 @@ export function JobOrders() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  // `?new=1&customerId=&assetId=&quotationId=&siteId=&kind=` — how Customer
-  // 360, a machine's page and a won quotation start one without retyping.
+  // `?new=1&customerId=&quotationId=&siteId=` — how Customer 360 and a
+  // quotation start one without retyping. (`assetId`, from the installed
+  // base's button, is read no more: an order names no machine.)
   const [raising, setRaising] = useState(() => params.get('new') === '1' && can('gops.job_orders.create'));
   const [prefill] = useState(() => ({
     customerId: params.get('customerId') ?? undefined,
     siteId: params.get('siteId') ?? undefined,
-    assetId: params.get('assetId') ?? undefined,
     quotationId: params.get('quotationId') ?? undefined,
-    kind: params.get('kind') ?? undefined,
   }));
 
   function closeRaising() {
@@ -159,89 +167,64 @@ export function JobOrders() {
   }
 
   const columns: Column<JobOrderRow>[] = [
+    { key: 'number', label: 'Number', sortKey: 'number', width: '130px', render: (r) => <span className="mono">{r.number}</span> },
     {
-      key: 'number',
-      label: 'Number',
-      sortKey: 'number',
+      key: 'project',
+      label: 'Project',
       render: (r) => (
         <div>
-          <span className="mono">{r.number}</span>
-          {r.urgent && (
-            <div>
-              <span className="badge danger">urgent</span>
-            </div>
-          )}
-        </div>
-      ),
-    },
-    {
-      key: 'title',
-      label: 'Job',
-      render: (r) => (
-        <div>
-          <div>{r.title}</div>
-          <div className="faint">{KIND_LABEL[r.kind] ?? r.kind}</div>
+          <div>{r.projectName ?? r.title}</div>
+          {r.projectName && <div className="faint">{r.title}</div>}
         </div>
       ),
     },
     {
       key: 'customer',
-      label: 'Where',
+      label: 'Customer',
       render: (r) => (
         <div>
           <div>{r.customer.name}</div>
-          <div className="faint">{r.asset?.name ?? r.site?.name ?? '—'}</div>
+          <div className="faint">{r.site?.name ?? r.contact?.name ?? '—'}</div>
         </div>
       ),
     },
     {
-      key: 'requestedFor',
-      label: 'Wanted',
+      key: 'targets',
+      label: 'Target',
       sortKey: 'requestedFor',
       render: (r) => (
         <div>
-          <div>{formatDate(r.requestedFor)}</div>
+          <div>
+            {formatDate(r.targetStart)} → {formatDate(r.targetFinish)}
+          </div>
+          <div className="faint">{daysLabel(r.durationDays)}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'amount',
+      label: 'Amount',
+      align: 'right',
+      render: (r) => (r.amount != null ? <span className="mono">{formatMoney(r.amount)}</span> : <span className="faint">—</span>),
+    },
+    {
+      key: 'people',
+      label: 'Project manager',
+      render: (r) => (
+        <div>
+          <div>{r.projectManager?.name ?? <span className="badge warn">none named</span>}</div>
           <div className="faint">{r.requestedBy.name}</div>
         </div>
       ),
     },
     {
-      key: 'cover',
-      label: 'Covered by',
+      key: 'links',
+      label: 'Links',
       render: (r) => (
-        <div>
-          <BasisBadge basis={r.chargeBasis} />
-          {r.chargeBasis === 'CHARGEABLE' && r.amount != null && (
-            <div className="faint mono">{formatMoney(r.amount)}</div>
-          )}
+        <div className="faint mono">
+          {[r.quotation?.number, r.salesOrder?.number, r.job?.number].filter(Boolean).join(' · ') || '—'}
         </div>
       ),
-    },
-    {
-      key: 'assignedTo',
-      label: 'Engineer',
-      render: (r) => (r.assignedTo ? r.assignedTo.name : <span className="badge warn">unassigned</span>),
-    },
-    {
-      key: 'visit',
-      label: 'Visit / report',
-      render: (r) =>
-        r.visit?.report ? (
-          <Link to={`/g-ops/service-reports/${r.visit.report.id}`} className="mono">
-            {r.visit.report.number}
-          </Link>
-        ) : r.visit ? (
-          <div>
-            <Link to={`/g-ops/visits?visit=${r.visit.id}`} className="mono">
-              {r.visit.number}
-            </Link>
-            <div>
-              <VisitBadge visit={{ status: r.visit.status, overdue: false }} />
-            </div>
-          </div>
-        ) : (
-          <span className="faint">—</span>
-        ),
     },
     {
       key: 'status',
@@ -257,11 +240,6 @@ export function JobOrders() {
       <div className="page-head">
         <div>
           <h1>Job Orders</h1>
-          <p>
-            A request for service work — a breakdown call, an installation, a paid PM outside contract
-            or warranty work. Approved by the service manager, it becomes a visit on the Service
-            Schedule; the engineer’s approved report completes it.
-          </p>
         </div>
       </div>
 
@@ -272,23 +250,13 @@ export function JobOrders() {
         rowKey={(r) => r.id}
         scoped
         onRowClick={(r) => navigate(`/g-ops/job-orders/${r.id}`)}
-        searchPlaceholder="Search number, title, customer, serial…"
+        searchPlaceholder="Search number, project, customer, quotation…"
         emptyTitle="No job orders yet"
-        emptyHint="Raise one from a customer, a machine in the installed base, or a won quotation."
+        emptyHint="Raise one for a customer, linked to its quotation — approval builds the project."
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
-          { key: 'kind', label: 'Kind', options: KINDS },
-          { key: 'chargeBasis', label: 'Cover', options: CHARGE_BASES },
-          {
-            key: 'open',
-            label: 'Open',
-            options: [{ value: 'true', label: 'Scheduled, not yet reported' }],
-          },
-          {
-            key: 'unbilled',
-            label: 'Billing',
-            options: [{ value: 'true', label: 'Completed, chargeable, not invoiced' }],
-          },
+          { key: 'open', label: 'Open', options: [{ value: 'true', label: 'Approved' }] },
+          { key: 'from', toKey: 'to', label: 'Target start', type: 'dateRange' },
         ]}
         actions={
           canCreate ? (
@@ -318,37 +286,29 @@ export function JobOrders() {
 interface Options {
   sites: { id: string; name: string; city: string | null }[];
   contacts: { id: string; name: string; phone: string | null }[];
-  assets: { id: string; code: string; name: string; serialNo: string | null; siteId: string | null }[];
-  quotations: { id: string; number: string; subject: string; outcome: string }[];
-  jobs: { id: string; number: string; name: string; type: string; status: string }[];
+  quotations: {
+    id: string;
+    number: string;
+    subject: string;
+    outcome: string;
+    contactId: string | null;
+    siteId: string | null;
+    amount: number | null;
+    costed: boolean;
+  }[];
+  salesOrders: { id: string; number: string; status: string; quotationId: string; contactId: string | null; poNumber: string | null; amount: number }[];
+  jobs: { id: string; number: string; name: string; type: string; status: string; projectManagerId: string | null }[];
 }
 
-const NO_OPTIONS: Options = { sites: [], contacts: [], assets: [], quotations: [], jobs: [] };
+const NO_OPTIONS: Options = { sites: [], contacts: [], quotations: [], salesOrders: [], jobs: [] };
 
-function coverageAlert(c: Coverage | null, date: string) {
-  if (!c) return null;
-  if (c.contract) {
-    return (
-      <div className="alert info">
-        Covered by contract <span className="mono">{c.contract.number}</span> on {formatDate(date)} — no
-        charge. The work is charged to the contract’s job.
-      </div>
-    );
-  }
-  if (c.underWarranty) {
-    return (
-      <div className="alert ok">
-        Under warranty until {formatDate(c.warrantyEndsAt)} — no charge. The work is charged to the
-        project that installed it{c.installingJob ? ` (${c.installingJob.number})` : ''}.
-      </div>
-    );
-  }
-  return (
-    <div className="alert warn">
-      Out of warranty and not under contract on {formatDate(date)} — this call is chargeable.
-    </div>
-  );
-}
+const OUTCOME_LABEL: Record<string, string> = {
+  OPEN: 'open',
+  SUBMITTED: 'submitted',
+  NEGOTIATION: 'under negotiation',
+  WON: 'won',
+  LOST: 'lost',
+};
 
 export function JobOrderModal({
   prefill,
@@ -356,7 +316,7 @@ export function JobOrderModal({
   onClose,
   onSaved,
 }: {
-  prefill?: { customerId?: string; siteId?: string; assetId?: string; quotationId?: string; kind?: string };
+  prefill?: { customerId?: string; siteId?: string; quotationId?: string };
   existing?: JobOrderRow;
   onClose: () => void;
   onSaved: (id: string) => void;
@@ -366,30 +326,29 @@ export function JobOrderModal({
   const [error, setError] = useState<unknown>(null);
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [options, setOptions] = useState<Options>(NO_OPTIONS);
-  const [engineers, setEngineers] = useState<{ id: string; name: string; position: string | null }[]>([]);
-  const [coverage, setCoverage] = useState<Coverage | null>(null);
-  // Once somebody picks a basis by hand, a new coverage answer must not
-  // overwrite it — the override is the point of the field.
-  const basisTouched = useRef(!!existing);
+  const [people, setPeople] = useState<Person[]>([]);
 
   const [form, setForm] = useState(() => ({
     customerId: existing?.customer.id ?? prefill?.customerId ?? '',
+    quotationId: existing?.quotation?.id ?? prefill?.quotationId ?? '',
+    salesOrderId: existing?.salesOrder?.id ?? '',
+    jobId: existing?.job?.id ?? '',
+    projectName: existing?.projectName ?? '',
     siteId: existing?.site?.id ?? prefill?.siteId ?? '',
     contactId: existing?.contact?.id ?? '',
-    assetId: existing?.asset?.id ?? prefill?.assetId ?? '',
-    kind: existing?.kind ?? (prefill?.kind && KIND_LABEL[prefill.kind] ? prefill.kind : 'CORRECTIVE'),
-    urgent: existing?.urgent ?? false,
+    contactNumber: existing?.contactNumber ?? '',
     title: existing?.title ?? '',
-    description: existing?.description ?? '',
-    scope: existing?.scope ?? '',
-    requestedFor: existing?.requestedFor.slice(0, 10) ?? todayLocal(),
-    assignedToId: existing?.assignedTo?.id ?? '',
-    chargeBasis: existing?.chargeBasis ?? 'CHARGEABLE',
-    quotationId: existing?.quotation?.id ?? prefill?.quotationId ?? '',
+    scope: existing?.scope ?? existing?.description ?? '',
+    targetStart: existing?.targetStart.slice(0, 10) ?? todayLocal(),
+    targetFinish: existing?.targetFinish.slice(0, 10) ?? todayLocal(),
+    projectManagerId: existing?.projectManager?.id ?? '',
+    projectEngineerId: existing?.projectEngineer?.id ?? '',
+    projectLeadId: existing?.projectLead?.id ?? '',
+    supportIds: existing?.support.map((p) => p.id) ?? [],
     customerPoNumber: existing?.customerPoNumber ?? '',
     amount: existing?.amount != null ? String(existing.amount) : '',
-    jobId: existing?.job?.id ?? '',
   }));
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   useEffect(() => {
     api
@@ -397,11 +356,9 @@ export function JobOrderModal({
       .then((d) => setCustomers(d.customers))
       .catch(() => setCustomers([]));
     api
-      .get<{ id: string; name: string; position: string | null }[]>(
-        `/users/lookup${qs({ holding: 'gops.pm_reports.create' })}`,
-      )
-      .then(setEngineers)
-      .catch(() => setEngineers([]));
+      .get<Person[]>('/users/lookup')
+      .then(setPeople)
+      .catch(() => setPeople([]));
   }, []);
 
   useEffect(() => {
@@ -415,21 +372,60 @@ export function JobOrderModal({
       .catch(() => setOptions(NO_OPTIONS));
   }, [form.customerId]);
 
+  // A prefilled quotation fills the form once its facts arrive.
   useEffect(() => {
-    if (!form.requestedFor) return;
-    let live = true;
-    api
-      .get<Coverage>(`/job-orders/coverage${qs({ assetId: form.assetId || undefined, date: form.requestedFor })}`)
-      .then((c) => {
-        if (!live) return;
-        setCoverage(c);
-        if (!basisTouched.current) setForm((f) => ({ ...f, chargeBasis: c.suggested }));
-      })
-      .catch(() => live && setCoverage(null));
-    return () => {
-      live = false;
-    };
-  }, [form.assetId, form.requestedFor]);
+    if (existing || !prefill?.quotationId || !options.quotations.length) return;
+    const q = options.quotations.find((x) => x.id === prefill.quotationId);
+    if (q) pickQuotation(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.quotations]);
+
+  /** Linking a quotation fills what it knows: the project's name, the contact, the site, the amount. */
+  function pickQuotation(q: Options['quotations'][number] | undefined) {
+    setForm((f) => {
+      if (!q) return { ...f, quotationId: '', salesOrderId: f.salesOrderId && options.salesOrders.find((o) => o.id === f.salesOrderId)?.quotationId === f.quotationId ? '' : f.salesOrderId };
+      const contact = q.contactId ? options.contacts.find((c) => c.id === q.contactId) : undefined;
+      return {
+        ...f,
+        quotationId: q.id,
+        projectName: f.projectName || q.subject,
+        contactId: f.contactId || q.contactId || '',
+        contactNumber: f.contactNumber || contact?.phone || '',
+        siteId: f.siteId || q.siteId || '',
+        amount: f.amount || (q.amount != null ? String(q.amount) : ''),
+        // A sales order on another quotation no longer fits.
+        salesOrderId: f.salesOrderId && options.salesOrders.find((o) => o.id === f.salesOrderId)?.quotationId !== q.id ? '' : f.salesOrderId,
+      };
+    });
+  }
+
+  function pickSalesOrder(o: Options['salesOrders'][number] | undefined) {
+    if (!o) {
+      set('salesOrderId', '');
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      salesOrderId: o.id,
+      quotationId: o.quotationId,
+      customerPoNumber: f.customerPoNumber || o.poNumber || '',
+      contactId: f.contactId || o.contactId || '',
+      amount: f.amount || String(o.amount),
+    }));
+    const q = options.quotations.find((x) => x.id === o.quotationId);
+    if (q) pickQuotation(q);
+  }
+
+  function pickContact(id: string) {
+    const c = options.contacts.find((x) => x.id === id);
+    setForm((f) => ({ ...f, contactId: id, contactNumber: f.contactNumber || c?.phone || '' }));
+  }
+
+  const duration = workingDays(form.targetStart, form.targetFinish);
+  const finishBeforeStart = !!form.targetStart && !!form.targetFinish && form.targetFinish < form.targetStart;
+  const salesOrdersOffered = form.quotationId ? options.salesOrders.filter((o) => o.quotationId === form.quotationId) : options.salesOrders;
+  const linkedQuotation = options.quotations.find((q) => q.id === form.quotationId);
+  const picked = (id: string) => people.find((p) => p.id === id);
 
   async function save() {
     setBusy(true);
@@ -437,19 +433,21 @@ export function JobOrderModal({
     const body = {
       siteId: form.siteId || null,
       contactId: form.contactId || null,
-      assetId: form.assetId || null,
-      kind: form.kind,
-      urgent: form.urgent,
-      title: form.title,
-      description: form.description,
-      scope: form.scope || null,
-      requestedFor: form.requestedFor,
-      assignedToId: form.assignedToId || null,
-      chargeBasis: form.chargeBasis,
-      quotationId: form.chargeBasis === 'CHARGEABLE' ? form.quotationId || null : null,
-      customerPoNumber: form.customerPoNumber || null,
-      amount: form.chargeBasis === 'CHARGEABLE' && form.amount !== '' ? Number(form.amount) : null,
+      quotationId: form.quotationId || null,
+      salesOrderId: form.salesOrderId || null,
       jobId: form.jobId || null,
+      projectName: form.projectName.trim(),
+      contactNumber: form.contactNumber.trim() || null,
+      title: form.title.trim(),
+      scope: form.scope.trim(),
+      targetStart: form.targetStart,
+      targetFinish: form.targetFinish,
+      projectManagerId: form.projectManagerId || null,
+      projectEngineerId: form.projectEngineerId || null,
+      projectLeadId: form.projectLeadId || null,
+      supportIds: form.supportIds,
+      customerPoNumber: form.customerPoNumber.trim() || null,
+      amount: form.amount !== '' ? Number(form.amount) : null,
     };
     try {
       if (existing) {
@@ -457,10 +455,7 @@ export function JobOrderModal({
         toast('ok', 'Job order updated');
         onSaved(existing.id);
       } else {
-        const created = await api.post<{ id: string; number: string }>('/job-orders', {
-          customerId: form.customerId,
-          ...body,
-        });
+        const created = await api.post<{ id: string; number: string }>('/job-orders', { customerId: form.customerId, ...body });
         toast('ok', `${created.number} raised — submit it when ready`);
         onSaved(created.id);
       }
@@ -470,9 +465,20 @@ export function JobOrderModal({
     }
   }
 
-  const chosenAsset = options.assets.find((a) => a.id === form.assetId);
-  const sellsWork = form.chargeBasis === 'CHARGEABLE';
-  const pickJob = form.chargeBasis === 'CHARGEABLE' || form.chargeBasis === 'GOODWILL';
+  const personSelect = (label: string, key: 'projectManagerId' | 'projectEngineerId' | 'projectLeadId', hint?: string) => (
+    <Field label={label} hint={hint}>
+      <select value={form[key]} onChange={(e) => set(key, e.target.value)}>
+        <option value="">— none —</option>
+        {form[key] && !picked(form[key]) && <option value={form[key]}>(kept)</option>}
+        {people.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+            {p.position ? ` — ${p.position}` : ''}
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
 
   return (
     <Modal
@@ -491,9 +497,12 @@ export function JobOrderModal({
             disabled={
               busy ||
               !form.customerId ||
+              form.projectName.trim().length < 2 ||
               form.title.trim().length < 3 ||
-              form.description.trim().length < 5 ||
-              !form.requestedFor
+              form.scope.trim().length < 5 ||
+              !form.targetStart ||
+              !form.targetFinish ||
+              finishBeforeStart
             }
           >
             {busy ? 'Saving…' : existing ? 'Save' : 'Raise job order'}
@@ -503,13 +512,14 @@ export function JobOrderModal({
     >
       <ErrorBox error={error} />
 
+      <h4 className="svc-subhead">Links</h4>
       <div className="grid grid-2">
         <Field label="Customer">
           <select
             value={form.customerId}
             disabled={!!existing || !!prefill?.customerId}
             onChange={(e) =>
-              setForm({ ...form, customerId: e.target.value, siteId: '', contactId: '', assetId: '', quotationId: '', jobId: '' })
+              setForm({ ...form, customerId: e.target.value, siteId: '', contactId: '', contactNumber: '', quotationId: '', salesOrderId: '', jobId: '' })
             }
           >
             <option value="">— choose —</option>
@@ -523,25 +533,63 @@ export function JobOrderModal({
             ))}
           </select>
         </Field>
-        <Field label="Equipment" hint="Leave empty for work on nothing registered yet — an installation, say">
-          <select
-            value={form.assetId}
-            onChange={(e) => {
-              const a = options.assets.find((x) => x.id === e.target.value);
-              setForm({ ...form, assetId: e.target.value, siteId: a?.siteId ?? form.siteId });
-            }}
-          >
+        <Field
+          label="Quotation"
+          hint={
+            linkedQuotation
+              ? linkedQuotation.costed
+                ? 'Approval builds the project from its costing'
+                : 'No costing behind it yet — approval cannot build the project until there is'
+              : 'Any quotation still on, one under negotiation included'
+          }
+        >
+          <select value={form.quotationId} onChange={(e) => pickQuotation(options.quotations.find((q) => q.id === e.target.value))}>
             <option value="">— none —</option>
-            {options.assets.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-                {a.serialNo ? ` (${a.serialNo})` : ''}
+            {existing?.quotation && !options.quotations.some((q) => q.id === existing.quotation!.id) && (
+              <option value={existing.quotation.id}>{existing.quotation.number}</option>
+            )}
+            {options.quotations.map((q) => (
+              <option key={q.id} value={q.id}>
+                {q.number} — {q.subject} ({OUTCOME_LABEL[q.outcome] ?? q.outcome.toLowerCase()})
               </option>
             ))}
           </select>
         </Field>
+        <Field label="Sales order" hint="Optional — the order the work was booked on">
+          <select value={form.salesOrderId} onChange={(e) => pickSalesOrder(options.salesOrders.find((o) => o.id === e.target.value))}>
+            <option value="">— none —</option>
+            {salesOrdersOffered.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.number} · {formatMoney(o.amount)} · {o.status.toLowerCase().replace(/_/g, ' ')}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Project" hint="Only when the project already exists — otherwise approval builds it">
+          <select
+            value={form.jobId}
+            onChange={(e) => {
+              const j = options.jobs.find((x) => x.id === e.target.value);
+              setForm((f) => ({ ...f, jobId: e.target.value, projectName: f.projectName || j?.name || '', projectManagerId: f.projectManagerId || j?.projectManagerId || '' }));
+            }}
+          >
+            <option value="">— none, to be built —</option>
+            {options.jobs.map((j) => (
+              <option key={j.id} value={j.id}>
+                {j.number} — {j.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+
+      <h4 className="svc-subhead">The project</h4>
+      <div className="grid grid-2">
+        <Field label="Project name">
+          <input value={form.projectName} placeholder="Oxygen plant, Building B" onChange={(e) => set('projectName', e.target.value)} />
+        </Field>
         <Field label="Site">
-          <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
+          <select value={form.siteId} onChange={(e) => set('siteId', e.target.value)}>
             <option value="">— none —</option>
             {options.sites.map((s) => (
               <option key={s.id} value={s.id}>
@@ -551,141 +599,61 @@ export function JobOrderModal({
             ))}
           </select>
         </Field>
-        <Field label="Contact on site">
-          <select value={form.contactId} onChange={(e) => setForm({ ...form, contactId: e.target.value })}>
+        <Field label="Contact person">
+          <select value={form.contactId} onChange={(e) => pickContact(e.target.value)}>
             <option value="">— none —</option>
             {options.contacts.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
-                {c.phone ? ` · ${c.phone}` : ''}
               </option>
             ))}
           </select>
         </Field>
-        <Field label="Kind of work">
-          <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
-            {KINDS.map((k) => (
-              <option key={k.value} value={k.value}>
-                {k.label}
-              </option>
-            ))}
-          </select>
+        <Field label="Contact number">
+          <input value={form.contactNumber} placeholder="0917 000 0000" onChange={(e) => set('contactNumber', e.target.value)} />
         </Field>
-        <Field label="Wanted on">
-          <input
-            type="date"
-            value={form.requestedFor}
-            onChange={(e) => setForm({ ...form, requestedFor: e.target.value })}
-          />
+        <Field label="Target start">
+          <input type="date" value={form.targetStart} onChange={(e) => set('targetStart', e.target.value)} />
+        </Field>
+        <Field
+          label="Target finish"
+          hint={finishBeforeStart ? 'Before the start' : form.targetStart && form.targetFinish ? `${daysLabel(duration)} (Mon–Fri)` : undefined}
+        >
+          <input type="date" value={form.targetFinish} min={form.targetStart || undefined} onChange={(e) => set('targetFinish', e.target.value)} />
         </Field>
       </div>
-
-      <Checkbox checked={form.urgent} onChange={(v) => setForm({ ...form, urgent: v })} label="Urgent — equipment down" />
 
       <Field label="In one line">
-        <input
-          value={form.title}
-          placeholder="Compressor tripping on high temperature"
-          onChange={(e) => setForm({ ...form, title: e.target.value })}
-        />
+        <input value={form.title} placeholder="Supply and install of the compressed air system" onChange={(e) => set('title', e.target.value)} />
       </Field>
-      <Field label="What the customer reported or asked for">
-        <textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-      </Field>
-      <Field label="What we will do" hint="Optional — the report records what was actually done">
-        <textarea rows={2} value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value })} />
-      </Field>
-      <Field label="Engineer to send" hint="Proposed — the service manager can change it on the schedule">
-        <select value={form.assignedToId} onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}>
-          <option value="">— leave to the service manager —</option>
-          {existing?.assignedTo && !engineers.some((u) => u.id === existing.assignedTo!.id) && (
-            <option value={existing.assignedTo.id}>{existing.assignedTo.name}</option>
-          )}
-          {engineers.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.name}
-              {u.position ? ` — ${u.position}` : ''}
-            </option>
-          ))}
-        </select>
+      <Field label="Scope of work" hint="The complete details — what is supplied, installed, tested and handed over">
+        <textarea rows={6} value={form.scope} onChange={(e) => set('scope', e.target.value)} />
       </Field>
 
-      <h4 className="svc-subhead">Cover and charging</h4>
-      {form.assetId ? (
-        coverageAlert(coverage, form.requestedFor)
-      ) : (
-        <div className="alert info">
-          No machine named, so nothing can cover it — chargeable unless you decide otherwise.
-        </div>
-      )}
-      <div className="grid grid-2">
-        <Field label="Charge basis" hint="Change this only if you know why — the service manager checks it">
-          <select
-            value={form.chargeBasis}
-            onChange={(e) => {
-              basisTouched.current = true;
-              setForm({ ...form, chargeBasis: e.target.value });
-            }}
-          >
-            {CHARGE_BASES.map((b) => (
-              <option key={b.value} value={b.value} disabled={b.value === 'CONTRACT' && !coverage?.contract}>
-                {b.label}
-                {b.value === coverage?.suggested ? ' (from the records)' : ''}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {pickJob && (
-          <Field label="Charge to project" hint="Optional — the job whose budget this work spends">
-            <select value={form.jobId} onChange={(e) => setForm({ ...form, jobId: e.target.value })}>
-              <option value="">— none —</option>
-              {options.jobs.map((j) => (
-                <option key={j.id} value={j.id}>
-                  {j.number} — {j.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-        )}
+      <h4 className="svc-subhead">Personnel to send</h4>
+      <div className="grid grid-3">
+        {personSelect('Project manager', 'projectManagerId', 'Approves the order first; runs the project')}
+        {personSelect('Project engineer', 'projectEngineerId')}
+        {personSelect('Project lead', 'projectLeadId')}
       </div>
-      {sellsWork && (
-        <div className="grid grid-3">
-          <Field label="Quotation">
-            <select value={form.quotationId} onChange={(e) => setForm({ ...form, quotationId: e.target.value })}>
-              <option value="">— none —</option>
-              {options.quotations.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.number} — {q.subject}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Customer PO">
-            <input
-              value={form.customerPoNumber}
-              onChange={(e) => setForm({ ...form, customerPoNumber: e.target.value })}
-            />
-          </Field>
-          <Field
-            label="Agreed amount (before VAT)"
-            hint={form.quotationId ? 'Empty takes the quotation’s price' : 'Leave empty to bill on completion'}
-          >
-            <NumberInput
-              kind="money"
-              min={0}
-              step="0.01"
-              value={form.amount}
-              onChange={(e) => setForm({ ...form, amount: e.target.value })}
-            />
-          </Field>
-        </div>
-      )}
-      {chosenAsset && coverage?.underWarranty && form.chargeBasis === 'CHARGEABLE' && (
-        <p className="faint">
-          The machine is inside its warranty on that date. Charging for it is a decision the order will
-          record, and the service manager will see it.
-        </p>
-      )}
+      <Field label="Project support" hint="As many as the job needs">
+        <PeoplePicker
+          people={people.map((p) => ({ id: p.id, name: p.name, sub: p.position ?? undefined }))}
+          value={form.supportIds}
+          onChange={(ids) => set('supportIds', ids)}
+          exclude={[form.projectManagerId, form.projectEngineerId, form.projectLeadId].filter(Boolean)}
+        />
+      </Field>
+
+      <h4 className="svc-subhead">Amount</h4>
+      <div className="grid grid-2">
+        <Field label="Customer PO">
+          <input value={form.customerPoNumber} onChange={(e) => set('customerPoNumber', e.target.value)} />
+        </Field>
+        <Field label="Amount (before VAT)" hint={form.quotationId || form.salesOrderId ? 'Empty takes the linked document’s price' : 'Leave empty to bill on completion'}>
+          <NumberInput kind="money" min={0} step="0.01" value={form.amount} onChange={(e) => set('amount', e.target.value)} />
+        </Field>
+      </div>
     </Modal>
   );
 }
@@ -721,6 +689,11 @@ export function JobOrderDetail() {
     void load();
   }, [load]);
 
+  const routeText = useMemo(
+    () => (row?.route ?? []).map((s) => `${s.step}: ${s.names.length ? s.names.join(' or ') : 'nobody yet'}`).join(' › '),
+    [row?.route],
+  );
+
   if (loading) return <Loading />;
   if (!row) return <ErrorBox error={error ?? new Error('Job order not found')} />;
 
@@ -738,9 +711,9 @@ export function JobOrderDetail() {
   }
 
   const r = row;
-  const canWriteReport =
-    r.status === 'APPROVED' && !!r.visit && !r.visit.report && can(reportPermission(r.kind, 'create'));
+  const canWriteReport = r.status === 'APPROVED' && !!r.visit && !r.visit.report && can(reportPermission(r.kind, 'create'));
   const canInvoice = r.status === 'COMPLETED' && r.billable && !r.invoice && can('gfin.ar.create');
+  const personLine = (p: Person | null) => (p ? [p.name, p.position].filter(Boolean).join(' · ') : <span className="faint">—</span>);
 
   return (
     <div>
@@ -753,18 +726,14 @@ export function JobOrderDetail() {
       <RecordHeader
         type="Job Order"
         code={r.number}
-        title={r.title}
+        title={r.projectName ?? r.title}
         status={r.status}
         statusExtra={JOB_ORDER_TONES}
-        amount={r.billable && r.amount != null ? formatMoney(r.amount) : undefined}
-        amountLabel="Agreed amount"
+        amount={r.amount != null ? formatMoney(r.amount) : undefined}
+        amountLabel="Amount (before VAT)"
         actions={
           <>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => openPdf(`/api/job-orders/${r.id}/pdf`, () => toast('error', 'Could not print'))}
-            >
+            <button type="button" className="btn" onClick={() => openPdf(`/api/job-orders/${r.id}/pdf`, () => toast('error', 'Could not print'))}>
               Print
             </button>
             {r.canEdit && (
@@ -777,7 +746,7 @@ export function JobOrderDetail() {
                 type="button"
                 className="btn btn-ok"
                 disabled={busy}
-                onClick={() => run('Sent to the service manager', () => api.post(`/job-orders/${r.id}/submit`))}
+                onClick={() => run('Submitted for approval', () => api.post(`/job-orders/${r.id}/submit`))}
               >
                 {r.status === 'REJECTED' ? 'Submit again' : 'Submit for approval'}
               </button>
@@ -807,144 +776,112 @@ export function JobOrderDetail() {
       />
 
       <p className="record-head-meta">
-        Raised by {r.requestedBy.name} on {formatDate(r.createdAt)}
-        {r.approvedAt ? ` · accepted ${formatDate(r.approvedAt)}` : ''}
+        {r.title} · raised by {r.requestedBy.name} on {formatDate(r.createdAt)}
+        {r.approvedAt ? ` · approved ${formatDate(r.approvedAt)}` : ''}
         {r.completedAt ? ` · completed ${formatDate(r.completedAt)}` : ''}
-        {r.urgent ? ' · URGENT' : ''}
       </p>
 
       <DocumentApproval documentType="job_order" documentId={r.id} reloadToken={reload} />
 
       <ErrorBox error={error} />
 
-      {r.status === 'DRAFT' && (
+      {(r.status === 'DRAFT' || r.status === 'REJECTED') && r.canEdit && (
         <div className="alert info">
-          Nothing is dispatched until the service manager accepts it — approval books the visit.
+          Submit for approval sends it to {routeText || 'the route in Admin › Approval Workflows'}. Approval builds the project
+          {r.quotation ? ` from ${r.quotation.number}'s costing` : ' — link a quotation with a costing first, or it will be approved without one'}.
         </div>
       )}
       {r.status === 'PENDING_APPROVAL' && (
-        <div className="alert info">
-          With the service manager, who checks the cover and who to send. To change it, ask them to
-          return it.
-        </div>
+        <div className="alert info">With the approvers — the project manager, then the team leader. To change it, ask them to return it.</div>
       )}
-      {r.status === 'REJECTED' && (
-        <div className="alert warn">Returned. Correct what the approver asked for, then submit it again.</div>
-      )}
+      {r.status === 'REJECTED' && <div className="alert warn">Returned. Correct what the approver asked for, then submit it again.</div>}
       {r.status === 'CANCELLED' && (
         <div className="alert warn">
           Cancelled{r.cancelledAt ? ` on ${formatDate(r.cancelledAt)}` : ''}: {r.cancelReason ?? 'no reason recorded'}
         </div>
       )}
-      {r.status === 'COMPLETED' && r.billable && !r.invoice && (
-        <div className="alert warn">
-          Done and reported, and chargeable — not yet invoiced.
-          {!can('gfin.ar.create') && ' Finance raises the invoice from this page.'}
-        </div>
+      {r.status === 'APPROVED' && !r.job && (
+        <div className="alert warn">Approved, but no project was built — the linked quotation had no usable costing. Build it from the quotation once it is costed.</div>
       )}
 
       <div className="svc-detail-grid">
         <section className="card">
-          <h3 className="card-title">Request</h3>
+          <h3 className="card-title">The project</h3>
           <dl className="kv">
-            <dt>Kind</dt>
-            <dd>{KIND_LABEL[r.kind]}</dd>
-            <dt>Priority</dt>
-            <dd>{r.urgent ? <span className="badge danger">urgent</span> : 'routine'}</dd>
-            <dt>Wanted on</dt>
-            <dd>{formatDate(r.requestedFor)}</dd>
+            <dt>Project name</dt>
+            <dd>{r.projectName ?? r.title}</dd>
             <dt>Customer</dt>
             <dd>
-              {can('gops.customers.view_all') ? (
-                <Link to={`/g-ops/customers/${r.customer.id}`}>{r.customer.name}</Link>
-              ) : (
-                r.customer.name
-              )}
+              {can('gops.customers.view_all') ? <Link to={`/g-ops/customers/${r.customer.id}`}>{r.customer.name}</Link> : r.customer.name}
             </dd>
             <dt>Site</dt>
             <dd>{r.site ? `${r.site.name}${r.site.city ? ` · ${r.site.city}` : ''}` : '—'}</dd>
             <dt>Contact</dt>
-            <dd>{r.contact ? [r.contact.name, r.contact.phone].filter(Boolean).join(' · ') : '—'}</dd>
-            <dt>Equipment</dt>
-            <dd>
-              {r.asset ? (
-                <>
-                  {can('gops.installed_base.view_all') ? (
-                    <Link to={`/g-ops/installed-base/${r.asset.id}`}>{r.asset.name}</Link>
-                  ) : (
-                    r.asset.name
-                  )}
-                  {r.asset.serialNo && <span className="faint mono"> · {r.asset.serialNo}</span>}
-                  {r.asset.warrantyEndsAt && (
-                    <div className="faint">warranty to {formatDate(r.asset.warrantyEndsAt)}</div>
-                  )}
-                </>
-              ) : (
-                <span className="faint">none named</span>
-              )}
-            </dd>
+            <dd>{r.contact?.name ?? '—'}</dd>
+            <dt>Contact number</dt>
+            <dd>{r.contactNumber ?? r.contact?.phone ?? '—'}</dd>
+            <dt>Target start</dt>
+            <dd>{formatDate(r.targetStart)}</dd>
+            <dt>Target finish</dt>
+            <dd>{formatDate(r.targetFinish)}</dd>
+            <dt>Duration</dt>
+            <dd>{daysLabel(r.durationDays)}</dd>
           </dl>
         </section>
 
         <section className="card">
-          <h3 className="card-title">Cover and charging</h3>
+          <h3 className="card-title">Links and amount</h3>
           <dl className="kv">
-            <dt>Basis</dt>
+            <dt>Quotation</dt>
             <dd>
-              <BasisBadge basis={r.chargeBasis} />
-            </dd>
-            <dt>Under warranty that day</dt>
-            <dd>{r.underWarranty ? 'yes' : 'no'}</dd>
-            {r.contract && (
-              <>
-                <dt>Contract</dt>
-                <dd>
-                  <Link to={`/g-ops/service-contracts/${r.contract.id}`} className="mono">
-                    {r.contract.number}
+              {r.quotation ? (
+                <>
+                  <Link to={`/g-ops/quotations/${r.quotation.id}`} className="mono">
+                    {r.quotation.number}
                   </Link>{' '}
-                  <span className="faint">to {formatDate(r.contract.endsAt)}</span>
-                </dd>
-              </>
-            )}
-            <dt>Charged to</dt>
+                  <span className="faint">
+                    {r.quotation.subject} · {OUTCOME_LABEL[r.quotation.outcome] ?? r.quotation.outcome.toLowerCase()}
+                  </span>
+                </>
+              ) : (
+                '—'
+              )}
+            </dd>
+            <dt>Sales order</dt>
             <dd>
-              {r.job ? (
-                <Link to={`/g-ops/projects/${r.job.id}`} className="mono">
-                  {r.job.number}
+              {r.salesOrder ? (
+                <Link to={`/g-ops/sales-orders/${r.salesOrder.id}`} className="mono">
+                  {r.salesOrder.number}
                 </Link>
               ) : (
-                <span className="faint">no project</span>
+                '—'
               )}
-              {r.job && <span className="faint"> {r.job.name}</span>}
             </dd>
-            {r.billable && (
+            <dt>Project</dt>
+            <dd>
+              {r.job ? (
+                <>
+                  <Link to={`/g-ops/projects/${r.job.id}`} className="mono">
+                    {r.job.number}
+                  </Link>{' '}
+                  <span className="faint">{r.job.name}</span> <StatusBadge status={r.job.status} />
+                </>
+              ) : (
+                <span className="faint">{r.status === 'APPROVED' || r.status === 'COMPLETED' ? 'none built' : 'built on approval'}</span>
+              )}
+            </dd>
+            <dt>Customer PO</dt>
+            <dd>{r.customerPoNumber ?? '—'}</dd>
+            <dt>Amount</dt>
+            <dd className="mono">{r.amount != null ? formatMoney(r.amount) : 'to be billed on completion'}</dd>
+            {r.invoice && (
               <>
-                <dt>Quotation</dt>
-                <dd>
-                  {r.quotation ? (
-                    <Link to={`/g-ops/quotations/${r.quotation.id}`} className="mono">
-                      {r.quotation.number}
-                    </Link>
-                  ) : (
-                    '—'
-                  )}
-                </dd>
-                <dt>Customer PO</dt>
-                <dd>{r.customerPoNumber ?? '—'}</dd>
-                <dt>Amount</dt>
-                <dd className="mono">{r.amount != null ? formatMoney(r.amount) : 'to be billed on completion'}</dd>
                 <dt>Invoice</dt>
                 <dd>
-                  {r.invoice ? (
-                    <>
-                      <Link to={`/g-fin/ar/${r.invoice.id}`} className="mono">
-                        {r.invoice.number}
-                      </Link>{' '}
-                      <StatusBadge status={r.invoice.status} />
-                    </>
-                  ) : (
-                    <span className="faint">not yet</span>
-                  )}
+                  <Link to={`/g-fin/ar/${r.invoice.id}`} className="mono">
+                    {r.invoice.number}
+                  </Link>{' '}
+                  <StatusBadge status={r.invoice.status} />
                 </dd>
               </>
             )}
@@ -953,9 +890,7 @@ export function JobOrderDetail() {
                 <dt>Acknowledged by</dt>
                 <dd>
                   {r.customerAcknowledgedBy}
-                  {r.customerAcknowledgedAt && (
-                    <span className="faint"> on {formatDate(r.customerAcknowledgedAt)}</span>
-                  )}
+                  {r.customerAcknowledgedAt && <span className="faint"> on {formatDate(r.customerAcknowledgedAt)}</span>}
                 </dd>
               </>
             )}
@@ -964,19 +899,27 @@ export function JobOrderDetail() {
       </div>
 
       <section className="card">
-        <h3 className="card-title">Reported problem</h3>
-        <p className="svc-text">{r.description}</p>
-        {r.scope && (
-          <>
-            <h4 className="svc-subhead">Scope of work</h4>
-            <p className="svc-text">{r.scope}</p>
-          </>
-        )}
+        <h3 className="card-title">Scope of work</h3>
+        <p className="svc-text">{r.scope ?? r.description}</p>
       </section>
 
       <section className="card">
-        <h3 className="card-title">Dispatch</h3>
-        {r.visit ? (
+        <h3 className="card-title">Personnel to send</h3>
+        <dl className="kv">
+          <dt>Project manager</dt>
+          <dd>{personLine(r.projectManager)}</dd>
+          <dt>Project engineer</dt>
+          <dd>{personLine(r.projectEngineer)}</dd>
+          <dt>Project lead</dt>
+          <dd>{personLine(r.projectLead)}</dd>
+          <dt>Project support</dt>
+          <dd>{r.support.length ? r.support.map((p) => p.name).join(', ') : <span className="faint">—</span>}</dd>
+        </dl>
+      </section>
+
+      {r.visit && (
+        <section className="card">
+          <h3 className="card-title">Service visit</h3>
           <dl className="kv">
             <dt>Engineer</dt>
             <dd>{r.assignedTo?.name ?? <span className="faint">unassigned</span>}</dd>
@@ -985,8 +928,7 @@ export function JobOrderDetail() {
               <Link to={`/g-ops/visits?visit=${r.visit.id}`} className="mono">
                 {r.visit.number}
               </Link>{' '}
-              <VisitBadge visit={{ status: r.visit.status, overdue: false }} />{' '}
-              <span className="faint">due {formatDate(r.visit.dueDate)}</span>
+              <VisitBadge visit={{ status: r.visit.status, overdue: false }} /> <span className="faint">due {formatDate(r.visit.dueDate)}</span>
             </dd>
             <dt>Report</dt>
             <dd>
@@ -1002,19 +944,14 @@ export function JobOrderDetail() {
               )}
             </dd>
           </dl>
-        ) : (
-          <p className="muted">
-            Nothing dispatched yet — approval schedules the visit
-            {r.assignedTo ? `, proposed for ${r.assignedTo.name}` : ''}.
-          </p>
-        )}
-      </section>
+        </section>
+      )}
 
       <Attachments
         entityType="job_order"
         entityId={r.id}
         title="Photos and documents"
-        hint="The customer’s email, a photo of the fault, the PO"
+        hint="The customer’s email, the PO, drawings"
         canEdit={r.canEdit || r.status !== 'CANCELLED'}
       />
 
@@ -1032,17 +969,11 @@ export function JobOrderDetail() {
         <ReasonModal
           title={`Cancel ${r.number}`}
           label="Why is it cancelled?"
-          hint={
-            r.visit?.status === 'SCHEDULED'
-              ? `Its visit ${r.visit.number} is cancelled with it${r.assignedTo ? `, and ${r.assignedTo.name} is told` : ''}.`
-              : undefined
-          }
+          hint={r.job ? `Project ${r.job.number} stays — a project is cancelled from its own page.` : undefined}
           action="Cancel job order"
           danger
           onClose={() => setModal(null)}
-          onSubmit={(reason) =>
-            run('Job order cancelled', () => api.post(`/job-orders/${r.id}/cancel`, { reason })).then(() => setModal(null))
-          }
+          onSubmit={(reason) => run('Job order cancelled', () => api.post(`/job-orders/${r.id}/cancel`, { reason })).then(() => setModal(null))}
         />
       )}
       {modal === 'ack' && (
@@ -1054,9 +985,9 @@ export function JobOrderDetail() {
           action="Record"
           onClose={() => setModal(null)}
           onSubmit={(name) =>
-            run('Acknowledgement recorded', () =>
-              api.patch(`/job-orders/${r.id}/acknowledge`, { customerAcknowledgedBy: name }),
-            ).then(() => setModal(null))
+            run('Acknowledgement recorded', () => api.patch(`/job-orders/${r.id}/acknowledge`, { customerAcknowledgedBy: name })).then(() =>
+              setModal(null),
+            )
           }
         />
       )}
@@ -1071,11 +1002,7 @@ export function JobOrderDetail() {
         />
       )}
       {modal === 'report' && r.visit && (
-        <NewReportModal
-          preset={{ visitId: r.visit.id }}
-          onClose={() => setModal(null)}
-          onCreated={(reportId) => navigate(`/g-ops/service-reports/${reportId}`)}
-        />
+        <NewReportModal preset={{ visitId: r.visit.id }} onClose={() => setModal(null)} onCreated={(reportId) => navigate(`/g-ops/service-reports/${reportId}`)} />
       )}
     </div>
   );
@@ -1134,18 +1061,11 @@ function ReasonModal({
 
 /**
  * Billing a completed chargeable order — through the ONE invoice path,
- * `POST /invoices` with the order's id, which refuses warranty and contract
- * work, an order whose report is not approved, and a second invoice.
+ * `POST /invoices` with the order's id, which refuses an order whose report
+ * is not approved and a second invoice. (Orders raised as service calls
+ * before 2026-10-09; a project work order is billed through its project.)
  */
-function InvoiceModal({
-  order,
-  onClose,
-  onRaised,
-}: {
-  order: JobOrderRow;
-  onClose: () => void;
-  onRaised: (invoiceId: string) => void;
-}) {
+function InvoiceModal({ order, onClose, onRaised }: { order: JobOrderRow; onClose: () => void; onRaised: (invoiceId: string) => void }) {
   const toast = useToast();
   const [amount, setAmount] = useState(order.amount != null ? String(order.amount) : '');
   const [dueDate, setDueDate] = useState('');
@@ -1181,12 +1101,7 @@ function InvoiceModal({
           <button type="button" className="btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={raise}
-            disabled={busy || !(Number(amount) > 0)}
-          >
+          <button type="button" className="btn btn-primary" onClick={raise} disabled={busy || !(Number(amount) > 0)}>
             {busy ? 'Raising…' : 'Raise invoice'}
           </button>
         </>
@@ -1194,14 +1109,11 @@ function InvoiceModal({
     >
       <ErrorBox error={error} />
       <p className="muted">
-        One line, “{order.number} — {order.title}”, to {order.customer.name}. VAT is added and EWT
-        withheld at the rates in Settings, as on every invoice.
+        One line, “{order.number} — {order.title}”, to {order.customer.name}. VAT is added and EWT withheld at the rates in Settings, as on every
+        invoice.
       </p>
       <div className="grid grid-2">
-        <Field
-          label="Amount (before VAT)"
-          hint={order.amount != null ? 'The agreed price' : 'Time and materials — type what was agreed'}
-        >
+        <Field label="Amount (before VAT)" hint={order.amount != null ? 'The agreed price' : 'Time and materials — type what was agreed'}>
           <NumberInput kind="money" min={0} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
         <Field label="Due date" hint="Empty uses the default payment terms">

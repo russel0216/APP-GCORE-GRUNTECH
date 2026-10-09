@@ -138,10 +138,11 @@ async function main() {
           `step ${step.sequence} "${step.name}" routes to each requester's supervisor, but ${unsupervised} active user(s) have none — and the HR fallback is unheld, so their documents route to nobody`,
         );
       }
-      // A PROJECT_MANAGER step resolves to the project's own manager and falls
-      // back to its role (Executive unless another is named) when the project
-      // has none or the manager raised the document. The fallback has to be
-      // held: a PM's own request, or one on an unmanaged project, goes there.
+      // A PROJECT_MANAGER step resolves to the manager the document names (a
+      // job order's own), else the project's, and falls back to its role
+      // (Executive unless another is named) when there is none or the manager
+      // raised the document. The fallback has to be held: a PM's own request,
+      // or one on an unmanaged project, goes there.
       if (step.approverType === 'PROJECT_MANAGER') {
         const fallbackKey = step.role?.key ?? 'executive';
         const fallback = roleMembers.get(fallbackKey) ?? [];
@@ -150,7 +151,7 @@ async function main() {
             `step ${step.sequence} "${step.name}" routes to the project's manager and falls back to ${step.role?.name ?? 'Executive / Management'}, which nobody holds — a project manager's own request, or one on a project with no manager, routes to nobody`,
           );
         }
-        if (unmanagedJobs > 0) {
+        if (unmanagedJobs > 0 && wf.documentType !== 'job_order') {
           issues.push(
             `step ${step.sequence} "${step.name}" routes to the project's manager, but ${unmanagedJobs} active project(s) have none set — their requests go to the ${step.role?.name ?? 'Executive / Management'} fallback`,
           );

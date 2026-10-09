@@ -126,7 +126,7 @@ export const REGISTRY: ModuleDef[] = [
       // registers that follow are hidden (rule: hidden, never deleted): each
       // is a tab inside the project, and a link from the Projects page.
       { key: 'costing', group: 'Project Management', label: 'Costing', path: '/g-ops/costing', actions: OWNED_APPROVABLE, phase: 3 },
-      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_APPROVABLE, phase: 8, note: 'A request for service work; approval schedules the visit' },
+      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_APPROVABLE, phase: 8, note: 'The project work order: sales raises it on a quotation, the project manager and the team leader approve, and approval builds the project' },
       { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       { key: 'plans', group: 'Project Management', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED_APPROVABLE, phase: 4, hidden: true, note: 'Managed from a project’s Approved Plans tab' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },

@@ -1765,7 +1765,9 @@ function ProjectActions({
   jobs: JobRef[];
   can: (permission: string) => boolean;
 }) {
-  if (quotation.outcome !== 'WON' || jobs.length > 0 || !can('gops.job_orders.create')) return null;
+  // Any quotation still on may be ordered (2026-10-09, the owner's call: one
+  // under negotiation included); approval of the order builds the project.
+  if (quotation.outcome === 'LOST' || jobs.length > 0 || !can('gops.job_orders.create')) return null;
   return (
     <Link
       className="btn"

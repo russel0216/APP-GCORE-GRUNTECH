@@ -446,6 +446,146 @@ function addDays(base: Date, days: number): Date {
   return d2;
 }
 
+type JobCosting = Prisma.CostingGetPayload<{ include: { lines: true; scopeSections: true } }>;
+
+/**
+ * The costing a project is built on, checked: decided (not with the
+ * approver), the project's customer, with a scope of work that adds up to the
+ * contract value. The one rule for POST /jobs and for a job order's approval
+ * (2026-10-09), which builds the project itself.
+ */
+export async function costingForJob(costingId: string, customerId: string): Promise<JobCosting> {
+  const costing = await prisma.costing.findUnique({
+    where: { id: costingId },
+    include: {
+      lines: true,
+      scopeSections: { orderBy: { sortOrder: 'asc' } },
+    },
+  });
+  if (!costing) throw notFound('Costing not found');
+  // A costing with the approver is still being decided; building on it would
+  // finalise it underneath them.
+  if (costing.status === 'PENDING_APPROVAL') {
+    throw badRequest(`${costing.number} is awaiting approval. Build the project once it is decided.`);
+  }
+  // The job's customer is the costing's customer. The screen locks it; this
+  // is the half that makes it true for any caller.
+  if (costing.customerId && costing.customerId !== customerId) {
+    throw badRequest(
+      `${costing.number} was costed for a different customer. A project takes its customer from its costing.`,
+    );
+  }
+  if (!costing.scopeSections.length) {
+    throw badRequest(
+      'That costing has no scope of work. The scope sections become the schedule of values, which progress and billing are measured against.',
+    );
+  }
+
+  const scopeTotal = costing.scopeSections.reduce((s, x) => s + num(x.value), 0);
+  const contractValue = num(costing.contractValue);
+  if (Math.abs(scopeTotal - contractValue) > 0.01) {
+    throw badRequest(
+      `The costing's scope sections total ${scopeTotal.toFixed(2)} but its contract value is ${contractValue.toFixed(2)}. Reconcile them first — otherwise progress billing cannot add up.`,
+    );
+  }
+  return costing;
+}
+
+export interface NewJobInput {
+  name: string;
+  type: 'PROJECT' | 'SERVICE_CONTRACT';
+  customerId: string;
+  siteId?: string | null;
+  contactId?: string | null;
+  projectManagerId?: string | null;
+  quotationRevisionId?: string | null;
+  customerPoNumber?: string | null;
+  customerPoDate?: Date | null;
+  contractDate?: Date | null;
+  /** Manila's day; the scope items are scheduled back to back from it. */
+  startDate: Date;
+  /** Given, the project's target end; else the day the last scope item ends. */
+  targetEndDate?: Date | null;
+  notes?: string | null;
+  createdById: string;
+}
+
+/**
+ * Writes the project in the caller's transaction: its number, the scope
+ * items snapshotted from the costing (back to back from the start date — a
+ * sensible default, not a claim about the plan), the opening budget as
+ * BUDGETED ledger rows per category, and the costing marked FINAL — a costing
+ * that has produced a job is a commercial record.
+ */
+export async function createJobRecord(tx: Prisma.TransactionClient, costing: JobCosting, input: NewJobInput) {
+  const number = await nextNumber('project', tx);
+  let cursor = new Date(input.startDate);
+  const scopeData = costing.scopeSections.map((s, i) => {
+    const plannedStart = new Date(cursor);
+    const plannedEnd = addDays(cursor, Math.max(s.durationDays, 1));
+    cursor = plannedEnd;
+    return {
+      sourceSectionId: s.id,
+      kind: s.kind,
+      name: s.name,
+      description: s.description,
+      value: s.value,
+      durationDays: s.durationDays,
+      plannedStart,
+      plannedEnd,
+      sortOrder: i,
+    };
+  });
+
+  const created = await tx.job.create({
+    data: {
+      number,
+      type: input.type,
+      name: input.name,
+      customerId: input.customerId,
+      siteId: input.siteId || null,
+      contactId: input.contactId || null,
+      costingId: costing.id,
+      quotationRevisionId: input.quotationRevisionId || null,
+      projectManagerId: input.projectManagerId || null,
+      createdById: input.createdById,
+      contractValue: costing.contractValue,
+      customerPoNumber: input.customerPoNumber || null,
+      customerPoDate: input.customerPoDate ?? null,
+      contractDate: input.contractDate ?? null,
+      startDate: input.startDate,
+      targetEndDate: input.targetEndDate ?? cursor,
+      notes: input.notes || null,
+      scopeItems: { create: scopeData },
+    },
+  });
+
+  const byCategory = new Map<string, number>();
+  for (const line of costing.lines) {
+    byCategory.set(line.costCategoryId, (byCategory.get(line.costCategoryId) ?? 0) + num(line.amount));
+  }
+  if (byCategory.size) {
+    await tx.jobCostEntry.createMany({
+      data: [...byCategory.entries()].map(([costCategoryId, amount]) => ({
+        jobId: created.id,
+        costCategoryId,
+        state: 'BUDGETED' as const,
+        amount: d(amount),
+        sourceType: 'costing',
+        sourceId: costing.id,
+        sourceNumber: costing.number,
+        description: 'Opening budget from costing',
+        createdById: input.createdById,
+      })),
+    });
+  }
+
+  if (costing.status !== 'FINAL') {
+    await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL', finalAt: new Date() } });
+  }
+  return created;
+}
+
 jobRoutes.post(
   '/',
   require_('gops.projects.create'),
@@ -453,39 +593,7 @@ jobRoutes.post(
     const me = currentUser(req);
     const body = parseBody(createJobSchema, req.body);
 
-    const costing = await prisma.costing.findUnique({
-      where: { id: body.costingId },
-      include: {
-        lines: true,
-        scopeSections: { orderBy: { sortOrder: 'asc' } },
-      },
-    });
-    if (!costing) throw notFound('Costing not found');
-    // A costing with the approver is still being decided; building on it would
-    // finalise it underneath them.
-    if (costing.status === 'PENDING_APPROVAL') {
-      throw badRequest(`${costing.number} is awaiting approval. Build the project once it is decided.`);
-    }
-    // The job's customer is the costing's customer. The screen locks it; this
-    // is the half that makes it true for any caller.
-    if (costing.customerId && costing.customerId !== body.customerId) {
-      throw badRequest(
-        `${costing.number} was costed for a different customer. A project takes its customer from its costing.`,
-      );
-    }
-    if (!costing.scopeSections.length) {
-      throw badRequest(
-        'That costing has no scope of work. The scope sections become the schedule of values, which progress and billing are measured against.',
-      );
-    }
-
-    const scopeTotal = costing.scopeSections.reduce((s, x) => s + num(x.value), 0);
-    const contractValue = num(costing.contractValue);
-    if (Math.abs(scopeTotal - contractValue) > 0.01) {
-      throw badRequest(
-        `The costing's scope sections total ${scopeTotal.toFixed(2)} but its contract value is ${contractValue.toFixed(2)}. Reconcile them first — otherwise progress billing cannot add up.`,
-      );
-    }
+    const costing = await costingForJob(body.costingId, body.customerId);
 
     if (body.quotationRevisionId) {
       const revision = await prisma.quotationRevision.findUnique({
@@ -534,79 +642,21 @@ jobRoutes.post(
     const start = asDate(body.startDate) ?? dayKey(new Date());
 
     const job = await prisma.$transaction(async (tx) => {
-      const number = await nextNumber('project', tx);
-
-      // Scope items scheduled back to back from the start date. Editable
-      // afterwards — this is a sensible default, not a claim about the plan.
-      let cursor = new Date(start);
-      const scopeData = costing.scopeSections.map((s, i) => {
-        const plannedStart = new Date(cursor);
-        const plannedEnd = addDays(cursor, Math.max(s.durationDays, 1));
-        cursor = plannedEnd;
-        return {
-          sourceSectionId: s.id,
-          kind: s.kind,
-          name: s.name,
-          description: s.description,
-          value: s.value,
-          durationDays: s.durationDays,
-          plannedStart,
-          plannedEnd,
-          sortOrder: i,
-        };
+      const created = await createJobRecord(tx, costing, {
+        name: body.name,
+        type,
+        customerId: body.customerId,
+        siteId: body.siteId,
+        contactId: body.contactId,
+        projectManagerId: body.projectManagerId,
+        quotationRevisionId: body.quotationRevisionId,
+        customerPoNumber: body.customerPoNumber,
+        customerPoDate: asDate(body.customerPoDate),
+        contractDate: asDate(body.contractDate),
+        startDate: start,
+        notes: body.notes,
+        createdById: me.id,
       });
-
-      const created = await tx.job.create({
-        data: {
-          number,
-          type,
-          name: body.name,
-          customerId: body.customerId,
-          siteId: body.siteId || null,
-          contactId: body.contactId || null,
-          costingId: costing.id,
-          quotationRevisionId: body.quotationRevisionId || null,
-          projectManagerId: body.projectManagerId || null,
-          createdById: me.id,
-          contractValue: costing.contractValue,
-          customerPoNumber: body.customerPoNumber || null,
-          customerPoDate: asDate(body.customerPoDate),
-          contractDate: asDate(body.contractDate),
-          startDate: start,
-          targetEndDate: cursor,
-          notes: body.notes || null,
-          scopeItems: { create: scopeData },
-        },
-      });
-
-      // The opening budget: the costing's cost lines, grouped by category.
-      const byCategory = new Map<string, number>();
-      for (const line of costing.lines) {
-        byCategory.set(
-          line.costCategoryId,
-          (byCategory.get(line.costCategoryId) ?? 0) + num(line.amount),
-        );
-      }
-      if (byCategory.size) {
-        await tx.jobCostEntry.createMany({
-          data: [...byCategory.entries()].map(([costCategoryId, amount]) => ({
-            jobId: created.id,
-            costCategoryId,
-            state: 'BUDGETED' as const,
-            amount: d(amount),
-            sourceType: 'costing',
-            sourceId: costing.id,
-            sourceNumber: costing.number,
-            description: 'Opening budget from costing',
-            createdById: me.id,
-          })),
-        });
-      }
-
-      // A costing that has produced a job is a commercial record.
-      if (costing.status !== 'FINAL') {
-        await tx.costing.update({ where: { id: costing.id }, data: { status: 'FINAL', finalAt: new Date() } });
-      }
 
       // The renewal's coverage terms: a DRAFT, so nothing is scheduled until
       // somebody activates it — the same rule as any new contract. Same term
@@ -1036,7 +1086,7 @@ jobRoutes.get(
       can('gops.job_orders.view_all')
         ? prisma.jobOrder.findMany({
             where: { jobId: job.id },
-            select: { id: true, number: true, title: true, status: true, kind: true, requestedFor: true },
+            select: { id: true, number: true, title: true, projectName: true, status: true, kind: true, requestedFor: true, targetFinish: true },
             orderBy: { requestedFor: 'desc' },
             take: 50,
           })

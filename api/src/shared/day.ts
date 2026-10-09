@@ -65,6 +65,19 @@ export function manilaDayEnd(key: string): Date {
  * project's real dates. A start on a weekend counts from the Monday after it.
  * Returns a DATE (UTC midnight) like every @db.Date value.
  */
+/** Working days (Mon–Fri) from one DATE to another, both days counted; 0 when `to` is before `from`. */
+export function workingDaysBetween(from: Date, to: Date): number {
+  const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
+  const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+  let days = 0;
+  while (d.getTime() <= end) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) days++;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return days;
+}
+
 export function workingDayDate(start: Date, day: number): Date {
   const d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
   let left = Math.max(1, Math.floor(day));

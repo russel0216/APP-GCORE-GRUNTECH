@@ -35,7 +35,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
-import { submitForApproval, act, approversForStep } from '../src/shared/approvals';
+import { submitForApproval, act, approversForStep, ctxOf } from '../src/shared/approvals';
 import {
   addMonths,
   coverageFor,
@@ -54,7 +54,7 @@ import {
 // the job-order subscriber, and the search and schedule providers. Without
 // them an approval here would settle into the void.
 import '../src/routes/aftermarket';
-import { settleJobOrder, decideCover } from '../src/routes/jobOrders';
+import { settleJobOrder } from '../src/routes/jobOrders';
 import { scheduleFor } from '../src/routes/workspace';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
@@ -109,6 +109,8 @@ async function cleanup() {
   await prisma.equipmentType.deleteMany({ where: { key: { startsWith: TAG } } });
   await prisma.reportTemplate.deleteMany({ where: { key: { startsWith: 'zzam-' } } });
   await prisma.job.deleteMany({ where: { name: { startsWith: TAG } } });
+  // The quotation a job order is raised on (its revisions go with it).
+  await prisma.quotation.deleteMany({ where: { number: { startsWith: TAG } } });
   await prisma.costing.deleteMany({ where: { title: { startsWith: TAG } } });
   await prisma.customer.deleteMany({ where: { name: { startsWith: TAG } } });
 
@@ -149,7 +151,7 @@ async function settle(approvalId: string, outcome: 'APPROVED' | 'REJECTED' = 'AP
     if (!request || request.status !== 'PENDING') return request;
     const step = request.workflow?.steps.find((s) => s.sequence === request.currentSequence);
     if (!step) throw new Error(`No step ${request.currentSequence}`);
-    const eligible = (await approversForStep(step, request.requesterId)).filter(
+    const eligible = (await approversForStep(step, request.requesterId, prisma, ctxOf(request))).filter(
       (id) => id !== request.requesterId,
     );
     if (!eligible.length) {
@@ -673,8 +675,6 @@ async function main() {
     lapsedCover.suggested === 'CHARGEABLE' && lapsedCover.underWarranty === false,
     `${lapsedCover.suggested}, underWarranty ${lapsedCover.underWarranty}`,
   );
-  const decidedLapsed = await decideCover({ assetId: booster.id, requestedFor: day('2027-04-01') });
-  check('and chargeable work names no job until somebody picks one', decidedLapsed.jobId === null);
 
   // The fixture contract was written straight into the database as a draft;
   // cover is only ever given by an ACTIVE one.
@@ -686,17 +686,12 @@ async function main() {
   );
   await prisma.serviceContract.update({ where: { id: contract.id }, data: { status: 'ACTIVE' } });
   const contractCover = await coverageFor(asset.id, day('2026-10-05'));
-  const decidedContract = await decideCover({ assetId: asset.id, requestedFor: day('2026-10-05') });
   check(
     'a machine under an active contract is covered by it',
     contractCover.suggested === 'CONTRACT' && contractCover.contract?.id === contract.id,
     `${contractCover.suggested} ${contractCover.contract?.number}`,
   );
-  check(
-    'and the cost goes to the contract’s job',
-    decidedContract.contractId === contract.id && decidedContract.jobId === serviceJob.id,
-    `job ${decidedContract.jobId}`,
-  );
+  check('and the cover names the contract’s job', contractCover.contract?.jobId === serviceJob.id, `job ${contractCover.contract?.jobId}`);
   const outsideTerm = await coverageFor(asset.id, day('2027-06-01'));
   check(
     'a date outside the contract’s term is not covered by it',
@@ -704,34 +699,38 @@ async function main() {
     `${outsideTerm.suggested}`,
   );
 
-  const overridden = await decideCover({
-    assetId: booster.id,
-    requestedFor: day('2026-11-01'),
-    chargeBasis: 'CHARGEABLE',
-  });
-  check(
-    'the decision can be overridden; the fact cannot',
-    overridden.chargeBasis === 'CHARGEABLE' && overridden.underWarranty === true,
-    `${overridden.chargeBasis}, underWarranty ${overridden.underWarranty}`,
-  );
-  await expectRejection(
-    'claiming contract cover where no contract covers the machine is refused',
-    () => decideCover({ assetId: booster.id, requestedFor: day('2026-11-01'), chargeBasis: 'CONTRACT' }),
-    'no active service contract',
-  );
+  // ── The project work order (2026-10-09) ───────────────────────────────────
+  // Sales raises it; the route is the project manager named ON THE ORDER,
+  // then the salesperson's team leader ("Reports to"). The director stands
+  // as the PM here, the service manager as the team leader.
+  await prisma.user.update({ where: { id: sales.id }, data: { supervisorId: manager.id } });
+  const submitJobOrder2 = async (id: string, requesterId: string) => {
+    const jo = await prisma.jobOrder.update({ where: { id }, data: { status: 'PENDING_APPROVAL' } });
+    return submitForApproval({
+      documentType: 'job_order',
+      documentId: jo.id,
+      documentNumber: jo.number,
+      subject: `${TAG} ${jo.title}`,
+      requesterId,
+      projectManagerId: jo.projectManagerId,
+    });
+  };
 
   const warrantyOrder = await makeJobOrder({
-    kind: 'CORRECTIVE',
     customerId: customer.id,
     siteId: site.id,
     assetId: booster.id,
-    title: `${TAG} Booster tripping on high temperature`,
-    description: 'Trips within ten minutes of starting.',
-    requestedFor: day('2026-11-01'),
-    chargeBasis: 'WARRANTY',
-    underWarranty: true,
-    jobId: project.id,
+    title: `${TAG} Booster replacement`,
+    projectName: `${TAG} Booster replacement at the main campus`,
+    description: 'Supply and install a replacement booster set.',
+    scope: 'Supply and install a replacement booster set.',
+    targetStart: day('2026-11-02'),
+    targetFinish: day('2026-11-13'),
+    requestedFor: day('2026-11-02'),
+    chargeBasis: 'CHARGEABLE',
     requestedById: sales.id,
+    projectManagerId: director.id,
+    projectEngineerId: engineer.id,
     assignedToId: engineer.id,
   });
   check(
@@ -740,94 +739,200 @@ async function main() {
     warrantyOrder.number,
   );
 
-  const joApproval = await submitJobOrder(warrantyOrder.id, sales.id);
+  const joApproval = await submitJobOrder2(warrantyOrder.id, sales.id);
   await expectRejection(
     'the salesperson who asked cannot accept it',
     () => act({ requestId: joApproval.id, userId: sales.id, action: 'APPROVED' }),
     'raised yourself',
   );
-  await settle(joApproval.id);
+  await expectRejection(
+    'nor can the team leader before the project manager named on the order',
+    () => act({ requestId: joApproval.id, userId: manager.id, action: 'APPROVED' }),
+    'not',
+  );
+  await act({ requestId: joApproval.id, userId: director.id, action: 'APPROVED' });
+  check(
+    'the project manager named on the order signs first, and the order waits for the team leader',
+    (await prisma.jobOrder.findUnique({ where: { id: warrantyOrder.id } }))?.status === 'PENDING_APPROVAL',
+  );
+  await act({ requestId: joApproval.id, userId: manager.id, action: 'APPROVED' });
 
-  const [approvedOrder, joVisits] = await Promise.all([
-    prisma.jobOrder.findUnique({ where: { id: warrantyOrder.id } }),
-    prisma.serviceVisit.findMany({ where: { jobOrderId: warrantyOrder.id } }),
-  ]);
-  check('approval accepts the order', approvedOrder?.status === 'APPROVED' && !!approvedOrder.approvedAt);
-  check('approval schedules the visit, once', joVisits.length === 1, `${joVisits.length} visit(s)`);
-  const joVisit = joVisits[0];
+  const approvedOrder = await prisma.jobOrder.findUnique({ where: { id: warrantyOrder.id } });
+  check('the team leader’s signature approves the order', approvedOrder?.status === 'APPROVED' && !!approvedOrder.approvedAt);
   check(
-    'the visit carries the order’s kind, customer, site and machine',
-    !!joVisit &&
-      joVisit.kind === 'CORRECTIVE' &&
-      joVisit.customerId === customer.id &&
-      joVisit.siteId === site.id &&
-      joVisit.assetId === booster.id,
-  );
-  check(
-    'it is due on the day the customer asked for, with the engineer proposed',
-    !!joVisit && iso(joVisit.dueDate) === '2026-11-01' && joVisit.assignedToId === engineer.id,
-    joVisit ? `${iso(joVisit.dueDate)} / ${joVisit.assignedToId}` : 'no visit',
-  );
-  check(
-    'it is numbered as a service visit and is not part of any generated plan',
-    !!joVisit && /-SV-/.test(joVisit.number) && joVisit.sequence === null,
-    joVisit?.number,
+    'with no quotation linked there is no costing, so no project is built — and the order says so',
+    approvedOrder?.jobId === null &&
+      !!(await prisma.notification.findFirst({ where: { userId: sales.id, title: { contains: 'no project was built' } } })),
   );
   const engineerHeard = await prisma.notification.findFirst({
-    where: { userId: engineer.id, link: `/g-ops/job-orders/${warrantyOrder.id}` },
+    where: { userId: engineer.id, link: `/g-ops/job-orders/${warrantyOrder.id}`, title: { contains: 'approved' } },
   });
-  check('the engineer is told, with a link to the order', !!engineerHeard);
+  check('the people sent are told, with a link to the order', !!engineerHeard);
 
   await settleJobOrder({ documentId: warrantyOrder.id }, 'APPROVED');
   check(
-    'a settlement that arrives twice schedules nothing twice',
-    (await prisma.serviceVisit.count({ where: { jobOrderId: warrantyOrder.id } })) === 1,
+    'a settlement that arrives twice changes nothing',
+    (await prisma.jobOrder.findUnique({ where: { id: warrantyOrder.id } }))?.jobId === null,
   );
 
-  // A call-out under the contract: the order's basis is CONTRACT, so its
-  // visit carries the contract — and regenerating the contract's schedule
-  // must leave it where it is.
+  // A visit on the order, as the service schedule still books one by hand
+  // for work an engineer attends: the report on it completes the order.
+  const joVisit = await prisma.serviceVisit.create({
+    data: {
+      number: await nextNumber('service_visit'),
+      kind: 'CORRECTIVE',
+      status: 'SCHEDULED',
+      customerId: customer.id,
+      siteId: site.id,
+      assetId: booster.id,
+      dueDate: day('2026-11-02'),
+      assignedToId: engineer.id,
+      jobOrderId: warrantyOrder.id,
+    },
+  });
+
+  // An order on a quotation whose value revision is costed — still under
+  // negotiation, which the owner allows — builds the project on approval.
+  const orderCosting = await prisma.costing.create({
+    data: {
+      number: await nextNumber('costing'),
+      title: `${TAG} Chiller plant`,
+      ownerId: sales.id,
+      customerId: customer.id,
+      totalCost: D(400_000),
+      contractValue: D(500_000),
+      marginPct: D(0.2),
+      lines: {
+        create: [
+          {
+            costCategoryId: (await prisma.costCategory.findUniqueOrThrow({ where: { code: 'MAT' } })).id,
+            description: `${TAG} chiller`,
+            quantity: D(1),
+            unit: 'lot',
+            unitCost: D(400_000),
+            amount: D(400_000),
+            sortOrder: 0,
+          },
+        ],
+      },
+      scopeSections: { create: [{ kind: 'MAIN_WORK', name: `${TAG} Install`, durationDays: 10, value: D(500_000), sortOrder: 0 }] },
+    },
+  });
+  const orderQuotation = await prisma.quotation.create({
+    data: {
+      number: `${TAG}-Q-JO`,
+      subject: `${TAG} Chiller plant`,
+      customerId: customer.id,
+      ownerId: sales.id,
+      outcome: 'NEGOTIATION',
+      revisions: { create: [{ revision: 0, status: 'DRAFT', costingId: orderCosting.id, subtotal: D(500_000), total: D(560_000) }] },
+    },
+  });
+  const costedOrder = await makeJobOrder({
+    customerId: customer.id,
+    siteId: site.id,
+    quotationId: orderQuotation.id,
+    title: `${TAG} Chiller plant install`,
+    projectName: `${TAG} Chiller plant`,
+    description: 'Install the chiller plant.',
+    scope: 'Install the chiller plant.',
+    targetStart: day('2026-12-01'),
+    targetFinish: day('2026-12-19'),
+    requestedFor: day('2026-12-01'),
+    chargeBasis: 'CHARGEABLE',
+    amount: D(500_000),
+    requestedById: sales.id,
+    projectManagerId: director.id,
+    customerPoNumber: 'PO-77',
+  });
+  await settle((await submitJobOrder2(costedOrder.id, sales.id)).id);
+  const built = await prisma.jobOrder.findUnique({ where: { id: costedOrder.id }, include: { job: { include: { scopeItems: true } } } });
+  check('approval builds the project from the quotation’s costing', built?.status === 'APPROVED' && !!built.job, `job ${built?.jobId}`);
+  check(
+    'named as the order names it, from the target start to the target finish, with the order’s project manager and PO',
+    !!built?.job &&
+      built.job.name === `${TAG} Chiller plant` &&
+      iso(built.job.startDate!) === '2026-12-01' &&
+      iso(built.job.targetEndDate!) === '2026-12-19' &&
+      built.job.projectManagerId === director.id &&
+      built.job.customerPoNumber === 'PO-77' &&
+      built.job.scopeItems.length === 1,
+    built?.job ? `${built.job.name} ${iso(built.job.startDate!)}–${iso(built.job.targetEndDate!)} pm ${built.job.projectManagerId}` : 'no job',
+  );
+  check(
+    'a revision still under negotiation stands behind no job, and the costing is FINAL once a project is built on it',
+    built?.job?.quotationRevisionId === null &&
+      (await prisma.costing.findUnique({ where: { id: orderCosting.id } }))?.status === 'FINAL' &&
+      (await prisma.jobCostEntry.count({ where: { jobId: built!.job!.id, state: 'BUDGETED' } })) === 1,
+  );
+  await settleJobOrder({ documentId: costedOrder.id }, 'APPROVED');
+  check(
+    'a settlement that arrives twice builds nothing twice',
+    (await prisma.job.count({ where: { costingId: orderCosting.id } })) === 1,
+  );
+
+  // A call-out under the contract, as the service schedule books it: the
+  // order and its hand-booked visit carrying the contract — and regenerating
+  // the contract's schedule must leave that visit where it is.
   const contractOrder = await makeJobOrder({
-    kind: 'CORRECTIVE',
     customerId: customer.id,
     siteId: site.id,
     assetId: asset.id,
     title: `${TAG} Oxygen purity dropping`,
+    projectName: `${TAG} Purity call-out`,
     description: 'Purity reads 88% at the outlet.',
+    scope: 'Purity reads 88% at the outlet.',
+    targetStart: day('2026-10-05'),
+    targetFinish: day('2026-10-05'),
     requestedFor: day('2026-10-05'),
     chargeBasis: 'CONTRACT',
     contractId: contract.id,
     jobId: serviceJob.id,
     requestedById: sales.id,
+    projectManagerId: director.id,
     assignedToId: engineer.id,
   });
-  await settle((await submitJobOrder(contractOrder.id, sales.id)).id);
-  const contractOrderVisit = await prisma.serviceVisit.findFirst({ where: { jobOrderId: contractOrder.id } });
+  await settle((await submitJobOrder2(contractOrder.id, sales.id)).id);
   check(
-    'a contract call-out’s visit carries the contract',
-    contractOrderVisit?.contractId === contract.id,
-    `contract ${contractOrderVisit?.contractId}`,
+    'an order already linked to a project is approved and builds no second one',
+    (await prisma.jobOrder.findUnique({ where: { id: contractOrder.id } }))?.jobId === serviceJob.id,
   );
+  const contractOrderVisit = await prisma.serviceVisit.create({
+    data: {
+      number: await nextNumber('service_visit'),
+      kind: 'CORRECTIVE',
+      status: 'SCHEDULED',
+      customerId: customer.id,
+      siteId: site.id,
+      assetId: asset.id,
+      contractId: contract.id,
+      dueDate: day('2026-10-05'),
+      assignedToId: engineer.id,
+      jobOrderId: contractOrder.id,
+    },
+  });
 
   const returned = await makeJobOrder({
-    kind: 'INSPECTION',
     customerId: customer.id,
-    assetId: booster.id,
     title: `${TAG} Annual look at the booster`,
+    projectName: `${TAG} Booster inspection`,
     description: 'Customer wants it looked at before the dry season.',
+    scope: 'Customer wants it looked at before the dry season.',
+    targetStart: day('2026-12-01'),
+    targetFinish: day('2026-12-02'),
     requestedFor: day('2026-12-01'),
     chargeBasis: 'CHARGEABLE',
-    underWarranty: true,
     requestedById: sales.id,
+    projectManagerId: director.id,
   });
-  await settle((await submitJobOrder(returned.id, sales.id)).id, 'REJECTED');
+  await settle((await submitJobOrder2(returned.id, sales.id)).id, 'REJECTED');
   check(
-    'a returned request schedules nothing',
+    'a returned request builds nothing',
     (await prisma.jobOrder.findUnique({ where: { id: returned.id } }))?.status === 'REJECTED' &&
       (await prisma.serviceVisit.count({ where: { jobOrderId: returned.id } })) === 0,
   );
   await prisma.jobOrder.update({ where: { id: returned.id }, data: { amount: D(8_500) } });
-  await submitJobOrder(returned.id, sales.id);
+  await submitJobOrder2(returned.id, sales.id);
   const attempts = await prisma.approvalRequest.count({
     where: { documentType: 'job_order', documentId: returned.id },
   });
@@ -857,12 +962,12 @@ async function main() {
   await prisma.$transaction((tx) => regenerateSchedule(tx, contract.id, (t) => nextNumber('service_visit', t)));
   const [calloutAfter, orderVisitAfter, generatedAfter] = await Promise.all([
     prisma.serviceVisit.findUnique({ where: { id: handCallout.id } }),
-    prisma.serviceVisit.findUnique({ where: { id: contractOrderVisit!.id } }),
+    prisma.serviceVisit.findUnique({ where: { id: contractOrderVisit.id } }),
     prisma.serviceVisit.count({ where: { contractId: contract.id, sequence: { not: null } } }),
   ]);
   check(
     'regenerating the schedule keeps a call-out raised by a job order',
-    orderVisitAfter?.id === contractOrderVisit!.id && orderVisitAfter.status === 'SCHEDULED',
+    orderVisitAfter?.id === contractOrderVisit.id && orderVisitAfter.status === 'SCHEDULED',
     `visit ${orderVisitAfter?.status ?? 'deleted'}`,
   );
   check(
@@ -924,7 +1029,7 @@ async function main() {
     completedOrder?.completedAt ? iso(completedOrder.completedAt) : 'null',
   );
 
-  const returnedReport = await writeJoReport(contractOrderVisit!.id, asset.id, '2026-10-06');
+  const returnedReport = await writeJoReport(contractOrderVisit.id, asset.id, '2026-10-06');
   await settle(
     (
       await submitForApproval({
@@ -1476,33 +1581,48 @@ async function main() {
     const raised = await api(salesToken, 'POST', '/job-orders', {
       customerId: customer.id,
       siteId: site.id,
-      assetId: booster.id,
-      kind: 'CORRECTIVE',
-      title: `${TAG} Booster leaking at the seal`,
-      description: 'Water on the floor under the booster set.',
-      requestedFor: '2026-11-01',
-      assignedToId: engineer.id,
+      quotationId: orderQuotation.id,
+      projectName: `${TAG} Chiller plant, phase 2`,
+      contactNumber: '0917 000 0000',
+      title: `${TAG} Chiller plant phase 2`,
+      scope: 'Second chiller, piping and controls.',
+      targetStart: '2026-11-02',
+      targetFinish: '2026-11-13',
+      projectManagerId: director.id,
+      projectEngineerId: engineer.id,
+      supportIds: [manager.id, engineer.id, manager.id],
     });
     check(
-      'a salesperson can raise a job order, and cover is decided from the machine',
-      raised.status === 201 && raised.body.chargeBasis === 'WARRANTY' && raised.body.underWarranty === true,
-      `${raised.status} ${raised.body.chargeBasis ?? raised.body.error}`,
+      'a salesperson can raise a job order on a quotation under negotiation; the working days are counted',
+      raised.status === 201 && raised.body.durationDays === 10 && raised.body.targetFinish?.startsWith('2026-11-13'),
+      `${raised.status} ${raised.body.durationDays ?? raised.body.error}`,
     );
     check(
-      'warranty work is charged to the project that sold it',
-      raised.body.job?.id === project.id,
-      `job ${raised.body.job?.id}`,
+      'the amount is the quotation’s net when nobody typed one, and support is one row per person',
+      raised.body.amount === 500_000 && (raised.body.support as { id: string }[]).length === 2,
+      `${raised.body.amount} / ${raised.body.support?.length}`,
     );
+    const finishFirst = await api(salesToken, 'POST', '/job-orders', {
+      customerId: customer.id,
+      projectName: `${TAG} Backwards`,
+      title: `${TAG} Backwards`,
+      scope: 'Finish before start.',
+      targetStart: '2026-11-13',
+      targetFinish: '2026-11-02',
+    });
+    check('a target finish before the start is refused', finishFirst.status === 400, `${finishFirst.status} ${finishFirst.body.error}`);
     const elsewhere = await api(salesToken, 'POST', '/job-orders', {
       customerId: other.id,
-      assetId: booster.id,
+      quotationId: orderQuotation.id,
+      projectName: `${TAG} Wrong customer`,
       title: `${TAG} Wrong customer`,
-      description: 'The machine is not theirs.',
-      requestedFor: '2026-11-01',
+      scope: 'The quotation is not theirs.',
+      targetStart: '2026-11-02',
+      targetFinish: '2026-11-02',
     });
     check(
-      'a machine at another customer is refused',
-      elsewhere.status === 400 && String(elsewhere.body.error).includes('not at this customer'),
+      'a quotation of another customer is refused',
+      elsewhere.status === 400 && String(elsewhere.body.error).includes('another customer'),
       `${elsewhere.status} ${elsewhere.body.error}`,
     );
 
@@ -1522,12 +1642,18 @@ async function main() {
       meddle.status === 403,
       String(meddle.status),
     );
-    const own = await api(salesToken, 'PATCH', `/job-orders/${raised.body.id}`, { urgent: true });
-    check('its author can', own.status === 200 && own.body.urgent === true, String(own.status));
+    const own = await api(salesToken, 'PATCH', `/job-orders/${raised.body.id}`, { projectName: `${TAG} Chiller plant, phase 2 (rev)`, supportIds: [manager.id] });
+    check('its author can', own.status === 200 && own.body.projectName === `${TAG} Chiller plant, phase 2 (rev)` && own.body.support.length === 1, String(own.status));
+    const opened = await api(salesToken, 'GET', `/job-orders/${raised.body.id}`);
+    check(
+      'the page says where Submit sends it: the project manager named, then the team leader',
+      opened.status === 200 && JSON.stringify(opened.body.route).includes(director.name) && JSON.stringify(opened.body.route).includes(manager.name),
+      JSON.stringify(opened.body.route),
+    );
 
     const submitted = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/submit`);
-    check('and submit it for the service manager', submitted.status === 200, `${submitted.status} ${submitted.body.error ?? ''}`);
-    const locked2 = await api(salesToken, 'PATCH', `/job-orders/${raised.body.id}`, { urgent: false });
+    check('and submit it for approval', submitted.status === 200, `${submitted.status} ${submitted.body.error ?? ''}`);
+    const locked2 = await api(salesToken, 'PATCH', `/job-orders/${raised.body.id}`, { projectName: `${TAG} too late` });
     check('once submitted it cannot be edited', locked2.status === 400, String(locked2.status));
     const withdraw = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/cancel`, { reason: 'changed mind' });
     check(
@@ -1545,17 +1671,12 @@ async function main() {
       `${pdf.status} ${pdf.headers.get('content-type')}`,
     );
 
-    const coverage = await api(salesToken, 'GET', `/job-orders/coverage?assetId=${booster.id}&date=2027-04-01`);
-    check(
-      'the form can ask what covers a machine before anything is saved',
-      coverage.status === 200 && coverage.body.suggested === 'CHARGEABLE',
-      `${coverage.status} ${coverage.body.suggested}`,
-    );
     const options = await api(salesToken, 'GET', `/job-orders/options?customerId=${customer.id}`);
+    const offeredQ = (options.body.quotations as { id: string; costed: boolean; amount: number }[] | undefined)?.find((q) => q.id === orderQuotation.id);
     check(
-      'and list the customer’s machines without Installed Base access',
-      options.status === 200 && (options.body.assets as { id: string }[]).some((a) => a.id === booster.id),
-      `${options.status}`,
+      'the form lists the customer’s quotations with their net and whether a costing stands behind them',
+      options.status === 200 && !!offeredQ && offeredQ.costed === true && offeredQ.amount === 500_000 && Array.isArray(options.body.salesOrders),
+      `${options.status} ${JSON.stringify(offeredQ)}`,
     );
 
     const cancelApproved = await api(managerToken, 'POST', `/job-orders/${contractOrder.id}/cancel`, {

@@ -126,6 +126,10 @@ model User {
   reportsPerformed   ServiceReport[]   @relation("ReportAuthor")
   jobOrdersRequested JobOrder[]        @relation("JobOrderRequester")
   jobOrdersAssigned  JobOrder[]        @relation("JobOrderEngineer")
+  jobOrdersManaged   JobOrder[]        @relation("JobOrderProjectManager")
+  jobOrdersEngineered JobOrder[]       @relation("JobOrderProjectEngineer")
+  jobOrdersLed       JobOrder[]        @relation("JobOrderProjectLead")
+  jobOrderSupport    JobOrderSupport[]
 
   quoteLinesProvided   QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided      SalesOrderLine[] @relation("SoLineProvider")
@@ -420,6 +424,9 @@ model ApprovalRequest {
   /// PROJECT_MANAGER step resolves against. Set at submission; never a
   /// relation, because the engine knows no document.
   jobId String?
+  /// The project manager the DOCUMENT names itself (a job order's, before its
+  /// project exists) — a PROJECT_MANAGER step reads this first, then the job's.
+  projectManagerId String?
 
   workflowId String?
   workflow   ApprovalWorkflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
@@ -1425,7 +1432,8 @@ model SalesOrder {
   vatAmount      Decimal @default(0) @db.Decimal(18, 2)
   total          Decimal @default(0) @db.Decimal(18, 2)
 
-  lines SalesOrderLine[]
+  lines     SalesOrderLine[]
+  jobOrders JobOrder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4091,6 +4099,20 @@ model JobOrder {
   job         Job?             @relation("JobOrderChargeTo", fields: [jobId], references: [id], onDelete: SetNull)
   quotationId String?
   quotation   Quotation?       @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  /// The sales order the work was booked on, when there is one (2026-10-09).
+  salesOrderId String?
+  salesOrder   SalesOrder?      @relation(fields: [salesOrderId], references: [id], onDelete: SetNull)
+
+  /// The project work order's own facts (2026-10-09, the owner's call): the
+  /// project's name, the contact's number, the target start and finish —
+  /// the working days between them are computed, never stored — and the
+  /// people to send. `kind`, `urgent`, `assetId`, `chargeBasis`, `contractId`
+  /// and `requestedFor` are the service-call shape of before; orders raised
+  /// since carry none of them (requestedFor mirrors targetStart).
+  projectName   String?
+  contactNumber String?
+  targetStart   DateTime? @db.Date
+  targetFinish  DateTime? @db.Date
 
   customerPoNumber String?
   /// Agreed price for chargeable work; null = billed on completion (T&M).
@@ -4100,6 +4122,16 @@ model JobOrder {
   requestedBy   User    @relation("JobOrderRequester", fields: [requestedById], references: [id], onDelete: Restrict)
   assignedToId  String?
   assignedTo    User?   @relation("JobOrderEngineer", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  /// Personnel to send: the project manager (who approves the order first),
+  /// the project engineer, the project lead, and any number of support.
+  projectManagerId  String?
+  projectManager    User?   @relation("JobOrderProjectManager", fields: [projectManagerId], references: [id], onDelete: SetNull)
+  projectEngineerId String?
+  projectEngineer   User?   @relation("JobOrderProjectEngineer", fields: [projectEngineerId], references: [id], onDelete: SetNull)
+  projectLeadId     String?
+  projectLead       User?   @relation("JobOrderProjectLead", fields: [projectLeadId], references: [id], onDelete: SetNull)
+  support           JobOrderSupport[]
 
   customerAcknowledgedBy String?
   customerAcknowledgedAt DateTime?
@@ -4121,6 +4153,17 @@ model JobOrder {
   @@index([assetId])
   @@index([requestedById])
   @@index([assignedToId, status])
+  @@index([salesOrderId])
+}
+
+/// Project support on a job order: one row per person sent (2026-10-09).
+model JobOrderSupport {
+  jobOrderId String
+  jobOrder   JobOrder @relation(fields: [jobOrderId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([jobOrderId, userId])
 }
 
 /// A versioned form definition (model §4.5: "report templates are data").
