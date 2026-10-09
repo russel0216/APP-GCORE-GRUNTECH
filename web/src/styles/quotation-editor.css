@@ -188,8 +188,8 @@
   Narrower than the minimum, the table scrolls inside its card.
 */
 table.data.qe-lines {
-  /* 96rem since the product became three boxes (2026-10-08): narrower, the table scrolls inside its card. */
-  min-width: 96rem;
+  /* 90rem (2026-10-09, the owner's call to squeeze the table): narrower, the table scrolls inside its card. */
+  min-width: 90rem;
   table-layout: fixed;
 }
 
@@ -267,9 +267,9 @@ table.data.qe-lines td {
   white-space: nowrap;
 }
 
-/* Cost and provider info: the toggles and who, then notes beside the unit cost. */
+/* Cost and provider info: the toggles and who; the unit and total cost side by side; the notes. */
 .qe-col-cost {
-  width: 17rem;
+  width: 18rem;
 }
 
 .qe-col-margin {
@@ -300,12 +300,31 @@ tr.qe-line-heading td {
   margin-top: var(--s-1);
 }
 
-/* Notes beside the unit cost, as SCORO's second line. */
+/* The unit cost and the total cost side by side, each captioned (the owner's layout, 2026-10-09). */
 .qe-cost-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 6.5rem;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
   gap: var(--s-1);
+}
+
+.qe-cost-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.qe-cost-caption {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: right;
+  color: var(--muted);
+}
+
+.qe-provider-hint {
+  font-size: var(--fs-xs);
 }
 
 /* Line number over its move buttons — the keyboard's version of a drag handle. */
@@ -338,11 +357,6 @@ tr.qe-line-heading td {
 .qe-kind-btn.is-on {
   border-color: var(--magenta);
   color: var(--magenta);
-}
-
-.qe-cost-sum {
-  font-size: var(--fs-sm);
-  text-align: right;
 }
 
 /* SCORO's buttons under the lines. */

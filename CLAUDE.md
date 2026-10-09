@@ -1878,7 +1878,17 @@ the detail.
   line with no provider says nothing about it** (2026-10-08, the owner's
   call): no "No provider named" caption in the editor's cost cell nor under
   a line on the quotation page; the cost panel's third row is "Unassigned
-  cost", shown only while there is some.
+  cost", shown only while there is some. **The product column's head is
+  "Brand | Prod. | Part No."** and the description is a placeholder in its
+  box, not a word in the head (2026-10-09, the owner's call, to squeeze the
+  table; the table's minimum is 90rem). **The cost cell is the owner's
+  layout** (2026-10-09, his picture): the two toggles and the person or
+  supplier on one line ("Who carries the cost" while none is named), then
+  the **unit cost beside the total cost**, each captioned, then Notes.
+  Either cost box may be typed: a typed total sets the unit cost to
+  total ÷ quantity to the centavo (`CostCell` keeps the typed total while
+  the box has focus and shows the derived one after); only the unit cost
+  is sent and the server derives the amount, as before.
 
 ## Quotation groups (2026-10-06; required since 2026-10-08)
 

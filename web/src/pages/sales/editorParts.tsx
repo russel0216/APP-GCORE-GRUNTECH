@@ -223,32 +223,54 @@ export function CellError({ id, message }: { id?: string; message?: string }) {
 }
 
 /**
- * SCORO's "Cost and provider info": two toggles for who carries the line's
- * cost — one of our people (in-house) or a supplier (outsourced); pressing the
- * one that is on clears it — the person or supplier beside them, then the
- * notes and the unit cost. The line's cost (quantity × unit cost) sits under.
- * Nothing is said while no provider is named (2026-10-08, the owner's call):
- * most lines have none, and a caption on every one of them was noise.
+ * SCORO's "Cost and provider info", in the owner's layout (2026-10-09): the
+ * two toggles for who carries the line's cost — one of our people (in-house)
+ * or a supplier (outsourced); pressing the one that is on clears it — with
+ * the person or supplier beside them on the first line; the unit cost and
+ * the total cost side by side under it, each captioned; the notes last.
+ * Either cost box may be typed: the total is quantity × unit cost, and a
+ * typed total sets the unit cost to total ÷ quantity, to the centavo (a
+ * quantity the division does not go into shows the centavo it lands on once
+ * the box is left). Only the unit cost is sent; the server derives the
+ * amount. Nothing is said while no provider is named (2026-10-08, the
+ * owner's call).
  */
 export function CostCell({
   line,
   n,
   costError,
   amount,
-  currency,
   onChange,
 }: {
   line: Line;
   n: number;
   costError?: string;
+  /** The line's cost as the mirror derives it (quantity × unit cost); null while no unit cost is typed. */
   amount: number | null;
-  currency: string;
+  currency?: string;
   onChange: (patch: Partial<Line>) => void;
 }) {
   const kinds: [Exclude<ProviderKind, 'none'>, 'person' | 'building', string][] = [
     ['user', 'person', 'In-house — one of our people'],
     ['supplier', 'building', 'Outsourced — a supplier'],
   ];
+  const qty = figure(line.quantity);
+  // The total box shows what was typed while it has focus, else the derived total.
+  const [totalText, setTotalText] = useState(amount == null ? '' : String(amount));
+  const [editingTotal, setEditingTotal] = useState(false);
+  useEffect(() => {
+    if (!editingTotal) setTotalText(amount == null ? '' : String(amount));
+  }, [amount, editingTotal]);
+  function typeTotal(text: string) {
+    setTotalText(text);
+    if (text.trim() === '') {
+      onChange({ unitCost: '' });
+      return;
+    }
+    const total = Number(text);
+    if (!Number.isFinite(total) || total < 0 || qty <= 0) return;
+    onChange({ unitCost: String(Math.round((total / qty) * 100) / 100) });
+  }
   return (
     <div className="qe-cost">
       <div className="qe-provider">
@@ -270,7 +292,7 @@ export function CostCell({
             );
           })}
         </div>
-        {line.providerKind !== 'none' && (
+        {line.providerKind !== 'none' ? (
           <ProviderLookup
             key={line.providerKind}
             kind={line.providerKind}
@@ -278,29 +300,50 @@ export function CostCell({
             value={line.provider}
             onChange={(provider) => onChange({ provider })}
           />
+        ) : (
+          <span className="faint qe-provider-hint">Who carries the cost</span>
         )}
       </div>
       <div className="qe-cost-row">
-        <input
-          aria-label={`Line ${n} cost notes`}
-          placeholder="Notes"
-          value={line.costNote}
-          onChange={(e) => onChange({ costNote: e.target.value })}
-        />
-        <NumberInput
-          kind="money"
-          id={lineField(line.key, 'unitCost')}
-          className="qe-num"
-          min={0}
-          step="0.01"
-          placeholder="Unit cost"
-          aria-label={`Line ${n} unit cost`}
-          aria-invalid={costError ? true : undefined}
-          value={line.unitCost}
-          onChange={(e) => onChange({ unitCost: e.target.value })}
-        />
+        <label className="qe-cost-box">
+          <NumberInput
+            kind="money"
+            id={lineField(line.key, 'unitCost')}
+            className="qe-num"
+            min={0}
+            step="0.01"
+            placeholder="0.00"
+            aria-label={`Line ${n} unit cost`}
+            aria-invalid={costError ? true : undefined}
+            value={line.unitCost}
+            onChange={(e) => onChange({ unitCost: e.target.value })}
+          />
+          <span className="qe-cost-caption">Unit cost</span>
+        </label>
+        <label className="qe-cost-box">
+          <NumberInput
+            kind="money"
+            className="qe-num"
+            min={0}
+            step="0.01"
+            placeholder="0.00"
+            aria-label={`Line ${n} total cost`}
+            title={qty > 0 ? undefined : 'Give the line a quantity first'}
+            disabled={qty <= 0}
+            value={totalText}
+            onFocus={() => setEditingTotal(true)}
+            onBlur={() => setEditingTotal(false)}
+            onChange={(e) => typeTotal(e.target.value)}
+          />
+          <span className="qe-cost-caption">Total cost</span>
+        </label>
       </div>
-      <div className="mono faint qe-cost-sum">{amount == null ? 'not costed' : formatMoney(amount, currency)}</div>
+      <input
+        aria-label={`Line ${n} cost notes`}
+        placeholder="Notes"
+        value={line.costNote}
+        onChange={(e) => onChange({ costNote: e.target.value })}
+      />
       <CellError message={costError} />
     </div>
   );
@@ -577,7 +620,7 @@ export function ProductCells({
         id={lineField(line.key, 'productType')}
         field="productType"
         label={`Line ${n} product type`}
-        placeholder="Product type"
+        placeholder="Prod."
         value={line.productType}
         brand={line.brand}
         invalid={invalid}
@@ -595,7 +638,7 @@ export function ProductCells({
           id={lineField(line.key, 'partNumber')}
           className="qe-title"
           aria-label={`Line ${n} part number`}
-          placeholder="Part number"
+          placeholder="Part No."
           autoComplete="off"
           aria-autocomplete="list"
           aria-expanded={open && matches.length > 0}

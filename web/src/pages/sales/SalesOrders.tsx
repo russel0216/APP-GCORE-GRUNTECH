@@ -1075,7 +1075,7 @@ export function SalesOrderEditor() {
                   <span className="visually-hidden">Order</span>
                 </th>
                 <th className="qe-col-group">Group</th>
-                <th className="qe-col-product">Brand | Product type | Part number | Description</th>
+                <th className="qe-col-product">Brand | Prod. | Part No.</th>
                 <th className="qe-col-qty">Quantity | Unit</th>
                 <th className="qe-col-price right">Unit price</th>
                 <th className="qe-col-amount right">Amount</th>
