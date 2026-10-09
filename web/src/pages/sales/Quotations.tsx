@@ -164,30 +164,19 @@ interface QuotationSummary {
 }
 
 /**
- * SCORO's summary row, one card wider: the listed quotations split by their
- * owner's team (`Employee.industryId`, shared/team.ts) — KAT, HIT, UIT, GIB,
- * SIT — each with its count and value, so a manager reads the teams' share
- * of the set before the rows.
+ * The teams' cards (2026-10-09, the owner's call: "there should be 8
+ * cards, separate card by team"): after Quotations, Sum and Margin, one
+ * card per active team — KAT, HIT, UIT, GIB, SIT — each its count over its
+ * value, the set split by the OWNER's team (`Employee.industryId`,
+ * shared/team.ts). Quotations whose owner has no team are said on the
+ * Quotations card, never a ninth card.
  */
-function TeamQuotesCard({ teams }: { teams: TeamQuotes[] }) {
-  return (
-    <div className="kpi-card wide">
-      <div className="kpi-label">Quotes by team</div>
-      {teams.length === 0 ? (
-        <div className="kpi-subtext">No teams yet — HR sets a person's team on the employee record.</div>
-      ) : (
-        <div className="list-summary-rows">
-          {teams.map((t) => (
-            <div key={t.id ?? 'none'} className="list-summary-row" title={t.name}>
-              <span className="code">{t.code}</span>
-              <span className="num">{t.count}</span>
-              <span className="num">{formatMoney(t.value)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function teamCards(teams: TeamQuotes[]) {
+  return teams
+    .filter((t) => t.id !== null)
+    .map((t) => (
+      <Stat key={t.id} label={t.code} value={formatMoney(t.value)} figure sub={`${t.count} quotation${t.count === 1 ? '' : 's'}`} />
+    ));
 }
 
 /**
@@ -402,7 +391,14 @@ export function Quotations() {
           const s = raw as QuotationSummary;
           return (
             <>
-              <Stat label="Quotations" value={total} />
+              <Stat
+                label="Quotations"
+                value={total}
+                sub={(() => {
+                  const none = (s.teams ?? []).find((t) => t.id === null);
+                  return none?.count ? `${none.count} with no team` : undefined;
+                })()}
+              />
               <Stat label="Sum" value={formatMoney(s.value ?? 0)} figure />
               {s.margin && (
                 <Stat
@@ -412,7 +408,7 @@ export function Quotations() {
                   sub={`${s.margin.pct !== null ? `${s.margin.pct}% · ` : ''}${s.margin.costed} costed`}
                 />
               )}
-              <TeamQuotesCard teams={s.teams ?? []} />
+              {teamCards(s.teams ?? [])}
             </>
           );
         }}

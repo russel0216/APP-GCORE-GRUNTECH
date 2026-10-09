@@ -1177,36 +1177,20 @@ a.card:hover {
   margin, the quotes by team. Narrower tiles than a dashboard's, so a row of
   four to six fits over a list; a wide card (the quotes by team) spans two.
 */
+/* The summary cards over a list: eight on the quotation list (count, sum, margin, a card per team), on one row where the width allows. */
 .kpi-grid.list-summary {
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   margin-bottom: var(--s-3);
 }
 
-.list-summary .kpi-card.wide {
-  grid-column: span 2;
+/* Eight across leaves each card narrow: the figure comes down a size and never breaks mid-number. */
+.list-summary .kpi-card {
+  padding: var(--s-3);
 }
 
-.list-summary-rows {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  font-size: var(--fs-sm);
-  font-variant-numeric: tabular-nums;
-}
-
-.list-summary-row {
-  display: grid;
-  grid-template-columns: 3.5rem 1fr auto;
-  column-gap: var(--s-2);
-  align-items: baseline;
-}
-
-.list-summary-row .code {
-  font-weight: 600;
-}
-
-.list-summary-row .num {
-  text-align: right;
+.list-summary .kpi-value {
+  font-size: var(--fs-base);
+  white-space: nowrap;
 }
 
 /* The Filters panel: every filter the screen declares, in a grid. */
