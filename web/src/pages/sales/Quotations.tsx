@@ -66,6 +66,8 @@ interface QuotationRow {
   valueRevision: { id: string; revision: number; status: string } | null;
   latest: { revision: number; status: string; total: number; updatedAt: string } | null;
   salesOrderCount: number;
+  /** The sales orders still standing on it — the S.O. column beside PDF. */
+  salesOrders: { id: string; number: string; status: string }[];
   /** Only for a viewer who may see this quotation's cost; null otherwise or when no line is costed. */
   margin: { amount: number; pct: number | null; costedLines: number; lineCount: number } | null;
   /** What Change status plans with; the PATCH still decides. */
@@ -206,7 +208,7 @@ export function Quotations() {
   const columns: Column<QuotationRow>[] = [
     {
       key: 'number',
-      label: 'Number',
+      label: 'No.',
       sortKey: 'number',
       width: '140px',
       render: (q) => (
@@ -218,7 +220,7 @@ export function Quotations() {
     },
     {
       key: 'subject',
-      label: 'Quotation',
+      label: 'Quote / Project',
       sortKey: 'subject',
       render: (q) => (
         <div>
@@ -270,14 +272,24 @@ export function Quotations() {
         ]
       : []),
     { key: 'probability', label: 'Probability', sortKey: 'probability', align: 'right', optional: true, render: (q) => `${q.probability}%` },
-    { key: 'owner', label: 'Owner', render: (q) => q.owner.name },
+    // The owner's heads (2026-10-09): Author as initials only, the full name in the tooltip.
+    {
+      key: 'owner',
+      label: 'Author',
+      width: '72px',
+      render: (q) => (
+        <abbr title={q.owner.name} className="mono">
+          {initials(q.owner.name)}
+        </abbr>
+      ),
+    },
     {
       key: 'expectedClosing',
       label: 'Closing',
       sortKey: 'expectedClosing',
       render: (q) => (q.expectedClosing ? formatDate(q.expectedClosing) : <span className="faint">—</span>),
     },
-    { key: 'createdAt', label: 'Raised', sortKey: 'createdAt', render: (q) => formatDate(q.createdAt) },
+    { key: 'createdAt', label: 'Issue date', sortKey: 'createdAt', render: (q) => formatDate(q.createdAt) },
     { key: 'updatedAt', label: 'Modified', sortKey: 'updatedAt', optional: true, render: (q) => formatDate(q.updatedAt) },
     {
       key: 'pdf',
@@ -288,6 +300,26 @@ export function Quotations() {
         q.valueRevision ? (
           <PdfButton path={`/api/quotations/${q.id}/revisions/${q.valueRevision.id}/pdf`} label={`Open the PDF of ${q.number}`} />
         ) : null,
+    },
+    {
+      // The sales orders booked on it, beside the PDF (2026-10-09, the owner's call).
+      key: 'salesOrders',
+      label: 'S.O.',
+      width: '110px',
+      render: (q) =>
+        q.salesOrders.length ? (
+          <div className="mono">
+            {q.salesOrders.map((o) => (
+              <div key={o.id}>
+                <Link to={`/g-ops/sales-orders/${o.id}`} onClick={(e) => e.stopPropagation()} title={`Sales order ${o.number} · ${o.status.toLowerCase().replace(/_/g, ' ')}`}>
+                  {o.number}
+                </Link>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <span className="faint">—</span>
+        ),
     },
   ];
 

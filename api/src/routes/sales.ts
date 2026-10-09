@@ -1230,6 +1230,8 @@ quotationRoutes.get(
           legacyQuote: { select: { id: true, number: true, status: true } },
           revisions: { orderBy: { revision: 'desc' }, select: { ...LIST_REVISION_SELECT, jobs: { select: { id: true }, take: 1 } } },
           _count: { select: { salesOrders: true } },
+          // The S.O. column (2026-10-09, the owner's call): the orders still standing, by number.
+          salesOrders: { where: { status: { not: 'CANCELLED' } }, select: { id: true, number: true, status: true }, orderBy: { number: 'asc' } },
         },
         orderBy: quotationOrderBy(q),
         skip: (q.page - 1) * q.pageSize,
@@ -1307,6 +1309,7 @@ quotationRoutes.get(
               ? { revision: latest.revision, status: latest.status, total: num(latest.total), updatedAt: latest.updatedAt }
               : null,
             salesOrderCount: r._count.salesOrders,
+            salesOrders: r.salesOrders,
             margin,
             // What the bulk status change needs to plan a move the way the
             // PATCH will judge it (assertOutcomeChange); the PATCH still decides.
@@ -1383,7 +1386,7 @@ quotationRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Quotation and customer', 'Stage', 'Value', 'Owner', 'Raised', 'Closing'],
+          head: ['No.', 'Quote / Project and customer', 'Stage', 'Value', 'Author', 'Issue date', 'Closing'],
           widths: [1.6, 2.5, 1.6, 1.4, 1.4, 1.35, 1.35],
           align: ['left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => {
