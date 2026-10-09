@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, downloadBlob, openPdf, qs, type ListResult } from '../../lib/api';
+import { api, downloadBlob, qs, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -10,6 +10,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -261,20 +262,15 @@ export function QuoteArchive() {
             </button>
           ) : undefined
         }
-        actions={
-          <>
-            {can('gops.quote_archive.export') && (
-              <button className="btn btn-sm" onClick={() => void exportAll()}>
-                Export all (CSV)
-              </button>
-            )}
-            {can('gops.quote_archive.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setImporting(true)}>
-                Import from SCORO
-              </button>
-            )}
-          </>
-        }
+        // The screen's own tools live in the list's ⋯ menu, never on the toolbar line (rule 9).
+        menuItems={[
+          ...(can('gops.quote_archive.export')
+            ? [{ label: 'Export all (CSV)', hint: 'Every SCORO quote the search and filters select', onSelect: () => void exportAll() }]
+            : []),
+          ...(can('gops.quote_archive.create')
+            ? [{ label: 'Import from SCORO', hint: 'The bundle tools/scoro/scoro_quotes.py made — a dry run first', onSelect: () => setImporting(true) }]
+            : []),
+        ]}
       />
 
       {importing && (
@@ -384,11 +380,11 @@ function ImportDialog({ onClose, onImported }: { onClose: () => void; onImported
       title="Import from SCORO"
       onClose={close}
       wide
+      // Once imported there is nothing left to lose: ✕, Escape and a click
+      // outside close it without asking.
+      guard={!committed}
       footer={
-        <>
-          <button className="btn" onClick={close}>
-            {committed ? 'Close' : 'Cancel'}
-          </button>
+        <ModalFoot onCancel={close} cancelLabel={committed ? 'Close' : 'Cancel'} busy={busy}>
           {!committed && (
             <button className="btn" disabled={!quotesFile || busy} onClick={() => void run(false)}>
               {busy && !report ? 'Checking…' : 'Check (dry run)'}
@@ -399,7 +395,7 @@ function ImportDialog({ onClose, onImported }: { onClose: () => void; onImported
               {busy ? 'Importing…' : `Import ${report.totals.quotes} quotes`}
             </button>
           )}
-        </>
+        </ModalFoot>
       }
     >
       <p className="muted archive-lead">
@@ -658,7 +654,6 @@ interface ArchiveDetail {
 export function QuoteArchiveDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const toast = useToast();
   const [quote, setQuote] = useState<ArchiveDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [confirming, setConfirming] = useState(false);
@@ -673,16 +668,8 @@ export function QuoteArchiveDetail() {
   }, [id]);
   useEffect(load, [load]);
 
-  if (error && !quote) {
-    return (
-      <div>
-        <div className="breadcrumb">
-          <Link to="/g-ops/quote-archive">SCORO Archive</Link>
-        </div>
-        <ErrorBox error={error} />
-      </div>
-    );
-  }
+  // Back is the Shell's line, to the archive.
+  if (error && !quote) return <ErrorBox error={error} />;
   if (!quote) return <Loading />;
 
   const currency = quote.currency || 'PHP';
@@ -691,50 +678,61 @@ export function QuoteArchiveDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/quote-archive">SCORO Archive</Link>
-        <span className="sep">›</span>
-        <span className="mono">{quote.number}</span>
-        {quote.continuedQuotation && (
-          <>
-            <span className="sep">›</span>
-            <Link to={`/g-ops/quotations/${quote.continuedQuotation.id}`}>{quote.continuedQuotation.number}</Link>
-          </>
-        )}
-      </div>
-
       <RecordHeader
-        type="SCORO Quote"
+        type="SCORO quotation"
         code={quote.number}
         title={quote.name || quote.customer?.name || quote.customerName}
         status={quote.status}
+        statusLabel={quote.status}
         statusExtra={SCORO_STATUS_TONES}
         amount={money(quote.total)}
         amountLabel="Total with VAT"
-        actions={
+        meta={
           <>
-            {quote.attachmentId ? (
-              <button
-                className="btn"
-                onClick={() => openPdf(`/api/quote-archive/${quote.id}/pdf`, () => toast('error', 'Could not open the PDF'))}
-              >
-                Open PDF
-              </button>
-            ) : (
-              <span className="faint">No PDF was exported from SCORO for this quote</span>
+            {/* The customer — unless the title already is it, a quote with no name. */}
+            {quote.name &&
+              (quote.customer ? (
+                <Link to={`/g-ops/customers/${quote.customer.id}`}>{quote.customer.name}</Link>
+              ) : (
+                `${quote.customerName} (not linked)`
+              ))}
+            {!quote.name && !quote.customer && 'Not linked to a G-CORE customer'}
+            {quote.name || !quote.customer ? ' · ' : ''}
+            {quote.contactName && `${quote.contactName} · `}
+            {`by ${quote.ownerUser ? quote.ownerUser.name : quote.ownerName}`}
+            {quote.continuedQuotation && (
+              <>
+                {' '}
+                · continued as{' '}
+                <Link className="mono" to={`/g-ops/quotations/${quote.continuedQuotation.id}`}>
+                  {quote.continuedQuotation.number}
+                </Link>
+              </>
             )}
-            {quote.canContinue && (
-              <button
-                className="btn btn-primary"
-                disabled={!quote.customer}
-                title={quote.customer ? undefined : 'Link this SCORO quote to a customer first'}
-                onClick={() => setConfirming(true)}
-              >
-                Continue in G-CORE
-              </button>
-            )}
+            {!quote.attachmentId && ' · no PDF was exported from SCORO for this quote'}
           </>
         }
+        actions={
+          quote.canContinue && (
+            <button
+              className="btn btn-primary"
+              disabled={!quote.customer}
+              title={quote.customer ? undefined : 'Link this SCORO quote to a customer first'}
+              onClick={() => setConfirming(true)}
+            >
+              Continue in G-CORE
+            </button>
+          )
+        }
+        print={quote.attachmentId ? `/api/quote-archive/${quote.id}/pdf` : undefined}
+        more={[
+          quote.canLink &&
+            !quote.customer && {
+              label: 'Link to customer',
+              hint: `Match SCORO’s “${quote.customerName}” to a G-CORE customer`,
+              onSelect: () => setLinking(true),
+            },
+        ]}
       />
 
       <ErrorBox error={error} />
@@ -766,12 +764,8 @@ export function QuoteArchiveDetail() {
           <span>
             SCORO&rsquo;s customer &ldquo;{quote.customerName}&rdquo; is not linked to a G-CORE customer.
             {quote.isOpen && ' Link this SCORO quote to a customer first, then continue it.'}
+            {quote.canLink && ' Use ⋯ › Link to customer.'}
           </span>
-          {quote.canLink && (
-            <button className="btn btn-sm" onClick={() => setLinking(true)}>
-              Link to customer
-            </button>
-          )}
         </div>
       )}
 
@@ -950,14 +944,11 @@ function ContinueDialog({
       title="Continue in G-CORE"
       onClose={close}
       footer={
-        <>
-          <button className="btn" onClick={close} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={close} busy={busy}>
           <button className="btn btn-primary" onClick={() => void go()} disabled={busy || !quote.customer}>
             {busy ? 'Creating…' : `Create quotation ${quote.number}`}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <p>
@@ -1031,7 +1022,8 @@ function LinkCustomerDialog({
   }
 
   return (
-    <Modal title="Link to a G-CORE customer" onClose={close}>
+    // The one box here is a search, not data to lose: closing never asks.
+    <Modal title="Link to a G-CORE customer" onClose={close} guard={false} footer={<ModalFoot onCancel={close} busy={busy} />}>
       <p className="muted">
         SCORO called this customer &ldquo;{quote.customerName}&rdquo;. Pick the G-CORE customer it is.
       </p>

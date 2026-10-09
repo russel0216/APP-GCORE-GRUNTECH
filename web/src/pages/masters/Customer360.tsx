@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ActivityLog } from '../../components/ActivityLog';
+import { useConfirm } from '../../components/Confirm';
+import { RecordHeader } from '../../components/RecordHeader';
 import {
   Checkbox,
   Empty,
@@ -10,6 +12,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -216,6 +219,10 @@ export function Customer360Page() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
 
   const [customer, setCustomer] = useState<Customer360 | null>(null);
   const [loading, setLoading] = useState(true);
@@ -255,15 +262,12 @@ export function Customer360Page() {
   if (loading) return <Loading />;
   if (!customer) return <ErrorBox error={error ?? new Error('Customer not found')} />;
 
+  /** Asked through the confirm bar, which shows a refusal and stays open — so this throws. */
   async function remove() {
     if (!customer) return;
-    try {
-      await api.del(`/customers/${customer.id}`);
-      toast('ok', `${customer.name} deleted`);
-      navigate('/g-ops/customers');
-    } catch (err) {
-      setError(err);
-    }
+    await api.del(`/customers/${customer.id}`);
+    toast('ok', `${customer.name} deleted`);
+    navigate('/g-ops/customers');
   }
 
   const leads = customer.leads ?? [];
@@ -273,62 +277,50 @@ export function Customer360Page() {
   const payments = customer.payments ?? [];
   const jobOrders = customer.jobOrders ?? [];
   const forCustomer = `new=1&customerId=${encodeURIComponent(customer.id)}`;
-
-  // Handoffs: start the next document already pointed at this customer.
-  const shortcuts: { to: string; label: string }[] = [
-    ...(can('gops.leads.create') ? [{ to: `/g-ops/leads?${forCustomer}`, label: 'New lead' }] : []),
-    ...(can('gops.quotations.create') ? [{ to: `/g-ops/quotations/new?customerId=${encodeURIComponent(customer.id)}`, label: 'New quotation' }] : []),
-    ...(can('gops.costing.create') ? [{ to: `/g-ops/costing/new?customerId=${encodeURIComponent(customer.id)}`, label: 'New costing' }] : []),
-    ...(can('gops.job_orders.create')
-      ? [{ to: `/g-ops/job-orders?${forCustomer}`, label: 'Request job order' }]
-      : []),
-  ];
-
-  const subtitle = [customer.legalName && customer.legalName !== customer.name ? customer.legalName : null]
-    .filter(Boolean)
-    .join(' · ');
+  const legalName = customer.legalName && customer.legalName !== customer.name ? customer.legalName : null;
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/customers">Customers</Link>
-        <span className="sep">›</span>
-        <span className="mono">{customer.code}</span>
-        <span className="sep">›</span>
-        <span>{customer.name}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{customer.name}</h1>
-          <p>
-            <SubIndustryLabel subIndustry={customer.subIndustry} />
-            {subtitle && <span className="muted"> · {subtitle}</span>}
-            {!customer.isActive && (
-              <span className="m-inline">
-                <StatusBadge status="INACTIVE" extra={{ INACTIVE: 'danger' }} />
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="row m-shortcuts">
-          {shortcuts.map((s) => (
-            <Link key={s.to} className="btn btn-sm" to={s.to}>
-              {s.label}
-            </Link>
-          ))}
-          {mayEdit && (
-            <button className="btn" onClick={() => setEditing(true)}>
-              Modify
-            </button>
-          )}
-          {mayEdit && can('gops.customers.delete') && (
-            <button className="btn btn-danger" onClick={remove}>
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
+      <RecordHeader
+        type="Customer"
+        code={customer.code}
+        title={customer.name}
+        status={customer.isActive ? 'ACTIVE' : 'INACTIVE'}
+        statusExtra={{ INACTIVE: 'danger' }}
+        meta={
+          <>
+            Sub-industry <SubIndustryLabel subIndustry={customer.subIndustry} /> · Team{' '}
+            <TeamLabel industry={customer.industry} />
+            {legalName && <> · {legalName}</>}
+          </>
+        }
+        more={[
+          // Handoffs: start the next document already pointed at this customer.
+          can('gops.leads.create') && { label: 'New lead for this customer', to: `/g-ops/leads?${forCustomer}` },
+          can('gops.quotations.create') && {
+            label: 'New quotation for this customer',
+            to: `/g-ops/quotations/new?customerId=${encodeURIComponent(customer.id)}`,
+          },
+          can('gops.costing.create') && {
+            label: 'New costing for this customer',
+            to: `/g-ops/costing/new?customerId=${encodeURIComponent(customer.id)}`,
+          },
+          can('gops.job_orders.create') && { label: 'Request a job order', to: `/g-ops/job-orders?${forCustomer}` },
+          mayEdit &&
+            can('gops.customers.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${customer.name}?`,
+                body: 'It cannot be undone. To keep a customer with work on file out of new work, mark it inactive under Modify instead.',
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
+        ]}
+        modify={mayEdit ? () => setEditing(true) : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -375,7 +367,7 @@ export function Customer360Page() {
           <div className="m-card-head">
             <h3 className="card-title">Contacts</h3>
             {mayEdit && (
-              <button className="btn btn-primary btn-sm" onClick={() => setContactModal('new')}>
+              <button className="btn btn-sm" onClick={() => setContactModal('new')}>
                 + Add contact
               </button>
             )}
@@ -429,7 +421,7 @@ export function Customer360Page() {
           <div className="m-card-head">
             <h3 className="card-title">Sites</h3>
             {mayEdit && (
-              <button className="btn btn-primary btn-sm" onClick={() => setSiteModal('new')}>
+              <button className="btn btn-sm" onClick={() => setSiteModal('new')}>
                 + Add site
               </button>
             )}
@@ -753,12 +745,8 @@ export function Customer360Page() {
           ))}
         </Collection>
 
-        {can('gops.calendar.view_all') && (
-          <div className="card">
-            <h3 className="card-title">Activity</h3>
-            <ActivityLog customerId={customer.id} />
-          </div>
-        )}
+        {/* ActivityLog draws its own "Activity" card. */}
+        {can('gops.calendar.view_all') && <ActivityLog customerId={customer.id} />}
 
         <div className="card">
           <h3 className="card-title">History</h3>
@@ -939,38 +927,32 @@ function ContactModal({
     }
   }
 
+  /** Asked in the modal's foot, which shows a refusal — so this throws. */
   async function remove() {
     if (!contact) return;
-    setBusy(true);
-    try {
-      await api.del(`/customers/${customerId}/contacts/${contact.id}`);
-      toast('ok', `${contact.name} removed`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/customers/${customerId}/contacts/${contact.id}`);
+    toast('ok', `${contact.name} removed`);
+    onSaved();
   }
 
   return (
     <Modal
-      title={contact ? `Modify ${contact.name}` : 'Add contact'}
+      title={contact ? `Modify contact ${contact.name}` : 'Add contact'}
       onClose={onClose}
       footer={
-        <>
-          {contact && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Remove
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            contact
+              ? { label: 'Remove', question: `Remove ${contact.name} from this customer's contacts?`, onConfirm: remove }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1058,38 +1040,28 @@ function SiteModal({
     }
   }
 
+  /** Asked in the modal's foot, which shows a refusal — so this throws. */
   async function remove() {
     if (!site) return;
-    setBusy(true);
-    try {
-      await api.del(`/customers/${customerId}/sites/${site.id}`);
-      toast('ok', `${site.name} removed`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/customers/${customerId}/sites/${site.id}`);
+    toast('ok', `${site.name} removed`);
+    onSaved();
   }
 
   return (
     <Modal
-      title={site ? `Modify ${site.name}` : 'Add site'}
+      title={site ? `Modify site ${site.name}` : 'Add site'}
       onClose={onClose}
       footer={
-        <>
-          {site && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Remove
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={site ? { label: 'Remove', question: `Remove the site ${site.name}?`, onConfirm: remove } : undefined}
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

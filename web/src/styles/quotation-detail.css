@@ -27,11 +27,6 @@
   font-size: var(--fs-xl);
 }
 
-.qd-actions {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
 /* Two columns, one under 860px. */
 .qd-grid {
   display: grid;
@@ -136,31 +131,6 @@
   margin-top: var(--s-1);
 }
 
-/* SCORO's bar: what makes the next thing on the left, the paper and the sending on the right. */
-.qd-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s-2);
-  margin-top: var(--s-3);
-  padding-top: var(--s-3);
-  border-top: 1px solid var(--line-soft);
-}
-
-.qd-bar .checkbox {
-  margin: 0;
-}
-
-.qd-bar > .row {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
-.qd-bar > .row:last-child {
-  margin-left: auto;
-}
-
 /* Under the bar: where Submit sends a draft, and who decides each step. */
 .qd-route {
   display: flex;
@@ -182,14 +152,6 @@
   margin: 0;
 }
 
-@media (max-width: 520px) {
-  .qd-bar > .row,
-  .qd-bar .btn {
-    flex: 1 1 auto;
-    justify-content: center;
-  }
-}
-
 /* The selected revision is a magenta button: its status pill turns white with
    it, or the pill's own colour vanishes into the button (R1 Draft unreadable). */
 .qd-revision.is-selected .badge {
@@ -207,35 +169,6 @@
 .qd-step {
   margin-top: var(--s-1);
   font-size: var(--fs-sm);
-}
-
-/* "Lost" asks why in the page. */
-.qd-lost {
-  margin-top: var(--s-2);
-  max-width: 30rem;
-}
-
-.qd-lost-label {
-  display: block;
-  font-weight: 600;
-  margin-bottom: var(--s-1);
-}
-
-.qd-lost-actions {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-  margin-top: var(--s-2);
-}
-
-/* Delete asks in the page, beside the button that started it. */
-.qd-confirm {
-  gap: var(--s-2);
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.qd-confirm-text {
-  font-weight: 600;
 }
 
 .qd-col-product {

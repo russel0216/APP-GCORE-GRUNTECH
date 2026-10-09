@@ -150,12 +150,19 @@ export function Modal({
   footer,
   wide,
   guard = true,
+  dirty: dirtyProp,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  /**
+   * Whether the form holds unsaved changes, when the caller knows better than
+   * "a field was touched" — a modal that saves and STAYS open (a course's
+   * tabs) passes its own flag, or the guard keeps asking after the save.
+   */
+  dirty?: boolean;
   /**
    * Ask before Escape, a click outside or ✕ throws away what was typed
    * (2026-10-09). On by default: the modal notices any change to a field
@@ -174,8 +181,11 @@ export function Modal({
   askRef.current = askDiscard;
 
   /** Close, unless something was changed — then ask first. */
+  const dirtyPropRef = useRef(dirtyProp);
+  dirtyPropRef.current = dirtyProp;
   const attemptClose = useCallback(() => {
-    if (guard && dirty.current) setAskDiscard(true);
+    const changed = dirtyPropRef.current ?? dirty.current;
+    if (guard && changed) setAskDiscard(true);
     else closeRef.current();
   }, [guard]);
 
@@ -295,35 +305,50 @@ export function ModalFoot({
   onCancel,
   cancelLabel = 'Cancel',
   danger,
+  busy = false,
   children,
 }: {
   onCancel: () => void;
   /** "Close" only on a modal with nothing to save. */
   cancelLabel?: string;
+  /** While the form is saving: Cancel and the destructive button wait for it. */
+  busy?: boolean;
   danger?: {
     label: string;
     /** The question, e.g. "Delete this item? It cannot be undone." */
     question: string;
-    onConfirm: () => Promise<unknown> | unknown;
+    /** Receives the reason typed when `reason` is set, else ''. */
+    onConfirm: (reason: string) => Promise<unknown> | unknown;
     disabled?: boolean;
     /** Why it is disabled, as the button's tooltip. */
     disabledReason?: string;
+    /** Ask for a reason in the foot (a cancelled visit or leave keeps one). */
+    reason?: 'required' | 'optional';
+    reasonLabel?: string;
+    /** The fewest characters the API accepts for the reason. */
+    minReason?: number;
   };
   children?: ReactNode;
 }) {
   const [asking, setAsking] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
+  const reasonId = useId();
+  const typed = reason.trim().length;
+  const missing =
+    (danger?.reason === 'required' && typed === 0) ||
+    (!!danger?.reason && !!danger?.minReason && typed < danger.minReason && (typed > 0 || danger.reason === 'required'));
 
   async function go() {
-    if (!danger || busy) return;
-    setBusy(true);
+    if (!danger || working || missing) return;
+    setWorking(true);
     setError(null);
     try {
-      await danger.onConfirm();
+      await danger.onConfirm(reason.trim());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'That did not go through.');
-      setBusy(false);
+      setWorking(false);
     }
   }
 
@@ -332,13 +357,29 @@ export function ModalFoot({
       <>
         <span className="modal-foot-question" role="alert">
           {danger.question}
+          {danger.reason && (
+            <span className="field modal-foot-reason">
+              <label htmlFor={reasonId}>
+                {danger.reasonLabel ?? 'Reason'}
+                {danger.reason === 'required' && <span className="req"> *</span>}
+              </label>
+              <textarea
+                id={reasonId}
+                rows={2}
+                autoFocus
+                value={reason}
+                disabled={working}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            </span>
+          )}
           {error && <span className="modal-foot-error">{error}</span>}
         </span>
-        <button type="button" className="btn" autoFocus disabled={busy} onClick={() => setAsking(false)}>
+        <button type="button" className="btn" autoFocus={!danger.reason} disabled={working} onClick={() => setAsking(false)}>
           Keep it
         </button>
-        <button type="button" className="btn btn-danger" disabled={busy} onClick={() => void go()}>
-          {busy ? 'Working…' : danger.label}
+        <button type="button" className="btn btn-danger" disabled={working || missing} onClick={() => void go()}>
+          {working ? 'Working…' : danger.label}
         </button>
       </>
     );
@@ -350,14 +391,14 @@ export function ModalFoot({
         <button
           type="button"
           className="btn btn-danger modal-foot-start"
-          disabled={danger.disabled}
+          disabled={danger.disabled || busy}
           title={danger.disabled ? danger.disabledReason : undefined}
           onClick={() => setAsking(true)}
         >
           {danger.label}
         </button>
       )}
-      <button type="button" className="btn" onClick={onCancel}>
+      <button type="button" className="btn" disabled={busy} onClick={onCancel}>
         {cancelLabel}
       </button>
       {children}

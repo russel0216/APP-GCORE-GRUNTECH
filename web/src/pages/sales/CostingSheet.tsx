@@ -6,6 +6,7 @@ import { addDays, todayLocal } from '../../lib/day';
 import { costingFigures, lineAmount, lineCodes, planTasks } from '../../lib/costingMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { Checkbox, ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
+import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import type { CostingDetail } from './CostingDetail';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -425,6 +426,30 @@ export function CostingSheet() {
     focusNext.current = null;
   });
 
+  // ── Unsaved changes ────────────────────────────────────────────────────────
+  //
+  // The sheet as it would be saved, without the row keys the page invents. The
+  // baseline is taken the moment the person first changes a field, clicks,
+  // presses a key or pastes in the sheet (in the capture phase, so before the
+  // change itself lands) — after the draft has loaded and the prefills (the
+  // lead, the customer, your last terms, a template from ?template=) have
+  // landed — so none of those counts as a change; only what the person did.
+  const snapshot = useMemo(
+    () =>
+      JSON.stringify({
+        header: { ...header, customer: header.customer?.id ?? null },
+        lines: lines.map(({ key: _key, ...l }) => l),
+        sections: sections.map(({ key: _key, tasks, ...s }) => ({ ...s, tasks: tasks.map(({ key: _k, ...t }) => t) })),
+        spread,
+      }),
+    [header, lines, sections, spread],
+  );
+  const [baseline, setBaseline] = useState<string | null>(null);
+  const touch = () => setBaseline((b) => b ?? snapshot);
+  const dirty = baseline !== null && baseline !== snapshot;
+  useUnsavedChanges(dirty);
+  useBackLink(editing ? `/g-ops/costing/${id}` : null, costing?.number);
+
   // ── Figures ────────────────────────────────────────────────────────────────
 
   const vatRate = header.vatOn ? (savedVat && savedVat > 0 ? savedVat : lists.companyVatRate) : 0;
@@ -704,6 +729,7 @@ export function CostingSheet() {
         ? await api.put<{ id: string; number: string }>(`/costings/${id}/sheet`, payload)
         : await api.post<{ id: string; number: string }>('/costings', { ...payload, leadId: header.leadId || null });
       toast('ok', `${saved.number} saved`);
+      setBaseline(null); // saved: nothing left to lose on the way out
       navigate(`/g-ops/costing/${saved.id}`);
     } catch (err) {
       setError(err);
@@ -734,6 +760,7 @@ export function CostingSheet() {
 
   if (!loaded || !categories.length) return error ? <ErrorBox error={error} /> : <Loading />;
   if (editing && costing && (!costing.canEdit || costing.status !== 'DRAFT')) {
+    // The Shell's "← Back to <number>" (useBackLink above) is the way out.
     return (
       <div className="card">
         <p className="muted">
@@ -743,54 +770,24 @@ export function CostingSheet() {
               ? 'This costing is final. Reopen it from its page before changing it.'
               : 'This costing is with the approver and holds still until they decide.'}
         </p>
-        <Link to={`/g-ops/costing/${costing.id}`} className="btn">
-          Back to {costing.number}
-        </Link>
       </div>
     );
   }
   if (editing && !costing) return <ErrorBox error={error ?? new Error('Costing not found')} />;
 
-  const back = editing ? `/g-ops/costing/${id}` : '/g-ops/costing';
-  const actions = (
-    <div className="row qe-actions">
-      <Link to={back} className="btn">
-        Back
-      </Link>
-      {can('gops.costing.create') && (
-        <button type="button" className="btn" onClick={() => setTemplatePanel((v) => !v)} aria-expanded={templatePanel}>
-          Save as template
-        </button>
-      )}
-      <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
-        {busy ? 'Saving…' : 'Save'}
-      </button>
-    </div>
+  const saveButton = (
+    <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
+      {busy ? 'Saving…' : 'Save'}
+    </button>
   );
 
   return (
-    <div className="costing-sheet">
-      <div className="breadcrumb">
-        <Link to="/g-ops/costing">Costing</Link>
-        <span className="sep">›</span>
-        {editing && costing ? (
-          <>
-            <Link to={back} className="mono">
-              {costing.number}
-            </Link>
-            <span className="sep">›</span>
-            <span>Modify</span>
-          </>
-        ) : (
-          <span>New costing</span>
-        )}
-      </div>
-
+    <div className="costing-sheet" onChangeCapture={touch} onClickCapture={touch} onKeyDownCapture={touch} onPasteCapture={touch}>
       <section className="card qe-card" aria-labelledby="cs-heading">
         <div className="qe-head">
           <div>
             <h1 id="cs-heading" className="qe-heading">
-              {editing && costing ? `Modify ${costing.number}` : 'New costing'}
+              {editing && costing ? `Modify costing ${costing.number}` : 'New costing'}
             </h1>
             <p className="muted qe-lead">
               {editing
@@ -798,7 +795,15 @@ export function CostingSheet() {
                 : 'Type straight into the sheet. The number is issued when you Save.'}
             </p>
           </div>
-          {actions}
+          <div className="row qe-actions">
+            {/* A new sheet's one other save: a template from what is typed, before any costing exists. A saved costing's is on its page's ⋯. */}
+            {!editing && can('gops.costing.create') && (
+              <button type="button" className="btn" onClick={() => setTemplatePanel((v) => !v)} aria-expanded={templatePanel}>
+                Save as template
+              </button>
+            )}
+            {saveButton}
+          </div>
         </div>
 
         <ErrorBox error={error} />
@@ -1326,7 +1331,7 @@ export function CostingSheet() {
           </Field>
         </div>
 
-        <div className="row qe-foot">{actions}</div>
+        <div className="row qe-foot">{saveButton}</div>
       </section>
 
       <datalist id="cs-units">
@@ -1543,7 +1548,7 @@ export function TemplateSavePanel({
           Cancel
         </button>
         <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || name.trim().length < 2}>
-          {busy ? 'Saving…' : 'Save template'}
+          {busy ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>

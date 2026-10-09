@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, downloadBlob, openPdf, qs } from '../../../lib/api';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { api, downloadBlob, qs } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { DataList, type Column } from '../../../components/DataList';
 import { RecordHeader } from '../../../components/RecordHeader';
+import { useConfirm } from '../../../components/Confirm';
+import { useUnsavedChanges } from '../../../components/Navigation';
 import { PeoplePicker, type Person } from '../../../components/PeoplePicker';
 import { MeetLink } from '../../../components/MeetLink';
 import { Attachments } from '../../../components/Attachments';
@@ -13,6 +15,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -257,7 +260,7 @@ export function Sessions() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [creating, setCreating] = useState(params.get('new') === '1');
-  // `?new=1&courseId=` is where a course's "Schedule a session" lands.
+  // `?new=1&courseId=` opens the form with the course chosen.
   const [presetCourse] = useState(params.get('courseId') ?? undefined);
   const [reload, setReload] = useState(0);
 
@@ -320,23 +323,14 @@ export function Sessions() {
 
   const newButton = canCreate ? (
     <button type="button" className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-      + Schedule session
+      + New session
     </button>
   ) : null;
 
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Training Sessions</h1>
-          <p>
-            Scheduled courses, who is on them and how they did. Completing a session writes the
-            result straight into each attendee's training passport.
-          </p>
-        </div>
-        <Link className="btn btn-sm" to="/g-hr/academy/calendar">
-          Calendar
-        </Link>
+        <h1>Training Sessions</h1>
       </div>
 
       <DataList<SessionRow>
@@ -514,18 +508,15 @@ export function SessionModal({
 
   return (
     <Modal
-      title={editing ? 'Change session' : 'Schedule a training session'}
+      title={initial ? `Modify session ${initial.number}` : 'New session'}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !valid}>
-            {busy ? 'Saving…' : editing ? 'Save changes' : 'Schedule'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -636,6 +627,7 @@ export function SessionDetail() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [session, setSession] = useState<SessionDetailData | null>(null);
   const [draft, setDraft] = useState<Draft>({});
@@ -644,8 +636,6 @@ export function SessionDetail() {
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
-  const [completing, setCompleting] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   const accept = useCallback((s: SessionDetailData) => {
@@ -669,6 +659,9 @@ export function SessionDetail() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Results typed and not yet saved hold the trainer on the page.
+  useUnsavedChanges(dirty && !!session?.canEdit);
 
   async function run(key: string, fn: () => Promise<void>) {
     setBusy(key);
@@ -697,7 +690,13 @@ export function SessionDetail() {
     }));
   const pending = resultsPayload().filter((r) => r.result === 'PENDING').length;
 
+  /**
+   * A change to the people grid withdraws any open question: "Complete
+   * session" posts the results as they stood when it was asked, so it is
+   * asked again over the results as they now stand.
+   */
   function setResult(employeeId: string, patch: Partial<{ result: string; score: string }>) {
+    confirm.close();
     setDraft((prev) => ({ ...prev, [employeeId]: { ...prev[employeeId], ...patch } }));
     setDirty(true);
   }
@@ -709,10 +708,9 @@ export function SessionDetail() {
     });
   }
 
+  /** Asked through the confirm bar, which shows a refusal and stays open. */
   async function removeAttendee(a: AttendeeRow) {
-    await run(`remove:${a.employeeId}`, async () => {
-      accept(await api.del<SessionDetailData>(`/training-sessions/${s.id}/attendees/${a.employeeId}`));
-    });
+    accept(await api.del<SessionDetailData>(`/training-sessions/${s.id}/attendees/${a.employeeId}`));
   }
 
   async function enrolMe(on: boolean) {
@@ -726,14 +724,54 @@ export function SessionDetail() {
     });
   }
 
+  /** Asked through the confirm bar, which shows a refusal and stays open. */
   async function remove() {
-    if (!window.confirm('Delete this session? Nobody is enrolled, so nobody needs telling.')) return;
-    await run('delete', async () => {
-      await api.del(`/training-sessions/${s.id}`);
-      toast('ok', 'Session deleted');
-      navigate('/g-hr/academy/sessions');
+    await api.del(`/training-sessions/${s.id}`);
+    toast('ok', 'Session deleted');
+    navigate('/g-hr/academy/sessions');
+  }
+
+  /** Asked through the confirm bar, with the reason everyone enrolled is told. */
+  async function cancel(reason: string) {
+    accept(await api.post<SessionDetailData>(`/training-sessions/${s.id}/cancel`, { reason }));
+    toast('ok', 'Session cancelled');
+  }
+
+  /** Asked through the confirm bar: completion is final and writes the passports. */
+  async function complete(results: { employeeId: string; result: string; score: number | null }[]) {
+    const next = await api.post<SessionDetailData & { outcome: { passed: number } }>(
+      `/training-sessions/${s.id}/complete`,
+      { results },
+    );
+    toast('ok', `Completed — ${next.outcome.passed} passport entr${next.outcome.passed === 1 ? 'y' : 'ies'} written`);
+    accept(next);
+  }
+
+  function askComplete() {
+    const results = resultsPayload();
+    const count = (r: string) => results.filter((x) => x.result === r).length;
+    confirm.ask({
+      title: `Complete ${s.number}?`,
+      body: (
+        <>
+          <strong>{count('PASSED')}</strong> passed · <strong>{count('FAILED')}</strong> failed ·{' '}
+          <strong>{count('NO_SHOW')}</strong> no-show. Everyone who passed gets a verified entry in their
+          training passport
+          {s.course.validityMonths ? `, valid for ${s.course.validityMonths} months` : ''}. This is final:
+          results cannot be changed afterwards.
+        </>
+      ),
+      confirmLabel: 'Complete session',
+      tone: 'primary',
+      onConfirm: () => complete(results),
     });
   }
+
+  const showComplete = s.canEdit && s.attendees.length > 0;
+  const completeReady = showComplete && started && pending === 0;
+  const joinable = s.live && !!s.meetLink;
+  /** Exactly one main step: completing, else joining, else enrolling. */
+  const primary = completeReady ? 'complete' : joinable ? 'join' : s.canSelfEnrol ? 'enrol' : null;
 
   async function saveLink(googleUrl: string) {
     accept(await api.patch<SessionDetailData>(`/training-sessions/${s.id}`, { googleUrl }));
@@ -741,33 +779,56 @@ export function SessionDetail() {
 
   return (
     <div className="academy-page">
-      <div className="breadcrumb">
-        <Link to="/g-hr/academy/sessions">Training Sessions</Link>
-        <span className="sep">›</span>
-        <span className="mono">{s.number}</span>
-      </div>
-
       <RecordHeader
         type="Training Session"
         code={s.number}
         title={s.course.title}
         status={s.status}
         statusExtra={SESSION_TONES}
+        meta={
+          <>
+            <strong>{sessionWhen(s.startsAt, s.endsAt)}</strong> · trained by {s.isTrainer ? 'you' : s.trainer.name}
+            {s.venue ? ` · ${s.venue}` : s.meetLink ? ' · online' : ''}
+            {s.provider ? ` · ${s.provider}` : ''}
+            {s.capacity ? ` · ${s.attendees.length} of ${s.capacity} places taken` : ''}
+          </>
+        }
         actions={
           <>
-            {s.live && s.meetLink && (
-              <a className="btn btn-primary" href={s.meetLink} target="_blank" rel="noopener noreferrer">
+            {joinable && (
+              <a
+                className={`btn${primary === 'join' ? ' btn-primary' : ''}`}
+                href={s.meetLink!}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 Join now
               </a>
             )}
             {s.canSelfEnrol && (
-              <button type="button" className="btn btn-ok" onClick={() => enrolMe(true)} disabled={busy === 'enrol'}>
+              <button
+                type="button"
+                className={`btn${primary === 'enrol' ? ' btn-primary' : ''}`}
+                onClick={() => enrolMe(true)}
+                disabled={busy === 'enrol'}
+              >
                 Enrol me
               </button>
             )}
             {s.canWithdraw && (
               <button type="button" className="btn" onClick={() => enrolMe(false)} disabled={busy === 'enrol'}>
                 Withdraw
+              </button>
+            )}
+            {showComplete && (
+              <button
+                type="button"
+                className={`btn${primary === 'complete' ? ' btn-primary' : ''}`}
+                onClick={askComplete}
+                disabled={!completeReady}
+                title={!started ? 'It has not started yet' : pending ? `${pending} still without a result` : undefined}
+              >
+                Complete session
               </button>
             )}
             <button
@@ -778,42 +839,41 @@ export function SessionDetail() {
             >
               Add to calendar (.ics)
             </button>
-            {canPrint && (
-              <button
-                type="button"
-                className="btn"
-                onClick={() =>
-                  openPdf(`/api/training-sessions/${s.id}/pdf`, () => toast('error', 'Could not open the attendance sheet'))
-                }
-              >
-                Attendance sheet
-              </button>
-            )}
-            {s.canEdit && (
-              <button type="button" className="btn" onClick={() => setEditing(true)}>
-                Change
-              </button>
-            )}
-            {s.canEdit && (
-              <button type="button" className="btn btn-danger" onClick={() => setCancelling(true)}>
-                Cancel session
-              </button>
-            )}
-            {s.canEdit && s.attendees.length === 0 && (
-              <button type="button" className="btn btn-ghost" onClick={remove} disabled={busy === 'delete'}>
-                Delete
-              </button>
-            )}
           </>
         }
+        print={canPrint ? `/api/training-sessions/${s.id}/pdf` : undefined}
+        more={[
+          s.canEdit && {
+            label: 'Cancel session',
+            danger: true,
+            confirm: {
+              title: `Cancel ${s.number}?`,
+              body: s.attendees.length
+                ? `${s.attendees.length} enrolled will be told, with your reason.`
+                : 'Nobody is enrolled, so nobody needs telling — the record stays as cancelled.',
+              confirmLabel: 'Cancel session',
+              reason: 'required',
+              reasonLabel: 'Why',
+              // The API wants three characters; the bar waits for them.
+              minReason: 3,
+              onConfirm: (reason) => cancel(reason),
+            },
+          },
+          s.canEdit &&
+            s.attendees.length === 0 && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${s.number}?`,
+                body: 'Nobody is enrolled, so nobody needs telling. It cannot be undone.',
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
+        ]}
+        modify={s.canEdit ? () => setEditing(true) : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta academy-meta">
-        <strong>{sessionWhen(s.startsAt, s.endsAt)}</strong> · trained by {s.isTrainer ? 'you' : s.trainer.name}
-        {s.venue ? ` · ${s.venue}` : s.meetLink ? ' · online' : ''}
-        {s.provider ? ` · ${s.provider}` : ''}
-        {s.capacity ? ` · ${s.attendees.length} of ${s.capacity} places taken` : ''}
-      </p>
 
       <ErrorBox error={error} />
 
@@ -883,11 +943,14 @@ export function SessionDetail() {
               <button
                 type="button"
                 className="btn btn-sm"
-                onClick={() => setAdding(true)}
+                onClick={() => {
+                  confirm.close();
+                  setAdding(true);
+                }}
                 disabled={s.full}
                 title={s.full ? 'The session is full' : undefined}
               >
-                + Enrol people
+                + Add people
               </button>
             )}
           </div>
@@ -964,12 +1027,20 @@ export function SessionDetail() {
                           <td>
                             <button
                               type="button"
-                              className="btn btn-ghost btn-sm"
+                              className="btn btn-sm"
                               aria-label={`Remove ${name}`}
-                              disabled={busy === `remove:${a.employeeId}`}
-                              onClick={() => removeAttendee(a)}
+                              onClick={() =>
+                                confirm.ask({
+                                  title: `Remove ${name} from ${s.number}?`,
+                                  body: a.employee.userId
+                                    ? 'They are told they are off the session.'
+                                    : 'They come off the session; they have no login to be told through.',
+                                  confirmLabel: 'Remove',
+                                  onConfirm: () => removeAttendee(a),
+                                })
+                              }
                             >
-                              ✕
+                              Remove
                             </button>
                           </td>
                         )}
@@ -982,24 +1053,17 @@ export function SessionDetail() {
           )}
 
           {s.canEdit && s.attendees.length > 0 && (
-            <div className="row academy-actions">
-              <button type="button" className="btn btn-sm" onClick={saveResults} disabled={!dirty || busy === 'results'}>
-                {busy === 'results' ? 'Saving…' : 'Save results'}
+            <div className="row academy-actions academy-split">
+              <span className="faint">
+                {!started
+                  ? 'Complete session opens once the session starts.'
+                  : pending > 0
+                    ? `${pending} attendee(s) still need a result before the session can be completed.`
+                    : ''}
+              </span>
+              <button type="button" className="btn btn-primary" onClick={saveResults} disabled={!dirty || busy === 'results'}>
+                {busy === 'results' ? 'Saving…' : 'Save'}
               </button>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                onClick={() => setCompleting(true)}
-                disabled={!started || pending > 0}
-                title={!started ? 'It has not started yet' : pending ? `${pending} still without a result` : undefined}
-              >
-                Complete session
-              </button>
-              {(!started || pending > 0) && (
-                <span className="faint">
-                  {!started ? 'Opens once the session starts.' : `${pending} attendee(s) still need a result.`}
-                </span>
-              )}
             </div>
           )}
         </div>
@@ -1031,27 +1095,6 @@ export function SessionDetail() {
           onClose={() => setAdding(false)}
           onDone={(next) => {
             setAdding(false);
-            accept(next);
-          }}
-        />
-      )}
-      {cancelling && (
-        <CancelModal
-          session={s}
-          onClose={() => setCancelling(false)}
-          onDone={(next) => {
-            setCancelling(false);
-            accept(next);
-          }}
-        />
-      )}
-      {completing && (
-        <CompleteModal
-          session={s}
-          results={resultsPayload()}
-          onClose={() => setCompleting(false)}
-          onDone={(next) => {
-            setCompleting(false);
             accept(next);
           }}
         />
@@ -1091,138 +1134,19 @@ function EnrolModal({
 
   return (
     <Modal
-      title="Enrol people"
+      title="Add people"
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={add} disabled={busy || ids.length === 0}>
             {busy ? 'Enrolling…' : `Enrol ${ids.length || ''}`.trim()}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
       {room !== undefined && <p className="muted">Room for {room} more.</p>}
       <EmployeePicker value={ids} onChange={setIds} exclude={exclude} max={room} />
-    </Modal>
-  );
-}
-
-function CancelModal({
-  session,
-  onClose,
-  onDone,
-}: {
-  session: SessionDetailData;
-  onClose: () => void;
-  onDone: (s: SessionDetailData) => void;
-}) {
-  const toast = useToast();
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-
-  async function cancel() {
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await api.post<SessionDetailData>(`/training-sessions/${session.id}/cancel`, { reason: reason.trim() });
-      toast('ok', 'Session cancelled');
-      onDone(next);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="Cancel this session"
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Keep it
-          </button>
-          <button type="button" className="btn btn-danger" onClick={cancel} disabled={busy || reason.trim().length < 3}>
-            {busy ? 'Cancelling…' : 'Cancel session'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted">
-        {session.attendees.length
-          ? `${session.attendees.length} enrolled will be told, with your reason.`
-          : 'Nobody is enrolled, so nobody needs telling — the record stays as cancelled.'}
-      </p>
-      <Field label="Why" required>
-        <textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} />
-      </Field>
-    </Modal>
-  );
-}
-
-function CompleteModal({
-  session,
-  results,
-  onClose,
-  onDone,
-}: {
-  session: SessionDetailData;
-  results: { employeeId: string; result: string; score: number | null }[];
-  onClose: () => void;
-  onDone: (s: SessionDetailData) => void;
-}) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const count = (r: string) => results.filter((x) => x.result === r).length;
-
-  async function complete() {
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await api.post<SessionDetailData & { outcome: { passed: number } }>(
-        `/training-sessions/${session.id}/complete`,
-        { results },
-      );
-      toast('ok', `Completed — ${next.outcome.passed} passport entr${next.outcome.passed === 1 ? 'y' : 'ies'} written`);
-      onDone(next);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="Complete this session"
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Not yet
-          </button>
-          <button type="button" className="btn btn-primary" onClick={complete} disabled={busy}>
-            {busy ? 'Completing…' : 'Complete session'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p>
-        <strong>{count('PASSED')}</strong> passed · <strong>{count('FAILED')}</strong> failed ·{' '}
-        <strong>{count('NO_SHOW')}</strong> no-show.
-      </p>
-      <p className="muted">
-        Everyone who passed gets a verified entry in their training passport
-        {session.course.validityMonths ? `, valid for ${session.course.validityMonths} months` : ''}. This is
-        final: results cannot be changed afterwards.
-      </p>
     </Modal>
   );
 }

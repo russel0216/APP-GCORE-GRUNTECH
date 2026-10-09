@@ -349,18 +349,6 @@ table.data.cs-tasks {
   background: none;
 }
 
-/* ── The costing's page ───────────────────────────────────────────────────── */
-
-.cs-subtitle {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
-.cs-page-actions {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
 .cs-stats {
   margin-bottom: var(--s-5);
 }
@@ -453,11 +441,3 @@ table.data.cs-tasks {
   white-space: pre-wrap;
 }
 
-.cs-rename {
-  gap: var(--s-2);
-}
-
-.cs-rename input {
-  flex: 1 1 12rem;
-  min-width: 0;
-}

@@ -7,6 +7,7 @@ import {
   ErrorBox,
   Field,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -189,11 +190,6 @@ export function Projects() {
       <div className="page-head">
         <div>
           <h1>Projects</h1>
-          <p>
-            A project is created from a costing, which carries across its budget and its schedule
-            of values. Cost shown here is committed plus incurred — what you have promised plus what
-            you already owe.
-          </p>
         </div>
       </div>
 
@@ -431,18 +427,15 @@ function NewJobModal({
       title={renewing ? 'Renew service contract' : 'New project'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={create}
             disabled={busy || !form.costingId || !form.customerId || form.name.length < 2}
           >
-            {busy ? 'Creating…' : renewing ? 'Create renewal' : 'Create project'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

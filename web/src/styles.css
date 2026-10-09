@@ -875,24 +875,6 @@ textarea {
   }
 }
 
-.breadcrumb {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 12px;
-}
-
-.breadcrumb a:hover {
-  color: var(--neon);
-}
-
-.breadcrumb .sep {
-  color: var(--faint);
-}
-
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -1675,12 +1657,16 @@ table.data .mono {
 
 .modal-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
   gap: 9px;
   padding: 14px 20px;
   border-top: 1px solid var(--line);
   position: sticky;
   bottom: 0;
+  /* Above a sticky table head scrolling in the body (table.data th is z 1). */
+  z-index: 2;
   background: var(--surface);
 }
 
@@ -3571,11 +3557,20 @@ a.funnel-row:hover .funnel-label {
   max-width: 80ch;
 }
 
+.record-head-meta strong {
+  color: var(--text);
+}
+
 .record-head-aside {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--s-5);
   flex-wrap: wrap;
+  /* Rule 19: Modify is always the right-most button. When the buttons do not
+     fit beside the title they wrap onto a line of their own — still against
+     the right edge, so Modify stays where it always is. */
+  margin-left: auto;
 }
 
 .record-head-amount {
@@ -3603,6 +3598,7 @@ a.funnel-row:hover .funnel-label {
 .record-head-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--s-2);
   flex-wrap: wrap;
 }
@@ -4986,6 +4982,19 @@ a.icon-row:hover {
   margin-right: auto;
 }
 
+/* The foot of an in-page panel (assign, create from, a task): the same order
+   as a modal's foot — [Remove] … [Cancel] [Save] — right-aligned. */
+.panel-foot,
+.card-foot,
+.page-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
 .modal-foot-question {
   margin-right: auto;
   align-self: center;
@@ -4996,6 +5005,12 @@ a.icon-row:hover {
 .modal-foot-error {
   display: block;
   color: var(--muted);
+}
+
+.modal-foot-reason {
+  display: block;
+  margin: var(--s-2) 0 0;
+  color: var(--text);
 }
 
 .modal-discard {

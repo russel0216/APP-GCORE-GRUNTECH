@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import {
   ErrorBox,
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -370,17 +372,14 @@ function RaiseInvoiceModal({
 
   return (
     <Modal
-      title={`Invoice ${billing.number}`}
+      title={`New invoice from ${billing.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={raise} disabled={busy}>
             {busy ? 'Raising…' : 'Raise invoice'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -442,6 +441,7 @@ export function InvoiceDetail() {
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
   const [certificate, setCertificate] = useState(false);
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     try {
@@ -458,26 +458,15 @@ export function InvoiceDetail() {
   if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
+  // Thrown, not caught: the confirm bar shows the refusal and stays open.
   async function issue() {
-    try {
-      await api.post(`/invoices/${id}/issue`);
-      toast('ok', 'Issued — it is now a receivable');
-      load();
-    } catch (err) {
-      setError(err);
-    }
+    await api.post(`/invoices/${id}/issue`);
+    toast('ok', 'Issued — it is now a receivable');
+    await load();
   }
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-fin/ar">Accounts Receivable</Link>
-        <span className="sep">›</span>
-        <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
-        <span className="sep">›</span>
-        <span className="mono">{row.number}</span>
-      </div>
-
       <RecordHeader
         type="Sales Invoice"
         code={row.number}
@@ -487,16 +476,51 @@ export function InvoiceDetail() {
         // What will actually arrive, not what the invoice prints — see the
         // header of this file.
         amountLabel="Net collectible"
+        meta={
+          <>
+            <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+            {row.job && (
+              <>
+                {' · '}
+                <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+                  {row.job.number}
+                </Link>{' '}
+                {row.job.name}
+              </>
+            )}
+            {row.progressBilling && (
+              <>
+                {' · from '}
+                <Link to={`/g-ops/billings/${row.progressBilling.id}`} className="mono">
+                  {row.progressBilling.number}
+                </Link>
+              </>
+            )}
+            {row.jobOrder && (
+              <>
+                {' · for job order '}
+                <Link to={`/g-ops/job-orders/${row.jobOrder.id}`} className="mono">
+                  {row.jobOrder.number}
+                </Link>
+              </>
+            )}
+          </>
+        }
         actions={
           <>
-            <button
-              className="btn"
-              onClick={() => openPdf(`/api/invoices/${row.id}/pdf`, () => toast('error', 'Could not print'))}
-            >
-              Print
-            </button>
             {row.status === 'DRAFT' && can('gfin.ar.edit_all') && (
-              <button className="btn btn-primary" onClick={issue}>
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  confirm.ask({
+                    title: `Issue ${row.number} to ${row.customer.name}?`,
+                    body: `It becomes a receivable: ${formatMoney(row.netCollectible)} collectible, due ${formatDate(row.dueDate)}.`,
+                    confirmLabel: 'Issue to customer',
+                    tone: 'primary',
+                    onConfirm: issue,
+                  })
+                }
+              >
                 Issue to customer
               </button>
             )}
@@ -505,43 +529,19 @@ export function InvoiceDetail() {
                 Record collection
               </button>
             )}
-            {row.ewtAmount > 0 && can('gfin.ar.edit_all') && (
-              <button className="btn" onClick={() => setCertificate(true)}>
-                {row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307'}
-              </button>
-            )}
           </>
         }
+        print={`/api/invoices/${row.id}/pdf`}
+        more={[
+          row.ewtAmount > 0 &&
+            can('gfin.ar.edit_all') && {
+              label: row.ewtCertificateNo ? 'Modify BIR 2307' : 'Record BIR 2307',
+              hint: 'The certificate for the EWT withheld at source',
+              onSelect: () => setCertificate(true),
+            },
+        ]}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta fin-gap-bottom">
-        <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
-        {row.job && (
-          <>
-            {' · '}
-            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-              {row.job.number}
-            </Link>{' '}
-            {row.job.name}
-          </>
-        )}
-        {row.progressBilling && (
-          <>
-            {' · from '}
-            <Link to={`/g-ops/billings/${row.progressBilling.id}`} className="mono">
-              {row.progressBilling.number}
-            </Link>
-          </>
-        )}
-        {row.jobOrder && (
-          <>
-            {' · for job order '}
-            <Link to={`/g-ops/job-orders/${row.jobOrder.id}`} className="mono">
-              {row.jobOrder.number}
-            </Link>
-          </>
-        )}
-      </p>
 
       <ErrorBox error={error} />
 
@@ -735,17 +735,18 @@ function CertificateModal({
 
   return (
     <Modal
-      title="BIR Form 2307"
+      title={
+        invoice.ewtCertificateNo
+          ? `Modify BIR 2307 ${invoice.ewtCertificateNo}`
+          : `Record BIR 2307 for ${invoice.number}`
+      }
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -917,10 +918,7 @@ export function RecordPaymentModal({
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={save}
@@ -928,7 +926,7 @@ export function RecordPaymentModal({
           >
             {busy ? 'Recording…' : `Record ${formatMoney(total)}`}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1125,10 +1123,8 @@ const partyName = (r: PaymentRow) => r.customer?.name ?? r.supplier?.name ?? r.p
 
 export function Payments() {
   const { can } = useAuth();
-  const toast = useToast();
   const [params, setParams] = useSearchParams();
   const [reload, setReload] = useState(0);
-  const [error, setError] = useState<unknown>(null);
 
   // The API clears on either edit right; the button follows the same rule, so
   // payables staff can clear a supplier cheque the server would accept anyway.
@@ -1141,16 +1137,6 @@ export function Payments() {
     else next.delete('payment');
     setParams(next, { replace: !id });
   };
-
-  async function clear(id: string) {
-    try {
-      await api.post(`/payments/${id}/clear`);
-      toast('ok', 'Marked cleared');
-      setReload((r) => r + 1);
-    } catch (err) {
-      setError(err);
-    }
-  }
 
   const columns: Column<PaymentRow>[] = [
     {
@@ -1204,25 +1190,13 @@ export function Payments() {
     {
       key: 'cleared',
       label: 'Cleared',
+      // Marking a payment cleared is done on its sheet (the row opens it),
+      // where it asks first: it cannot be undone.
       render: (r) =>
         r.clearedAt ? (
           <span className="faint">{formatDate(r.clearedAt)}</span>
         ) : (
-          <span className="fin-inline">
-            <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="uncleared" />
-            {canClear && (
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  clear(r.id);
-                }}
-                onKeyDown={(e) => e.stopPropagation()}
-              >
-                clear
-              </button>
-            )}
-          </span>
+          <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="uncleared" />
         ),
     },
   ];
@@ -1239,8 +1213,6 @@ export function Payments() {
           </p>
         </div>
       </div>
-
-      <ErrorBox error={error} />
 
       <DataList<PaymentRow>
         listKey="payments"
@@ -1292,9 +1264,9 @@ function PaymentDetailModal({
   onChanged: () => void;
 }) {
   const toast = useToast();
+  const confirm = useConfirm();
   const [row, setRow] = useState<PaymentRow | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -1308,18 +1280,12 @@ function PaymentDetailModal({
     load();
   }, [load]);
 
+  // Thrown, not caught: the confirm bar shows the refusal and stays open.
   async function clear() {
-    setBusy(true);
-    try {
-      await api.post(`/payments/${id}/clear`);
-      toast('ok', 'Marked cleared');
-      await load();
-      onChanged();
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
+    await api.post(`/payments/${id}/clear`);
+    toast('ok', 'Marked cleared');
+    await load();
+    onChanged();
   }
 
   return (
@@ -1328,18 +1294,28 @@ function PaymentDetailModal({
       onClose={onClose}
       wide
       footer={
-        <>
+        <ModalFoot onCancel={onClose} cancelLabel="Close">
           {row && !row.clearedAt && canClear && (
-            <button className="btn" onClick={clear} disabled={busy}>
+            <button
+              className="btn"
+              disabled={confirm.open}
+              onClick={() =>
+                confirm.ask({
+                  title: `Mark ${row.number} cleared?`,
+                  body: 'From today it counts as cash. It cannot be set back to uncleared.',
+                  confirmLabel: 'Mark cleared',
+                  tone: 'primary',
+                  onConfirm: clear,
+                })
+              }
+            >
               Mark cleared
             </button>
           )}
-          <button className="btn btn-primary" onClick={onClose}>
-            Close
-          </button>
-        </>
+        </ModalFoot>
       }
     >
+      {confirm.bar}
       <ErrorBox error={error} />
       {!row && !error && <Loading />}
       {row && (

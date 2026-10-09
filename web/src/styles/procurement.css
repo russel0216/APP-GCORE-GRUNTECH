@@ -18,11 +18,6 @@
   margin: 0;
 }
 
-/* The line under a record header: kind, counterparty, project. */
-.proc-meta {
-  margin-bottom: var(--s-4);
-}
-
 /* Stat row on a record page. */
 .proc-stats {
   margin-bottom: var(--s-5);

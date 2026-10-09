@@ -4,7 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { BarList, Meter, Panel, Stat } from '../../components/charts';
-import { Checkbox, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
@@ -180,11 +180,6 @@ export function Plantilla() {
       <div className="page-head">
         <div>
           <h1>Plantilla</h1>
-          <p>
-            The authorised staffing pattern — how many of each position the company has approved,
-            who fills them, and what is vacant. Filled and vacant are counted off active employees,
-            so they are right the moment someone is hired or cleared.
-          </p>
         </div>
       </div>
 
@@ -281,7 +276,7 @@ export function Plantilla() {
         actions={
           can('ghr.plantilla.create') && (
             <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
-              + Add position
+              + New position
             </button>
           )
         }
@@ -362,19 +357,15 @@ function PositionModal({
     }
   }
 
+  /**
+   * Asked in the modal's foot first. A position anyone has held is
+   * deactivated, not deleted — the 409 says so, in the foot, so this throws.
+   */
   async function remove() {
     if (!position) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.del(`/positions/${position.id}`);
-      toast('ok', `${position.title} deleted`);
-      onSaved();
-    } catch (err) {
-      // A position anyone has held is deactivated, not deleted — the 409 says so.
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/positions/${position.id}`);
+    toast('ok', `${position.title} deleted`);
+    onSaved();
   }
 
   const filled = position?.filled ?? 0;
@@ -382,25 +373,35 @@ function PositionModal({
 
   return (
     <Modal
-      title={position ? `${position.title} · ${position.code}` : 'Add position'}
+      title={
+        position
+          ? mayEdit
+            ? `Modify position ${position.title}`
+            : `${position.title} · ${position.code}`
+          : 'New position'
+      }
       onClose={onClose}
       footer={
-        <>
-          {position && can('ghr.plantilla.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div className="plantilla-spacer" />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            {mayEdit ? 'Cancel' : 'Close'}
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          cancelLabel={mayEdit ? 'Cancel' : 'Close'}
+          busy={busy}
+          danger={
+            position && can('ghr.plantilla.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete ${position.title}? It cannot be undone. A position anyone has held cannot be deleted — make it inactive instead.`,
+                  onConfirm: remove,
+                }
+              : undefined
+          }
+        >
           {mayEdit && (
             <button className="btn btn-primary" onClick={save} disabled={busy || !valid}>
               {busy ? 'Saving…' : 'Save'}
             </button>
           )}
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

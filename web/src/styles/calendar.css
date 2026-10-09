@@ -198,18 +198,6 @@ button.cal-head[aria-pressed='true'] {
   line-height: 1.3;
 }
 
-.act-head-tags {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
-.act-type {
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-
 .act-when,
 .act-where {
   margin: 0;
@@ -218,19 +206,6 @@ button.cal-head[aria-pressed='true'] {
 
 .act-where::before {
   content: '📍 ';
-}
-
-.act-head-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-  margin-left: auto;
-}
-
-.act-confirm {
-  font-size: var(--fs-sm);
-  color: var(--muted);
 }
 
 /* "Participants" with the Google hand-off beside it; "Responses" with the viewer's answer. */

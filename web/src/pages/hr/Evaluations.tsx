@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useUnsavedChanges } from '../../components/Navigation';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Panel } from '../../components/charts';
@@ -12,6 +14,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -414,14 +417,7 @@ export function Evaluations() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Evaluations</h1>
-          <p>
-            Probationary and trainee reviews. The supervisor rates and recommends, HR reviews, and
-            management approves — regularisation, an extension or an absorption happens only when
-            the last approval lands. The person evaluated reads it once it is approved.
-          </p>
-        </div>
+        <h1>Evaluations</h1>
       </div>
 
       {viewAll && (
@@ -639,17 +635,14 @@ export function ScheduleModal({
 
   return (
     <Modal
-      title={preset.milestone ? 'Schedule an evaluation' : 'New evaluation'}
+      title="New evaluation"
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !valid}>
-            {busy ? 'Opening…' : mine ? 'Open and start writing' : 'Schedule and tell the evaluator'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -760,6 +753,7 @@ function outcomeText(ev: Evaluation): string {
 export function EvaluationDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [ev, setEv] = useState<Evaluation | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -768,7 +762,6 @@ export function EvaluationDetail() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [approvalToken, setApprovalToken] = useState(0);
-  const [cancelling, setCancelling] = useState(false);
   const [acknowledging, setAcknowledging] = useState(false);
 
   const load = useCallback(async () => {
@@ -790,17 +783,11 @@ export function EvaluationDetail() {
     void load();
   }, [load]);
 
+  // Ratings typed and not yet saved hold the person on the page.
+  useUnsavedChanges(dirty && !!ev?.canEdit);
+
   if (loading) return <Loading label="Opening the evaluation…" />;
-  if (!ev || !draft) {
-    return (
-      <div>
-        <div className="breadcrumb">
-          <Link to="/g-hr/evaluations">Evaluations</Link>
-        </div>
-        <ErrorBox error={error ?? new Error('Evaluation not found')} />
-      </div>
-    );
-  }
+  if (!ev || !draft) return <ErrorBox error={error ?? new Error('Evaluation not found')} />;
 
   const editing = ev.canEdit;
   const name = fullName(ev.employee);
@@ -862,18 +849,18 @@ export function EvaluationDetail() {
       toast('ok', 'Submitted — HR reviews it next');
     });
 
-  const printIt = () => openPdf(`/api/evaluations/${ev.id}/pdf`, () => toast('error', 'Could not open the PDF'));
+  /** Asked through the confirm bar, which shows a refusal and stays open. */
+  async function cancel() {
+    await api.post(`/evaluations/${ev!.id}/cancel`);
+    toast('ok', `${ev!.number} cancelled`);
+    await load();
+    setApprovalToken((n) => n + 1);
+  }
 
   const ready = rated === ev.lines.length && !!rec && (rec !== 'EXTEND' || !!draft.extendedTo);
 
   return (
     <div className="eval-page">
-      <div className="breadcrumb">
-        <Link to="/g-hr/evaluations">Evaluations</Link>
-        <span className="sep">›</span>
-        <span className="mono">{ev.number}</span>
-      </div>
-
       <RecordHeader
         type="Employee Evaluation"
         code={ev.number}
@@ -882,6 +869,16 @@ export function EvaluationDetail() {
         statusExtra={EVALUATION_TONES}
         amount={score == null ? undefined : `${score.toFixed(2)} / ${ev.ratingScale}`}
         amountLabel="Weighted score"
+        meta={
+          <>
+            <strong>{humanise(ev.kind)}</strong> evaluation · <span className="mono">{ev.employee.employeeNo}</span>
+            {ev.employee.position ? ` · ${ev.employee.position}` : ''}
+            {ev.employee.department ? ` · ${ev.employee.department.name}` : ''} · hired{' '}
+            {formatDate(ev.employee.dateHired)} · due {formatDate(ev.dueDate)} · evaluator{' '}
+            <strong>{ev.evaluator.name}</strong>
+            {ev.scheduledBy && ev.scheduledBy.id !== ev.evaluator.id ? ` · scheduled by ${ev.scheduledBy.name}` : ''}
+          </>
+        }
         actions={
           <>
             {editing && (
@@ -905,25 +902,26 @@ export function EvaluationDetail() {
                 Acknowledge
               </button>
             )}
-            <button type="button" className="btn" onClick={printIt}>
-              Print
-            </button>
-            {ev.canCancel && (
-              <button type="button" className="btn btn-danger" onClick={() => setCancelling(true)} disabled={busy !== null}>
-                Cancel evaluation
-              </button>
-            )}
           </>
         }
+        print={`/api/evaluations/${ev.id}/pdf`}
+        more={[
+          ev.canCancel && {
+            label: 'Cancel evaluation',
+            danger: true,
+            confirm: {
+              title: `Cancel ${ev.number}?`,
+              body:
+                ev.status === 'PENDING_APPROVAL'
+                  ? 'It is withdrawn from the approval chain. Nothing changes on the employee record, and the milestone falls due again.'
+                  : 'Nothing changes on the employee record, and the milestone falls due again.',
+              confirmLabel: 'Cancel evaluation',
+              onConfirm: cancel,
+            },
+          },
+        ]}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta eval-meta">
-        <strong>{humanise(ev.kind)}</strong> evaluation · <span className="mono">{ev.employee.employeeNo}</span>
-        {ev.employee.position ? ` · ${ev.employee.position}` : ''}
-        {ev.employee.department ? ` · ${ev.employee.department.name}` : ''} · hired {formatDate(ev.employee.dateHired)} · due{' '}
-        {formatDate(ev.dueDate)} · evaluator <strong>{ev.evaluator.name}</strong>
-        {ev.scheduledBy && ev.scheduledBy.id !== ev.evaluator.id ? ` · scheduled by ${ev.scheduledBy.name}` : ''}
-      </p>
 
       <ErrorBox error={error} />
 
@@ -1137,27 +1135,6 @@ export function EvaluationDetail() {
         />
       </div>
 
-      {cancelling && (
-        <ConfirmModal
-          title={`Cancel ${ev.number}?`}
-          body={
-            ev.status === 'PENDING_APPROVAL'
-              ? 'It is withdrawn from the approval chain. Nothing changes on the employee record, and the milestone falls due again.'
-              : 'Nothing changes on the employee record, and the milestone falls due again.'
-          }
-          confirm="Cancel evaluation"
-          danger
-          onClose={() => setCancelling(false)}
-          onConfirm={async () => {
-            await api.post(`/evaluations/${ev.id}/cancel`);
-            toast('ok', `${ev.number} cancelled`);
-            setCancelling(false);
-            await load();
-            setApprovalToken((n) => n + 1);
-          }}
-        />
-      )}
-
       {acknowledging && (
         <AcknowledgeModal
           evaluation={ev}
@@ -1170,58 +1147,6 @@ export function EvaluationDetail() {
         />
       )}
     </div>
-  );
-}
-
-function ConfirmModal({
-  title,
-  body,
-  confirm,
-  danger,
-  onClose,
-  onConfirm,
-}: {
-  title: string;
-  body: string;
-  confirm: string;
-  danger?: boolean;
-  onClose: () => void;
-  onConfirm: () => Promise<void>;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  return (
-    <Modal
-      title={title}
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Keep it
-          </button>
-          <button
-            type="button"
-            className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                await onConfirm();
-              } catch (err) {
-                setError(err);
-                setBusy(false);
-              }
-            }}
-          >
-            {busy ? 'Working…' : confirm}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted">{body}</p>
-    </Modal>
   );
 }
 
@@ -1256,14 +1181,11 @@ function AcknowledgeModal({
       title={`Acknowledge ${evaluation.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Not now
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={acknowledge} disabled={busy}>
-            {busy ? 'Recording…' : 'I have read it'}
+            {busy ? 'Recording…' : 'Acknowledge'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

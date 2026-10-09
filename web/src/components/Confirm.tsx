@@ -25,6 +25,10 @@ export interface ConfirmSpec {
   reason?: 'required' | 'optional';
   /** The reason box's label. Defaults to "Reason". */
   reasonLabel?: string;
+  /** What the reason box starts with (the reason given last time). */
+  initialReason?: string;
+  /** The fewest characters the API accepts for the reason (e.g. 3); the action waits until it is met. */
+  minReason?: number;
   /** Red (the default) for what destroys or withdraws; primary for a decision such as Approve. */
   tone?: 'danger' | 'primary';
   /** Does it. A thrown error is shown in the bar; the bar closes when this resolves. */
@@ -33,6 +37,8 @@ export interface ConfirmSpec {
 
 export interface ConfirmApi {
   ask: (spec: ConfirmSpec) => void;
+  /** Withdraws an open question without acting (the page moved on under it). */
+  close: () => void;
   /** Render this where the bar belongs: under the record's header. RecordHeader does it for you. */
   bar: ReactNode;
   open: boolean;
@@ -41,8 +47,9 @@ export interface ConfirmApi {
 export function useConfirm(): ConfirmApi {
   const [spec, setSpec] = useState<ConfirmSpec | null>(null);
   const ask = useCallback((next: ConfirmSpec) => setSpec(next), []);
+  const close = useCallback(() => setSpec(null), []);
   const bar = spec ? <ConfirmBar key={spec.title} spec={spec} onDone={() => setSpec(null)} /> : null;
-  return { ask, bar, open: spec !== null };
+  return { ask, close, bar, open: spec !== null };
 }
 
 function messageOf(err: unknown): string {
@@ -52,7 +59,7 @@ function messageOf(err: unknown): string {
 }
 
 export function ConfirmBar({ spec, onDone }: { spec: ConfirmSpec; onDone: () => void }) {
-  const [reason, setReason] = useState('');
+  const [reason, setReason] = useState(spec.initialReason ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const keep = useRef<HTMLButtonElement>(null);
@@ -60,7 +67,11 @@ export function ConfirmBar({ spec, onDone }: { spec: ConfirmSpec; onDone: () => 
   const titleId = useId();
   const reasonId = useId();
   const tone = spec.tone ?? 'danger';
-  const missing = spec.reason === 'required' && reason.trim() === '';
+  const typed = reason.trim().length;
+  const missing =
+    (spec.reason === 'required' && typed === 0) ||
+    (!!spec.reason && !!spec.minReason && typed > 0 && typed < spec.minReason) ||
+    (spec.reason === 'required' && !!spec.minReason && typed < spec.minReason);
 
   useEffect(() => {
     // The reason when one is asked for, else the safe answer.
@@ -112,6 +123,9 @@ export function ConfirmBar({ spec, onDone }: { spec: ConfirmSpec; onDone: () => 
             disabled={busy}
             onChange={(e) => setReason(e.target.value)}
           />
+          {spec.minReason && typed > 0 && typed < spec.minReason && (
+            <span className="hint">At least {spec.minReason} characters.</span>
+          )}
         </div>
       )}
       {error && (

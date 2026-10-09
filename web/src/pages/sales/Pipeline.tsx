@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { Stat } from '../../components/charts';
 import { Menu } from '../../components/Menu';
 import { NumberInput } from '../../components/NumberInput';
+import { useConfirm } from '../../components/Confirm';
 import {
   Avatar,
   Checkbox,
@@ -13,13 +14,13 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
 import { LeadForm, loadPeople, type Person } from './Leads';
-import { LostReasonModal } from './LostReasonModal';
 
 /*
   The sales board.
@@ -405,6 +406,7 @@ function stageTarget(card: Card, stage: StageDef): { key: string | null; reason:
 export function Pipeline() {
   const { can, me } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [view, setViewState] = useState<PipelineView>(() => readStoredView() ?? DEFAULT_VIEW);
   const hadStoredView = useRef(readStoredView() !== null);
@@ -419,7 +421,6 @@ export function Pipeline() {
   const [over, setOver] = useState<string | null>(null);
   const [refused, setRefused] = useState<{ key: string; reason: string } | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
-  const [losing, setLosing] = useState<Card | null>(null);
   const [live, setLive] = useState('');
   const pendingFocus = useRef<string | null>(null);
 
@@ -429,6 +430,15 @@ export function Pipeline() {
   const [customising, setCustomising] = useState(false);
   const [newMenu, setNewMenu] = useState(false);
   const [creating, setCreating] = useState<'lead' | 'forecast' | null>(null);
+  /** The view a "Delete the view?" question names: picking another view withdraws the question. */
+  const viewInQuestion = useRef<string | null>(null);
+  const closeConfirm = confirm.close;
+  useEffect(() => {
+    if (viewInQuestion.current !== null && viewInQuestion.current !== activeViewId) {
+      viewInQuestion.current = null;
+      closeConfirm();
+    }
+  }, [activeViewId, closeConfirm]);
   const navigate = useNavigate();
   const [people, setPeople] = useState<Person[]>([]);
 
@@ -515,18 +525,45 @@ export function Pipeline() {
     window.setTimeout(() => setLive(text), 30);
   }
 
-  /** Optimistic: the card jumps now; the server's answer re-derives every total. */
-  async function move(card: Card, key: string, lostReason?: string) {
-    if (key === 'LOST' && !lostReason) {
-      setLosing(card);
-      return;
-    }
+  /**
+   * A move. LOST asks "Why was it lost?" first, in the confirm bar under the
+   * board's head (the lead and quotation pages ask it the same way under
+   * theirs); every other move goes straight through.
+   */
+  async function move(card: Card, key: string) {
     const reason = refusalFor(card, key);
     if (reason) {
       announce(reason);
       toast('warn', reason);
       return;
     }
+    if (key === 'LOST') {
+      viewInQuestion.current = null;
+      confirm.ask({
+        title: `Mark ${card.number} lost?`,
+        body: 'Price, timing, went to a competitor, project shelved… Sales Analytics groups these, so a few plain words beat a paragraph.',
+        confirmLabel: 'Mark lost',
+        reason: 'required',
+        reasonLabel: 'Why was it lost?',
+        // A few plain words — the board always asked for three characters at least.
+        minReason: 3,
+        // Through the ref: the bar outlives this render, and the move must
+        // roll back to the board as it is when the person confirms.
+        onConfirm: (lostReason) => sendMoveRef.current(card, 'LOST', lostReason),
+      });
+      return;
+    }
+    await sendMove(card, key);
+  }
+
+  /**
+   * Optimistic: the card jumps now; the server's answer re-derives every total.
+   * With a lost reason it was asked in the confirm bar, so a refusal rolls the
+   * board back and is THROWN — the bar shows it and stays open with the reason
+   * typed so far — rather than toasted.
+   */
+  async function sendMove(card: Card, key: string, lostReason?: string) {
+    const asked = lostReason !== undefined;
     const before = board;
     if (board) {
       setBoard({
@@ -559,12 +596,15 @@ export function Pipeline() {
     } catch (err) {
       setBoard(before);
       const message = err instanceof ApiError ? err.message : 'The move did not go through';
-      toast('error', message);
       announce(`${card.number} was not moved: ${message}`);
+      if (asked) throw err;
+      toast('error', message);
       if (err instanceof ApiError && err.status === 400) return;
       throw err;
     }
   }
+  const sendMoveRef = useRef(sendMove);
+  sendMoveRef.current = sendMove;
 
   function tryMove(card: Card, key: string) {
     move(card, key).catch(() => {});
@@ -586,7 +626,7 @@ export function Pipeline() {
     return card.allowedTargets.includes(key) ? { key, reason: null } : { key: null, reason: refusalFor(card, key) };
   }
 
-  /** Shift+Arrow: the nearest column (or stage) this card may go to, in board order. LOST needs the modal. */
+  /** Shift+Arrow: the nearest column (or stage) this card may go to, in board order. LOST is skipped: it asks for a reason. */
   function stepTarget(card: Card, dir: -1 | 1): string | null {
     if (stageMode) {
       const order = (board?.stages ?? []).filter((s) => s.inActiveList).map((s) => s.key);
@@ -696,16 +736,25 @@ export function Pipeline() {
     }
   }
 
-  async function deleteView() {
+  /** Asks first, under the board's head; a refusal shows in the bar, which stays open. */
+  function deleteView() {
     if (!activeView) return;
-    try {
-      await api.del(`/saved-filters/${activeView.id}`);
-      toast('ok', `View “${activeView.name}” deleted`);
-      setActiveViewId('');
-      await loadViews();
-    } catch (err) {
-      setError(err);
-    }
+    const doomed = activeView;
+    viewInQuestion.current = doomed.id;
+    confirm.ask({
+      title: `Delete the view “${doomed.name}”?`,
+      body: doomed.isShared
+        ? 'It is shared — it goes from everyone’s list of views. The board itself is not changed.'
+        : 'The board itself is not changed; only the saved view goes.',
+      confirmLabel: 'Delete view',
+      onConfirm: async () => {
+        await api.del(`/saved-filters/${doomed.id}`);
+        toast('ok', `View “${doomed.name}” deleted`);
+        viewInQuestion.current = null;
+        setActiveViewId('');
+        await loadViews();
+      },
+    });
   }
 
   async function exportCsv() {
@@ -850,6 +899,8 @@ export function Pipeline() {
         {newMenuButton}
       </div>
 
+      {confirm.bar}
+
       <ErrorBox error={error} />
 
       <div className="pipe-toolbar">
@@ -944,7 +995,7 @@ export function Pipeline() {
           ownsActive={ownsActive}
           onSaveView={() => setSavingView(true)}
           onUpdateView={() => void updateView()}
-          onDeleteView={() => void deleteView()}
+          onDeleteView={deleteView}
           canExport={can('gops.pipeline.export')}
           onExport={() => void exportCsv()}
         />
@@ -961,7 +1012,6 @@ export function Pipeline() {
                 ? 'Clear the search or pick all salespeople.'
                 : 'Add a lead the moment an enquiry arrives, and it appears here.'
             }
-            action={debounced || view.ownerId ? undefined : newMenuButton || undefined}
           />
         </div>
       ) : lanes ? (
@@ -992,18 +1042,6 @@ export function Pipeline() {
       <div className="pipe-live" aria-live="polite" role="status">
         {live}
       </div>
-
-      {losing && (
-        <LostReasonModal
-          what={losing.number}
-          onClose={() => setLosing(null)}
-          onSave={async (reason) => {
-            const card = losing;
-            await move(card, 'LOST', reason);
-            setLosing(null);
-          }}
-        />
-      )}
 
       {savingView && (
         <SaveViewModal
@@ -1631,14 +1669,11 @@ function SaveViewModal({
       title="Save this view"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy || name.trim().length < 1}>
+            {busy ? 'Saving…' : 'Save'}
           </button>
-          <button className="btn btn-primary" onClick={() => void save()} disabled={busy || name.trim().length < 1}>
-            {busy ? 'Saving…' : 'Save view'}
-          </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1706,17 +1741,14 @@ function ForecastDealForm({
 
   return (
     <Modal
-      title="Forecast deal"
+      title="New forecast deal"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy || !valid}>
+            {busy ? 'Saving\u2026' : 'Save'}
           </button>
-          <button className="btn btn-primary" onClick={() => void save()} disabled={busy || !valid}>
-            {busy ? 'Adding\u2026' : 'Add to forecast'}
-          </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

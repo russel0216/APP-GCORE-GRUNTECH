@@ -1140,7 +1140,8 @@ export function FinanceSettings() {
     api.get<FinSettings>('/finance-settings').then(setSettings).catch(setError);
   }, []);
 
-  if (error) return <ErrorBox error={error} />;
+  // A refused save keeps the form on screen, with the reason under the head.
+  if (error && !settings) return <ErrorBox error={error} />;
   if (!settings) return <Loading />;
 
   async function save() {
@@ -1180,11 +1181,13 @@ export function FinanceSettings() {
           </p>
         </div>
         {editable && (
-          <button className="btn btn-primary btn-sm" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save rules'}
+          <button className="btn btn-primary" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : 'Save'}
           </button>
         )}
       </div>
+
+      <ErrorBox error={error} />
 
       <fieldset disabled={!editable} className="fin-fieldset">
         <div className="grid grid-2">
@@ -1306,6 +1309,20 @@ export function FinanceSettings() {
           </div>
         </div>
       </fieldset>
+
+      {/* Again at the foot: the form is longer than a screen — and so is
+          the reason a save was refused, said here too beside the button
+          that was pressed. */}
+      {editable && (
+        <div className="fin-gap-top">
+          <ErrorBox error={error} />
+          <div className="right">
+            <button className="btn btn-primary" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

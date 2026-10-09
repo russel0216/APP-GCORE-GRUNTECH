@@ -80,7 +80,7 @@ export function MeetLink({
           )}
           {canEdit && !editing && (
             <button type="button" className="btn btn-sm" onClick={() => setEditing(true)}>
-              Change link
+              Modify link
             </button>
           )}
         </div>

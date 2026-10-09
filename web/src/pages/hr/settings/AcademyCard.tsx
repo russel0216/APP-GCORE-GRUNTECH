@@ -118,7 +118,7 @@ export function AcademyCard() {
             label="Employees may enrol themselves on a scheduled session from the Training Calendar"
           />
           {canEdit && (
-            <div className="row academy-actions">
+            <div className="card-foot">
               <button type="button" className="btn btn-primary btn-sm" onClick={save} disabled={busy || !dirty || !valid}>
                 {busy ? 'Saving…' : 'Save'}
               </button>

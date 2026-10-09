@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ErrorBox, Loading, useToast } from '../../components/ui';
+import { useConfirm } from '../../components/Confirm';
 import {
   appearanceCss,
   applyAppearance,
@@ -57,6 +58,7 @@ export function Appearance_() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [openGroup, setOpenGroup] = useState<string>('layout');
+  const confirm = useConfirm();
 
   /* Load the stored appearance, and read what the stylesheet says by itself. */
   useEffect(() => {
@@ -162,6 +164,8 @@ export function Appearance_() {
       saved.current = clean;
       setDraft(clean);
       applyAppearance(clean);
+      // A "Discard your changes?" still open is about changes that are saved now.
+      confirm.close();
       // So the rest of the app — and the next reload — sees it too.
       await refresh();
       toast('ok', 'Appearance saved for everyone');
@@ -200,14 +204,31 @@ export function Appearance_() {
           </p>
         </div>
         <div className="row" style={{ gap: 'var(--s-2)' }}>
-          <button className="btn btn-sm" onClick={discard} disabled={!dirty || busy}>
+          <button
+            className="btn"
+            onClick={() =>
+              confirm.ask({
+                title: 'Discard your changes?',
+                body: 'The app goes back to the saved appearance. Nothing stored changes.',
+                confirmLabel: 'Discard',
+                onConfirm: discard,
+              })
+            }
+            disabled={!dirty || busy}
+          >
             Discard
           </button>
-          <button className="btn btn-primary btn-sm" onClick={save} disabled={!dirty || busy || !canEdit}>
-            {busy ? 'Saving…' : dirty ? 'Save for everyone' : 'Saved'}
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={!dirty || busy || !canEdit}
+            title="Saves it for everyone"
+          >
+            {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
+      {confirm.bar}
 
       <ErrorBox error={error} />
 

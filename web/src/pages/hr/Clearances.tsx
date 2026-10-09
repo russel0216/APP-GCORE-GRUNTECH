@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Meter, Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import {
@@ -13,6 +14,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -185,12 +187,6 @@ export function Clearances() {
       <div className="page-head">
         <div>
           <h1>Turnover &amp; Clearance</h1>
-          <p>
-            What a leaver still holds — tools on borrow slips, unpaid claims, projects and people
-            assigned to them — cleared by the area that owns each item and signed off by their
-            supervisor, finance and HR. Items that point at a record take their status from that
-            record.
-          </p>
         </div>
       </div>
 
@@ -222,7 +218,7 @@ export function Clearances() {
         actions={
           can('ghr.clearances.create') && (
             <button className="btn btn-primary btn-sm" onClick={() => setRaising(true)}>
-              + Raise clearance
+              + New clearance
             </button>
           )
         }
@@ -387,21 +383,18 @@ function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id:
 
   return (
     <Modal
-      title="Raise a clearance"
+      title="New clearance"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={raise}
             disabled={busy || !form.employeeId || !form.lastWorkingDay || Boolean(self?.open)}
           >
-            {busy ? 'Raising…' : 'Raise clearance'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -567,6 +560,7 @@ export function ClearanceDetail() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
   const [data, setData] = useState<ClearanceDetailData | null>(null);
   const [areas, setAreas] = useState<AreaDef[]>([]);
   const [error, setError] = useState<unknown>(null);
@@ -576,7 +570,6 @@ export function ClearanceDetail() {
   const [waiving, setWaiving] = useState<Item | null>(null);
   const [adding, setAdding] = useState<Area | null>(null);
   const [editing, setEditing] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -624,12 +617,6 @@ export function ClearanceDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-hr/clearances">Turnover &amp; Clearance</Link>
-        <span className="sep">›</span>
-        <span className="mono">{c.number}</span>
-      </div>
-
       <RecordHeader
         type="Employee Clearance"
         code={c.number}
@@ -638,43 +625,47 @@ export function ClearanceDetail() {
         statusExtra={CLEARANCE_TONES}
         amount={`${done}/${c.items.length}`}
         amountLabel="Items cleared"
-        actions={
+        meta={
           <>
-            <button
-              className="btn"
-              onClick={() => openPdf(`/api/clearances/${c.id}/pdf`, () => toast('error', 'Could not print'))}
-            >
-              Print
-            </button>
-            {c.canEdit && (
-              <button className="btn" onClick={() => setEditing(true)} disabled={busy}>
-                Modify
-              </button>
-            )}
-            {c.canEdit && (
-              <button
-                className="btn btn-ok"
-                disabled={busy || !c.readyToSubmit}
-                title={c.readyToSubmit ? undefined : `${pending} item(s) still pending`}
-                onClick={() => run('Submitted for sign-off', () => api.post(`/clearances/${c.id}/submit`))}
-              >
-                Submit for sign-off
-              </button>
-            )}
-            {c.canCancel && (
-              <button className="btn btn-danger" onClick={() => setCancelling(true)} disabled={busy}>
-                Cancel clearance
-              </button>
-            )}
+            Raised by {c.raisedBy.name} on {formatDate(c.createdAt)}
+            {c.submittedAt ? ` · submitted ${formatDate(c.submittedAt)}` : ''}
+            {c.clearedAt ? ` · cleared ${formatDate(c.clearedAt)}` : ''}
           </>
         }
+        actions={
+          c.canEdit && (
+            <button
+              className="btn btn-primary"
+              disabled={busy || !c.readyToSubmit}
+              title={c.readyToSubmit ? undefined : `${pending} item(s) still pending`}
+              onClick={() => run('Submitted for approval', () => api.post(`/clearances/${c.id}/submit`))}
+            >
+              Submit for approval
+            </button>
+          )
+        }
+        print={`/api/clearances/${c.id}/pdf`}
+        more={[
+          c.canCancel && {
+            label: 'Cancel clearance',
+            danger: true,
+            confirm: {
+              title: `Cancel ${c.number}?`,
+              body: 'For someone who is staying after all. Any sign-off in progress is withdrawn; nothing on the employee record changes.',
+              confirmLabel: 'Cancel clearance',
+              reason: 'optional',
+              reasonLabel: 'Why — goes on the audit trail',
+              onConfirm: async (reason) => {
+                await api.post(`/clearances/${c.id}/cancel`, { reason: reason || null });
+                toast('ok', 'Clearance cancelled');
+                await load();
+              },
+            },
+          },
+        ]}
+        modify={c.canEdit ? () => setEditing(true) : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta">
-        Raised by {c.raisedBy.name} on {formatDate(c.createdAt)}
-        {c.submittedAt ? ` · submitted ${formatDate(c.submittedAt)}` : ''}
-        {c.clearedAt ? ` · cleared ${formatDate(c.clearedAt)}` : ''}
-      </p>
 
       <DocumentApproval documentType="clearance" documentId={c.id} reloadToken={reload} />
 
@@ -860,7 +851,15 @@ export function ClearanceDetail() {
                                       disabled={busy}
                                       aria-label={`Remove ${item.description}`}
                                       onClick={() =>
-                                        run('Removed', () => api.del(`/clearances/${c.id}/items/${item.id}`))
+                                        confirm.ask({
+                                          title: `Remove “${item.description}” from ${c.number}?`,
+                                          confirmLabel: 'Remove',
+                                          onConfirm: async () => {
+                                            await api.del(`/clearances/${c.id}/items/${item.id}`);
+                                            toast('ok', 'Removed');
+                                            await load();
+                                          },
+                                        })
                                       }
                                     >
                                       Remove
@@ -924,18 +923,6 @@ export function ClearanceDetail() {
           }}
         />
       )}
-      {cancelling && (
-        <CancelModal
-          number={c.number}
-          onClose={() => setCancelling(false)}
-          onCancel={async (reason) => {
-            await api.post(`/clearances/${c.id}/cancel`, { reason: reason || null });
-            setCancelling(false);
-            toast('ok', 'Clearance cancelled');
-            await load();
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -959,10 +946,7 @@ function WaiveModal({
       title="Waive this item"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             disabled={busy || !ok}
@@ -978,7 +962,7 @@ function WaiveModal({
           >
             Waive
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1014,13 +998,10 @@ function AddItemModal({
   const duplicate = existing.some((d) => d.toLowerCase() === text.toLowerCase());
   return (
     <Modal
-      title={`Add to ${areaLabel}`}
+      title={`Add item — ${areaLabel}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             disabled={busy || text.length < 3 || duplicate}
@@ -1034,9 +1015,9 @@ function AddItemModal({
               }
             }}
           >
-            Add item
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1070,13 +1051,10 @@ function EditModal({
   const [error, setError] = useState<unknown>(null);
   return (
     <Modal
-      title={`Modify ${clearance.number}`}
+      title={`Modify clearance ${clearance.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             disabled={busy || !form.lastWorkingDay}
@@ -1096,9 +1074,9 @@ function EditModal({
               }
             }}
           >
-            Save
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1133,57 +1111,6 @@ function EditModal({
       </div>
       <Field label="Notes">
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-      </Field>
-    </Modal>
-  );
-}
-
-function CancelModal({
-  number,
-  onClose,
-  onCancel,
-}: {
-  number: string;
-  onClose: () => void;
-  onCancel: (reason: string) => Promise<void>;
-}) {
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  return (
-    <Modal
-      title={`Cancel ${number}?`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Keep it
-          </button>
-          <button
-            className="btn btn-danger"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await onCancel(reason.trim());
-              } catch (err) {
-                setError(err);
-                setBusy(false);
-              }
-            }}
-          >
-            Cancel clearance
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted">
-        For someone who is staying after all. Any sign-off in progress is withdrawn; nothing on the
-        employee record changes.
-      </p>
-      <Field label="Why" hint="Optional — goes on the audit trail">
-        <input value={reason} onChange={(e) => setReason(e.target.value)} />
       </Field>
     </Modal>
   );

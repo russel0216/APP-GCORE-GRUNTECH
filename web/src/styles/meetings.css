@@ -25,18 +25,6 @@
 
 /* ── Detail ──────────────────────────────────────────────────────────────── */
 
-/* When · length · organiser · place — one line under the header. */
-.meeting-meta {
-  margin: 0 0 var(--s-4);
-  color: var(--muted);
-  font-size: var(--fs-md);
-}
-
-.meeting-meta strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
 /* A card head with its action on the right; wraps rather than overflowing. */
 .meeting-split {
   justify-content: space-between;

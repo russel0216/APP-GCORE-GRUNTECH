@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { Checkbox, ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 import type { LeaveType } from './Leave';
 import { ProbationCard } from './settings/ProbationCard';
 import { ClearanceChecklistCard } from './settings/ClearanceChecklistCard';
@@ -20,7 +20,8 @@ import { NumberInput } from '../../components/NumberInput';
  *
  * Below them sit the cards other rules live on — probation and evaluations,
  * the clearance checklist, the Academy. Each loads and saves its own keys, so
- * the Save at the top of this page never writes over one of them.
+ * the Save under the working rules never writes over one of them. Every card
+ * that saves on its own has its Save at its foot, on the right.
  */
 
 interface HrSettings {
@@ -116,11 +117,6 @@ export function HrSettingsPage() {
             affects entries made from now on — it does not rewrite what has already been recorded.
           </p>
         </div>
-        {editable && (
-          <button className="btn btn-primary btn-sm" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save rules'}
-          </button>
-        )}
       </div>
 
       <ErrorBox error={error} />
@@ -133,7 +129,7 @@ export function HrSettingsPage() {
       )}
 
       <fieldset disabled={!editable} style={{ border: 0, padding: 0, margin: 0 }}>
-        <div className="grid grid-2">
+        <div className="grid grid-3">
           <div className="card">
             <h3 className="card-title">The working day</h3>
             <div className="grid grid-2">
@@ -262,64 +258,73 @@ export function HrSettingsPage() {
               rather than argued about.
             </div>
           </div>
-
-          <div className="card">
-            <h3 className="card-title">Leave types</h3>
-            <p className="muted">Allotted days per year, per type.</p>
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Type</th>
-                    <th className="right">Days / year</th>
-                    <th>Paid</th>
-                    <th>Proof</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {types.map((t) => (
-                    <tr
-                      key={t.id}
-                      className={editable ? 'clickable' : undefined}
-                      tabIndex={editable ? 0 : undefined}
-                      onClick={editable ? () => setEditingType(t) : undefined}
-                      onKeyDown={
-                        editable
-                          ? (e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                setEditingType(t);
-                              }
-                            }
-                          : undefined
-                      }
-                    >
-                      <td>
-                        {t.name} <span className="faint mono">{t.code}</span>
-                        {!t.isActive && <span className="badge"> retired</span>}
-                      </td>
-                      <td className="right mono">{t.daysPerYear}</td>
-                      <td>{t.isPaid ? 'yes' : <span className="faint">unpaid</span>}</td>
-                      <td>{t.requiresProof ? 'required' : <span className="faint">—</span>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {editable && (
-              <button
-                className="btn btn-sm"
-                style={{ marginTop: 'var(--s-3)' }}
-                onClick={() =>
-                  setEditingType({ code: '', name: '', daysPerYear: 0, isPaid: true, requiresProof: false, isActive: true })
-                }
-              >
-                + Add a leave type
-              </button>
-            )}
-          </div>
         </div>
+        {/* Saves the three cards above — the working day, overtime and face recognition. */}
+        {editable && (
+          <div className="card-foot">
+            <button className="btn btn-primary btn-sm" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        )}
       </fieldset>
+
+      <div className="card">
+        <div className="panel-head">
+          <h3 className="card-title">Leave types</h3>
+          {editable && (
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() =>
+                setEditingType({ code: '', name: '', daysPerYear: 0, isPaid: true, requiresProof: false, isActive: true })
+              }
+            >
+              + New leave type
+            </button>
+          )}
+        </div>
+        <p className="muted">Allotted days per year, per type.</p>
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th className="right">Days / year</th>
+                <th>Paid</th>
+                <th>Proof</th>
+              </tr>
+            </thead>
+            <tbody>
+              {types.map((t) => (
+                <tr
+                  key={t.id}
+                  className={editable ? 'clickable' : undefined}
+                  tabIndex={editable ? 0 : undefined}
+                  onClick={editable ? () => setEditingType(t) : undefined}
+                  onKeyDown={
+                    editable
+                      ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setEditingType(t);
+                          }
+                        }
+                      : undefined
+                  }
+                >
+                  <td>
+                    {t.name} <span className="faint mono">{t.code}</span>
+                    {!t.isActive && <span className="badge"> retired</span>}
+                  </td>
+                  <td className="right mono">{t.daysPerYear}</td>
+                  <td>{t.isPaid ? 'yes' : <span className="faint">unpaid</span>}</td>
+                  <td>{t.requiresProof ? 'required' : <span className="faint">—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <ProbationCard />
 
@@ -382,13 +387,10 @@ function LeaveTypeModal({
 
   return (
     <Modal
-      title={value.id ? `Modify ${value.name}` : 'New leave type'}
+      title={value.id ? `Modify leave type ${value.name}` : 'New leave type'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={save}
@@ -396,7 +398,7 @@ function LeaveTypeModal({
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

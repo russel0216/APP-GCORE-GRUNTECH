@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, isDayKey, parseDay, todayLocal } from '../../lib/day';
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
 import {
   CostPanelBlock,
@@ -30,7 +32,6 @@ import {
   CostCell,
   figure,
   isBlank,
-  LeaveBar,
   lineField,
   linePayload,
   LooseField,
@@ -54,8 +55,11 @@ import {
   modifies its DRAFT revision — or, when no revision is a draft, the
   quotation's own details (number, name, contact, site, closing date, status)
   while the sent revision's lines stay as they were sent. No dialog anywhere:
-  appending another quote, confirming a replace and leaving unsaved all happen
-  in the page. Everything is typed in place — the header in two
+  appending another quote and confirming a replace happen in the page; Back
+  is the Shell's line (to the quotation, or the list for a new one), and
+  leaving with unsaved changes asks there (useUnsavedChanges). Save sits top
+  right and again at the foot (2026-10-09, the owner's call: buttons in the
+  same place everywhere). Everything is typed in place — the header in two
   columns, then the lines table with an empty row to start in, then the totals
   and the cost panel — and one Save sends it all:
 
@@ -176,8 +180,9 @@ export function QuotationEditor() {
   const { me, can } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
-  const location = useLocation();
   const [params] = useSearchParams();
+  /** "Replace the lines?" asks in the bar under the editor's head. */
+  const confirm = useConfirm();
 
   const preset = useMemo(
     () => ({
@@ -257,9 +262,6 @@ export function QuotationEditor() {
   const numberTouched = useRef(false);
   /** Why the typed number cannot be used — said beside the box as it is typed. */
   const [numberProblem, setNumberProblem] = useState<string | null>(null);
-  /** In-page confirmations, where a dialog used to ask. */
-  const [confirmFill, setConfirmFill] = useState(false);
-  const [leaving, setLeaving] = useState(false);
   /** Bumped to re-read the quotation (after raising a new revision here). */
   const [reloadKey, setReloadKey] = useState(0);
   const [lines, setLines] = useState<Line[]>(() => [blankLine()]);
@@ -270,6 +272,12 @@ export function QuotationEditor() {
   const [focusKey, setFocusKey] = useState<string | null>(null);
   /** Ids to focus once the table has redrawn (see the layout effect below). */
   const focusAfterRender = useRef<string[] | null>(null);
+
+  // Back goes to the quotation being modified (a new one keeps the Shell's
+  // list), and leaving with unsaved changes asks first — in the Shell's bar
+  // for a link, through the browser for a reload or a closed tab.
+  useBackLink(editing ? `/g-ops/quotations/${id}` : null, editing ? (quotation?.number ?? null) : null);
+  useUnsavedChanges(dirty);
 
   const issueDate = editing && revision ? dayKeyOf(new Date(revision.createdAt)) : today;
   const showCost = editing ? !!quotation?.canSeeCost : true;
@@ -580,27 +588,34 @@ export function QuotationEditor() {
     };
   }, [editing, header.costingId, loadCostingLines]);
 
-  async function fillFromCosting(confirmed = false) {
+  /** The table becomes the costing's scope of work. Throws, so the confirm bar can say why not. */
+  async function fillLines() {
+    const filled = await loadCostingLines(header.costingId);
+    if (!filled.length) throw new Error('That costing has no scope of work yet — add sections to it first');
+    setLines(filled);
+    linesTouched.current = true;
+    setDirty(true);
+  }
+
+  function fillFromCosting() {
     if (!header.costingId) return;
-    const hasLines = lines.some((l) => !isBlank(l));
-    if (hasLines && !confirmed) {
-      setConfirmFill(true);
+    if (lines.some((l) => !isBlank(l))) {
+      confirm.ask({
+        title: 'Replace the lines with the costing’s scope of work?',
+        body: 'What is in the table now is replaced. Nothing is saved until you press Save.',
+        confirmLabel: 'Replace',
+        tone: 'primary',
+        onConfirm: fillLines,
+      });
       return;
     }
-    setConfirmFill(false);
-    try {
-      const filled = await loadCostingLines(header.costingId);
-      if (!filled.length) {
-        setError(new Error('That costing has no scope of work yet — add sections to it first'));
-        return;
-      }
-      setLines(filled);
-      linesTouched.current = true;
-      setDirty(true);
-    } catch (err) {
-      setError(err);
-    }
+    fillLines().catch(setError);
   }
+
+  // The question is about the costing chosen when it was asked: choosing another
+  // (or none) withdraws it, as the old in-line question went with the button.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [header.costingId, closeConfirm]);
 
   // ── Lines ─────────────────────────────────────────────────────────────────
   function updateLine(key: string, patch: Partial<Line>) {
@@ -701,18 +716,6 @@ export function QuotationEditor() {
     }
   }, [lines]);
 
-  // `#line-3` from the detail page's per-line Modify lands on that line.
-  const hashDone = useRef(false);
-  useEffect(() => {
-    if (hashDone.current || loading) return;
-    const m = /^#line-(\d+)$/.exec(location.hash);
-    if (!m) return;
-    const line = lines[Number(m[1]) - 1];
-    if (!line) return;
-    hashDone.current = true;
-    document.getElementById(lineField(line.key, 'title'))?.focus();
-  }, [location.hash, lines, loading]);
-
   /** A product picked from what was quoted before: its words, unit and price come with it. */
   /** The dropdown's rows for a line: the master, plus the line's own group when it is not on it (an older spelling, or one since deactivated). */
   function groupOptions(current: string): KnownGroup[] {
@@ -747,17 +750,6 @@ export function QuotationEditor() {
     [priced, header.discountPct, header.vatInclusive, vatRate],
   );
   const marginByKey = new Map<string, LineMargin>(priced.map((l, i) => [l.key, totals.lines[i]]));
-
-  // Leaving with unsaved work asks first — the browser's own prompt.
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
 
   // ── Validation and save ───────────────────────────────────────────────────
   function validate(): { errors: Record<string, string>; first: string | null } {
@@ -880,22 +872,6 @@ export function QuotationEditor() {
     }
   }
 
-  function cancel() {
-    if (dirty && !leaving) {
-      setLeaving(true);
-      return;
-    }
-    leave();
-  }
-
-  function leave() {
-    setLeaving(false);
-    setDirty(false);
-    if (editing) navigate(`/g-ops/quotations/${id}`);
-    else if (location.key !== 'default') navigate(-1);
-    else navigate('/g-ops/quotations');
-  }
-
   // ── What to draw ──────────────────────────────────────────────────────────
   if (loading) return <Loading />;
   if (editing && !quotation) return <ErrorBox error={loadError ?? new Error('Quotation not found')} />;
@@ -903,6 +879,7 @@ export function QuotationEditor() {
     return <QuotationDetailsEditor quotation={quotation} onRevisionRaised={() => setReloadKey((k) => k + 1)} />;
   }
   if (editing && quotation && (!quotation.canEdit || !quotation.canSeeCost)) {
+    // The way back is the Shell's line, to the quotation (useBackLink above).
     return (
       <div className="card">
         <h3 className="card-title">{quotation.number} cannot be modified here</h3>
@@ -911,9 +888,6 @@ export function QuotationEditor() {
             ? 'Only the author can edit this quotation (or someone who may edit every quotation).'
             : 'Its cost is not visible to you, so its lines cannot be rewritten here.'}
         </p>
-        <Link className="btn" to={`/g-ops/quotations/${quotation.id}`}>
-          Back to {quotation.number}
-        </Link>
       </div>
     );
   }
@@ -958,22 +932,6 @@ export function QuotationEditor() {
 
   return (
     <div className="qe">
-      <div className="breadcrumb">
-        <Link to="/g-ops/quotations">Quotations</Link>
-        <span className="sep">›</span>
-        {editing ? (
-          <>
-            <Link to={`/g-ops/quotations/${quotation!.id}`} className="mono">
-              {quotation!.number} R{revision!.revision}
-            </Link>
-            <span className="sep">›</span>
-            <span>Modify</span>
-          </>
-        ) : (
-          <span>New</span>
-        )}
-      </div>
-
       <ErrorBox error={error} />
       {duplicateOf && (
         <div className="alert info">
@@ -998,13 +956,13 @@ export function QuotationEditor() {
       {/*
         One card, as SCORO lays out "Modify quote details": the header in two
         columns with the labels beside the values, the custom fields, the
-        lines, the totals beside the cost panel, and Back / Save at both ends.
+        lines, the totals beside the cost panel, and Save at both ends.
       */}
       <section className="card qe-card" aria-labelledby="qe-title">
         <div className="qe-head">
           <div>
             <h1 id="qe-title" className="qe-heading">
-              {editing ? 'Modify quote details' : 'New quotation'}
+              {editing ? `Modify quotation ${quotation!.number}` : 'New quotation'}
             </h1>
             <p className="faint qe-lead">
               {editing
@@ -1013,16 +971,13 @@ export function QuotationEditor() {
             </p>
           </div>
           <div className="row qe-actions">
-            <button type="button" className="btn" onClick={cancel} disabled={busy}>
-              Back
-            </button>
             <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
               {busy ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>
 
-        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
+        {confirm.bar}
 
         <div className="qe-header qe-rows">
           <div className="qe-col">
@@ -1511,22 +1466,11 @@ export function QuotationEditor() {
           <button type="button" className="btn btn-sm" aria-expanded={appendOpen} onClick={() => setAppendOpen((v) => !v)}>
             + Append quote
           </button>
-          {header.costingId &&
-            (confirmFill ? (
-              <span className="row qe-confirm" role="group" aria-label="Replace the lines">
-                <span>Replace the lines with the costing’s scope of work?</span>
-                <button type="button" className="btn btn-sm btn-primary" onClick={() => void fillFromCosting(true)}>
-                  Replace
-                </button>
-                <button type="button" className="btn btn-sm" onClick={() => setConfirmFill(false)}>
-                  Keep mine
-                </button>
-              </span>
-            ) : (
-              <button type="button" className="btn btn-sm" onClick={() => void fillFromCosting()}>
-                Fill from costing
-              </button>
-            ))}
+          {header.costingId && (
+            <button type="button" className="btn btn-sm" onClick={fillFromCosting}>
+              Fill from costing
+            </button>
+          )}
         </div>
         {appendOpen && <AppendQuotePanel excludeId={quotation?.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
@@ -1638,13 +1582,9 @@ export function QuotationEditor() {
           {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} />}
         </div>
 
-        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
         <div className="row qe-foot">
-          <button type="button" className="btn" onClick={cancel} disabled={busy}>
-            Back
-          </button>
           <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : editing ? 'Save' : 'Save quotation'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
       </section>
@@ -1831,8 +1771,10 @@ function NumberField({
 function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: QuotationDetail; onRevisionRaised: () => void }) {
   const navigate = useNavigate();
   const toast = useToast();
+  /** "Pull it back?" asks in the bar under the editor's head. */
+  const confirm = useConfirm();
   const latest = quotation.revisions[0] ?? null;
-  const [form, setForm] = useState({
+  const [initial] = useState(() => ({
     number: quotation.number,
     subject: quotation.subject,
     contactId: quotation.contact?.id ?? '',
@@ -1840,12 +1782,15 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
     expectedClosing: quotation.expectedClosing?.slice(0, 10) ?? '',
     outcome: quotation.outcome,
     lostReason: quotation.lostReason ?? '',
-  });
+  }));
+  const [form, setForm] = useState(initial);
   const [contacts, setContacts] = useState<Option[]>([]);
   const [sites, setSites] = useState<Option[]>([]);
   const [numberProblem, setNumberProblem] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  // Leaving with changes typed asks first (Back is the Shell's line, to the quotation).
+  useUnsavedChanges(JSON.stringify(form) !== JSON.stringify(initial));
 
   useEffect(() => {
     api
@@ -1938,50 +1883,32 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
     call): the author spotted something and must get to it before the approver
     does. The withdrawal tells the approvers, and the page reloads straight
     into the full editor — same revision number, nothing the customer saw.
+    Asked in the confirm bar, which shows a refusal and stays open.
   */
-  const [pullingBack, setPullingBack] = useState(false);
   async function pullBack() {
     if (!latest) return;
-    setBusy(true);
-    try {
-      await api.post(`/quotations/${quotation.id}/revisions/${latest.id}/withdraw`);
-      toast('ok', `R${latest.revision} pulled back to draft — its lines are ready to change`);
-      onRevisionRaised();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-      setPullingBack(false);
-    }
+    await api.post(`/quotations/${quotation.id}/revisions/${latest.id}/withdraw`);
+    toast('ok', `R${latest.revision} pulled back to draft — its lines are ready to change`);
+    onRevisionRaised();
   }
 
   return (
     <div className="qe">
-      <div className="breadcrumb">
-        <Link to="/g-ops/quotations">Quotations</Link>
-        <span className="sep">›</span>
-        <Link to={`/g-ops/quotations/${quotation.id}`} className="mono">
-          {quotation.number}
-        </Link>
-        <span className="sep">›</span>
-        <span>Modify</span>
-      </div>
       <section className="card qe-card" aria-labelledby="qe-details-title">
         <div className="qe-head">
           <div>
             <h1 id="qe-details-title" className="qe-heading">
-              Modify quote details
+              Modify quotation {quotation.number}
             </h1>
             <p className="faint qe-lead">Nothing changes until you save.</p>
           </div>
           <div className="row qe-actions">
-            <Link className="btn" to={`/g-ops/quotations/${quotation.id}`}>
-              Back
-            </Link>
             <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
               {busy ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>
+        {confirm.bar}
         <ErrorBox error={error} />
         {latest && (
           <div className="alert info row qe-locked">
@@ -1994,25 +1921,24 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
                 Raise a new revision to change them
               </button>
             )}
-            {latest.status === 'PENDING_APPROVAL' && !pullingBack && (
-              <button type="button" className="btn btn-sm" onClick={() => setPullingBack(true)} disabled={busy}>
+            {latest.status === 'PENDING_APPROVAL' && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: `Pull R${latest.revision} back to draft?`,
+                    body: 'It is withdrawn from the approver — they are told, and nothing can be approved until you submit it again.',
+                    confirmLabel: `Pull R${latest.revision} back`,
+                    tone: 'primary',
+                    onConfirm: pullBack,
+                  })
+                }
+              >
                 Pull it back and edit
               </button>
             )}
-          </div>
-        )}
-        {latest && latest.status === 'PENDING_APPROVAL' && pullingBack && (
-          <div className="alert warn row qe-locked">
-            <span>
-              Pulling R{latest.revision} back withdraws it from the approver — they are told, and nothing can be
-              approved until you submit it again.
-            </span>
-            <button type="button" className="btn btn-sm btn-primary" onClick={() => void pullBack()} disabled={busy}>
-              {busy ? 'Pulling back…' : `Pull R${latest.revision} back to draft`}
-            </button>
-            <button type="button" className="btn btn-sm" onClick={() => setPullingBack(false)} disabled={busy}>
-              Cancel
-            </button>
           </div>
         )}
         <div className="qe-header qe-rows">
@@ -2085,6 +2011,12 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               </Field>
             )}
           </div>
+        </div>
+
+        <div className="row qe-foot">
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
         </div>
       </section>
     </div>

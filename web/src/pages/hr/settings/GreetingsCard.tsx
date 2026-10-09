@@ -115,7 +115,7 @@ export function GreetingsCard() {
             {text('everyoneAnniversary', "Everyone's bell — anniversary", `Now: ${fill(rules.everyoneAnniversary, 5)}`)}
           </div>
           {canEdit && (
-            <div className="row academy-actions">
+            <div className="card-foot">
               <button type="button" className="btn btn-primary btn-sm" onClick={save} disabled={busy || !dirty}>
                 {busy ? 'Saving…' : 'Save'}
               </button>

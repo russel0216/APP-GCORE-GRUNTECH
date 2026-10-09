@@ -162,7 +162,7 @@ export function EmployeeEvaluationsTab({
           <h3 className="card-title">History</h3>
           {onPeriod && canCreate && (
             <button type="button" className="btn btn-sm" onClick={() => setPreset({ employeeId, employeeName: 'This employee', milestone: 'ADHOC' })}>
-              + Ad hoc evaluation
+              + New evaluation
             </button>
           )}
         </div>

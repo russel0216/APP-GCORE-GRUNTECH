@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FocusEvent } from 'react';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf } from '../../lib/day';
-import { Checkbox, ErrorBox, Field, Modal, formatDateTime } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, ModalFoot, formatDateTime } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { PeoplePicker } from '../../components/PeoplePicker';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
@@ -18,8 +18,11 @@ import { REMINDERS, REPEATS, type Activity, type ActivityTypeDef, type Person } 
   the end shown, All day, Repeat, Title, Activity type, Address, Private,
   Conference call link, Description, Reminder — and, beside it, the
   Participants (find users, tick them, select all) and the Links: customer,
-  contact person, project, quotation, lead. Save, Save and open, Save and
-  add another across the foot. SCORO's Busy, Shared resources and rich text
+  contact person, project, quotation, lead. Across the foot, in the order
+  every modal keeps (2026-10-09): Cancel, Save and add another, Save and
+  open (both on a new one only — Modify is opened from the activity's own
+  page), Save. Delete is not here: an activity has a page of its own, and it
+  is deleted from that page's ⋯. SCORO's Busy, Shared resources and rich text
   are not here: G-CORE has no resource booking and no availability view,
   and the description is plain text as every note in the app is.
 
@@ -110,7 +113,7 @@ function initialForm(activity: Activity | null, defaultStart: Date, meId: string
   };
 }
 
-/** The activity form — "+ Schedule" on the calendar, Modify on the activity's page. */
+/** The activity form — "+ New activity" on the calendar ("New activity"), Modify on the activity's page ("Modify activity"). */
 export function ActivityModal({
   activity,
   people,
@@ -118,7 +121,6 @@ export function ActivityModal({
   defaultStart,
   onClose,
   onSaved,
-  onRemoved,
 }: {
   activity: Activity | null;
   people: Person[];
@@ -128,13 +130,10 @@ export function ActivityModal({
   onClose: () => void;
   /** After Save ('close'), Save and open ('open' — the caller opens the page) or Save and add another ('another' — the form stays, blank). */
   onSaved: (saved: Activity, action: SaveAction) => void;
-  /** After Remove; the activity's page leaves for the calendar. Defaults to closing through `onSaved`'s caller. */
-  onRemoved?: (removed: number) => void;
 }) {
   const { me, can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [confirmRemove, setConfirmRemove] = useState(false);
   const typeOptions = types.filter((t) => t.isActive || t.key === activity?.type);
   const defaultType = typeOptions.some((t) => t.key === 'FOLLOW_UP') ? 'FOLLOW_UP' : (typeOptions[0]?.key ?? 'OTHER');
   const [form, setForm] = useState<FormState>(() => initialForm(activity, defaultStart, me?.user.id ?? '', defaultType));
@@ -243,66 +242,28 @@ export function ActivityModal({
     }
   }
 
-  async function remove(series: boolean) {
-    if (!activity) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const out = await api.del<{ removed: number }>(`/activities/${activity.id}${series ? '?series=upcoming' : ''}`);
-      if (onRemoved) onRemoved(out?.removed ?? 1);
-      else onSaved(activity, 'close');
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  const removing = activity && confirmRemove;
-
   return (
     <Modal
       title={activity ? 'Modify activity' : 'New activity'}
       onClose={onClose}
       wide
       footer={
-        <>
-          {activity &&
-            (removing ? (
-              <>
-                <span className="act-confirm">Remove it? Everyone on it loses it from their calendar.</span>
-                <button type="button" className="btn btn-danger" onClick={() => remove(false)} disabled={busy}>
-                  {activity.seriesId ? 'Remove this one' : 'Yes, remove it'}
-                </button>
-                {activity.seriesId && (
-                  <button type="button" className="btn btn-danger" onClick={() => remove(true)} disabled={busy}>
-                    Remove this and later ones
-                  </button>
-                )}
-                <button type="button" className="btn" onClick={() => setConfirmRemove(false)} disabled={busy}>
-                  Keep it
-                </button>
-              </>
-            ) : (
-              <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)} disabled={busy}>
-                Remove
-              </button>
-            ))}
-          <div className="topbar-spacer" />
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
+          {/* Modify is opened from the activity's own page, where "Save and open" would only be Save again. */}
           {!activity && (
-            <button type="button" className="btn" onClick={() => save('another')} disabled={busy || !canSave}>
-              Save and add another
-            </button>
+            <>
+              <button type="button" className="btn" onClick={() => save('another')} disabled={busy || !canSave}>
+                Save and add another
+              </button>
+              <button type="button" className="btn" onClick={() => save('open')} disabled={busy || !canSave}>
+                Save and open
+              </button>
+            </>
           )}
-          <button type="button" className="btn" onClick={() => save('open')} disabled={busy || !canSave}>
-            Save and open
-          </button>
           <button type="button" className="btn btn-primary" onClick={() => save('close')} disabled={busy || !canSave}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

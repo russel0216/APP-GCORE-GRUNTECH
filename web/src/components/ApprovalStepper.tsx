@@ -303,7 +303,7 @@ export function DocumentApproval({
             <>
               <p className="panel-blurb">This step is waiting on you.</p>
               <div className="row approval-decide-buttons">
-                <button type="button" className="btn btn-sm btn-ok" onClick={() => setDeciding('APPROVED')}>
+                <button type="button" className="btn btn-sm btn-primary" onClick={() => setDeciding('APPROVED')}>
                   Approve
                 </button>
                 <button type="button" className="btn btn-sm" onClick={() => setDeciding('RETURNED')}>
@@ -327,10 +327,14 @@ export function DocumentApproval({
                 placeholder={deciding === 'APPROVED' ? 'Anything the requester should know' : 'This is what the requester sees'}
               />
               {decideError && <div className="alert error">{decideError}</div>}
-              <div className="row approval-decide-buttons">
+              {/* The confirm grammar of rule 19: [Keep it] then the decision itself, on the right. */}
+              <div className="panel-foot approval-decide-buttons">
+                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setDeciding(null); setDecideError(null); }}>
+                  Keep it
+                </button>
                 <button
                   type="button"
-                  className={`btn btn-sm ${deciding === 'APPROVED' ? 'btn-ok' : 'btn-danger'}`}
+                  className={`btn btn-sm ${deciding === 'APPROVED' ? 'btn-primary' : deciding === 'REJECTED' ? 'btn-danger' : ''}`}
                   disabled={busy}
                   onClick={async () => {
                     setBusy(true);
@@ -345,10 +349,7 @@ export function DocumentApproval({
                     }
                   }}
                 >
-                  {busy ? 'Working…' : `Confirm ${DECISION_VERB[deciding].toLowerCase()}`}
-                </button>
-                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setDeciding(null); setDecideError(null); }}>
-                  Cancel
+                  {busy ? 'Working…' : DECISION_VERB[deciding]}
                 </button>
               </div>
               <p className="faint">Recorded against the document permanently, with your name and the time.</p>

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import {
   Checkbox,
   ErrorBox,
@@ -34,7 +37,6 @@ import {
   CostCell,
   figure,
   isBlank,
-  LeaveBar,
   lineField,
   linePayload,
   moneyOf,
@@ -429,11 +431,13 @@ export function SalesOrderDetail() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  // Cancel, Delete, Reopen and Pull back ask here, in the bar under the header.
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
   const [order, setOrder] = useState<SalesOrderDetailRow | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [cancelling, setCancelling] = useState(false);
-  const [cancelReason, setCancelReason] = useState('');
-  const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [optionId, setOptionId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -455,12 +459,18 @@ export function SalesOrderDetail() {
 
   if (!order) return error ? <ErrorBox error={error} /> : <Loading />;
 
-  async function act(run: () => Promise<unknown>, done: string) {
+  /** Does it, says so, reloads — and throws, so a confirm bar can show the refusal. */
+  async function run(fn: () => Promise<unknown>, done: string) {
+    await fn();
+    toast('ok', done);
+    await load();
+  }
+
+  /** The same, for a button that acts at once: a refusal goes to the page's error box. */
+  async function act(fn: () => Promise<unknown>, done: string) {
     setBusy(true);
     try {
-      await run();
-      toast('ok', done);
-      await load();
+      await run(fn, done);
     } catch (err) {
       setError(err);
     } finally {
@@ -468,151 +478,138 @@ export function SalesOrderDetail() {
     }
   }
 
+  async function remove() {
+    await api.del(`/sales-orders/${order!.id}`);
+    toast('ok', 'Deleted');
+    navigate('/g-ops/sales-orders');
+  }
+
   const showCost = order.canSeeCost;
   const draft = order.status === 'DRAFT';
   const pending = order.status === 'PENDING_APPROVAL';
   const chosenOption = optionId && (order.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null;
   const route = (chosenOption ? order.approvalRoutes?.options.find((o) => o.id === chosenOption)?.route : null) ?? order.approvalRoutes?.standard ?? null;
+  const options = order.approvalOptions ?? [];
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/sales-orders">Sales Orders</Link>
-        <span className="sep">›</span>
-        <span className="mono">{order.number}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            Sales Order <span className="mono">{order.number}</span>
-          </h1>
-          <p>
-            <StatusBadge status={order.status} extra={SO_TONES} />
-            <span className="sales-after-badge">
-              {order.customer.name} · per{' '}
-              <Link to={`/g-ops/quotations/${order.quotation.id}`} className="mono">
-                {order.quotation.number}
-              </Link>{' '}
-              · booked by {order.owner.name}
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          <button className="btn" onClick={() => openPdf(`/api/sales-orders/${order.id}/pdf`, () => setError(new Error('The PDF could not be made')))}>
-            PDF
-          </button>
-          {order.canEdit && draft && (
-            <Link className="btn" to={`/g-ops/sales-orders/${order.id}/edit`}>
-              Modify
-            </Link>
-          )}
-          {order.canEdit && draft && !order.needsApproval && (
-            <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.post(`/sales-orders/${order.id}/issue`), 'Issued — the sale is booked')}>
-              Issue
-            </button>
-          )}
-          {order.canEdit && draft && order.needsApproval && (
-            <>
-              {(order.approvalOptions ?? []).map((o) => (
-                <label key={o.id} className="checkbox">
-                  <input type="checkbox" checked={optionId === o.id} onChange={(e) => setOptionId(e.target.checked ? o.id : null)} />
-                  <span>{o.label}</span>
-                </label>
-              ))}
+      <RecordHeader
+        type="Sales Order"
+        code={order.number}
+        title={order.customer.name}
+        status={order.status}
+        statusExtra={SO_TONES}
+        amount={formatMoney(order.total)}
+        amountLabel="Order total"
+        meta={
+          <>
+            Per{' '}
+            <Link to={`/g-ops/quotations/${order.quotation.id}`} className="mono">
+              {order.quotation.number}
+            </Link>{' '}
+            {order.quotation.subject} · booked by {order.owner.name}
+          </>
+        }
+        actions={
+          <>
+            {order.canEdit && draft && !order.needsApproval && (
+              <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.post(`/sales-orders/${order.id}/issue`), 'Issued — the sale is booked')}>
+                Issue
+              </button>
+            )}
+            {order.canEdit && draft && order.needsApproval && (
               <button
                 className="btn btn-primary"
                 disabled={busy}
-                onClick={() => act(() => api.post(`/sales-orders/${order.id}/submit`, { optionId: chosenOption }), 'Sent for approval')}
+                onClick={() => act(() => api.post(`/sales-orders/${order.id}/submit`, { optionId: chosenOption }), 'Submitted for approval')}
               >
                 Submit for approval
               </button>
-            </>
-          )}
-          {order.canEdit && pending && (
-            <button className="btn" disabled={busy} onClick={() => act(() => api.post(`/sales-orders/${order.id}/withdraw`), 'Pulled back to draft')}>
-              Pull back and edit
-            </button>
-          )}
-          {order.canEdit && order.status === 'ISSUED' && (
-            <button className="btn" disabled={busy} onClick={() => act(() => api.post(`/sales-orders/${order.id}/reopen`), 'Back to draft')}>
-              Reopen
-            </button>
-          )}
-          {order.canEdit && order.status !== 'CANCELLED' && (
-            <button className="btn btn-danger" onClick={() => setCancelling((v) => !v)}>
-              Cancel order
-            </button>
-          )}
-          {order.canEdit && (draft || order.status === 'CANCELLED') && can('gops.sales_orders.delete') && (
-            <button className="btn btn-danger" onClick={() => setRemoving((v) => !v)}>
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
+            )}
+          </>
+        }
+        print={`/api/sales-orders/${order.id}/pdf`}
+        more={[
+          order.canEdit &&
+            pending && {
+              label: 'Pull back and edit',
+              hint: 'Withdraw it from the approvers and return it to draft',
+              confirm: {
+                title: `Pull ${order.number} back to draft?`,
+                body: 'It is withdrawn from the approvers — they are told — and needs approval again once it is resubmitted.',
+                confirmLabel: 'Pull back',
+                tone: 'primary',
+                onConfirm: () => run(() => api.post(`/sales-orders/${order.id}/withdraw`), 'Pulled back to draft'),
+              },
+            },
+          order.canEdit &&
+            order.status === 'ISSUED' && {
+              label: 'Reopen',
+              hint: 'Back to draft, to change it',
+              confirm: {
+                title: `Reopen ${order.number}?`,
+                body: order.needsApproval ? 'It goes back to draft and needs approval again before it is issued.' : 'It goes back to draft.',
+                confirmLabel: 'Reopen',
+                tone: 'primary',
+                onConfirm: () => run(() => api.post(`/sales-orders/${order.id}/reopen`), 'Back to draft'),
+              },
+            },
+          order.canEdit &&
+            order.status !== 'CANCELLED' && {
+              label: 'Cancel order',
+              danger: true,
+              confirm: {
+                title: `Cancel ${order.number}?`,
+                body: 'Cancelling keeps the record and its number, and gives back what it booked of the quotation.',
+                confirmLabel: 'Cancel order',
+                reason: 'required',
+                reasonLabel: 'Why is it cancelled?',
+                minReason: 3,
+                onConfirm: (reason) => run(() => api.post(`/sales-orders/${order.id}/cancel`, { reason }), 'Cancelled'),
+              },
+            },
+          order.canEdit &&
+            (draft || order.status === 'CANCELLED') &&
+            can('gops.sales_orders.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${order.number}?`,
+                body: `This ${order.status === 'CANCELLED' ? 'cancelled order' : 'draft'} goes for good. Its number is not reused.`,
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
+        ]}
+        modify={order.canEdit && draft ? `/g-ops/sales-orders/${order.id}/edit` : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
-      {order.canEdit && draft && order.needsApproval && !!route?.steps.length && (
-        // The route the submit would take — the CEO's when it is ticked —
+      {order.canEdit && draft && order.needsApproval && (!!route?.steps.length || options.length > 0) && (
+        // The route the submit would take — the option's when it is ticked —
         // with who decides each step, named before anybody presses Submit,
         // exactly as the quotation page shows it.
-        <div className="qd-route">
-          <span className="qd-route-label">Submit for approval sends it to</span>
-          <ApprovalStepper
-            steps={route.steps.map((st) => ({
-              label: st.name,
-              approver: st.approvers.length ? st.approvers.map((p) => p.name).join(' or ') : 'Nobody — no one else holds this role',
-              status: 'WAITING',
-            }))}
-          />
+        <div className="card qd-route sales-card-gap" role="group" aria-label="Submit for approval">
+          {options.map((o) => (
+            <Checkbox key={o.id} checked={optionId === o.id} onChange={(v) => setOptionId(v ? o.id : null)} label={o.label} />
+          ))}
+          {!!route?.steps.length && (
+            <>
+              <span className="qd-route-label">Submit for approval sends it to</span>
+              <ApprovalStepper
+                steps={route.steps.map((st) => ({
+                  label: st.name,
+                  approver: st.approvers.length ? st.approvers.map((p) => p.name).join(' or ') : 'Nobody — no one else holds this role',
+                  status: 'WAITING',
+                }))}
+              />
+            </>
+          )}
         </div>
       )}
       {(pending || order.status === 'ISSUED') && <DocumentApproval documentType="sales_order" documentId={order.id} reloadToken={reload} />}
 
-      {cancelling && (
-        <div className="alert warn row so-confirm">
-          <span>Cancelling keeps the record and its number — say why:</span>
-          <input value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} aria-label="Why it is cancelled" />
-          <button
-            className="btn btn-sm btn-danger"
-            disabled={busy || cancelReason.trim().length < 3}
-            onClick={() =>
-              act(() => api.post(`/sales-orders/${order.id}/cancel`, { reason: cancelReason.trim() }), 'Cancelled').then(() => setCancelling(false))
-            }
-          >
-            Cancel this order
-          </button>
-          <button className="btn btn-sm" onClick={() => setCancelling(false)}>
-            Keep it
-          </button>
-        </div>
-      )}
-      {removing && (
-        <div className="alert warn row so-confirm">
-          <span>Delete this {order.status === 'CANCELLED' ? 'cancelled order' : 'draft'} for good? Its number is not reused.</span>
-          <button
-            className="btn btn-sm btn-danger"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await api.del(`/sales-orders/${order.id}`);
-                toast('ok', 'Deleted');
-                navigate('/g-ops/sales-orders');
-              } catch (err) {
-                setError(err);
-                setBusy(false);
-              }
-            }}
-          >
-            Delete
-          </button>
-          <button className="btn btn-sm" onClick={() => setRemoving(false)}>
-            Keep it
-          </button>
-        </div>
-      )}
       {order.status === 'CANCELLED' && order.cancelReason && (
         <div className="alert warn">Cancelled — {order.cancelReason}</div>
       )}
@@ -746,26 +743,29 @@ function ReleaseCard({ order, onSaved }: { order: SalesOrderDetailRow; onSaved: 
           <input value={dr} disabled={!editable} onChange={(e) => setDr(e.target.value)} />
         </Field>
       </div>
+      {/* A card that saves on its own: Save at its foot, on the right. */}
       {editable && (si !== (order.siNumber ?? '') || dr !== (order.drNumber ?? '')) && (
-        <button
-          className="btn btn-sm"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await api.patch(`/sales-orders/${order.id}`, { siNumber: si.trim() || null, drNumber: dr.trim() || null });
-              toast('ok', 'Release references saved');
-              await onSaved();
-            } catch (err) {
-              setError(err);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? 'Saving…' : 'Save references'}
-        </button>
+        <div className="row qe-foot">
+          <button
+            className="btn btn-primary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await api.patch(`/sales-orders/${order.id}`, { siNumber: si.trim() || null, drNumber: dr.trim() || null });
+                toast('ok', 'Release references saved');
+                await onSaved();
+              } catch (err) {
+                setError(err);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
       )}
     </div>
   );
@@ -779,7 +779,8 @@ function ReleaseCard({ order, onSaved }: { order: SalesOrderDetailRow; onSaved: 
  * the labels beside the values, the lines as one row each — group, product
  * over description, quantity beside unit, price, amount with the with-VAT
  * figure under it, cost and provider, margin — the totals beside the cost
- * panel, and Back / Save at both ends. The cells, the line arithmetic and
+ * panel, and Save at both ends; Back is the Shell's line, to the order, and
+ * leaving with unsaved changes asks there. The cells, the line arithmetic and
  * the payload are the quotation editor's own (`editorParts.tsx`), so the two
  * cannot drift. One Save sends the header and every line in one PUT; a line
  * sent back with its id keeps what it books of the quotation.
@@ -828,7 +829,6 @@ export function SalesOrderEditor() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [leaving, setLeaving] = useState(false);
   const [lines, setLines] = useState<Line[]>([]);
   /** The saved line behind each row — sent back so a line keeps its booking. */
   const [idByKey, setIdByKey] = useState<Record<string, string>>({});
@@ -887,16 +887,10 @@ export function SalesOrderEditor() {
       .catch(setLoadError);
   }, [id]);
 
-  // Leaving with unsaved work asks first — the browser's own prompt.
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
+  // Back goes to the order being modified, and leaving with unsaved changes
+  // asks first — in the Shell's bar for a link, through the browser otherwise.
+  useBackLink(id ? `/g-ops/sales-orders/${id}` : null, order?.number ?? null);
+  useUnsavedChanges(dirty);
 
   const set = <K extends keyof SoHeader>(k: K, v: SoHeader[K]) => {
     setHeader((h) => ({ ...h, [k]: v }));
@@ -1054,30 +1048,15 @@ export function SalesOrderEditor() {
     }
   }
 
-  function cancel() {
-    if (dirty && !leaving) {
-      setLeaving(true);
-      return;
-    }
-    leave();
-  }
-  function leave() {
-    setLeaving(false);
-    setDirty(false);
-    navigate(`/g-ops/sales-orders/${id}`);
-  }
-
   if (!order) return loadError ? <ErrorBox error={loadError} /> : <Loading />;
   if (!order.canEdit || order.status !== 'DRAFT') {
+    // The way back is the Shell's line, to the order (useBackLink above).
     return (
       <div className="card">
         <h3 className="card-title">{order.number} cannot be modified</h3>
         <p className="muted">
           {order.status !== 'DRAFT' ? `It is ${order.status.toLowerCase().replace(/_/g, ' ')} — reopen it first.` : 'Only its author can edit it.'}
         </p>
-        <Link className="btn" to={`/g-ops/sales-orders/${order.id}`}>
-          Back to {order.number}
-        </Link>
       </div>
     );
   }
@@ -1092,35 +1071,21 @@ export function SalesOrderEditor() {
 
   return (
     <div className="qe">
-      <div className="breadcrumb">
-        <Link to="/g-ops/sales-orders">Sales Orders</Link>
-        <span className="sep">›</span>
-        <Link to={`/g-ops/sales-orders/${order.id}`} className="mono">
-          {order.number}
-        </Link>
-        <span className="sep">›</span>
-        <span>Modify</span>
-      </div>
-
       <section className="card qe-card" aria-labelledby="so-title">
         <div className="qe-head">
           <div>
             <h1 id="so-title" className="qe-heading">
-              Modify sales order details
+              Modify sales order {order.number}
             </h1>
             <p className="faint qe-lead">Draft. Nothing changes until you save.</p>
           </div>
           <div className="row qe-actions">
-            <button type="button" className="btn" onClick={cancel} disabled={busy}>
-              Back
-            </button>
             <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
               {busy ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>
 
-        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
         <ErrorBox error={error} />
 
         <div className="qe-header qe-rows">
@@ -1453,11 +1418,7 @@ export function SalesOrderEditor() {
           {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} />}
         </div>
 
-        {leaving && <LeaveBar onLeave={leave} onStay={() => setLeaving(false)} />}
         <div className="row qe-foot">
-          <button type="button" className="btn" onClick={cancel} disabled={busy}>
-            Back
-          </button>
           <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>

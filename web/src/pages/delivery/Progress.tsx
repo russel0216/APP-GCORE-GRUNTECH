@@ -10,14 +10,18 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
 import { ProgressBar } from './Projects';
-import { openPdf } from '../../lib/api';
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink } from '../../components/Navigation';
+import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
 //  LIST
@@ -157,11 +161,6 @@ export function ProgressReports() {
       <div className="page-head">
         <div>
           <h1>Progress &amp; Billing</h1>
-          <p>
-            Reports are a chain — each one carries the previous percentages forward, so it reads as
-            a period statement rather than a running total someone has to work out by hand. A
-            billing covers only the increment that report added.
-          </p>
         </div>
         <div className="scope-switch" role="tablist" aria-label="Progress or billing">
           <button
@@ -286,11 +285,19 @@ export function ProgressReportDetail() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [report, setReport] = useState<ReportDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [narrative, setNarrative] = useState(false);
+
+  // A report belongs to its project: back goes to the project's Progress & Billing tab.
+  const seesProjects = can('gops.projects.view_all') || can('gops.projects.view_own');
+  useBackLink(
+    report && seesProjects ? `/g-ops/projects/${report.job.id}?tab=progress` : null,
+    report ? `${report.job.number} Progress & Billing` : null,
+  );
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -307,6 +314,14 @@ export function ProgressReportDetail() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // A question is about the record on screen: opening another from here
+  // (the report before or after) withdraws it, rather than leave it to act on
+  // the one left behind.
+  const closeConfirm = confirm.close;
+  useEffect(() => {
+    closeConfirm();
+  }, [id, closeConfirm]);
 
   if (loading) return <Loading />;
   if (!report) return <ErrorBox error={error ?? new Error('Report not found')} />;
@@ -326,15 +341,12 @@ export function ProgressReportDetail() {
     }
   }
 
+  /** Asked in the confirm bar first; a refusal is shown there. */
   async function approve() {
     if (!report) return;
-    try {
-      await api.post(`/progress-reports/${report.id}/approve`);
-      toast('ok', 'Report approved — it can now be billed');
-      await load();
-    } catch (err) {
-      setError(err);
-    }
+    await api.post(`/progress-reports/${report.id}/approve`);
+    toast('ok', 'Report approved — it can now be billed');
+    await load();
   }
 
   async function bill() {
@@ -350,62 +362,62 @@ export function ProgressReportDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to={`/g-ops/projects/${report.job.id}`}>{report.job.number}</Link>
-        <span className="sep">›</span>
-        <Link to="/g-ops/progress">Progress</Link>
-        <span className="sep">›</span>
-        {report.previousReport && (
+      <RecordHeader
+        type="Progress report"
+        code={report.number}
+        title={`${report.job.name} · Report #${report.reportNo}`}
+        status={report.status}
+        meta={
           <>
-            <Link to={`/g-ops/progress/${report.previousReport.id}`}>#{report.previousReport.reportNo}</Link>
-            <span className="sep">›</span>
+            <Link className="mono" to={`/g-ops/projects/${report.job.id}`}>
+              {report.job.number}
+            </Link>{' '}
+            · {report.job.customer.name} · {formatDate(report.periodFrom)} — {formatDate(report.periodTo)} · prepared by{' '}
+            {report.preparedBy.name}
+            {report.previousReport && (
+              <>
+                {' '}
+                · after{' '}
+                <Link to={`/g-ops/progress/${report.previousReport.id}`}>#{report.previousReport.reportNo}</Link>
+              </>
+            )}
+            {report.nextReport && (
+              <>
+                {' '}
+                · followed by <Link to={`/g-ops/progress/${report.nextReport.id}`}>#{report.nextReport.reportNo}</Link>
+              </>
+            )}
           </>
-        )}
-        <span className="mono">
-          {report.number} (#{report.reportNo})
-        </span>
-        {report.nextReport && (
+        }
+        actions={
           <>
-            <span className="sep">›</span>
-            <Link to={`/g-ops/progress/${report.nextReport.id}`}>#{report.nextReport.reportNo}</Link>
+            {report.status === 'DRAFT' && can('gops.progress_billing.approve') && (
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  confirm.ask({
+                    title: `Approve ${report.number}?`,
+                    body: 'Its percentages become the record of what was reported and cannot be changed. It can then be billed.',
+                    confirmLabel: 'Approve',
+                    tone: 'primary',
+                    onConfirm: approve,
+                  })
+                }
+              >
+                Approve
+              </button>
+            )}
+            {report.status === 'APPROVED' && !report.billing && can('gops.progress_billing.create') && (
+              <button className="btn btn-primary" onClick={bill}>
+                Raise billing
+              </button>
+            )}
           </>
-        )}
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            Progress report #{report.reportNo}
-          </h1>
-          <p>
-            {report.job.name} · {report.job.customer.name} · {formatDate(report.periodFrom)} —{' '}
-            {formatDate(report.periodTo)} <StatusBadge status={report.status} />
-          </p>
-        </div>
-        <div className="row">
-          <button
-            className="btn"
-            onClick={() => openPdf(`/api/progress-reports/${report.id}/pdf`, () => toast('error', 'Could not print'))}
-          >
-            Print
-          </button>
-          {report.canEdit && (
-            <button className="btn" onClick={() => setNarrative(true)}>
-              Narrative
-            </button>
-          )}
-          {report.status === 'DRAFT' && can('gops.progress_billing.approve') && (
-            <button className="btn btn-ok" onClick={approve}>
-              Approve
-            </button>
-          )}
-          {report.status === 'APPROVED' && !report.billing && can('gops.progress_billing.create') && (
-            <button className="btn btn-primary" onClick={bill}>
-              Raise billing
-            </button>
-          )}
-        </div>
-      </div>
+        }
+        print={`/api/progress-reports/${report.id}/pdf`}
+        modify={report.canEdit ? () => setNarrative(true) : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -578,7 +590,7 @@ export function ProgressReportDetail() {
   );
 }
 
-/** Commits on blur or Enter rather than on every keystroke. */
+/** Commits on blur or Enter rather than on every keystroke. The one numeric input (rule 17). */
 function PctInput({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
   const [text, setText] = useState(value.toString());
   useEffect(() => setText(value.toString()), [value]);
@@ -590,7 +602,8 @@ function PctInput({ value, onCommit }: { value: number; onCommit: (v: number) =>
   }
 
   return (
-    <input
+    <NumberInput
+      kind="percent"
       className="mono del-pct-input"
       aria-label="Percentage"
       value={text}
@@ -643,17 +656,14 @@ function NarrativeModal({
   return (
     <Modal
       wide
-      title="Report narrative"
+      title={`Modify progress report ${report.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -733,10 +743,19 @@ export function BillingDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [billing, setBilling] = useState<BillingDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+
+  // A billing has no menu entry of its own: back goes to its project's
+  // Progress & Billing tab, else to the Progress & Billing register.
+  const seesProjects = can('gops.projects.view_all') || can('gops.projects.view_own');
+  useBackLink(
+    billing ? (seesProjects ? `/g-ops/projects/${billing.job.id}?tab=progress` : '/g-ops/progress') : null,
+    billing ? (seesProjects ? `${billing.job.number} Progress & Billing` : 'Progress & Billing') : null,
+  );
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -757,56 +776,64 @@ export function BillingDetailPage() {
   if (loading) return <Loading />;
   if (!billing) return <ErrorBox error={error ?? new Error('Billing not found')} />;
 
+  /** Asked in the confirm bar first; a refusal is shown there. */
   async function approve() {
     if (!billing) return;
-    try {
-      await api.post(`/billings/${billing.id}/approve`);
-      toast('ok', 'Billing approved');
-      await load();
-    } catch (err) {
-      setError(err);
-    }
+    await api.post(`/billings/${billing.id}/approve`);
+    toast('ok', 'Billing approved');
+    await load();
   }
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to={`/g-ops/projects/${billing.job.id}`}>{billing.job.number}</Link>
-        <span className="sep">›</span>
-        <Link to={`/g-ops/progress/${billing.progressReport.id}`}>{billing.progressReport.number}</Link>
-        <span className="sep">›</span>
-        <span className="mono">{billing.number}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>Progress billing #{billing.billingNo}</h1>
-          <p>
-            {billing.job.name} · {billing.job.customer.name} · {formatDate(billing.billingDate)}{' '}
-            <StatusBadge status={billing.status} />
-          </p>
-        </div>
-        <div className="row">
-          <button
-            className="btn"
-            onClick={() => openPdf(`/api/billings/${billing.id}/pdf`, () => toast('error', 'Could not print'))}
-          >
-            Print
-          </button>
-          {billing.status === 'DRAFT' && can('gops.progress_billing.approve') && (
-            <button className="btn btn-ok" onClick={approve}>
-              Approve
-            </button>
-          )}
-          {/* The hand-off to Finance. The invoice copies this billing's figures,
-              so it is raised from here rather than keyed again in A/R. */}
-          {!billing.invoice && billing.status === 'APPROVED' && can('gfin.ar.create') && (
-            <Link className="btn btn-primary" to={`/g-fin/ar?raise=${billing.id}`}>
-              Raise invoice
+      <RecordHeader
+        type="Progress billing"
+        code={billing.number}
+        title={`${billing.job.name} · Billing #${billing.billingNo}`}
+        status={billing.status}
+        amount={formatMoney(billing.invoiceTotal)}
+        amountLabel="Invoice total"
+        meta={
+          <>
+            <Link className="mono" to={`/g-ops/projects/${billing.job.id}`}>
+              {billing.job.number}
+            </Link>{' '}
+            · {billing.job.customer.name} · {formatDate(billing.billingDate)} · against{' '}
+            <Link className="mono" to={`/g-ops/progress/${billing.progressReport.id}`}>
+              {billing.progressReport.number}
             </Link>
-          )}
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <>
+            {billing.status === 'DRAFT' && can('gops.progress_billing.approve') && (
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  confirm.ask({
+                    title: `Approve ${billing.number}?`,
+                    body: 'Its figures are fixed, and finance can raise the invoice from it.',
+                    confirmLabel: 'Approve',
+                    tone: 'primary',
+                    onConfirm: approve,
+                  })
+                }
+              >
+                Approve
+              </button>
+            )}
+            {/* The hand-off to Finance. The invoice copies this billing's figures,
+                so it is raised from here rather than keyed again in A/R. */}
+            {!billing.invoice && billing.status === 'APPROVED' && can('gfin.ar.create') && (
+              <Link className="btn btn-primary" to={`/g-fin/ar?raise=${billing.id}`}>
+                Raise invoice
+              </Link>
+            )}
+          </>
+        }
+        print={`/api/billings/${billing.id}/pdf`}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -991,11 +1018,6 @@ export function BudgetMonitoring() {
       <div className="page-head">
         <div>
           <h1>Budget Monitoring</h1>
-          <p>
-            Every live project on one page. <strong>Unbilled</strong> is work done but not yet
-            invoiced — cash you are owed and have not asked for. Open a project for its per-category
-            budget position.
-          </p>
         </div>
       </div>
 

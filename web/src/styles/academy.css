@@ -9,19 +9,6 @@
   there is no academy grid here, deliberately.
 */
 
-/* ── Shared page furniture ───────────────────────────────────────────────── */
-
-.academy-meta {
-  margin: 0 0 var(--s-4);
-  color: var(--muted);
-  font-size: var(--fs-md);
-}
-
-.academy-meta strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
 .academy-body {
   align-items: start;
   margin-bottom: var(--s-4);

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { Attachments, openAttachment, readableSize } from '../../components/Attachments';
 import { Meter, Stat } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
@@ -16,6 +17,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -625,23 +627,20 @@ export function CadRequestModal({
 
   return (
     <Modal
-      title={existing ? `Modify ${existing.number}` : 'New CAD job order'}
+      title={existing ? `Modify CAD job order ${existing.number}` : 'New CAD job order'}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             type="button"
             className="btn btn-primary"
             onClick={save}
             disabled={busy || !form.customerId || form.title.trim().length < 3 || form.scope.trim().length < 5}
           >
-            {busy ? 'Saving…' : existing ? 'Save' : 'Raise request'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -730,70 +729,18 @@ export function CadRequestModal({
 
 // ── One request ─────────────────────────────────────────────────────────────
 
-/** An in-page panel for an action that needs a word: a reason, a note, a designer. */
-function NotePanel({
-  title,
-  label,
-  hint,
-  placeholder,
-  action,
-  danger,
-  required = true,
-  busy,
-  onClose,
-  onSubmit,
-  children,
-}: {
-  title: string;
-  label: string;
-  hint?: string;
-  placeholder?: string;
-  action: string;
-  danger?: boolean;
-  required?: boolean;
-  busy: boolean;
-  onClose: () => void;
-  onSubmit: (value: string) => void;
-  children?: ReactNode;
-}) {
-  const [value, setValue] = useState('');
-  return (
-    <div className="cad-panel" role="group" aria-label={title}>
-      <h4 className="svc-subhead" style={{ marginTop: 0 }}>
-        {title}
-      </h4>
-      {children}
-      <Field label={label} hint={hint}>
-        <textarea rows={3} value={value} placeholder={placeholder} autoFocus onChange={(e) => setValue(e.target.value)} />
-      </Field>
-      <div className="cad-panel-actions">
-        <button type="button" className="btn" onClick={onClose} disabled={busy}>
-          Back
-        </button>
-        <button
-          type="button"
-          className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
-          disabled={busy || (required && value.trim().length < 3)}
-          onClick={() => onSubmit(value.trim())}
-        >
-          {action}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function CadJobOrderDetail() {
   const { id } = useParams<{ id: string }>();
   const { can, me } = useAuth();
-  const navigate = useNavigate();
   const toast = useToast();
   const designers = useDesigners();
+  const confirm = useConfirm();
   const [row, setRow] = useState<CadDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [panel, setPanel] = useState<'edit' | 'cancel' | 'hold' | 'accept' | 'changes' | 'assign' | 'plan' | null>(null);
+  /** The in-page panels that gather more than a word (a designer; a revision's files and note; a plan's title and number), and the Modify form. */
+  const [panel, setPanel] = useState<'edit' | 'assign' | 'revision' | 'plan' | null>(null);
   const [assignee, setAssignee] = useState('');
   const [pct, setPct] = useState('');
 
@@ -830,77 +777,159 @@ export function CadJobOrderDetail() {
     }
   }
 
+  /** A step asked in the confirm bar: it throws, so a refusal shows in the bar and the bar stays open. */
+  async function step(label: string, fn: () => Promise<unknown>) {
+    await fn();
+    toast('ok', label);
+    setPanel(null);
+    await load();
+  }
+
   if (loading) return <Loading />;
   if (!row) return <ErrorBox error={error ?? new Error('CAD job order not found')} />;
 
   const r = row;
   const requestor = me?.user.id === r.requestedBy.id;
   const latest = r.revisions[0] ?? null;
+  const latestLabel = latest?.label ?? 'the drawing';
+  const nextLabel = latest ? `R${latest.sequence + 1}` : 'R0';
+  // The one main next step, when there is one: take it, accept it, file it, resume it, give it a designer, or submit the next revision.
+  const main = r.canTake
+    ? 'take'
+    : r.canAccept
+      ? 'accept'
+      : r.canFilePlan
+        ? 'plan'
+        : r.canResume
+          ? 'resume'
+          : r.canAssign && !r.assignedTo
+            ? 'assign'
+            : r.canSubmitRevision
+              ? 'revision'
+              : null;
+  const btn = (key: string) => (main === key ? 'btn btn-primary' : 'btn');
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/cad-job-orders">CAD J.O.</Link>
-        <span className="sep">›</span>
-        <span className="mono">{r.number}</span>
-      </div>
-
       <RecordHeader
         type="CAD Job Order"
         code={r.number}
         title={r.title}
         status={r.status}
         statusExtra={CAD_TONES}
+        statusLabel={statusLabel(r.status)}
+        meta={
+          <>
+            {r.customer.name} · requested by {r.requestedBy.name} on {formatDate(r.createdAt)}
+            {r.neededBy ? ` · needed by ${formatDate(r.neededBy)}` : ''}
+            {r.assignedTo ? ` · with ${r.assignedTo.name}` : ' · no designer yet'}
+            {r.completedAt ? ` · completed ${formatDate(r.completedAt)}` : ''}
+          </>
+        }
         actions={
           <>
-            <button type="button" className="btn" onClick={() => openPdf(`/api/cad-job-orders/${r.id}/pdf`, () => toast('error', 'Could not print'))}>
-              Print
-            </button>
-            {r.canEdit && (
-              <button type="button" className="btn" onClick={() => setPanel('edit')} disabled={busy}>
-                Modify
-              </button>
-            )}
             {r.canTake && (
-              <button type="button" className="btn btn-ok" disabled={busy} onClick={() => run('It is on your board', () => api.post(`/cad-job-orders/${r.id}/take`))}>
+              <button type="button" className={btn('take')} disabled={busy} onClick={() => run('It is on your board', () => api.post(`/cad-job-orders/${r.id}/take`))}>
                 Take this request
               </button>
             )}
             {r.canAssign && (
-              <button type="button" className="btn" onClick={() => setPanel(panel === 'assign' ? null : 'assign')} disabled={busy}>
+              <button type="button" className={btn('assign')} aria-expanded={panel === 'assign'} onClick={() => setPanel(panel === 'assign' ? null : 'assign')} disabled={busy}>
                 {r.assignedTo ? 'Reassign' : 'Assign designer'}
               </button>
             )}
-            {r.canFilePlan && (
-              <button type="button" className="btn btn-primary" onClick={() => setPanel(panel === 'plan' ? null : 'plan')} disabled={busy}>
-                File as Approved Plan
+            {r.canSubmitRevision && (
+              <button type="button" className={btn('revision')} aria-expanded={panel === 'revision'} onClick={() => setPanel(panel === 'revision' ? null : 'revision')} disabled={busy}>
+                Submit {nextLabel}
+              </button>
+            )}
+            {r.canAccept && (
+              <button
+                type="button"
+                className={btn('accept')}
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: requestor ? `Accept ${latestLabel}?` : `Close ${r.number} with ${latestLabel}?`,
+                    body: requestor
+                      ? 'The request is completed with this revision, and the designer is told.'
+                      : 'The request is completed without the requestor’s acceptance, and they are told.',
+                    confirmLabel: 'Accept and complete',
+                    reason: requestor ? 'optional' : 'required',
+                    reasonLabel: requestor ? 'A note, if any' : 'Why is it being closed without the requestor’s acceptance?',
+                    tone: 'primary',
+                    onConfirm: (note) => step('Completed', () => api.post(`/cad-job-orders/${r.id}/accept`, { note: note || null })),
+                  })
+                }
+              >
+                Accept {latest?.label ?? ''}
+              </button>
+            )}
+            {r.canRequestChanges && (
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: `Ask for changes to ${latestLabel}?`,
+                    body: 'Goes into the thread; the designer is told and the next revision answers it.',
+                    confirmLabel: 'Request changes',
+                    reason: 'required',
+                    minReason: 3,
+                    reasonLabel: 'What should change?',
+                    tone: 'primary',
+                    onConfirm: (comment) => step('Changes requested', () => api.post(`/cad-job-orders/${r.id}/changes`, { comment })),
+                  })
+                }
+              >
+                Request changes
               </button>
             )}
             {r.canResume && (
-              <button type="button" className="btn btn-ok" disabled={busy} onClick={() => run('Resumed', () => api.post(`/cad-job-orders/${r.id}/resume`))}>
+              <button type="button" className={btn('resume')} disabled={busy} onClick={() => run('Resumed', () => api.post(`/cad-job-orders/${r.id}/resume`))}>
                 Resume
               </button>
             )}
-            {r.canHold && (
-              <button type="button" className="btn" onClick={() => setPanel(panel === 'hold' ? null : 'hold')} disabled={busy}>
-                Put on hold
-              </button>
-            )}
-            {r.canCancel && (
-              <button type="button" className="btn btn-danger" onClick={() => setPanel(panel === 'cancel' ? null : 'cancel')} disabled={busy}>
-                Cancel
+            {r.canFilePlan && (
+              <button type="button" className={btn('plan')} aria-expanded={panel === 'plan'} onClick={() => setPanel(panel === 'plan' ? null : 'plan')} disabled={busy}>
+                File as Approved Plan
               </button>
             )}
           </>
         }
+        print={`/api/cad-job-orders/${r.id}/pdf`}
+        more={[
+          r.canHold && {
+            label: 'Put on hold',
+            confirm: {
+              title: `Put ${r.number} on hold?`,
+              body: 'Waiting on the customer, on a site measurement, on a decision… Resume picks it up where it stopped.',
+              confirmLabel: 'Put on hold',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why?',
+              tone: 'primary',
+              onConfirm: (reason) => step('On hold', () => api.post(`/cad-job-orders/${r.id}/hold`, { reason })),
+            },
+          },
+          r.canCancel && {
+            label: 'Cancel CAD job order',
+            danger: true,
+            confirm: {
+              title: `Cancel ${r.number}?`,
+              body: 'The requestor and the designer are told. A cancelled request is kept as a record.',
+              confirmLabel: 'Cancel CAD job order',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why is it cancelled?',
+              onConfirm: (reason) => step('Request cancelled', () => api.post(`/cad-job-orders/${r.id}/cancel`, { reason })),
+            },
+          },
+        ]}
+        modify={r.canEdit ? () => setPanel('edit') : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta">
-        Requested by {r.requestedBy.name} on {formatDate(r.createdAt)}
-        {r.neededBy ? ` · needed by ${formatDate(r.neededBy)}` : ''}
-        {r.assignedTo ? ` · with ${r.assignedTo.name}` : ' · no designer yet'}
-        {r.completedAt ? ` · completed ${formatDate(r.completedAt)}` : ''}
-      </p>
 
       <ErrorBox error={error} />
 
@@ -910,7 +939,7 @@ export function CadJobOrderDetail() {
       )}
       {r.status === 'FOR_REVIEW' && latest && (
         <div className="alert info">
-          {latest.label} is ready for review{requestor ? ' — accept it, or ask for changes below' : ` — waiting on ${r.requestedBy.name}`}.
+          {latest.label} is ready for review{requestor ? ' — accept it, or ask for changes' : ` — waiting on ${r.requestedBy.name}`}.
         </div>
       )}
       {r.status === 'CHANGES_REQUESTED' && <div className="alert warn">Changes were requested — see the thread. The next revision answers them.</div>}
@@ -953,7 +982,7 @@ export function CadJobOrderDetail() {
           </Field>
           <div className="cad-panel-actions">
             <button type="button" className="btn" onClick={() => setPanel(null)} disabled={busy}>
-              Back
+              Cancel
             </button>
             <button
               type="button"
@@ -966,50 +995,7 @@ export function CadJobOrderDetail() {
           </div>
         </div>
       )}
-      {panel === 'cancel' && (
-        <NotePanel
-          title={`Cancel ${r.number}`}
-          label="Why is it cancelled?"
-          action="Cancel request"
-          danger
-          busy={busy}
-          onClose={() => setPanel(null)}
-          onSubmit={(reason) => run('Request cancelled', () => api.post(`/cad-job-orders/${r.id}/cancel`, { reason }))}
-        />
-      )}
-      {panel === 'hold' && (
-        <NotePanel
-          title="Put on hold"
-          label="Why?"
-          hint="Waiting on the customer, on a site measurement, on a decision…"
-          action="Put on hold"
-          busy={busy}
-          onClose={() => setPanel(null)}
-          onSubmit={(reason) => run('On hold', () => api.post(`/cad-job-orders/${r.id}/hold`, { reason }))}
-        />
-      )}
-      {panel === 'accept' && (
-        <NotePanel
-          title={`Accept ${latest?.label ?? 'the drawing'}`}
-          label={requestor ? 'A note, if any' : 'Why is it being closed without the requestor’s acceptance?'}
-          required={!requestor}
-          action="Accept and complete"
-          busy={busy}
-          onClose={() => setPanel(null)}
-          onSubmit={(note) => run('Completed', () => api.post(`/cad-job-orders/${r.id}/accept`, { note: note || null }))}
-        />
-      )}
-      {panel === 'changes' && (
-        <NotePanel
-          title={`Ask for changes to ${latest?.label ?? 'the drawing'}`}
-          label="What should change?"
-          hint="Goes into the thread; the designer is told and the next revision answers it."
-          action="Request changes"
-          busy={busy}
-          onClose={() => setPanel(null)}
-          onSubmit={(comment) => run('Changes requested', () => api.post(`/cad-job-orders/${r.id}/changes`, { comment }))}
-        />
-      )}
+      {panel === 'revision' && r.canSubmitRevision && <SubmitRevisionPanel row={r} next={nextLabel} busy={busy} onClose={() => setPanel(null)} onRun={run} />}
       {panel === 'plan' && r.canFilePlan && <FilePlanPanel row={r} busy={busy} onClose={() => setPanel(null)} onRun={run} />}
 
       <div className="svc-detail-grid">
@@ -1133,7 +1119,7 @@ export function CadJobOrderDetail() {
                     disabled={busy || pct === '' || Number(pct) === r.progressPct}
                     onClick={() => run(`Progress ${pct}%`, () => api.post(`/cad-job-orders/${r.id}/progress`, { progressPct: Math.round(Number(pct)) }))}
                   >
-                    Update
+                    Save progress
                   </button>
                 </div>
               )}
@@ -1149,7 +1135,7 @@ export function CadJobOrderDetail() {
         <p className="svc-text">{r.scope}</p>
       </section>
 
-      <RevisionsCard row={r} busy={busy} onRun={run} onAccept={() => setPanel('accept')} onChanges={() => setPanel('changes')} />
+      <RevisionsCard row={r} />
 
       <ThreadCard row={r} busy={busy} onRun={run} />
 
@@ -1171,52 +1157,15 @@ export function CadJobOrderDetail() {
           }}
         />
       )}
-      {!r.canEdit && !r.isDesigner && r.status === 'CANCELLED' && (
-        <p className="muted">
-          <button type="button" className="btn btn-sm" onClick={() => navigate('/g-ops/cad-job-orders')}>
-            Back to the list
-          </button>
-        </p>
-      )}
     </div>
   );
 }
 
-/** The revisions, latest first, and the designer's "Submit revision" panel. */
-function RevisionsCard({
-  row: r,
-  busy,
-  onRun,
-  onAccept,
-  onChanges,
-}: {
-  row: CadDetail;
-  busy: boolean;
-  onRun: (label: string, fn: () => Promise<unknown>, close?: boolean) => Promise<void>;
-  onAccept: () => void;
-  onChanges: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [note, setNote] = useState('');
-  const [externalUrl, setExternalUrl] = useState('');
-  const [files, setFiles] = useState<File[]>([]);
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const hasPdf = files.some((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
-  const next = r.revisions.length ? `R${r.revisions[0].sequence + 1}` : 'R0';
-
-  async function submit() {
-    const form = new FormData();
-    form.set('note', note.trim());
-    if (externalUrl.trim()) form.set('externalUrl', externalUrl.trim());
-    for (const f of files) form.append('files', f);
-    await onRun(`${next} submitted — the requestor has been told`, () => api.post(`/cad-job-orders/${r.id}/revisions`, form));
-    setOpen(false);
-    setNote('');
-    setExternalUrl('');
-    setFiles([]);
-    if (fileRef.current) fileRef.current.value = '';
-  }
-
+/**
+ * The revisions, latest first. Submitting the next one, accepting the latest
+ * or asking for changes to it are next steps in the page's header.
+ */
+function RevisionsCard({ row: r }: { row: CadDetail }) {
   return (
     <section className="card">
       <h3 className="card-title">
@@ -1224,7 +1173,7 @@ function RevisionsCard({
         {r.revisions.length ? <span className="badge">{r.revisions.length}</span> : null}
       </h3>
       {r.revisions.length === 0 ? (
-        <Empty title="No revision submitted yet" hint={r.canSubmitRevision ? 'Submit the first one, R0, with its PDF below.' : undefined} />
+        <Empty title="No revision submitted yet" hint={r.canSubmitRevision ? 'Submit the first one, R0, with its PDF.' : undefined} />
       ) : (
         <ul className="cad-revisions">
           {r.revisions.map((rev, i) => (
@@ -1238,63 +1187,71 @@ function RevisionsCard({
               </div>
               <p className="cad-revision-note">{rev.note}</p>
               <FileChips files={rev.files} link={rev.externalUrl} />
-              {i === 0 && r.status === 'FOR_REVIEW' && (r.canAccept || r.canRequestChanges) && (
-                <div className="cad-panel-actions">
-                  {r.canRequestChanges && (
-                    <button type="button" className="btn" disabled={busy} onClick={onChanges}>
-                      Request changes
-                    </button>
-                  )}
-                  {r.canAccept && (
-                    <button type="button" className="btn btn-ok" disabled={busy} onClick={onAccept}>
-                      Accept {rev.label}
-                    </button>
-                  )}
-                </div>
-              )}
             </li>
           ))}
         </ul>
       )}
-
-      {r.canSubmitRevision && !open && (
-        <p className="muted" style={{ marginTop: 'var(--s-3)' }}>
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => setOpen(true)} disabled={busy}>
-            Submit {next}
-          </button>
-        </p>
-      )}
-      {r.canSubmitRevision && open && (
-        <div className="cad-panel" role="group" aria-label={`Submit ${next}`}>
-          <h4 className="svc-subhead" style={{ marginTop: 0 }}>
-            Submit {next}
-          </h4>
-          <Field label="Files" hint="The PDF output is required — the requestor always receives a PDF. Add the AutoCAD or SketchUp source beside it; up to 20 files.">
-            <input ref={fileRef} type="file" multiple accept={FILE_ACCEPT} onChange={(e) => setFiles([...(e.target.files ?? [])])} />
-            {files.length > 0 && (
-              <p className="cad-picked">
-                {files.map((f) => f.name).join(', ')} · {readableSize(files.reduce((t, f) => t + f.size, 0))}
-                {!hasPdf ? ' · no PDF yet' : ''}
-              </p>
-            )}
-          </Field>
-          <Field label="What this revision covers, or what changed" hint={r.revisions.length ? 'Say what changed since the last revision' : undefined}>
-            <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} />
-          </Field>
-          <Field label="External file link" hint="For a model too big to upload: a shared-drive link, http(s) only">
-            <input value={externalUrl} placeholder="https://…" onChange={(e) => setExternalUrl(e.target.value)} />
-          </Field>
-          <div className="cad-panel-actions">
-            <button type="button" className="btn" onClick={() => setOpen(false)} disabled={busy}>
-              Back
-            </button>
-            <button type="button" className="btn btn-primary" disabled={busy || !hasPdf || note.trim().length < 2} onClick={() => void submit()}>
-              {busy ? 'Uploading…' : `Submit ${next}`}
-            </button>
-          </div>
-        </div>
-      )}
     </section>
+  );
+}
+
+/** The designer's "Submit Rn" panel, opened from the header: the PDF (and its source), a note, an optional link. */
+function SubmitRevisionPanel({
+  row: r,
+  next,
+  busy,
+  onClose,
+  onRun,
+}: {
+  row: CadDetail;
+  next: string;
+  busy: boolean;
+  onClose: () => void;
+  onRun: (label: string, fn: () => Promise<unknown>, close?: boolean) => Promise<void>;
+}) {
+  const [note, setNote] = useState('');
+  const [externalUrl, setExternalUrl] = useState('');
+  const [files, setFiles] = useState<File[]>([]);
+  const hasPdf = files.some((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+
+  async function submit() {
+    const form = new FormData();
+    form.set('note', note.trim());
+    if (externalUrl.trim()) form.set('externalUrl', externalUrl.trim());
+    for (const f of files) form.append('files', f);
+    // A success closes the panel (the page's run()); a refusal keeps it open with the files still picked.
+    await onRun(`${next} submitted — the requestor has been told`, () => api.post(`/cad-job-orders/${r.id}/revisions`, form));
+  }
+
+  return (
+    <div className="cad-panel" role="group" aria-label={`Submit ${next}`}>
+      <h4 className="svc-subhead" style={{ marginTop: 0 }}>
+        Submit {next}
+      </h4>
+      <Field label="Files" hint="The PDF output is required — the requestor always receives a PDF. Add the AutoCAD or SketchUp source beside it; up to 20 files.">
+        <input type="file" multiple accept={FILE_ACCEPT} onChange={(e) => setFiles([...(e.target.files ?? [])])} />
+        {files.length > 0 && (
+          <p className="cad-picked">
+            {files.map((f) => f.name).join(', ')} · {readableSize(files.reduce((t, f) => t + f.size, 0))}
+            {!hasPdf ? ' · no PDF yet' : ''}
+          </p>
+        )}
+      </Field>
+      <Field label="What this revision covers, or what changed" hint={r.revisions.length ? 'Say what changed since the last revision' : undefined}>
+        <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} />
+      </Field>
+      <Field label="External file link" hint="For a model too big to upload: a shared-drive link, http(s) only">
+        <input value={externalUrl} placeholder="https://…" onChange={(e) => setExternalUrl(e.target.value)} />
+      </Field>
+      <div className="cad-panel-actions">
+        <button type="button" className="btn" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-primary" disabled={busy || !hasPdf || note.trim().length < 2} onClick={() => void submit()}>
+          {busy ? 'Uploading…' : `Submit ${next}`}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1408,7 +1365,7 @@ function FilePlanPanel({
       </div>
       <div className="cad-panel-actions">
         <button type="button" className="btn" onClick={onClose} disabled={busy}>
-          Back
+          Cancel
         </button>
         <button
           type="button"

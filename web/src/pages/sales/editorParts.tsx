@@ -10,7 +10,9 @@ import { NumberInput } from '../../components/NumberInput';
   (2026-10-08, the owner's call: the sales order is modified the way a
   quotation is). A line as the table edits it, its arithmetic view for
   lib/quotationMath, the payload both APIs take, and the cells — product with
-  suggestions, cost and provider, the read-only header value, the leave bar.
+  suggestions, cost and provider, the read-only header value. Leaving with
+  unsaved changes is the Shell's question now (useUnsavedChanges in
+  components/Navigation.tsx), so there is no leave bar of the editors' own.
   Nothing here knows which document it is in.
 */
 
@@ -469,21 +471,6 @@ export function ProviderLookup({
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-/** Leaving with unsaved work, asked in the page rather than in a dialog. */
-export function LeaveBar({ onLeave, onStay }: { onLeave: () => void; onStay: () => void }) {
-  return (
-    <div className="alert warn row qe-leave" role="alert">
-      <span>You have changes that are not saved.</span>
-      <button type="button" className="btn btn-sm btn-danger" onClick={onLeave}>
-        Leave without saving
-      </button>
-      <button type="button" className="btn btn-sm" autoFocus onClick={onStay}>
-        Keep editing
-      </button>
     </div>
   );
 }

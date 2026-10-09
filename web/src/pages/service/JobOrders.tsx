@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf, qs } from '../../lib/api';
+import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { PeoplePicker } from '../../components/PeoplePicker';
@@ -12,6 +13,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -482,14 +484,11 @@ export function JobOrderModal({
 
   return (
     <Modal
-      title={existing ? `Modify ${existing.number}` : 'New job order'}
+      title={existing ? `Modify job order ${existing.number}` : 'New job order'}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             type="button"
             className="btn btn-primary"
@@ -505,9 +504,9 @@ export function JobOrderModal({
               finishBeforeStart
             }
           >
-            {busy ? 'Saving…' : existing ? 'Save' : 'Raise job order'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -670,7 +669,8 @@ export function JobOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
-  const [modal, setModal] = useState<'edit' | 'cancel' | 'ack' | 'invoice' | 'report' | null>(null);
+  const [modal, setModal] = useState<'edit' | 'ack' | 'invoice' | 'report' | null>(null);
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -710,6 +710,13 @@ export function JobOrderDetail() {
     }
   }
 
+  /** Cancelling, asked in the confirm bar under the header — which shows a refusal and stays open. */
+  async function cancel(reason: string) {
+    await api.post(`/job-orders/${row!.id}/cancel`, { reason });
+    toast('ok', 'Job order cancelled');
+    await load();
+  }
+
   const r = row;
   const canWriteReport = r.status === 'APPROVED' && !!r.visit && !r.visit.report && can(reportPermission(r.kind, 'create'));
   const canInvoice = r.status === 'COMPLETED' && r.billable && !r.invoice && can('gfin.ar.create');
@@ -717,48 +724,38 @@ export function JobOrderDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/job-orders">Job Orders</Link>
-        <span className="sep">›</span>
-        <span className="mono">{r.number}</span>
-      </div>
-
       <RecordHeader
         type="Job Order"
         code={r.number}
         title={r.projectName ?? r.title}
         status={r.status}
         statusExtra={JOB_ORDER_TONES}
+        statusLabel={statusLabel(r.status)}
         amount={r.amount != null ? formatMoney(r.amount) : undefined}
         amountLabel="Amount (before VAT)"
+        meta={
+          <>
+            {r.customer.name} · {r.title} · raised by {r.requestedBy.name} on {formatDate(r.createdAt)}
+            {r.approvedAt ? ` · approved ${formatDate(r.approvedAt)}` : ''}
+            {r.completedAt ? ` · completed ${formatDate(r.completedAt)}` : ''}
+          </>
+        }
         actions={
           <>
-            <button type="button" className="btn" onClick={() => openPdf(`/api/job-orders/${r.id}/pdf`, () => toast('error', 'Could not print'))}>
-              Print
-            </button>
-            {r.canEdit && (
-              <button type="button" className="btn" onClick={() => setModal('edit')} disabled={busy}>
-                Modify
-              </button>
-            )}
+            {/* The main next step, by status: submit a draft, write the visit's report, bill a completed order. */}
             {r.canEdit && (
               <button
                 type="button"
-                className="btn btn-ok"
+                className="btn btn-primary"
                 disabled={busy}
                 onClick={() => run('Submitted for approval', () => api.post(`/job-orders/${r.id}/submit`))}
               >
-                {r.status === 'REJECTED' ? 'Submit again' : 'Submit for approval'}
+                Submit for approval
               </button>
             )}
             {canWriteReport && (
-              <button type="button" className="btn" onClick={() => setModal('report')} disabled={busy}>
+              <button type="button" className="btn btn-primary" onClick={() => setModal('report')} disabled={busy}>
                 Write report
-              </button>
-            )}
-            {r.canAcknowledge && (
-              <button type="button" className="btn" onClick={() => setModal('ack')} disabled={busy}>
-                {r.customerAcknowledgedBy ? 'Re-record acknowledgement' : 'Record acknowledgement'}
               </button>
             )}
             {canInvoice && (
@@ -766,20 +763,32 @@ export function JobOrderDetail() {
                 Raise invoice
               </button>
             )}
-            {r.canCancel && (
-              <button type="button" className="btn btn-danger" onClick={() => setModal('cancel')} disabled={busy}>
-                Cancel
+            {r.canAcknowledge && (
+              <button type="button" className="btn" onClick={() => setModal('ack')} disabled={busy}>
+                {r.customerAcknowledgedBy ? 'Re-record acknowledgement' : 'Record acknowledgement'}
               </button>
             )}
           </>
         }
+        print={`/api/job-orders/${r.id}/pdf`}
+        more={[
+          r.canCancel && {
+            label: 'Cancel job order',
+            danger: true,
+            confirm: {
+              title: `Cancel ${r.number}?`,
+              body: r.job ? `Project ${r.job.number} stays — a project is cancelled from its own page.` : undefined,
+              confirmLabel: 'Cancel job order',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why is it cancelled?',
+              onConfirm: cancel,
+            },
+          },
+        ]}
+        modify={r.canEdit ? () => setModal('edit') : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta">
-        {r.title} · raised by {r.requestedBy.name} on {formatDate(r.createdAt)}
-        {r.approvedAt ? ` · approved ${formatDate(r.approvedAt)}` : ''}
-        {r.completedAt ? ` · completed ${formatDate(r.completedAt)}` : ''}
-      </p>
 
       <DocumentApproval documentType="job_order" documentId={r.id} reloadToken={reload} />
 
@@ -965,30 +974,17 @@ export function JobOrderDetail() {
           }}
         />
       )}
-      {modal === 'cancel' && (
-        <ReasonModal
-          title={`Cancel ${r.number}`}
-          label="Why is it cancelled?"
-          hint={r.job ? `Project ${r.job.number} stays — a project is cancelled from its own page.` : undefined}
-          action="Cancel job order"
-          danger
-          onClose={() => setModal(null)}
-          onSubmit={(reason) => run('Job order cancelled', () => api.post(`/job-orders/${r.id}/cancel`, { reason })).then(() => setModal(null))}
-        />
-      )}
       {modal === 'ack' && (
-        <ReasonModal
-          title="Customer acknowledgement"
-          label="Who signed for it?"
-          hint="The name printed in the customer’s slot on the job order"
+        <AcknowledgeModal
+          title={r.customerAcknowledgedBy ? 'Re-record acknowledgement' : 'Record acknowledgement'}
           initial={r.customerAcknowledgedBy ?? r.contact?.name ?? ''}
-          action="Record"
           onClose={() => setModal(null)}
-          onSubmit={(name) =>
-            run('Acknowledgement recorded', () => api.patch(`/job-orders/${r.id}/acknowledge`, { customerAcknowledgedBy: name })).then(() =>
-              setModal(null),
-            )
-          }
+          onSave={async (name) => {
+            await api.patch(`/job-orders/${r.id}/acknowledge`, { customerAcknowledgedBy: name });
+            toast('ok', 'Acknowledgement recorded');
+            setModal(null);
+            await load();
+          }}
         />
       )}
       {modal === 'invoice' && (
@@ -1008,51 +1004,51 @@ export function JobOrderDetail() {
   );
 }
 
-function ReasonModal({
+/**
+ * Who signed for the order on the customer's side — a name, kept on the
+ * order and printed in the customer's slot. It gathers a value (prefilled
+ * with the contact), not a yes, so it is a small form rather than a confirm.
+ */
+function AcknowledgeModal({
   title,
-  label,
-  hint,
-  initial = '',
-  action,
-  danger,
+  initial,
   onClose,
-  onSubmit,
+  onSave,
 }: {
   title: string;
-  label: string;
-  hint?: string;
-  initial?: string;
-  action: string;
-  danger?: boolean;
+  initial: string;
   onClose: () => void;
-  onSubmit: (value: string) => Promise<unknown>;
+  onSave: (name: string) => Promise<void>;
 }) {
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave(value.trim());
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
   return (
     <Modal
       title={title}
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Back
+        <ModalFoot onCancel={onClose} busy={busy}>
+          <button type="button" className="btn btn-primary" disabled={busy || value.trim().length < 2} onClick={() => void save()}>
+            {busy ? 'Saving…' : 'Save'}
           </button>
-          <button
-            type="button"
-            className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
-            disabled={busy || value.trim().length < 2}
-            onClick={() => {
-              setBusy(true);
-              void onSubmit(value.trim()).finally(() => setBusy(false));
-            }}
-          >
-            {action}
-          </button>
-        </>
+        </ModalFoot>
       }
     >
-      <Field label={label} hint={hint}>
+      <ErrorBox error={error} />
+      <Field label="Who signed for it?" hint="The name printed in the customer’s slot on the job order">
         <input value={value} onChange={(e) => setValue(e.target.value)} autoFocus />
       </Field>
     </Modal>
@@ -1094,17 +1090,14 @@ function InvoiceModal({ order, onClose, onRaised }: { order: JobOrderRow; onClos
 
   return (
     <Modal
-      title={`Invoice ${order.number}`}
+      title={`Raise invoice for ${order.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={raise} disabled={busy || !(Number(amount) > 0)}>
             {busy ? 'Raising…' : 'Raise invoice'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

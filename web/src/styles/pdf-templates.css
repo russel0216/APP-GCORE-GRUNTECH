@@ -20,11 +20,6 @@
   margin-top: var(--s-3);
 }
 
-.pt-confirm {
-  gap: var(--s-2);
-  align-items: center;
-}
-
 /* What Company Settings is missing that the layout prints; Hide at the far end. */
 .pt-company-note {
   align-items: center;

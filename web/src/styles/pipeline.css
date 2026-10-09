@@ -479,11 +479,6 @@
   color: var(--faint);
 }
 
-/* Room between a status pill and the words beside it. */
-.sales-after-badge {
-  margin-left: var(--s-2);
-}
-
 .sales-after-text {
   margin-left: var(--s-2);
 }
@@ -516,11 +511,6 @@
   font-size: var(--fs-sm);
 }
 
-.sales-assign-actions {
-  gap: var(--s-2);
-  margin-top: var(--s-3);
-}
-
 .sales-revisions {
   gap: var(--s-2);
   margin-bottom: var(--s-4);
@@ -547,10 +537,6 @@
 
 .sales-col-num {
   width: 2.5rem;
-}
-
-.sales-col-action {
-  width: 4rem;
 }
 
 .sales-blurb {
@@ -749,18 +735,6 @@
   margin-bottom: var(--s-3);
 }
 
-/* ── Sales orders ─────────────────────────────────────────────────────────── */
-
-.so-confirm {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.so-confirm input {
-  flex: 1 1 14rem;
-}
-
 .so-heading td {
   font-weight: 600;
   background: var(--panel-2, rgb(255 255 255 / 0.03));
@@ -832,11 +806,6 @@
 /* ── Admin › Pipeline Stages ── */
 .ps-actions {
   gap: var(--s-2);
-}
-
-.ps-confirm {
-  gap: var(--s-2);
-  align-items: center;
 }
 
 .ps-table input[type='text'],
@@ -967,7 +936,6 @@
   align-items: center;
   gap: var(--s-2);
 }
-
 
 .so-book-totals {
   display: grid;

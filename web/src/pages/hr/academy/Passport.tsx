@@ -4,6 +4,8 @@ import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { todayLocal } from '../../../lib/day';
 import { Attachments } from '../../../components/Attachments';
+import { RecordHeader } from '../../../components/RecordHeader';
+import { useConfirm } from '../../../components/Confirm';
 import { Meter, Stat } from '../../../components/charts';
 import {
   Empty,
@@ -11,6 +13,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   useToast,
@@ -183,22 +186,21 @@ export function Passport() {
       </div>
     );
   }
-  return <PassportView data={data} onChange={setData} reload={load} fromRegister={Boolean(employeeId)} />;
+  return <PassportView data={data} onChange={setData} reload={load} />;
 }
 
 export function PassportView({
   data,
   onChange,
   reload,
-  fromRegister,
 }: {
   data: PassportData;
   onChange: (d: PassportData) => void;
   reload: () => Promise<void>;
-  fromRegister: boolean;
 }) {
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
   const [filing, setFiling] = useState<{ courseId?: string } | null>(null);
   const [editing, setEditing] = useState<RecordRow | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -208,20 +210,19 @@ export function PassportView({
   const r = p.readiness;
   const canFile = p.canAddOwn || p.canRecord;
 
-  async function decide(rec: RecordRow, action: 'APPROVED' | 'REJECTED') {
+  /** The approval decision; a refusal is thrown so the caller can show it. */
+  async function decide(rec: RecordRow, action: 'APPROVED' | 'REJECTED', comment?: string) {
     if (!rec.approvalRequestId) return;
-    let comment: string | undefined;
-    if (action === 'REJECTED') {
-      const why = window.prompt('Why is this certificate rejected? The employee sees your reason.');
-      if (!why || why.trim().length < 3) return;
-      comment = why.trim();
-    }
+    await api.post(`/approvals/${rec.approvalRequestId}/act`, { action, comment });
+    toast('ok', action === 'APPROVED' ? 'Verified' : 'Rejected');
+    await reload();
+  }
+
+  async function verify(rec: RecordRow) {
     setBusy(`decide:${rec.id}`);
     setError(null);
     try {
-      await api.post(`/approvals/${rec.approvalRequestId}/act`, { action, comment });
-      toast('ok', action === 'APPROVED' ? 'Verified' : 'Rejected');
-      await reload();
+      await decide(rec, 'APPROVED');
     } catch (err) {
       setError(err);
     } finally {
@@ -229,48 +230,56 @@ export function PassportView({
     }
   }
 
+  function askReject(rec: RecordRow) {
+    confirm.ask({
+      title: `Reject ${rec.number ?? rec.course.title}?`,
+      body: 'It counts for nothing. The employee sees your reason.',
+      confirmLabel: 'Reject',
+      reason: 'required',
+      reasonLabel: 'Why is this certificate rejected?',
+      // The employee reads it: a few words at least, as before.
+      minReason: 3,
+      onConfirm: (reason) => decide(rec, 'REJECTED', reason),
+    });
+  }
+
+  /** Asked first — through the confirm bar, or the Modify modal's foot. A refusal is thrown. */
   async function remove(rec: RecordRow) {
-    if (!window.confirm(`Remove ${rec.number ?? 'this record'} from the passport?`)) return;
-    setBusy(`delete:${rec.id}`);
-    setError(null);
-    try {
-      await api.del(`/passports/records/${rec.id}`);
-      toast('ok', 'Removed');
-      await reload();
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(null);
-    }
+    await api.del(`/passports/records/${rec.id}`);
+    toast('ok', 'Removed');
+    await reload();
   }
 
+  const fileLabel = '+ New certificate';
   const fileButton = canFile ? (
     <button type="button" className="btn btn-primary btn-sm" onClick={() => setFiling({})}>
-      {p.own ? '+ Add a certificate' : '+ Record training'}
+      {fileLabel}
     </button>
   ) : null;
 
   return (
     <div className="academy-page">
-      {fromRegister && can('ghr.passports.view_all') && (
-        <div className="breadcrumb">
-          <Link to="/g-hr/academy/passports">Training Passports</Link>
-          <span className="sep">›</span>
-          <span>{p.employee.name}</span>
-        </div>
-      )}
-      <div className="page-head">
-        <div>
-          <h1>{p.own ? 'My Training Passport' : p.employee.name}</h1>
-          <p>
-            <span className="mono">{p.employee.employeeNo}</span>
-            {p.employee.position ? ` · ${p.employee.position}` : ' · no plantilla position'}
+      <RecordHeader
+        type="Training Passport"
+        code={p.employee.employeeNo}
+        title={p.own ? 'My Training Passport' : p.employee.name}
+        meta={
+          <>
+            {p.own ? `${p.employee.name} · ` : ''}
+            {p.employee.position ?? 'no plantilla position'}
             {p.employee.department ? ` · ${p.employee.department.name}` : ''}
             {!p.employee.isActive ? ' · inactive' : ''}
-          </p>
-        </div>
-        {fileButton}
-      </div>
+          </>
+        }
+        actions={
+          canFile && (
+            <button type="button" className="btn btn-primary" onClick={() => setFiling({})}>
+              {fileLabel}
+            </button>
+          )
+        }
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -352,9 +361,9 @@ export function PassportView({
                             type="button"
                             className="btn btn-sm"
                             onClick={() => setFiling({ courseId: l.course.id })}
-                            aria-label={`Add a certificate for ${l.course.title}`}
+                            aria-label={`New certificate for ${l.course.title}`}
                           >
-                            Add certificate
+                            + New certificate
                           </button>
                         )}
                       </td>
@@ -449,9 +458,9 @@ export function PassportView({
                             <>
                               <button
                                 type="button"
-                                className="btn btn-ok btn-sm"
+                                className="btn btn-sm"
                                 disabled={busy !== null}
-                                onClick={() => decide(rec, 'APPROVED')}
+                                onClick={() => void verify(rec)}
                               >
                                 Verify
                               </button>
@@ -459,7 +468,7 @@ export function PassportView({
                                 type="button"
                                 className="btn btn-danger-ghost btn-sm"
                                 disabled={busy !== null}
-                                onClick={() => decide(rec, 'REJECTED')}
+                                onClick={() => askReject(rec)}
                               >
                                 Reject
                               </button>
@@ -475,21 +484,34 @@ export function PassportView({
                               {open === rec.id ? 'Hide scan' : 'Scan'}
                             </button>
                           )}
-                          {rec.canEdit && (
-                            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(rec)}>
-                              Correct
-                            </button>
-                          )}
-                          {rec.canDelete && (
+                          {rec.canEdit ? (
                             <button
                               type="button"
-                              className="btn btn-ghost btn-sm"
-                              aria-label={`Remove ${rec.number ?? rec.course.title}`}
-                              disabled={busy !== null}
-                              onClick={() => remove(rec)}
+                              className="btn btn-sm"
+                              aria-label={`Modify ${rec.number ?? rec.course.title}`}
+                              onClick={() => setEditing(rec)}
                             >
-                              Remove
+                              Modify
                             </button>
+                          ) : (
+                            rec.canDelete && (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                aria-label={`Remove ${rec.number ?? rec.course.title}`}
+                                disabled={busy !== null}
+                                onClick={() =>
+                                  confirm.ask({
+                                    title: `Remove ${rec.number ?? 'this record'} from the passport?`,
+                                    body: 'It cannot be undone.',
+                                    confirmLabel: 'Remove',
+                                    onConfirm: () => remove(rec),
+                                  })
+                                }
+                              >
+                                Remove
+                              </button>
+                            )
                           )}
                         </div>
                       </td>
@@ -538,6 +560,14 @@ export function PassportView({
             setEditing(null);
             onChange(next);
           }}
+          onRemove={
+            editing.canDelete
+              ? async () => {
+                  await remove(editing);
+                  setEditing(null);
+                }
+              : undefined
+          }
         />
       )}
     </div>
@@ -604,17 +634,14 @@ export function ExternalCertModal({
 
   return (
     <Modal
-      title={employeeId ? `Record training — ${employeeName}` : 'Add a certificate'}
+      title={employeeId ? `New certificate — ${employeeName}` : 'New certificate'}
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !valid}>
-            {busy ? 'Saving…' : employeeId ? 'Record' : 'Send to HR'}
+            {busy ? 'Saving…' : employeeId ? 'Save' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -673,10 +700,13 @@ function CorrectModal({
   record,
   onClose,
   onSaved,
+  onRemove,
 }: {
   record: RecordRow;
   onClose: () => void;
   onSaved: (p: PassportData) => void;
+  /** Present when the record may be removed: asked in the modal's foot. */
+  onRemove?: () => Promise<void>;
 }) {
   const toast = useToast();
   const [form, setForm] = useState({
@@ -710,13 +740,22 @@ function CorrectModal({
 
   return (
     <Modal
-      title={`Correct ${record.number ?? record.course.title}`}
+      title={`Modify training record ${record.number ?? record.course.title}`}
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            onRemove
+              ? {
+                  label: 'Remove',
+                  question: `Remove ${record.number ?? 'this record'} from the passport? It cannot be undone.`,
+                  onConfirm: onRemove,
+                }
+              : undefined
+          }
+        >
           <button
             type="button"
             className="btn btn-primary"
@@ -725,7 +764,7 @@ function CorrectModal({
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

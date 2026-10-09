@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { addDays, mondayOf, parseDay, todayLocal } from '../../lib/day';
-import { Empty, ErrorBox, Field, StatusBadge, formatDate, useToast } from '../../components/ui';
+import { Empty, ErrorBox, Field, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
@@ -202,8 +202,8 @@ export function ProjectGantt({
                 Plan from costing
               </button>
             )}
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setEditing('new')} disabled={busy}>
-              + Task
+            <button type="button" className="btn btn-sm" onClick={() => setEditing('new')} disabled={busy}>
+              + Add task
             </button>
           </div>
         )}
@@ -303,7 +303,7 @@ export function ProjectGantt({
                   <tr key={t.id} className={`gantt-task${overdue ? ' is-overdue' : ''}`}>
                     <th scope="row" className="gantt-name">
                       {canEdit ? (
-                        <button type="button" className="gantt-edit" onClick={() => setEditing(t)} title="Edit this task">
+                        <button type="button" className="gantt-edit" onClick={() => setEditing(t)} title="Modify this task">
                           {t.name}
                         </button>
                       ) : (
@@ -336,7 +336,10 @@ export function ProjectGantt({
       </p>
 
       {editing && (
+        // A fresh form (and a fresh Remove question) for each task: without
+        // the key, opening task B over task A kept A's values and saved them on B.
         <TaskEditor
+          key={editing === 'new' ? 'new' : editing.id}
           jobId={jobId}
           task={editing === 'new' ? null : editing}
           scopeItems={scopeItems}
@@ -419,22 +422,17 @@ function TaskEditor({
     }
   }
 
+  /** Asked in the panel's foot first; a refusal is shown there, beside the question. */
   async function remove() {
     if (!task) return;
-    setBusy(true);
-    try {
-      await api.del(`/jobs/${jobId}/tasks/${task.id}`);
-      toast('ok', 'Task removed');
-      await onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/jobs/${jobId}/tasks/${task.id}`);
+    toast('ok', 'Task removed');
+    await onSaved();
   }
 
   return (
-    <section className="gantt-editor" aria-label={task ? `Edit ${task.name}` : 'New task'}>
-      <h4 className="card-title">{task ? 'Task' : 'New task'}</h4>
+    <section className="gantt-editor" aria-label={task ? `Modify task ${task.name}` : 'Add task'}>
+      <h4 className="card-title">{task ? 'Modify task' : 'Add task'}</h4>
       <ErrorBox error={error} />
       <div className="grid grid-2">
         <Field label="Task" required>
@@ -485,18 +483,21 @@ function TaskEditor({
           </select>
         </Field>
       </div>
-      <div className="row">
-        <button type="button" className="btn btn-primary btn-sm" onClick={save} disabled={busy || !valid}>
-          {busy ? 'Saving…' : task ? 'Save' : 'Add task'}
-        </button>
-        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy}>
-          Cancel
-        </button>
-        {task && (
-          <button type="button" className="btn btn-sm btn-ghost del-danger" onClick={remove} disabled={busy}>
-            Remove task
+      {/* The modal foot's order in a panel: [Remove] … [Cancel] [Save]. */}
+      <div className="panel-foot">
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            task
+              ? { label: 'Remove', question: `Remove the task “${task.name}”? It cannot be undone.`, onConfirm: remove }
+              : undefined
+          }
+        >
+          <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !valid}>
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        )}
+        </ModalFoot>
       </div>
     </section>
   );

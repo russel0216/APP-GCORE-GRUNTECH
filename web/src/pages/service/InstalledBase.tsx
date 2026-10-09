@@ -3,11 +3,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
+import { RecordHeader } from '../../components/RecordHeader';
 import {
   ErrorBox,
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   useToast,
@@ -157,11 +159,6 @@ export function InstalledBase() {
       <div className="page-head">
         <div>
           <h1>Installed Base</h1>
-          <p>
-            Every machine Gruntech put in, where it is, and when the free repair stops. Equipment
-            whose warranty is lapsing with no contract behind it is the renewal pipeline — the
-            customer is about to start paying for what they currently get free.
-          </p>
         </div>
       </div>
 
@@ -207,7 +204,7 @@ export function InstalledBase() {
           <>
             {can('gops.installed_base.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-                + Register equipment
+                + New equipment
               </button>
             )}
           </>
@@ -336,14 +333,11 @@ function AssetModal({
 
   return (
     <Modal
-      title={asset ? `Modify ${asset.code}` : 'Register equipment'}
+      title={asset ? `Modify equipment ${asset.code}` : 'New equipment'}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={save}
@@ -353,9 +347,9 @@ function AssetModal({
               form.name.trim().length < 2
             }
           >
-            {busy ? 'Saving…' : asset ? 'Save' : 'Register'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -406,7 +400,7 @@ function AssetModal({
             </button>
           ) : (
             <div className="row ib-add-customer">
-              <span>“{customerQ.trim()}” will be filed as a new customer when you register.</span>
+              <span>“{customerQ.trim()}” will be filed as a new customer when you save.</span>
               <button type="button" className="btn btn-sm" onClick={() => setAddingCustomer(false)}>
                 Pick an existing one instead
               </button>
@@ -547,7 +541,6 @@ interface AssetDetail extends Asset {
 export function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { can, canView } = useAuth();
-  const navigate = useNavigate();
   const [row, setRow] = useState<AssetDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
@@ -571,46 +564,31 @@ export function AssetDetailPage() {
 
   return (
     <div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            {row.name} <WarrantyBadge state={row.warranty} />
-          </h1>
-          <p>
-            <span className="mono">{row.code}</span> ·{' '}
+      <RecordHeader
+        type="Equipment"
+        code={row.code}
+        title={row.name}
+        status={row.warranty}
+        statusExtra={WARRANTY_TONE}
+        statusLabel={WARRANTY_LABEL[row.warranty]}
+        meta={
+          <>
             {can('gops.customers.view_all') ? (
               <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
             ) : (
               row.customer.name
             )}
-            {row.site && ` · ${row.site.name}`}
+            {(row.site?.name ?? row.address) && ` · ${row.site?.name ?? row.address}`}
             {row.serialNo && (
               <>
                 {' · serial '}
                 <span className="mono">{row.serialNo}</span>
               </>
             )}
-          </p>
-        </div>
-        <div className="row">
-          {can('gops.job_orders.create') && (
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={() =>
-                navigate(`/g-ops/job-orders?new=1&customerId=${row.customer.id}&assetId=${row.id}`)
-              }
-            >
-              Request service
-            </button>
-          )}
-          {can('gops.installed_base.edit_all') && (
-            <button className="btn btn-sm" onClick={() => setEditing(true)}>
-              Modify
-            </button>
-          )}
-        </div>
-      </div>
+          </>
+        }
+        modify={can('gops.installed_base.edit_all') ? () => setEditing(true) : undefined}
+      />
 
       {row.warranty === 'EXPIRING' && !covered && (
         <div className="alert warn">

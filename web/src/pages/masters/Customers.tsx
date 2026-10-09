@@ -5,7 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import type { Industry, SubIndustry } from './Reference';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -447,7 +447,7 @@ export function Customers() {
   );
 }
 
-// ── Create / edit form ───────────────────────────────────────────────────────
+// ── New / Modify form ───────────────────────────────────────────────────────
 
 export function CustomerForm({
   customer,
@@ -536,17 +536,14 @@ export function CustomerForm({
   return (
     <Modal
       wide
-      title={customer ? `Modify ${customer.name}` : 'Add customer'}
+      title={customer ? `Modify customer ${customer.name}` : 'New customer'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

@@ -4,7 +4,17 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
+import {
+  Checkbox,
+  ErrorBox,
+  Field,
+  Modal,
+  ModalFoot,
+  StatusBadge,
+  formatDate,
+  formatMoney,
+  useToast,
+} from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
 const ITEM_TYPES = [
@@ -201,24 +211,27 @@ export function Items() {
           },
         ]}
         actions={
-          <>
-            {can('gchain.items.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
-                + Add item
-              </button>
-            )}
-            {can('gchain.items.create') && (
-              <button
-                className="btn btn-sm"
-                onClick={async () => {
-                  const spec = await loadImportSpec('items');
-                  if (spec) setImporting(spec as { label: string; columns: never[] });
-                }}
-              >
-                Import
-              </button>
-            )}
-          </>
+          can('gchain.items.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
+              + New item
+            </button>
+          ) : null
+        }
+        // The list's own tool lives in its ⋯ menu, as on the supplier list.
+        menuItems={
+          can('gchain.items.create')
+            ? [
+                {
+                  label: 'Import items…',
+                  hint: 'From a spreadsheet, checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('items').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
         }
       />
 
@@ -329,39 +342,34 @@ function ItemForm({
     }
   }
 
-  async function remove() {
-    if (!item) return;
-    setBusy(true);
-    try {
-      await api.del(`/items/${item.id}`);
-      toast('ok', 'Item deleted');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
   return (
     <Modal
       wide
-      title={item ? `Modify ${item.name}` : 'Add item'}
+      title={item ? `Modify item ${item.name}` : 'New item'}
       onClose={onClose}
       footer={
-        <>
-          {item && can('gchain.items.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            item && can('gchain.items.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete ${item.name}? It cannot be undone.`,
+                  // Thrown errors show beside the question, which stays open.
+                  onConfirm: async () => {
+                    await api.del(`/items/${item.id}`);
+                    toast('ok', 'Item deleted');
+                    onSaved();
+                  },
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

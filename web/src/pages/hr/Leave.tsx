@@ -10,6 +10,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -197,10 +198,6 @@ export function Leave() {
       <div className="page-head">
         <div>
           <h1>Leave</h1>
-          <p>
-            File with a start and end date, and a time on either if it is a half day. Approval
-            routes to whoever you report to, and falls back to HR if nobody is set.
-          </p>
         </div>
       </div>
 
@@ -239,7 +236,7 @@ export function Leave() {
         actions={
           can('ghr.leave.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-              + File leave
+              + New leave request
             </button>
           ) : null
         }
@@ -351,13 +348,10 @@ function FileLeaveModal({ onClose, onFiled }: { onClose: () => void; onFiled: ()
 
   return (
     <Modal
-      title="File leave"
+      title="New leave request"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={file}
@@ -370,9 +364,9 @@ function FileLeaveModal({ onClose, onFiled }: { onClose: () => void; onFiled: ()
               (type?.requiresProof && !form.proofNote.trim())
             }
           >
-            {busy ? 'Filing…' : 'File and send for approval'}
+            {busy ? 'Submitting…' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -496,8 +490,6 @@ function LeaveDetailModal({
   const { can } = useAuth();
   const [row, setRow] = useState<LeaveDetail | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
     let live = true;
@@ -512,43 +504,45 @@ function LeaveDetailModal({
     };
   }, [id]);
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function cancel() {
     if (!row) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/leave/${row.id}/cancel`);
-      toast(
-        'ok',
-        row.status === 'APPROVED'
-          ? 'Cancelled — the days have gone back on the balance'
-          : 'Cancelled',
-      );
-      onChanged();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.post(`/leave/${row.id}/cancel`);
+    toast(
+      'ok',
+      row.status === 'APPROVED'
+        ? 'Cancelled — the days have gone back on the balance'
+        : 'Cancelled',
+    );
+    onChanged();
   }
 
   return (
     <Modal
-      title={row?.number ?? 'Leave request'}
+      title={row ? `Leave request ${row.number}` : 'Leave request'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Close
-          </button>
-          {row?.canCancel && (
-            <button className="btn btn-danger" onClick={cancel} disabled={busy}>
-              {busy ? 'Cancelling…' : 'Cancel this request'}
-            </button>
-          )}
-        </>
+        <ModalFoot
+          onCancel={onClose}
+          cancelLabel="Close"
+          danger={
+            row?.canCancel
+              ? {
+                  label: 'Cancel request',
+                  question:
+                    row.status === 'APPROVED'
+                      ? `Cancel ${row.number}? The ${row.days} day${row.days === 1 ? '' : 's'} go back on the balance.`
+                      : row.status === 'PENDING_APPROVAL'
+                        ? `Cancel ${row.number}? It is withdrawn from the approvers.`
+                        : `Cancel ${row.number}?`,
+                  onConfirm: cancel,
+                }
+              : undefined
+          }
+        />
       }
     >
-      <ErrorBox error={error ?? loadError} />
+      <ErrorBox error={loadError} />
       {!row ? (
         !loadError && <Loading />
       ) : (

@@ -5,7 +5,7 @@ import { useAuth } from '../../../lib/auth';
 import { CalendarToolbar, MonthCalendar, useCalendarNav, type CalendarEvent } from '../../../components/MonthCalendar';
 import { Panel } from '../../../components/charts';
 import { dayKeyOf, parseDay } from '../../../lib/day';
-import { ErrorBox, Loading, Modal, StatusBadge, statusTone, useToast } from '../../../components/ui';
+import { ErrorBox, Loading, Modal, ModalFoot, StatusBadge, statusTone, useToast } from '../../../components/ui';
 import { RESULT_LABEL, RESULT_TONES, SESSION_TONES, SessionModal, sessionWhen, type SessionDetailData } from './Sessions';
 
 /**
@@ -111,16 +111,10 @@ export function TrainingCalendar() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Training Calendar</h1>
-          <p>
-            Every Gruntech Academy session. Open one to see who is going, add it to your own
-            calendar, or enrol yourself.
-          </p>
-        </div>
+        <h1>Training Calendar</h1>
         {canCreate && (
           <button type="button" className="btn btn-primary btn-sm" onClick={() => setBooking(atNine(nav.focus))}>
-            + Schedule session
+            + New session
           </button>
         )}
       </div>
@@ -252,32 +246,38 @@ function SessionPreview({
       title={s ? s.course.title : 'Training session'}
       onClose={onClose}
       footer={
-        s ? (
-          <>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => downloadBlob(`/training-sessions/${s.id}/ics`, `${s.number}.ics`).catch(setError)}
-            >
-              Add to calendar (.ics)
-            </button>
-            {s.canWithdraw && (
-              <button type="button" className="btn" onClick={() => enrol(false)} disabled={busy}>
-                Withdraw
+        <ModalFoot onCancel={onClose} cancelLabel="Close" busy={busy}>
+          {s && (
+            <>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => downloadBlob(`/training-sessions/${s.id}/ics`, `${s.number}.ics`).catch(setError)}
+              >
+                Add to calendar (.ics)
               </button>
-            )}
-            {s.canSelfEnrol && (
-              <button type="button" className="btn btn-ok" onClick={() => enrol(true)} disabled={busy}>
-                Enrol me
-              </button>
-            )}
-            {canOpen && (
-              <button type="button" className="btn btn-primary" onClick={() => onOpen(s.id)}>
-                Open session
-              </button>
-            )}
-          </>
-        ) : undefined
+              {s.canWithdraw && (
+                <button type="button" className="btn" onClick={() => enrol(false)} disabled={busy}>
+                  Withdraw
+                </button>
+              )}
+              {canOpen && (
+                <button
+                  type="button"
+                  className={`btn${s.canSelfEnrol ? '' : ' btn-primary'}`}
+                  onClick={() => onOpen(s.id)}
+                >
+                  Open session
+                </button>
+              )}
+              {s.canSelfEnrol && (
+                <button type="button" className="btn btn-primary" onClick={() => enrol(true)} disabled={busy}>
+                  Enrol me
+                </button>
+              )}
+            </>
+          )}
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

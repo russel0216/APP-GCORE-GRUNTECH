@@ -127,14 +127,7 @@ export function ProbationCard() {
   return (
     <div className="eval-settings">
       <div className="card">
-        <div className="panel-head">
-          <h3 className="card-title">Probation and evaluations</h3>
-          {editable && (
-            <button type="button" className="btn btn-sm btn-primary" onClick={save} disabled={busy || !dirty}>
-              {busy ? 'Saving…' : 'Save'}
-            </button>
-          )}
-        </div>
+        <h3 className="card-title">Probation and evaluations</h3>
         <p className="muted">
           When a probationer or trainee is due an evaluation, and what it is rated on. Changing these
           moves what falls due from now on; an evaluation already open keeps its date and its form.
@@ -194,6 +187,13 @@ export function ProbationCard() {
             ))}
           </ol>
         </fieldset>
+        {editable && (
+          <div className="card-foot">
+            <button type="button" className="btn btn-sm btn-primary" onClick={save} disabled={busy || !dirty}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        )}
       </div>
 
       <SettingListCard

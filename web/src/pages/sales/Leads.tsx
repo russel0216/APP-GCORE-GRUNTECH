@@ -1,23 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ApiError, api, openPdf, qs } from '../../lib/api';
+import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { ActivityLog } from '../../components/ActivityLog';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import {
   ErrorBox,
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
   formatMoney,
   useToast,
 } from '../../components/ui';
-import { LostReasonModal } from './LostReasonModal';
 import { QUOTATION_OUTCOME_TONES } from './Quotations';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -91,15 +93,12 @@ function LeadProgress({
   canEdit,
   hasQuotation,
   onMove,
-  onLose,
 }: {
   status: string;
   lostReason: string | null;
   canEdit: boolean;
   hasQuotation: boolean;
   onMove: (status: string) => void;
-  /** Losing a lead asks why first — see LostReasonModal. */
-  onLose: () => void;
 }) {
   const index = PIPELINE.findIndex((s) => s.value === status);
   const lost = status === 'LOST';
@@ -133,21 +132,7 @@ function LeadProgress({
             {lost && <span className="faint">{lostReason || 'no reason recorded'}</span>}
           </div>
         </div>
-
-        {canEdit && !won && (
-          <div className="row" style={{ gap: 'var(--s-2)' }}>
-            {!held && !lost && (
-              <button className="btn btn-sm" onClick={() => onMove('ON_HOLD')}>
-                Put on hold
-              </button>
-            )}
-            {!lost && (
-              <button className="btn btn-sm btn-danger-ghost" onClick={onLose}>
-                Mark lost…
-              </button>
-            )}
-          </div>
-        )}
+        {/* Put on hold and Mark lost are in the page header's ⋯ (2026-10-09, the button standard). */}
       </div>
 
       <div className={`lead-track ${tone}`} role="img" aria-label={progressLabel(status, index)}>
@@ -626,13 +611,16 @@ export function LeadDetail() {
   const navigate = useNavigate();
   const { can, me } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
 
   const [lead, setLead] = useState<LeadDetailRow | null>(null);
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
-  const [losing, setLosing] = useState(false);
   const [assigning, setAssigning] = useState(false);
 
   const load = useCallback(async () => {
@@ -666,11 +654,15 @@ export function LeadDetail() {
     }
   }
 
-  /** Throws on refusal so LostReasonModal keeps the reason and shows why. */
+  /**
+   * Throws on refusal so the confirm bar keeps the reason and shows why. A few
+   * plain words at least: Sales Analytics groups the reasons, and "no" teaches
+   * nobody anything.
+   */
   async function markLost(reason: string) {
     if (!lead) return;
+    if (reason.length < 3) throw new Error('Say why in a few words — Sales Analytics reports the reasons.');
     await api.patch(`/leads/${lead.id}`, { status: 'LOST', lostReason: reason });
-    setLosing(false);
     toast('ok', `${lead.companyName} marked lost`);
     await load();
   }
@@ -689,77 +681,112 @@ export function LeadDetail() {
     ? 'Link the lead to a customer first: Modify, and pick or add the company'
     : null;
 
+  /** Throws on refusal, so the confirm bar shows why and stays open. */
   async function remove() {
     if (!lead) return;
-    try {
-      await api.del(`/leads/${lead.id}`);
-      toast('ok', 'Lead deleted');
-      navigate('/g-ops/leads');
-    } catch (err) {
-      setError(err);
-    }
+    await api.del(`/leads/${lead.id}`);
+    toast('ok', 'Lead deleted');
+    navigate('/g-ops/leads');
   }
+
+  const won = lead.status === 'WON';
+  const lost = lead.status === 'LOST';
+  const held = lead.status === 'ON_HOLD';
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/leads">Leads</Link>
-        <span className="sep">›</span>
-        <span>{lead.companyName}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{lead.companyName}</h1>
-          <p>
-            <StatusBadge status={lead.status} />
-            <span className="sales-after-badge">
-              {lead.number} · {lead.assignedTo.name}
-              {lead.source ? ` · via ${lead.source}` : ''}
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          {!closed && lead.canEdit && (
-            <button
-              type="button"
-              className="btn"
-              aria-expanded={assigning}
-              aria-controls="assign-costing"
-              onClick={() => setAssigning((v) => !v)}
-            >
-              Assign costing
-            </button>
-          )}
-          {!closed &&
-            can('gops.quotations.create') &&
-            (quotationBlocked ? (
-              <button className="btn btn-primary" disabled title={quotationBlocked}>
-                Create quotation
-              </button>
-            ) : (
-              <Link
-                className="btn btn-primary"
-                to={`/g-ops/quotations/new${qs({ leadId: lead.id, costingId: latestCosting?.id })}`}
+      <RecordHeader
+        type="Lead"
+        code={lead.number}
+        title={lead.companyName}
+        status={lead.status}
+        amount={lead.estimatedValue == null ? undefined : formatMoney(lead.estimatedValue)}
+        amountLabel="Estimated value"
+        meta={
+          <>
+            {lead.contactPerson ? `${lead.contactPerson} · ` : ''}
+            owned by {lead.assignedTo.name}
+            {lead.source ? ` · via ${lead.source}` : ''}
+            {lead.customer && (
+              <>
+                {' · '}
+                <Link to={`/g-ops/customers/${lead.customer.id}`}>{lead.customer.name}</Link>
+              </>
+            )}
+          </>
+        }
+        actions={
+          <>
+            {!closed && lead.canEdit && (
+              <button
+                type="button"
+                className="btn"
+                aria-expanded={assigning}
+                aria-controls="assign-costing"
+                onClick={() => setAssigning((v) => !v)}
               >
-                Create quotation
-              </Link>
-            ))}
-          <button className="btn" onClick={() => openPdf(`/api/leads/${lead.id}/pdf`, () => setError(new Error('The PDF could not be made')))}>
-            PDF
-          </button>
-          {lead.canEdit && (
-            <button className="btn" onClick={() => setEditing(true)}>
-              Modify
-            </button>
-          )}
-          {lead.canEdit && can('gops.leads.delete') && (
-            <button className="btn btn-danger" onClick={remove}>
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
+                Assign costing
+              </button>
+            )}
+            {!closed &&
+              can('gops.quotations.create') &&
+              (quotationBlocked ? (
+                <button type="button" className="btn" disabled title={quotationBlocked}>
+                  Create quotation
+                </button>
+              ) : (
+                <Link
+                  className="btn btn-primary"
+                  to={`/g-ops/quotations/new${qs({ leadId: lead.id, costingId: latestCosting?.id })}`}
+                >
+                  Create quotation
+                </Link>
+              ))}
+          </>
+        }
+        print={`/api/leads/${lead.id}/pdf`}
+        more={[
+          lead.canEdit &&
+            !won &&
+            !held &&
+            !lost && {
+              label: 'Put on hold',
+              hint: 'Paused — nothing moves until somebody picks it up',
+              onSelect: () => void setStatus('ON_HOLD'),
+            },
+          lead.canEdit &&
+            !won &&
+            !lost && {
+              label: 'Mark lost',
+              danger: true,
+              confirm: {
+                title: `Mark ${lead.companyName} lost?`,
+                body: 'Price, timing, went to a competitor, project shelved… Sales Analytics groups these, so a few plain words beat a paragraph.',
+                confirmLabel: 'Mark lost',
+                reason: 'required',
+                reasonLabel: 'Why was it lost?',
+                // A few plain words: markLost refuses fewer than three, as the old modal did.
+                minReason: 3,
+                // A lead lost before and picked up again offers the reason it was lost with.
+                initialReason: lead.lostReason ?? '',
+                onConfirm: (reason) => markLost(reason),
+              },
+            },
+          lead.canEdit &&
+            can('gops.leads.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${lead.number}?`,
+                body: 'It cannot be undone. A lead a quotation came from cannot be deleted.',
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
+        ]}
+        modify={lead.canEdit ? () => setEditing(true) : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
       {!closed && quotationBlocked && can('gops.quotations.create') && (
@@ -788,7 +815,6 @@ export function LeadDetail() {
         canEdit={lead.canEdit}
         hasQuotation={hasQuotation}
         onMove={setStatus}
-        onLose={() => setLosing(true)}
       />
 
       {/*
@@ -968,15 +994,6 @@ export function LeadDetail() {
           }}
         />
       )}
-
-      {losing && (
-        <LostReasonModal
-          what={lead.companyName}
-          initial={lead.lostReason ?? ''}
-          onClose={() => setLosing(false)}
-          onSave={markLost}
-        />
-      )}
     </div>
   );
 }
@@ -1092,12 +1109,13 @@ function AssignCostingPanel({
           </Field>
         </div>
       )}
-      <div className="row sales-assign-actions">
-        <button type="button" className="btn btn-primary" disabled={!assigneeId || busy} onClick={assign}>
-          {busy ? 'Assigning…' : assigneeId && assigneeId === me?.user.id ? 'Start costing' : 'Assign'}
-        </button>
+      {/* [Cancel] [Assign], right — the order every form's foot keeps. */}
+      <div className="panel-foot">
         <button type="button" className="btn" onClick={onCancel} disabled={busy}>
           Cancel
+        </button>
+        <button type="button" className="btn btn-primary" disabled={!assigneeId || busy} onClick={assign}>
+          {busy ? 'Assigning…' : assigneeId && assigneeId === me?.user.id ? 'Start costing' : 'Assign'}
         </button>
       </div>
     </section>
@@ -1284,21 +1302,19 @@ export function LeadForm({
   return (
     <Modal
       wide
-      title={lead ? `Modify ${lead.number}` : 'Add lead'}
+      title={lead ? `Modify lead ${lead.number}` : 'New lead'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
+            type="button"
             className="btn btn-primary"
             onClick={save}
             disabled={busy || form.companyName.length < 2}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

@@ -9,6 +9,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatMoney,
   useToast,
@@ -85,11 +86,6 @@ export function ReportTemplates() {
       <div className="page-head">
         <div>
           <h1>Report Templates</h1>
-          <p>
-            The forms your engineers fill in on site. Change them to suit the work — a template
-            that has already been used publishes a new version rather than changing underneath the
-            reports that were signed on it.
-          </p>
         </div>
         <div className="row">
           <Checkbox checked={showAll} onChange={setShowAll} label="Show old versions" />
@@ -140,7 +136,7 @@ export function ReportTemplates() {
                         )}
                       </td>
                       <td className="right">
-                        <button className="btn btn-ghost btn-sm" onClick={() => setEditing(t)}>
+                        <button className="btn btn-sm" onClick={() => setEditing(t)}>
                           {editable && t.isCurrent ? 'Modify' : 'View'}
                         </button>
                       </td>
@@ -245,16 +241,19 @@ function TemplateEditor({
 
   return (
     <Modal
-      title={template ? `${template.name} v${template.version}` : 'New template'}
+      title={
+        !template
+          ? 'New template'
+          : readOnly
+            ? `${template.name} v${template.version}`
+            : `Modify template ${template.name} v${template.version}`
+      }
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            {readOnly ? 'Close' : 'Cancel'}
-          </button>
+        <ModalFoot onCancel={onClose} cancelLabel={readOnly ? 'Close' : 'Cancel'} busy={busy}>
           {template && (
-            <button className="btn btn-sm" onClick={duplicate} disabled={busy}>
+            <button className="btn" onClick={duplicate} disabled={busy}>
               Duplicate
             </button>
           )}
@@ -267,7 +266,7 @@ function TemplateEditor({
               {busy ? 'Saving…' : used ? 'Publish new version' : 'Save'}
             </button>
           )}
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -415,6 +414,8 @@ function TemplateEditor({
                         {!readOnly && (
                           <button
                             className="btn btn-ghost btn-sm"
+                            aria-label={`Remove field ${field.label || fi + 1}`}
+                            title="Remove field"
                             onClick={() =>
                               patchSection(si, { fields: section.fields.filter((_, k) => k !== fi) })
                             }
@@ -443,7 +444,7 @@ function TemplateEditor({
                   });
                 }}
               >
-                + Add a field
+                + Add field
               </button>
             )}
             {section.fields.length === 0 && (
@@ -466,7 +467,7 @@ function TemplateEditor({
               ]);
             }}
           >
-            + Add a section
+            + Add section
           </button>
         )}
       </fieldset>
@@ -760,7 +761,7 @@ export function AftermarketSettings() {
         </div>
         {editable && (
           <button className="btn btn-primary btn-sm" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save rules'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
         )}
       </div>

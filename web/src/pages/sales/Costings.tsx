@@ -4,7 +4,7 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Stat } from '../../components/charts';
-import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
+import { Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast, type Tone } from '../../components/ui';
 
 /** A costing's statuses; none is in the shared lifecycle table as it stands. */
 export const COSTING_TONES: Record<string, Tone> = { DRAFT: 'warn', PENDING_APPROVAL: 'info', FINAL: 'ok' };
@@ -99,11 +99,6 @@ export function Costings() {
       <div className="page-head">
         <div>
           <h1>Costing</h1>
-          <p>
-            Where the contract amount comes from. The scope of work you enter here becomes the
-            Schedule of Values — the same phases that progress reports, progress billing and the
-            S-curve are measured against later.
-          </p>
         </div>
       </div>
 
@@ -231,15 +226,16 @@ interface TemplateRow {
 
 /**
  * The costing templates: a costing to start from — its lines, phases, tasks,
- * markup and terms. Saved from a costing's page or from the sheet ("Save as
+ * margin and terms. Saved from a costing's page or from a new sheet ("Save as
  * template"); used from the sheet ("Start from a template") or from here.
+ * A template has no page of its own: its row's Modify opens it, and it is
+ * deleted there.
  */
 function CostingTemplates() {
   const { can } = useAuth();
-  const toast = useToast();
   const [rows, setRows] = useState<TemplateRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [renaming, setRenaming] = useState<{ id: string; name: string; description: string } | null>(null);
+  const [modifying, setModifying] = useState<TemplateRow | null>(null);
 
   const load = () =>
     api
@@ -250,29 +246,6 @@ function CostingTemplates() {
     void load();
   }, []);
 
-  async function rename() {
-    if (!renaming) return;
-    try {
-      await api.patch(`/costings/templates/${renaming.id}`, { name: renaming.name, description: renaming.description });
-      toast('ok', 'Template renamed');
-      setRenaming(null);
-      void load();
-    } catch (err) {
-      setError(err);
-    }
-  }
-
-  async function remove(t: TemplateRow) {
-    if (!window.confirm(`Delete the template “${t.name}”? Costings already made from it are not affected.`)) return;
-    try {
-      await api.del(`/costings/templates/${t.id}`);
-      toast('ok', 'Template deleted');
-      void load();
-    } catch (err) {
-      setError(err);
-    }
-  }
-
   if (error && !rows) return <ErrorBox error={error} />;
   if (!rows) return <Loading />;
 
@@ -282,7 +255,7 @@ function CostingTemplates() {
       {rows.length === 0 ? (
         <Empty
           title="No templates yet"
-          hint="Open a costing you would build again and choose “Save as template” — or save one from the sheet while you type it."
+          hint="Open a costing you would build again and choose “Save as template” from its ⋯ menu — or save one from a new sheet while you type it."
         />
       ) : (
         <div className="table-wrap">
@@ -301,74 +274,110 @@ function CostingTemplates() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((t) =>
-                renaming?.id === t.id ? (
-                  <tr key={t.id}>
-                    <td colSpan={6}>
-                      <div className="row cs-rename">
-                        <input aria-label="Template name" value={renaming.name} maxLength={120} autoFocus onChange={(e) => setRenaming({ ...renaming, name: e.target.value })} />
-                        <input
-                          aria-label="Template description"
-                          placeholder="Description"
-                          value={renaming.description}
-                          maxLength={500}
-                          onChange={(e) => setRenaming({ ...renaming, description: e.target.value })}
-                        />
-                      </div>
-                    </td>
-                    <td>
-                      <div className="row cs-row-actions">
-                        <button type="button" className="btn btn-sm" onClick={() => setRenaming(null)}>
-                          Cancel
+              {rows.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    <div>
+                      <strong>{t.name}</strong>
+                    </div>
+                    <div className="faint">{[t.systemUnit, t.description].filter(Boolean).join(' · ') || '—'}</div>
+                  </td>
+                  <td className="right mono">{t.lineCount}</td>
+                  <td className="right mono">
+                    {t.sectionCount}
+                    {t.taskCount ? <span className="faint"> · {t.taskCount} tasks</span> : null}
+                  </td>
+                  <td>{t.withPrices ? 'With unit costs' : 'Quantities only'}</td>
+                  <td>{t.createdBy.name}</td>
+                  <td>{formatDate(t.updatedAt)}</td>
+                  <td>
+                    <div className="row cs-row-actions">
+                      {can('gops.costing.create') && (
+                        <Link to={`/g-ops/costing/new?template=${t.id}`} className="btn btn-sm btn-primary">
+                          Start costing
+                        </Link>
+                      )}
+                      {t.canEdit && (
+                        <button type="button" className="btn btn-sm" onClick={() => setModifying(t)}>
+                          Modify
                         </button>
-                        <button type="button" className="btn btn-sm btn-primary" onClick={rename} disabled={renaming.name.trim().length < 2}>
-                          Save
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ) : (
-                  <tr key={t.id}>
-                    <td>
-                      <div>
-                        <strong>{t.name}</strong>
-                      </div>
-                      <div className="faint">{[t.systemUnit, t.description].filter(Boolean).join(' · ') || '—'}</div>
-                    </td>
-                    <td className="right mono">{t.lineCount}</td>
-                    <td className="right mono">
-                      {t.sectionCount}
-                      {t.taskCount ? <span className="faint"> · {t.taskCount} tasks</span> : null}
-                    </td>
-                    <td>{t.withPrices ? 'With unit costs' : 'Quantities only'}</td>
-                    <td>{t.createdBy.name}</td>
-                    <td>{formatDate(t.updatedAt)}</td>
-                    <td>
-                      <div className="row cs-row-actions">
-                        {can('gops.costing.create') && (
-                          <Link to={`/g-ops/costing/new?template=${t.id}`} className="btn btn-sm btn-primary">
-                            Start costing
-                          </Link>
-                        )}
-                        {t.canEdit && (
-                          <>
-                            <button type="button" className="btn btn-sm" onClick={() => setRenaming({ id: t.id, name: t.name, description: t.description ?? '' })}>
-                              Rename
-                            </button>
-                            <button type="button" className="btn btn-sm btn-danger" onClick={() => remove(t)}>
-                              Delete
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ),
-              )}
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       )}
+      {modifying && (
+        <TemplateModal
+          template={modifying}
+          onClose={() => setModifying(null)}
+          onDone={() => {
+            setModifying(null);
+            void load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/** Modify a template's name and description, or delete it — it has no page of its own. */
+function TemplateModal({ template, onClose, onDone }: { template: TemplateRow; onClose: () => void; onDone: () => void }) {
+  const toast = useToast();
+  const [name, setName] = useState(template.name);
+  const [description, setDescription] = useState(template.description ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/costings/templates/${template.id}`, { name, description });
+      toast('ok', 'Template saved');
+      onDone();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    await api.del(`/costings/templates/${template.id}`);
+    toast('ok', 'Template deleted');
+    onDone();
+  }
+
+  return (
+    <Modal
+      title={`Modify template ${template.name}`}
+      onClose={onClose}
+      footer={
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={{
+            label: 'Delete',
+            question: `Delete the template “${template.name}”? Costings already made from it are not affected.`,
+            onConfirm: remove,
+          }}
+        >
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy || name.trim().length < 2}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </ModalFoot>
+      }
+    >
+      <ErrorBox error={error} />
+      <Field label="Template name" required>
+        <input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />
+      </Field>
+      <Field label="Description">
+        <input value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} />
+      </Field>
+    </Modal>
   );
 }

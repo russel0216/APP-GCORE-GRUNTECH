@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -12,12 +12,15 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink } from '../../components/Navigation';
 import { NumberInput } from '../../components/NumberInput';
 
 export const PR_STATUSES = [
@@ -187,7 +190,7 @@ export function PurchaseRequests() {
         actions={
           can('gchain.purchase_requests.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + New request
+              + New purchase request
             </button>
           ) : null
         }
@@ -275,18 +278,15 @@ function NewPrModal({
       title="New purchase request"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={create}
             disabled={busy || form.purpose.length < 3 || (direct ? !form.jobId : !form.warehouseId)}
           >
-            {busy ? 'Creating…' : 'Create'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -430,6 +430,7 @@ export function PurchaseRequestDetail() {
   const base = usePrBase();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [pr, setPr] = useState<PrDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -438,6 +439,26 @@ export function PurchaseRequestDetail() {
   // Bumped on every reload so the approval chain re-reads after a submit —
   // the chain lives behind its own endpoint and will not know otherwise.
   const [reload, setReload] = useState(0);
+
+  // A project's request belongs to its project: back goes to the project's
+  // Purchase Requisition tab, whichever path opened it (the project tab, the
+  // approval notification and My Work all link the G-CHAIN path). Someone who
+  // cannot open projects, or a stock replenishment, keeps the menu's register.
+  // The tab shows only to a holder of one of its registers' view_all (the
+  // project page's own rule); anyone else goes back to the project itself.
+  const seesProjects = can('gops.projects.view_all') || can('gops.projects.view_own');
+  const seesTab = [
+    'gchain.purchase_requests.view_all',
+    'gchain.purchase_orders.view_all',
+    'gchain.receiving.view_all',
+    'gchain.stock_issuance.view_all',
+    'gchain.borrow_slips.view_all',
+  ].some(can);
+  const project = seesProjects && pr?.job ? pr.job : null;
+  useBackLink(
+    project ? `/g-ops/projects/${project.id}${seesTab ? '?tab=procurement' : ''}` : null,
+    project ? (seesTab ? `${project.number} Purchase Requisition` : project.number) : null,
+  );
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -496,20 +517,37 @@ export function PurchaseRequestDetail() {
         }, {} as Record<string, number>)
     : {};
 
+  const addLineButton = pr.canEdit ? (
+    <button className="btn btn-sm" onClick={() => setAdding(true)}>
+      + Add line
+    </button>
+  ) : null;
+
+  /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
+  async function removeLine(line: PrItem) {
+    if (!pr) return;
+    await api.del(`/purchase-requests/${pr.id}/items/${line.id}`);
+    toast('ok', 'Line removed');
+    await load();
+  }
+
+  const sourcing = pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED';
+  // The API's own rule: a draft or rejected request with no order raised from it.
+  const mayDelete =
+    (pr.status === 'DRAFT' || pr.status === 'REJECTED') &&
+    pr.orders.length === 0 &&
+    can('gchain.purchase_requests.delete');
+
+  /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
+  async function remove() {
+    if (!pr) return;
+    await api.del(`/purchase-requests/${pr.id}`);
+    toast('ok', `${pr.number} deleted`);
+    navigate(base);
+  }
+
   return (
     <div>
-      <div className="breadcrumb">
-        {pr.job && (
-          <>
-            <Link to={`/g-ops/projects/${pr.job.id}`}>{pr.job.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        <Link to={base}>Purchase Requests</Link>
-        <span className="sep">›</span>
-        <span className="mono">{pr.number}</span>
-      </div>
-
       <RecordHeader
         type="Purchase Request"
         code={pr.number}
@@ -519,44 +557,60 @@ export function PurchaseRequestDetail() {
         // Estimated, not contracted: a PR is a request, and what it finally
         // costs is settled at the purchase order.
         amountLabel="Estimated total"
+        meta={
+          <>
+            {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment'}
+            {pr.job ? (
+              <>
+                {' '}
+                ·{' '}
+                <Link to={`/g-ops/projects/${pr.job.id}`}>
+                  {pr.job.number} — {pr.job.name}
+                </Link>
+              </>
+            ) : pr.warehouse ? (
+              ` · ${pr.warehouse.name}`
+            ) : (
+              ''
+            )}{' '}
+            · requested by {pr.requestedBy.name}
+            {pr.neededBy ? ` · needed by ${formatDate(pr.neededBy)}` : ''}
+          </>
+        }
         actions={
           <>
-            <button
-              className="btn"
-              onClick={() =>
-                openPdf(`/api/purchase-requests/${pr.id}/pdf`, () => toast('error', 'Could not print'))
-              }
-            >
-              Print
-            </button>
             {pr.canEdit && pr.items.length > 0 && (
-              <button className="btn btn-ok" onClick={submit}>
+              <button className="btn btn-primary" onClick={submit}>
                 Submit for approval
               </button>
             )}
-            {(pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
-              can('gchain.canvass.create') && (
-                <button className="btn" onClick={startCanvass}>
-                  Start canvass
-                </button>
-              )}
-            {(pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED') &&
-              can('gchain.purchase_orders.create') && (
-                <button className="btn btn-primary" onClick={raiseOrder}>
-                  Raise order
-                </button>
-              )}
+            {sourcing && can('gchain.canvass.create') && (
+              <button className="btn" onClick={startCanvass}>
+                Start canvass
+              </button>
+            )}
+            {sourcing && can('gchain.purchase_orders.create') && (
+              <button className="btn btn-primary" onClick={raiseOrder}>
+                Raise order
+              </button>
+            )}
           </>
         }
+        print={`/api/purchase-requests/${pr.id}/pdf`}
+        more={[
+          mayDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${pr.number}?`,
+              body: 'It cannot be undone.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
+            },
+          },
+        ]}
+        confirm={confirm}
       />
-
-      {/* The kind and the counterparty, under the header rather than in it —
-          the header answers what/which/what state, this answers the rest. */}
-      <p className="record-head-meta proc-meta">
-        {pr.kind === 'DIRECT_TO_JOB' ? 'Direct to project' : 'Stock replenishment'}
-        {pr.job ? ` · ${pr.job.name}` : pr.warehouse ? ` · ${pr.warehouse.name}` : ''} ·{' '}
-        requested by {pr.requestedBy.name}
-      </p>
 
       <DocumentApproval documentType="purchase_request" documentId={pr.id} reloadToken={reload} />
 
@@ -577,24 +631,14 @@ export function PurchaseRequestDetail() {
       <div className="card proc-card">
         <div className="proc-card-head">
           <h3 className="card-title">Items requested</h3>
-          {pr.canEdit && (
-            <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-              + Add line
-            </button>
-          )}
+          {pr.items.length > 0 && addLineButton}
         </div>
 
         {pr.items.length === 0 ? (
           <Empty
             title="No lines yet"
             hint="Add what is needed, with quantities and estimated cost."
-            action={
-              pr.canEdit ? (
-                <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-                  + Add line
-                </button>
-              ) : undefined
-            }
+            action={addLineButton ?? undefined}
           />
         ) : (
           <div className="table-wrap">
@@ -628,16 +672,15 @@ export function PurchaseRequestDetail() {
                       <td>
                         <div className="proc-row-actions">
                           <button
-                            className="btn btn-ghost btn-sm"
+                            className="btn btn-sm"
                             aria-label={`Remove ${i.description}`}
-                            onClick={async () => {
-                              try {
-                                await api.del(`/purchase-requests/${pr.id}/items/${i.id}`);
-                                await load();
-                              } catch (err) {
-                                setError(err);
-                              }
-                            }}
+                            onClick={() =>
+                              confirm.ask({
+                                title: `Remove ${i.description} from ${pr.number}?`,
+                                confirmLabel: 'Remove',
+                                onConfirm: () => removeLine(i),
+                              })
+                            }
                           >
                             Remove
                           </button>
@@ -813,22 +856,19 @@ function AddLineModal({ pr, onClose, onSaved }: { pr: PrDetail; onClose: () => v
 
   return (
     <Modal
-      title="Add a line"
+      title="Add line"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={save}
             disabled={busy || !form.description || needsCategory || !(Number(form.quantity) > 0)}
             title={needsCategory ? 'Choose the budget line first' : undefined}
           >
-            {busy ? 'Adding…' : 'Add'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

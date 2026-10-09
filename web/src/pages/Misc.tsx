@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { api, getToken, SHIPPED_PHASE } from '../lib/api';
+import { api, SHIPPED_PHASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Avatar, ErrorBox, Field, Loading, useToast } from '../components/ui';
+import { useConfirm, type ConfirmApi } from '../components/Confirm';
 import { PasswordInput } from '../components/PasswordInput';
 import { HrFact, type HrFacts } from '../components/HrFacts';
 
@@ -17,7 +18,7 @@ import { HrFact, type HrFacts } from '../components/HrFacts';
  * goes the other way and overwrites this with that verified photo, which is
  * why the note below points there instead of duplicating a camera here.
  */
-function ProfilePhoto() {
+function ProfilePhoto({ confirm }: { confirm: ConfirmApi }) {
   const { me, refresh } = useAuth();
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -45,6 +46,7 @@ function ProfilePhoto() {
     }
   }
 
+  /** Asked through the page's confirm bar, which shows a refusal and stays open — so this throws. */
   async function remove() {
     setBusy(true);
     setError(null);
@@ -52,8 +54,6 @@ function ProfilePhoto() {
       await api.del('/auth/photo');
       await refresh();
       toast('ok', 'Photo removed');
-    } catch (err) {
-      setError(err);
     } finally {
       setBusy(false);
     }
@@ -76,7 +76,19 @@ function ProfilePhoto() {
               {me?.user.photoPath ? 'Replace photo' : 'Upload photo'}
             </button>
             {me?.user.photoPath && (
-              <button type="button" className="btn btn-sm btn-ghost" disabled={busy} onClick={remove}>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                disabled={busy}
+                onClick={() =>
+                  confirm.ask({
+                    title: 'Remove your profile photo?',
+                    body: 'Your initials show beside your name until you upload another.',
+                    confirmLabel: 'Remove',
+                    onConfirm: remove,
+                  })
+                }
+              >
                 Remove
               </button>
             )}
@@ -232,9 +244,11 @@ function ContactDetails() {
           </div>
         </>
       )}
-      <button className="btn btn-primary" type="submit" disabled={busy || snapshot(phone, personal) === saved}>
-        {busy ? 'Saving…' : 'Save details'}
-      </button>
+      <div className="card-foot">
+        <button className="btn btn-primary" type="submit" disabled={busy || snapshot(phone, personal) === saved}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
     </form>
   );
 }
@@ -242,6 +256,7 @@ function ContactDetails() {
 export function Account() {
   const { me, signOut } = useAuth();
   const toast = useToast();
+  const ask = useConfirm();
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -277,8 +292,10 @@ export function Account() {
         </div>
       </div>
 
+      {ask.bar}
+
       <div className="grid grid-2">
-        <ProfilePhoto />
+        <ProfilePhoto confirm={ask} />
 
         <div className="card">
           <h3 className="card-title">Details</h3>
@@ -359,9 +376,11 @@ export function Account() {
               required
             />
           </Field>
-          <button className="btn btn-primary" type="submit" disabled={busy}>
-            {busy ? 'Changing…' : 'Change password'}
-          </button>
+          <div className="card-foot">
+            <button className="btn btn-primary" type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
         </form>
       </div>
 
@@ -394,7 +413,6 @@ interface Setting {
 }
 
 export function SystemSettings() {
-  const toast = useToast();
   const [rows, setRows] = useState<Setting[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -406,13 +424,6 @@ export function SystemSettings() {
       .catch(setError)
       .finally(() => setLoading(false));
   }, []);
-
-  function openSpecimen() {
-    fetch('/api/pdf/specimen', { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then((r) => r.blob())
-      .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-      .catch(() => toast('error', 'Could not render the specimen'));
-  }
 
   if (loading) return <Loading />;
 
@@ -430,47 +441,35 @@ export function SystemSettings() {
 
       <ErrorBox error={error} />
 
-      <div className="grid grid-2">
-        <div className="card">
-          <h3 className="card-title">Document engine</h3>
-          <p className="muted" style={{ marginTop: 0 }}>
-            Every printable document renders through one pipeline, so branding, the signature block
-            and page numbering are identical everywhere. Print the specimen after changing company
-            settings to see exactly what a quotation or progress report will look like.
-          </p>
-          <button className="btn" onClick={openSpecimen}>
-            Print document specimen
-          </button>
-        </div>
-
-        <div className="card">
-          <h3 className="card-title">Stored settings</h3>
-          {rows.length === 0 ? (
-            <div className="muted">
-              Nothing stored yet. Modules add their own settings here as they ship — leave
-              allotments in Phase 6, budget-block rules in Phase 4.
-            </div>
-          ) : (
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Key</th>
-                    <th>Value</th>
+      {/* The document specimen prints from Company Settings, where the
+          details it shows are changed — one button, in one place. */}
+      <div className="card">
+        <h3 className="card-title">Stored settings</h3>
+        {rows.length === 0 ? (
+          <div className="muted">
+            Nothing stored yet. Modules add their own settings here as they ship — leave
+            allotments in Phase 6, budget-block rules in Phase 4.
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((s) => (
+                  <tr key={s.key}>
+                    <td className="mono">{s.key}</td>
+                    <td className="mono faint">{JSON.stringify(s.value)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {rows.map((s) => (
-                    <tr key={s.key}>
-                      <td className="mono">{s.key}</td>
-                      <td className="mono faint">{JSON.stringify(s.value)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -518,9 +517,6 @@ export function ComingSoon() {
           {found?.sub.note ??
             'Its access can already be configured in Admin › Roles & Permissions, and its numbering in Admin › Numbering — so when the screen arrives, the surrounding configuration is already in place.'}
         </p>
-        <Link to="/" className="btn">
-          Back to home
-        </Link>
       </div>
     </div>
   );

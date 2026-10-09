@@ -12,6 +12,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -19,6 +20,7 @@ import {
   humanise,
   useToast,
 } from '../../components/ui';
+import { RecordHeader } from '../../components/RecordHeader';
 import { Collection, Detail } from './Customer360';
 
 interface SupplierRow {
@@ -528,62 +530,54 @@ export function SupplierDetail() {
 
   const mayEdit = can('gchain.suppliers.edit_all');
 
+  /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
   async function remove() {
     if (!supplier) return;
-    try {
-      await api.del(`/suppliers/${supplier.id}`);
-      toast('ok', `${supplier.name} deleted`);
-      navigate('/g-chain/suppliers');
-    } catch (err) {
-      setError(err);
-    }
+    await api.del(`/suppliers/${supplier.id}`);
+    toast('ok', `${supplier.name} deleted`);
+    navigate('/g-chain/suppliers');
   }
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-chain/suppliers">Suppliers</Link>
-        <span className="sep">›</span>
-        <span className="mono">{supplier.code}</span>
-        <span className="sep">›</span>
-        <span>{supplier.name}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{supplier.name}</h1>
-          <p>
+      <RecordHeader
+        type="Supplier"
+        code={supplier.code}
+        title={supplier.name}
+        status={supplier.isActive ? 'ACTIVE' : 'INACTIVE'}
+        statusExtra={{ INACTIVE: 'danger' }}
+        meta={
+          <>
             {supplier.category ?? 'No category recorded'}
             {supplier.isPartner && (
-              <span className="m-inline">
-                <PartnerBadge />
-              </span>
+              <>
+                {' '}
+                ·{' '}
+                {/* The partner page is Sales' window on the same record. */}
+                {can('gops.partners.view_all') ? (
+                  <Link to={`/g-ops/partners/${supplier.id}`}>Sales partner</Link>
+                ) : (
+                  'Sales partner'
+                )}
+              </>
             )}
-            {!supplier.isActive && (
-              <span className="m-inline">
-                <StatusBadge status="INACTIVE" extra={{ INACTIVE: 'danger' }} />
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="row">
-          {supplier.isPartner && can('gops.partners.view_all') && (
-            <Link className="btn btn-sm" to={`/g-ops/partners/${supplier.id}`}>
-              Open in Sales › Partners
-            </Link>
-          )}
-          {mayEdit && (
-            <button className="btn" onClick={() => setEditing(true)}>
-              Modify
-            </button>
-          )}
-          {mayEdit && can('gchain.suppliers.delete') && (
-            <button className="btn btn-danger" onClick={remove}>
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
+          </>
+        }
+        more={[
+          mayEdit &&
+            can('gchain.suppliers.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${supplier.name}?`,
+                body: 'It cannot be undone. A Sales partner, or a supplier an item names as its preferred supplier, is refused — mark it inactive instead.',
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
+        ]}
+        modify={mayEdit ? () => setEditing(true) : undefined}
+      />
 
       <ErrorBox error={error} />
 
@@ -622,7 +616,7 @@ export function SupplierDetail() {
           <div className="m-card-head">
             <h3 className="card-title">People</h3>
             {mayEdit && (
-              <button className="btn btn-primary btn-sm" onClick={() => setContactModal('new')}>
+              <button className="btn btn-sm" onClick={() => setContactModal('new')}>
                 + Add contact
               </button>
             )}
@@ -653,7 +647,11 @@ export function SupplierDetail() {
                       <td>{c.mobile ?? '—'}</td>
                       {mayEdit && (
                         <td className="m-col-action">
-                          <button className="btn btn-sm" onClick={() => setContactModal(c)}>
+                          <button
+                            className="btn btn-sm"
+                            aria-label={`Modify ${c.name}`}
+                            onClick={() => setContactModal(c)}
+                          >
                             Modify
                           </button>
                         </td>
@@ -863,17 +861,14 @@ function SupplierForm({
   return (
     <Modal
       wide
-      title={supplier ? `Modify ${supplier.name}` : 'Add supplier'}
+      title={supplier ? `Modify supplier ${supplier.name}` : 'New supplier'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -990,37 +985,33 @@ function SupplierContactModal({
     }
   }
 
-  async function remove() {
-    if (!contact) return;
-    setBusy(true);
-    try {
-      await api.del(`/suppliers/${supplierId}/contacts/${contact.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
   return (
     <Modal
-      title={contact ? `Modify ${contact.name}` : 'Add contact'}
+      title={contact ? `Modify contact ${contact.name}` : 'Add contact'}
       onClose={onClose}
       footer={
-        <>
-          {contact && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Remove
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            contact
+              ? {
+                  label: 'Remove',
+                  question: `Remove ${contact.name} from this supplier's contacts?`,
+                  // Thrown errors show beside the question, which stays open.
+                  onConfirm: async () => {
+                    await api.del(`/suppliers/${supplierId}/contacts/${contact.id}`);
+                    toast('ok', `${contact.name} removed`);
+                    onSaved();
+                  },
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

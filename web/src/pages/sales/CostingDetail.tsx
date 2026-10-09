@@ -1,8 +1,10 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, openPdf } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DocumentApproval } from '../../components/ApprovalStepper';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { Empty, ErrorBox, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
 import { COSTING_TONES, MarginBadge, type CostingRow } from './Costings';
 import { PlanBar, TemplateSavePanel } from './CostingSheet';
@@ -126,6 +128,10 @@ export function CostingDetailPage() {
   const [reload, setReload] = useState(0);
   const [templatePanel, setTemplatePanel] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
 
   // A renewal arrives as ?renewFrom=<contract id>: the Contracts screen has
   // just duplicated the old contract's costing and sent the user here to
@@ -177,10 +183,6 @@ export function CostingDetailPage() {
     }
   }
 
-  function printPdf() {
-    openPdf(`/api/costings/${costing!.id}/pdf`, () => toast('error', 'Could not render the cost estimate'));
-  }
-
   /** A fresh draft copy under a new number, then straight to it. */
   async function duplicate() {
     setBusy(true);
@@ -194,15 +196,19 @@ export function CostingDetailPage() {
     }
   }
 
+  /** Asked in the confirm bar under the header, which shows a refusal and stays open. */
   async function remove() {
-    if (!window.confirm(`Delete ${costing!.number}? This cannot be undone.`)) return;
-    try {
-      await api.del(`/costings/${costing!.id}`);
-      toast('ok', 'Costing deleted');
-      navigate('/g-ops/costing');
-    } catch (err) {
-      setError(err);
-    }
+    await api.del(`/costings/${costing!.id}`);
+    toast('ok', 'Costing deleted');
+    navigate('/g-ops/costing');
+  }
+
+  /** Back to draft — asked first, because it needs approval again. Throws for the confirm bar. */
+  async function reopen() {
+    await api.patch(`/costings/${costing!.id}`, { status: 'DRAFT' });
+    toast('ok', 'Costing reopened');
+    setReload((r) => r + 1);
+    await load();
   }
 
   async function saveTemplate(name: string, description: string, withPrices: boolean) {
@@ -236,76 +242,110 @@ export function CostingDetailPage() {
 
   return (
     <div className="costing-page">
-      <div className="breadcrumb">
-        <Link to="/g-ops/costing">Costing</Link>
-        <span className="sep">›</span>
-        <span className="mono">{costing.number}</span>
-        {costing.quotationRevisions.length > 0 && (
+      <RecordHeader
+        type="Costing"
+        code={costing.number}
+        title={costing.title}
+        status={costing.status}
+        statusExtra={COSTING_TONES}
+        amount={formatMoney(costing.contractValue)}
+        amountLabel="Contract value (net of VAT)"
+        meta={
           <>
-            <span className="sep">›</span>
-            {costing.quotationRevisions.map((r) => (
-              <Link key={r.id} to={`/g-ops/quotations/${r.quotation.id}`}>
-                {r.quotation.number} R{r.revision}
-              </Link>
-            ))}
-          </>
-        )}
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{costing.title}</h1>
-          <p className="row cs-subtitle">
-            <span className="mono">{costing.number}</span>
-            <StatusBadge status={costing.status} extra={COSTING_TONES} />
-            <span className="muted">prepared by {costing.owner.name}</span>
-          </p>
-        </div>
-        <div className="row cs-page-actions">
-          <button className="btn" onClick={printPdf} title="Opens the Material Cost Estimate — print it or save it as PDF from there">
-            Print / Save PDF
-          </button>
-          {can('gops.costing.create') && (
-            <>
-              <button className="btn" onClick={duplicate} disabled={busy}>
-                Duplicate
-              </button>
-              <button className="btn" onClick={() => setTemplatePanel((v) => !v)} aria-expanded={templatePanel}>
-                Save as template
-              </button>
-            </>
-          )}
-          {editable && (
-            <Link to={`/g-ops/costing/${costing.id}/edit`} className="btn">
-              Modify
-            </Link>
-          )}
-          {editable &&
-            (costing.approvalConfigured ? (
-              <button
-                className="btn btn-ok"
-                disabled={busy}
-                onClick={() => act(() => api.post(`/costings/${costing.id}/submit`), 'Submitted for approval')}
-              >
-                Submit for approval
-              </button>
+            {costing.customer ? (
+              can('gops.customers.view_all') ? (
+                <Link to={`/g-ops/customers/${costing.customer.id}`}>{costing.customer.name}</Link>
+              ) : (
+                costing.customer.name
+              )
             ) : (
-              <button className="btn btn-ok" disabled={busy} onClick={() => act(() => api.patch(`/costings/${costing.id}`, { status: 'FINAL' }), 'Costing marked final')}>
-                Mark final
-              </button>
-            ))}
-          {costing.canEdit && isFinal && (
-            <button className="btn btn-danger" disabled={busy} onClick={() => act(() => api.patch(`/costings/${costing.id}`, { status: 'DRAFT' }), 'Costing reopened')}>
-              Reopen
-            </button>
-          )}
-          {costing.canEdit && can('gops.costing.delete') && isDraft && (
-            <button className="btn btn-danger" onClick={remove}>
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
+              'No customer linked'
+            )}{' '}
+            · prepared by {costing.owner.name}
+            {costing.lead && (
+              <>
+                {' '}
+                · from lead <Link to={`/g-ops/leads/${costing.lead.id}`}>{costing.lead.number}</Link>
+              </>
+            )}
+            {costing.quotationRevisions.length > 0 && (
+              <>
+                {' '}
+                · on{' '}
+                {costing.quotationRevisions.map((r, i) => (
+                  <Fragment key={r.id}>
+                    {i > 0 && ', '}
+                    <Link to={`/g-ops/quotations/${r.quotation.id}`}>
+                      {r.quotation.number} R{r.revision}
+                    </Link>
+                  </Fragment>
+                ))}
+              </>
+            )}
+          </>
+        }
+        actions={
+          <>
+            {editable &&
+              (costing.approvalConfigured ? (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={busy}
+                  onClick={() => act(() => api.post(`/costings/${costing.id}/submit`), 'Submitted for approval')}
+                >
+                  Submit for approval
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={busy}
+                  onClick={() => act(() => api.patch(`/costings/${costing.id}`, { status: 'FINAL' }), 'Costing marked final')}
+                >
+                  Mark final
+                </button>
+              ))}
+            {isFinal && canCreateProject && (
+              <Link to={projectHref} className="btn btn-primary">
+                {renewFrom ? 'Create service contract' : 'Convert to project'}
+              </Link>
+            )}
+            {canCreateQuotation && (
+              <Link to={quotationHref} className="btn">
+                Create quotation
+              </Link>
+            )}
+          </>
+        }
+        print={`/api/costings/${costing.id}/pdf`}
+        more={[
+          can('gops.costing.create') && { label: 'Duplicate', hint: 'A fresh draft copy under a new number', disabled: busy, onSelect: () => void duplicate() },
+          can('gops.costing.create') && { label: 'Save as template', onSelect: () => setTemplatePanel(true) },
+          costing.canEdit &&
+            isFinal && {
+              label: 'Reopen',
+              confirm: {
+                title: `Reopen ${costing.number}?`,
+                body: costing.approvalConfigured
+                  ? 'It goes back to draft and needs approval again before a project can be built on it.'
+                  : 'It goes back to draft and must be marked final again before a project can be built on it.',
+                confirmLabel: 'Reopen',
+                tone: 'primary',
+                onConfirm: reopen,
+              },
+            },
+          costing.canEdit &&
+            can('gops.costing.delete') &&
+            isDraft && {
+              label: 'Delete',
+              danger: true,
+              confirm: { title: `Delete ${costing.number}?`, body: 'It cannot be undone.', confirmLabel: 'Delete', onConfirm: remove },
+            },
+        ]}
+        modify={editable ? `/g-ops/costing/${costing.id}/edit` : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
       {templatePanel && (
@@ -324,15 +364,7 @@ export function CostingDetailPage() {
           ) : (
             'the previous service contract'
           )}{' '}
-          — copied at last year's prices. Reprice the lines, finalise the costing, then{' '}
-          {isFinal && canCreateProject ? (
-            <Link to={projectHref} className="btn btn-primary btn-sm">
-              Create service contract
-            </Link>
-          ) : (
-            <strong>Create service contract</strong>
-          )}
-          .
+          — copied at last year's prices. Reprice the lines, finalise the costing, then <strong>Create service contract</strong>.
         </div>
       )}
       {costing.status === 'PENDING_APPROVAL' && (
@@ -394,16 +426,9 @@ export function CostingDetailPage() {
       </section>
 
       <section className="card" aria-labelledby="cs-cost">
-        <div className="row cs-block-head">
-          <h2 id="cs-cost" className="card-title">
-            Project budgeted cost
-          </h2>
-          {editable && (
-            <Link to={`/g-ops/costing/${costing.id}/edit`} className="btn btn-sm">
-              Modify lines
-            </Link>
-          )}
-        </div>
+        <h2 id="cs-cost" className="card-title">
+          Project budgeted cost
+        </h2>
         {costing.lines.length === 0 ? (
           <Empty title="No cost lines yet" hint="Modify the costing to add what the job will cost, in the five buckets." />
         ) : (
@@ -529,11 +554,6 @@ export function CostingDetailPage() {
               ))}
             </div>
           )}
-          {canCreateQuotation && (
-            <Link to={quotationHref} className="btn btn-sm">
-              Create quotation
-            </Link>
-          )}
 
           <hr className="rule" />
           <div className="section-label">PROJECTS</div>
@@ -558,11 +578,6 @@ export function CostingDetailPage() {
                 </Link>
               ))}
             </div>
-          )}
-          {isFinal && canCreateProject && (
-            <Link to={projectHref} className="btn btn-sm">
-              {renewFrom ? 'Create service contract' : 'Convert to project'}
-            </Link>
           )}
         </section>
       </div>

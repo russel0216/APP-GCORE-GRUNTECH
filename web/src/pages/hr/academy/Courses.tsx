@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { DataList, type Column } from '../../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
 
 /**
@@ -65,7 +65,6 @@ const ACTIVE_TONES = { ACTIVE: 'ok', INACTIVE: '' } as const;
 
 export function Courses() {
   const { can } = useAuth();
-  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [open, setOpen] = useState<string | 'new' | null>(params.get('course'));
   const [importing, setImporting] = useState<{ label: string; columns: { header: string; required?: boolean; example?: string; hint?: string }[] } | null>(null);
@@ -158,31 +157,16 @@ export function Courses() {
     },
   ];
 
-  const actions = (
-    <>
-      {can('ghr.courses.create') && (
-        <button type="button" className="btn btn-sm" onClick={startImport}>
-          Import CSV
-        </button>
-      )}
-      {can('ghr.courses.create') && (
-        <button type="button" className="btn btn-primary btn-sm" onClick={() => show('new')}>
-          + New course
-        </button>
-      )}
-    </>
-  );
+  const newButton = can('ghr.courses.create') ? (
+    <button type="button" className="btn btn-primary btn-sm" onClick={() => show('new')}>
+      + New course
+    </button>
+  ) : null;
 
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Courses</h1>
-          <p>
-            What Gruntech Academy teaches, how long a completion stays valid, and which departments
-            and plantilla positions must hold each course.
-          </p>
-        </div>
+        <h1>Courses</h1>
       </div>
 
       <DataList<CourseRow>
@@ -195,7 +179,7 @@ export function Courses() {
         searchPlaceholder="Search code, title, category…"
         emptyTitle="No courses yet"
         emptyHint="Add the courses people must hold — safety inductions, equipment tickets, quality training."
-        emptyAction={can('ghr.courses.create') ? actions : null}
+        emptyAction={newButton}
         onRowClick={(r) => show(r.id)}
         filters={[
           {
@@ -216,7 +200,18 @@ export function Courses() {
             ],
           },
         ]}
-        actions={actions}
+        actions={newButton}
+        menuItems={
+          can('ghr.courses.create')
+            ? [
+                {
+                  label: 'Import courses…',
+                  hint: 'From a CSV, checked before anything is saved',
+                  onSelect: () => void startImport(),
+                },
+              ]
+            : []
+        }
       />
 
       {open && (
@@ -225,7 +220,6 @@ export function Courses() {
           categories={categories}
           onClose={() => show(null)}
           onChanged={() => setReload((n) => n + 1)}
-          onSchedule={(courseId) => navigate(`/g-hr/academy/sessions?new=1&courseId=${courseId}`)}
         />
       )}
       {importing && (
@@ -246,18 +240,28 @@ export function Courses() {
 
 type Tab = 'details' | 'requirements';
 
+/** A new course's form, and what "unchanged" means before it is saved. */
+const BLANK_COURSE = {
+  code: '',
+  title: '',
+  category: '',
+  description: '',
+  hours: '8',
+  validityMonths: '',
+  requiresAssessment: false,
+  isActive: true,
+};
+
 function CourseModal({
   id,
   categories,
   onClose,
   onChanged,
-  onSchedule,
 }: {
   id: string | null;
   categories: string[];
   onClose: () => void;
   onChanged: () => void;
-  onSchedule: (courseId: string) => void;
 }) {
   const { can } = useAuth();
   const toast = useToast();
@@ -269,22 +273,22 @@ function CourseModal({
   const [error, setError] = useState<unknown>(null);
   const editable = courseId ? can('ghr.courses.edit_all') : can('ghr.courses.create');
 
-  const [form, setForm] = useState({
-    code: '',
-    title: '',
-    category: '',
-    description: '',
-    hours: '8',
-    validityMonths: '',
-    requiresAssessment: false,
-    isActive: true,
-  });
+  const [form, setForm] = useState(BLANK_COURSE);
+  /** The details as last loaded or saved: the form is "changed" only against these. */
+  const [savedForm, setSavedForm] = useState(BLANK_COURSE);
   const [reqs, setReqs] = useState<Requirement[]>([]);
   const [reqsDirty, setReqsDirty] = useState(false);
+  /**
+   * Saves made while the modal is open. The modal stays open after one, so it
+   * is remounted under a new key: the shared Modal's "Close without saving?"
+   * then counts only what was typed since, and the foot reads Close while
+   * nothing is unsaved.
+   */
+  const [saves, setSaves] = useState(0);
 
   const accept = useCallback((c: CourseDetail) => {
     setCourse(c);
-    setForm({
+    const next = {
       code: c.code,
       title: c.title,
       category: c.category ?? '',
@@ -293,7 +297,9 @@ function CourseModal({
       validityMonths: c.validityMonths != null ? String(c.validityMonths) : '',
       requiresAssessment: c.requiresAssessment,
       isActive: c.isActive,
-    });
+    };
+    setForm(next);
+    setSavedForm(next);
     setReqs(c.requirements.map((r) => ({ departmentId: r.departmentId, positionId: r.positionId, label: r.label })));
     setReqsDirty(false);
   }, []);
@@ -319,6 +325,8 @@ function CourseModal({
     Number.isFinite(hours) &&
     hours >= 0 &&
     (validity === null || (Number.isInteger(validity) && validity > 0));
+  const detailsDirty = (Object.keys(form) as (keyof typeof form)[]).some((k) => form[k] !== savedForm[k]);
+  const dirty = editable && (detailsDirty || reqsDirty);
 
   async function saveDetails() {
     setBusy(true);
@@ -344,6 +352,7 @@ function CourseModal({
         setTab('requirements');
         toast('ok', 'Course added — now say who must hold it');
       }
+      setSaves((n) => n + 1);
       onChanged();
     } catch (err) {
       setError(err);
@@ -364,6 +373,7 @@ function CourseModal({
         ),
       );
       toast('ok', 'Requirements saved');
+      setSaves((n) => n + 1);
       onChanged();
     } catch (err) {
       setError(err);
@@ -372,59 +382,49 @@ function CourseModal({
     }
   }
 
+  /** Asked in the modal's foot, which shows a refusal and stays open. */
   async function remove() {
-    if (!courseId || !course) return;
-    if (!window.confirm(`Delete ${course.code}? This cannot be undone.`)) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.del(`/courses/${courseId}`);
-      toast('ok', 'Course deleted');
-      onChanged();
-      onClose();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    if (!courseId) return;
+    await api.del(`/courses/${courseId}`);
+    toast('ok', 'Course deleted');
+    onChanged();
+    onClose();
   }
 
-  const footer =
-    tab === 'details' ? (
-      <>
-        {courseId && course && can('ghr.courses.delete') && (
-          <button type="button" className="btn btn-ghost" onClick={remove} disabled={busy}>
-            Delete
-          </button>
-        )}
-        {courseId && course?.isActive && can('ghr.training_sessions.create') && (
-          <button type="button" className="btn" onClick={() => onSchedule(courseId)}>
-            Schedule a session
-          </button>
-        )}
-        <button type="button" className="btn" onClick={onClose} disabled={busy}>
-          Close
-        </button>
-        {editable && (
+  const footer = (
+    <ModalFoot
+      onCancel={onClose}
+      cancelLabel={editable && (dirty || saves === 0) ? 'Cancel' : 'Close'}
+      busy={busy}
+      danger={
+        courseId && course && can('ghr.courses.delete')
+          ? { label: 'Delete', question: `Delete ${course.code}? It cannot be undone.`, onConfirm: remove }
+          : undefined
+      }
+    >
+      {editable &&
+        (tab === 'details' ? (
           <button type="button" className="btn btn-primary" onClick={saveDetails} disabled={busy || !valid}>
-            {busy ? 'Saving…' : courseId ? 'Save' : 'Add course'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        )}
-      </>
-    ) : (
-      <>
-        <button type="button" className="btn" onClick={onClose} disabled={busy}>
-          Close
-        </button>
-        {editable && (
+        ) : (
           <button type="button" className="btn btn-primary" onClick={saveRequirements} disabled={busy || !reqsDirty}>
-            {busy ? 'Saving…' : 'Save requirements'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        )}
-      </>
-    );
+        ))}
+    </ModalFoot>
+  );
+
+  const title = !courseId
+    ? 'New course'
+    : !course
+      ? 'Course'
+      : editable
+        ? `Modify course ${course.code}`
+        : `${course.code} — ${course.title}`;
 
   return (
-    <Modal title={course ? `${course.code} — ${course.title}` : 'New course'} onClose={onClose} wide footer={footer}>
+    <Modal title={title} onClose={onClose} wide footer={footer} dirty={dirty}>
       <div className="scope-switch academy-tabs" role="tablist" aria-label="Course">
         {(['details', 'requirements'] as Tab[]).map((t) => (
           <button
@@ -616,7 +616,7 @@ function RequirementsEditor({
             className="btn btn-sm"
             onClick={() => onChange([...rows, { departmentId: null, positionId: null }])}
           >
-            + Add a requirement
+            + Add requirement
           </button>
         </div>
       )}

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
+import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 
 interface Role {
   id: string;
@@ -73,7 +73,7 @@ export function Roles() {
         </div>
         {can('admin.roles.create') && (
           <button className="btn btn-primary" onClick={() => setEditing('new')}>
-            + Add role
+            + New role
           </button>
         )}
       </div>
@@ -82,10 +82,13 @@ export function Roles() {
 
       <div className="grid grid-3">
         {roles.map((role) => (
-          <div
+          // A button, not a div: opening a role to modify it was mouse-only (rule 13).
+          // A column, so the card's text starts at its top as it did, not centred as a button centres it.
+          <button
+            type="button"
             key={role.id}
-            className="card"
-            style={{ cursor: 'pointer' }}
+            className="card clickable card-button"
+            style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}
             onClick={() => setEditing(role)}
           >
             <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -99,7 +102,7 @@ export function Roles() {
               {role.permissions.length} permissions · {role.userCount} user
               {role.userCount === 1 ? '' : 's'}
             </div>
-          </div>
+          </button>
         ))}
       </div>
 
@@ -148,6 +151,15 @@ function RoleEditor({
     });
   }
 
+  function toggleModule(moduleKey: string) {
+    setCollapsed((c) => {
+      const next = new Set(c);
+      if (next.has(moduleKey)) next.delete(moduleKey);
+      else next.add(moduleKey);
+      return next;
+    });
+  }
+
   function toggleSubmodule(keys: string[]) {
     const allOn = keys.every((k) => selected.has(k));
     setSelected((s) => {
@@ -175,39 +187,37 @@ function RoleEditor({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!role) return;
-    setBusy(true);
-    try {
-      await api.del(`/roles/${role.id}`);
-      toast('ok', `${role.name} deleted`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/roles/${role.id}`);
+    toast('ok', `${role.name} deleted`);
+    onSaved();
   }
 
   return (
     <Modal
       wide
-      title={role ? `Modify ${role.name}` : 'Add role'}
+      title={role ? `Modify role ${role.name}` : 'New role'}
       onClose={onClose}
       footer={
-        <>
-          {role && !role.isSystem && can('admin.roles.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            role && !role.isSystem && can('admin.roles.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the role ${role.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : `Save (${selected.size})`}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -244,14 +254,11 @@ function RoleEditor({
         return (
           <div key={mod.key} className="perm-module">
             <header
-              onClick={() =>
-                setCollapsed((c) => {
-                  const next = new Set(c);
-                  if (next.has(mod.key)) next.delete(mod.key);
-                  else next.add(mod.key);
-                  return next;
-                })
-              }
+              role="button"
+              tabIndex={0}
+              aria-expanded={!isCollapsed}
+              onClick={() => toggleModule(mod.key)}
+              onKeyDown={onActivate(() => toggleModule(mod.key))}
             >
               <h4>
                 {isCollapsed ? '▸' : '▾'} {mod.label}
@@ -268,8 +275,17 @@ function RoleEditor({
                   <div key={sub.key} className="perm-row">
                     <div
                       className="name"
+                      role="button"
+                      tabIndex={0}
                       style={{ cursor: 'pointer' }}
-                      onClick={() => toggleSubmodule(subKeys)}
+                      onClick={(e) => {
+                        toggleSubmodule(subKeys);
+                        markChanged(e.currentTarget);
+                      }}
+                      onKeyDown={onActivate((el) => {
+                        toggleSubmodule(subKeys);
+                        markChanged(el);
+                      })}
                       title={sub.note}
                     >
                       {sub.label}
@@ -281,14 +297,20 @@ function RoleEditor({
                     </div>
                     <div className="perm-actions">
                       {sub.actions.map((a) => (
-                        <span
+                        // A button, not a span: a permission could not be ticked from a keyboard (rule 13).
+                        <button
+                          type="button"
                           key={a.key}
                           className={`perm-chip${selected.has(a.key) ? ' on' : ''}`}
-                          onClick={() => toggle(a.key)}
+                          aria-pressed={selected.has(a.key)}
+                          onClick={(e) => {
+                            toggle(a.key);
+                            markChanged(e.currentTarget);
+                          }}
                           title={a.key}
                         >
                           {a.label}
-                        </span>
+                        </button>
                       ))}
                     </div>
                   </div>
@@ -299,4 +321,24 @@ function RoleEditor({
       })}
     </Modal>
   );
+}
+
+/** Enter or Space on something drawn as a button but not one. */
+function onActivate(fn: (el: HTMLElement) => void) {
+  return (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      fn(e.currentTarget);
+    }
+  };
+}
+
+/**
+ * A permission is ticked with a button, and a button sends no `input` event —
+ * so the Modal's "Close without saving?" guard never heard about it, and
+ * Escape or a click outside threw the ticks away. Tell it, the way a field
+ * would. (Collapsing a module changes nothing, so it does not.)
+ */
+function markChanged(el: HTMLElement) {
+  el.dispatchEvent(new Event('input', { bubbles: true }));
 }

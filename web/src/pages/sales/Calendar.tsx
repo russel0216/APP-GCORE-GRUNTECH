@@ -310,8 +310,8 @@ export function SalesCalendar() {
   const days = useMemo(() => weekDays(nav.week), [nav.week]);
 
   /*
-    "+ Schedule" proposes the day the person is looking at. Today keeps the
-    old "an hour from now"; any other focused day starts at nine.
+    "+ New activity" proposes the day the person is looking at. Today keeps
+    the old "an hour from now"; any other focused day starts at nine.
   */
   const defaultStart = useMemo(() => {
     if (nav.focus === today) return new Date(Date.now() + 3600000);
@@ -332,7 +332,7 @@ export function SalesCalendar() {
           </p>
         </div>
         <button type="button" className="btn btn-primary" onClick={() => setEditing('new')}>
-          + Schedule
+          + New activity
         </button>
       </div>
 
@@ -413,8 +413,8 @@ const HOURS = Array.from({ length: 24 }, (_, h) => h);
  * the hours, and each activity a block sized by its Starts and Ends — blocks
  * that overlap share the column in lanes (`lib/timeGrid.ts`). A half-hour
  * slot shows "+" under the pointer and books that time; the blocks are
- * buttons, so the keyboard reaches every activity, while "+ Schedule" on the
- * focused day stays the keyboard's way to a new one.
+ * buttons, so the keyboard reaches every activity, while "+ New activity" on
+ * the focused day stays the keyboard's way to a new one.
  */
 function TimeGrid({
   days,

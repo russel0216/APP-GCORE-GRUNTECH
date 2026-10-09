@@ -83,16 +83,6 @@ ul.svc-legend {
   margin-bottom: var(--s-3);
 }
 
-.svc-cancel {
-  display: grid;
-  gap: var(--s-2);
-  margin-top: var(--s-2);
-  padding: var(--s-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-
 .svc-notes {
   white-space: pre-wrap;
   font-size: var(--fs-sm);

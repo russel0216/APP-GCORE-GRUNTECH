@@ -36,19 +36,6 @@
   color: var(--text);
 }
 
-/* ── Detail ──────────────────────────────────────────────────────────────── */
-
-.eval-meta {
-  margin: 0 0 var(--s-4);
-  color: var(--muted);
-  font-size: var(--fs-md);
-}
-
-.eval-meta strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
 .eval-body {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);

@@ -144,16 +144,7 @@ export function Passports() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Training Passports</h1>
-          <p>
-            Every employee's required courses against what they hold today. Requirements come from
-            each course; certificates from completed sessions and verified external training.
-          </p>
-        </div>
-        <Link className="btn btn-sm" to="/g-hr/academy/courses">
-          Courses &amp; requirements
-        </Link>
+        <h1>Training Passports</h1>
       </div>
 
       {summary && (

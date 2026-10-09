@@ -110,6 +110,12 @@ export function Company() {
   if (loading) return <Loading />;
   if (!data) return <ErrorBox error={error} />;
 
+  const saveButton = (
+    <button className="btn btn-primary" onClick={save} disabled={busy}>
+      {busy ? 'Saving…' : 'Save'}
+    </button>
+  );
+
   return (
     <div>
       <div className="page-head">
@@ -120,9 +126,12 @@ export function Company() {
             progress reports, invoices. Change them here and every PDF follows.
           </p>
         </div>
-        <button className="btn" onClick={openSpecimen}>
-          Preview document specimen
-        </button>
+        <div className="row">
+          <button className="btn" onClick={openSpecimen}>
+            Preview document specimen
+          </button>
+          {saveButton}
+        </div>
       </div>
 
       <ErrorBox error={error} />
@@ -305,10 +314,9 @@ export function Company() {
         </div>
       </div>
 
-      <div className="row company-actions">
-        <button className="btn btn-primary" onClick={save} disabled={busy}>
-          {busy ? 'Saving…' : 'Save company settings'}
-        </button>
+      {/* The form is long: Save again at its foot, right, as at its head. */}
+      <div className="page-foot company-actions">
+        {saveButton}
       </div>
     </div>
   );

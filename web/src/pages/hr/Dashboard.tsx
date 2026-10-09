@@ -8,6 +8,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   formatDateTime,
   useToast,
 } from '../../components/ui';
@@ -319,10 +320,7 @@ export function HrDashboard() {
           title="Extract attendance"
           onClose={() => setRange(null)}
           footer={
-            <>
-              <button className="btn" onClick={() => setRange(null)} disabled={exporting}>
-                Cancel
-              </button>
+            <ModalFoot onCancel={() => setRange(null)} busy={exporting}>
               <button
                 className="btn btn-primary"
                 onClick={() => exportCsv(range.from, range.to)}
@@ -330,7 +328,7 @@ export function HrDashboard() {
               >
                 {exporting ? 'Building…' : 'Download CSV'}
               </button>
-            </>
+            </ModalFoot>
           }
         >
           <p className="muted">
@@ -453,11 +451,6 @@ export function AttendanceRegister() {
       <div className="page-head">
         <div>
           <h1>Attendance</h1>
-          <p>
-            Every clock entry, with how the person was identified. A fallback entry carries its
-            reason — hover the badge. Corrections are recorded as manual, against whoever made
-            them.
-          </p>
         </div>
       </div>
 
@@ -548,17 +541,14 @@ function CorrectionModal({
 
   return (
     <Modal
-      title={`Correct ${row.employee.firstName} ${row.employee.lastName} — ${row.date.slice(0, 10)}`}
+      title={`Modify attendance — ${row.employee.firstName} ${row.employee.lastName}, ${row.date.slice(0, 10)}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save correction'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

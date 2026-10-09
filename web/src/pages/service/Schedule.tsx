@@ -10,6 +10,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   statusTone,
@@ -260,12 +261,6 @@ export function ServiceSchedule() {
       <div className="page-head">
         <div>
           <h1>Service Schedule</h1>
-          <p>
-            Every visit a contract implies, every call a job order scheduled, and the call-outs
-            nobody planned. A visit is complete once its report is approved. A late visit reads{' '}
-            <strong>overdue</strong>
-            {feed ? ` for ${feed.missedAfterDays} days` : ''}, then <strong>missed</strong>.
-          </p>
         </div>
         <div className="row">
           <div className="scope-switch" role="tablist" aria-label="Schedule view">
@@ -290,7 +285,7 @@ export function ServiceSchedule() {
           </div>
           {can('gops.pm_reports.create') && (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + Call-out
+              + New call-out
             </button>
           )}
         </div>
@@ -649,8 +644,6 @@ function VisitSheet({
   const [busy, setBusy] = useState(false);
   const [engineers, setEngineers] = useState<{ id: string; name: string; position: string | null }[]>([]);
   const [form, setForm] = useState({ dueDate: '', assignedToId: '', notes: '' });
-  const [cancelling, setCancelling] = useState(false);
-  const [reason, setReason] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -682,22 +675,30 @@ function VisitSheet({
       .catch(() => setEngineers([]));
   }, [canSchedule]);
 
-  async function save(extra: Record<string, unknown> = {}) {
+  /**
+   * The PATCH itself; a refusal is thrown, so the cancel's question in the
+   * foot can show it. A save that went through closes the sheet, as every
+   * modify modal does — staying open would leave the modal believing the
+   * saved fields (or the cancel reason typed in the foot) were unsaved.
+   */
+  async function patchVisit(extra: Record<string, unknown> = {}) {
     if (!visit) return;
+    await api.patch(`/service-visits/${visit.id}`, {
+      dueDate: form.dueDate,
+      assignedToId: form.assignedToId || null,
+      notes: form.notes || null,
+      ...extra,
+    });
+    toast('ok', extra.status === 'CANCELLED' ? 'Visit cancelled' : 'Visit updated');
+    onChanged();
+    onClose();
+  }
+
+  async function save(extra: Record<string, unknown> = {}) {
     setBusy(true);
     setError(null);
     try {
-      await api.patch(`/service-visits/${visit.id}`, {
-        dueDate: form.dueDate,
-        assignedToId: form.assignedToId || null,
-        notes: form.notes || null,
-        ...extra,
-      });
-      toast('ok', extra.status === 'CANCELLED' ? 'Visit cancelled' : 'Visit updated');
-      setCancelling(false);
-      setReason('');
-      onChanged();
-      await load();
+      await patchVisit(extra);
     } catch (err) {
       setError(err);
     } finally {
@@ -705,10 +706,13 @@ function VisitSheet({
     }
   }
 
-  const title = visit ? `${visit.number} — ${visit.customer.name}` : 'Visit';
   const open = visit && (visit.status === 'SCHEDULED' || visit.status === 'MISSED');
   const editable = !!visit && canSchedule && visit.status !== 'COMPLETED';
+  /** The date, the engineer and the notes can be changed — the sheet is a form. */
+  const formOpen = editable && visit!.status !== 'CANCELLED';
+  const canRestore = editable && visit!.status === 'CANCELLED';
   const canWrite = !!visit && !visit.report && !!open && can(reportPermission(visit.kind, 'create'));
+  const title = visit ? (formOpen ? `Modify visit ${visit.number}` : `Visit ${visit.number}`) : 'Visit';
 
   return (
     <Modal
@@ -716,10 +720,27 @@ function VisitSheet({
       onClose={onClose}
       wide
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          cancelLabel={formOpen ? 'Cancel' : 'Close'}
+          busy={busy}
+          danger={
+            formOpen && visit
+              ? {
+                  label: 'Cancel visit',
+                  question: `Cancel ${visit.number}? ${
+                    visit.sequence
+                      ? 'Regenerating the contract’s schedule rewrites cancelled visits, so this one may come back.'
+                      : 'The reason is kept in the visit’s notes.'
+                  }`,
+                  reason: 'required',
+                  reasonLabel: 'Why is it cancelled?',
+                  minReason: 3,
+                  onConfirm: (reason) => patchVisit({ status: 'CANCELLED', reason }),
+                }
+              : undefined
+          }
+        >
           {visit?.report && (
             <Link to={`/g-ops/service-reports/${visit.report.id}`} className="btn">
               Open report {visit.report.number}
@@ -734,12 +755,27 @@ function VisitSheet({
               Write report
             </button>
           )}
-          {editable && visit!.status !== 'CANCELLED' && (
-            <button type="button" className="btn btn-primary" onClick={() => save(visit!.status === 'MISSED' ? { status: 'SCHEDULED' } : {})} disabled={busy}>
+          {formOpen && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => save(visit!.status === 'MISSED' ? { status: 'SCHEDULED' } : {})}
+              disabled={busy}
+            >
               {busy ? 'Saving…' : visit!.status === 'MISSED' ? 'Reschedule' : 'Save'}
             </button>
           )}
-        </>
+          {canRestore && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => save({ status: 'SCHEDULED' })}
+              disabled={busy}
+            >
+              {busy ? 'Saving…' : 'Put it back on the schedule'}
+            </button>
+          )}
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -775,7 +811,7 @@ function VisitSheet({
           )}
           {visit.report && visit.report.status === 'REJECTED' && (
             <div className="alert warn">
-              Its report was returned. Open it, correct it and send it again — the visit closes when
+              Its report was returned. Open it, correct it and submit it again — the visit closes when
               the report is approved.
             </div>
           )}
@@ -848,7 +884,7 @@ function VisitSheet({
             )}
           </dl>
 
-          {editable && visit.status !== 'CANCELLED' && (
+          {formOpen && (
             <>
               <div className="grid grid-2">
                 <Field label={visit.status === 'MISSED' ? 'New date' : 'Due'}>
@@ -879,49 +915,10 @@ function VisitSheet({
               <Field label="Notes for the engineer">
                 <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
               </Field>
-
-              {!cancelling ? (
-                <button type="button" className="btn btn-sm btn-danger" onClick={() => setCancelling(true)} disabled={busy}>
-                  Cancel visit…
-                </button>
-              ) : (
-                <div className="svc-cancel">
-                  <Field
-                    label="Why is it cancelled?"
-                    hint={
-                      visit.sequence
-                        ? 'Regenerating the contract’s schedule rewrites cancelled visits, so this one may come back.'
-                        : 'The reason is kept in the visit’s notes.'
-                    }
-                  >
-                    <input value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
-                  </Field>
-                  <div className="row">
-                    <button type="button" className="btn btn-sm" onClick={() => setCancelling(false)} disabled={busy}>
-                      Keep it
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-danger"
-                      disabled={busy || reason.trim().length < 3}
-                      onClick={() => save({ status: 'CANCELLED', reason: reason.trim() })}
-                    >
-                      Cancel the visit
-                    </button>
-                  </div>
-                </div>
-              )}
             </>
           )}
 
-          {editable && visit.status === 'CANCELLED' && (
-            <div className="alert info svc-day-note">
-              <span>This visit was cancelled.</span>
-              <button type="button" className="btn btn-sm" onClick={() => save({ status: 'SCHEDULED' })} disabled={busy}>
-                Put it back on the schedule
-              </button>
-            </div>
-          )}
+          {canRestore && <div className="alert info">This visit was cancelled.</div>}
           {visit.status === 'CANCELLED' && visit.notes && <p className="faint svc-notes">{visit.notes}</p>}
         </>
       )}
@@ -1011,13 +1008,10 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
 
   return (
     <Modal
-      title="Book a call-out"
+      title="New call-out"
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             type="button"
             className="btn btn-primary"
@@ -1026,15 +1020,10 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           >
             {busy ? 'Booking…' : 'Book visit'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
-      <p className="muted">
-        For work nobody planned. A customer asking for chargeable or warranty work is better raised as a{' '}
-        <Link to="/g-ops/job-orders?new=1">job order</Link> — it records who asked, what covers it and
-        who approved sending someone.
-      </p>
       <div className="grid grid-2">
         <Field label="Kind">
           <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>

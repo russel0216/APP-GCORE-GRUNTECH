@@ -8,6 +8,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -16,10 +17,12 @@ import {
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm, type ConfirmApi } from '../../components/Confirm';
 import { recordLink } from '../../lib/links';
 import { SCurve, type CurvePoint } from './SCurve';
 import { ProjectGantt } from './ProjectGantt';
-import { JOB_STATUSES, JobStatus, ProgressBar } from './Projects';
+import { JOB_STATUSES, JOB_TONES, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
 import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
@@ -184,6 +187,7 @@ export function ProjectWorkspace() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
   const [params, setParams] = useSearchParams();
 
   const [job, setJob] = useState<Job | null>(null);
@@ -276,15 +280,12 @@ export function ProjectWorkspace() {
   };
   const current: Tab = visible[tab] ? tab : 'overview';
 
+  /** Asked in the confirm bar first; a refusal is shown there. */
   async function setStatus(status: string) {
     if (!job) return;
-    try {
-      await api.patch(`/jobs/${job.id}`, { status });
-      toast('ok', `Moved to ${JOB_STATUSES.find((x) => x.value === status)?.label}`);
-      await load();
-    } catch (err) {
-      setError(err);
-    }
+    await api.patch(`/jobs/${job.id}`, { status });
+    toast('ok', `Moved to ${JOB_STATUSES.find((x) => x.value === status)?.label}`);
+    await load();
   }
 
   const tabLabel: Record<Tab, string> = {
@@ -302,50 +303,73 @@ export function ProjectWorkspace() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        {job.quotationRevision && (
+      <RecordHeader
+        type={job.type === 'SERVICE_CONTRACT' ? 'Service contract' : 'Project'}
+        code={job.number}
+        title={job.name}
+        status={job.status}
+        statusExtra={JOB_TONES}
+        statusLabel={JOB_STATUSES.find((x) => x.value === job.status)?.label}
+        amount={formatMoney(s.contractValue)}
+        amountLabel="Contract value"
+        meta={
           <>
-            <Link to={`/g-ops/quotations/${job.quotationRevision.quotation.id}`}>
-              {job.quotationRevision.quotation.number} R{job.quotationRevision.revision}
-            </Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        {job.costing && (
-          <>
-            <Link to={`/g-ops/costing/${job.costing.id}`}>{job.costing.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        <Link to="/g-ops/projects">Projects</Link>
-        <span className="sep">›</span>
-        <span className="mono">{job.number}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{job.name}</h1>
-          <p>
             <Link to={`/g-ops/customers/${job.customer.id}`}>{job.customer.name}</Link>
             {job.site ? ` · ${job.site.name}` : ''}
-            {job.projectManager ? ` · ${job.projectManager.name}` : ' · unassigned'}{' '}
-            <JobStatus status={job.status} />
-          </p>
-        </div>
-        {(mayEdit || mayRegister) && (
-          <div className="row">
-            {mayEdit && (
-              <button className="btn" onClick={() => setEditing(true)}>
-                Modify
-              </button>
+            {job.projectManager ? ` · project manager ${job.projectManager.name}` : ' · no project manager'}
+            {job.costing && (
+              <>
+                {' '}
+                · from{' '}
+                <Link className="mono" to={`/g-ops/costing/${job.costing.id}`}>
+                  {job.costing.number}
+                </Link>
+              </>
             )}
+            {job.quotationRevision && (
+              <>
+                {' '}
+                · delivers{' '}
+                <Link className="mono" to={`/g-ops/quotations/${job.quotationRevision.quotation.id}`}>
+                  {job.quotationRevision.quotation.number} R{job.quotationRevision.revision}
+                </Link>
+              </>
+            )}
+          </>
+        }
+        actions={
+          <>
             {mayEdit && job.status === 'PLANNING' && (
-              <button className="btn btn-ok" onClick={() => setStatus('IN_PROGRESS')}>
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  confirm.ask({
+                    title: `Start ${job.number}?`,
+                    body: 'It moves to In progress.',
+                    confirmLabel: 'Start',
+                    tone: 'primary',
+                    onConfirm: () => setStatus('IN_PROGRESS'),
+                  })
+                }
+              >
                 Start
               </button>
             )}
             {mayEdit && job.status === 'IN_PROGRESS' && (
-              <button className="btn" onClick={() => setStatus('COMPLETED')}>
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  confirm.ask({
+                    title: `Mark ${job.number} complete?`,
+                    body: mayRegister
+                      ? 'It moves to Completed. Turn it over next, registering what it installed.'
+                      : 'It moves to Completed.',
+                    confirmLabel: 'Mark complete',
+                    tone: 'primary',
+                    onConfirm: () => setStatus('COMPLETED'),
+                  })
+                }
+              >
                 Mark complete
               </button>
             )}
@@ -356,20 +380,52 @@ export function ProjectWorkspace() {
                 Turn over
               </button>
             )}
-            {mayRegister && job.status === 'TURNED_OVER' && (
-              <button className="btn" onClick={() => setTurnover('register')}>
-                Register more equipment
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+          </>
+        }
+        more={[
+          mayEdit &&
+            (job.status === 'PLANNING' || job.status === 'IN_PROGRESS') && {
+              label: 'Put on hold',
+              confirm: {
+                title: `Put ${job.number} on hold?`,
+                body: 'It moves to On hold until somebody resumes it.',
+                confirmLabel: 'Put on hold',
+                tone: 'primary',
+                onConfirm: () => setStatus('ON_HOLD'),
+              },
+            },
+          mayEdit &&
+            job.status === 'ON_HOLD' && {
+              label: 'Resume',
+              confirm: {
+                title: `Resume ${job.number}?`,
+                body: 'It moves back to In progress.',
+                confirmLabel: 'Resume',
+                tone: 'primary',
+                onConfirm: () => setStatus('IN_PROGRESS'),
+              },
+            },
+          mayEdit &&
+            job.status !== 'CANCELLED' &&
+            job.status !== 'TURNED_OVER' && {
+              label: job.type === 'SERVICE_CONTRACT' ? 'Cancel service contract' : 'Cancel project',
+              danger: true,
+              confirm: {
+                title: `Cancel ${job.number}?`,
+                body: 'It moves to Cancelled. Its documents and ledger stay as they are.',
+                confirmLabel: job.type === 'SERVICE_CONTRACT' ? 'Cancel service contract' : 'Cancel project',
+                onConfirm: () => setStatus('CANCELLED'),
+              },
+            },
+        ]}
+        modify={mayEdit ? () => setEditing(true) : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
       {/* The numbers a project manager actually opens this page for. */}
       <div className="kpi-grid">
-        <Stat label="Contract value" value={formatMoney(s.contractValue)} figure accent="neon" />
         <Stat
           label="Progress"
           value={<ProgressBar pct={s.progressPct} />}
@@ -597,6 +653,7 @@ export function ProjectWorkspace() {
           job={job}
           onAdd={can('gops.plans.create') ? () => setNewPlan(true) : undefined}
           onChanged={load}
+          confirm={confirm}
         />
       )}
 
@@ -609,7 +666,7 @@ export function ProjectWorkspace() {
             <h3 className="card-title">Progress reports</h3>
             {can('gops.progress_billing.create') && (
               <button className="btn btn-primary btn-sm" onClick={() => setNewReport(true)}>
-                + New report
+                + New progress report
               </button>
             )}
           </div>
@@ -980,7 +1037,7 @@ function ProcurementTab({ job }: { job: Job }) {
           action={
             can('gchain.purchase_requests.create') ? (
               <Link className="btn btn-primary btn-sm" to={`/g-chain/purchase-requests?new=1&jobId=${job.id}`}>
-                + Purchase request
+                + New purchase request
               </Link>
             ) : undefined
           }
@@ -1507,7 +1564,7 @@ function ServiceTab({
             <h3 className="card-title">Equipment installed ({data.assets.length})</h3>
             {onRegister && (
               <button className="btn btn-sm" onClick={onRegister}>
-                Register more equipment
+                + Add equipment
               </button>
             )}
           </div>
@@ -1863,26 +1920,34 @@ function PlansTab({
   job,
   onAdd,
   onChanged,
+  confirm,
 }: {
   job: Job;
   onAdd?: () => void;
   onChanged: () => Promise<void>;
+  /** The page's confirm bar, under the project's header. */
+  confirm: ConfirmApi;
 }) {
   const { can } = useAuth();
   const toast = useToast();
   const [open, setOpen] = useState<string | null>(null);
-  const [error, setError] = useState<unknown>(null);
   const mayApprove = can('gops.plans.edit_all');
   const mayAttach = can('gops.plans.create') || can('gops.plans.edit_all');
 
-  async function approve(planId: string) {
-    try {
-      await api.patch(`/jobs/${job.id}/plans/${planId}`, { status: 'APPROVED' });
-      toast('ok', 'Plan approved');
-      await onChanged();
-    } catch (err) {
-      setError(err);
-    }
+  /** Asked in the confirm bar first; a refusal is shown there. */
+  function approve(plan: Job['plans'][number]) {
+    const name = plan.drawingNo ? `${plan.drawingNo} rev ${plan.revision}` : `“${plan.title}” rev ${plan.revision}`;
+    confirm.ask({
+      title: `Approve ${name}?`,
+      body: 'Work may start on it once it is approved.',
+      confirmLabel: 'Approve',
+      tone: 'primary',
+      onConfirm: async () => {
+        await api.patch(`/jobs/${job.id}/plans/${plan.id}`, { status: 'APPROVED' });
+        toast('ok', 'Plan approved');
+        await onChanged();
+      },
+    });
   }
 
   return (
@@ -1890,12 +1955,11 @@ function PlansTab({
       <div className="del-card-head">
         <h3 className="card-title">Approved plans</h3>
         {onAdd && (
-          <button className="btn btn-primary btn-sm" onClick={onAdd}>
+          <button className="btn btn-sm" onClick={onAdd}>
             + Add plan
           </button>
         )}
       </div>
-      <ErrorBox error={error} />
       {job.plans.length === 0 ? (
         <Empty
           title="No plans registered"
@@ -1924,7 +1988,7 @@ function PlansTab({
                   plan={p}
                   open={open === p.id}
                   onToggle={() => setOpen(open === p.id ? null : p.id)}
-                  onApprove={mayApprove && p.status === 'FOR_APPROVAL' ? () => approve(p.id) : undefined}
+                  onApprove={mayApprove && p.status === 'FOR_APPROVAL' ? () => approve(p) : undefined}
                   mayAttach={mayAttach}
                 />
               ))}
@@ -1974,7 +2038,7 @@ function PlanRow({
               Files
             </button>
             {onApprove && (
-              <button className="btn btn-sm btn-ok" onClick={onApprove}>
+              <button className="btn btn-sm" onClick={onApprove}>
                 Approve
               </button>
             )}
@@ -2143,17 +2207,14 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
   return (
     <Modal
       wide
-      title={`Modify ${job.number}`}
+      title={`Modify ${job.type === 'SERVICE_CONTRACT' ? 'service contract' : 'project'} ${job.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -2165,8 +2226,12 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
           label="Status"
           hint={job.status === 'COMPLETED' ? 'Use Turn over on the page to register the equipment in the same step' : undefined}
         >
+          {/* Putting on hold and cancelling are ⋯ items on the page, each
+              asking first; the job's own status still shows when it is one. */}
           <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-            {JOB_STATUSES.map((st) => (
+            {JOB_STATUSES.filter(
+              (st) => (st.value !== 'ON_HOLD' && st.value !== 'CANCELLED') || st.value === job.status,
+            ).map((st) => (
               <option key={st.value} value={st.value}>
                 {st.label}
               </option>
@@ -2267,14 +2332,11 @@ function NewReportModal({
       title="New progress report"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={create} disabled={busy}>
-            {busy ? 'Starting…' : 'Start report'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -2329,17 +2391,14 @@ function NewPlanModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
 
   return (
     <Modal
-      title="Register a plan"
+      title="Add plan"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || form.title.length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -2492,13 +2551,10 @@ function TurnoverModal({
   return (
     <Modal
       wide
-      title={mode === 'turnover' ? `Turn over ${job.number}` : `Register equipment — ${job.number}`}
+      title={mode === 'turnover' ? `Turn over ${job.number}` : 'Add equipment'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={finish} disabled={!canFinish}>
             {busy
               ? 'Saving…'
@@ -2506,9 +2562,9 @@ function TurnoverModal({
                 ? filled.length
                   ? `Register ${filled.length} and turn over`
                   : 'Turn over without equipment'
-                : `Register ${filled.length || ''}`.trim()}
+                : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

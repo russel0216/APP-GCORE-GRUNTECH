@@ -194,12 +194,6 @@
   margin-bottom: var(--s-2);
 }
 
-/* ── Customer 360 header shortcuts ──────────────────────────────────────── */
-
-.m-shortcuts {
-  justify-content: flex-end;
-}
-
 @media (max-width: 640px) {
   .m-details > div {
     flex-direction: column;
@@ -210,9 +204,6 @@
     flex-basis: auto;
   }
 
-  .m-shortcuts {
-    justify-content: flex-start;
-  }
 }
 
 .m-industries {

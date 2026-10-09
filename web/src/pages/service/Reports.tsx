@@ -6,6 +6,9 @@ import { DataList, type Column } from '../../components/DataList';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
+import { RecordHeader } from '../../components/RecordHeader';
+import { NumberInput } from '../../components/NumberInput';
+import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import {
   Checkbox,
   Empty,
@@ -13,6 +16,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -144,25 +148,24 @@ interface Report {
  * three menus showed every report; and the menu could not highlight a path the
  * registry does not declare, so all three lit up nothing.
  */
-const PRESET_BY_PATH: Record<string, { kind: string; title: string; blurb: string }> = {
-  '/g-ops/commissioning': {
-    kind: 'COMMISSIONING',
-    title: 'Commissioning Reports',
-    blurb:
-      'The handover record for equipment put into service - and what starts its warranty running.',
-  },
-  '/g-ops/pm': {
-    kind: 'PREVENTIVE_MAINTENANCE',
-    title: 'Preventive Maintenance',
-    blurb:
-      'Scheduled visits against a contract. A visit completes when its report is approved, not when the engineer leaves site.',
-  },
-  '/g-ops/inspections': {
-    kind: 'INSPECTION',
-    title: 'Service Inspections',
-    blurb: 'Inspections and breakdown calls, on the same template engine as the rest.',
-  },
+const PRESET_BY_PATH: Record<string, { kind: string; title: string }> = {
+  '/g-ops/commissioning': { kind: 'COMMISSIONING', title: 'Commissioning Reports' },
+  '/g-ops/pm': { kind: 'PREVENTIVE_MAINTENANCE', title: 'Preventive Maintenance' },
+  '/g-ops/inspections': { kind: 'INSPECTION', title: 'Service Inspections' },
 };
+
+/**
+ * Where "← Back to …" goes from a report: the menu entry of its kind. The
+ * report's own path is not a menu entry, so the Shell alone would send it to
+ * the module's dashboard. A corrective report has no menu of its own and goes
+ * back to the one list of every report, narrowed to its kind.
+ */
+function reportListFor(kind: string): { to: string; label: string } {
+  const entry = Object.entries(PRESET_BY_PATH).find(([, p]) => p.kind === kind);
+  return entry
+    ? { to: entry[0], label: entry[1].title }
+    : { to: `/g-ops/service-reports?kind=${kind}`, label: 'Service Reports' };
+}
 
 export function ServiceReports() {
   const { can } = useAuth();
@@ -264,12 +267,6 @@ export function ServiceReports() {
       <div className="page-head">
         <div>
           <h1>{preset?.title ?? 'Service Reports'}</h1>
-          <p>
-            {preset?.blurb ??
-              'Commissioning, preventive maintenance, inspections and breakdown calls.'}{' '}
-            The form comes from a template, so the fields are yours to change — and an old report
-            keeps rendering the way it was signed.
-          </p>
         </div>
       </div>
 
@@ -299,7 +296,7 @@ export function ServiceReports() {
         actions={
           canWrite ? (
             <button className="btn btn-primary btn-sm" onClick={() => setWriting(true)}>
-              + New report
+              + New service report
             </button>
           ) : null
         }
@@ -458,21 +455,18 @@ export function NewReportModal({
 
   return (
     <Modal
-      title={chosen ? `Report for ${chosen.number}` : 'New service report'}
+      title={chosen ? `New service report for ${chosen.number}` : 'New service report'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={create}
             disabled={busy || !form.customerId || !form.templateId}
           >
-            {busy ? 'Starting…' : 'Start report'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -589,10 +583,16 @@ export function ServiceReportDetail() {
   const [row, setRow] = useState<Report | null>(null);
   const [reload, setReload] = useState(0);
   const [error, setError] = useState<unknown>(null);
+  /** A refused Save draft or Submit: shown under the header, never in place of the page. */
+  const [actionError, setActionError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState<Record<string, Record<string, unknown>>>({});
   const [meta, setMeta] = useState({ findings: '', recommendations: '', customerSignedBy: '', billable: false });
   const [dirty, setDirty] = useState(false);
+  // A report is filled in on site: leaving with typed readings asks first.
+  useUnsavedChanges(dirty);
+  const backTo = row ? reportListFor(row.kind) : null;
+  useBackLink(backTo?.to, backTo?.label);
 
   const load = useCallback(async () => {
     try {
@@ -648,7 +648,7 @@ export function ServiceReportDetail() {
 
   async function save() {
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       await api.patch(`/service-reports/${id}`, {
         data: draft,
@@ -660,7 +660,7 @@ export function ServiceReportDetail() {
       toast('ok', 'Saved');
       await load();
     } catch (err) {
-      setError(err);
+      setActionError(err);
     } finally {
       setBusy(false);
     }
@@ -668,7 +668,7 @@ export function ServiceReportDetail() {
 
   async function submit() {
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       await api.patch(`/service-reports/${id}`, {
         data: draft,
@@ -677,11 +677,13 @@ export function ServiceReportDetail() {
         customerSignedBy: meta.customerSignedBy || null,
         billable: meta.billable,
       });
+      // Saved: a submit refused after this leaves nothing unsaved behind.
+      setDirty(false);
       await api.post(`/service-reports/${id}/submit`);
-      toast('ok', 'Sent for approval');
+      toast('ok', 'Submitted for approval');
       await load();
     } catch (err) {
-      setError(err);
+      setActionError(err);
     } finally {
       setBusy(false);
     }
@@ -689,15 +691,15 @@ export function ServiceReportDetail() {
 
   return (
     <div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            <span className="mono">{row.number}</span>{' '}
-            <StatusBadge status={row.status} extra={REPORT_TONES} label={row.status === 'REJECTED' ? 'Returned' : undefined} />
-          </h1>
-          <p>
-            {KIND_LABEL[row.kind]} ·{' '}
+      <RecordHeader
+        type={`${KIND_LABEL[row.kind] ?? row.kind} report`}
+        code={row.number}
+        title={row.customer.name}
+        status={row.status}
+        statusExtra={REPORT_TONES}
+        statusLabel={row.status === 'REJECTED' ? 'Returned' : undefined}
+        meta={
+          <>
             {can('gops.customers.view_all') ? (
               <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
             ) : (
@@ -711,31 +713,43 @@ export function ServiceReportDetail() {
             )}
             {' · '}
             {formatDate(row.performedAt)} by {row.performedBy.name}
-          </p>
-        </div>
-        {editable && (
-          <div className="row">
-            <button className="btn btn-sm" onClick={save} disabled={busy || !dirty}>
-              {busy ? 'Saving…' : 'Save draft'}
-            </button>
-            {canSubmit && (
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={submit}
-                disabled={busy || missing.length > 0 || !meta.customerSignedBy.trim()}
-              >
-                {row.status === 'REJECTED' ? 'Send again' : 'Send for approval'}
-              </button>
+            {row.visit && (
+              <>
+                {' · visit '}
+                <Link to={`/g-ops/visits?visit=${row.visit.id}`} className="mono">
+                  {row.visit.number}
+                </Link>
+              </>
             )}
-          </div>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          editable && (
+            <>
+              <button className="btn" onClick={save} disabled={busy || !dirty}>
+                {busy ? 'Saving…' : 'Save draft'}
+              </button>
+              {canSubmit && (
+                <button
+                  className="btn btn-primary"
+                  onClick={submit}
+                  disabled={busy || missing.length > 0 || !meta.customerSignedBy.trim()}
+                >
+                  Submit for approval
+                </button>
+              )}
+            </>
+          )
+        }
+      />
+
+      <ErrorBox error={actionError} />
 
       <DocumentApproval documentType={REPORT_DOC_TYPE[row.kind]} documentId={row.id} reloadToken={reload} />
 
       {row.status === 'REJECTED' && (
         <div className="alert warn">
-          Returned by the approver. Correct it and send it again — the visit closes when the report
+          Returned by the approver. Correct it and submit it again — the visit closes when the report
           is approved.
         </div>
       )}
@@ -884,19 +898,27 @@ export function ServiceReportDetail() {
                   </div>
                 );
               }
+              if (field.type === 'number') {
+                return (
+                  <Field key={field.key} label={label}>
+                    <NumberInput
+                      kind="decimal"
+                      value={(value as number | string | null | undefined) ?? ''}
+                      onChange={(e) => {
+                        // Stored as a number, as the old number box stored it ('' read as 0).
+                        const n = Number(e.target.value);
+                        set(section.key, field.key, Number.isFinite(n) ? n : 0);
+                      }}
+                    />
+                  </Field>
+                );
+              }
               return (
                 <Field key={field.key} label={label}>
                   <input
-                    type={field.type === 'number' ? 'number' : field.type === 'date' ? 'date' : 'text'}
-                    step={field.type === 'number' ? 'any' : undefined}
+                    type={field.type === 'date' ? 'date' : 'text'}
                     value={(value as string) ?? ''}
-                    onChange={(e) =>
-                      set(
-                        section.key,
-                        field.key,
-                        field.type === 'number' ? Number(e.target.value) : e.target.value,
-                      )
-                    }
+                    onChange={(e) => set(section.key, field.key, e.target.value)}
                   />
                 </Field>
               );

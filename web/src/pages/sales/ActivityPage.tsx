@@ -4,7 +4,10 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf } from '../../lib/day';
 import { Attachments } from '../../components/Attachments';
-import { Avatar, ErrorBox, Loading, StatusBadge, formatDateTime, useToast } from '../../components/ui';
+import { RecordHeader, type MoreItem } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink } from '../../components/Navigation';
+import { Avatar, ErrorBox, Loading, formatDateTime, useToast } from '../../components/ui';
 import { ActivityModal } from './ActivityForm';
 import {
   ACTIVITY_TONES,
@@ -30,8 +33,14 @@ import {
   Google Calendar", the description, the files — and what SCORO lacked, the
   answers as a table: Going / Maybe / Not going / No reply, with when each
   was given. An invitee answers here; whoever may open the calendar modifies
-  (the form), marks it done or cancels it. `?respond=` from the invitation
-  email records the answer on opening, for the invitee only.
+  (the form), marks it done, cancels it or deletes it. `?respond=` from the
+  invitation email records the answer on opening, for the invitee only.
+
+  The head is every record page's (2026-10-09, the button standard): the type
+  and status, the title, who it is booked for, then [Mark done] [⋯] [Modify]
+  — Cancel activity and Delete are the ⋯'s red items and ask first in the bar
+  under the head (an occurrence of a series: "Delete this one" and "Delete
+  this and later ones"). Back is the Shell's line, to the calendar on this day.
 */
 
 /** The class the answer's colour comes from (readable without it: the mark and the word are there). */
@@ -70,9 +79,16 @@ export function ActivityPage() {
   const [actionError, setActionError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [confirmCancel, setConfirmCancel] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
   const [types, setTypes] = useState<ActivityTypeDef[]>(BUILTIN_TYPES);
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
+
+  // Back goes to the calendar on the activity's own day, as the breadcrumb did.
+  const backDay = activity ? dayKeyOf(new Date(activity.startsAt)) : null;
+  useBackLink(backDay ? `/g-ops/calendar${qs({ view: 'day', day: backDay })}` : null, 'Calendar');
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -185,47 +201,125 @@ export function ActivityPage() {
       setActionError(err);
     } finally {
       setBusy(false);
-      setConfirmCancel(false);
     }
   }
   const respond = (r: Rsvp) =>
     run(() => api.post(`/activities/${activity.id}/respond`, { response: r }), `Marked as ${RSVP_LABEL[r].toLowerCase()}`);
   const markDone = () => run(() => api.patch(`/activities/${activity.id}`, { status: 'DONE' }), 'Marked done');
-  const cancel = () =>
-    run(() => api.patch(`/activities/${activity.id}`, { status: 'CANCELLED' }), 'Cancelled — everyone on it is told');
+  /** Asked in the confirm bar: a refusal throws, so the bar shows it and stays open. */
+  const cancel = async () => {
+    await api.patch(`/activities/${activity.id}`, { status: 'CANCELLED' });
+    toast('ok', 'Cancelled — everyone on it is told');
+    await load();
+  };
+  /** `series`: this occurrence and every later planned one of its series (SCORO's "this and following"). */
+  const remove = async (series: boolean) => {
+    const out = await api.del<{ removed: number }>(`/activities/${activity.id}${series ? '?series=upcoming' : ''}`);
+    const removed = out?.removed ?? 1;
+    toast('ok', removed > 1 ? `Deleted ${removed} occurrences` : 'Deleted');
+    navigate(calendarPath, { replace: true });
+  };
 
   const linked = activity.lead || activity.quotation || activity.customer;
 
+  const deleteBody = 'Everyone on it loses it from their calendar. It cannot be undone.';
+  const deleteItems: MoreItem[] = activity.seriesId
+    ? [
+        {
+          label: 'Delete this one',
+          danger: true,
+          confirm: { title: `Delete this “${activity.subject}”?`, body: deleteBody, confirmLabel: 'Delete this one', onConfirm: () => remove(false) },
+        },
+        {
+          label: 'Delete this and later ones',
+          hint: 'Past and done occurrences stay as a record',
+          danger: true,
+          confirm: {
+            title: `Delete this “${activity.subject}” and every later one?`,
+            body: `${deleteBody} Past and done occurrences of the series stay.`,
+            confirmLabel: 'Delete this and later ones',
+            onConfirm: () => remove(true),
+          },
+        },
+      ]
+    : [
+        {
+          label: 'Delete',
+          danger: true,
+          confirm: { title: `Delete “${activity.subject}”?`, body: deleteBody, confirmLabel: 'Delete', onConfirm: () => remove(false) },
+        },
+      ];
+
   return (
     <div className="act-page">
-      <div className="breadcrumb">
-        <Link to={calendarPath}>Sales Calendar</Link>
-        <span className="sep">›</span>
-        <span>{activity.subject}</span>
-      </div>
+      <RecordHeader
+        type={activity.typeName ?? 'Activity'}
+        title={activity.subject}
+        status={activity.status}
+        statusExtra={ACTIVITY_TONES}
+        meta={
+          <>
+            Booked for {activity.assignedTo.name}
+            {/* Who booked it is a detail: a private activity read by someone not on it shows only the person and the time. */}
+            {!activity.masked &&
+              activity.createdBy &&
+              activity.createdBy.id !== activity.assignedTo.id &&
+              ` · booked by ${activity.createdBy.name}`}
+            {activity.isPrivate && (
+              <>
+                {' · '}
+                <span className="act-tag" title="Only the people on it see what it is">
+                  Private
+                </span>
+              </>
+            )}
+            {activity.seriesId && (
+              <>
+                {' · '}
+                <span className="act-tag" title="One of a repeating booking">
+                  Repeats
+                </span>
+              </>
+            )}
+          </>
+        }
+        actions={
+          !activity.masked &&
+          planned && (
+            <button type="button" className="btn btn-primary" onClick={markDone} disabled={busy}>
+              Mark done
+            </button>
+          )
+        }
+        more={
+          activity.masked
+            ? []
+            : [
+                planned && {
+                  label: 'Cancel activity',
+                  danger: true,
+                  confirm: {
+                    title: `Cancel “${activity.subject}”?`,
+                    body: 'Everyone on it is told.',
+                    confirmLabel: 'Cancel activity',
+                    onConfirm: cancel,
+                  },
+                },
+                ...deleteItems,
+              ]
+        }
+        modify={activity.masked ? undefined : () => setEditing(true)}
+        confirm={confirm}
+      />
 
-      <header className="act-head card">
+      {/* The date as a block, with when and where beside it — SCORO's event head, under the record's. */}
+      <section className="act-head card" aria-label="When and where">
         <div className="act-date" title={start.toLocaleDateString('en-PH', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}>
           <span className="act-date-month">{start.toLocaleDateString('en-PH', { month: 'short' }).toUpperCase()}</span>
           <span className="act-date-day">{String(start.getDate()).padStart(2, '0')}</span>
           <span className="act-date-dow">{start.toLocaleDateString('en-PH', { weekday: 'long' })}</span>
         </div>
         <div className="act-head-main">
-          <h1>{activity.subject}</h1>
-          <div className="act-head-tags">
-            <StatusBadge status={activity.status} extra={ACTIVITY_TONES} />
-            <span className="act-type">{activity.typeName ?? activity.type}</span>
-            {activity.isPrivate && (
-              <span className="act-tag" title="Only the people on it see what it is">
-                Private
-              </span>
-            )}
-            {activity.seriesId && (
-              <span className="act-tag" title="One of a repeating booking">
-                Repeats
-              </span>
-            )}
-          </div>
           <p className="act-when">
             <strong>{activity.allDay ? (activity.durationMinutes > 1440 ? `All day, ${activity.durationMinutes / 1440} days` : 'All day') : whenText}</strong>
             {!activity.allDay && <span className="faint"> · {durationLabel(activity.durationMinutes)}</span>}
@@ -240,35 +334,7 @@ export function ActivityPage() {
             </p>
           )}
         </div>
-        <div className="act-head-actions">
-          {activity.masked ? null : planned &&
-            (confirmCancel ? (
-              <>
-                <span className="act-confirm">Cancel this activity? Everyone on it is told.</span>
-                <button type="button" className="btn btn-danger" onClick={cancel} disabled={busy}>
-                  Yes, cancel it
-                </button>
-                <button type="button" className="btn" onClick={() => setConfirmCancel(false)} disabled={busy}>
-                  Keep it
-                </button>
-              </>
-            ) : (
-              <>
-                <button type="button" className="btn" onClick={markDone} disabled={busy}>
-                  Mark done
-                </button>
-                <button type="button" className="btn btn-danger" onClick={() => setConfirmCancel(true)} disabled={busy}>
-                  Cancel activity
-                </button>
-              </>
-            ))}
-          {!activity.masked && (
-            <button type="button" className="btn btn-primary" onClick={() => setEditing(true)} disabled={busy}>
-              Modify
-            </button>
-          )}
-        </div>
-      </header>
+      </section>
 
       <ErrorBox error={actionError} />
 
@@ -451,10 +517,6 @@ export function ActivityPage() {
             setEditing(false);
             toast('ok', 'Saved');
             void load();
-          }}
-          onRemoved={(removed) => {
-            toast('ok', removed > 1 ? `Removed ${removed} occurrences` : 'Removed');
-            navigate(calendarPath, { replace: true });
           }}
         />
       )}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { ErrorBox, Field, Loading, Modal, formatMoney, useToast } from '../../components/ui';
+import { ErrorBox, Field, Loading, Modal, ModalFoot, formatMoney, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
 interface Step {
@@ -101,7 +101,7 @@ export function Workflows() {
         </div>
         {can('admin.workflows.create') && (
           <button className="btn btn-primary" onClick={() => setEditing('new')}>
-            + Add workflow
+            + New workflow
           </button>
         )}
       </div>
@@ -276,39 +276,40 @@ function WorkflowEditor({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!workflow) return;
-    setBusy(true);
-    try {
-      await api.del(`/workflows/${workflow.id}`);
-      toast('ok', 'Workflow deleted');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/workflows/${workflow.id}`);
+    toast('ok', 'Workflow deleted');
+    onSaved();
   }
 
   return (
     <Modal
       wide
-      title={workflow ? `Modify ${workflow.name}` : 'Add workflow'}
+      title={workflow ? `Modify workflow ${workflow.name}` : 'New workflow'}
       onClose={onClose}
       footer={
-        <>
-          {workflow && can('admin.workflows.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            workflow && can('admin.workflows.delete')
+              ? {
+                  label: 'Delete',
+                  question:
+                    workflow.requestCount > 0
+                      ? `Delete ${workflow.name}? It has routed ${workflow.requestCount} request${workflow.requestCount === 1 ? '' : 's'}; it cannot be undone.`
+                      : `Delete ${workflow.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

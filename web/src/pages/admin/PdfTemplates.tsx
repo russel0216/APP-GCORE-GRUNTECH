@@ -50,6 +50,9 @@ import {
   type TotalsBlock,
 } from '../../lib/pdfTemplate';
 import { NumberInput } from '../../components/NumberInput';
+import { useConfirm } from '../../components/Confirm';
+import { RecordActions } from '../../components/RecordHeader';
+import { useUnsavedChanges } from '../../components/Navigation';
 
 /**
  * Admin › PDF Templates — the designed documents' PDFs, laid out by hand:
@@ -333,25 +336,39 @@ function fitSize(block: TextBlock, lines: Run[][]): number {
 /** Which "Empty in Company Settings" note this reader hid — the note, not the fields. */
 const HIDDEN_NOTE_KEY = 'pdfTemplates.hiddenCompanyNote';
 
+/**
+ * One editor per document, remounted when `?doc=` changes — by the switch, the
+ * menu, Ctrl+K or "Leave without saving". A question open in the confirm bar,
+ * the undo history and every other piece of state belong to the document they
+ * were made on, and go with it: a "Put the standard layout back?" asked on the
+ * sales order must never be answered on the quotation.
+ */
 export function PdfTemplates() {
+  const [params] = useSearchParams();
+  const docType: DocType = params.get('doc') === 'sales_order' ? 'sales_order' : 'quotation';
+  return <PdfTemplateEditor key={docType} docType={docType} />;
+}
+
+function PdfTemplateEditor({ docType }: { docType: DocType }) {
   const toast = useToast();
   const { can } = useAuth();
   const canEdit = can('admin.pdf_templates.edit_all');
   const canCompany = can('admin.company.view_all');
-  const [params, setParams] = useSearchParams();
-  const docType: DocType = params.get('doc') === 'sales_order' ? 'sales_order' : 'quotation';
+  const [, setParams] = useSearchParams();
   const doc = DOCS.find((x) => x.type === docType)!;
-  const [pendingDoc, setPendingDoc] = useState<DocType | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [hist, dispatch] = useReducer(history, null);
   const [savedJson, setSavedJson] = useState('');
+  // Read when a confirmed Discard runs, which may be after a save made while it was asking.
+  const savedJsonRef = useRef(savedJson);
+  savedJsonRef.current = savedJson;
   const [saved, setSaved] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>('first');
   const [tab, setTab] = useState<'box' | 'boxes'>('boxes');
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<'reset' | 'discard' | 'switch' | null>(null);
+  const confirm = useConfirm();
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [previewWith, setPreviewWith] = useState<'short' | 'long' | 'real'>('short');
   const [previewDoc, setPreviewDoc] = useState<{ id: string; number: string; label: string } | null>(null);
@@ -375,7 +392,6 @@ export function PdfTemplates() {
     setSelectedId(null);
     setView('first');
     setTab('boxes');
-    setConfirm(null);
     setError(null);
     setPreviewWith('short');
     setPreviewDoc(null);
@@ -408,24 +424,21 @@ export function PdfTemplates() {
   /** The other document's editor, guarded: unsaved work asks first. */
   function switchDoc(next: DocType) {
     if (next === docType) return;
-    if (dirty) {
-      setPendingDoc(next);
-      setConfirm('switch');
+    const open = () => setParams(next === 'quotation' ? {} : { doc: next }, { replace: true });
+    if (!dirty) {
+      open();
       return;
     }
-    setParams(next === 'quotation' ? {} : { doc: next }, { replace: true });
+    confirm.ask({
+      title: 'Throw away the changes since you last saved?',
+      body: `The ${DOCS.find((x) => x.type === next)!.label.toLowerCase()}'s layout opens instead.`,
+      confirmLabel: 'Discard and switch',
+      onConfirm: open,
+    });
   }
 
-  // Leaving with unsaved work asks first — the browser's own prompt.
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
+  // Leaving with unsaved work asks first: a link in the app, or the browser's own prompt.
+  useUnsavedChanges(dirty);
 
   const edit = useCallback((next: Layout, key?: string) => dispatch({ type: 'edit', update: () => next, key, at: Date.now() }), []);
 
@@ -526,6 +539,9 @@ export function PdfTemplates() {
       dispatch({ type: 'live', layout: res.layout });
       setSavedJson(JSON.stringify(res.layout));
       setSaved(true);
+      // Every question this page asks is about what is saved (discard, switch,
+      // put the standard back); a save changes it under the question.
+      confirm.close();
       toast('ok', `Saved — ${doc.plural.toLowerCase()} now print with this layout`);
     } catch (err) {
       setError(err);
@@ -534,8 +550,8 @@ export function PdfTemplates() {
     }
   }
 
+  /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
   async function reset() {
-    setConfirm(null);
     setBusy(true);
     setError(null);
     try {
@@ -545,8 +561,6 @@ export function PdfTemplates() {
       setSaved(false);
       setSelectedId(null);
       toast('ok', 'The standard layout is back');
-    } catch (err) {
-      setError(err);
     } finally {
       setBusy(false);
     }
@@ -608,8 +622,7 @@ export function PdfTemplates() {
   }
 
   function discard() {
-    setConfirm(null);
-    const last = JSON.parse(savedJson) as Layout;
+    const last = JSON.parse(savedJsonRef.current) as Layout;
     edit(last);
     setSelectedId(null);
   }
@@ -688,6 +701,11 @@ export function PdfTemplates() {
   if (!loaded || !layout || !hist) return error ? <ErrorBox error={error} /> : <Loading />;
 
   const missing = (type: BlockType) => !layout.blocks.some((b) => b.type === type);
+  const saveButton = (
+    <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !dirty} title="Save (Ctrl+S)">
+      Save
+    </button>
+  );
 
   return (
     <div className="pt-screen">
@@ -712,46 +730,57 @@ export function PdfTemplates() {
             ))}
           </div>
         </div>
+        {/* The page editor's head: [⋯] [Save] — Save right-most, everything rarer in ⋯. */}
         <div className="pt-actions">
-          <button type="button" className="btn btn-sm" onClick={() => dispatch({ type: 'undo' })} disabled={!hist.past.length || !canEdit} title="Undo (Ctrl+Z)">
-            Undo
-          </button>
-          <button type="button" className="btn btn-sm" onClick={() => dispatch({ type: 'redo' })} disabled={!hist.future.length || !canEdit} title="Redo (Ctrl+Y)">
-            Redo
-          </button>
-          <button type="button" className="btn btn-sm" onClick={exportLayout} title="Download this layout as a file, to import on another G-CORE">
-            Export layout
-          </button>
           {canEdit && (
-            <>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="application/json,.json"
-                hidden
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void importLayout(file);
-                }}
-              />
-              <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()} disabled={busy} title="Load a layout file exported from another G-CORE">
-                Import layout
-              </button>
-              {dirty && (
-                <button type="button" className="btn btn-sm" onClick={() => setConfirm('discard')} disabled={busy}>
-                  Discard changes
-                </button>
-              )}
-              <button type="button" className="btn btn-sm" onClick={() => setConfirm('reset')} disabled={busy}>
-                Standard layout
-              </button>
-              <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !dirty} title="Save (Ctrl+S)">
-                Save
-              </button>
-            </>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void importLayout(file);
+              }}
+            />
           )}
+          <RecordActions
+            confirm={confirm}
+            more={[
+              { label: 'Export layout', hint: 'A file to import on another G-CORE', onSelect: exportLayout },
+              canEdit && {
+                label: 'Import layout',
+                hint: 'A layout file exported from another G-CORE',
+                disabled: busy,
+                onSelect: () => fileRef.current?.click(),
+              },
+              canEdit &&
+                dirty && {
+                  label: 'Discard changes',
+                  disabled: busy,
+                  confirm: {
+                    title: 'Throw away the changes since you last saved?',
+                    confirmLabel: 'Discard',
+                    onConfirm: discard,
+                  },
+                },
+              canEdit && {
+                label: 'Standard layout',
+                danger: true,
+                disabled: busy,
+                confirm: {
+                  title: 'Put the standard layout back?',
+                  body: `Your saved layout is deleted, and ${doc.plural.toLowerCase()} print the standard way.`,
+                  confirmLabel: 'Put it back',
+                  onConfirm: reset,
+                },
+              },
+            ]}
+          />
+          {canEdit && saveButton}
         </div>
       </div>
+      {confirm.bar}
 
       {(() => {
         // The company's own details are real on this page, not samples: an
@@ -796,47 +825,29 @@ export function PdfTemplates() {
           The saved layout could not be read, so {doc.plural.toLowerCase()} print with the standard one. Saving puts a layout that reads in its place.
         </div>
       )}
-      {confirm && (
-        <div className="alert warn row pt-confirm" role="alert">
-          <span>
-            {confirm === 'reset'
-              ? `Put the standard layout back? Your saved layout is deleted, and ${doc.plural.toLowerCase()} print the standard way.`
-              : confirm === 'switch'
-                ? 'Throw away the changes since you last saved, and open the other document?'
-                : 'Throw away the changes since you last saved?'}
-          </span>
-          <button
-            type="button"
-            className="btn btn-sm btn-danger"
-            onClick={
-              confirm === 'reset'
-                ? reset
-                : confirm === 'switch'
-                  ? () => {
-                      setConfirm(null);
-                      if (pendingDoc) setParams(pendingDoc === 'quotation' ? {} : { doc: pendingDoc }, { replace: true });
-                      setPendingDoc(null);
-                    }
-                  : discard
-            }
-          >
-            {confirm === 'reset' ? 'Put it back' : confirm === 'switch' ? 'Discard and switch' : 'Discard'}
-          </button>
-          <button type="button" className="btn btn-sm" autoFocus onClick={() => setConfirm(null)}>
-            Keep it
-          </button>
-        </div>
-      )}
       <ErrorBox error={error} />
 
       <div className="pt-status">
-        <span className={`pt-state${dirty ? ' is-dirty' : ''}`}>
-          {dirty
-            ? 'Changes not saved yet'
-            : saved
-              ? `${doc.plural} print with this layout`
-              : `The standard layout — ${doc.plural.toLowerCase()} print with it`}
-        </span>
+        {/* Undo and Redo sit with what they act on — the unsaved changes — not beside Save. */}
+        <div className="pt-actions">
+          <span className={`pt-state${dirty ? ' is-dirty' : ''}`}>
+            {dirty
+              ? 'Changes not saved yet'
+              : saved
+                ? `${doc.plural} print with this layout`
+                : `The standard layout — ${doc.plural.toLowerCase()} print with it`}
+          </span>
+          {canEdit && (
+            <>
+              <button type="button" className="btn btn-sm" onClick={() => dispatch({ type: 'undo' })} disabled={!hist.past.length} title="Undo (Ctrl+Z)">
+                Undo
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => dispatch({ type: 'redo' })} disabled={!hist.future.length} title="Redo (Ctrl+Y)">
+                Redo
+              </button>
+            </>
+          )}
+        </div>
         <PreviewControl
           docType={docType}
           label={doc.label}
@@ -955,6 +966,11 @@ export function PdfTemplates() {
           </div>
         </aside>
       </div>
+      {canEdit && (
+        <div className="page-foot">
+          {saveButton}
+        </div>
+      )}
     </div>
   );
 }
@@ -1665,8 +1681,8 @@ function Inspector({
             </button>
           )}
           {block.type !== 'items' && (
-            <button type="button" className="btn btn-sm btn-danger" onClick={onRemove}>
-              Delete
+            <button type="button" className="btn btn-sm btn-danger" onClick={onRemove} title="Undo (Ctrl+Z) brings it back">
+              Remove
             </button>
           )}
         </div>

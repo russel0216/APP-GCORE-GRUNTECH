@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink } from '../../components/Navigation';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import {
@@ -11,6 +13,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -68,9 +71,9 @@ interface ClaimAdvance {
 
 /** Where the cash a liquidation accounts for came from, and where its page is. */
 function liquidationSource(row: { advance: ClaimAdvance | null; budgetRequest: ClaimAdvance | null }) {
-  if (row.advance) return { ...row.advance, what: 'Advance', list: 'Cash Advances', listTo: '/g-fin/cash-advances', to: `/g-fin/cash-advances/${row.advance.id}` };
+  if (row.advance) return { ...row.advance, what: 'Advance', to: `/g-fin/cash-advances/${row.advance.id}` };
   if (row.budgetRequest) {
-    return { ...row.budgetRequest, what: 'Budget request', list: 'Budget Requests', listTo: '/g-fin/budget-requests', to: `/g-ops/budget-requests/${row.budgetRequest.id}` };
+    return { ...row.budgetRequest, what: 'Budget request', to: `/g-ops/budget-requests/${row.budgetRequest.id}` };
   }
   return null;
 }
@@ -229,7 +232,7 @@ export function Expenses() {
         actions={
           can('gfin.expenses.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-              + New claim
+              + New expense claim
             </button>
           ) : null
         }
@@ -336,7 +339,7 @@ export function NewClaimModal({
           })),
       });
       if (submitNow) await api.post(`/expense-claims/${created.id}/submit`);
-      toast('ok', submitNow ? 'Filed and sent for approval' : 'Saved as a draft');
+      toast('ok', submitNow ? 'Submitted for approval' : 'Saved as a draft');
       onCreated(created.id);
     } catch (err) {
       setError(err);
@@ -352,10 +355,7 @@ export function NewClaimModal({
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn" onClick={() => create(false)} disabled={busy || !valid}>
             Save draft
           </button>
@@ -364,9 +364,9 @@ export function NewClaimModal({
             onClick={() => create(true)}
             disabled={busy || !valid || missingReceipts > 0}
           >
-            {busy ? 'Filing…' : 'File and send for approval'}
+            {busy ? 'Submitting…' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -505,7 +505,7 @@ export function NewClaimModal({
                         aria-label={`Remove line ${i + 1}`}
                         onClick={() => setLines(lines.filter((_, j) => j !== i))}
                       >
-                        ✕
+                        Remove
                       </button>
                     )}
                   </td>
@@ -530,7 +530,7 @@ export function NewClaimModal({
           setLines([...lines, { spentOn: today, description: '', category: '', receiptNo: '', amount: 0 }])
         }
       >
-        + Add a line
+        + Add line
       </button>
 
       {advance && total > 0 && (
@@ -564,6 +564,7 @@ export function ExpenseClaimDetail() {
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
   const [reload, setReload] = useState(0);
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     try {
@@ -577,19 +578,22 @@ export function ExpenseClaimDetail() {
     load();
   }, [load]);
 
+  // A liquidation goes back to the advance or budget request it accounts for.
+  const source = row ? liquidationSource(row) : null;
+  const liquidation = !!row && row.kind === 'liquidation' && !!source;
+  useBackLink(liquidation ? source?.to : null, liquidation ? source?.number : null);
+
   if (error && !row) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
 
   const own = row.claimedBy.id === me?.user.id;
   // The server lets a super admin act on anybody's draft; the buttons agree.
   const mine = own || !!me?.user.isSuperAdmin;
-  const source = liquidationSource(row);
-  const liquidation = row.kind === 'liquidation' && !!source;
 
   async function submit() {
     try {
       await api.post(`/expense-claims/${id}/submit`);
-      toast('ok', 'Sent for approval');
+      toast('ok', 'Submitted for approval');
       setReload((r) => r + 1);
       load();
     } catch (err) {
@@ -597,43 +601,19 @@ export function ExpenseClaimDetail() {
     }
   }
 
+  // Thrown, not caught: the confirm bar shows the refusal and stays open.
   async function cancel() {
-    try {
-      await api.post(`/expense-claims/${id}/cancel`);
-      toast('ok', 'Cancelled');
-      setReload((r) => r + 1);
-      load();
-    } catch (err) {
-      setError(err);
-    }
+    await api.post(`/expense-claims/${id}/cancel`);
+    toast('ok', 'Cancelled');
+    setReload((r) => r + 1);
+    await load();
   }
 
   const open = row.status === 'DRAFT' || row.status === 'PENDING_APPROVAL';
+  const kindWord = liquidation ? 'liquidation' : 'claim';
 
   return (
     <div>
-      <div className="breadcrumb">
-        {row.job && (
-          <>
-            <Link to={`/g-ops/projects/${row.job.id}`}>{row.job.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        {liquidation && source ? (
-          <>
-            <Link to={source.listTo}>{source.list}</Link>
-            <span className="sep">›</span>
-            <Link to={source.to} className="mono">
-              {source.number}
-            </Link>
-          </>
-        ) : (
-          <Link to="/g-fin/expenses">Expense Claims</Link>
-        )}
-        <span className="sep">›</span>
-        <span className="mono">{row.number}</span>
-      </div>
-
       <RecordHeader
         type={liquidation ? 'Liquidation' : 'Expense Claim'}
         code={row.number}
@@ -642,17 +622,35 @@ export function ExpenseClaimDetail() {
         statusExtra={CLAIM_TONES}
         amount={formatMoney(row.total)}
         amountLabel={liquidation ? 'Receipts total' : 'Claimed'}
+        meta={
+          <>
+            {row.claimedBy.name} · {formatDate(row.claimDate)}
+            {liquidation && source && (
+              <>
+                {` · liquidates ${source.what.toLowerCase()} `}
+                <Link to={source.to} className="mono">
+                  {source.number}
+                </Link>
+              </>
+            )}
+            {row.job ? (
+              <>
+                {' · charged to '}
+                <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+                  {row.job.number}
+                </Link>{' '}
+                {row.costCategory ? `· ${row.costCategory.name}` : ''}
+              </>
+            ) : (
+              ' · overheads'
+            )}
+          </>
+        }
         actions={
           <>
-            <button
-              className="btn"
-              onClick={() => openPdf(`/api/expense-claims/${row.id}/pdf`, () => toast('error', 'Could not print'))}
-            >
-              Print
-            </button>
             {row.status === 'DRAFT' && mine && (
               <button className="btn btn-primary" onClick={submit}>
-                Send for approval
+                Submit for approval
               </button>
             )}
             {row.status === 'APPROVED' && row.outstanding > 0 && can('gfin.ap.create') && (
@@ -660,29 +658,27 @@ export function ExpenseClaimDetail() {
                 {liquidation ? 'Reimburse the excess' : 'Reimburse'}
               </button>
             )}
-            {open && (mine || can('gfin.expenses.edit_all')) && (
-              <button className="btn btn-danger" onClick={cancel}>
-                Cancel
-              </button>
-            )}
           </>
         }
+        print={`/api/expense-claims/${row.id}/pdf`}
+        more={[
+          open &&
+            (mine || can('gfin.expenses.edit_all')) && {
+              label: `Cancel ${kindWord}`,
+              danger: true,
+              confirm: {
+                title: `Cancel ${row.number}?`,
+                body:
+                  row.status === 'PENDING_APPROVAL'
+                    ? 'The approval request is withdrawn with it, and the approvers are told.'
+                    : 'Nothing has been approved or paid on it.',
+                confirmLabel: `Cancel ${kindWord}`,
+                onConfirm: cancel,
+              },
+            },
+        ]}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta fin-gap-bottom">
-        {row.claimedBy.name} · {formatDate(row.claimDate)}
-        {row.job ? (
-          <>
-            {' · charged to '}
-            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-              {row.job.number}
-            </Link>{' '}
-            {row.costCategory ? `· ${row.costCategory.name}` : ''}
-          </>
-        ) : (
-          ' · overheads'
-        )}
-      </p>
 
       <DocumentApproval documentType="expense" documentId={row.id} reloadToken={reload} />
 

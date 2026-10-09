@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf, type ListResult } from '../../lib/api';
+import { api, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
+import { useBackLink } from '../../components/Navigation';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
-import { ErrorBox, Field, Loading, Modal, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
+import { ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, humanise, useToast, type Tone } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { RecordPaymentModal, paymentLink } from '../finance/Receivables';
 import { NewClaimModal, CLAIM_TONES } from '../finance/Expenses';
@@ -175,11 +177,6 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
       <div className="page-head">
         <div>
           <h1>Budget Requests</h1>
-          <p>
-            {finance
-              ? 'Project cash. Approved requests are released here in one voucher; released ones are liquidated by the team in Expenses, with receipts, and only what was spent reaches the project. Overdue ones are past their liquidation deadline.'
-              : 'Cash a project team asks for so it can buy what it needs without a purchase requisition. The project manager allows it, finance releases it, and the team accounts for it with receipts in Expenses.'}
-          </p>
         </div>
       </div>
 
@@ -286,20 +283,17 @@ export function BudgetRequestModal({
 
   return (
     <Modal
-      title={existing ? `Modify ${existing.number}` : `Budget request — ${job.number}`}
+      title={existing ? `Modify budget request ${existing.number}` : 'New budget request'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn" onClick={() => save(false)} disabled={busy || !valid}>
-            {existing ? 'Save' : 'Save draft'}
+            Save draft
           </button>
           <button className="btn btn-primary" onClick={() => save(true)} disabled={busy || !valid}>
             {busy ? 'Sending…' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -386,7 +380,7 @@ export function ProjectBudgetRequestsCard({
         <h3 className="card-title">Budget requests{rows && rows.length ? ` (${rows.length})` : ''}</h3>
         {onRaise && (
           <button className="btn btn-primary btn-sm" onClick={onRaise}>
-            + Budget request
+            + New budget request
           </button>
         )}
       </div>
@@ -513,10 +507,24 @@ export function BudgetRequestDetail() {
   const navigate = useNavigate();
   const toast = useToast();
   const { me, can } = useAuth();
+  const confirm = useConfirm();
   const [row, setRow] = useState<BudgetRequest | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
-  const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate' | 'cancel'>(null);
+  const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate'>(null);
+
+  /*
+    Back goes to the project's Budget Requests tab for the project side, and
+    to G-FIN's register for finance, who may not open projects at all.
+  */
+  const projectSide =
+    (can('gops.budget_requests.view_all') || can('gops.budget_requests.view_own')) &&
+    (can('gops.projects.view_all') || can('gops.projects.view_own'));
+  const financeSide = can('gfin.budget_requests.view_all');
+  useBackLink(
+    row && projectSide ? `/g-ops/projects/${row.job.id}?tab=requests` : row && financeSide ? '/g-fin/budget-requests' : null,
+    row && projectSide ? `${row.job.number} Budget Requests` : row && financeSide ? 'Budget Requests' : null,
+  );
 
   const load = useCallback(async () => {
     try {
@@ -561,16 +569,15 @@ export function BudgetRequestDetail() {
     }
   }
 
+  /** Asked in the confirm bar first; a refusal is shown there. */
+  async function cancel(reason: string) {
+    await api.post(`/budget-requests/${id}/cancel`, { reason: reason || null });
+    toast('ok', 'Cancelled');
+    done();
+  }
+
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to={`/g-ops/projects/${row.job.id}`}>{row.job.number}</Link>
-        <span className="sep">›</span>
-        <Link to={`/g-ops/projects/${row.job.id}?tab=requests`}>Budget Requests</Link>
-        <span className="sep">›</span>
-        <span className="mono">{row.number}</span>
-      </div>
-
       <RecordHeader
         type="Budget Request"
         code={row.number}
@@ -579,16 +586,20 @@ export function BudgetRequestDetail() {
         statusExtra={BUDGET_REQUEST_TONES}
         amount={formatMoney(row.amount)}
         amountLabel="Requested"
+        meta={
+          <>
+            Requested by {row.requestedBy.name} on {formatDate(row.createdAt)}
+            {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
+            {' · for '}
+            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+              {row.job.number}
+            </Link>{' '}
+            {row.job.name} · {row.costCategory.name}
+            {row.job.projectManager && <> · project manager {row.job.projectManager.name}</>}
+          </>
+        }
         actions={
           <>
-            <button className="btn" onClick={() => openPdf(`/api/budget-requests/${row.id}/pdf`, () => toast('error', 'Could not print'))}>
-              Print
-            </button>
-            {canModify && (
-              <button className="btn" onClick={() => setModal('edit')}>
-                Modify
-              </button>
-            )}
             {canSubmit && (
               <button className="btn btn-primary" onClick={submit}>
                 Submit for approval
@@ -609,25 +620,31 @@ export function BudgetRequestDetail() {
                 Record refund
               </button>
             )}
-            {canCancel && (
-              <button className="btn btn-danger" onClick={() => setModal('cancel')}>
-                Cancel
-              </button>
-            )}
           </>
         }
+        print={`/api/budget-requests/${row.id}/pdf`}
+        more={[
+          canCancel && {
+            label: 'Cancel budget request',
+            danger: true,
+            confirm: {
+              title: `Cancel ${row.number}?`,
+              body:
+                row.status === 'PENDING_APPROVAL'
+                  ? 'The approval request is withdrawn with it, and the approvers are told.'
+                  : row.status === 'APPROVED'
+                    ? 'Nothing has been released, so nothing needs to come back.'
+                    : 'Nothing has been approved or released yet.',
+              confirmLabel: 'Cancel budget request',
+              reason: 'optional',
+              reasonLabel: 'Why? Kept on the request',
+              onConfirm: cancel,
+            },
+          },
+        ]}
+        modify={canModify ? () => setModal('edit') : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta fin-gap-bottom">
-        Requested by {row.requestedBy.name} on {formatDate(row.createdAt)}
-        {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
-        {' · for '}
-        <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-          {row.job.number}
-        </Link>{' '}
-        {row.job.name} · {row.costCategory.name}
-        {row.job.projectManager && <> · project manager {row.job.projectManager.name}</>}
-      </p>
 
       {row.status === 'DRAFT' && route && route.steps.length > 0 && (
         <div className="qd-route">
@@ -829,57 +846,6 @@ export function BudgetRequestDetail() {
           onCreated={(claimId) => navigate(`/g-fin/expenses/${claimId}`)}
         />
       )}
-
-      {modal === 'cancel' && <CancelRequestModal request={row} onClose={() => setModal(null)} onDone={done} />}
     </div>
-  );
-}
-
-function CancelRequestModal({ request, onClose, onDone }: { request: BudgetRequest; onClose: () => void; onDone: () => void }) {
-  const toast = useToast();
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-
-  async function cancel() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/budget-requests/${request.id}/cancel`, { reason: reason || null });
-      toast('ok', 'Cancelled');
-      onDone();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={`Cancel ${request.number}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Keep it
-          </button>
-          <button className="btn btn-danger" onClick={cancel} disabled={busy}>
-            {busy ? 'Cancelling…' : 'Cancel the request'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted">
-        {request.status === 'PENDING_APPROVAL'
-          ? 'The approval request is withdrawn with it, and the approvers are told.'
-          : request.status === 'APPROVED'
-            ? 'Nothing has been released, so nothing needs to come back.'
-            : 'Nothing has been approved or released yet.'}
-      </p>
-      <Field label="Why?" hint="Kept on the request">
-        <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
-      </Field>
-    </Modal>
   );
 }

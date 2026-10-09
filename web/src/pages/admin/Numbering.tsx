@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { ErrorBox, Field, Loading, Modal, useToast } from '../../components/ui';
+import { ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
 type Period = 'YEAR' | 'MONTH' | 'NONE';
@@ -122,7 +122,25 @@ export function Numbering() {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.documentType}>
+              // The row opens "Modify numbering …" for whoever may change it — clicked,
+              // or Enter / Space while it has focus (rule 13); the row-end Modify stays.
+              <tr
+                key={row.documentType}
+                className={canEdit ? 'clickable' : undefined}
+                tabIndex={canEdit ? 0 : undefined}
+                onClick={canEdit ? () => setEditing(row) : undefined}
+                onKeyDown={
+                  canEdit
+                    ? (e) => {
+                        if (e.target !== e.currentTarget) return;
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setEditing(row);
+                        }
+                      }
+                    : undefined
+                }
+              >
                 <td>{row.label}</td>
                 <td className="mono">{row.typeCode}</td>
                 <td className="mono faint">{row.pattern}</td>
@@ -136,7 +154,14 @@ export function Numbering() {
                 </td>
                 {canEdit && (
                   <td className="numbering-actions">
-                    <button className="btn btn-sm" onClick={() => setEditing(row)}>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditing(row);
+                      }}
+                    >
                       Modify
                     </button>
                   </td>
@@ -223,17 +248,14 @@ function SequenceEditor({
 
   return (
     <Modal
-      title={`Numbering — ${row.label}`}
+      title={`Modify numbering — ${row.label}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

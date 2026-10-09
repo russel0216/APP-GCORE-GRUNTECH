@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, openPdf } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import {
   ErrorBox,
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -317,7 +319,7 @@ export function NewCashAdvanceModal({
         ? await api.put<{ id: string }>(`/cash-advances/${existing.id}`, body)
         : await api.post<{ id: string }>('/cash-advances', body);
       if (submitNow) await api.post(`/cash-advances/${saved.id}/submit`);
-      toast('ok', submitNow ? 'Sent for approval' : existing ? 'Saved' : 'Saved as a draft');
+      toast('ok', submitNow ? 'Submitted for approval' : existing ? 'Saved' : 'Saved as a draft');
       onSaved(saved.id);
     } catch (err) {
       setError(err);
@@ -329,20 +331,17 @@ export function NewCashAdvanceModal({
 
   return (
     <Modal
-      title={existing ? `Modify ${existing.number}` : 'New cash advance'}
+      title={existing ? `Modify cash advance ${existing.number}` : 'New cash advance'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn" onClick={() => save(false)} disabled={busy || !valid}>
             {existing ? 'Save' : 'Save draft'}
           </button>
           <button className="btn btn-primary" onClick={() => save(true)} disabled={busy || !valid}>
-            {busy ? 'Sending…' : 'Send for approval'}
+            {busy ? 'Submitting…' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -433,7 +432,8 @@ export function CashAdvanceDetail() {
   const [row, setRow] = useState<Advance | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
-  const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate' | 'cancel'>(null);
+  const [modal, setModal] = useState<null | 'edit' | 'release' | 'refund' | 'liquidate'>(null);
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     try {
@@ -470,27 +470,22 @@ export function CashAdvanceDetail() {
   async function submit() {
     try {
       await api.post(`/cash-advances/${id}/submit`);
-      toast('ok', 'Sent for approval');
+      toast('ok', 'Submitted for approval');
       done();
     } catch (err) {
       setError(err);
     }
   }
 
+  // Thrown, not caught: the confirm bar shows the refusal and stays open.
+  async function cancel(reason: string) {
+    await api.post(`/cash-advances/${id}/cancel`, { reason: reason || null });
+    toast('ok', 'Cancelled');
+    done();
+  }
+
   return (
     <div>
-      <div className="breadcrumb">
-        {row.job && (
-          <>
-            <Link to={`/g-ops/projects/${row.job.id}`}>{row.job.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        <Link to="/g-fin/cash-advances">Cash Advances</Link>
-        <span className="sep">›</span>
-        <span className="mono">{row.number}</span>
-      </div>
-
       <RecordHeader
         type="Cash Advance"
         code={row.number}
@@ -499,22 +494,29 @@ export function CashAdvanceDetail() {
         statusExtra={ADVANCE_TONES}
         amount={formatMoney(row.amount)}
         amountLabel="Requested"
+        meta={
+          <>
+            Requested by {row.requestedBy.name} on {formatDate(row.requestDate)}
+            {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
+            {row.job ? (
+              <>
+                {' · for '}
+                <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+                  {row.job.number}
+                </Link>{' '}
+                {row.job.name}
+                {row.costCategory && ` · ${row.costCategory.name}`}
+              </>
+            ) : (
+              ' · overheads'
+            )}
+          </>
+        }
         actions={
           <>
-            <button
-              className="btn"
-              onClick={() => openPdf(`/api/cash-advances/${row.id}/pdf`, () => toast('error', 'Could not print'))}
-            >
-              Print
-            </button>
-            {canModify && (
-              <button className="btn" onClick={() => setModal('edit')}>
-                Modify
-              </button>
-            )}
             {canSubmit && (
               <button className="btn btn-primary" onClick={submit}>
-                Send for approval
+                Submit for approval
               </button>
             )}
             {row.status === 'APPROVED' && row.toRelease > 0 && can('gfin.ap.create') && (
@@ -532,31 +534,31 @@ export function CashAdvanceDetail() {
                 Record refund
               </button>
             )}
-            {canCancel && (
-              <button className="btn btn-danger" onClick={() => setModal('cancel')}>
-                Cancel
-              </button>
-            )}
           </>
         }
+        print={`/api/cash-advances/${row.id}/pdf`}
+        more={[
+          canCancel && {
+            label: 'Cancel cash advance',
+            danger: true,
+            confirm: {
+              title: `Cancel ${row.number}?`,
+              body:
+                row.status === 'PENDING_APPROVAL'
+                  ? 'The approval request is withdrawn with it.'
+                  : row.status === 'APPROVED'
+                    ? 'Nothing has been released, so nothing needs to come back.'
+                    : 'Nothing has been approved or released yet.',
+              confirmLabel: 'Cancel cash advance',
+              reason: 'optional',
+              reasonLabel: 'Why? (kept on the advance’s notes)',
+              onConfirm: cancel,
+            },
+          },
+        ]}
+        modify={canModify ? () => setModal('edit') : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta fin-gap-bottom">
-        Requested by {row.requestedBy.name} on {formatDate(row.requestDate)}
-        {row.neededBy && <> · needed by {formatDate(row.neededBy)}</>}
-        {row.job ? (
-          <>
-            {' · for '}
-            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-              {row.job.number}
-            </Link>{' '}
-            {row.job.name}
-            {row.costCategory && ` · ${row.costCategory.name}`}
-          </>
-        ) : (
-          ' · overheads'
-        )}
-      </p>
 
       <DocumentApproval documentType="cash_advance" documentId={row.id} reloadToken={reload} />
 
@@ -750,65 +752,6 @@ export function CashAdvanceDetail() {
           onCreated={(claimId) => navigate(`/g-fin/expenses/${claimId}`)}
         />
       )}
-
-      {modal === 'cancel' && <CancelAdvanceModal advance={row} onClose={() => setModal(null)} onDone={done} />}
     </div>
-  );
-}
-
-function CancelAdvanceModal({
-  advance,
-  onClose,
-  onDone,
-}: {
-  advance: Advance;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const toast = useToast();
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-
-  async function cancel() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/cash-advances/${advance.id}/cancel`, { reason: reason || null });
-      toast('ok', 'Cancelled');
-      onDone();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={`Cancel ${advance.number}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Keep it
-          </button>
-          <button className="btn btn-danger" onClick={cancel} disabled={busy}>
-            {busy ? 'Cancelling…' : 'Cancel the advance'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted">
-        {advance.status === 'PENDING_APPROVAL'
-          ? 'The approval request is withdrawn with it.'
-          : advance.status === 'APPROVED'
-            ? 'Nothing has been released, so nothing needs to come back.'
-            : 'Nothing has been approved or released yet.'}
-      </p>
-      <Field label="Why?" hint="Kept on the advance's notes">
-        <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
-      </Field>
-    </Modal>
   );
 }

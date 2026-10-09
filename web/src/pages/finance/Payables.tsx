@@ -11,6 +11,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -249,13 +250,6 @@ export function Payables() {
             because that is the first time the cost appears.
           </p>
         </div>
-        <div className="row">
-          {can('gfin.ap.create') && (
-            <button className="btn btn-primary btn-sm" onClick={() => setCreating('blank')}>
-              + New bill
-            </button>
-          )}
-        </div>
       </div>
 
       {queue && queue.length > 0 && (
@@ -327,6 +321,13 @@ export function Payables() {
           { key: 'outstanding', label: 'Balance', options: [{ value: 'true', label: 'Outstanding only' }] },
           { key: 'overdue', label: 'Overdue', options: [{ value: 'true', label: 'Overdue only' }] },
         ]}
+        actions={
+          can('gfin.ap.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setCreating('blank')}>
+              + New supplier bill
+            </button>
+          ) : null
+        }
       />
 
       {creating && (
@@ -444,22 +445,19 @@ function NewBillModal({
 
   return (
     <Modal
-      title={from ? `Bill for ${from.number}` : 'New supplier bill'}
+      title={from ? `New supplier bill for ${from.number}` : 'New supplier bill'}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={create}
             disabled={busy || !form.supplierId || lineTotal <= 0}
           >
-            {busy ? 'Saving…' : 'Enter bill'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -605,7 +603,7 @@ function NewBillModal({
                       aria-label={`Remove line ${i + 1}`}
                       onClick={() => setLines(lines.filter((_, j) => j !== i))}
                     >
-                      ✕
+                      Remove
                     </button>
                   )}
                 </td>
@@ -618,7 +616,7 @@ function NewBillModal({
         className="btn btn-sm fin-gap-top-sm"
         onClick={() => setLines([...lines, { description: '', quantity: 1, unitPrice: 0 }])}
       >
-        + Add a line
+        + Add line
       </button>
 
       <div className="grid grid-2 fin-gap-top">
@@ -681,6 +679,8 @@ export function BillDetail() {
   const [row, setRow] = useState<Bill | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [paying, setPaying] = useState(false);
+  // Bumped after a submit, so the approval chain under the header shows the new request.
+  const [reload, setReload] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -700,7 +700,8 @@ export function BillDetail() {
   async function submit() {
     try {
       await api.post(`/supplier-bills/${id}/submit`);
-      toast('ok', 'Sent for approval');
+      toast('ok', 'Submitted for approval');
+      setReload((r) => r + 1);
       load();
     } catch (err) {
       setError(err);
@@ -709,14 +710,6 @@ export function BillDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-fin/ap">Accounts Payable</Link>
-        <span className="sep">›</span>
-        <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
-        <span className="sep">›</span>
-        <span className="mono">{row.number}</span>
-      </div>
-
       <RecordHeader
         type="Supplier Bill"
         code={row.number}
@@ -725,6 +718,21 @@ export function BillDetail() {
         amount={formatMoney(row.netPayable)}
         // What leaves the bank, after whatever Gruntech withholds.
         amountLabel="Net payable"
+        meta={
+          <>
+            <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
+            {row.supplierInvoiceNo && <> · their ref {row.supplierInvoiceNo}</>}
+            {row.job && (
+              <>
+                {' · '}
+                <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
+                  {row.job.number}
+                </Link>{' '}
+                {row.job.name}
+              </>
+            )}
+          </>
+        }
         actions={
           <>
             {row.status === 'DRAFT' && can('gfin.ap.create') && (
@@ -741,21 +749,7 @@ export function BillDetail() {
         }
       />
 
-      <p className="record-head-meta fin-gap-bottom">
-        <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
-        {row.supplierInvoiceNo && <> · their ref {row.supplierInvoiceNo}</>}
-        {row.job && (
-          <>
-            {' · '}
-            <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
-              {row.job.number}
-            </Link>{' '}
-            {row.job.name}
-          </>
-        )}
-      </p>
-
-      <DocumentApproval documentType="supplier_bill" documentId={row.id} />
+      <DocumentApproval documentType="supplier_bill" documentId={row.id} reloadToken={reload} />
 
       <ErrorBox error={error} />
 

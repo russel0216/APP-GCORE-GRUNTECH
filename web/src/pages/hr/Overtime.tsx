@@ -12,11 +12,14 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   formatDate,
   formatMoney,
   useToast,
 } from '../../components/ui';
 import { todayLocal } from '../../lib/day';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 
 /**
  * Overtime — two filings against one record.
@@ -168,11 +171,6 @@ export function Overtime() {
       <div className="page-head">
         <div>
           <h1>Overtime</h1>
-          <p>
-            File <strong>before</strong> the work so you have the authorisation in writing, then
-            file the hours you actually worked afterwards. The project is charged only once the
-            supervisor and HR have both approved the actual filing.
-          </p>
         </div>
       </div>
 
@@ -190,7 +188,7 @@ export function Overtime() {
         actions={
           can('ghr.overtime.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setFiling(true)}>
-              + File prior approval
+              + New overtime request
             </button>
           ) : null
         }
@@ -305,21 +303,18 @@ function PriorModal({ onClose, onFiled }: { onClose: () => void; onFiled: (id: s
 
   return (
     <Modal
-      title="File overtime — prior approval"
+      title="New overtime request"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={file}
             disabled={busy || form.reason.trim().length < 5 || !preview || preview.hours <= 0}
           >
-            {busy ? 'Filing…' : 'Send for authorisation'}
+            {busy ? 'Submitting…' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -439,6 +434,7 @@ export function OvertimeDetail() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
   const [row, setRow] = useState<OtDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [filingActual, setFilingActual] = useState(false);
@@ -466,45 +462,69 @@ export function OvertimeDetail() {
   const actualFiled = ACTUAL_FILED_STAGES.includes(row.stage) || row.actualHours != null;
   const employeeName = `${row.employee.firstName} ${row.employee.lastName}`;
 
+  /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
   async function cancel() {
-    try {
-      await api.post(`/overtime/${id}/cancel`);
-      toast('ok', 'Cancelled');
-      load();
-    } catch (err) {
-      setError(err);
-    }
+    await api.post(`/overtime/${id}/cancel`);
+    toast('ok', 'Cancelled');
+    load();
   }
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>
-            <span className="mono">{row.number}</span> <StageBadge stage={row.stage} />
-          </h1>
-          <p>
+      <RecordHeader
+        type="Overtime"
+        code={row.number}
+        title={`${employeeName} · ${formatDate(row.date)}`}
+        status={row.stage}
+        statusLabel={STAGE_LABEL[row.stage]}
+        statusExtra={STAGE_TONES}
+        meta={
+          <>
             {can('ghr.employees.view_all') ? (
-              <Link to={`/g-hr/employees/${row.employee.id}`}>{employeeName}</Link>
+              <Link to={`/g-hr/employees/${row.employee.id}`} className="mono">
+                {row.employee.employeeNo}
+              </Link>
             ) : (
-              employeeName
+              <span className="mono">{row.employee.employeeNo}</span>
             )}{' '}
-            · {formatDate(row.date)}
-          </p>
-        </div>
-        <div className="row">
-          {row.canFileActual && (
-            <button className="btn btn-primary btn-sm" onClick={() => setFilingActual(true)}>
+            · <span className="mono">{row.actualStart ?? row.plannedStart}–{row.actualEnd ?? row.plannedEnd}</span>
+            {row.job && (
+              <>
+                {' '}
+                · charged to{' '}
+                {can('gops.projects.view_all') || can('gops.projects.view_own') ? (
+                  <Link to={`/g-ops/projects/${row.job.id}`}>{row.job.number}</Link>
+                ) : (
+                  row.job.number
+                )}
+              </>
+            )}
+          </>
+        }
+        actions={
+          row.canFileActual && (
+            <button className="btn btn-primary" onClick={() => setFilingActual(true)}>
               File the actual hours
             </button>
-          )}
-          {row.canCancel && (
-            <button className="btn btn-danger btn-sm" onClick={cancel}>
-              Cancel
-            </button>
-          )}
-        </div>
-      </div>
+          )
+        }
+        more={[
+          row.canCancel && {
+            label: 'Cancel overtime',
+            danger: true,
+            confirm: {
+              title: `Cancel ${row.number}?`,
+              body:
+                row.stage === 'PRIOR' || row.stage === 'ACTUAL_FILED'
+                  ? 'It is withdrawn from the approvers, and nothing is charged to a project.'
+                  : 'Nothing is charged to a project.',
+              confirmLabel: 'Cancel overtime',
+              onConfirm: cancel,
+            },
+          },
+        ]}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -713,18 +733,15 @@ function ActualModal({
       title="File the actual hours"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={file}
             disabled={busy || !preview || preview.hours <= 0 || (needsNote && !form.varianceNote.trim())}
           >
-            {busy ? 'Filing…' : 'Send for approval'}
+            {busy ? 'Submitting…' : 'Submit for approval'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

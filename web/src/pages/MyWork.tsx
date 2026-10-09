@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import { useConfirm } from '../components/Confirm';
 import {
   ErrorBox,
   Loading,
-  Modal,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -25,6 +25,13 @@ interface ApprovalRequest {
   requester?: { name: string };
   actions?: { action: string; comment: string | null; actedAt: string; approver?: { name: string } }[];
 }
+
+type Decision = 'APPROVED' | 'REJECTED' | 'RETURNED';
+
+/** The decision as its button says it — the same words as the row's buttons. */
+const DECISION_LABEL: Record<Decision, string> = { APPROVED: 'Approve', RETURNED: 'Return', REJECTED: 'Reject' };
+/** The decision once made, for the toast. */
+const DECISION_DONE: Record<Decision, string> = { APPROVED: 'approved', RETURNED: 'returned', REJECTED: 'rejected' };
 
 /** The row contract every module's work shares — see api/src/routes/workspace.ts. */
 export interface WorkRow {
@@ -141,8 +148,8 @@ export function MyWork() {
   const [work, setWork] = useState<MyWorkData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  const [acting, setActing] = useState<{ request: ApprovalRequest; action: 'APPROVED' | 'REJECTED' | 'RETURNED' } | null>(null);
   const toast = useToast();
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -167,6 +174,52 @@ export function MyWork() {
     void load();
   }, [load]);
 
+  /*
+    A decision asks in the page's one confirm bar (components/Confirm.tsx),
+    the same bar every other "are you sure" uses: what is being decided, the
+    document one click away, a comment, then [Keep it] [Approve]. While the
+    decision is being recorded, Keep it is disabled, so nobody backs out of
+    a decision that is already on its way.
+  */
+  function decide(r: ApprovalRequest, action: Decision) {
+    const number = r.documentNumber ?? r.documentType;
+    const label = DECISION_LABEL[action];
+    confirm.ask({
+      title: `${label} ${number}?`,
+      body: (
+        <>
+          <div className="decision-subject">
+            {r.subject}
+            {r.amount !== null && ` · ${formatMoney(r.amount)}`}
+            {r.requester?.name && <span className="faint"> · raised by {r.requester.name}</span>}
+          </div>
+          {/* The decision is about the document, so the document is one click
+              away — an approver should never have to decide on a subject line. */}
+          <div className="decision-open">
+            <Link to={r.link ?? '/my-work'} target="_blank" rel="noopener">
+              Open {number}
+            </Link>
+          </div>
+          <div className="faint decision-note">
+            Recorded against the document permanently, with your name and the time.
+          </div>
+        </>
+      ),
+      confirmLabel: label,
+      reason: 'optional',
+      reasonLabel:
+        action === 'APPROVED'
+          ? 'Comment (optional) — anything the requester should know'
+          : 'Comment (recommended) — what needs to change; this is what the requester sees',
+      tone: action === 'APPROVED' ? 'primary' : 'danger',
+      onConfirm: async (comment) => {
+        await api.post(`/approvals/${r.id}/act`, { action, comment: comment || undefined });
+        toast('ok', `${r.subject} — ${DECISION_DONE[action]}`);
+        await load();
+      },
+    });
+  }
+
   if (loading) return <Loading />;
 
   const schedule = work?.todaysSchedule ?? [];
@@ -185,6 +238,8 @@ export function MyWork() {
           </p>
         </div>
       </div>
+
+      {confirm.bar}
 
       <ErrorBox error={error} />
 
@@ -225,22 +280,22 @@ export function MyWork() {
                       <div className="row">
                         <button
                           type="button"
-                          className="btn btn-sm btn-ok"
-                          onClick={() => setActing({ request: r, action: 'APPROVED' })}
+                          className="btn btn-sm btn-primary"
+                          onClick={() => decide(r, 'APPROVED')}
                         >
                           Approve
                         </button>
                         <button
                           type="button"
                           className="btn btn-sm"
-                          onClick={() => setActing({ request: r, action: 'RETURNED' })}
+                          onClick={() => decide(r, 'RETURNED')}
                         >
                           Return
                         </button>
                         <button
                           type="button"
                           className="btn btn-sm btn-danger"
-                          onClick={() => setActing({ request: r, action: 'REJECTED' })}
+                          onClick={() => decide(r, 'REJECTED')}
                         >
                           Reject
                         </button>
@@ -415,103 +470,6 @@ export function MyWork() {
           </div>
         )}
       </div>
-
-      {acting && (
-        <DecisionModal
-          request={acting.request}
-          action={acting.action}
-          onClose={() => setActing(null)}
-          onDone={async (verb) => {
-            setActing(null);
-            toast('ok', `${acting.request.subject} — ${verb}`);
-            await load();
-          }}
-        />
-      )}
     </div>
-  );
-}
-
-function DecisionModal({
-  request,
-  action,
-  onClose,
-  onDone,
-}: {
-  request: ApprovalRequest;
-  action: 'APPROVED' | 'REJECTED' | 'RETURNED';
-  onClose: () => void;
-  onDone: (verb: string) => void;
-}) {
-  const [comment, setComment] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-
-  const verb = action === 'APPROVED' ? 'approved' : action === 'REJECTED' ? 'rejected' : 'returned';
-  const number = request.documentNumber ?? request.documentType;
-
-  async function submit() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/approvals/${request.id}/act`, { action, comment: comment || undefined });
-      onDone(verb);
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={`${verb[0].toUpperCase()}${verb.slice(1)} — ${number}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className={`btn ${action === 'APPROVED' ? 'btn-ok' : 'btn-danger'}`}
-            onClick={submit}
-            disabled={busy}
-          >
-            {busy ? 'Working…' : `Confirm ${verb}`}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted decision-subject">
-        {request.subject}
-        {request.amount !== null && ` · ${formatMoney(request.amount)}`}
-        {request.requester?.name && (
-          <span className="faint"> · raised by {request.requester.name}</span>
-        )}
-      </p>
-      {/* The decision is about the document, so the document is one click
-          away — an approver should never have to decide on a subject line. */}
-      <p className="decision-open">
-        <Link to={request.link ?? '/my-work'} className="btn btn-sm" target="_blank" rel="noopener">
-          Open {number}
-        </Link>
-      </p>
-      <div className="field">
-        <label>Comment {action === 'APPROVED' ? '(optional)' : '(recommended)'}</label>
-        <textarea
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-          placeholder={
-            action === 'APPROVED'
-              ? 'Anything the requester should know'
-              : 'Say what needs to change — this is what the requester sees'
-          }
-        />
-      </div>
-      <p className="faint decision-note">
-        This decision is recorded against the document permanently, with your name and the time.
-      </p>
-    </Modal>
   );
 }

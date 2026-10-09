@@ -8,6 +8,7 @@ import {
   ErrorBox,
   Field,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDateTime,
   useToast,
@@ -60,6 +61,15 @@ interface EmployeeOption {
   position: string | null;
   department: { id: string; name: string } | null;
   hasUser: boolean;
+}
+
+/**
+ * A permission chip is a button, and a button sends no `input` event — so the
+ * Modal's "Close without saving?" guard never heard about a tick. Tell it, the
+ * way a field would.
+ */
+function markChanged(el: HTMLElement) {
+  el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 interface MailStatus {
@@ -227,7 +237,7 @@ export function Users() {
         actions={
           can('admin.users.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
-              + Add user
+              + New user
             </button>
           ) : null
         }
@@ -409,17 +419,18 @@ function UserEditor({
     }
   }
 
-  // After an invitation from "Add user": the link, and a way out.
+  // After an invitation from "New user": the link, and a way out. Its own key
+  // and no guard: it sits where the New user form sat, and React would
+  // otherwise keep that form's Modal — and its "something was typed" flag —
+  // asking "Close without saving?" about a user already saved.
   if (isNew && issued) {
     return (
       <Modal
+        key="added"
+        guard={false}
         title={`${form.name} added`}
         onClose={onSaved}
-        footer={
-          <button className="btn btn-primary" onClick={onSaved}>
-            Done
-          </button>
-        }
+        footer={<ModalFoot onCancel={onSaved} cancelLabel="Close" />}
       >
         <LinkDelivery delivery={issued.delivery} email={form.email} kind={issued.kind} />
         <p className="muted">
@@ -446,17 +457,14 @@ function UserEditor({
   return (
     <Modal
       wide
-      title={isNew ? 'Add user' : `Modify ${form.name || 'user'}`}
+      title={isNew ? 'New user' : `Modify user ${detail?.name ?? form.name}`.trim()}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -669,7 +677,10 @@ function UserEditor({
                             type="button"
                             key={a.key}
                             className={`perm-chip${state === 'ALLOW' ? ' on' : state === 'DENY' ? ' deny' : ''}`}
-                            onClick={() => cycle(a.key)}
+                            onClick={(e) => {
+                              cycle(a.key);
+                              markChanged(e.currentTarget);
+                            }}
                             title={a.key}
                             aria-label={`${sub.label}: ${a.label} — ${
                               state === 'ALLOW' ? 'allowed' : state === 'DENY' ? 'denied' : 'role default'

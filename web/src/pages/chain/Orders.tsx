@@ -9,6 +9,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -17,6 +18,7 @@ import {
 import { Stat } from '../../components/charts';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { ProgressBar } from '../delivery/Projects';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -138,6 +140,7 @@ export function CanvassDetail() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [canvass, setCanvass] = useState<CanvassDetailData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -164,56 +167,67 @@ export function CanvassDetail() {
   if (loading) return <Loading />;
   if (!canvass) return <ErrorBox error={error ?? new Error('Canvass not found')} />;
 
+  /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
   async function award(supplierRowId: string) {
     if (!canvass) return;
-    try {
-      const res = await api.post<{ supplier: string }>(`/canvasses/${canvass.id}/award/${supplierRowId}`);
-      toast('ok', `Awarded to ${res.supplier}`);
-      await load();
-    } catch (err) {
-      setError(err);
-    }
+    const res = await api.post<{ supplier: string }>(`/canvasses/${canvass.id}/award/${supplierRowId}`);
+    toast('ok', `Awarded to ${res.supplier}`);
+    await load();
   }
 
   const winner = canvass.suppliers.find((s) => s.isSelected);
+  const mayEdit = canvass.status === 'OPEN' && can('gchain.canvass.edit_all');
+
+  const addSupplierButton = mayEdit ? (
+    <button className="btn btn-sm" onClick={() => setAdding(true)}>
+      + Add supplier
+    </button>
+  ) : null;
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to={`/g-chain/purchase-requests/${canvass.request.id}`}>{canvass.request.number}</Link>
-        <span className="sep">›</span>
-        <Link to="/g-chain/canvass">Canvass</Link>
-        <span className="sep">›</span>
-        <span className="mono">{canvass.number}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{canvass.request.purpose}</h1>
-          <p>
-            {canvass.request.job ? `${canvass.request.job.number} · ` : ''}
-            {canvass.suppliers.length} supplier{canvass.suppliers.length === 1 ? '' : 's'} quoting
-            <span className="proc-pill-gap">
-              <StatusBadge status={canvass.status} extra={{ AWARDED: 'ok' }} />
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          {canvass.status === 'OPEN' && can('gchain.canvass.edit_all') && (
-            <button className="btn btn-primary" onClick={() => setAdding(true)}>
-              + Add supplier
-            </button>
-          )}
-          {winner && can('gchain.purchase_orders.create') && (
+      <RecordHeader
+        type="Canvass"
+        code={canvass.number}
+        title={canvass.request.purpose}
+        status={canvass.status}
+        statusExtra={{ AWARDED: 'ok' }}
+        amount={winner ? formatMoney(winner.total) : undefined}
+        amountLabel="Awarded total"
+        meta={
+          <>
+            For <Link to={`/g-chain/purchase-requests/${canvass.request.id}`}>{canvass.request.number}</Link>
+            {canvass.request.job && (
+              <>
+                {' '}
+                ·{' '}
+                <Link to={`/g-ops/projects/${canvass.request.job.id}`}>
+                  {canvass.request.job.number} — {canvass.request.job.name}
+                </Link>
+              </>
+            )}{' '}
+            · {canvass.suppliers.length} supplier{canvass.suppliers.length === 1 ? '' : 's'} quoting
+            {winner && (
+              <>
+                {' '}
+                · awarded to <Link to={`/g-chain/suppliers/${winner.supplier.id}`}>{winner.supplier.name}</Link>
+              </>
+            )}
+          </>
+        }
+        actions={
+          winner &&
+          can('gchain.purchase_orders.create') && (
             <button
               className="btn btn-primary"
               onClick={() => navigate(`/g-chain/purchase-orders?fromCanvass=${canvass.id}`)}
             >
               Raise order
             </button>
-          )}
-        </div>
-      </div>
+          )
+        }
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -225,9 +239,16 @@ export function CanvassDetail() {
       )}
 
       <div className="card">
-        <h3 className="card-title">Quote comparison</h3>
+        <div className="proc-card-head">
+          <h3 className="card-title">Quote comparison</h3>
+          {canvass.suppliers.length > 0 && addSupplierButton}
+        </div>
         {canvass.suppliers.length === 0 ? (
-          <Empty title="No suppliers yet" hint="Add the suppliers you are asking to quote." />
+          <Empty
+            title="No suppliers yet"
+            hint="Add the suppliers you are asking to quote."
+            action={addSupplierButton ?? undefined}
+          />
         ) : (
           <div className="table-wrap">
             <table className="data">
@@ -306,19 +327,34 @@ export function CanvassDetail() {
                     </td>
                   ))}
                 </tr>
-                {canvass.status === 'OPEN' && can('gchain.canvass.edit_all') && (
+                {mayEdit && (
                   <tr>
                     <td colSpan={3} />
                     {canvass.suppliers.map((s) => (
                       <td key={s.id} className="right">
                         <div className="proc-row-actions">
-                          <button className="btn btn-sm" onClick={() => setQuoting(s)}>
+                          <button
+                            className="btn btn-sm"
+                            aria-label={`Quote from ${s.supplier.name}`}
+                            onClick={() => setQuoting(s)}
+                          >
                             Quote
                           </button>
                           <button
-                            className="btn btn-sm btn-ok"
+                            className="btn btn-sm"
+                            aria-label={`Award to ${s.supplier.name}`}
                             disabled={!s.quotes.length}
-                            onClick={() => award(s.id)}
+                            onClick={() =>
+                              confirm.ask({
+                                title: `Award ${canvass.number} to ${s.supplier.name}?`,
+                                body: s.complete
+                                  ? `Their quote totals ${formatMoney(s.total)}. The purchase order is raised from the award.`
+                                  : 'Their quote does not price every line. The purchase order is raised from the award.',
+                                confirmLabel: 'Award',
+                                tone: 'primary',
+                                onConfirm: () => award(s.id),
+                              })
+                            }
                           >
                             Award
                           </button>
@@ -412,17 +448,14 @@ function AddSupplierModal({
 
   return (
     <Modal
-      title="Add a supplier to canvass"
+      title="Add supplier"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || !form.supplierId}>
-            {busy ? 'Adding…' : 'Add'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -465,6 +498,7 @@ function QuoteModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [prices, setPrices] = useState<Record<string, string>>(() =>
@@ -497,17 +531,28 @@ function QuoteModal({
   return (
     <Modal
       wide
-      title={`Quote from ${supplierRow.supplier.name}`}
+      title={`${supplierRow.quotes.length ? 'Modify' : 'Add'} quote from ${supplierRow.supplier.name}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          // A supplier added to the canvass by mistake leaves it here, with
+          // their prices. The modal opens only while the canvass is open.
+          danger={{
+            label: 'Remove',
+            question: `Remove ${supplierRow.supplier.name} from this canvass? Their prices go with them.`,
+            onConfirm: async () => {
+              await api.del(`/canvasses/${canvassId}/suppliers/${supplierRow.id}`);
+              toast('ok', `${supplierRow.supplier.name} removed`);
+              onSaved();
+            },
+          }}
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy}>
-            {busy ? 'Saving…' : 'Save quote'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -664,7 +709,7 @@ export function PurchaseOrders() {
         actions={
           can('gchain.purchase_orders.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + New order
+              + New purchase order
             </button>
           ) : null
         }
@@ -760,14 +805,11 @@ function NewPoModal({
       title="New purchase order"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={create} disabled={busy || !form.supplierId}>
-            {busy ? 'Creating…' : 'Create'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -904,23 +946,22 @@ export function PurchaseOrderDetail() {
     }
   }
 
-  async function removeLine(line: PoLine) {
-    if (!po) return;
-    try {
-      await api.del(`/purchase-orders/${po.id}/items/${line.id}`);
-      toast('ok', 'Line removed');
-      await load();
-    } catch (err) {
-      setError(err);
-    }
-  }
-
   const outstanding = po.items.reduce((s, i) => s + i.outstandingQty, 0);
   const isDraft = po.status === 'DRAFT';
   const billable = ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(po.status);
+  // The API's own rule: a draft with nothing received against it.
+  const mayDelete = isDraft && po.receivings.length === 0 && can('gchain.purchase_orders.delete');
+
+  /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
+  async function remove() {
+    if (!po) return;
+    await api.del(`/purchase-orders/${po.id}`);
+    toast('ok', `${po.number} deleted`);
+    navigate('/g-chain/purchase-orders');
+  }
 
   const addLineButton = po.canEdit ? (
-    <button className="btn btn-primary btn-sm" onClick={() => setLineEditing('new')}>
+    <button className="btn btn-sm" onClick={() => setLineEditing('new')}>
       + Add line
     </button>
   ) : null;
@@ -976,6 +1017,18 @@ export function PurchaseOrderDetail() {
           </>
         }
         print={`/api/purchase-orders/${po.id}/pdf`}
+        more={[
+          mayDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${po.number}?`,
+              body: 'It cannot be undone.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
+            },
+          },
+        ]}
         modify={po.canEdit ? () => setModifying(true) : undefined}
       />
 
@@ -1074,20 +1127,14 @@ export function PurchaseOrderDetail() {
                   </td>
                   {po.canEdit && (
                     <td>
+                      {/* Removing the line is in its modal, behind a question. */}
                       <div className="proc-row-actions">
                         <button
-                          className="btn btn-ghost btn-sm"
+                          className="btn btn-sm"
                           aria-label={`Modify ${i.description}`}
                           onClick={() => setLineEditing(i)}
                         >
                           Modify
-                        </button>
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          aria-label={`Remove ${i.description}`}
-                          onClick={() => void removeLine(i)}
-                        >
-                          Remove
                         </button>
                       </div>
                     </td>
@@ -1238,17 +1285,14 @@ function PoHeaderModal({
 
   return (
     <Modal
-      title={`Modify ${po.number}`}
+      title={`Modify purchase order ${po.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || !form.supplierId}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1315,6 +1359,7 @@ function PoLineModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [items, setItems] = useState<
@@ -1375,22 +1420,35 @@ function PoLineModal({
 
   return (
     <Modal
-      title={line ? 'Modify line' : 'Add a line'}
+      title={line ? 'Modify line' : 'Add line'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            line
+              ? {
+                  label: 'Remove',
+                  question: `Remove ${line.description} from ${po.number}?`,
+                  onConfirm: async () => {
+                    await api.del(`/purchase-orders/${po.id}/items/${line.id}`);
+                    toast('ok', 'Line removed');
+                    onSaved();
+                  },
+                }
+              : undefined
+          }
+        >
           <button
             className="btn btn-primary"
             onClick={save}
             disabled={busy || !valid}
             title={needsCategory ? 'Choose the budget line first' : undefined}
           >
-            {busy ? 'Saving…' : line ? 'Save' : 'Add'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1504,17 +1562,14 @@ function ReceiveModal({
   return (
     <Modal
       wide
-      title={`Receive against ${po.number}`}
+      title={`Receive goods against ${po.number}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={receive} disabled={busy || receivingValue <= 0}>
-            {busy ? 'Receiving…' : 'Receive'}
+            {busy ? 'Receiving…' : 'Receive goods'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

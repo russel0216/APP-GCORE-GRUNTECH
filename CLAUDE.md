@@ -234,6 +234,51 @@ four databases and four copies of "customer".
     because it is a link key, not a label (rule 16). "Client" in a code comment
     about the HTTP client or the Prisma client is a different word and stays.
 
+19. **One button grammar on every screen** (2026-10-09, the owner's call:
+    "consider always the uniformity of button location — modify, delete,
+    back; if a button is not necessary in a module, remove it").
+    - **Back** is drawn by the Shell alone on the first line of every page
+      deeper than its menu entry ("← Back to Quotations"). No page draws a
+      Back button or a breadcrumb; lineage (the project, the request it came
+      from) is a link in the header's `meta` line. A page whose way back is
+      elsewhere says so with `useBackLink(to, label)` (`components/
+      Navigation.tsx`): an editor goes back to its record, a progress report
+      to its project.
+    - **Every record page's header is `RecordHeader`**: KIND • NUMBER, the
+      status pill, the title, one `meta` line, the amount — and the buttons
+      ALWAYS in this order: **[next steps…] [Print] [⋯] [Modify]**. Next
+      steps (`actions`) move the record on — exactly one `btn-primary`.
+      Print (`print`, the record's `/api/…/pdf`) is one word everywhere.
+      The ⋯ menu (`more`) holds the rarer actions and, last and in red
+      (`danger`), the destructive ones — Cancel <document>, Mark lost,
+      Delete. Modify (`modify`: an editor path or a handler) is always the
+      right-most button, and the only entry to the editor.
+    - **Nothing destructive happens without asking**, and asking is ONE
+      thing: `useConfirm()` (`components/Confirm.tsx`) — a bar under the
+      header that says what will happen, takes a reason where the document
+      keeps one, and offers "Keep it" and the action; a refusal from the
+      server shows in the bar. A ⋯ item with `confirm` opens it; a page
+      passes the same `confirm` to `RecordHeader` for its own buttons. Never
+      `window.confirm`/`prompt`, a cancel modal or a hand-built confirm bar.
+    - **Every modal footer is `ModalFoot`** (`components/ui.tsx`):
+      [Delete] … [Cancel] [Save] — Delete only on a record edited in that
+      modal with no page of its own, and it asks in the foot. Titles say
+      "New <thing>" (opened by "+ New <thing>") or "Modify <thing> <id>";
+      a part of a record (a line, a contact, a location) is "+ Add <part>"
+      and is removed with "Remove" in its modal. A modal asks before
+      Escape, an outside click or ✕ throws away typed changes, and only the
+      top-most modal reacts to Escape.
+    - **A page editor** (`/new`, `/:id/edit`) has Save top-right and again
+      at its foot, no Back or Cancel of its own, and holds unsaved edits
+      with `useUnsavedChanges(dirty)`: every in-app link asks first in one
+      leave bar, and the browser asks before the tab closes.
+    - **Labels**: "+ New …", "Modify", "Save", "Cancel" (a read-only
+      modal: "Close"), "Submit for approval", "Print", "Delete". Never
+      btn-ok, never btn-sm in a header. A button that duplicates another
+      way to the same place, or leads somewhere that no longer fits, is
+      removed — never the only way to perform an action, which moves into
+      ⋯ instead.
+
 ## Verification
 
 ```bash
@@ -1220,7 +1265,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   the answer on opening, for the invitee only, then drops out of the URL.
 - **The activity form is SCORO's "New event" dialog** (2026-10-08, the
   owner's first screenshot: "make it as reference for calendar"):
-  `ActivityModal` in `pages/sales/ActivityForm.tsx`, opened by "+ Schedule"
+  `ActivityModal` in `pages/sales/ActivityForm.tsx`, opened by "+ New activity"
   and a time-grid slot on the calendar and by Modify on the activity's page;
   what the three screens share (the `Activity` row, the answers, the
   reminders, the types' stand-ins) is `pages/sales/activityShared.ts`, no
@@ -1239,8 +1284,9 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   dialog; `ActivityLog` on the record pages still sends its own links. The
   foot is SCORO's: Save, **Save and open** (the page) and **Save and add
   another** (the form stays, blank, on the same time; `onSaved(saved,
-  action)`), and Remove — "Remove this one" / "Remove this and later ones"
-  on an occurrence of a series. Not here, on purpose: SCORO's Busy (no
+  action)`) — the last two on a NEW activity only. Removing is the
+  activity page's ⋯ (rule 19): "Delete", or "Remove this one" / "Remove
+  this and later ones" on an occurrence of a series, each asking first. Not here, on purpose: SCORO's Busy (no
   availability view), Shared resources (no resource booking), rich text
   (every note in the app is plain) and Add file (files go on the page once
   it exists). The columns: `SalesActivity.allDay`, `isPrivate`, `callLink`
@@ -1878,10 +1924,13 @@ the detail.
   links redirect** to `/new` with the same preset; new links point at `/new`.
   `docs/notes/quotation-editor.md` has the detail.
 - **The quotation page is SCORO's "Quote details"** (`QuotationDetail` in
-  `pages/sales/Quotations.tsx`): SCORO's labels in two columns, Duplicate and
-  Modify top right, and SCORO's action bar (PDF, Submit for approval, Mark as
-  sent) across the card's foot — in flow, because `.content` scrolls and a
-  fixed bar would sit on the toasts. Its status block (Previous status, who
+  `pages/sales/Quotations.tsx`): SCORO's labels in two columns, under the
+  record header every record has (rule 19, 2026-10-09): next steps (Submit
+  for approval, Mark as sent, Create Sales Order, Request job order, Create
+  project — one primary), Print, ⋯ (Duplicate, New revision, Fill lines
+  from costing, Mark lost with its reason, Delete) and Modify right-most.
+  SCORO's old action bar across the card's foot, "Edit lines" and the
+  per-line Modify are gone (each was a second way to the same editor). Its status block (Previous status, who
   moved it and when, Date confirmed, Sent, days per status) is
   `outcomeChanges()` / `outcomeStages()` in `shared/pipeline.ts`, read off the
   quotation's audit rows — there is no history table. The PATCH writes each
@@ -1930,8 +1979,9 @@ the detail.
   `/g-ops/quotations/:id/edit`: the full editor on a DRAFT, or — when no
   revision is a draft — `QuotationDetailsEditor` (number, name, contact, site,
   closing date, status) with "Raise a new revision" to change the lines. Lost
-  asks its reason in the page, Delete confirms in the page, Append quote is a
-  panel, "Fill from costing" and leaving unsaved confirm in the page.
+  asks its reason in the confirm bar, Delete asks there too, Append quote is
+  a panel, "Fill from costing" asks in the bar and leaving unsaved changes
+  asks in the Shell's leave bar (rule 19).
 - **The quote number may be typed by hand.** `number` on `POST` and `PATCH
   /quotations/:id`, checked by `checkQuoteNumber()` — shape, then case-blind
   against every quotation and every SCORO archive number (a continued
@@ -1987,8 +2037,8 @@ the detail.
   optionId?)` — the route a draft WOULD take; `approvalSlots(…, draft?)` gives
   an open or draft step `assigned` people while `name`/`at` stay "who signed,
   when"; `historyFor()` adds `approvers` to the open steps of a PENDING
-  request. The quotation page shows "Submit for approval sends it to …" under
-  the action bar (`approvalRoutes` on `GET /quotations/:id`: the standard
+  request. The quotation page shows "Submit for approval sends it to …" in a
+  card under the header (`approvalRoutes` on `GET /quotations/:id`: the standard
   route and each option's, names only, the caller as requester) and switches
   to the CEO route when it is ticked; the Approval panel says "Waiting on …"
   and "Then …". The PDF names who will sign each open step with "Pending"
@@ -1998,7 +2048,7 @@ the detail.
   applies falls back to the standard route.
 - **A pending revision can be pulled back to draft** (2026-10-07, the
   owner's call): the author (or `edit_all`) on the Modify page — "Pull it
-  back and edit", confirmed in the page — calls `POST
+  back and edit", asked in the confirm bar — calls `POST
   /quotations/:id/revisions/:revisionId/withdraw`, which claims
   PENDING_APPROVAL → DRAFT with a conditional `updateMany` (a decision that
   lands first wins and the route says so) and withdraws the open request
@@ -2196,14 +2246,14 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   (2026-10-08, the owner's call): `SalesOrderEditor` in
   `pages/sales/SalesOrders.tsx` is built from `pages/sales/editorParts.tsx`
   — the `Line` shape, `moneyOf` / `linePayload`, `ProductInput`, `CostCell`
-  (the person/building toggles and the provider lookup), `Static`,
-  `LeaveBar` — which the quotation editor imports too, so the two cannot
+  (the person/building toggles and the provider lookup), `Static` — which
+  the quotation editor imports too, so the two cannot
   drift: one card, labels beside values (`.qe-rows`), the contact beside the
   customer, the `qe-lines` table (group, product over description, quantity
   beside unit, price, amount with the with-VAT figure, cost and provider,
   margin), SCORO's Tax dropdown (`taxOptions` on `GET /sales-orders/:id`),
-  the totals beside `CostPanelBlock`, Back / Save at both ends and the
-  leave bar. The PUT takes `providerUserId` / `providerSupplierId` per
+  the totals beside `CostPanelBlock`, Save at both ends, the Shell's Back
+  line and `useUnsavedChanges` (rule 19). The PUT takes `providerUserId` / `providerSupplierId` per
   line (one or the other, checked to exist). Add a shared cell to
   `editorParts.tsx`, never to one editor. `audit-workflows.ts` knows sales and sales
   managers raise sales orders.

@@ -4,7 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
-import { Checkbox, ErrorBox, Field, Loading, Modal, formatDate, formatMoney, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, formatDate, formatMoney, useToast } from '../../components/ui';
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
@@ -234,11 +234,6 @@ export function Employees() {
       <div className="page-head">
         <div>
           <h1>Employees</h1>
-          <p>
-            The people record — used by attendance, leave and overtime, and by projects for labour
-            cost. Pay data is a separate permission: a project manager sees headcount and
-            assignment, never salaries.
-          </p>
         </div>
       </div>
 
@@ -284,30 +279,32 @@ export function Employees() {
             ],
           },
         ]}
+        menuItems={
+          can('ghr.employees.create')
+            ? [
+                {
+                  label: 'Import employees…',
+                  hint: 'From a spreadsheet, checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('employees').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
+        }
         actions={
-          <>
-            {can('ghr.employees.create') && (
-              <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-                + Add employee
-              </button>
-            )}
-            {can('ghr.employees.create') && (
-              <button
-                className="btn btn-sm"
-                onClick={async () => {
-                  const spec = await loadImportSpec('employees');
-                  if (spec) setImporting(spec as { label: string; columns: never[] });
-                }}
-              >
-                Import
-              </button>
-            )}
-          </>
+          can('ghr.employees.create') ? (
+            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+              + New employee
+            </button>
+          ) : undefined
         }
       />
 
       {id && recordError !== null && (
-        <Modal title="Employee" onClose={closeRecord}>
+        <Modal title="Employee" onClose={closeRecord} footer={<ModalFoot onCancel={closeRecord} cancelLabel="Close" />}>
           <ErrorBox error={recordError} />
         </Modal>
       )}
@@ -378,6 +375,9 @@ function EmployeeForm({
   const toast = useToast();
   const seeRates = can('ghr.employee_rates.view_all');
   const setRates = can('ghr.employee_rates.edit_all');
+  // Reading the register is not the right to change it: a viewer (finance)
+  // gets the record to read and Close, never a Save the PATCH would refuse.
+  const mayEdit = employee ? can('ghr.employees.edit_all') : can('ghr.employees.create');
 
   const [tab, setTab] = useState<'person' | 'employment' | 'login' | 'pay' | 'evaluations'>('person');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
@@ -634,17 +634,12 @@ function EmployeeForm({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!employee) return;
-    setBusy(true);
-    try {
-      await api.del(`/employees/${employee.id}`);
-      toast('ok', 'Employee deleted');
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/employees/${employee.id}`);
+    toast('ok', 'Employee deleted');
+    onSaved();
   }
 
   const burdened =
@@ -658,11 +653,7 @@ function EmployeeForm({
       <Modal
         title={issued.created ? `${form.firstName} ${form.lastName} saved` : `Invitation for ${form.firstName} ${form.lastName}`}
         onClose={onSaved}
-        footer={
-          <button className="btn btn-primary" onClick={onSaved}>
-            Done
-          </button>
-        }
+        footer={<ModalFoot onCancel={onSaved} cancelLabel="Close" />}
       >
         <LinkDelivery delivery={issued.delivery} email={issued.email} kind="invite" />
         <p className="muted">
@@ -676,27 +667,39 @@ function EmployeeForm({
   return (
     <Modal
       wide
-      title={employee ? `${employee.firstName} ${employee.lastName}` : 'Add employee'}
+      title={
+        employee
+          ? mayEdit
+            ? `Modify employee ${employee.firstName} ${employee.lastName}`
+            : `${employee.firstName} ${employee.lastName}`
+          : 'New employee'
+      }
       onClose={onClose}
       footer={
-        <>
-          {employee && can('ghr.employees.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
+        <ModalFoot
+          onCancel={onClose}
+          cancelLabel={mayEdit ? 'Cancel' : 'Close'}
+          busy={busy}
+          danger={
+            employee && can('ghr.employees.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete ${employee.firstName} ${employee.lastName}? It cannot be undone. Someone with attendance, a clearance, an evaluation or training on file cannot be deleted — make them inactive instead.`,
+                  onConfirm: remove,
+                }
+              : undefined
+          }
+        >
+          {mayEdit && (
+            <button
+              className="btn btn-primary"
+              onClick={save}
+              disabled={busy || !form.firstName || !form.lastName}
+            >
+              {busy ? 'Saving…' : 'Save'}
             </button>
           )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={save}
-            disabled={busy || !form.firstName || !form.lastName}
-          >
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

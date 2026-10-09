@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, StatusBadge, useToast } from '../../components/ui';
+import { Checkbox, Empty, ErrorBox, Field, Loading, Modal, ModalFoot, StatusBadge, useToast } from '../../components/ui';
+import { useConfirm } from '../../components/Confirm';
 import { NumberInput } from '../../components/NumberInput';
 
 // ════════════════════════════════════════════════════════════════════
@@ -91,6 +92,45 @@ export interface DrawingTypeDef {
   _count?: { requests: number };
 }
 
+/**
+ * A category row opens its "Modify …" modal — clicked, or Enter / Space while
+ * the row has focus (rule 13) — for whoever may edit; nothing for a reader.
+ * Keys pressed on the row-end Modify button are that button's own.
+ */
+function opensModify(open: (() => void) | null) {
+  if (!open) return {};
+  return {
+    className: 'clickable',
+    tabIndex: 0,
+    onClick: open,
+    onKeyDown: (e: ReactKeyboardEvent<HTMLTableRowElement>) => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        open();
+      }
+    },
+  };
+}
+
+/** The row-end Modify: the same modal as the row, without the row's click opening it a second time. */
+function ModifyCell({ onClick }: { onClick: () => void }) {
+  return (
+    <td className="m-col-action">
+      <button
+        type="button"
+        className="btn btn-sm"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+      >
+        Modify
+      </button>
+    </td>
+  );
+}
+
 export function Categories() {
   const { can } = useAuth();
   const toast = useToast();
@@ -169,8 +209,8 @@ export function Categories() {
           <div className="m-card-head">
             <h3 className="card-title">Cost categories</h3>
             {can('admin.categories.create') && (
-              <button className="btn btn-sm" onClick={() => setEditingCost('new')}>
-                + Add
+              <button className="btn btn-primary btn-sm" onClick={() => setEditingCost('new')}>
+                + New cost category
               </button>
             )}
           </div>
@@ -187,7 +227,7 @@ export function Categories() {
               </thead>
               <tbody>
                 {cost.map((c) => (
-                  <tr key={c.id}>
+                  <tr key={c.id} {...opensModify(mayEdit ? () => setEditingCost(c) : null)}>
                     <td className="mono">{c.code}</td>
                     <td>
                       {c.name}
@@ -196,13 +236,7 @@ export function Categories() {
                     <td>
                       <StatusBadge status={c.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                     </td>
-                    {mayEdit && (
-                      <td>
-                        <button className="btn btn-sm" onClick={() => setEditingCost(c)}>
-                          Modify
-                        </button>
-                      </td>
-                    )}
+                    {mayEdit && <ModifyCell onClick={() => setEditingCost(c)} />}
                   </tr>
                 ))}
               </tbody>
@@ -219,8 +253,8 @@ export function Categories() {
           <div className="m-card-head">
             <h3 className="card-title">Item categories</h3>
             {can('admin.categories.create') && (
-              <button className="btn btn-sm" onClick={() => setEditingItem('new')}>
-                + Add
+              <button className="btn btn-primary btn-sm" onClick={() => setEditingItem('new')}>
+                + New item category
               </button>
             )}
           </div>
@@ -242,20 +276,14 @@ export function Categories() {
                 </thead>
                 <tbody>
                   {items.map((c) => (
-                    <tr key={c.id}>
+                    <tr key={c.id} {...opensModify(mayEdit ? () => setEditingItem(c) : null)}>
                       <td className="mono">{c.code}</td>
                       <td>
                         {c.parentId && <span className="faint">↳ </span>}
                         {c.name}
                       </td>
                       <td className="right">{c._count.items}</td>
-                      {mayEdit && (
-                        <td>
-                          <button className="btn btn-sm" onClick={() => setEditingItem(c)}>
-                            Modify
-                          </button>
-                        </td>
-                      )}
+                      {mayEdit && <ModifyCell onClick={() => setEditingItem(c)} />}
                     </tr>
                   ))}
                 </tbody>
@@ -274,8 +302,8 @@ export function Categories() {
         <div className="m-card-head">
           <h3 className="card-title">Teams</h3>
           {can('admin.categories.create') && (
-            <button className="btn btn-sm" onClick={() => setEditingIndustry('new')}>
-              + Add
+            <button className="btn btn-primary btn-sm" onClick={() => setEditingIndustry('new')}>
+              + New team
             </button>
           )}
         </div>
@@ -299,7 +327,7 @@ export function Categories() {
               </thead>
               <tbody>
                 {industries.map((ind) => (
-                  <tr key={ind.id}>
+                  <tr key={ind.id} {...opensModify(mayEdit ? () => setEditingIndustry(ind) : null)}>
                     <td className="mono">{ind.code}</td>
                     <td>
                       {ind.name}
@@ -309,13 +337,7 @@ export function Categories() {
                     <td>
                       <StatusBadge status={ind.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                     </td>
-                    {mayEdit && (
-                      <td className="m-col-action">
-                        <button className="btn btn-sm" onClick={() => setEditingIndustry(ind)}>
-                          Modify
-                        </button>
-                      </td>
-                    )}
+                    {mayEdit && <ModifyCell onClick={() => setEditingIndustry(ind)} />}
                   </tr>
                 ))}
               </tbody>
@@ -340,8 +362,8 @@ export function Categories() {
         <div className="m-card-head">
           <h3 className="card-title">Sub-industries</h3>
           {can('admin.categories.create') && (
-            <button className="btn btn-sm" onClick={() => setEditingSubIndustry('new')}>
-              + Add
+            <button className="btn btn-primary btn-sm" onClick={() => setEditingSubIndustry('new')}>
+              + New sub-industry
             </button>
           )}
         </div>
@@ -361,7 +383,7 @@ export function Categories() {
               </thead>
               <tbody>
                 {subIndustries.map((s) => (
-                  <tr key={s.id}>
+                  <tr key={s.id} {...opensModify(mayEdit ? () => setEditingSubIndustry(s) : null)}>
                     <td>
                       {s.name}
                       {s.isSystem && <span className="badge m-inline">standard</span>}
@@ -370,13 +392,7 @@ export function Categories() {
                     <td>
                       <StatusBadge status={s.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                     </td>
-                    {mayEdit && (
-                      <td className="m-col-action">
-                        <button className="btn btn-sm" onClick={() => setEditingSubIndustry(s)}>
-                          Modify
-                        </button>
-                      </td>
-                    )}
+                    {mayEdit && <ModifyCell onClick={() => setEditingSubIndustry(s)} />}
                   </tr>
                 ))}
               </tbody>
@@ -399,8 +415,8 @@ export function Categories() {
         <div className="m-card-head">
           <h3 className="card-title">Quotation groups</h3>
           {can('admin.categories.create') && (
-            <button className="btn btn-sm" onClick={() => setEditingGroup('new')}>
-              + Add
+            <button className="btn btn-primary btn-sm" onClick={() => setEditingGroup('new')}>
+              + New quotation group
             </button>
           )}
         </div>
@@ -425,7 +441,7 @@ export function Categories() {
               </thead>
               <tbody>
                 {groups.map((g) => (
-                  <tr key={g.id}>
+                  <tr key={g.id} {...opensModify(mayEdit ? () => setEditingGroup(g) : null)}>
                     <td>{g.name}</td>
                     <td>{g.description ?? <span className="faint">—</span>}</td>
                     <td>{g.brand ?? <span className="faint">—</span>}</td>
@@ -433,13 +449,7 @@ export function Categories() {
                     <td>
                       <StatusBadge status={g.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                     </td>
-                    {mayEdit && (
-                      <td className="m-col-action">
-                        <button className="btn btn-sm" onClick={() => setEditingGroup(g)}>
-                          Modify
-                        </button>
-                      </td>
-                    )}
+                    {mayEdit && <ModifyCell onClick={() => setEditingGroup(g)} />}
                   </tr>
                 ))}
               </tbody>
@@ -464,8 +474,8 @@ export function Categories() {
         <div className="m-card-head">
           <h3 className="card-title">Activity types</h3>
           {can('admin.categories.create') && (
-            <button className="btn btn-sm" onClick={() => setEditingType('new')}>
-              + Add
+            <button className="btn btn-primary btn-sm" onClick={() => setEditingType('new')}>
+              + New activity type
             </button>
           )}
         </div>
@@ -483,7 +493,7 @@ export function Categories() {
             </thead>
             <tbody>
               {activityTypes.map((t) => (
-                <tr key={t.id}>
+                <tr key={t.id} {...opensModify(mayEdit ? () => setEditingType(t) : null)}>
                   <td>
                     {t.name}
                     {t.isSystem && <span className="faint"> · built-in</span>}
@@ -502,13 +512,7 @@ export function Categories() {
                   <td>
                     <StatusBadge status={t.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                   </td>
-                  {mayEdit && (
-                    <td className="m-col-action">
-                      <button className="btn btn-sm" onClick={() => setEditingType(t)}>
-                        Modify
-                      </button>
-                    </td>
-                  )}
+                  {mayEdit && <ModifyCell onClick={() => setEditingType(t)} />}
                 </tr>
               ))}
             </tbody>
@@ -531,8 +535,8 @@ export function Categories() {
         <div className="m-card-head">
           <h3 className="card-title">Drawing types</h3>
           {can('admin.categories.create') && (
-            <button className="btn btn-sm" onClick={() => setEditingDrawingType('new')}>
-              + Add
+            <button className="btn btn-primary btn-sm" onClick={() => setEditingDrawingType('new')}>
+              + New drawing type
             </button>
           )}
         </div>
@@ -549,7 +553,7 @@ export function Categories() {
             </thead>
             <tbody>
               {drawingTypes.map((t) => (
-                <tr key={t.id}>
+                <tr key={t.id} {...opensModify(mayEdit ? () => setEditingDrawingType(t) : null)}>
                   <td>
                     {t.name}
                     {t.isSystem && <span className="faint"> · built-in</span>}
@@ -558,13 +562,7 @@ export function Categories() {
                   <td>
                     <StatusBadge status={t.isActive ? 'ACTIVE' : 'INACTIVE'} extra={{ INACTIVE: '' }} />
                   </td>
-                  {mayEdit && (
-                    <td className="m-col-action">
-                      <button className="btn btn-sm" onClick={() => setEditingDrawingType(t)}>
-                        Modify
-                      </button>
-                    </td>
-                  )}
+                  {mayEdit && <ModifyCell onClick={() => setEditingDrawingType(t)} />}
                 </tr>
               ))}
             </tbody>
@@ -698,37 +696,36 @@ function CostCategoryModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!category) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/cost-categories/${category.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/cost-categories/${category.id}`);
+    onSaved();
   }
 
   return (
     <Modal
-      title={category ? `Modify ${category.name}` : 'Add cost category'}
+      title={category ? `Modify cost category ${category.name}` : 'New cost category'}
       onClose={onClose}
       footer={
-        <>
-          {category && !category.isSystem && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            category && !category.isSystem && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the cost category ${category.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -795,39 +792,38 @@ function QuotationGroupModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!group) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/quotation-groups/${group.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/quotation-groups/${group.id}`);
+    onSaved();
   }
 
   const inUse = group?.lineCount ?? 0;
 
   return (
     <Modal
-      title={group ? `Modify ${group.name}` : 'Add quotation group'}
+      title={group ? `Modify quotation group ${group.name}` : 'New quotation group'}
       onClose={onClose}
       footer={
-        <>
-          {group && inUse === 0 && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            group && inUse === 0 && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the quotation group ${group.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || !form.name.trim()}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -895,39 +891,38 @@ function ActivityTypeModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!type) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/activity-types/${type.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/activity-types/${type.id}`);
+    onSaved();
   }
 
   const inUse = type?.activityCount ?? 0;
 
   return (
     <Modal
-      title={type ? `Modify ${type.name}` : 'Add activity type'}
+      title={type ? `Modify activity type ${type.name}` : 'New activity type'}
       onClose={onClose}
       footer={
-        <>
-          {type && !type.isSystem && inUse === 0 && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            type && !type.isSystem && inUse === 0 && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the activity type ${type.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || !form.name.trim()}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -987,39 +982,38 @@ function DrawingTypeModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!type) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/cad-drawing-types/${type.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/cad-drawing-types/${type.id}`);
+    onSaved();
   }
 
   const inUse = type?._count?.requests ?? 0;
 
   return (
     <Modal
-      title={type ? `Modify ${type.name}` : 'Add drawing type'}
+      title={type ? `Modify drawing type ${type.name}` : 'New drawing type'}
       onClose={onClose}
       footer={
-        <>
-          {type && !type.isSystem && inUse === 0 && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            type && !type.isSystem && inUse === 0 && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the drawing type ${type.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.trim().length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1077,16 +1071,11 @@ function IndustryModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!industry) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/industries/${industry.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/industries/${industry.id}`);
+    onSaved();
   }
 
   const inUse = (industry?._count?.customers ?? 0) + (industry?._count?.employees ?? 0);
@@ -1094,23 +1083,27 @@ function IndustryModal({
 
   return (
     <Modal
-      title={industry ? `Modify ${industry.name}` : 'Add team'}
+      title={industry ? `Modify team ${industry.name}` : 'New team'}
       onClose={onClose}
       footer={
-        <>
-          {industry && !industry.isSystem && inUse === 0 && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            industry && !industry.isSystem && inUse === 0 && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the team ${industry.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || !valid}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1186,39 +1179,38 @@ function SubIndustryModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!subIndustry) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/sub-industries/${subIndustry.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/sub-industries/${subIndustry.id}`);
+    onSaved();
   }
 
   const inUse = subIndustry?._count?.customers ?? 0;
 
   return (
     <Modal
-      title={subIndustry ? `Modify ${subIndustry.name}` : 'Add sub-industry'}
+      title={subIndustry ? `Modify sub-industry ${subIndustry.name}` : 'New sub-industry'}
       onClose={onClose}
       footer={
-        <>
-          {subIndustry && !subIndustry.isSystem && inUse === 0 && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            subIndustry && !subIndustry.isSystem && inUse === 0 && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the sub-industry ${subIndustry.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || form.name.trim().length < 2}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1280,37 +1272,36 @@ function ItemCategoryModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!category) return;
-    setBusy(true);
-    try {
-      await api.del(`/reference/item-categories/${category.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/reference/item-categories/${category.id}`);
+    onSaved();
   }
 
   return (
     <Modal
-      title={category ? `Modify ${category.name}` : 'Add item category'}
+      title={category ? `Modify item category ${category.name}` : 'New item category'}
       onClose={onClose}
       footer={
-        <>
-          {category && can('admin.categories.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            category && can('admin.categories.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the item category ${category.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1368,6 +1359,10 @@ export function Warehouses() {
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState<Warehouse | 'new' | null>(null);
   const [addingLocation, setAddingLocation] = useState<Warehouse | null>(null);
+  // Removing a location asks here, under the page head: a location has no
+  // modal of its own (there is nothing to modify on it), so it is removed
+  // from its chip on the warehouse's card.
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1387,6 +1382,13 @@ export function Warehouses() {
 
   const mayEdit = can('gchain.warehouses.edit_all');
 
+  /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
+  async function removeLocation(w: Warehouse, l: Location) {
+    await api.del(`/warehouses/${w.id}/locations/${l.id}`);
+    toast('ok', `Location ${l.code} removed`);
+    void load();
+  }
+
   if (loading) return <Loading />;
 
   return (
@@ -1401,10 +1403,11 @@ export function Warehouses() {
         </div>
         {can('gchain.warehouses.create') && (
           <button className="btn btn-primary" onClick={() => setEditing('new')}>
-            + Add warehouse
+            + New warehouse
           </button>
         )}
       </div>
+      {confirm.bar}
 
       <ErrorBox error={error} />
 
@@ -1416,46 +1419,68 @@ export function Warehouses() {
         <div className="grid grid-2">
           {rows.map((w) => (
             <div key={w.id} className="card">
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <div>
-                  <strong>{w.name}</strong>{' '}
+              {/* The card's head: what it is on the left; + Add location, then Modify right-most. */}
+              <div className="m-card-head">
+                <div className="row">
+                  <strong>{w.name}</strong>
                   <span className="mono faint" style={{ fontSize: 12 }}>
                     {w.code}
                   </span>
+                  <span className={`badge ${w.isActive ? 'ok' : ''}`}>
+                    {w.isActive ? 'Active' : 'Inactive'}
+                  </span>
                 </div>
-                <span className={`badge ${w.isActive ? 'ok' : ''}`}>
-                  {w.isActive ? 'Active' : 'Inactive'}
-                </span>
+                {mayEdit && (
+                  <div className="row">
+                    <button className="btn btn-sm" onClick={() => setAddingLocation(w)}>
+                      + Add location
+                    </button>
+                    <button className="btn btn-sm" onClick={() => setEditing(w)}>
+                      Modify
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="muted" style={{ fontSize: 12, margin: '6px 0 12px' }}>
                 {[w.address, w.city].filter(Boolean).join(', ') || 'No address recorded'}
               </div>
 
-              <div className="row" style={{ gap: 5, marginBottom: 12 }}>
+              <div className="row" style={{ gap: 5 }}>
                 {w.locations.length === 0 ? (
                   <span className="faint" style={{ fontSize: 12 }}>
                     No locations
                   </span>
                 ) : (
-                  w.locations.map((l) => (
-                    <span key={l.id} className="badge" title={l.name ?? undefined}>
-                      {l.code}
-                    </span>
-                  ))
+                  w.locations.map((l) =>
+                    mayEdit ? (
+                      // Removed from its chip, asking first: a location has nothing to modify.
+                      <span key={l.id} className="list-chip" title={l.name ?? undefined}>
+                        {l.code}
+                        <button
+                          type="button"
+                          aria-label={`Remove the location ${l.code}`}
+                          title="Remove"
+                          onClick={() =>
+                            confirm.ask({
+                              title: `Remove the location ${l.code} from ${w.name}?`,
+                              body: 'It cannot be undone.',
+                              confirmLabel: 'Remove',
+                              onConfirm: () => removeLocation(w, l),
+                            })
+                          }
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ) : (
+                      <span key={l.id} className="badge" title={l.name ?? undefined}>
+                        {l.code}
+                      </span>
+                    ),
+                  )
                 )}
               </div>
-
-              {mayEdit && (
-                <div className="row">
-                  <button className="btn btn-sm" onClick={() => setEditing(w)}>
-                    Modify
-                  </button>
-                  <button className="btn btn-sm" onClick={() => setAddingLocation(w)}>
-                    + Location
-                  </button>
-                </div>
-              )}
             </div>
           ))}
         </div>
@@ -1527,37 +1552,36 @@ function WarehouseModal({
     }
   }
 
+  /** Asked in the modal's foot first; a refusal is shown there, so it throws. */
   async function remove() {
     if (!warehouse) return;
-    setBusy(true);
-    try {
-      await api.del(`/warehouses/${warehouse.id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/warehouses/${warehouse.id}`);
+    onSaved();
   }
 
   return (
     <Modal
-      title={warehouse ? `Modify ${warehouse.name}` : 'Add warehouse'}
+      title={warehouse ? `Modify warehouse ${warehouse.name}` : 'New warehouse'}
       onClose={onClose}
       footer={
-        <>
-          {warehouse && can('gchain.warehouses.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            warehouse && can('gchain.warehouses.delete')
+              ? {
+                  label: 'Delete',
+                  question: `Delete the warehouse ${warehouse.name}? It cannot be undone.`,
+                  onConfirm: remove,
+                  disabled: busy,
+                }
+              : undefined
+          }
+        >
           <button className="btn btn-primary" onClick={save} disabled={busy || !form.name || !form.code}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1608,58 +1632,19 @@ function LocationModal({
     }
   }
 
-  async function removeLocation(id: string) {
-    try {
-      await api.del(`/warehouses/${warehouse.id}/locations/${id}`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-    }
-  }
-
   return (
     <Modal
-      title={`Locations — ${warehouse.name}`}
+      title={`Add location — ${warehouse.name}`}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || !code}>
-            {busy ? 'Adding…' : 'Add location'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
-
-      {warehouse.locations.length > 0 && (
-        <div className="table-wrap" style={{ marginBottom: 16 }}>
-          <table className="data">
-            <thead>
-              <tr>
-                <th style={{ width: 90 }}>Code</th>
-                <th>Name</th>
-                <th style={{ width: 70 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {warehouse.locations.map((l) => (
-                <tr key={l.id}>
-                  <td className="mono">{l.code}</td>
-                  <td>{l.name ?? '—'}</td>
-                  <td>
-                    <button className="btn btn-ghost btn-sm" onClick={() => removeLocation(l.id)}>
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
 
       <div className="grid grid-2">
         <Field label="Code" hint="A-01, RACK-3">

@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Checkbox, ErrorBox, Loading, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
+import { useConfirm } from '../../components/Confirm';
 
 /**
  * Admin › Pipeline Stages — SCORO's "Quotes and pipeline" statuses, as the
@@ -55,7 +56,7 @@ export function PipelineStages() {
   const [savedJson, setSavedJson] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
+  const confirm = useConfirm();
 
   useEffect(() => {
     let alive = true;
@@ -108,8 +109,8 @@ export function PipelineStages() {
     }
   }
 
+  /** Asked in the confirm bar first; a refusal is shown there, so it throws. */
   async function reset() {
-    setConfirmReset(false);
     setBusy(true);
     setError(null);
     try {
@@ -119,8 +120,6 @@ export function PipelineStages() {
       setRows(next);
       setSavedJson(JSON.stringify(next));
       toast('ok', 'SCORO’s defaults are back');
-    } catch (err) {
-      setError(err);
     } finally {
       setBusy(false);
     }
@@ -139,7 +138,19 @@ export function PipelineStages() {
         </div>
         {canEdit && (
           <div className="row ps-actions">
-            <button type="button" className="btn btn-sm" onClick={() => setConfirmReset(true)} disabled={busy}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() =>
+                confirm.ask({
+                  title: 'Put SCORO’s defaults back?',
+                  body: 'Your names, odds, colours and board listing are replaced.',
+                  confirmLabel: 'Put them back',
+                  onConfirm: reset,
+                })
+              }
+              disabled={busy}
+            >
               SCORO’s defaults
             </button>
             <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy || !dirty}>
@@ -148,17 +159,7 @@ export function PipelineStages() {
           </div>
         )}
       </div>
-      {confirmReset && (
-        <div className="alert warn row ps-confirm" role="alert">
-          <span>Put SCORO’s defaults back? Your names, odds, colours and board listing are replaced.</span>
-          <button type="button" className="btn btn-sm btn-danger" onClick={() => void reset()}>
-            Put them back
-          </button>
-          <button type="button" className="btn btn-sm" autoFocus onClick={() => setConfirmReset(false)}>
-            Keep mine
-          </button>
-        </div>
-      )}
+      {confirm.bar}
       <ErrorBox error={error} />
 
       <div className="card">

@@ -31,10 +31,6 @@
   color: var(--faint);
 }
 
-.plantilla-spacer {
-  flex: 1;
-}
-
 .plantilla-holder-list {
   margin-top: var(--s-4);
 }

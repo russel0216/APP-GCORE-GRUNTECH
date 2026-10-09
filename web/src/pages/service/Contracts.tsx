@@ -4,11 +4,14 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { Stat } from '../../components/charts';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import {
   ErrorBox,
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatMoney,
@@ -170,10 +173,6 @@ export function ServiceContracts() {
       <div className="page-head">
         <div>
           <h1>Service Contracts</h1>
-          <p>
-            A contract is a job of its own type, so it carries a costing, a budget and its own
-            billing. What lives here is the cover: which machines, how often, and until when.
-          </p>
         </div>
       </div>
 
@@ -344,18 +343,15 @@ function CoverModal({
 
   return (
     <Modal
-      title={`Coverage for ${job.number}`}
+      title={`New service contract for ${job.number}`}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || chosen.size === 0}>
-            {busy ? 'Saving…' : 'Set cover'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -481,6 +477,7 @@ export function ContractDetail() {
   const toast = useToast();
   const navigate = useNavigate();
   const { can } = useAuth();
+  const confirm = useConfirm();
   const [row, setRow] = useState<ContractDetail | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -497,16 +494,29 @@ export function ContractDetail() {
     load();
   }, [load]);
 
+  // A question is about the record on screen: opening another from here
+  // (a renewal or the contract it renews) withdraws it, rather than leave it to act on
+  // the one left behind.
+  const closeConfirm = confirm.close;
+  useEffect(() => {
+    closeConfirm();
+  }, [id, closeConfirm]);
+
   if (error) return <ErrorBox error={error} />;
   if (!row) return <Loading />;
+
+  /** Posts the step and reloads; a refusal is thrown, so the confirm bar can show it. */
+  async function call(path: string, message: string) {
+    const result = await api.post<{ created: number; kept: number }>(`/service-contracts/${id}/${path}`);
+    toast('ok', `${message} — ${result.created} visit(s) scheduled`);
+    await load();
+  }
 
   async function run(path: string, message: string) {
     setBusy(true);
     setError(null);
     try {
-      const result = await api.post<{ created: number; kept: number }>(`/service-contracts/${id}/${path}`);
-      toast('ok', `${message} — ${result.created} visit(s) scheduled`);
-      await load();
+      await call(path, message);
     } catch (err) {
       setError(err);
     } finally {
@@ -547,52 +557,63 @@ export function ContractDetail() {
 
   return (
     <div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            <span className="mono">{row.number}</span>{' '}
-            <StatusBadge status={row.status} extra={CONTRACT_TONES} />
-          </h1>
-          <p>
+      <RecordHeader
+        type="Service contract"
+        code={row.number}
+        title={row.job.name}
+        status={row.status}
+        statusExtra={CONTRACT_TONES}
+        amount={formatMoney(row.job.contractValue)}
+        amountLabel="Contract value"
+        meta={
+          <>
             {can('gops.customers.view_all') ? (
               <Link to={`/g-ops/customers/${row.job.customer.id}`}>{row.job.customer.name}</Link>
             ) : (
               row.job.customer.name
             )}{' '}
-            ·{' '}
+            · project{' '}
             <Link to={`/g-ops/projects/${row.job.id}`} className="mono">
               {row.job.number}
-            </Link>{' '}
-            — {row.job.name}
-          </p>
-        </div>
-        <div className="row">
-          {row.status === 'DRAFT' && can('gops.service_contracts.edit_all') && (
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={() => run('activate', 'Contract activated')}
-              disabled={busy}
-            >
-              Activate and schedule
-            </button>
-          )}
-          {row.status === 'ACTIVE' && can('gops.service_contracts.edit_all') && (
-            <button
-              className="btn btn-sm"
-              onClick={() => run('regenerate-schedule', 'Schedule regenerated')}
-              disabled={busy}
-            >
-              Regenerate schedule
-            </button>
-          )}
-          {canRenew && (
-            <button className="btn btn-primary btn-sm" onClick={renew} disabled={busy}>
-              Renew
-            </button>
-          )}
-        </div>
-      </div>
+            </Link>
+          </>
+        }
+        actions={
+          <>
+            {row.status === 'DRAFT' && can('gops.service_contracts.edit_all') && (
+              <button
+                className="btn btn-primary"
+                onClick={() => run('activate', 'Contract activated')}
+                disabled={busy}
+              >
+                Activate and schedule
+              </button>
+            )}
+            {canRenew && (
+              <button className="btn btn-primary" onClick={renew} disabled={busy}>
+                Renew
+              </button>
+            )}
+          </>
+        }
+        more={[
+          row.status === 'ACTIVE' &&
+            can('gops.service_contracts.edit_all') && {
+              label: 'Regenerate schedule',
+              hint: 'Rewrites the generated visits nobody has attended',
+              disabled: busy,
+              confirm: {
+                title: `Regenerate the schedule of ${row.number}?`,
+                body:
+                  'The generated visits nobody has attended are written again from the cover. Completed and missed visits stay as the record of what happened, and call-outs — booked by hand or by a job order — are never erased.',
+                confirmLabel: 'Regenerate schedule',
+                tone: 'primary',
+                onConfirm: () => call('regenerate-schedule', 'Schedule regenerated'),
+              },
+            },
+        ]}
+        confirm={confirm}
+      />
 
       {row.renewedFrom && (
         <div className="alert info">

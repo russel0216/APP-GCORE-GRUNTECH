@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ApiError, api, openPdf, qs } from '../../lib/api';
+import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
-import { NumberInput } from '../../components/NumberInput';
 
 export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -774,15 +775,16 @@ export function QuotationDetail() {
   const [params] = useSearchParams();
   const { can } = useAuth();
   const toast = useToast();
+  // Delete, Lost and the rarer moves ask here, in the bar under the header.
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
 
   const [quotation, setQuotation] = useState<QuotationDetail | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
-  /** "Lost" chosen: the reason is asked for here, in the page. */
-  const [losing, setLosing] = useState(false);
-  const [lostReason, setLostReason] = useState('');
-  const [deleting, setDeleting] = useState(false);
   const [optionId, setOptionId] = useState<string | null>(null);
   const [bookingOrder, setBookingOrder] = useState(params.get('order') === '1');
   const [reload, setReload] = useState(0);
@@ -815,6 +817,10 @@ export function QuotationDetail() {
   const showPanel = quotation.canSeeCost && !!revision?.costPanel && revision.items.length > 0;
   const editable = quotation.canEdit && revision?.status === 'DRAFT';
   const approved = quotation.revisions.find((r) => r.status === 'APPROVED') ?? null;
+  // The quotation's value: the approved revision, else the latest (`quotationValue()` on the server).
+  const valueRevision =
+    approved ??
+    quotation.revisions.reduce<Revision | null>((best, r) => (best === null || r.revision > best.revision ? r : best), null);
   const jobs = quotation.revisions.flatMap((r) => r.jobs ?? []);
   const showCost = quotation.canSeeCost;
   // Everything is changed on the full-page editor — a draft's lines and terms,
@@ -827,46 +833,37 @@ export function QuotationDetail() {
     jobs.length === 0 &&
     !quotation.revisions.some((r) => r.status === 'PENDING_APPROVAL');
 
+  /** Does it, says so, reloads — and throws, so a confirm bar can show the refusal. */
+  async function run(fn: () => Promise<unknown>, message: string) {
+    await fn();
+    toast('ok', message);
+    await load();
+  }
+
+  /** The same, for a button that acts at once: a refusal goes to the page's error box. */
   async function act(fn: () => Promise<unknown>, message: string) {
     try {
-      await fn();
-      toast('ok', message);
-      await load();
+      await run(fn, message);
     } catch (err) {
       setError(err);
     }
   }
 
-  async function markLost() {
-    try {
-      await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: lostReason.trim() });
-      setLosing(false);
-      setLostReason('');
-      toast('ok', `${quotation!.number} marked lost`);
-      await load();
-    } catch (err) {
-      setError(err);
-    }
+  async function markLost(reason: string) {
+    await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: reason });
+    toast('ok', `${quotation!.number} marked lost`);
+    await load();
   }
 
   async function remove() {
-    try {
-      await api.del(`/quotations/${quotation!.id}`);
-      toast('ok', `${quotation!.number} deleted`);
-      navigate('/g-ops/quotations');
-    } catch (err) {
-      setError(err);
-      setDeleting(false);
-    }
+    await api.del(`/quotations/${quotation!.id}`);
+    toast('ok', `${quotation!.number} deleted`);
+    navigate('/g-ops/quotations');
   }
 
-  function printPdf() {
-    if (!revision) return;
-    const option = optionId && (quotation!.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null;
-    openPdf(`/api/quotations/${quotation!.id}/revisions/${revision.id}/pdf${qs({ option })}`, () =>
-      toast('error', 'Could not render the quotation'),
-    );
-  }
+  // The option ticked under the header ("Add the CEO as approver") routes the
+  // submit and the draft's PDF alike; one that no longer applies is dropped.
+  const chosenOption = optionId && (quotation.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null;
 
   // The page speaks in STAGES (2026-10-08) — the board's and the list's
   // words — while every value stays the fine outcome the PATCH takes.
@@ -897,47 +894,259 @@ export function QuotationDetail() {
     ? [quotation.contact.mobile || quotation.contact.phone, quotation.contact.email].filter(Boolean).join(' · ')
     : '';
 
+  // Lost is the ⋯ menu's "Mark lost" (red, asking why in the bar under the
+  // header); the Change status select carries only the moves that destroy nothing.
+  const canMarkLost = quotation.canEdit && moves.some((m) => m.value === 'LOST');
+  const statusMoves = moves.filter((m) => m.value !== 'LOST');
+
   function changeOutcome(next: string) {
     if (!next) return;
-    if (next === 'LOST') {
-      setLostReason(quotation!.lostReason ?? '');
-      setLosing(true);
-      return;
-    }
     void act(
       () => api.patch(`/quotations/${quotation!.id}`, { outcome: next }),
       reopening ? 'Reopened' : `Moved to ${stageLabelOf(next)}`,
     );
   }
 
+  // ── The header's buttons ──────────────────────────────────────────────────
+  const hasPricedLine = quotation.revisions.some((r) => r.items.some((i) => !i.isHeading));
+  const canOrder = can('gops.sales_orders.create');
+  // Any quotation still on may be ordered (2026-10-09, the owner's call: one
+  // under negotiation included); approval of the order builds the project.
+  const canRequestJobOrder = quotation.outcome !== 'LOST' && jobs.length === 0 && can('gops.job_orders.create');
+  // A won quotation not yet delivered becomes a project from its approved revision's costing.
+  const canCreateProject = quotation.outcome === 'WON' && !!approved && jobs.length === 0 && can('gops.projects.create');
+  // ONE main next step, in the order a quotation lives them: approve the
+  // draft, send it, then book the won work.
+  const primary = canSubmit ? 'submit' : canSend ? 'send' : quotation.outcome === 'WON' && canOrder && hasPricedLine ? 'order' : null;
+  const pendingLatest = quotation.revisions[0]?.status === 'PENDING_APPROVAL' ? quotation.revisions[0] : null;
+  const raiseRevision = () =>
+    run(
+      () => api.post(`/quotations/${quotation.id}/revisions`),
+      // The server withdraws a pending revision's approval request as it
+      // supersedes it; say so, since the approver is told.
+      pendingLatest ? `New revision raised — R${pendingLatest.revision} is withdrawn from approval` : 'New revision raised',
+    );
+  const fillFromCosting = () =>
+    run(
+      () => api.post(`/quotations/${quotation.id}/revisions/${revision!.id}/from-costing`),
+      'Filled from the costing scope of work',
+    );
+
   return (
     <div>
-      <div className="breadcrumb">
-        {quotation.lead && (
+      <RecordHeader
+        type="Quotation"
+        code={`${quotation.number}${revision ? ` R${revision.revision}` : ''}`}
+        title={quotation.subject}
+        // The STAGE — the word the board and the list use.
+        status={quotation.stage || stageKeyFor(quotation.outcome, quotation.quotationStages)}
+        statusLabel={quotation.stageLabel ?? stageLabelOf(quotation.outcome)}
+        statusExtra={STAGE_TONES}
+        amount={valueRevision ? formatMoney(valueRevision.total) : undefined}
+        amountLabel={valueRevision ? `Total · R${valueRevision.revision}${valueRevision.status === 'APPROVED' ? ' approved' : ''}` : undefined}
+        meta={
           <>
-            <Link to={`/g-ops/leads/${quotation.lead.id}`}>{quotation.lead.number}</Link>
-            <span className="sep">›</span>
+            <Link to={`/g-ops/customers/${quotation.customer.id}`}>{quotation.customer.name}</Link>
+            {quotation.contact && ` · ${quotation.contact.name}`}
+            {quotation.lead && (
+              <>
+                {' '}
+                · from <Link to={`/g-ops/leads/${quotation.lead.id}`}>{quotation.lead.number}</Link>
+              </>
+            )}
+            {revision?.costing && (
+              <>
+                {' '}
+                · costing <Link to={`/g-ops/costing/${revision.costing.id}`}>{revision.costing.number}</Link>
+              </>
+            )}
+            {jobs.map((j) => (
+              <span key={j.id}>
+                {' '}
+                · project <Link to={`/g-ops/projects/${j.id}`}>{j.number}</Link>
+              </span>
+            ))}
           </>
-        )}
-        <Link to="/g-ops/quotations">Quotations</Link>
-        <span className="sep">›</span>
-        <span className="mono">
-          {quotation.number}
-          {revision ? ` R${revision.revision}` : ''}
-        </span>
-        {revision?.costing && (
+        }
+        actions={
           <>
-            <span className="sep">›</span>
-            <Link to={`/g-ops/costing/${revision.costing.id}`}>{revision.costing.number}</Link>
+            {canSubmit && (
+              <button
+                className={`btn${primary === 'submit' ? ' btn-primary' : ''}`}
+                onClick={() =>
+                  act(
+                    () => api.post(`/quotations/${quotation.id}/revisions/${revision!.id}/submit`, { optionId: chosenOption }),
+                    'Submitted for approval',
+                  )
+                }
+              >
+                Submit for approval
+              </button>
+            )}
+            {canSend && (
+              <button
+                className={`btn${primary === 'send' ? ' btn-primary' : ''}`}
+                title="Records that the customer has it. Email the PDF as you always have."
+                onClick={() => act(() => api.patch(`/quotations/${quotation.id}`, { outcome: 'SUBMITTED' }), 'Marked as sent')}
+              >
+                Mark as sent
+              </button>
+            )}
+            {canOrder && (
+              <button
+                className={`btn${primary === 'order' ? ' btn-primary' : ''}`}
+                aria-expanded={bookingOrder}
+                aria-controls="qd-create-so"
+                onClick={() => setBookingOrder((v) => !v)}
+                disabled={!hasPricedLine}
+                title="Book this quotation in operations — SCORO's Create invoice"
+              >
+                Create Sales Order
+              </button>
+            )}
+            {canRequestJobOrder && (
+              <Link
+                className="btn"
+                to={`/g-ops/job-orders${qs({
+                  new: 1,
+                  customerId: quotation.customer.id,
+                  siteId: quotation.site?.id,
+                  quotationId: quotation.id,
+                })}`}
+              >
+                Request job order
+              </Link>
+            )}
+            {canCreateProject && approved && (
+              <Link
+                className="btn"
+                to={`/g-ops/projects${qs({ new: 1, costingId: approved.costing?.id, quotationRevisionId: approved.id })}`}
+                title={`R${approved.revision} is the approved revision — its costing carries the budget and the schedule of values into the project`}
+              >
+                Create project
+              </Link>
+            )}
           </>
-        )}
-        {jobs.map((j) => (
-          <span key={j.id}>
-            <span className="sep">›</span>
-            <Link to={`/g-ops/projects/${j.id}`}>{j.number}</Link>
-          </span>
-        ))}
-      </div>
+        }
+        print={revision ? `/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption })}` : undefined}
+        more={[
+          can('gops.quotations.create') &&
+            revision && {
+              label: 'Duplicate',
+              hint: "A new quotation with this one's customer, terms and lines — numbered when you save it",
+              to: `/g-ops/quotations/new${qs({ duplicate: quotation.id, revision: revision.id })}`,
+            },
+          // The sales order's own item, in the same place: the same revision
+          // back to draft, no number burned on what the customer never saw.
+          quotation.canEdit &&
+            pendingLatest && {
+              label: 'Pull back and edit',
+              hint: 'Withdraw it from the approvers and return it to draft',
+              confirm: {
+                title: `Pull R${pendingLatest.revision} back to draft?`,
+                body: 'It is withdrawn from the approvers — they are told — and nothing can be approved until you submit it again.',
+                confirmLabel: 'Pull back',
+                tone: 'primary' as const,
+                onConfirm: () =>
+                  run(
+                    () => api.post(`/quotations/${quotation.id}/revisions/${pendingLatest.id}/withdraw`),
+                    `R${pendingLatest.revision} pulled back to draft`,
+                  ),
+              },
+            },
+          quotation.canEdit &&
+            revision?.status !== 'DRAFT' &&
+            (pendingLatest
+              ? {
+                  label: 'New revision',
+                  hint: `R${pendingLatest.revision} is withdrawn from approval`,
+                  confirm: {
+                    title: `Raise a new revision of ${quotation.number}?`,
+                    body: `R${pendingLatest.revision} is withdrawn from approval — its approvers are told — and the new revision starts as a draft.`,
+                    confirmLabel: 'Raise new revision',
+                    tone: 'primary' as const,
+                    onConfirm: raiseRevision,
+                  },
+                }
+              : { label: 'New revision', hint: 'A draft copy of the latest revision, to change and send again', onSelect: () => void raiseRevision().catch(setError) }),
+          editable &&
+            revision?.costing && {
+              label: 'Fill lines from costing',
+              hint: `Replace the lines with ${revision.costing.number}'s scope of work`,
+              ...(revision.items.length
+                ? {
+                    confirm: {
+                      title: `Replace R${revision.revision}'s lines with ${revision.costing.number}'s scope of work?`,
+                      body: `The ${revision.items.length} line${revision.items.length === 1 ? '' : 's'} there now are deleted. The costing is not changed.`,
+                      confirmLabel: 'Replace lines',
+                      onConfirm: fillFromCosting,
+                    },
+                  }
+                : { onSelect: () => void fillFromCosting().catch(setError) }),
+            },
+          canMarkLost && {
+            label: 'Mark lost',
+            danger: true,
+            confirm: {
+              title: `Mark ${quotation.number} lost?`,
+              body: 'Its lead moves with it, so the pipeline stays honest. Sales Analytics reports the reasons.',
+              confirmLabel: 'Mark lost',
+              reason: 'required' as const,
+              reasonLabel: 'Why was it lost?',
+              // A quotation lost before and reopened offers the reason it was lost with.
+              initialReason: quotation.lostReason ?? '',
+              onConfirm: markLost,
+            },
+          },
+          canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${quotation.number}?`,
+              body: 'It cannot be undone. A lead left with no quotation steps back to costing or qualified.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
+            },
+          },
+        ]}
+        modify={quotation.canEdit ? editHref : undefined}
+        confirm={confirm}
+      />
+
+      <ErrorBox error={error} />
+
+      {canSubmit &&
+        (() => {
+          // The route the submit would take — the option's when it is
+          // ticked — with who decides each step, named before anybody
+          // presses Submit. The submitter is never among them.
+          const chosen = chosenOption ? quotation.approvalRoutes?.options.find((o) => o.id === chosenOption)?.route : null;
+          const route = chosen ?? quotation.approvalRoutes?.standard;
+          const options = quotation.approvalOptions ?? [];
+          if (!route?.steps.length && !options.length) return null;
+          return (
+            <div className="card qd-route sales-card-gap" role="group" aria-label="Submit for approval">
+              {options.map((o) => (
+                <Checkbox key={o.id} checked={optionId === o.id} onChange={(v) => setOptionId(v ? o.id : null)} label={o.label} />
+              ))}
+              {!!route?.steps.length && (
+                <>
+                  <span className="qd-route-label">Submit for approval sends it to</span>
+                  <ApprovalStepper
+                    steps={route.steps.map((st) => ({
+                      label: st.name,
+                      approver: st.approvers.length
+                        ? st.approvers.map((p) => p.name).join(' or ')
+                        : 'Nobody — no one else holds this role',
+                      status: 'WAITING',
+                    }))}
+                  />
+                </>
+              )}
+            </div>
+          );
+        })()}
+      {bookingOrder && <CreateSalesOrderPanel quotation={quotation} onClose={() => setBookingOrder(false)} />}
 
       {quotation.legacyQuote && (
         <div className="alert info">
@@ -950,65 +1159,15 @@ export function QuotationDetail() {
         </div>
       )}
 
-      <ErrorBox error={error} />
-
       {/*
         SCORO's "Quote details": the same labels in the same two columns, so a
         salesperson coming from SCORO finds each thing where they left it.
       */}
       <section className="card qd-card" aria-labelledby="qd-title">
         <div className="qd-head">
-          <h1 id="qd-title" className="qd-title">
+          <h2 id="qd-title" className="qd-title">
             Quote details
-          </h1>
-          <div className="row qd-actions">
-            {can('gops.quotations.create') && revision && (
-              <Link
-                className="btn"
-                to={`/g-ops/quotations/new${qs({ duplicate: quotation.id, revision: revision.id })}`}
-                title="A new quotation with this one's customer, terms and lines — numbered when you save it"
-              >
-                Duplicate
-              </Link>
-            )}
-            {quotation.canEdit && revision?.status !== 'DRAFT' && (
-              <button
-                className="btn"
-                onClick={() => {
-                  // The server withdraws a pending revision's approval request
-                  // as it supersedes it; say so, since the approver is told.
-                  const pending = quotation.revisions[0]?.status === 'PENDING_APPROVAL' ? quotation.revisions[0] : null;
-                  return act(
-                    () => api.post(`/quotations/${quotation.id}/revisions`),
-                    pending ? `New revision raised — R${pending.revision} is withdrawn from approval` : 'New revision raised',
-                  );
-                }}
-              >
-                New revision
-              </button>
-            )}
-            {quotation.canEdit && (
-              <Link className="btn btn-primary" to={editHref}>
-                Modify
-              </Link>
-            )}
-            {canDelete &&
-              (deleting ? (
-                <span className="row qd-confirm" role="group" aria-label="Confirm delete">
-                  <span className="qd-confirm-text">Delete {quotation.number}?</span>
-                  <button className="btn btn-danger" onClick={() => void remove()}>
-                    Delete
-                  </button>
-                  <button className="btn" onClick={() => setDeleting(false)}>
-                    Keep it
-                  </button>
-                </span>
-              ) : (
-                <button className="btn btn-danger" onClick={() => setDeleting(true)}>
-                  Delete
-                </button>
-              ))}
-          </div>
+          </h2>
         </div>
 
         <div className="qd-grid">
@@ -1130,7 +1289,7 @@ export function QuotationDetail() {
                     {quotation.closedInDays != null ? ` · ${quotation.outcome === 'WON' ? 'won' : 'lost'} in ${dayCount(quotation.closedInDays)}` : ''}
                   </div>
                 )}
-                {quotation.canEdit && moves.length > 0 && (
+                {quotation.canEdit && statusMoves.length > 0 && (
                   <div className="qd-status-change">
                     <select
                       aria-label="Change status"
@@ -1139,12 +1298,11 @@ export function QuotationDetail() {
                       onChange={(e) => changeOutcome(e.target.value)}
                     >
                       <option value="">Change status…</option>
-                      {moves.map((o) => {
+                      {statusMoves.map((o) => {
                         const needsApproval = o.value === 'WON' && !approved;
                         return (
                           <option key={o.value} value={o.value} disabled={needsApproval}>
                             {reopening ? `Reopen — ${o.label}` : o.label}
-                            {o.value === 'LOST' ? '…' : ''}
                             {needsApproval ? ' (needs an approved revision)' : ''}
                           </option>
                         );
@@ -1156,29 +1314,6 @@ export function QuotationDetail() {
                         ? ' Won is available once a revision is approved — only the approved revision becomes a project.'
                         : ''}
                     </p>
-                  </div>
-                )}
-                {losing && (
-                  <div className="qd-lost">
-                    <label htmlFor="qd-lost-reason" className="qd-lost-label">
-                      Why was it lost?
-                    </label>
-                    <textarea
-                      id="qd-lost-reason"
-                      rows={2}
-                      autoFocus
-                      value={lostReason}
-                      onChange={(e) => setLostReason(e.target.value)}
-                    />
-                    <div className="row qd-lost-actions">
-                      <button className="btn btn-danger btn-sm" disabled={!lostReason.trim()} onClick={() => void markLost()}>
-                        Mark lost
-                      </button>
-                      <button className="btn btn-sm" onClick={() => setLosing(false)}>
-                        Cancel
-                      </button>
-                      <span className="faint sales-hint">Sales Analytics reports the reasons.</span>
-                    </div>
                   </div>
                 )}
               </Detail>
@@ -1222,94 +1357,6 @@ export function QuotationDetail() {
           </div>
         </div>
 
-        {/* SCORO's action bar, at the foot of the details it acts on. */}
-        <div className="qd-bar">
-          <div className="row">
-            <ProjectActions quotation={quotation} jobs={jobs} can={can} />
-          </div>
-          <div className="row">
-            <button className="btn" onClick={printPdf} disabled={!revision}>
-              PDF
-            </button>
-            {can('gops.sales_orders.create') && (
-              <button
-                className="btn"
-                aria-expanded={bookingOrder}
-                aria-controls="qd-create-so"
-                onClick={() => setBookingOrder((v) => !v)}
-                disabled={!quotation.revisions.some((r) => r.items.some((i) => !i.isHeading))}
-                title="Book this quotation in operations — SCORO's Create invoice"
-              >
-                Create Sales Order
-              </button>
-            )}
-            {canSubmit &&
-              (quotation.approvalOptions ?? []).map((o) => (
-                <Checkbox
-                  key={o.id}
-                  checked={optionId === o.id}
-                  onChange={(v) => setOptionId(v ? o.id : null)}
-                  label={o.label}
-                />
-              ))}
-            {canSubmit && (
-              <button
-                className="btn btn-ok"
-                onClick={() =>
-                  act(
-                    () =>
-                      api.post(`/quotations/${quotation.id}/revisions/${revision!.id}/submit`, {
-                        optionId: optionId && (quotation.approvalOptions ?? []).some((o) => o.id === optionId) ? optionId : null,
-                      }),
-                    'Submitted for approval',
-                  )
-                }
-              >
-                Submit for approval
-              </button>
-            )}
-            {canSend && (
-              <button
-                className="btn btn-primary"
-                title="Records that the customer has it. Email the PDF as you always have."
-                onClick={() =>
-                  act(() => api.patch(`/quotations/${quotation.id}`, { outcome: 'SUBMITTED' }), 'Marked as sent')
-                }
-              >
-                Mark as sent
-              </button>
-            )}
-          </div>
-        </div>
-        {canSubmit &&
-          (() => {
-            // The route the submit would take — the option's when it is
-            // ticked — with who decides each step, named before anybody
-            // presses Submit. The submitter is never among them.
-            const chosen = optionId ? quotation.approvalRoutes?.options.find((o) => o.id === optionId)?.route : null;
-            const route = chosen ?? quotation.approvalRoutes?.standard;
-            if (!route?.steps.length) return null;
-            return (
-              <div className="qd-route">
-                <span className="qd-route-label">Submit for approval sends it to</span>
-                <ApprovalStepper
-                  steps={route.steps.map((st) => ({
-                    label: st.name,
-                    approver: st.approvers.length
-                      ? st.approvers.map((p) => p.name).join(' or ')
-                      : 'Nobody — no one else holds this role',
-                    status: 'WAITING',
-                  }))}
-                />
-              </div>
-            );
-          })()}
-        {bookingOrder && (
-          <CreateSalesOrderPanel
-            quotation={quotation}
-            onClose={() => setBookingOrder(false)}
-          />
-        )}
       </section>
 
       {revision && (
@@ -1317,8 +1364,8 @@ export function QuotationDetail() {
           {revision.status === 'PENDING_APPROVAL' && (
             <div className="alert info">
               Revision {revision.revision} is with the approver. It cannot be edited until they
-              decide — raise a new revision if something must change, and this one is withdrawn
-              from their queue.
+              decide — ⋯ › Pull back and edit returns it to draft, or raise a new revision if
+              something must change; either way it is withdrawn from their queue.
             </div>
           )}
           {revision.status === 'APPROVED' && (
@@ -1340,38 +1387,17 @@ export function QuotationDetail() {
           <div className="card sales-card-gap">
             <div className="row sales-card-head">
               <h2 className="card-title">Lines</h2>
-              {editable && (
-                <div className="row">
-                  {revision.costing && (
-                    <button
-                      className="btn btn-sm"
-                      onClick={() =>
-                        act(
-                          () =>
-                            api.post(
-                              `/quotations/${quotation.id}/revisions/${revision.id}/from-costing`,
-                            ),
-                          'Filled from the costing scope of work',
-                        )
-                      }
-                    >
-                      Fill from costing
-                    </button>
-                  )}
-                  <Link className="btn btn-primary btn-sm" to={editHref}>
-                    Edit lines
-                  </Link>
-                </div>
-              )}
             </div>
 
             {revision.items.length === 0 ? (
               <Empty
                 title="No lines yet"
                 hint={
-                  revision.costing
-                    ? 'Use “Fill from costing” to bring in the scope sections you already priced, or type the lines in under Edit lines.'
-                    : 'Type the lines in under Edit lines, or link a costing there and fill them from its scope of work.'
+                  !editable
+                    ? 'Nothing was quoted on this revision.'
+                    : revision.costing
+                      ? 'Modify to type the lines in, or ⋯ › Fill lines from costing to bring in the scope sections you already priced.'
+                      : 'Modify to type the lines in, or to link a costing and fill them from its scope of work.'
                 }
               />
             ) : (
@@ -1387,7 +1413,6 @@ export function QuotationDetail() {
                       <th className="right">Amount</th>
                       {showCost && <th>Cost &amp; provider</th>}
                       {showCost && <th className="right">Margin</th>}
-                      {editable && <th className="sales-col-action" />}
                     </tr>
                   </thead>
                   <tbody>
@@ -1395,7 +1420,7 @@ export function QuotationDetail() {
                       row.kind === 'heading' ? (
                         <tr key={row.key} className="quote-heading-row">
                           <td />
-                          <td colSpan={5 + (showCost ? 2 : 0) + (editable ? 1 : 0)}>{row.text}</td>
+                          <td colSpan={5 + (showCost ? 2 : 0)}>{row.text}</td>
                         </tr>
                       ) : (
                       <tr key={row.item.id}>
@@ -1427,17 +1452,6 @@ export function QuotationDetail() {
                             )}
                           </td>
                         )}
-                        {editable && (
-                          <td>
-                            <Link
-                              className="btn btn-sm"
-                              to={`${editHref}#line-${row.n}`}
-                              aria-label={`Modify line ${row.n}`}
-                            >
-                              Modify
-                            </Link>
-                          </td>
-                        )}
                       </tr>
                       ),
                     )}
@@ -1447,13 +1461,7 @@ export function QuotationDetail() {
             )}
 
             <div className={`quote-summary${showPanel ? '' : ' quote-summary-single'}`}>
-              <TotalsBlock
-                quotationId={quotation.id}
-                revision={revision}
-                editable={editable}
-                onSaved={() => void load()}
-                onError={setError}
-              />
+              <TotalsBlock revision={revision} />
               {showPanel && revision.costPanel && <CostPanelBlock panel={revision.costPanel} />}
             </div>
           </div>
@@ -1461,13 +1469,7 @@ export function QuotationDetail() {
           {(can('gops.sales_orders.view_all') || can('gops.sales_orders.view_own')) && (
             <QuotationSalesOrders
               quotationId={quotation.id}
-              quotationTotal={Number(
-                (quotation.revisions.find((r) => r.status === 'APPROVED') ??
-                  quotation.revisions.reduce<QuotationDetail['revisions'][number] | null>(
-                    (best, r) => (best === null || r.revision > best.revision ? r : best),
-                    null,
-                  ))?.total ?? 0,
-              )}
+              quotationTotal={Number(valueRevision?.total ?? 0)}
               reloadToken={reload}
             />
           )}
@@ -1597,87 +1599,21 @@ function LineCost({ item }: { item: Item }) {
 }
 
 /**
- * SCORO's totals: subtotal, the discount (edited in place on a draft), the sum
- * without tax, the tax and the total. The figures are the server's — it
+ * SCORO's totals: subtotal, the discount, the sum without tax, the tax and the
+ * total. Read only — the discount is changed with the rest of the draft through
+ * Modify, where the discount calculator is. The figures are the server's — it
  * recomputes them on every save with the one `quotationTotals`.
  */
-function TotalsBlock({
-  quotationId,
-  revision,
-  editable,
-  onSaved,
-  onError,
-}: {
-  quotationId: string;
-  revision: Revision;
-  editable: boolean;
-  onSaved: () => void;
-  onError: (err: unknown) => void;
-}) {
-  const [discount, setDiscount] = useState(String(revision.discountPct ?? 0));
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => setDiscount(String(revision.discountPct ?? 0)), [revision.id, revision.discountPct]);
-
-  async function commit() {
-    if (busy) return;
-    const value = Number(discount);
-    if (!Number.isFinite(value) || value === revision.discountPct) {
-      setDiscount(String(revision.discountPct ?? 0));
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.patch(`/quotations/${quotationId}/revisions/${revision.id}`, { discountPct: value });
-      onSaved();
-    } catch (err) {
-      onError(err);
-      setDiscount(String(revision.discountPct ?? 0));
-    } finally {
-      setBusy(false);
-    }
-  }
-
+function TotalsBlock({ revision }: { revision: Revision }) {
   const rate = `${(revision.vatRate * 100).toFixed(0)}%`;
   return (
-    <div>
     <dl className="quote-totals" aria-label="Totals">
       <div>
         <dt>Subtotal</dt>
         <dd className="mono">{formatMoney(revision.subtotal)}</dd>
       </div>
       <div>
-        <dt>
-          {editable ? (
-            <label className="quote-discount">
-              Discount
-              <NumberInput
-                kind="percent"
-                min={0}
-                max={100}
-                step="0.01"
-                value={discount}
-                disabled={busy}
-                aria-label="Discount percent"
-                aria-describedby="quote-discount-hint"
-                onChange={(e) => setDiscount(e.target.value)}
-                onBlur={() => void commit()}
-                onKeyDown={(e) => {
-                  // Enter leaves the field, and leaving it is what saves — one
-                  // PATCH, not one for the key and another for the blur.
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    e.currentTarget.blur();
-                  }
-                  if (e.key === 'Escape') setDiscount(String(revision.discountPct ?? 0));
-                }}
-              />
-              %
-            </label>
-          ) : (
-            `Discount ${revision.discountPct ? `${revision.discountPct}%` : ''}`
-          )}
-        </dt>
+        <dt>{`Discount ${revision.discountPct ? `${revision.discountPct}%` : ''}`}</dt>
         <dd className="mono">{revision.discountAmount > 0 ? `−${formatMoney(revision.discountAmount)}` : formatMoney(0)}</dd>
       </div>
       <div>
@@ -1693,12 +1629,6 @@ function TotalsBlock({
         <dd className="mono">{formatMoney(revision.total)}</dd>
       </div>
     </dl>
-      {editable && (
-        <p id="quote-discount-hint" className="faint sales-hint">
-          The discount comes off the whole quotation before tax. Enter to save.
-        </p>
-      )}
-    </div>
   );
 }
 
@@ -1737,9 +1667,10 @@ type JobRef = { id: string; number: string; name: string; status: string };
 
 /**
  * SCORO's Project row. A quotation that became a project links to it; a won
- * one not yet delivered offers "Create project" from the approved revision's
- * costing; before that the row says when a project becomes possible — so a won
- * quotation waiting on somebody reads differently from one already delivered.
+ * one not yet delivered says "Create project" (in the header) builds it from
+ * the approved revision's costing; before that the row says when a project
+ * becomes possible — so a won quotation waiting on somebody reads differently
+ * from one already delivered.
  */
 function ProjectCell({
   approved,
@@ -1773,45 +1704,12 @@ function ProjectCell({
   if (!can('gops.projects.create')) return <span className="faint">Won — waiting for a project to be created</span>;
   return (
     <>
-      <Link
-        className="btn btn-sm btn-primary"
-        to={`/g-ops/projects${qs({ new: 1, costingId: approved.costing?.id, quotationRevisionId: approved.id })}`}
-      >
-        Create project ›
-      </Link>
+      <span className="faint">Not created yet — Create project, above, builds it</span>
       <div className="qd-sub">
         R{approved.revision} is the approved revision — its costing carries the budget and the schedule of values
         into the project.
       </div>
     </>
-  );
-}
-
-/** The action bar's left end: a won quotation not yet delivered can also become a job order. */
-function ProjectActions({
-  quotation,
-  jobs,
-  can,
-}: {
-  quotation: QuotationDetail;
-  jobs: JobRef[];
-  can: (permission: string) => boolean;
-}) {
-  // Any quotation still on may be ordered (2026-10-09, the owner's call: one
-  // under negotiation included); approval of the order builds the project.
-  if (quotation.outcome === 'LOST' || jobs.length > 0 || !can('gops.job_orders.create')) return null;
-  return (
-    <Link
-      className="btn"
-      to={`/g-ops/job-orders${qs({
-        new: 1,
-        customerId: quotation.customer.id,
-        siteId: quotation.site?.id,
-        quotationId: quotation.id,
-      })}`}
-    >
-      Request job order
-    </Link>
   );
 }
 
@@ -1938,7 +1836,7 @@ function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDet
   const total = booking ? (booking.vatInclusive ? net : Math.round(net * (1 + booking.vatRate) * 100) / 100) : 0;
 
   return (
-    <div id="qd-create-so" className="qd-route so-create" role="group" aria-label="Create Sales Order">
+    <div id="qd-create-so" className="card qd-route so-create sales-card-gap" role="group" aria-label="Create Sales Order">
       <ErrorBox error={error} />
       {!booking && !error && <Loading />}
       {booking && (
@@ -1976,14 +1874,14 @@ function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDet
             </dl>
           )}
           <div className="row so-create-actions">
+            <button className="btn btn-sm" onClick={onClose} disabled={busy}>
+              {nothingLeft ? 'Close' : 'Cancel'}
+            </button>
             {!nothingLeft && (
               <button className="btn btn-primary btn-sm" onClick={() => void proceed()} disabled={busy}>
                 {busy ? 'Creating…' : 'Proceed'}
               </button>
             )}
-            <button className="btn btn-sm" onClick={onClose} disabled={busy}>
-              {nothingLeft ? 'Close' : 'Cancel'}
-            </button>
           </div>
         </>
       )}

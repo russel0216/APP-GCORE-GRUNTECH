@@ -9,6 +9,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -16,7 +17,8 @@ import {
   useToast,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
-import { openPdf } from '../../lib/api';
+import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { label } from './PurchaseRequests';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -134,29 +136,29 @@ export function ReceivingDetail() {
     orderItem: { description: string; item: { code: string } | null; costCategory: { name: string } | null };
   }[];
 
+  const warehouse = rec.warehouse as { name: string } | null;
+
   return (
     <div>
-      <div className="breadcrumb">
-        {order.job && (
+      <RecordHeader
+        type="Receiving"
+        code={String(rec.number)}
+        title={order.supplier.name}
+        amount={formatMoney(Number(rec.value))}
+        amountLabel="Value received"
+        meta={
           <>
-            <Link to={`/g-ops/projects/${order.job.id}`}>{order.job.number}</Link>
-            <span className="sep">›</span>
-          </>
-        )}
-        <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link>
-        <span className="sep">›</span>
-        <Link to="/g-chain/receiving">Receiving</Link>
-        <span className="sep">›</span>
-        <span className="mono">{String(rec.number)}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>Receiving {String(rec.number)}</h1>
-          <p>
-            <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link> ·{' '}
+            Against <Link to={`/g-chain/purchase-orders/${order.id}`}>{order.number}</Link> ·{' '}
+            {order.job ? (
+              <Link to={`/g-ops/projects/${order.job.id}`}>
+                {order.job.number} — {order.job.name}
+              </Link>
+            ) : (
+              'Stock'
+            )}{' '}
+            · from <Link to={`/g-chain/suppliers/${order.supplier.id}`}>{order.supplier.name}</Link> · received{' '}
             {formatDate(String(rec.receivedDate))}
-            {(rec.warehouse as { name: string } | null) ? ` · into ${(rec.warehouse as { name: string }).name}` : ''}
+            {warehouse ? ` into ${warehouse.name}` : ''}
             {bills.length > 0 && (
               <>
                 {' '}
@@ -172,19 +174,19 @@ export function ReceivingDetail() {
                 ))}
               </>
             )}
-          </p>
-        </div>
-        {canEnterBill && (
-          <div className="row">
-            {/* The bill picks up the supplier, order and these goods from the
-                receiving, and — because it names the receiving — posts no job
-                cost a second time. */}
+          </>
+        }
+        actions={
+          canEnterBill && (
+            // The bill picks up the supplier, order and these goods from the
+            // receiving, and — because it names the receiving — posts no job
+            // cost a second time.
             <Link to={`/g-fin/ap?fromReceiving=${String(rec.id)}`} className="btn btn-primary">
               Enter supplier bill
             </Link>
-          </div>
-        )}
-      </div>
+          )
+        }
+      />
 
       <ErrorBox error={error} />
 
@@ -322,7 +324,7 @@ export function StockIssues() {
         actions={
           can('gchain.stock_issuance.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + New issue
+              + New stock issue
             </button>
           ) : null
         }
@@ -382,18 +384,15 @@ function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       title="New stock issue"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={create}
             disabled={busy || !form.warehouseId || form.purpose.length < 3}
           >
-            {busy ? 'Creating…' : 'Create'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -430,6 +429,7 @@ function NewIssueModal({ onClose, onCreated }: { onClose: () => void; onCreated:
 export function StockIssueDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
+  const confirm = useConfirm();
   const [issue, setIssue] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -465,61 +465,77 @@ export function StockIssueDetail() {
     costCategory: { name: string } | null;
   }[];
   const isDraft = issue.status === 'DRAFT';
+  const number = String(issue.number);
+  const issuedTo = typeof issue.issuedToName === 'string' && issue.issuedToName ? issue.issuedToName : null;
 
+  /** Asked in the confirm bar, which shows a refusal — so these throw rather than catching. */
   async function commit() {
-    try {
-      setIssue(await api.post<Record<string, unknown>>(`/stock-issues/${id}/issue`));
-      toast('ok', job ? 'Issued — the project has been charged' : 'Issued');
-      await load();
-    } catch (err) {
-      setError(err);
-    }
+    setIssue(await api.post<Record<string, unknown>>(`/stock-issues/${id}/issue`));
+    toast('ok', job ? 'Issued — the project has been charged' : 'Issued');
+    await load();
   }
+
+  async function removeItem(itemRowId: string) {
+    await api.del(`/stock-issues/${id}/items/${itemRowId}`);
+    toast('ok', 'Item removed');
+    await load();
+  }
+
+  const addItemButton = isDraft ? (
+    <button className="btn btn-sm" onClick={() => setAdding(true)}>
+      + Add item
+    </button>
+  ) : null;
 
   return (
     <div>
-      <div className="breadcrumb">
-        {job && (
+      <RecordHeader
+        type="Stock Issue"
+        code={number}
+        title={String(issue.purpose)}
+        status={String(issue.status)}
+        amount={formatMoney(Number(issue.value))}
+        amountLabel={isDraft ? 'Value at current cost' : 'Value issued'}
+        meta={
           <>
-            <Link to={`/g-ops/projects/${job.id}`}>{job.number}</Link>
-            <span className="sep">›</span>
+            From {warehouse.name}
+            {job && (
+              <>
+                {' '}
+                →{' '}
+                <Link to={`/g-ops/projects/${job.id}`}>
+                  {job.number} — {job.name}
+                </Link>
+              </>
+            )}
+            {issuedTo ? ` · to ${issuedTo}` : ''} · {formatDate(String(issue.issueDate))}
           </>
-        )}
-        <Link to="/g-chain/stock-issuance">Stock Issuance</Link>
-        <span className="sep">›</span>
-        <span className="mono">{String(issue.number)}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{String(issue.purpose)}</h1>
-          <p>
-            {warehouse.name}
-            {job ? ` → ${job.number}` : ''} · {formatDate(String(issue.issueDate))}
-            <span className="proc-pill-gap">
-              <StatusBadge status={String(issue.status)} />
-            </span>
-          </p>
-        </div>
-        <div className="row">
-          <button
-            className="btn"
-            onClick={() => openPdf(`/api/stock-issues/${id}/pdf`, () => toast('error', 'Could not print'))}
-          >
-            Print
-          </button>
-          {isDraft && (
-            <>
-              <button className="btn btn-primary" onClick={() => setAdding(true)}>
-                + Add item
-              </button>
-              <button className="btn btn-ok" disabled={items.length === 0} onClick={commit}>
-                Issue
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+        }
+        actions={
+          isDraft && (
+            <button
+              className="btn btn-primary"
+              disabled={items.length === 0}
+              title={items.length === 0 ? 'Add an item first' : undefined}
+              onClick={() =>
+                confirm.ask({
+                  title: `Issue ${number}?`,
+                  body: job
+                    ? `The stock leaves ${warehouse.name} and ${formatMoney(Number(issue.value))} is charged to ${job.number} at the current average cost. It cannot be taken back.`
+                    : `The stock leaves ${warehouse.name}. No project is charged. It cannot be taken back.`,
+                  confirmLabel: 'Issue',
+                  tone: 'primary',
+                  onConfirm: commit,
+                })
+              }
+            >
+              Issue
+            </button>
+          )
+        }
+        print={`/api/stock-issues/${id}/pdf`}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -531,9 +547,16 @@ export function StockIssueDetail() {
       )}
 
       <div className="card">
-        <h3 className="card-title">Items</h3>
+        <div className="proc-card-head">
+          <h3 className="card-title">Items</h3>
+          {items.length > 0 && addItemButton}
+        </div>
         {items.length === 0 ? (
-          <Empty title="No items yet" />
+          <Empty
+            title="No items yet"
+            hint={isDraft ? 'Add what is leaving the store. Only what this warehouse holds can be issued.' : undefined}
+            action={addItemButton ?? undefined}
+          />
         ) : (
           <div className="table-wrap">
             <table className="data">
@@ -562,15 +585,21 @@ export function StockIssueDetail() {
                     <td className="right mono">{formatMoney(i.amount)}</td>
                     {isDraft && (
                       <td>
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={async () => {
-                            await api.del(`/stock-issues/${id}/items/${i.id}`);
-                            await load();
-                          }}
-                        >
-                          ✕
-                        </button>
+                        <div className="proc-row-actions">
+                          <button
+                            className="btn btn-sm"
+                            aria-label={`Remove ${i.item.name}`}
+                            onClick={() =>
+                              confirm.ask({
+                                title: `Remove ${i.item.name} from ${number}?`,
+                                confirmLabel: 'Remove',
+                                onConfirm: () => removeItem(i.id),
+                              })
+                            }
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </td>
                     )}
                   </tr>
@@ -649,21 +678,18 @@ function AddIssueItemModal({
 
   return (
     <Modal
-      title="Add an item to issue"
+      title="Add item"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button
             className="btn btn-primary"
             onClick={save}
             disabled={busy || !form.itemId || Number(form.quantity) <= 0}
           >
-            {busy ? 'Adding…' : 'Add'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -806,7 +832,7 @@ export function BorrowSlips() {
         actions={
           can('gchain.borrow_slips.create') ? (
             <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-              + Lend out
+              + New borrow slip
             </button>
           ) : null
         }
@@ -889,13 +915,11 @@ function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated
   return (
     <Modal
       wide
-      title="Lend tools out"
+      title="New borrow slip"
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
+          {/* The form's one act is lending, so it keeps that verb. */}
           <button
             className="btn btn-primary"
             onClick={create}
@@ -903,7 +927,7 @@ function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated
           >
             {busy ? 'Saving…' : 'Lend out'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -965,12 +989,14 @@ function NewBorrowModal({ onClose, onCreated }: { onClose: () => void; onCreated
             value={l.quantity}
             onChange={(e) => setLines(lines.map((x, n) => (n === i ? { ...x, quantity: e.target.value } : x)))}
           />
+          {/* An unsaved row of this form: nothing on record is lost, so no question. */}
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn btn-sm"
+            aria-label={`Remove item ${i + 1}`}
             onClick={() => setLines(lines.filter((_, n) => n !== i))}
             disabled={lines.length === 1}
           >
-            ✕
+            Remove
           </button>
         </div>
       ))}
@@ -1039,24 +1065,25 @@ export function BorrowSlipDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-chain/borrow-slips">Borrow Slips</Link>
-        <span className="sep">›</span>
-        <span className="mono">{String(slip.number)}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{String(slip.borrowerName)}</h1>
-          <p>
+      <RecordHeader
+        type="Borrow Slip"
+        code={String(slip.number)}
+        title={String(slip.borrowerName)}
+        status={String(slip.status)}
+        statusExtra={{ RETURNED: 'ok' }}
+        meta={
+          <>
             {String(slip.purpose)}
-            {job ? ` · ${job.number}` : ''} · due {formatDate(String(slip.dueAt))}
-            <span className="proc-pill-gap">
-              <StatusBadge status={String(slip.status)} extra={{ RETURNED: 'ok' }} />
-            </span>
-          </p>
-        </div>
-      </div>
+            {job && (
+              <>
+                {' '}
+                · <Link to={`/g-ops/projects/${job.id}`}>{job.number}</Link>
+              </>
+            )}{' '}
+            · due {formatDate(String(slip.dueAt))}
+          </>
+        }
+      />
 
       <ErrorBox error={error} />
 
@@ -1107,9 +1134,10 @@ export function BorrowSlipDetail() {
           </table>
         </div>
 
+        {/* The card's own act, at its foot under the quantities it takes. */}
         {!done && can('gchain.borrow_slips.edit_all') && (
-          <div className="row proc-card-note">
-            <button className="btn btn-ok" onClick={receiveBack}>
+          <div className="proc-row-actions proc-card-note">
+            <button className="btn btn-primary" onClick={receiveBack}>
               Receive back into stock
             </button>
           </div>
@@ -1287,28 +1315,22 @@ export function StockCard() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-chain/inventory">Inventory</Link>
-        <span className="sep">›</span>
-        <span className="mono">{item.code}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>{item.name}</h1>
-          <p>
-            <span className="mono">{item.code}</span> · stock card
-          </p>
-        </div>
-      </div>
+      <RecordHeader
+        type="Stock Card"
+        code={item.code}
+        title={item.name}
+        meta={
+          warehouseId ? (
+            <>
+              One warehouse only · <Link to={`/g-chain/inventory/${itemId}`}>Show every warehouse</Link>
+            </>
+          ) : (
+            'Every warehouse'
+          )
+        }
+      />
 
       <ErrorBox error={error} />
-
-      {warehouseId && (
-        <p className="muted">
-          One warehouse only. <Link to={`/g-chain/inventory/${itemId}`}>Show every warehouse</Link>
-        </p>
-      )}
 
       <div className="kpi-grid proc-stats">
         {balances.map((b) => (

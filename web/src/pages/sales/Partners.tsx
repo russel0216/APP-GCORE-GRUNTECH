@@ -6,6 +6,8 @@ import { DataList, type BulkContext, type Column, type FilterDef } from '../../c
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { openAttachment } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
+import { useConfirm } from '../../components/Confirm';
+import { RecordHeader } from '../../components/RecordHeader';
 import {
   Checkbox,
   Empty,
@@ -13,6 +15,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -465,7 +468,7 @@ export function Partners() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  ADD / MODIFY
+//  NEW / MODIFY
 // ════════════════════════════════════════════════════════════════════
 
 function PartnerForm({
@@ -580,17 +583,14 @@ function PartnerForm({
   return (
     <Modal
       wide
-      title={partner ? `Modify ${partner.brand ?? partner.name}` : 'Add partner'}
+      title={partner ? `Modify partner ${partner.brand ?? partner.name}` : 'New partner'}
       onClose={onClose}
       footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button className="btn btn-primary" onClick={save} disabled={busy || !valid}>
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -733,13 +733,16 @@ export function PartnerDetail() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
+  // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
+  const closeConfirm = confirm.close;
+  useEffect(() => closeConfirm(), [id, closeConfirm]);
   const [params, setParams] = useSearchParams();
 
   const [partner, setPartner] = useState<Partner | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
-  const [removing, setRemoving] = useState(false);
   const [resourceModal, setResourceModal] = useState<{ resource: Resource | null; kind: ResourceKind } | null>(null);
   const [importingItems, setImportingItems] = useState<{ label: string; columns: never[] } | null>(null);
   const [priceReload, setPriceReload] = useState(0);
@@ -784,16 +787,12 @@ export function PartnerDetail() {
   const sizingApps = byKind(['SIZING_APP']);
   const links = byKind(['LINK']);
 
+  /** Asked through the confirm bar, which shows a refusal and stays open — so this throws. */
   async function removePartner() {
     if (!partner) return;
-    try {
-      await api.del(`/partners/${partner.id}`);
-      toast('ok', `${brand} removed from partners — the supplier record is kept`);
-      navigate('/g-ops/partners');
-    } catch (err) {
-      setError(err);
-      setRemoving(false);
-    }
+    await api.del(`/partners/${partner.id}`);
+    toast('ok', `${brand} removed from partners — the supplier record is kept`);
+    navigate('/g-ops/partners');
   }
 
   const tabLabel: Record<Tab, string> = {
@@ -814,7 +813,7 @@ export function PartnerDetail() {
 
   const addResource = (kind: ResourceKind, label: string) =>
     mayEdit && (
-      <button className="btn btn-primary btn-sm" onClick={() => setResourceModal({ resource: null, kind })}>
+      <button className="btn btn-sm" onClick={() => setResourceModal({ resource: null, kind })}>
         + Add {label}
       </button>
     );
@@ -836,26 +835,15 @@ export function PartnerDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/g-ops/partners">Partners</Link>
-        <span className="sep">›</span>
-        <span className="mono">{partner.code}</span>
-        <span className="sep">›</span>
-        <span>{brand}</span>
-      </div>
-
-      <div className="page-head">
-        <div>
-          <h1>
-            {brand}
-            {!partner.isActive && (
-              <span className="m-inline">
-                <StatusBadge status="INACTIVE" extra={STATUS_EXTRA} />
-              </span>
-            )}
-          </h1>
-          <p>
-            {partner.brand && partner.brand !== partner.name && <span className="m-subname">{partner.name}</span>}
+      <RecordHeader
+        type="Partner"
+        code={partner.code}
+        title={brand}
+        status={partner.isActive ? 'ACTIVE' : 'INACTIVE'}
+        statusExtra={STATUS_EXTRA}
+        meta={
+          <>
+            {partner.brand && partner.brand !== partner.name && <>{partner.name} · </>}
             {partner.category ?? 'What they supply is not recorded yet'}
             {website && (
               <>
@@ -865,26 +853,35 @@ export function PartnerDetail() {
                 </a>
               </>
             )}
-          </p>
-        </div>
-        <div className="row">
-          {can('gchain.suppliers.view_all') && (
-            <Link className="btn btn-sm" to={`/g-chain/suppliers/${partner.id}`}>
-              Supplier record ›
-            </Link>
-          )}
-          {mayEdit && (
-            <button className="btn" onClick={() => setEditing(true)}>
-              Modify
-            </button>
-          )}
-          {mayDelete && (
-            <button className="btn btn-danger" onClick={() => setRemoving(true)}>
-              Remove from partners
-            </button>
-          )}
-        </div>
-      </div>
+            {can('gchain.suppliers.view_all') && (
+              <>
+                {' · '}
+                <Link to={`/g-chain/suppliers/${partner.id}`}>Supplier record</Link>
+              </>
+            )}
+          </>
+        }
+        more={[
+          mayDelete && {
+            label: 'Remove from partners',
+            danger: true,
+            confirm: {
+              title: `Remove ${brand} from partners?`,
+              body: (
+                <>
+                  {brand} stops appearing under Sales › Partners. The supplier record, its purchase orders and
+                  bills stay exactly as they are, and so do its catalogues and price lists — adding it back as a
+                  partner brings them back. To remove a single catalogue or link, open it with Modify and remove it there.
+                </>
+              ),
+              confirmLabel: 'Remove from partners',
+              onConfirm: removePartner,
+            },
+          },
+        ]}
+        modify={mayEdit ? () => setEditing(true) : undefined}
+        confirm={confirm}
+      />
 
       <ErrorBox error={error} />
 
@@ -1020,18 +1017,20 @@ export function PartnerDetail() {
                 ],
               },
             ]}
-            actions={
-              can('gchain.items.create') && (
-                <button
-                  className="btn btn-sm"
-                  onClick={async () => {
-                    const spec = await loadImportSpec('items');
-                    if (spec) setImportingItems(spec as { label: string; columns: never[] });
-                  }}
-                >
-                  Import price list
-                </button>
-              )
+            menuItems={
+              can('gchain.items.create')
+                ? [
+                    {
+                      label: 'Import price list…',
+                      hint: 'Items and their list prices, from a spreadsheet',
+                      onSelect: () => {
+                        void loadImportSpec('items').then((spec) => {
+                          if (spec) setImportingItems(spec as { label: string; columns: never[] });
+                        });
+                      },
+                    },
+                  ]
+                : []
             }
             emptyTitle="No priced items yet"
             emptyHint={`Items whose preferred supplier is this partner appear here with their list price. Bulk-load them under G-CHAIN › Item Master › Import with Preferred Supplier = "${brand}".`}
@@ -1159,30 +1158,6 @@ export function PartnerDetail() {
         />
       )}
 
-      {removing && (
-        <Modal
-          title={`Remove ${brand} from partners?`}
-          onClose={() => setRemoving(false)}
-          footer={
-            <>
-              <button className="btn" onClick={() => setRemoving(false)}>
-                Cancel
-              </button>
-              <button className="btn btn-danger" onClick={removePartner}>
-                Remove from partners
-              </button>
-            </>
-          }
-        >
-          <p>
-            {brand} stops appearing under Sales › Partners. The supplier record, its purchase
-            orders and bills stay exactly as they are, and so do its catalogues and price lists —
-            adding it back as a partner brings them back.
-          </p>
-          <p className="muted">To delete a single catalogue or link, remove that card instead.</p>
-        </Modal>
-      )}
-
       {resourceModal && (
         <ResourceModal
           partnerId={partner.id}
@@ -1270,7 +1245,7 @@ function ResourceCard({
           </a>
         )}
         {mayEdit && (
-          <button className="btn btn-sm btn-ghost" onClick={onModify}>
+          <button className="btn btn-sm" onClick={onModify}>
             Modify
           </button>
         )}
@@ -1346,34 +1321,36 @@ function ResourceModal({
     }
   }
 
+  /** Asked in the modal's foot, which shows a refusal — so this throws. */
   async function remove() {
     if (!resource) return;
-    setBusy(true);
-    try {
-      await api.del(`/partners/${partnerId}/resources/${resource.id}`);
-      toast('ok', `${resource.title} removed`);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
+    await api.del(`/partners/${partnerId}/resources/${resource.id}`);
+    toast('ok', `${resource.title} removed`);
+    onSaved();
   }
 
   return (
     <Modal
-      title={resource ? `Modify ${resource.title}` : `Add ${KIND_LABEL[kind].toLowerCase()}`}
+      title={
+        resource
+          ? `Modify ${KIND_LABEL[resource.kind].toLowerCase()} ${resource.title}`
+          : `Add ${KIND_LABEL[kind].toLowerCase()}`
+      }
       onClose={onClose}
       footer={
-        <>
-          {resource && can('gops.partners.delete') && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy}>
-              Remove
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot
+          onCancel={onClose}
+          busy={busy}
+          danger={
+            resource && can('gops.partners.delete')
+              ? {
+                  label: 'Remove',
+                  question: `Remove ${resource.title}? It cannot be undone${resource.attachment ? ' — its file goes with it' : ''}.`,
+                  onConfirm: remove,
+                }
+              : undefined
+          }
+        >
           <button
             className="btn btn-primary"
             onClick={save}
@@ -1381,7 +1358,7 @@ function ResourceModal({
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />

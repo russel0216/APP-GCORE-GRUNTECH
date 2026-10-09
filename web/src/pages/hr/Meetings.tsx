@@ -4,6 +4,7 @@ import { api, downloadBlob, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { useConfirm } from '../../components/Confirm';
 import { PeoplePicker, type Person } from '../../components/PeoplePicker';
 import { MeetLink } from '../../components/MeetLink';
 import { Attachments } from '../../components/Attachments';
@@ -21,6 +22,7 @@ import {
   Field,
   Loading,
   Modal,
+  ModalFoot,
   StatusBadge,
   formatDate,
   formatDateTime,
@@ -309,14 +311,7 @@ export function Meetings() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Meetings</h1>
-          <p>
-            Internal meetings and who is expected at them. Schedule one, add the people, send the
-            invitations when the list is right — and paste the Google Meet link so everyone joins
-            from here.
-          </p>
-        </div>
+        <h1>Meetings</h1>
         <div className="meetings-head-actions">
           <div className="scope-switch" role="group" aria-label="How to show meetings">
             <button
@@ -595,18 +590,15 @@ function MeetingModal({
 
   return (
     <Modal
-      title={editing ? 'Change meeting' : 'New meeting'}
+      title={initial ? `Modify meeting ${initial.number}` : 'New meeting'}
       onClose={onClose}
       wide
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !valid}>
-            {busy ? 'Saving…' : editing ? 'Save changes' : 'Schedule'}
+            {busy ? 'Saving…' : 'Save'}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -713,13 +705,13 @@ export function MeetingDetail() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const toast = useToast();
+  const confirm = useConfirm();
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -774,24 +766,29 @@ export function MeetingDetail() {
     });
   }
 
+  /** Asked through the confirm bar, which shows a refusal and stays open. */
   async function removeInvitee(userId: string) {
-    await run(`remove:${userId}`, async () => {
-      await api.del(`/meetings/${m.id}/invitees/${userId}`);
-    });
+    await api.del(`/meetings/${m.id}/invitees/${userId}`);
+    await load();
   }
 
+  /** Asked through the confirm bar, which shows a refusal and stays open. */
   async function remove() {
-    if (!window.confirm('Delete this meeting? Nobody has been invited yet, so nothing needs telling.')) return;
-    setBusy('delete');
-    try {
-      await api.del(`/meetings/${m.id}`);
-      toast('ok', 'Meeting deleted');
-      navigate('/g-hr/meetings');
-    } catch (err) {
-      setError(err);
-      setBusy(null);
-    }
+    await api.del(`/meetings/${m.id}`);
+    toast('ok', 'Meeting deleted');
+    navigate('/g-hr/meetings');
   }
+
+  const told = m.invitees.filter((i) => i.notifiedAt).length;
+
+  /** Asked through the confirm bar, with the reason everyone invited is told. */
+  async function cancel(reason: string) {
+    await api.post(`/meetings/${m.id}/cancel`, { reason });
+    toast('ok', told ? `Cancelled — ${told} told` : 'Cancelled');
+    await load();
+  }
+
+  const sending = m.canEdit && planned && m.unsentInvitations > 0;
 
   async function saveLink(googleUrl: string) {
     await api.patch(`/meetings/${m.id}`, { googleUrl });
@@ -800,24 +797,41 @@ export function MeetingDetail() {
 
   return (
     <div className="meeting-page">
-      <div className="breadcrumb">
-        <Link to="/g-hr/meetings">Meetings</Link>
-        <span className="sep">›</span>
-        <span className="mono">{m.number}</span>
-      </div>
-
       <RecordHeader
         type="Meeting"
         code={m.number}
         title={m.title}
         status={m.status}
         statusExtra={MEETING_TONES}
+        meta={
+          <>
+            <strong>{whenText(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised
+            by {m.isOrganizer ? 'you' : m.organizer.name}
+            {m.location ? ` · ${m.location}` : ''}
+            {m.job && (
+              <>
+                {' '}
+                · for <Link to={`/g-ops/projects/${m.job.id}?tab=meetings`}>{m.job.number}</Link> {m.job.name}
+              </>
+            )}
+          </>
+        }
         actions={
           <>
             {m.live && m.meetLink && (
-              <a className="btn btn-primary" href={m.meetLink} target="_blank" rel="noopener noreferrer">
+              <a
+                className={`btn${sending ? '' : ' btn-primary'}`}
+                href={m.meetLink}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 Join now
               </a>
+            )}
+            {sending && (
+              <button type="button" className="btn btn-primary" onClick={send} disabled={busy === 'send'}>
+                {busy === 'send' ? 'Sending…' : `Send invitations (${m.unsentInvitations})`}
+              </button>
             )}
             <button
               type="button"
@@ -831,41 +845,41 @@ export function MeetingDetail() {
             >
               Add to calendar (.ics)
             </button>
-            {m.canEdit && planned && (
-              <button type="button" className="btn" onClick={() => setEditing(true)}>
-                Change
-              </button>
-            )}
-            {m.canEdit && planned && m.unsentInvitations > 0 && (
-              <button type="button" className="btn btn-ok" onClick={send} disabled={busy === 'send'}>
-                {busy === 'send' ? 'Sending…' : `Send invitations (${m.unsentInvitations})`}
-              </button>
-            )}
-            {m.canEdit && planned && (
-              <button type="button" className="btn btn-danger" onClick={() => setCancelling(true)}>
-                Cancel meeting
-              </button>
-            )}
-            {canDelete && planned && (
-              <button type="button" className="btn btn-ghost" onClick={remove} disabled={busy === 'delete'}>
-                Delete
-              </button>
-            )}
           </>
         }
+        more={[
+          m.canEdit &&
+            planned && {
+              label: 'Cancel meeting',
+              danger: true,
+              confirm: {
+                title: `Cancel ${m.number}?`,
+                body: told
+                  ? `${told} ${told === 1 ? 'person has' : 'people have'} been invited and will be told, with your reason.`
+                  : 'Nobody has been invited yet, so nobody needs telling — the record stays as cancelled.',
+                confirmLabel: 'Cancel meeting',
+                reason: 'required',
+                reasonLabel: 'Why',
+                // The API wants three characters; the bar waits for them.
+                minReason: 3,
+                onConfirm: (reason) => cancel(reason),
+              },
+            },
+          canDelete &&
+            planned && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${m.number}?`,
+                body: 'Nobody has been invited yet, so nothing needs telling. It cannot be undone.',
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
+        ]}
+        modify={m.canEdit && planned ? () => setEditing(true) : undefined}
+        confirm={confirm}
       />
-
-      <p className="record-head-meta meeting-meta">
-        <strong>{whenText(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised by{' '}
-        {m.isOrganizer ? 'you' : m.organizer.name}
-        {m.location ? ` · ${m.location}` : ''}
-        {m.job && (
-          <>
-            {' '}
-            · for <Link to={`/g-ops/projects/${m.job.id}?tab=meetings`}>{m.job.number}</Link> {m.job.name}
-          </>
-        )}
-      </p>
 
       <ErrorBox error={error} />
 
@@ -1011,12 +1025,20 @@ export function MeetingDetail() {
                         <td>
                           <button
                             type="button"
-                            className="btn btn-ghost btn-sm"
+                            className="btn btn-sm"
                             aria-label={`Remove ${i.user.name}`}
-                            disabled={busy === `remove:${i.userId}`}
-                            onClick={() => removeInvitee(i.userId)}
+                            onClick={() =>
+                              confirm.ask({
+                                title: `Remove ${i.user.name} from ${m.number}?`,
+                                body: i.notifiedAt
+                                  ? 'They were invited, and are told the invitation is withdrawn.'
+                                  : 'They have not been invited yet, so nobody is told.',
+                                confirmLabel: 'Remove',
+                                onConfirm: () => removeInvitee(i.userId),
+                              })
+                            }
                           >
-                            ✕
+                            Remove
                           </button>
                         </td>
                       )}
@@ -1056,17 +1078,6 @@ export function MeetingDetail() {
           onClose={() => setAdding(false)}
           onAdded={() => {
             setAdding(false);
-            void load();
-          }}
-        />
-      )}
-
-      {cancelling && (
-        <CancelModal
-          meeting={m}
-          onClose={() => setCancelling(false)}
-          onCancelled={() => {
-            setCancelling(false);
             void load();
           }}
         />
@@ -1114,14 +1125,11 @@ function AddPeopleModal({
       title="Add people"
       onClose={onClose}
       footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
+        <ModalFoot onCancel={onClose} busy={busy}>
           <button type="button" className="btn btn-primary" onClick={add} disabled={busy || ids.length === 0}>
             {busy ? 'Adding…' : `Add ${ids.length || ''}`.trim()}
           </button>
-        </>
+        </ModalFoot>
       }
     >
       <ErrorBox error={error} />
@@ -1129,72 +1137,6 @@ function AddPeopleModal({
       <div className="meeting-required">
         <Checkbox checked={required} onChange={setRequired} label="Their attendance is required" />
       </div>
-    </Modal>
-  );
-}
-
-function CancelModal({
-  meeting,
-  onClose,
-  onCancelled,
-}: {
-  meeting: Meeting;
-  onClose: () => void;
-  onCancelled: () => void;
-}) {
-  const toast = useToast();
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const told = meeting.invitees.filter((i) => i.notifiedAt).length;
-
-  async function cancel() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.post(`/meetings/${meeting.id}/cancel`, { reason: reason.trim() });
-      toast('ok', told ? `Cancelled — ${told} told` : 'Cancelled');
-      onCancelled();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title="Cancel this meeting"
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Keep it
-          </button>
-          <button
-            type="button"
-            className="btn btn-danger"
-            onClick={cancel}
-            disabled={busy || reason.trim().length < 3}
-          >
-            {busy ? 'Cancelling…' : 'Cancel meeting'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-      <p className="muted">
-        {told
-          ? `${told} ${told === 1 ? 'person has' : 'people have'} been invited and will be told, with your reason.`
-          : 'Nobody has been invited yet, so nobody needs telling — the record stays as cancelled.'}
-      </p>
-      <Field label="Why" required>
-        <textarea
-          rows={3}
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="Customer moved the date, key people unavailable…"
-        />
-      </Field>
     </Modal>
   );
 }
