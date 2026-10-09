@@ -21,6 +21,7 @@ import { globalSearch } from '../src/shared/search';
 import { customerListSummary, customerListWhere } from '../src/routes/customers';
 import { supplierListSummary, supplierListWhere } from '../src/routes/masters';
 import { listQuery } from '../src/http/kit';
+import { SUB_INDUSTRIES } from '../src/shared/subIndustries';
 import bcrypt from 'bcryptjs';
 
 if (env.isProduction) {
@@ -170,13 +171,19 @@ async function main() {
   );
   const subIndustries = await prisma.subIndustry.findMany({ orderBy: { sortOrder: 'asc' } });
   check(
-    'the eleven sub-industries are seeded as system rows, in the owner’s order',
-    subIndustries.filter((s) => s.isSystem).map((s) => s.name).join('|') ===
-      'Enterprise|Hospital|Pharmaceutical|Power and Water|Laguna & Batangas Hubs|Cavite Hubs|Manufacturing|Building|EPC|Infrastructure|Government',
+    'the owner’s twenty-six sub-industries are seeded as active system rows, in his order',
+    subIndustries.filter((s) => s.isSystem && s.isActive).map((s) => s.name).join('|') === SUB_INDUSTRIES.join('|') &&
+      SUB_INDUSTRIES.length === 26,
     subIndustries.map((s) => s.name).join('|'),
   );
-  const hospital = subIndustries.find((s) => s.name === 'Hospital');
-  const manufacturing = subIndustries.find((s) => s.name === 'Manufacturing');
+  check(
+    'the retired eleven are switched off, never deleted',
+    subIndustries.every((s) => !['Enterprise', 'Manufacturing', 'EPC'].includes(s.name) || !s.isActive) &&
+      !subIndustries.some((s) => s.name === 'Hospital' || s.name === 'Building'),
+    subIndustries.filter((s) => !s.isActive).map((s) => s.name).join('|'),
+  );
+  const hospital = subIndustries.find((s) => s.name === 'Healthcare');
+  const manufacturing = subIndustries.find((s) => s.name === 'Industrial and Commercial Machinery');
 
   // ── 4. Real customer import, end to end ────────────────────────────────────
   console.log('\nCustomer import');
@@ -184,13 +191,13 @@ async function main() {
   const subIndustryColumn = customerSpec.columns.find((c) => c.header === 'Sub-industry');
   check('the Sub-industry column is optional', !!subIndustryColumn && !subIndustryColumn.required);
   check('and there is no Industry column any more', !customerSpec.columns.some((c) => c.header === 'Industry'));
-  check('the template example is a name', subIndustryColumn?.example === 'Hospital', subIndustryColumn?.example);
+  check('the template example is a name', subIndustryColumn?.example === 'Healthcare', subIndustryColumn?.example);
 
   // A — a name, and a name in the wrong case: both resolve, both commit.
   const csv = [
     'Name,Code,Sub-industry,Contact Name,Contact Position,Site Name,Site City,Active',
-    `${TAG} Hospital,,Hospital,Maria Santos,Purchasing,Main Plant,Cagayan de Oro,Yes`,
-    `${TAG} Foods,,manufacturing,Juan Cruz,Engineering,Plant 2,Davao,Yes`,
+    `${TAG} Hospital,,healthcare,Maria Santos,Purchasing,Main Plant,Cagayan de Oro,Yes`,
+    `${TAG} Foods,,Industrial and Commercial Machinery,Juan Cruz,Engineering,Plant 2,Davao,Yes`,
   ].join('\n');
 
   const report = await runImport(csv, customerSpec, true, customerWrite);
@@ -210,7 +217,7 @@ async function main() {
   check('and nothing from that file was written', !refused.committed);
   check(
     'the refusal lists the names to use',
-    (refused.rows[0].message ?? '').includes('Hospital') && (refused.rows[0].message ?? '').includes('Government'),
+    (refused.rows[0].message ?? '').includes('Healthcare') && (refused.rows[0].message ?? '').includes('Government'),
     refused.rows[0].message,
   );
   const cannery = await prisma.customer.count({ where: { name: `${TAG} Cannery` } });
@@ -224,7 +231,7 @@ async function main() {
     where: { name: `${TAG} Hospital` },
     include: { contacts: true, sites: true },
   });
-  check('it is filed under Hospital', imported?.subIndustryId === hospital?.id);
+  check('it is filed under Healthcare', imported?.subIndustryId === hospital?.id);
   check('the customer landed', imported !== null);
   check('its contact came with it', imported?.contacts.length === 1, `${imported?.contacts.length ?? 0} contacts`);
   check('the contact is marked primary', imported?.contacts[0]?.isPrimary === true);
@@ -354,7 +361,7 @@ async function main() {
 
   const hit = byName.find((h) => h.kind === 'customer');
   check('the hit deep-links to the record', /^\/g-ops\/customers\/.+/.test(hit?.link ?? ''), hit?.link);
-  check('the hit names its sub-industry', (hit?.subtitle ?? '').includes('Hospital'), hit?.subtitle ?? '');
+  check('the hit names its sub-industry', (hit?.subtitle ?? '').includes('Healthcare'), hit?.subtitle ?? '');
 
   // A project manager has no supplier permission, so suppliers must not leak.
   const pmSearch = await globalSearch(TAG, pm);
@@ -370,9 +377,10 @@ async function main() {
     const LISTC = `${TAG} LISTC`;
     const custQ = (query: Record<string, string>) =>
       listQuery({ query: { search: LISTC, ...query } } as unknown as Parameters<typeof listQuery>[0]);
-    const building = await prisma.subIndustry.findFirstOrThrow({ where: { name: 'Building' } });
+    const building = await prisma.subIndustry.findFirstOrThrow({ where: { name: 'Commercial Building and Land Development' } });
+    const kat = await prisma.industry.findFirstOrThrow({ where: { code: 'KAT' } });
     const cHi = await prisma.customer.create({
-      data: { code: `${TAG}-LC1`, name: `${LISTC} Hospital`, subIndustryId: hospital!.id, createdById: admin!.id, createdAt: new Date('2026-03-01T00:30:00+08:00') },
+      data: { code: `${TAG}-LC1`, name: `${LISTC} Hospital`, subIndustryId: hospital!.id, industryId: kat.id, createdById: admin!.id, createdAt: new Date('2026-03-01T00:30:00+08:00') },
     });
     await prisma.customer.create({ data: { code: `${TAG}-LC2`, name: `${LISTC} Builder`, subIndustryId: building.id, isActive: false } });
     await prisma.customer.create({ data: { code: `${TAG}-LC3`, name: `${LISTC} Nobody filed` } });
@@ -390,7 +398,7 @@ async function main() {
     );
     check(
       'the choices are the sub-industries by name, Not stated last and only while somebody is',
-      sum.tabs[sum.tabs.length - 1]?.value === 'none' && sum.tabs.some((t) => t.value === hospital!.id && t.label === 'Hospital'),
+      sum.tabs[sum.tabs.length - 1]?.value === 'none' && sum.tabs.some((t) => t.value === hospital!.id && t.label === 'Healthcare'),
       JSON.stringify(sum.tabs),
     );
     check('the summary counts the inactive', sum.count === 3 && sum.inactive === 1, JSON.stringify(sum));
@@ -410,6 +418,10 @@ async function main() {
         (await count({ scope: 'mine' })) === 1,
     );
     check('?ids= selects the rows ticked', (await count({ ids: cHi.id })) === 1);
+    check(
+      'the Team filter picks a team’s customers, and "none" the ones still open',
+      (await count({ team: kat.id })) === 1 && (await count({ team: 'none' })) === 2,
+    );
     let refusedC = 0;
     for (const bad of [{ isActive: 'maybe' }, { openQuote: 'perhaps' }, { createdFrom: '2026/03/01' }]) {
       try {

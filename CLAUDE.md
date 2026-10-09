@@ -803,17 +803,28 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **A customer carries no industry any more — a SUB-INDUSTRY, optional**
   (2026-10-08, the owner's call: "remove the customer industry; later they
   manually input which sub-industry the customer falls on"). `SubIndustry`
-  (`shared/subIndustries.ts`: `SUB_INDUSTRIES`, the owner's eleven —
-  Enterprise, Hospital, Pharmaceutical, Power and Water, Laguna & Batangas
-  Hubs, Cavite Hubs, Manufacturing, Building, EPC, Infrastructure,
-  Government — seeded as `isSystem` rows, case-blind one per spelling;
+  (`shared/subIndustries.ts`: `SUB_INDUSTRIES`, **the owner's twenty-six
+  since 2026-10-09** — Commercial Building and Land Development, Aerospace,
+  Agriculture … Water Utilities, in his order, replacing the eleven of the
+  day before: `RENAMED` moves Hospital → Healthcare and Building →
+  Commercial Building and Land Development in place, keeping the row and
+  its customers, and `RETIRED` switches the other seven off, never deleting
+  them — seeded as `isSystem` rows, case-blind one per spelling;
   `/reference/sub-industries`, `admin.categories.*` to change, anyone
   signed in to read) is `Customer.subIndustryId`, nullable: the form offers
   "— not stated —", a blank import cell is none, the quick-adds (the lead
   form, `CustomerPicker`, the installed-base register) file a customer by
-  name alone, and `POST /customers` takes no `industryId`. `Customer.
-  industryId` stays on the rows that carried one and is never written
-  again. Reclassifying never regenerates the customer code — identifiers do
+  name alone. **A customer also has a TEAM, open until somebody sets it**
+  (2026-10-09, the owner's call: "a Team who will handle the Customer
+  (KAT, UIT, HIT, SIT, GIB) … later user will categorize"): `Customer.
+  industryId` is the Industry (team) master again, nullable, written by
+  `POST`/`PATCH /customers` (`activeTeam()` refuses an inactive one), the
+  form's "Team" select ("— open —"), the list's Team column (code, "Open"
+  while none) and `?team=` filter (an id or `none`), and Customer 360's
+  Company card. Nothing classifies a customer automatically — the owner
+  asked for an online classification where possible, and it is not
+  possible from the app, so both fields stay open for hand editing.
+  Reclassifying never regenerates the customer code — identifiers do
   not move under the quotations and invoices that print them. A lead's
   sub-industry is its customer's; do not add one to Lead, it would be a
   second copy that drifts. Sales Analytics' "By industry" is **"By

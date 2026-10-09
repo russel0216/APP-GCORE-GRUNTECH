@@ -84,6 +84,8 @@ export function customerListWhere(
   if (project !== null) and.push(project ? { jobs: { some: {} } } : { jobs: { none: {} } });
   const ids = idsFilter(f.ids);
   if (ids) and.push({ id: { in: ids } });
+  // The team who handles them (2026-10-09, the owner's call): an Industry row's id, or 'none'.
+  if (f.team) and.push(f.team === 'none' ? { industryId: null } : { industryId: String(f.team) });
 
   const base: Prisma.CustomerWhereInput = and.length ? { AND: and } : {};
   // The sub-industry is a reference row; the filter takes its id, or 'none'
@@ -140,6 +142,7 @@ customerRoutes.get(
         include: {
           createdBy: { select: { id: true, name: true } },
           subIndustry: { select: { id: true, name: true } },
+          industry: { select: { id: true, code: true, name: true } },
           _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
@@ -304,6 +307,7 @@ customerRoutes.get(
       include: {
         createdBy: { select: { id: true, name: true } },
         subIndustry: { select: { id: true, name: true } },
+        industry: { select: { id: true, code: true, name: true } },
         contacts: { orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] },
         sites: {
           orderBy: { name: 'asc' },
@@ -568,6 +572,13 @@ async function activeSubIndustry(tx: Prisma.TransactionClient, subIndustryId: st
   return row;
 }
 
+/** The team who handles a customer (KAT, HIT, UIT, GIB, SIT — an Industry row), when one is set, must be active. */
+async function activeTeam(tx: Prisma.TransactionClient, industryId: string) {
+  const row = await tx.industry.findUnique({ where: { id: industryId } });
+  if (!row || !row.isActive) throw badRequest('Choose an active team');
+  return row;
+}
+
 // ── Create / update / delete ─────────────────────────────────────────────────
 
 const customerSchema = z.object({
@@ -579,6 +590,8 @@ const customerSchema = z.object({
   // is typed in by hand, later. The customer's industry — the sales team's
   // list — is no longer taken here at all.
   subIndustryId: z.string().optional().nullable(),
+  /** The team who handles them (2026-10-09, the owner's call) — open until somebody sets it. */
+  industryId: z.string().optional().nullable(),
   paymentTerms: z.string().trim().optional().nullable(),
   creditLimit: z.number().nonnegative().optional().nullable(),
   phone: z.string().trim().optional().nullable(),
@@ -597,6 +610,7 @@ customerRoutes.post(
 
     const { customer, subIndustry } = await prisma.$transaction(async (tx) => {
       const subIndustry = body.subIndustryId ? await activeSubIndustry(tx, body.subIndustryId) : null;
+      const team = body.industryId ? await activeTeam(tx, body.industryId) : null;
       // Only consume a number when none was supplied — an operator pasting
       // their own code should not silently burn a sequence value.
       const code = body.code || (await nextNumber('customer', tx, { ownerId: me.id }));
@@ -610,6 +624,7 @@ customerRoutes.post(
           legalName: body.legalName || null,
           tin: body.tin || null,
           subIndustryId: subIndustry?.id ?? null,
+          industryId: team?.id ?? null,
           paymentTerms: body.paymentTerms || null,
           creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null,
           phone: body.phone || null,
@@ -651,6 +666,7 @@ customerRoutes.patch(
     // Reclassifying never regenerates the code — identifiers do not move under
     // the quotations and invoices that carry them. The audit row records it.
     if (body.subIndustryId) await activeSubIndustry(prisma, body.subIndustryId);
+    if (body.industryId) await activeTeam(prisma, body.industryId);
 
     const customer = await prisma.customer.update({
       where: { id: req.params.id },
@@ -660,6 +676,7 @@ customerRoutes.patch(
         ...(body.legalName !== undefined ? { legalName: body.legalName || null } : {}),
         ...(body.tin !== undefined ? { tin: body.tin || null } : {}),
         ...(body.subIndustryId !== undefined ? { subIndustryId: body.subIndustryId || null } : {}),
+        ...(body.industryId !== undefined ? { industryId: body.industryId || null } : {}),
         ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
         ...(body.creditLimit !== undefined
           ? { creditLimit: body.creditLimit != null ? new Prisma.Decimal(body.creditLimit) : null }

@@ -6,7 +6,7 @@ import { DataList, type BulkContext, type Column, type FilterDef } from '../../c
 import { Stat } from '../../components/charts';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Modal, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
-import type { SubIndustry } from './Reference';
+import type { Industry, SubIndustry } from './Reference';
 import { NumberInput } from '../../components/NumberInput';
 
 export interface CustomerRow {
@@ -18,6 +18,9 @@ export interface CustomerRow {
   /** Where in the market the customer sits (2026-10-08) — optional, typed in by hand. */
   subIndustryId: string | null;
   subIndustry: { id: string; name: string } | null;
+  /** The team that handles the customer (KAT, HIT, UIT, GIB, SIT) — open until somebody sets it (2026-10-09). */
+  industryId: string | null;
+  industry: { id: string; code: string; name: string } | null;
   paymentTerms: string | null;
   creditLimit: number | null;
   phone: string | null;
@@ -52,6 +55,24 @@ function useSubIndustries(activeOnly = false): SubIndustry[] | null {
       .catch(() => setRows([]));
   }, [activeOnly]);
   return rows;
+}
+
+/** The teams (the Industry master), loaded once per screen; anyone signed in may read it. */
+function useTeams(): Industry[] | null {
+  const [rows, setRows] = useState<Industry[] | null>(null);
+  useEffect(() => {
+    api
+      .get<Industry[]>('/reference/industries')
+      .then(setRows)
+      .catch(() => setRows([]));
+  }, []);
+  return rows;
+}
+
+/** The team's code with its name in the title, or a faint "Open" — the customer is not yet handed to a team. */
+export function TeamLabel({ industry }: { industry: CustomerRow['industry'] }) {
+  if (!industry) return <span className="faint">Open</span>;
+  return <span title={industry.name}>{industry.code}</span>;
 }
 
 /** The sub-industry's name, or a faint "Not stated" — never a blank cell. */
@@ -190,6 +211,7 @@ export function Customers() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const subIndustries = useSubIndustries();
+  const teams = useTeams();
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
   const [reload, setReload] = useState(0);
@@ -217,6 +239,7 @@ export function Customers() {
       ),
     },
     { key: 'subIndustry', label: 'Sub-industry', render: (c) => <SubIndustryLabel subIndustry={c.subIndustry} /> },
+    { key: 'team', label: 'Team', width: '90px', render: (c) => <TeamLabel industry={c.industry} /> },
     {
       key: 'isActive',
       label: 'Status',
@@ -277,6 +300,14 @@ export function Customers() {
       options: [
         ...(subIndustries ?? []).filter((i) => i.isActive).map((i) => ({ value: i.id, label: i.name })),
         { value: 'none', label: 'Not stated' },
+      ],
+    },
+    {
+      key: 'team',
+      label: 'Team',
+      options: [
+        ...(teams ?? []).filter((t) => t.isActive).map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` })),
+        { value: 'none', label: 'Open (no team yet)' },
       ],
     },
     {
@@ -400,6 +431,7 @@ export function CustomerForm({
 }) {
   const toast = useToast();
   const allSubIndustries = useSubIndustries();
+  const allTeams = useTeams();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState({
@@ -408,6 +440,7 @@ export function CustomerForm({
     legalName: customer?.legalName ?? '',
     tin: customer?.tin ?? '',
     subIndustryId: customer?.subIndustryId ?? '',
+    industryId: customer?.industryId ?? '',
     paymentTerms: customer?.paymentTerms ?? '',
     creditLimit: customer?.creditLimit?.toString() ?? '',
     phone: customer?.phone ?? '',
@@ -439,6 +472,7 @@ export function CustomerForm({
   // has even if it has since been deactivated — otherwise the select would
   // show a blank and a save would silently reclassify.
   const subIndustries = (allSubIndustries ?? []).filter((i) => i.isActive || i.id === form.subIndustryId);
+  const teams = (allTeams ?? []).filter((t) => t.isActive || t.id === form.industryId);
 
   async function save() {
     setBusy(true);
@@ -450,6 +484,7 @@ export function CustomerForm({
         legalName: form.legalName || null,
         tin: form.tin || null,
         subIndustryId: form.subIndustryId || null,
+        industryId: form.industryId || null,
         paymentTerms: form.paymentTerms || null,
         creditLimit: form.creditLimit === '' ? null : Number(form.creditLimit),
         phone: form.phone || null,
@@ -498,13 +533,24 @@ export function CustomerForm({
         <Field label="Code" hint="Auto-generated — override it if you have your own scheme">
           <input className="mono" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} />
         </Field>
-        <Field label="Sub-industry" hint="Where in the market they sit — Hospital, Manufacturing, Government… Leave it until you know.">
+        <Field label="Sub-industry" hint="Where in the market they sit — Healthcare, Government, Food and Beverage… Leave it until you know.">
           <select value={form.subIndustryId} onChange={(e) => setForm({ ...form, subIndustryId: e.target.value })}>
             <option value="">— not stated —</option>
             {subIndustries.map((i) => (
               <option key={i.id} value={i.id}>
                 {i.name}
                 {i.isActive ? '' : ' (inactive)'}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Team" hint="Who handles this customer — KAT, HIT, UIT, GIB or SIT. Leave it open until it is decided.">
+          <select value={form.industryId} onChange={(e) => setForm({ ...form, industryId: e.target.value })}>
+            <option value="">— open —</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+                {t.isActive ? '' : ' (inactive)'}
               </option>
             ))}
           </select>

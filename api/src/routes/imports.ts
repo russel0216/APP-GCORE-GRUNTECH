@@ -69,8 +69,8 @@ export const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
     { header: 'TIN', example: '000-123-456-000' },
     {
       header: 'Sub-industry',
-      example: 'Hospital',
-      hint: 'Enterprise, Hospital, Pharmaceutical, Power and Water, Laguna & Batangas Hubs, Cavite Hubs, Manufacturing, Building, EPC, Infrastructure or Government — or blank',
+      example: 'Healthcare',
+      hint: 'One of the sub-industries under Admin › Categories (Healthcare, Pharmaceutical, Government, Food and Beverage, Mining…) — or blank',
     },
     { header: 'Payment Terms', example: '30 days' },
     { header: 'Credit Limit', example: '500000' },
