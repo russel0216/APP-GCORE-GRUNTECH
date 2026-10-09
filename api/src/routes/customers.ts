@@ -189,6 +189,7 @@ customerRoutes.get(
         where,
         include: {
           subIndustry: { select: { name: true } },
+          industry: { select: { code: true } },
           createdBy: { select: { name: true } },
           _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
         },
@@ -202,6 +203,7 @@ customerRoutes.get(
     const filters = [
       q.search ? `search "${q.search}"` : null,
       f.subIndustry ? `sub-industry ${subIndustryName ?? f.subIndustry}` : null,
+      f.team === 'none' ? 'team open' : f.team ? `team ${rows.find((c) => c.industryId === f.team)?.industry?.code ?? f.team}` : null,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
       f.createdById ? 'added by one person' : null,
       f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
@@ -218,13 +220,14 @@ customerRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Customer', 'Sub-industry', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'],
-          widths: [1.6, 2.6, 1.3, 0.9, 0.7, 1, 0.9, 1.2, 1],
-          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
+          head: ['Code', 'Customer', 'Sub-industry', 'Team', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'],
+          widths: [1.6, 2.6, 1.3, 0.7, 0.9, 0.7, 1, 0.9, 1.2, 1],
+          align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
           rows: rows.map((c) => [
             c.code,
             { title: c.name, body: c.legalName && c.legalName !== c.name ? c.legalName : undefined },
             c.subIndustry?.name ?? '—',
+            c.industry?.code ?? 'Open',
             String(c._count.contacts),
             String(c._count.sites),
             String(c._count.quotations),
