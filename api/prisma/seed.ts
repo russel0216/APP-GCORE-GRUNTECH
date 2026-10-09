@@ -6,6 +6,7 @@ import { backfillPositions } from '../src/shared/plantilla';
 import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
+import { migrateCostingMargins } from '../src/shared/costingLegacy';
 import { seedOwnerGroups, seedQuotationGroups } from '../src/shared/quotationGroups';
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { TEAMS, retireFirstIndustries } from '../src/shared/team';
@@ -175,6 +176,50 @@ const ROLES: RoleSeed[] = [
     ],
   },
   {
+    // The costing's reviewer (2026-10-09, the owner's route: an engineer
+    // creates › Technical Manager reviews › Team Leader approves › CTG second
+    // approval). Reads every costing — the cost and the margin are what they
+    // check — and changes nothing. Assign it in Admin › Users; until somebody
+    // holds it, costings stall at step 1 and audit-workflows.ts says so.
+    key: 'technical_manager',
+    name: 'Technical Manager',
+    description: 'Reviews a costing before the team leader — the first signature on the costing route',
+    only: [
+      'gops.dashboard.view_all',
+      'gops.costing.view_all',
+      'gops.costing.export',
+      'gops.quotations.view_all',
+      'gops.quote_archive.view_all',
+      'gops.customers.view_all',
+      'gops.projects.view_all',
+      'gops.plans.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+    ],
+  },
+  {
+    // The costing's second approval, after the team leader. "CTG" is the
+    // owner's name for the signatory (2026-10-09); rename the role in Admin ›
+    // Roles if it stands for somebody's initials — the key stays.
+    key: 'ctg',
+    name: 'CTG',
+    description: 'The second approval on the costing route, after the team leader',
+    only: [
+      'gops.dashboard.view_all',
+      'gops.costing.view_all',
+      'gops.costing.export',
+      'gops.quotations.view_all',
+      'gops.quote_archive.view_all',
+      'gops.customers.view_all',
+      'gops.projects.view_all',
+      'gops.plans.view_all',
+      ...VIEW_OWN_SELF('gfin', 'expenses'),
+      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
+      ...VIEW_OWN_SELF('ghr', 'meetings'),
+    ],
+  },
+  {
     key: 'project_manager',
     name: 'Project Manager',
     description: 'Runs projects — budget, procurement requests, progress and billing',
@@ -217,10 +262,13 @@ const ROLES: RoleSeed[] = [
   {
     key: 'project_engineer',
     name: 'Project Engineer',
-    description: 'Executes the work: progress reports, purchase requests, plans',
+    description: 'Executes the work: progress reports, purchase requests, plans — and costs the work (the costing route starts with an engineer)',
     only: [
       'gops.projects.view_all',
       'gops.plans.view_all',
+      // The costing route's creator (2026-10-09, the owner's call): an
+      // engineer raises and edits their own costings.
+      ...VIEW_OWN_SELF('gops', 'costing'),
       ...VIEW_OWN_SELF('gops', 'progress_billing'),
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
       ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
@@ -625,9 +673,20 @@ const WORKFLOWS: WorkflowSeed[] = [
     // DEACTIVATE this workflow (Admin › Approval Workflows) rather than
     // deleting it — a deleted seeded workflow is recreated on the next seed,
     // a deactivated one is left alone, and the page returns to "Mark final".
+    // The costing route (2026-10-09, the owner's call: "creator engineer ›
+    // reviewer technical manager › approval team leader › 2nd approval
+    // CTG"). Step 2 is a SUPERVISOR step — the author's "Reports to" —
+    // falling back to the sales managers, as the quotation's and the sales
+    // order's Team Leader steps do; audit-workflows.ts checks the fallback
+    // is held. "Costing — management approval" (one step, the executive
+    // role) is RETIRED below: a costing pending on it finishes on it.
     documentType: 'costing',
-    name: 'Costing — management approval',
-    steps: [{ sequence: 1, name: 'Management approval', approverType: 'ROLE', roleKey: 'executive' }],
+    name: 'Costing — technical manager, team leader, CTG',
+    steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 3, name: 'CTG', approverType: 'ROLE', roleKey: 'ctg' },
+    ],
   },
   {
     // The salesperson's own supervisor ("Reports to" on their login) decides
@@ -970,6 +1029,9 @@ async function main() {
     // new orders; an order already pending on one finishes on it.
     'Sales Order — sales manager',
     'Sales Order — with the CEO',
+    // The costing's one-step management approval gave way to the owner's
+    // three-signature route (2026-10-09).
+    'Costing — management approval',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });
@@ -1075,6 +1137,13 @@ async function main() {
     // 2026-10-07) are closed, so they do not read as cash finance still owes.
     const closedIncreases = await closeLegacyBudgetIncreases();
     if (closedIncreases) console.log(`  · Closed ${closedIncreases} budget request(s) approved as budget increases under the old rule`);
+    // Costings priced with a markup, a contingency % or a discount (the rule
+    // before 2026-10-09) carry over to the margin rule; the contract value
+    // never moves.
+    const margins = await migrateCostingMargins();
+    if (margins.costings) {
+      console.log(`  · Carried ${margins.costings} costing(s) over to the margin rule (${margins.contingencyLines} contingency line(s) written)`);
+    }
     if (withdrawn.length) {
       console.log(
         `  · Withdrew ${withdrawn.length} approval request(s) left open on quotation revisions no longer awaiting approval: ${withdrawn.join(', ')}`,
@@ -1147,12 +1216,16 @@ async function main() {
   // The five buckets every costing, budget and cost-ledger row is grouped by
   // (model §5.1). Marked isSystem so they cannot be deleted out from under the
   // ledger; the labels stay editable.
+  // Contingency is the SIXTH bucket (2026-10-09, the owner's call): a
+  // contingency is a cost line the estimate prices like any other, not a
+  // percentage in the summary's foot.
   for (const [i, c] of [
     { code: 'MAT', name: 'Materials' },
     { code: 'EQP', name: 'Equipment' },
     { code: 'LAB', name: 'Labor' },
     { code: 'SUB', name: 'Subcontractor' },
     { code: 'IND', name: 'Indirect Cost' },
+    { code: 'CON', name: 'Contingency' },
   ].entries()) {
     await prisma.costCategory.upsert({
       where: { code: c.code },
@@ -1160,7 +1233,7 @@ async function main() {
       update: { isSystem: true },
     });
   }
-  console.log('  ✓ Cost categories (5)');
+  console.log('  ✓ Cost categories (6)');
 
   // ── Item categories ────────────────────────────────────────────────────────
   // A starting tree for an industrial gas and mechanical contractor. Fully

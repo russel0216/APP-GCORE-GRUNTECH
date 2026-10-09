@@ -907,9 +907,11 @@ async function main() {
   const note = await prisma.notification.findFirst({
     where: { userId: seller.id, title: { contains: 'Survey the plant room' } },
   });
+  // Since 2026-10-08 an activity has a page of its own, and every bell about
+  // it lands there (`activityLink()`); the page shows its day.
   check(
-    'the assignee is sent to the activity itself, on its Manila day',
-    !!note?.link?.startsWith(`/g-ops/calendar?activity=${activityId}`) && note.link.includes('date=2026-10-03'),
+    "the assignee is sent to the activity's own page",
+    note?.link === `/g-ops/calendar/activities/${activityId}`,
     note?.link ?? 'no notification',
   );
   const forQuote = await http(managerToken, 'GET', `/activities?quotationId=${sellersOwn.id}`);

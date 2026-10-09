@@ -25,7 +25,9 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   budget_request: ['project_manager', 'project_engineer'],
   quotation: ['sales', 'sales_manager'],
   sales_order: ['sales', 'sales_manager'],
-  costing: ['sales', 'sales_manager', 'project_manager'],
+  // The costing route starts with an engineer (2026-10-09); sales and the
+  // project managers still cost work too.
+  costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager'],
   purchase_order: ['procurement'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a

@@ -19,7 +19,8 @@ import {
   PdfButton,
 } from '../../components/ui';
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
-import { CostPanelBlock } from './Quotations';
+import { CostPanelBlock, type Item } from './Quotations';
+import { AppendQuotePanel, linesFromItems } from './QuotationEditor';
 import {
   DiscountCalculator,
   ProductCells,
@@ -162,6 +163,8 @@ export function SalesOrders() {
   const navigate = useNavigate();
   const { me, can } = useAuth();
   const [owners, setOwners] = useState<{ value: string; label: string }[]>([]);
+  /** "+ New sales order": which quotation it books, asked in the page (2026-10-09, the owner's call). */
+  const [picking, setPicking] = useState(false);
 
   const seesAll = can('gops.sales_orders.view_all');
   // Whoever may edit sales orders opens on their own; a reader — finance,
@@ -280,6 +283,8 @@ export function SalesOrders() {
         </div>
       </div>
 
+      {picking && <PickQuotationPanel onClose={() => setPicking(false)} onPick={(qid) => navigate(`/g-ops/quotations/${qid}?order=1`)} />}
+
       <DataList<SalesOrderListRow>
         listKey="sales-orders"
         endpoint="/sales-orders"
@@ -290,7 +295,14 @@ export function SalesOrders() {
         searchPlaceholder="Search number, PO, SI/DR, customer, quotation…"
         onRowClick={(r) => navigate(`/g-ops/sales-orders/${r.id}`)}
         emptyTitle="Nothing booked yet"
-        emptyHint="Open a quotation and press Create Sales Order — that is where one starts."
+        emptyHint="An order books a quotation: + New sales order asks which, or open the quotation and press Create Sales Order."
+        actions={
+          can('gops.sales_orders.create') ? (
+            <button className="btn btn-primary btn-sm" aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
+              + New sales order
+            </button>
+          ) : undefined
+        }
         filters={filters}
         printPath="/api/sales-orders/pdf"
         selectable
@@ -321,6 +333,84 @@ export function SalesOrders() {
       />
     </div>
   );
+}
+
+/**
+ * "+ New sales order" (2026-10-09, the owner's call): an order is raised FROM
+ * a quotation, so the button asks which — the quotation list's own search, in
+ * the page, in the Append quote panel's dress — and opens that quotation with
+ * its Create Sales Order panel already open (`?order=1`). No second create
+ * path: the panel on the quotation page is still the one way an order starts.
+ */
+function PickQuotationPanel({ onClose, onPick }: { onClose: () => void; onPick: (quotationId: string) => void }) {
+  const [text, setText] = useState('');
+  const [rows, setRows] = useState<QuotationPick[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      api
+        .get<{ rows: QuotationPick[] }>(`/quotations${qs({ search: text.trim() || undefined, pageSize: 8 })}`)
+        .then((r) => setRows(r.rows))
+        .catch(setError);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [text]);
+
+  return (
+    <section className="qe-append so-pick" aria-label="New sales order">
+      <div className="row qe-append-head">
+        <label htmlFor="so-pick-find" className="qe-append-title">
+          Which quotation does the order book?
+        </label>
+        <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <ErrorBox error={error} />
+      <input
+        id="so-pick-find"
+        autoFocus
+        placeholder="Find by number, name or customer"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose();
+        }}
+      />
+      {rows === null ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <p className="faint">No quotation matches.</p>
+      ) : (
+        <ul className="qe-append-list">
+          {rows.map((q) => (
+            <li key={q.id}>
+              <button type="button" className="qe-append-item" onClick={() => onPick(q.id)}>
+                <span className="mono">{q.number}</span>
+                <span className="qe-append-name">{q.subject}</span>
+                <span className="faint">
+                  {q.customer.name}
+                  {q.latest ? ` · ${formatMoney(q.latest.total)}` : ''}
+                  {q.stageLabel ? ` · ${q.stageLabel}` : ''}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** What the picker needs of a quotation list row. */
+interface QuotationPick {
+  id: string;
+  number: string;
+  subject: string;
+  customer: { name: string };
+  latest: { revision: number; total: number } | null;
+  stageLabel?: string;
 }
 
 // ── One order ────────────────────────────────────────────────────────────────
@@ -745,6 +835,8 @@ export function SalesOrderEditor() {
   const [groups, setGroups] = useState<KnownGroup[]>([]);
   /** SCORO's discount calculator, open under the totals. */
   const [calcOpen, setCalcOpen] = useState(false);
+  /** "+ Append quote": another quotation's lines, as on the quotation editor. */
+  const [appendOpen, setAppendOpen] = useState(false);
   const [contacts, setContacts] = useState<Option[]>([]);
   const [header, setHeader] = useState<SoHeader>({
     orderDate: '',
@@ -826,6 +918,24 @@ export function SalesOrderEditor() {
   function removeLine(key: string) {
     setLines((ls) => (ls.length === 1 ? [blankLine()] : ls.filter((l) => l.key !== key)));
     setDirty(true);
+  }
+  /**
+   * Another quotation's lines, added under these (2026-10-09, the owner's
+   * call) — the quotation editor's rule: empty lines give way to them, and
+   * the keyboard lands on the first line appended. An appended line has no
+   * saved id, so it books nothing of this order's quotation.
+   */
+  function appendLines(items: Item[], from: string) {
+    setAppendOpen(false);
+    if (!items.length) {
+      setError(new Error(`${from} has no lines to append`));
+      return;
+    }
+    const added = linesFromItems(items);
+    setLines((ls) => [...ls.filter((l) => !isBlank(l)), ...added]);
+    setDirty(true);
+    setTimeout(() => document.getElementById(lineField(added[0].key, 'title'))?.focus(), 0);
+    toast('ok', `Appended ${added.length} line${added.length === 1 ? '' : 's'} from ${from}`);
   }
   function moveLine(key: string, by: -1 | 1) {
     setLines((ls) => {
@@ -1252,7 +1362,11 @@ export function SalesOrderEditor() {
           <button type="button" id="so-add-line" className="btn btn-sm" onClick={() => addLine()}>
             + Add row
           </button>
+          <button type="button" className="btn btn-sm" aria-expanded={appendOpen} onClick={() => setAppendOpen((v) => !v)}>
+            + Append quote
+          </button>
         </div>
+        {appendOpen && <AppendQuotePanel excludeId={order?.quotation.id} onClose={() => setAppendOpen(false)} onPick={appendLines} />}
         <p className="faint sales-hint">
           Type a product and pick from what was quoted before. Enter on the last line’s price adds a line; empty lines are
           left out when you save. A line kept from the quotation keeps what it books of it; a new line books nothing.

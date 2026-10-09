@@ -19,8 +19,8 @@ import { can, canEditRecord, resolveUser } from '../permissions/resolve';
 import { notify } from '../shared/notifications';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
-import { approvalSignoffs, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
-import { costingFigures, lineAmount, lineCodes, planTasks } from '../shared/costingMath';
+import { approvalSlots, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
+import { costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
 import { renderDocument, formatMoney, formatAmount, type PdfGanttGroup, type PdfRow, type PdfSection, type Signatory } from '../shared/pdf';
 
 /**
@@ -54,19 +54,11 @@ function num(v: Prisma.Decimal | null | undefined): number {
 type Tx = Prisma.TransactionClient;
 
 /** The costing's stored rates, as costingMath takes them. */
-function ratesOf(c: {
-  markupPct: Prisma.Decimal;
-  contingencyPct: Prisma.Decimal;
-  discountAmount: Prisma.Decimal;
-  vatRate: Prisma.Decimal;
-}) {
-  return {
-    markupPct: c.markupPct.toString(),
-    contingencyPct: c.contingencyPct.toString(),
-    discountAmount: c.discountAmount.toString(),
-    vatRate: c.vatRate.toString(),
-  };
+function ratesOf(c: { marginPct: Prisma.Decimal; vatRate: Prisma.Decimal }) {
+  return { marginPct: c.marginPct.toString(), vatRate: c.vatRate.toString() };
 }
+
+const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /** Recomputes totals from the lines and rewrites the stored figures. */
 async function recalc(costingId: string, tx: Tx = prisma) {
@@ -130,14 +122,14 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
   const totalCost = num(costing.totalCost as Prisma.Decimal);
   const contractValue = num(costing.contractValue as Prisma.Decimal);
   const rates = {
-    markupPct: num(costing.markupPct as Prisma.Decimal),
-    contingencyPct: num(costing.contingencyPct as Prisma.Decimal),
-    discountAmount: num(costing.discountAmount as Prisma.Decimal),
+    marginPct: num(costing.marginPct as Prisma.Decimal),
     vatRate: num(costing.vatRate as Prisma.Decimal),
   };
-  // The summary's middle rows, worked from the stored cost with the same
-  // arithmetic the stored contract value came from (one "line" of the cost).
-  const f = costingFigures([{ quantity: 1, unitCost: totalCost }], rates);
+  // The summary's figures come from the STORED cost and contract value — the
+  // commercial facts — never re-derived from the rate: a costing carried over
+  // from the markup rule holds its margin to six decimals, which reproduces
+  // its contract value only to within a few centavos.
+  const vatAmount = vatOn(contractValue, rates.vatRate);
 
   // Codes run within each category, in the order the sheet shows the lines.
   const ordered = [...lines].sort(
@@ -157,11 +149,10 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
     ...rates,
     totalCost,
     contractValue,
-    markupAmount: f.markupAmount,
-    contingencyAmount: f.contingencyAmount,
-    vatAmount: f.vatAmount,
-    grandTotal: f.grandTotal,
-    grossProfit: contractValue - totalCost,
+    marginAmount: round2(contractValue - totalCost),
+    vatAmount,
+    grandTotal: round2(contractValue + vatAmount),
+    grossProfit: round2(contractValue - totalCost),
     // Margin is profit over the contract value, not over cost — the two differ
     // and only one of them is what the business calls margin (model §5.3).
     grossMarginPct: contractValue > 0 ? (contractValue - totalCost) / contractValue : 0,
@@ -540,14 +531,17 @@ const templateSectionSchema = z.object({
     .array(z.object({ name: z.string(), startDay: z.number().int().nullable().default(null), durationDays: z.number().int().min(0).default(0) }))
     .default([]),
 });
-const templateBodySchema = z.object({
-  systemUnit: z.string().nullable().default(null),
-  markupPct: z.number().default(0),
-  contingencyPct: z.number().default(0),
-  terms: z.string().nullable().default(null),
-  lines: z.array(templateLineSchema).default([]),
-  sections: z.array(templateSectionSchema).default([]),
-});
+const templateBodySchema = z
+  .object({
+    systemUnit: z.string().nullable().default(null),
+    /** The margin on the price (2026-10-09); a template saved before carries a markup, read as the margin it amounts to. */
+    marginPct: z.number().optional(),
+    markupPct: z.number().optional(),
+    terms: z.string().nullable().default(null),
+    lines: z.array(templateLineSchema).default([]),
+    sections: z.array(templateSectionSchema).default([]),
+  })
+  .transform(({ marginPct, markupPct, ...rest }) => ({ ...rest, marginPct: marginPct ?? marginOfMarkup(markupPct ?? 0) }));
 type TemplateBody = z.infer<typeof templateBodySchema>;
 
 function readTemplateBody(json: Prisma.JsonValue): TemplateBody {
@@ -622,8 +616,7 @@ const templateSchema = z.object({
   sheet: z
     .object({
       systemUnit: z.string().max(200).optional().nullable(),
-      markupPct: z.number().min(0).max(10).optional(),
-      contingencyPct: z.number().min(0).max(5).optional(),
+      marginPct: z.number().gt(-0.95).lt(0.95).optional(),
       terms: z.string().max(20000).optional().nullable(),
       lines: z.array(z.lazy(() => sheetLineSchema)).max(1000).default([]),
       sections: z.array(z.lazy(() => sheetSectionSchema)).max(100).default([]),
@@ -655,8 +648,7 @@ costingRoutes.post(
       if (onlyOwn(me) && source.ownerId !== me.id) throw forbidden('This costing belongs to someone else');
       content = {
         systemUnit: source.systemUnit,
-        markupPct: num(source.markupPct),
-        contingencyPct: num(source.contingencyPct),
+        marginPct: num(source.marginPct),
         terms: source.terms,
         lines: source.lines.map((l) => ({
           category: codeOf.get(l.costCategoryId) ?? '',
@@ -680,8 +672,7 @@ costingRoutes.post(
       const sheet = body.sheet;
       content = {
         systemUnit: sheet.systemUnit ?? null,
-        markupPct: sheet.markupPct ?? 0,
-        contingencyPct: sheet.contingencyPct ?? 0,
+        marginPct: sheet.marginPct ?? 0,
         terms: sheet.terms ?? null,
         lines: sheet.lines.map((l) => ({
           category: codeOf.get(l.costCategoryId) ?? '',
@@ -907,9 +898,8 @@ const headerSchema = z.object({
   siteId: z.string().optional().nullable(),
   /** The lead this costing answers. Set on creation from "Start costing". */
   leadId: z.string().optional().nullable(),
-  markupPct: z.number().min(0).max(10).optional(),
-  contingencyPct: z.number().min(0).max(5).optional(),
-  discountAmount: z.number().min(0).optional(),
+  /** The gross margin on the price, a fraction: ±95% at most — at 100% there is no price. */
+  marginPct: z.number().gt(-0.95, 'A margin of −95% or below prices nothing').lt(0.95, 'A margin of 95% or more is no price at all').optional(),
   /** The company's VAT rate, or 0 for a zero-rated job — see `checkVatRate`. */
   vatRate: z.number().min(0).max(1).optional(),
   validUntil: z.string().regex(DAY, 'Use a date').optional().nullable(),
@@ -1076,9 +1066,7 @@ costingRoutes.post(
           siteId: body.siteId || (body.customerId ? null : lead?.siteId) || null,
           leadId: lead?.id ?? null,
           ownerId: me.id,
-          markupPct: d(body.markupPct ?? 0),
-          contingencyPct: d(body.contingencyPct ?? 0),
-          discountAmount: d(body.discountAmount ?? 0),
+          marginPct: d(body.marginPct ?? 0),
           // Snapshotted, like a quotation revision's: a Settings change later
           // does not reprint the tax this estimate was made with.
           vatRate: d(vatRate ?? (company ? Number(company.vatRate) : 0.12)),
@@ -1247,9 +1235,7 @@ function headerData(body: Partial<z.infer<typeof headerSchema>>, vatRate: number
   if (body.notes !== undefined) data.notes = body.notes || null;
   if (body.terms !== undefined) data.terms = body.terms || null;
   if (body.durationDays !== undefined) data.durationDays = body.durationDays ?? null;
-  if (body.markupPct !== undefined) data.markupPct = d(body.markupPct);
-  if (body.contingencyPct !== undefined) data.contingencyPct = d(body.contingencyPct);
-  if (body.discountAmount !== undefined) data.discountAmount = d(body.discountAmount);
+  if (body.marginPct !== undefined) data.marginPct = d(body.marginPct);
   if (vatRate !== undefined) data.vatRate = d(vatRate);
   if (body.validUntil !== undefined) data.validUntil = asDay(body.validUntil);
   if (body.systemUnit !== undefined) data.systemUnit = body.systemUnit?.trim() || null;
@@ -1515,9 +1501,7 @@ costingRoutes.post(
           customerId: source.customerId,
           siteId: source.siteId,
           ownerId: me.id,
-          markupPct: source.markupPct,
-          contingencyPct: source.contingencyPct,
-          discountAmount: source.discountAmount,
+          marginPct: source.marginPct,
           vatRate: source.vatRate,
           systemUnit: source.systemUnit,
           durationDays: source.durationDays,
@@ -1923,26 +1907,18 @@ costingRoutes.get(
       });
     }
 
+    // The owner's summary (2026-10-09): cost, the margin as a share of the
+    // price, the subtotal, VAT, the grand total — no contingency line and no
+    // discount in the foot (a contingency is a cost line of its own bucket).
     const summary = [
       { label: 'Project budgeted cost', value: formatMoney(view.totalCost) },
-      {
-        label: `Markup (${pct(view.markupPct)} on cost)`,
-        value: formatMoney(view.markupAmount),
-      },
+      { label: `Margin (${pct(view.grossMarginPct)} of the price)`, value: formatMoney(view.marginAmount) },
+      { label: 'Subtotal', value: formatMoney(view.contractValue) },
     ];
-    if (view.contingencyPct > 0) {
-      summary.push({ label: `Contingency (${pct(view.contingencyPct)})`, value: formatMoney(view.contingencyAmount) });
-    }
-    if (view.discountAmount > 0) summary.push({ label: 'Less discount', value: formatMoney(-view.discountAmount) });
-    summary.push({ label: 'Subtotal', value: formatMoney(view.contractValue) });
     if (view.vatRate > 0) summary.push({ label: `VAT (${pct(view.vatRate, 0)})`, value: formatMoney(view.vatAmount) });
     sections.push({
       kind: 'totals',
-      rows: [
-        ...summary,
-        { label: 'GRAND TOTAL', value: formatMoney(view.grandTotal), bold: true },
-        { label: 'Gross margin', value: pct(view.grossMarginPct) },
-      ],
+      rows: [...summary, { label: 'GRAND TOTAL', value: formatMoney(view.grandTotal), bold: true }],
     });
 
     if (costing.terms) sections.push({ kind: 'text', title: 'Terms & Conditions', body: costing.terms });
@@ -1956,11 +1932,17 @@ costingRoutes.get(
       planDays: number;
       tasks: { name: string; start: number; durationDays: number }[];
     }[];
+    // Always the Gantt chart, on landscape pages of its own after the
+    // sign-offs (2026-10-09, the owner's call: "Gantt chart on PDF have 2nd
+    // page") — a phase without tasks is a bar over its own planned days, the
+    // way the costing page draws it; there is no table fallback any more.
     const groups: PdfGanttGroup[] = scope.map((s) => ({
       name: s.name,
+      start: s.startDay ?? undefined,
+      days: s.planDays,
       tasks: s.tasks.map((t) => ({ name: t.name, start: t.start, days: t.durationDays })),
     }));
-    if (groups.some((g) => g.tasks.length)) {
+    if (groups.length) {
       sections.push({
         kind: 'gantt',
         title: 'Scope of work',
@@ -1968,26 +1950,17 @@ costingRoutes.get(
         groups,
         legend: `Planned duration in working days (Mon–Fri) — ${view.planDays} working day${view.planDays === 1 ? '' : 's'} in all.`,
       });
-    } else if (scope.length) {
-      sections.push({
-        kind: 'table',
-        title: 'Scope of work',
-        head: ['#', 'Phase', 'Days'],
-        widths: [6, 80, 14],
-        align: ['right', 'left', 'right'],
-        rows: scope.map((s, i) => [String(i + 1), s.name, String(s.planDays)]),
-      });
     }
 
-    // Prepared by the author at creation; then the approval engine's own
-    // sign-offs — every step but the last is a check, the last the approval.
-    // A slot nobody has acted on prints "Pending".
-    const signoffs = await approvalSignoffs('costing', costing.id);
-    const approved = costing.status === 'FINAL' ? signoffs : [];
+    // Prepared by the author at creation; then one line per step of the
+    // route, the step's name as the capacity it signs in (Technical Manager,
+    // Team Leader, CTG — 2026-10-09, the owner's route), who signed and
+    // when, "Pending" until they do. A draft prints the route submitting
+    // would take; a costing with no route at all prints one open approval.
+    const slots = await approvalSlots('costing', costing.id, { amount: num(costing.contractValue), requesterId: costing.ownerId });
     const signatories: Signatory[] = [
       { role: 'Prepared by', name: costing.owner.name, position: costing.owner.position ?? undefined, at: costing.createdAt },
-      ...approved.slice(0, -1).map((s) => ({ role: 'Checked by', ...s })),
-      approved.length ? { role: 'Approved by', ...approved[approved.length - 1] } : { role: 'Approved by' },
+      ...(slots.length ? slots.map((s) => ({ role: s.step, name: s.name, position: s.position, at: s.at })) : [{ role: 'Approved by' }]),
     ];
 
     const pdf = await renderDocument({

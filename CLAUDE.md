@@ -221,8 +221,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,659 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
-masters 74, sales 425, costing 120, pipeline 86, calendar 96, numbering 46,
+**2,678 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
+masters 74, sales 425, costing 139, pipeline 86, calendar 96, numbering 46,
 partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1953,7 +1953,16 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   selection, or what is left, as one line worth its net, with `bookedItems`
   saying which lines it books) — scripts and a future screen may use them.
   The quotation's Sales orders card has no button of its own: the action
-  bar's is the one way.
+  bar's is the one way. **The list's "+ New sales order"** (2026-10-09, the
+  owner's call: "add also add button in sales order") asks which quotation
+  the order books — the quotation list's own search, in the page
+  (`PickQuotationPanel`, in the Append quote panel's dress) — and opens
+  that quotation with its Create Sales Order panel already open
+  (`/g-ops/quotations/:id?order=1`; `QuotationDetail` reads `?order=1`
+  once). No second create path. **The editor has "+ Append quote"** too:
+  the quotation editor's `AppendQuotePanel` and `linesFromItems` are
+  exported for it; an appended line has no saved id, so it books nothing
+  of the order's quotation.
 - **Progress booking is `bookingFor()` in `shared/salesOrderBooking.ts`**
   — SCORO's "100% of available": a quotation line is booked by the live
   (not cancelled) orders' lines pointing at it (`SalesOrderLine.
@@ -2323,26 +2332,69 @@ Cost Estimate" PDF) in G-CORE's own style.
   `?new=1&leadId=&customerId=` list links redirect to `/new`. The per-line and
   per-section routes stay for scripts and the renewal path.
 - **One arithmetic: `shared/costingMath.ts`**, exact in BigInt: line amount =
-  qty (3 dp) × cost (2 dp) rounded half away from zero; markup and contingency
-  are % of the budgeted cost; contract value = cost + markup + contingency −
-  discount, never below 0, **net of VAT** (the SOV and billing are unchanged);
-  VAT and grand total are shown, not stored. `web/src/lib/costingMath.ts` is a
-  COPY for the page's live figures, pinned equal on 400 random sheets by
-  verify-costing. `recalc()` is the only writer of `totalCost`/`contractValue`.
+  qty (3 dp) × cost (2 dp) rounded half away from zero; **contract value =
+  cost ÷ (1 − margin)**, rounded once to the centavo, **net of VAT** (the SOV
+  and billing are unchanged); VAT and grand total are shown, not stored.
+  `web/src/lib/costingMath.ts` is a COPY for the page's live figures, pinned
+  equal on 400 random sheets by verify-costing. `recalc()` is the only
+  writer of `totalCost`/`contractValue`.
+  **The margin replaced the markup on 2026-10-09** (the owner's call:
+  "remove markup and replace with margin", "6th category contingency",
+  "remove footer contingency and less discount"): `Costing.marginPct` is
+  the gross margin on the PRICE, a fraction to six decimals (`Decimal(9,6)`;
+  the API refuses ±95% and beyond — at 100% there is no price; a negative
+  one is a loss-making bid, priced below cost and said as such). The
+  summary is cost, `Margin (x% of the price)`, subtotal, VAT, grand total —
+  no contingency % and no discount: **Contingency is the SIXTH system cost
+  category** (`CON`, after Indirect Cost), a cost LINE like any other, and
+  a discount is the quotation's business. The sheet's "set the grand
+  total" solves for the margin (a share of the price cannot always land on
+  the centavo, and the toast says where it landed); the note under the box
+  says the markup on cost it amounts to. `present()` reads the summary off
+  the STORED cost and contract value (`vatOn()` on the stored contract),
+  never re-derived from the rate. The three legacy columns (`markupPct`,
+  `contingencyPct`, `discountAmount`) stay on the table because the server's
+  `prisma db push` would refuse to drop data: **`migrateCostingMargins()`
+  in `shared/costingLegacy.ts`** (the seed, every deploy; idempotent) writes
+  a costing's contingency % as a Contingency line at its amount, derives
+  the margin from the stored contract value over that cost (the contract
+  value never moves) and zeroes the three; a template saved with a markup
+  reads as the margin it amounts to (`marginOfMarkup`). The board's
+  "Average discount" is now the valued revision's own `discountPct`.
 - **A line has `name` (bold) and `description`**; a line typed as a name alone
   carries it as its description too, because every older reader prints
   `description`. **`isHeading` is a subheading**: amount 0, no code.
   **Codes are derived, never stored**: `lineCodes()` numbers cost lines 101,
-  102… per bucket by the bucket's rank (Materials 1 … Indirect 5).
+  102… per bucket by the bucket's rank (Materials 1 … Indirect 5,
+  Contingency 6).
 - **The plan is working days, not dates** (`planTasks()`): a task with a
   `startDay` keeps it; one without starts the day after the previous task ends.
-  On save a phase with tasks takes their span as `durationDays` and the costing
-  the plan's total — the job schedule reads those. "Sequence tasks" only writes
-  the computed starts down. `spread: true` on a save runs `spreadSections()`
-  (the same rule as `/sections/distribute`) so the SOV equals the contract value.
+  **A phase with no tasks but a typed duration takes its place in the same
+  sequence** (2026-10-09): Day 11–15 after a ten-day phase, a bar on the
+  Gantt chart like any other, and the plan lasts through it; a phase with
+  neither is unplanned and moves nothing. On save a phase with tasks takes
+  their span as `durationDays` and the costing the plan's total — the job
+  schedule reads those. "Sequence tasks" only writes the computed starts
+  down. `spread: true` on a save runs `spreadSections()` (the same rule as
+  `/sections/distribute`) so the SOV equals the contract value.
 - **VAT is the company rate or 0%** (`checkVatRate`, as on the quotation),
   snapshotted at creation; a draft keeps its rate after Settings change.
-- **Approval is the seeded `costing` workflow (executive)**. With it active the
+- **Approval is the seeded `costing` workflow — the owner's three
+  signatures** (2026-10-09: "creator engineer › reviewer technical manager ›
+  approval team leader › 2nd approval CTG"): "Costing — technical manager,
+  team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
+  Manager**, a seeded role that reads every costing), step 2 a SUPERVISOR
+  step named **Team Leader** (the author's "Reports to", falling back to
+  `sales_manager` as the quotation's and the sales order's do), step 3 ROLE
+  `ctg` (**CTG** — the owner's name for the signatory; rename the role in
+  Admin › Roles if it stands for somebody's initials, the key stays). The
+  `project_engineer` role now raises and edits its own costings. "Costing —
+  management approval" (one step, executive) is in the seed's RETIRED list;
+  a costing pending on it finishes on it. **Assign the two new roles in
+  Admin › Users** — until somebody holds them, costings stall at step 1 and
+  `audit-workflows.ts` says so (it also knows engineers raise costings).
+  FINAL takes every signature (verify-costing proves two of three leave it
+  pending, and that CTG cannot sign out of turn). With the route active the
   author cannot PATCH to FINAL; `POST /:id/submit` claims DRAFT →
   PENDING_APPROVAL with a conditional update, submits in the AUTHOR's name, and
   reverts to DRAFT if the engine refuses. `settleCosting()` moves APPROVED →
@@ -2362,11 +2414,20 @@ Cost Estimate" PDF) in G-CORE's own style.
   funnel no longer has a "Being costed" stage.
 - **The PDF is "Material Cost Estimate"** (house style): details, one table with
   numbered bucket headings, name-over-description cells, subtotals, the summary
-  as `totals`, Terms & Conditions — **never the internal notes** — then the
-  Scope of Work as the engine's **`gantt` section** on landscape pages. The
-  sign-offs come from `approvalSignoffs('costing', …)` once FINAL: every step
-  but the last prints as CHECKED BY, the last as APPROVED BY; a costing marked
-  final without a workflow prints "Pending" for the approver, which is true.
+  as `totals`, Terms & Conditions — **never the internal notes** — the
+  sign-offs, then the Scope of Work as the engine's **`gantt` section** on
+  landscape pages of its own. **A trailing landscape `gantt` section is an
+  APPENDIX** (2026-10-09, the owner's call: "Gantt chart on PDF have 2nd
+  page"): `renderDocument` draws the sign-offs BEFORE it (`isAppendix` in
+  `shared/pdf.ts`), so the chart is the last page and no near-empty portrait
+  page follows it; the Scope of Work is always the chart — a phase without
+  tasks is a bar over its own planned days (`PdfGanttGroup.start`/`days`,
+  which `safeSpec` must carry through) — never a table. The sign-offs come
+  from `approvalSlots('costing', …)`: Prepared by, then one line per step
+  of the route with the step's name as the capacity it signs in (TECHNICAL
+  MANAGER, TEAM LEADER, CTG), who signed and when, "Pending" until they do;
+  a draft prints the route submitting would take, and a costing with no
+  route at all one open APPROVED BY.
 - **Predictions never widen visibility**: `GET /costings/suggest?q=` offers past
   lines (newest price, use count) only from costings the caller may read, plus
   the item master; `/suggest/lists` feeds the datalists (units, System / Unit,

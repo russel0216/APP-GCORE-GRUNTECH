@@ -1098,7 +1098,16 @@ model Costing {
   ownerId String
   owner   User   @relation("CostingOwner", fields: [ownerId], references: [id], onDelete: Restrict)
 
-  /// Applied to total cost to reach the contract amount.
+  /// The gross margin on the contract value, as a fraction to six decimals
+  /// (0.25 = 25%): contract value = project budgeted cost ÷ (1 − margin).
+  /// Replaced the markup on 2026-10-09 (the owner's call).
+  marginPct      Decimal @default(0) @db.Decimal(9, 6)
+  /// LEGACY (before 2026-10-09): the markup on cost and the quote-level
+  /// discount of the old rule, contract = cost + markup + contingency −
+  /// discount. `migrateCostingMargins()` (the seed) folds them into the
+  /// margin and zeroes them; nothing reads or writes them any more. Kept
+  /// because `prisma db push` on the server would refuse to drop a column
+  /// holding data.
   markupPct      Decimal @default(0) @db.Decimal(7, 4)
   discountAmount Decimal @default(0) @db.Decimal(18, 2)
 
@@ -1113,7 +1122,9 @@ model Costing {
   /// Terms & Conditions — printed on the cost estimate.
   terms        String?
 
-  /// Contingency on the project budgeted cost, priced in like the markup.
+  /// LEGACY (before 2026-10-09): contingency as a % of the cost. It is a
+  /// cost LINE now, in the Contingency category (the sixth bucket); the seed's
+  /// migration wrote one for each costing that carried a percentage.
   contingencyPct Decimal   @default(0) @db.Decimal(7, 4)
   /// VAT shown on the estimate's grand total: the company rate, or 0 for a
   /// zero-rated job. The contract value stays net of VAT, as it always was.

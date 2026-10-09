@@ -16,9 +16,10 @@ import { NumberInput } from '../../components/NumberInput';
   Everything is typed in place, top to bottom as the estimate prints:
 
     Costing details      project, customer, location, system / unit, valid until
-    Project budgeted cost the five buckets, each a block of rows with its own
-                          subtotal; subheadings; paste straight from Excel
-    Cost summary          markup, contingency, discount, VAT, grand total — and
+    Project budgeted cost the six buckets (Contingency the sixth), each a block
+                          of rows with its own subtotal; subheadings; paste
+                          straight from Excel
+    Cost summary          the margin on the price, VAT, grand total — and
                           "set the grand total" to price to a figure
     Scope of work         phases and their tasks on working days (Mon–Fri)
     Terms & Conditions    printed; Internal notes, never printed
@@ -83,9 +84,8 @@ interface Header {
   leadId: string;
   systemUnit: string;
   validUntil: string;
-  markupPct: string;
-  contingencyPct: string;
-  discountAmount: string;
+  /** The margin on the price, in percent as typed ("25" = 25%). */
+  marginPct: string;
   vatOn: boolean;
   notes: string;
   terms: string;
@@ -113,8 +113,7 @@ interface TemplateFull {
   id: string;
   name: string;
   systemUnit: string | null;
-  markupPct: number;
-  contingencyPct: number;
+  marginPct: number;
   terms: string | null;
   lines: {
     costCategoryId: string | null;
@@ -182,7 +181,13 @@ function figure(s: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 const figureOk = (s: string) => s.trim() === '' || (Number.isFinite(Number(s.replace(/[,\s₱]|PHP/gi, ''))) && figure(s) >= 0);
-const percentString = (fraction: number) => String(Number((fraction * 100).toFixed(2)));
+/** A stored fraction as the percent typed in the box — to four places, since the margin is kept to six decimals. */
+const percentString = (fraction: number) => String(Number((fraction * 100).toFixed(4)));
+/** The margin box: a percentage of the price, between −95 and 95 (at 100% there is no price). */
+const marginOk = (s: string) => {
+  const v = Number(s.replace(/[,\s%]/g, ''));
+  return s.trim() !== '' && Number.isFinite(v) && v > -95 && v < 95;
+};
 const isBlankLine = (l: SheetLine) => !l.isHeading && !l.name.trim() && !l.description.trim() && !figure(l.unitCost);
 const isBlankTask = (t: SheetTask) => !t.name.trim();
 
@@ -204,17 +209,18 @@ function parsePasted(text: string, categoryId: string): SheetLine[] {
 }
 
 /**
- * Prices the sheet to a grand total: the markup (to the 0.01% it is stored at)
- * rounded up, and the few centavos that leaves over taken back as a discount,
- * so the estimate lands on the figure exactly — and says so on paper.
+ * Prices the sheet to a grand total: the margin (to the 0.0001% it is stored
+ * at) that lands the estimate nearest the figure. A margin is a share of the
+ * price, so the estimate may miss the target by a centavo or two; the toast
+ * says where it landed. (The markup rule used a discount to make up the
+ * difference — there is no discount on a costing any more, 2026-10-09.)
  */
 function priceTo(
   target: number,
   lines: { quantity: string; unitCost: string; isHeading?: boolean }[],
-  contingencyPct: number,
   vatRate: number,
-): { markupPct: number; discount: number; grand: number } | null {
-  const base = costingFigures(lines, { markupPct: 0, contingencyPct, discountAmount: 0, vatRate });
+): { marginPct: number; grand: number } | null {
+  const base = costingFigures(lines, { marginPct: 0, vatRate });
   if (base.totalCost <= 0 || target <= 0) return null;
   // The contract value whose VAT brings it to the target, to the centavo.
   const targetCents = Math.round(target * 100);
@@ -229,12 +235,10 @@ function priceTo(
     }
   }
   const contract = contractCents / 100;
-  const need = contract - base.totalCost - base.contingencyAmount;
-  const markupPct = need <= 0 ? 0 : Math.ceil((need / base.totalCost) * 10000 - 1e-9) / 10000;
-  const priced = costingFigures(lines, { markupPct, contingencyPct, discountAmount: 0, vatRate });
-  const discount = Math.max(0, Math.round((priced.contractValue - contract) * 100) / 100);
-  const final = costingFigures(lines, { markupPct, contingencyPct, discountAmount: discount, vatRate });
-  return { markupPct, discount, grand: final.grandTotal };
+  if (contract <= 0) return null;
+  const marginPct = Math.round(((contract - base.totalCost) / contract) * 1_000_000) / 1_000_000;
+  if (marginPct >= 0.95 || marginPct <= -0.95) return null;
+  return { marginPct, grand: costingFigures(lines, { marginPct, vatRate }).grandTotal };
 }
 
 export function CostingSheet() {
@@ -262,9 +266,7 @@ export function CostingSheet() {
     leadId: params.get('leadId') ?? '',
     systemUnit: '',
     validUntil: addDays(todayLocal(), 30),
-    markupPct: '15',
-    contingencyPct: '0',
-    discountAmount: '0',
+    marginPct: '15',
     vatOn: true,
     notes: '',
     terms: '',
@@ -315,9 +317,7 @@ export function CostingSheet() {
           leadId: c.lead?.id ?? '',
           systemUnit: c.systemUnit ?? '',
           validUntil: c.validUntil ?? '',
-          markupPct: percentString(c.markupPct),
-          contingencyPct: percentString(c.contingencyPct),
-          discountAmount: String(c.discountAmount),
+          marginPct: percentString(c.marginPct),
           vatOn: c.vatRate > 0,
           notes: c.notes ?? '',
           terms: c.terms ?? '',
@@ -429,13 +429,14 @@ export function CostingSheet() {
 
   const vatRate = header.vatOn ? (savedVat && savedVat > 0 ? savedVat : lists.companyVatRate) : 0;
   const rates = {
-    markupPct: figure(header.markupPct) / 100,
-    contingencyPct: figure(header.contingencyPct) / 100,
-    discountAmount: figure(header.discountAmount),
+    // Typed in percent, stored as a fraction to six decimals; a minus sign is a loss-making bid, said as such.
+    marginPct: marginOk(header.marginPct) ? Math.round(Number(header.marginPct.replace(/[,\s%]/g, '')) * 10000) / 1_000_000 : 0,
     vatRate,
   };
   const mathLines = lines.map((l) => ({ quantity: l.quantity || '0', unitCost: l.unitCost || '0', isHeading: l.isHeading }));
   const totals = costingFigures(mathLines, rates);
+  /** The markup on cost the typed margin amounts to — for whoever still thinks in markup. */
+  const markupNote = totals.totalCost > 0 ? ((totals.marginAmount / totals.totalCost) * 100).toFixed(2) : '0.00';
 
   const visibleCategories = useMemo(
     () =>
@@ -612,8 +613,7 @@ export function CostingSheet() {
         setHeader((h) => ({
           ...h,
           systemUnit: h.systemUnit || t.systemUnit || '',
-          markupPct: t.markupPct ? percentString(t.markupPct) : h.markupPct,
-          contingencyPct: t.contingencyPct ? percentString(t.contingencyPct) : h.contingencyPct,
+          marginPct: t.marginPct ? percentString(t.marginPct) : h.marginPct,
           terms: t.terms || h.terms,
         }));
       }
@@ -624,18 +624,13 @@ export function CostingSheet() {
   }
 
   function applyTarget() {
-    const result = priceTo(figure(target), mathLines, rates.contingencyPct, vatRate);
+    const result = priceTo(figure(target), mathLines, vatRate);
     if (!result) {
-      toast('error', 'Enter the cost lines first — a price is set on top of a cost.');
+      toast('error', 'Enter the cost lines first — a price is set on top of a cost, and within a 95% margin of it.');
       return;
     }
-    setHeader((h) => ({ ...h, markupPct: percentString(result.markupPct), discountAmount: String(result.discount) }));
-    toast(
-      'ok',
-      result.discount > 0
-        ? `Markup ${percentString(result.markupPct)}% less ${formatMoney(result.discount)} lands on ${formatMoney(result.grand)}`
-        : `Markup ${percentString(result.markupPct)}% lands on ${formatMoney(result.grand)}`,
-    );
+    setHeader((h) => ({ ...h, marginPct: percentString(result.marginPct) }));
+    toast('ok', `A ${percentString(result.marginPct)}% margin lands on ${formatMoney(result.grand)}`);
   }
 
   // ── Saving ─────────────────────────────────────────────────────────────────
@@ -650,10 +645,7 @@ export function CostingSheet() {
   const sectionProblems = new Map<string, string>();
   for (const s of keptSections) if (s.name.trim().length < 2) sectionProblems.set(s.key, 'Name the phase');
   const titleProblem = header.title.trim().length < 2 ? 'Give the costing a title' : null;
-  const rateProblem =
-    !figureOk(header.markupPct) || !figureOk(header.contingencyPct) || !figureOk(header.discountAmount)
-      ? 'Markup, contingency and discount are numbers, zero or more'
-      : null;
+  const rateProblem = !marginOk(header.marginPct) ? 'The margin is a percentage of the price, between −95 and 95' : null;
   const valid = !titleProblem && !rateProblem && !lineProblems.size && !sectionProblems.size;
 
   function sheetPayload() {
@@ -663,9 +655,7 @@ export function CostingSheet() {
       siteId: header.siteId || null,
       systemUnit: header.systemUnit.trim() || null,
       validUntil: header.validUntil || null,
-      markupPct: rates.markupPct,
-      contingencyPct: rates.contingencyPct,
-      discountAmount: rates.discountAmount,
+      marginPct: rates.marginPct,
       vatRate,
       notes: header.notes,
       terms: header.terms,
@@ -729,8 +719,7 @@ export function CostingSheet() {
       withPrices,
       sheet: {
         systemUnit: p.systemUnit,
-        markupPct: p.markupPct,
-        contingencyPct: p.contingencyPct,
+        marginPct: p.marginPct,
         terms: p.terms,
         lines: p.lines,
         sections: p.sections,
@@ -909,7 +898,7 @@ export function CostingSheet() {
           const rows = byCategory.get(cat.id) ?? [];
           const subtotal = costingFigures(
             rows.map((l) => ({ quantity: l.quantity || '0', unitCost: l.unitCost || '0', isHeading: l.isHeading })),
-            { markupPct: 0 },
+            { marginPct: 0 },
           ).totalCost;
           const open = !collapsed.has(cat.id);
           const count = rows.filter((l) => !l.isHeading && !isBlankLine(l)).length;
@@ -1094,35 +1083,17 @@ export function CostingSheet() {
                 <td />
                 <td className="right mono">{formatMoney(totals.totalCost)}</td>
               </tr>
+              {/* The owner's summary (2026-10-09): the margin as a share of the price; no contingency % and no discount here. */}
               <tr>
                 <td>
-                  <label htmlFor="cs-markup">Markup on cost</label>
-                  <div className="faint cs-note">= {(totals.grossMarginPct * 100).toFixed(2)}% gross margin on the price</div>
+                  <label htmlFor="cs-margin">Margin on the price</label>
+                  <div className="faint cs-note">= {markupNote}% markup on cost</div>
                 </td>
                 <td className="cs-rate">
-                  <NumberInput kind="percent" id="cs-markup" className="qe-num" value={header.markupPct} onChange={(e) => setH('markupPct', e.target.value)} />
+                  <NumberInput kind="percent" id="cs-margin" className="qe-num" value={header.marginPct} onChange={(e) => setH('marginPct', e.target.value)} />
                   <span aria-hidden="true">%</span>
                 </td>
-                <td className="right mono">{formatMoney(totals.markupAmount)}</td>
-              </tr>
-              <tr>
-                <td>
-                  <label htmlFor="cs-contingency">Contingency</label>
-                </td>
-                <td className="cs-rate">
-                  <NumberInput kind="percent" id="cs-contingency" className="qe-num" value={header.contingencyPct} onChange={(e) => setH('contingencyPct', e.target.value)} />
-                  <span aria-hidden="true">%</span>
-                </td>
-                <td className="right mono">{formatMoney(totals.contingencyAmount)}</td>
-              </tr>
-              <tr>
-                <td>
-                  <label htmlFor="cs-discount">Less discount</label>
-                </td>
-                <td className="cs-rate">
-                  <NumberInput kind="money" id="cs-discount" className="qe-num" value={header.discountAmount} onChange={(e) => setH('discountAmount', e.target.value)} />
-                </td>
-                <td className="right mono">{formatMoney(-totals.discountAmount)}</td>
+                <td className="right mono">{formatMoney(totals.marginAmount)}</td>
               </tr>
               <tr className="cs-strong">
                 <td>Subtotal (contract value)</td>
@@ -1143,7 +1114,7 @@ export function CostingSheet() {
           </table>
           <div className="cs-summary-side">
             {rateProblem && attempted && <div className="alert error">{rateProblem}</div>}
-            <Field label="Set the grand total" hint="Works out the markup (and a few centavos' discount if needed) to land on this figure exactly.">
+            <Field label="Set the grand total" hint="Works out the margin that lands on this figure — to the centavo where a margin can.">
               <div className="row cs-target">
                 <NumberInput
                   kind="money"
@@ -1163,8 +1134,9 @@ export function CostingSheet() {
               </div>
             </Field>
             <p className="faint cs-note">
-              The project budgeted cost — without markup — becomes the project's purchasing budget when a project is built on
-              this costing. The contract value is net of VAT; it is what the schedule of values below adds up to.
+              The project budgeted cost — every line, contingency included, without the margin — becomes the project's
+              purchasing budget when a project is built on this costing. The contract value is net of VAT; it is what the
+              schedule of values below adds up to.
             </p>
           </div>
         </div>
@@ -1553,7 +1525,7 @@ export function TemplateSavePanel({
         Save as template
       </h3>
       <p className="muted">
-        The lines, phases, tasks, markup and terms are kept, to start the next costing from. The customer, dates and approval are
+        The lines, phases, tasks, margin and terms are kept, to start the next costing from. The customer, dates and approval are
         not.
       </p>
       <ErrorBox error={error} />

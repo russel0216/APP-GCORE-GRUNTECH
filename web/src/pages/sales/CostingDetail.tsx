@@ -66,12 +66,11 @@ export interface ScopeSection {
 
 export interface CostingDetail extends Omit<CostingRow, 'status'> {
   status: 'DRAFT' | 'PENDING_APPROVAL' | 'FINAL';
-  markupPct: number;
-  contingencyPct: number;
-  discountAmount: number;
+  /** The margin on the price, a fraction to six decimals. */
+  marginPct: number;
   vatRate: number;
-  markupAmount: number;
-  contingencyAmount: number;
+  /** Contract value − cost, from the stored figures. */
+  marginAmount: number;
   vatAmount: number;
   grandTotal: number;
   validUntil: string | null;
@@ -493,23 +492,20 @@ export function CostingDetailPage() {
           </h2>
           <table className="data cs-summary">
             <tbody>
+              {/* The owner's summary (2026-10-09): the margin as a share of the price; no contingency row and no discount. */}
               <SummaryRow label="Project budgeted cost" value={formatMoney(costing.totalCost)} />
-              <SummaryRow label={`Markup (${pct(costing.markupPct)} on cost)`} value={formatMoney(costing.markupAmount)} />
-              {costing.contingencyPct > 0 && <SummaryRow label={`Contingency (${pct(costing.contingencyPct)})`} value={formatMoney(costing.contingencyAmount)} />}
-              {costing.discountAmount > 0 && <SummaryRow label="Less discount" value={formatMoney(-costing.discountAmount)} />}
+              <SummaryRow label={`Margin (${pct(costing.grossMarginPct)} of the price)`} value={formatMoney(costing.marginAmount)} />
               <SummaryRow label="Subtotal (contract value)" value={formatMoney(costing.contractValue)} strong />
               <SummaryRow label={costing.vatRate > 0 ? `VAT (${pct(costing.vatRate)})` : 'VAT (zero-rated)'} value={formatMoney(costing.vatAmount)} />
               <tr className="cs-grand">
                 <td>GRAND TOTAL</td>
                 <td className="right mono">{formatMoney(costing.grandTotal)}</td>
               </tr>
-              <SummaryRow label="Gross profit" value={formatMoney(costing.grossProfit)} />
-              <SummaryRow label="Gross margin" value={pct(costing.grossMarginPct)} />
             </tbody>
           </table>
           <p className="faint cs-note">
-            Margin is profit over the contract value, not over cost. The project budgeted cost — without markup — becomes the
-            project's purchasing budget.
+            The margin is a share of the contract value, not of cost. The project budgeted cost — every line, contingency
+            included — becomes the project's purchasing budget.
           </p>
         </section>
 

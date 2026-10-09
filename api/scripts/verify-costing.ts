@@ -35,6 +35,7 @@ import { nextNumber } from '../src/shared/numbering';
 import { act } from '../src/shared/approvals';
 import * as serverMath from '../src/shared/costingMath';
 import * as webMath from '../../web/src/lib/costingMath';
+import { migrateCostingMargins } from '../src/shared/costingLegacy';
 // Registers the costing's onApprovalSettled subscriber in this process.
 import '../src/routes/costing';
 
@@ -185,16 +186,35 @@ async function main() {
     'gops.costing.edit_own',
   ]);
   const readRole = await makeRole('zzcost_read', `${TAG} read-only costing`, ['gops.costing.view_all']);
-  // The seeded workflow routes costings to the executive role; the approver
-  // holds it, and nobody else here does.
-  const executive = await prisma.role.findUnique({ where: { key: 'executive' } });
-  if (!executive) throw new Error('Expected the seeded executive role');
+  // The seeded costing route (2026-10-09, the owner's call): the Technical
+  // Manager reviews, the author's Team Leader ("Reports to") approves, CTG
+  // gives the second approval. The signers hold the seeded roles; the team
+  // leader is whoever the estimator reports to.
+  const roleByKey = async (key: string) => {
+    const role = await prisma.role.findUnique({ where: { key } });
+    if (!role) throw new Error(`Expected the seeded ${key} role`);
+    return role;
+  };
+  const technicalManagerRole = await roleByKey('technical_manager');
+  const ctgRole = await roleByKey('ctg');
 
   const estimator = await makeUser(`${TAG} Estimator`, `estimator${MAIL}`, [ownRole.id]);
   const colleague = await makeUser(`${TAG} Colleague`, `colleague${MAIL}`, [ownRole.id]);
   const manager = await makeUser(`${TAG} Manager`, `manager${MAIL}`, [allRole.id]);
   const reader = await makeUser(`${TAG} Reader`, `reader${MAIL}`, [readRole.id]);
-  const approver = await makeUser(`${TAG} Approver`, `approver${MAIL}`, [executive.id]);
+  const reviewer = await makeUser(`${TAG} Technical Manager`, `techmgr${MAIL}`, [technicalManagerRole.id]);
+  const teamLeader = await makeUser(`${TAG} Team Leader`, `teamleader${MAIL}`, [allRole.id]);
+  const ctg = await makeUser(`${TAG} CTG`, `ctg${MAIL}`, [ctgRole.id]);
+  await prisma.user.update({ where: { id: estimator.id }, data: { supervisorId: teamLeader.id } });
+
+  /** The route's signatures, in the order given — each on the request still open. */
+  async function signCosting(costingId: string, signers: { id: string; name: string }[]) {
+    for (const signer of signers) {
+      const request = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: costingId, status: 'PENDING' } });
+      if (!request) throw new Error(`No open approval request on ${costingId} for ${signer.name} to sign`);
+      await act({ requestId: request.id, userId: signer.id, action: 'APPROVED' });
+    }
+  }
 
   const tEstimator = signToken(estimator.id, estimator.email);
   const tColleague = signToken(colleague.id, colleague.email);
@@ -233,7 +253,7 @@ async function main() {
   const fromNew = await api(tEstimator, 'POST', '/costings', {
     title: `${TAG} from a new lead`,
     leadId: newLead.id,
-    markupPct: 0.2,
+    marginPct: 0.2,
   });
   check('a costing is created from a NEW lead', fromNew.status === 201, `status ${fromNew.status}`);
   check('it carries the lead', fromNew.body.leadId === newLead.id);
@@ -407,11 +427,31 @@ async function main() {
   check('nor deleted', pendingDelete.status === 400 || pendingDelete.status === 403, `status ${pendingDelete.status}`);
   const request = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sourceId, status: 'PENDING' } });
   check('the approval request is raised in the author\'s name', request?.requesterId === estimator.id);
-  await act({ requestId: request!.id, userId: approver.id, action: 'APPROVED' });
+  let outOfTurn = false;
+  try {
+    await act({ requestId: request!.id, userId: ctg.id, action: 'APPROVED' });
+  } catch {
+    outOfTurn = true;
+  }
+  check('CTG cannot sign before the technical manager — the route runs in order', outOfTurn);
+  await signCosting(sourceId, [reviewer, teamLeader]);
+  check(
+    'after the technical manager and the team leader it is still pending — FINAL takes every signature',
+    (await prisma.costing.findUnique({ where: { id: sourceId } }))?.status === 'PENDING_APPROVAL',
+  );
+  const history = await api(tEstimator, 'GET', `/approvals/history/costing/${sourceId}`);
+  const historyText = JSON.stringify(history.body);
+  check(
+    "the route is Technical Manager › Team Leader (the author's supervisor) › CTG, and the open step waits on CTG by name",
+    history.status === 200 && historyText.includes('Technical Manager') && historyText.includes('Team Leader') && historyText.includes('CTG') && historyText.includes(ctg.name),
+    historyText.slice(0, 400),
+  );
+  await signCosting(sourceId, [ctg]);
   const finalised = await api(tEstimator, 'GET', `/costings/${sourceId}`);
   check('the source costing is FINAL once approved', finalised.status === 200 && finalised.body.status === 'FINAL', String(finalised.body.status));
-  // 2×150,000 + 12×2,500 = 330,000 cost; ×1.2 = 396,000 contract.
-  check('its contract value is cost × (1 + markup)', money(Number(finalised.body.contractValue), 396000));
+  // 2×150,000 + 12×2,500 = 330,000 cost; ÷ (1 − 0.2) = 412,500 contract.
+  check('its contract value is cost ÷ (1 − margin)', money(Number(finalised.body.contractValue), 412500), String(finalised.body.contractValue));
+  check('and the margin it reads is the 20% of the price it was given', Number(finalised.body.marginAmount) === 82500 && money(Number(finalised.body.grossMarginPct), 0.2), `${finalised.body.marginAmount} / ${finalised.body.grossMarginPct}`);
   const finalRow = await prisma.costing.findUnique({ where: { id: sourceId }, select: { finalAt: true } });
   check('approval dates it final (finalAt)', !!finalRow?.finalAt && Date.now() - finalRow.finalAt.getTime() < 60_000);
 
@@ -524,11 +564,11 @@ async function main() {
   check('the copy has a new number', !!copy && copy.number !== source!.number && /^GT-COST-/.test(copy.number), copy?.number);
   check('the copy is a DRAFT even though the source is FINAL', copy?.status === 'DRAFT', copy?.status);
   check('the copy belongs to whoever copied it', copy?.ownerId === manager.id);
-  check('the copy keeps the title, customer, site, markup and duration',
+  check('the copy keeps the title, customer, site, margin and duration',
     copy?.title === source!.title &&
       copy?.customerId === source!.customerId &&
       copy?.siteId === source!.siteId &&
-      num(copy?.markupPct) === num(source!.markupPct) &&
+      num(copy?.marginPct) === num(source!.marginPct) &&
       copy?.durationDays === source!.durationDays,
   );
   check('the copy answers no lead', copy?.leadId === null);
@@ -558,7 +598,7 @@ async function main() {
   );
   check(
     'the totals are recomputed from the copied lines and match the source',
-    money(num(copy?.totalCost), 330000) && money(num(copy?.contractValue), 396000),
+    money(num(copy?.totalCost), 330000) && money(num(copy?.contractValue), 412500),
     `${num(copy?.totalCost)} / ${num(copy?.contractValue)}`,
   );
   check('the copy carries no quotation revisions and no jobs', copy?.quotationRevisions.length === 0 && copy?.jobs.length === 0);
@@ -604,9 +644,8 @@ async function main() {
       isHeading: rand() < 0.1,
     }));
     const rates = {
-      markupPct: (Math.floor(rand() * 20000) / 10000).toString(),
-      contingencyPct: (Math.floor(rand() * 1000) / 10000).toString(),
-      discountAmount: (Math.floor(rand() * 100000) / 100).toString(),
+      // A margin anywhere the API allows, −95% to 95%, to six decimals.
+      marginPct: ((Math.floor(rand() * 1_900_000) - 950_000) / 1_000_000).toString(),
       vatRate: rand() < 0.3 ? '0' : '0.12',
     };
     const a = JSON.stringify(serverMath.costingFigures(lines, rates));
@@ -618,18 +657,42 @@ async function main() {
     }
   }
   check('400 random sheets: web/src/lib/costingMath equals the server\'s to the centavo', mathAgree, mathDetail);
-  const plansAgree =
-    JSON.stringify(serverMath.planTasks([{ durationDays: 0, tasks: [{ durationDays: 2 }, { startDay: 9, durationDays: 3 }, { durationDays: 0 }] }])) ===
-    JSON.stringify(webMath.planTasks([{ durationDays: 0, tasks: [{ durationDays: 2 }, { startDay: 9, durationDays: 3 }, { durationDays: 0 }] }]));
+  const planSample = [
+    { durationDays: 0, tasks: [{ durationDays: 2 }, { startDay: 9, durationDays: 3 }, { durationDays: 0 }] },
+    { durationDays: 4, tasks: [] },
+    { durationDays: 0, tasks: [] },
+    { durationDays: 1, tasks: [{ durationDays: 5 }] },
+  ];
+  const serverPlan = serverMath.planTasks(planSample);
+  const plansAgree = JSON.stringify(serverPlan) === JSON.stringify(webMath.planTasks(planSample));
   check('and its plan is the server\'s plan', plansAgree);
+  check(
+    'a phase with no tasks but a duration takes its place in the sequence; one with neither is unplanned and moves nothing',
+    serverPlan.sections[1].start === 13 &&
+      serverPlan.sections[1].end === 16 &&
+      serverPlan.sections[2].start === null &&
+      serverPlan.sections[2].days === 0 &&
+      serverPlan.sections[3].start === 17 &&
+      serverPlan.sections[3].end === 21 &&
+      serverPlan.totalDays === 21,
+    JSON.stringify(serverPlan),
+  );
   check('a line amount is exact where a float is not: 0.1 × 3 = 0.30', serverMath.lineAmount('3', '0.1') === 0.3);
   check('quantity to three places, cost to two: 1.005 × 99.99 = 100.49', serverMath.lineAmount('1.005', '99.99') === 100.49);
-  const f = serverMath.costingFigures([{ quantity: 1, unitCost: 55471.43 }], { markupPct: 1.0925, contingencyPct: 0, discountAmount: 0, vatRate: 0.12 });
+  const f = serverMath.costingFigures([{ quantity: 1, unitCost: 55471.43 }], { marginPct: 0.522, vatRate: 0.12 });
   check(
-    'markup and VAT round once each, half away from zero',
-    f.markupAmount === 60602.54 && f.contractValue === 116073.97 && f.vatAmount === 13928.88 && f.grandTotal === 130002.85,
+    'the contract value (cost ÷ (1 − margin)) and VAT round once each, half away from zero',
+    f.contractValue === 116049.02 && f.marginAmount === 60577.59 && f.vatAmount === 13925.88 && f.grandTotal === 129974.9,
     JSON.stringify(f),
   );
+  check(
+    'a 25% margin on 75,000 prices at 100,000; a negative margin prices below cost; 100% prices at cost rather than at infinity',
+    serverMath.costingFigures([{ quantity: 1, unitCost: 75000 }], { marginPct: 0.25 }).contractValue === 100000 &&
+      serverMath.costingFigures([{ quantity: 1, unitCost: 100 }], { marginPct: -0.25 }).contractValue === 80 &&
+      serverMath.costingFigures([{ quantity: 1, unitCost: 100 }], { marginPct: 1 }).contractValue === 100,
+  );
+  check('vatOn() is VAT on a stored amount, rounded once', serverMath.vatOn('116049.02', '0.12') === 13925.88 && webMath.vatOn('116049.02', '0.12') === 13925.88);
+  check('a 25% markup on cost is a 20% margin on the price', serverMath.marginOfMarkup(0.25) === 0.2 && webMath.marginOfMarkup(0.25) === 0.2);
   check(
     'codes run 101, 102 in a bucket and restart at 201 in the next; a subheading has none',
     JSON.stringify(serverMath.lineCodes([{ rank: 1 }, { rank: 1, isHeading: true }, { rank: 1 }, { rank: 2 }])) === JSON.stringify(['101', null, '102', '201']),
@@ -664,9 +727,7 @@ async function main() {
     siteId: site.id,
     systemUnit: `${TAG} Booster pump controller`,
     validUntil: '2026-10-30',
-    markupPct: 0.5,
-    contingencyPct: 0.05,
-    discountAmount: 100,
+    marginPct: 0.35,
     vatRate: 0,
     terms: `${TAG} terms: 50% down payment`,
     notes: 'Internal only',
@@ -700,18 +761,18 @@ async function main() {
   // 2 × 45,000.50 + 3,000 + 39,400 = 132,401 cost.
   const expected = serverMath.costingFigures(
     sheet.lines.map((l) => ({ quantity: l.quantity ?? 0, unitCost: l.unitCost ?? 0, isHeading: l.isHeading })),
-    { markupPct: 0.5, contingencyPct: 0.05, discountAmount: 100, vatRate: 0 },
+    { marginPct: 0.35, vatRate: 0 },
   );
   check('the stored cost is the sum of the lines', money(num(stored?.totalCost), 132401), String(num(stored?.totalCost)));
   check(
-    'the contract value is cost + markup + contingency − discount, as the page computes it',
-    money(num(stored?.contractValue), expected.contractValue) && money(expected.contractValue, 132401 + 66200.5 + 6620.05 - 100),
+    'the contract value is cost ÷ (1 − margin), as the page computes it: 132,401 ÷ 0.65',
+    money(num(stored?.contractValue), expected.contractValue) && money(expected.contractValue, 203693.85),
     `${num(stored?.contractValue)} vs ${expected.contractValue}`,
   );
-  check('the header fields are kept (system / unit, valid until, contingency, VAT 0%)',
+  check('the header fields are kept (system / unit, valid until, margin, VAT 0%)',
     stored?.systemUnit === sheet.systemUnit &&
       stored?.validUntil?.toISOString().slice(0, 10) === '2026-10-30' &&
-      num(stored?.contingencyPct) === 0.05 &&
+      num(stored?.marginPct) === 0.35 &&
       num(stored?.vatRate) === 0,
   );
   check('the subheading is stored as a heading that costs nothing', stored?.lines[0].isHeading === true && num(stored?.lines[0].amount) === 0);
@@ -734,7 +795,12 @@ async function main() {
     stored?.scopeSections[0].durationDays === 15 && stored?.scopeSections[1].durationDays === 3 && stored?.scopeSections[2].durationDays === 2,
     stored?.scopeSections.map((x) => x.durationDays).join(','),
   );
-  check('the costing lasts as long as its plan (18 working days)', stored?.durationDays === 18, String(stored?.durationDays));
+  check(
+    'the taskless third phase is planned after the second, Day 19–20',
+    planned[2]?.startDay === 19 && planned[2]?.endDay === 20 && planned[2]?.planDays === 2,
+    JSON.stringify(planned[2]),
+  );
+  check('the costing lasts as long as its plan (20 working days, the taskless phase included)', stored?.durationDays === 20, String(stored?.durationDays));
   check(
     'spread: the schedule of values adds up to the contract value exactly',
     money(stored!.scopeSections.reduce((n, x) => n + num(x.value), 0), num(stored?.contractValue)),
@@ -821,7 +887,7 @@ async function main() {
   check('its phases and tasks come along', rows(tpl.body.sections).length === 1 && rows(rows(tpl.body.sections)[0].tasks).length === 1);
   const fromSheet = await api(tColleague, 'POST', '/costings/templates', {
     name: `${TAG} sheet template`,
-    sheet: { markupPct: 0.3, lines: [{ costCategoryId: lab.id, name: 'Technician', quantity: 2, unit: 'day', unitCost: 1800 }], sections: [] },
+    sheet: { marginPct: 0.3, lines: [{ costCategoryId: lab.id, name: 'Technician', quantity: 2, unit: 'day', unitCost: 1800 }], sections: [] },
   });
   check('a template is saved from an unsaved sheet', fromSheet.status === 201, `status ${fromSheet.status}`);
   const list = await api(tEstimator, 'GET', '/costings/templates');
@@ -846,17 +912,15 @@ async function main() {
 
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
   const rejectReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sheetId, status: 'PENDING' } });
-  await act({ requestId: rejectReq!.id, userId: approver.id, action: 'REJECTED', comment: 'Recheck the crane' });
-  check('a rejected costing comes back to draft to rework', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'DRAFT');
+  await act({ requestId: rejectReq!.id, userId: reviewer.id, action: 'REJECTED', comment: 'Recheck the crane' });
+  check('a costing the technical manager rejects comes back to draft to rework', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'DRAFT');
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
-  const approveReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sheetId, status: 'PENDING' } });
-  await act({ requestId: approveReq!.id, userId: approver.id, action: 'APPROVED' });
-  check('resubmitted and approved, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
+  await signCosting(sheetId, [reviewer, teamLeader, ctg]);
+  check('resubmitted and signed by all three, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
   const reopen = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
   check('the author can still reopen a final costing', reopen.status === 200 && reopen.body.status === 'DRAFT');
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
-  const again = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: sheetId, status: 'PENDING' } });
-  await act({ requestId: again!.id, userId: approver.id, action: 'APPROVED' });
+  await signCosting(sheetId, [reviewer, teamLeader, ctg]);
 
   // The estimate: a PDF with the landscape Scope of Work page after it.
   await prisma.scopeTask.create({ data: { scopeSectionId: afterPut!.scopeSections[0].id, name: `${TAG} Long task`, startDay: 3, durationDays: 20, sortOrder: 5 } });
@@ -874,14 +938,69 @@ async function main() {
   const dupSheet = await api(tEstimator, 'POST', `/costings/${sheetId}/duplicate`);
   const dupStored = await prisma.costing.findUnique({ where: { id: dupSheet.body.id as string }, include: { scopeSections: { include: { tasks: true } }, lines: true } });
   check(
-    'a duplicate keeps names, contingency, VAT, System / Unit and task start days — but not the validity date',
+    'a duplicate keeps names, margin, VAT, System / Unit and task start days — but not the validity date',
     dupStored?.lines.every((l) => !!l.name) === true &&
-      num(dupStored?.contingencyPct) === 0.05 &&
+      num(dupStored?.marginPct) === 0.35 &&
       num(dupStored?.vatRate) > 0 &&
       dupStored?.systemUnit === sheet.systemUnit &&
       dupStored?.scopeSections[0].tasks.some((t) => t.startDay === 3) === true &&
       dupStored?.validUntil === null,
   );
+
+  // ══ The margin rule, the sixth bucket and the carry-over ═══════════════════
+  console.log('Margin, Contingency and the carry-over from the markup rule');
+
+  const con = await prisma.costCategory.findUnique({ where: { code: 'CON' } });
+  check('Contingency is the sixth system bucket', !!con && con.isSystem && con.sortOrder === 5, JSON.stringify(con));
+  const tooMuch = await api(tEstimator, 'POST', '/costings', { title: `${TAG} no price`, marginPct: 0.95 });
+  check('a margin of 95% or more is refused — at 100% there is no price', tooMuch.status === 400, `status ${tooMuch.status}`);
+  const belowCost = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} below cost`,
+    marginPct: -0.25,
+    lines: [{ costCategoryId: mat.id, name: `${TAG} Loss leader`, quantity: 1, unit: 'lot', unitCost: 100 }],
+  });
+  check('a negative margin is a loss-making bid, priced below cost: −25% on 100 is 80', belowCost.status === 201 && belowCost.body.contractValue === 80, `${belowCost.status} ${belowCost.body.contractValue}`);
+
+  // A costing priced under the markup rule: 100,000 cost, 20% markup, 5%
+  // contingency, 1,000 discount → 124,000 contract (the stored fact).
+  const legacy = await prisma.costing.create({
+    data: {
+      number: `${TAG}-LEGACY`,
+      title: `${TAG} priced under the markup rule`,
+      ownerId: estimator.id,
+      markupPct: 0.2,
+      contingencyPct: 0.05,
+      discountAmount: 1000,
+      totalCost: 100000,
+      contractValue: 124000,
+      lines: { create: [{ costCategoryId: mat.id, description: `${TAG} old line`, quantity: 1, unit: 'lot', unitCost: 100000, amount: 100000, sortOrder: 0 }] },
+    },
+  });
+  const carried = await migrateCostingMargins({ ids: [legacy.id] });
+  const after = await prisma.costing.findUnique({ where: { id: legacy.id }, include: { lines: { orderBy: { sortOrder: 'asc' } } } });
+  const conLine = after?.lines.find((l) => l.costCategoryId === con?.id);
+  check(
+    'the carry-over writes the 5% contingency as a 5,000 line in the Contingency bucket',
+    carried.costings === 1 && carried.contingencyLines === 1 && !!conLine && num(conLine.amount) === 5000 && conLine.sortOrder === 1 && conLine.name === 'Contingency',
+    JSON.stringify({ carried, conLine }),
+  );
+  check('the cost now includes it and the contract value has not moved', num(after?.totalCost) === 105000 && num(after?.contractValue) === 124000, `${after?.totalCost} / ${after?.contractValue}`);
+  check('the margin is derived from the stored contract value, to six decimals: 19,000 ÷ 124,000', num(after?.marginPct) === 0.153226, String(after?.marginPct));
+  check('the legacy columns are zeroed', num(after?.markupPct) === 0 && num(after?.contingencyPct) === 0 && num(after?.discountAmount) === 0);
+  const carriedAgain = await migrateCostingMargins({ ids: [legacy.id] });
+  const afterAgain = await prisma.costing.findUnique({ where: { id: legacy.id }, include: { lines: true } });
+  check('a second run finds nothing to carry over', carriedAgain.costings === 0 && afterAgain?.lines.length === 2 && num(afterAgain?.marginPct) === 0.153226);
+  const viewed = await api(tEstimator, 'GET', `/costings/${legacy.id}`);
+  check(
+    'the carried-over costing reads its STORED figures — margin 19,000 on 124,000 — never a re-derivation from the rate',
+    viewed.status === 200 && viewed.body.marginAmount === 19000 && viewed.body.contractValue === 124000 && viewed.body.totalCost === 105000 && viewed.body.grandTotal === 138880,
+    JSON.stringify({ m: viewed.body.marginAmount, c: viewed.body.contractValue, t: viewed.body.totalCost, g: viewed.body.grandTotal }),
+  );
+  const oldTemplate = await prisma.costingTemplate.create({
+    data: { name: `${TAG} old template`, body: { markupPct: 0.25, lines: [], sections: [] }, createdById: estimator.id },
+  });
+  const readOld = await api(tEstimator, 'GET', `/costings/templates/${oldTemplate.id}`);
+  check('a template saved with a 25% markup reads as the 20% margin it amounts to', readOld.status === 200 && readOld.body.marginPct === 0.2, String(readOld.body.marginPct));
 
   // ── Done ──────────────────────────────────────────────────────────────────
   await cleanup();

@@ -204,7 +204,7 @@ async function main() {
       title: `${TAG} Oxygen plant`,
       ownerId: pm.id,
       customerId: customer.id,
-      markupPct: d(0.25),
+      marginPct: d(0.2),
       totalCost: d(800_000),
       contractValue: d(1_000_000),
       lines: {

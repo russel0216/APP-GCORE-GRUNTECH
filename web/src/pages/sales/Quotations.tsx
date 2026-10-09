@@ -737,6 +737,9 @@ const pct = (v: number | null | undefined) => (v == null ? '—' : `${v.toFixed(
 
 export function QuotationDetail() {
   const { id } = useParams<{ id: string }>();
+  // `?order=1` opens the Create Sales Order panel: the sales order list's
+  // "+ New sales order" lands here with the quotation chosen (2026-10-09).
+  const [params] = useSearchParams();
   const { can } = useAuth();
   const toast = useToast();
 
@@ -749,7 +752,7 @@ export function QuotationDetail() {
   const [lostReason, setLostReason] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [optionId, setOptionId] = useState<string | null>(null);
-  const [bookingOrder, setBookingOrder] = useState(false);
+  const [bookingOrder, setBookingOrder] = useState(params.get('order') === '1');
   const [reload, setReload] = useState(0);
   const navigate = useNavigate();
 

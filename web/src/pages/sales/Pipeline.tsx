@@ -1059,7 +1059,7 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
         key="discount"
         label="Average discount"
         value={kpis.averageDiscountPct === null ? '—' : `${kpis.averageDiscountPct}%`}
-        sub={kpis.averageDiscountPct === null ? 'no discount recorded on a costing' : 'off list, from the costings behind open quotes'}
+        sub={kpis.averageDiscountPct === null ? 'no open quotation to average' : 'the discount on open quotations, averaged'}
       />
     ),
     open: (
@@ -1078,7 +1078,7 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
         label="Average quote"
         value={kpis.averageQuote === null ? '—' : formatMoney(kpis.averageQuote)}
         figure
-        sub={kpis.averageDiscountPct === null ? 'no discount recorded on a costing' : `average discount ${kpis.averageDiscountPct}% off list`}
+        sub={kpis.averageDiscountPct === null ? 'no open quotation to average' : `average discount ${kpis.averageDiscountPct}%`}
       />
     ),
     margin:

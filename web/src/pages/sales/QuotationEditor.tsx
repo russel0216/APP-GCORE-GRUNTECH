@@ -159,8 +159,8 @@ function fromItem(i: Item): Line {
   };
 }
 
-/** Saved lines as the table edits them — groups, subheadings and all. */
-function linesFromItems(items: Item[]): Line[] {
+/** Saved lines as the table edits them — groups, subheadings and all. The sales order editor appends through it too. */
+export function linesFromItems(items: Item[]): Line[] {
   return items.map(fromItem);
 }
 
@@ -1661,9 +1661,11 @@ function merge<T extends { id: string }>(pinned: T[], list: T[]) {
  * SCORO's "Append quote", in the page: find another quotation and its newest
  * revision's lines are added under these. The search is the quotation list's
  * own, so it finds only what this person may read, and a line's cost comes
- * along only where the server sends it to them.
+ * along only where the server sends it to them. The sales order editor opens
+ * the same panel (2026-10-09, the owner's call: "add also add button in
+ * sales order").
  */
-function AppendQuotePanel({
+export function AppendQuotePanel({
   excludeId,
   onClose,
   onPick,

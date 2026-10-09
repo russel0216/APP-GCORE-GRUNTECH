@@ -404,11 +404,11 @@ export interface BoardRevision {
   total: Prisma.Decimal | number;
   validityDays: number;
   createdAt: Date;
+  /** The quotation's own discount, in percent (to six decimals). */
+  discountPct: Prisma.Decimal | number;
   costing: {
     contractValue: Prisma.Decimal | number;
     totalCost: Prisma.Decimal | number;
-    markupPct: Prisma.Decimal | number;
-    discountAmount: Prisma.Decimal | number;
   } | null;
   jobs: { id: string; number: string }[];
 }
@@ -807,7 +807,9 @@ export function buildBoard(input: {
   const quotedValue = cents(openQuotationCards.reduce((s, c) => s + c.value, 0));
   const weightedValue = weightedSum(openQuotationCards);
 
-  // Margin and discount come from the costing behind the VALUED revision.
+  // The margin comes from the costing behind the VALUED revision; the
+  // discount is that revision's own (2026-10-09 — a costing carries no
+  // discount any more, SCORO's "average discount" was always the quote's).
   let contract = 0;
   let cost = 0;
   let withCosting = 0;
@@ -815,12 +817,12 @@ export function buildBoard(input: {
   for (const c of openQuotationCards) {
     const q = quotationById.get(c.id);
     const rev = q ? valuedRevision(q.revisions) : null;
-    if (!rev?.costing) continue;
+    if (!rev) continue;
+    discounts.push(num(rev.discountPct) / 100);
+    if (!rev.costing) continue;
     withCosting++;
     contract += num(rev.costing.contractValue);
     cost += num(rev.costing.totalCost);
-    const listPrice = num(rev.costing.totalCost) * (1 + num(rev.costing.markupPct));
-    if (listPrice > 0) discounts.push(num(rev.costing.discountAmount) / listPrice);
   }
 
   const won = cards.filter((c) => c.column === 'WON');

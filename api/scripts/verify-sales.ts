@@ -326,8 +326,8 @@ async function main() {
       title: `${TAG} Oxygen plant`,
       ownerId: sales.id,
       customerId: customer.id,
-      markupPct: d(0.25),
-      discountAmount: d(50_000),
+      // 200,000 over a 1,200,000 contract: a 16.6667% margin on the price.
+      marginPct: d(0.166667),
     },
   });
 
@@ -348,9 +348,10 @@ async function main() {
     });
   }
 
-  // Mirrors the route's recalc: cost + markup − discount.
+  // The stored contract value is the commercial fact (here written as the
+  // route's recalc would: cost ÷ (1 − margin), to the centavo).
   const totalCost = costs.reduce((a, b) => a + b, 0);
-  const expectedContract = totalCost * 1.25 - 50_000;
+  const expectedContract = 1_200_000;
   await prisma.costing.update({
     where: { id: costing.id },
     data: { totalCost: d(totalCost), contractValue: d(expectedContract) },
@@ -359,7 +360,7 @@ async function main() {
   const priced = await prisma.costing.findUnique({ where: { id: costing.id } });
   check('total cost sums the five buckets', money(Number(priced!.totalCost), 1_000_000), String(priced!.totalCost));
   check(
-    'contract = cost + markup − discount',
+    'contract = cost ÷ (1 − margin)',
     money(Number(priced!.contractValue), 1_200_000),
     String(priced!.contractValue),
   );
@@ -795,6 +796,7 @@ async function main() {
           total: D(1_344_000),
           validityDays: 30,
           createdAt: daysAgo(10),
+          discountPct: 0,
           costing: null,
           jobs: [],
         },
@@ -1000,6 +1002,7 @@ async function main() {
     total: D(total),
     validityDays: 30,
     createdAt: created,
+    discountPct: 0,
     costing: null,
     jobs: [],
   });

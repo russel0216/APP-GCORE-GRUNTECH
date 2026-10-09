@@ -79,6 +79,9 @@ export interface PdfGanttTask {
 export interface PdfGanttGroup {
   name: string;
   tasks: PdfGanttTask[];
+  /** The phase's own span (working days from 1), drawn as its bar when it has no tasks to span. */
+  start?: number;
+  days?: number;
 }
 
 export type PdfSection =
@@ -178,6 +181,9 @@ const HOUSE: Layout = { left: MARGIN, right: MARGIN, footerTop: FOOTER_TOP, size
 
 const usableWidth = (doc: PDFKit.PDFDocument) => doc.page.width - HOUSE.left - HOUSE.right;
 const contentBottom = (doc: PDFKit.PDFDocument) => doc.page.height - HOUSE.footerTop - 24;
+
+/** A section that stands on landscape pages of its own after the signed body: the Gantt chart. */
+const isAppendix = (s: PdfSection) => s.kind === 'gantt' && !!s.landscape;
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const isHeading = (row: PdfRow): row is { heading: string; shade?: boolean } => !Array.isArray(row);
 
@@ -205,8 +211,17 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   });
 
   drawHeader(doc, spec, company);
-  for (const section of spec.sections) drawSection(doc, section);
+  // A landscape section at the end is an APPENDIX (the costing's Scope of
+  // Work, 2026-10-09): the sign-offs print before it, on the last portrait
+  // page of the body, and the chart gets pages of its own after them. Drawn
+  // after everything, the sign-offs spilled onto a near-empty portrait page
+  // behind the chart whenever its legend ran low.
+  const sections = spec.sections;
+  let appendixFrom = sections.length;
+  while (appendixFrom > 0 && isAppendix(sections[appendixFrom - 1])) appendixFrom--;
+  for (const section of sections.slice(0, appendixFrom)) drawSection(doc, section);
   drawSignoffs(doc, spec.signatories);
+  for (const section of sections.slice(appendixFrom)) drawSection(doc, section);
   paginate(doc, spec, company);
 
   doc.end();
@@ -309,6 +324,7 @@ function safeSection(section: PdfSection): PdfSection {
         title: t(section.title),
         legend: t(section.legend),
         groups: section.groups.map((g) => ({
+          ...g,
           name: pdfSafe(g.name ?? ''),
           tasks: g.tasks.map((task) => ({ ...task, name: pdfSafe(task.name ?? '') })),
         })),
@@ -647,8 +663,23 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
 /** The last working day a plan reaches. */
 export function ganttEnd(groups: PdfGanttGroup[]): number {
   let end = 0;
-  for (const g of groups) for (const t of g.tasks) end = Math.max(end, t.start + Math.max(t.days, 1) - 1);
+  for (const g of groups) {
+    const span = groupSpan(g);
+    if (span) end = Math.max(end, span.to);
+    for (const t of g.tasks) end = Math.max(end, t.start + Math.max(t.days, 1) - 1);
+  }
   return end;
+}
+
+/** A phase's bar: over its tasks when it has any, else its own start and days; none when it has neither. */
+function groupSpan(g: PdfGanttGroup): { from: number; to: number } | null {
+  if (g.tasks.length) {
+    const from = Math.min(...g.tasks.map((t) => t.start));
+    const to = Math.max(...g.tasks.map((t) => t.start + Math.max(t.days, 1) - 1));
+    return { from, to };
+  }
+  if (g.start && g.days) return { from: g.start, to: g.start + Math.max(g.days, 1) - 1 };
+  return null;
 }
 
 /** A day-label step that keeps the labels about 22pt apart. */
@@ -733,11 +764,20 @@ function drawGantt(
     const gTop = doc.y;
     doc.rect(L.left, gTop, usable, groupH).fill(SHADE);
     doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
-    doc.text(group.name, L.left + 5, gTop + 5, { width: fixed - 10, height: size + 2, ellipsis: true, lineGap: 0 });
-    if (group.tasks.length) {
-      const from = Math.min(...group.tasks.map((t) => t.start));
-      const to = Math.max(...group.tasks.map((t) => t.start + Math.max(t.days, 1) - 1));
-      doc.roundedRect(dayX(from), gTop + 6, (to - from + 1) * dayW, 5, 2).fill(HEAD_BG);
+    doc.text(group.name, L.left + 5, gTop + 5, { width: colTask - 10, height: size + 2, ellipsis: true, lineGap: 0 });
+    // The phase's own span — over its tasks, or its planned days when it has
+    // none (a costing phased without tasks still has a schedule to show).
+    const span = groupSpan(group);
+    if (span) {
+      doc.font('Helvetica-Bold').fontSize(size).fillColor(INK);
+      doc.text(`Day ${span.from}`, L.left + colTask + 5, gTop + 5, { width: colStart - 10, lineBreak: false });
+      doc.text(`Day ${span.to}`, L.left + colTask + colStart + 5, gTop + 5, { width: colEnd - 10, lineBreak: false });
+      doc.text(String(span.to - span.from + 1), L.left + colTask + colStart + colEnd + 5, gTop + 5, {
+        width: colDays - 10,
+        align: 'right',
+        lineBreak: false,
+      });
+      doc.roundedRect(dayX(span.from), gTop + 6, (span.to - span.from + 1) * dayW, 5, 2).fill(HEAD_BG);
     }
     gridLines(gTop, groupH);
     doc.y = gTop + groupH;
