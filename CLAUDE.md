@@ -104,7 +104,12 @@ four databases and four copies of "customer".
    `summary.teams`, each its value over its count, `teamCards()`; a
    quotation whose owner has no team is said on the Quotations card, never
    a ninth card). Eight across: the list's cards take a smaller figure
-   (`.list-summary .kpi-value`, `nowrap`) so a sum never breaks mid-number. A screen that
+   (`.list-summary .kpi-value`, `nowrap`) so a sum never breaks mid-number.
+   The leads and sales order lists draw the same cards (a lead's share is
+   its estimated value, an order's its booked total): `teamShares()` in
+   `shared/team.ts` is the one split, `teamCards()` / `noTeamNote()` in
+   `components/charts.tsx` the one drawing, and verify-sales asserts each
+   list's shares add up to its own total. A screen that
    learns from the summary (the stage names, the categories on file) still
    takes `onSummary`. Never a totals line, under or over, again.
    `defaultScope` is where the scope switch starts when the URL says
@@ -216,8 +221,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,657 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
-masters 74, sales 423, costing 120, pipeline 86, calendar 96, numbering 46,
+**2,659 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
+masters 74, sales 425, costing 120, pipeline 86, calendar 96, numbering 46,
 partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering

@@ -4,7 +4,7 @@ import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
-import { Stat } from '../../components/charts';
+import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
 import {
   Checkbox,
@@ -147,6 +147,8 @@ interface SalesOrderSummary {
   margin?: { amount: number; pct: number | null; costed: number };
   /** The viewer's team's share of the booked value; only for a viewer with a team. */
   team?: { count: number; value: number };
+  /** The booked value split by the owner's team — a card per team. */
+  teams?: TeamShare[];
 }
 
 /**
@@ -294,11 +296,15 @@ export function SalesOrders() {
         selectable
         rowLabel={(r) => `${r.number} ${r.quotation.subject}`}
         teamScope={!!me?.user.team && can('gops.sales_orders.view_all')}
-        summary={(raw, total, scope) => {
+        summary={(raw, total) => {
           const s = raw as SalesOrderSummary;
           return (
             <>
-              <Stat label="Orders" value={total} sub={s.cancelledCount ? `${s.cancelledCount} cancelled, not counted` : undefined} />
+              <Stat
+                label="Orders"
+                value={total}
+                sub={[s.cancelledCount ? `${s.cancelledCount} cancelled, not counted` : null, noTeamNote(s.teams)].filter(Boolean).join(' · ') || undefined}
+              />
               <Stat label="Booked value" value={formatMoney(s.value ?? 0)} figure />
               {s.margin && (
                 <Stat
@@ -308,9 +314,7 @@ export function SalesOrders() {
                   sub={`${s.margin.pct !== null ? `${s.margin.pct}% · ` : ''}${s.margin.costed} costed`}
                 />
               )}
-              {s.team && scope !== 'team' && (
-                <Stat label="My team" value={s.team.count} sub={formatMoney(s.team.value)} />
-              )}
+              {teamCards(s.teams, formatMoney, 'order')}
             </>
           );
         }}

@@ -517,3 +517,29 @@ export function Panel({
     </section>
   );
 }
+
+/** One team's share of a listed set, as the API's summaries send `teams` (shared/team.ts). */
+export interface TeamShare {
+  id: string | null;
+  code: string;
+  name: string;
+  count: number;
+  value: number;
+}
+
+/**
+ * The lists' team cards (2026-10-09, the owner's call: "there should be 8
+ * cards, separate card by team"): one `Stat` per active team — KAT, HIT,
+ * UIT, GIB, SIT — its value over its count. Rows whose owner has no team
+ * are said by `noTeamNote()` on the count card, never a card of their own.
+ */
+export function teamCards(teams: TeamShare[] | undefined, money: (v: number) => string, noun = 'quotation') {
+  return (teams ?? [])
+    .filter((t) => t.id !== null)
+    .map((t) => <Stat key={t.id} label={t.code} value={money(t.value)} figure sub={`${t.count} ${noun}${t.count === 1 ? '' : 's'}`} />);
+}
+
+export function noTeamNote(teams: TeamShare[] | undefined): string | undefined {
+  const none = (teams ?? []).find((t) => t.id === null);
+  return none?.count ? `${none.count} with no team` : undefined;
+}

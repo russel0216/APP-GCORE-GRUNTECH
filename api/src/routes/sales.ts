@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { teamMembers, teamOf } from '../shared/team';
+import { OWNER_TEAM_SELECT, teamMembers, teamOf, teamShares, type TeamRef, type TeamShare } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -238,7 +238,7 @@ export async function leadListSummary(
   };
   const [perStatus, valued, teamRows] = await Promise.all([
     prisma.lead.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
-    prisma.lead.findMany({ where, select: { estimatedValue: true, probability: true } }),
+    prisma.lead.findMany({ where, select: { estimatedValue: true, probability: true, assignedTo: OWNER_TEAM_SELECT } }),
     // The viewer's team's share of the same set, for the totals row.
     opts.teamWhere ? prisma.lead.findMany({ where: { AND: [where, opts.teamWhere] }, select: { estimatedValue: true, probability: true } }) : null,
   ]);
@@ -250,7 +250,9 @@ export async function leadListSummary(
     tabCounts[''] += r._count._all;
   }
   const tabs = leadStages(stages).map((st) => ({ value: st.key, label: st.label, color: st.color }));
-  return { tabs, tabCounts, ...valueOf(valued), ...(teamRows ? { team: valueOf(teamRows) } : {}) };
+  // A card per team (2026-10-09): the set split by the lead's owner's team, at the estimated value.
+  const teams = await teamShares(valued.map((l) => ({ team: l.assignedTo.employee?.industry ?? null, cents: Math.round(num(l.estimatedValue) * 100) })));
+  return { tabs, tabCounts, ...valueOf(valued), teams, ...(teamRows ? { team: valueOf(teamRows) } : {}) };
 }
 
 const LEAD_SORTS = ['number', 'companyName', 'estimatedValue', 'expectedClosing', 'createdAt', 'probability'];
@@ -1111,15 +1113,8 @@ const LIST_REVISION_SELECT = {
 /** Cents, so a sum of hundreds of totals does not drift by a centavo. */
 const toCents = (v: number) => Math.round(v * 100);
 
-/** One line of the "Quotes by team" card: a team (Industry row) and its share of the listed set. */
-export interface TeamQuotes {
-  /** null for the quotations whose owner has no team. */
-  id: string | null;
-  code: string;
-  name: string;
-  count: number;
-  value: number;
-}
+/** The lists' team cards: `TeamShare` in shared/team.ts. */
+export type TeamQuotes = TeamShare;
 
 /**
  * The summary a list query carries: a count per stage under `base` (with
@@ -1137,55 +1132,34 @@ export async function quotationListSummary(
   /** `teamWhere`: the viewer's team's share of the set; `margin`: only where the caller may see every listed quotation's cost. */
   opts: { teamWhere?: Prisma.QuotationWhereInput | null; margin?: boolean } = {},
 ) {
-  const [perOutcome, bookedPerOutcome, valued, teamRows, teamList] = await Promise.all([
+  const [perOutcome, bookedPerOutcome, valued, teamRows] = await Promise.all([
     prisma.quotation.groupBy({ by: ['outcome'], where: base, _count: { _all: true } }),
     prisma.quotation.groupBy({ by: ['outcome'], where: { AND: [base, QUOTATION_BOOKED_WHERE] }, _count: { _all: true } }),
     prisma.quotation.findMany({
       where,
       select: {
         revisions: { select: LIST_REVISION_SELECT },
-        owner: { select: { employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } },
+        owner: OWNER_TEAM_SELECT,
       },
     }),
     opts.teamWhere
       ? prisma.quotation.findMany({ where: { AND: [where, opts.teamWhere] }, select: { revisions: { select: { status: true, total: true, revision: true } } } })
       : null,
-    prisma.industry.findMany({
-      where: { isActive: true },
-      orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
-      select: { id: true, code: true, name: true },
-    }),
   ]);
   const flat = (rows: { outcome: string; _count: { _all: number } }[]) =>
     rows.map((r) => ({ outcome: r.outcome, count: r._count._all }));
   const tabCounts = quotationStageCounts(flat(perOutcome), flat(bookedPerOutcome), stages);
   tabCounts[''] = perOutcome.reduce((t, r) => t + r._count._all, 0);
 
-  // Every active team first, in the master's order, so a team with nothing
-  // listed still shows at zero; a team since switched off joins as it is met.
-  const byTeam = new Map<string, { id: string | null; code: string; name: string; count: number; valueCents: number }>();
-  for (const t of teamList) byTeam.set(t.id, { id: t.id, code: t.code, name: t.name, count: 0, valueCents: 0 });
-  const noTeam = { id: null, code: '—', name: 'No team', count: 0, valueCents: 0 };
+  // The set split by the owner's team (shared/team.ts), the lists' team cards.
   let valueCents = 0;
+  const shares: { team: TeamRef; cents: number }[] = [];
   for (const r of valued) {
     const cents = toCents(quotationValue(r.revisions));
     valueCents += cents;
-    const team = r.owner.employee?.industry ?? null;
-    let row = team ? byTeam.get(team.id) : noTeam;
-    if (!row) {
-      row = { id: team!.id, code: team!.code, name: team!.name, count: 0, valueCents: 0 };
-      byTeam.set(team!.id, row);
-    }
-    row.count++;
-    row.valueCents += cents;
+    shares.push({ team: r.owner.employee?.industry ?? null, cents });
   }
-  const teams: TeamQuotes[] = [...byTeam.values(), ...(noTeam.count ? [noTeam] : [])].map((t) => ({
-    id: t.id,
-    code: t.code,
-    name: t.name,
-    count: t.count,
-    value: t.valueCents / 100,
-  }));
+  const teams = await teamShares(shares);
 
   // The stages, as Admin › Pipeline Stages names and colours them — sent with
   // the counts so a list reader needs no pipeline right to filter by them.

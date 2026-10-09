@@ -1317,6 +1317,15 @@ async function main() {
         (await prisma.salesOrder.count({ where: salesOrderListWhere(superUser, soQ({ scope: 'team' }), soTeamId).where })) === 4,
       JSON.stringify({ team: soTeam.team, margin: soTeam.margin }),
     );
+    // A card per team (2026-10-09): the booked value split by the owner's team, adding up to the whole.
+    const soShares = soSummary.teams ?? [];
+    check(
+      'the sales order summary splits the booked value by the owner’s team, the shares adding up to the booked value',
+      soShares.some((t) => t.id === soTeamId && t.count === 3 && money(t.value, 6000)) &&
+        soShares.reduce((n, t) => n + t.count, 0) === 3 &&
+        money(soShares.reduce((v, t) => v + t.value, 0), soSummary.value),
+      JSON.stringify(soShares),
+    );
     check(
       'each status tab has its order, and the tabs add up to All',
       soSummary.tabCounts[''] === 4 && ['DRAFT', 'PENDING_APPROVAL', 'ISSUED', 'CANCELLED'].every((k) => soSummary.tabCounts[k] === 1),
@@ -1389,6 +1398,14 @@ async function main() {
       (await prisma.lead.count({ where: leadListWhere(superUser, leadQ({ scope: 'team' }), stages, hiTeam.id).where })) === teamLeads &&
         lTeam.team?.count === teamLeads && teamLeads === 7,
       `${teamLeads} / ${lTeam.team?.count}`,
+    );
+    const lShares = lSum.teams ?? [];
+    check(
+      'the lead summary splits the estimated value by the owner’s team, the shares adding up to the whole',
+      lShares.some((t) => t.id === hiTeam.id && t.count === teamLeads) &&
+        lShares.reduce((n, t) => n + t.count, 0) === lSum.count &&
+        money(lShares.reduce((v, t) => v + t.value, 0), lSum.value),
+      JSON.stringify(lShares),
     );
     check(
       'the tabs count each stage and add up to All',

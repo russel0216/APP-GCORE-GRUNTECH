@@ -83,3 +83,49 @@ export async function retireFirstIndustries(): Promise<{ moved: number; retired:
   });
   return { moved, retired };
 }
+
+// ── A set split by team (2026-10-09, the owner's call: "separate card by team") ──
+
+/** One team's share of a listed set — a card on the quotation, lead and sales order lists. */
+export interface TeamShare {
+  /** null for the rows whose owner has no team. */
+  id: string | null;
+  code: string;
+  name: string;
+  count: number;
+  value: number;
+}
+
+/** The team a row's owner is on, as the summaries select it. */
+export type TeamRef = { id: string; code: string; name: string } | null;
+
+/** The select that brings an owner's team along with a row. */
+export const OWNER_TEAM_SELECT = { select: { employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } } as const;
+
+/**
+ * Splits a listed set by its owners' teams — every active team in the
+ * master's order even at zero, a team since switched off as it is met,
+ * "No team" last while any owner has none. Exact in cents; the shares add
+ * up to the whole. The one rule for the quotation, lead and sales order
+ * lists' team cards.
+ */
+export async function teamShares(rows: { team: TeamRef; cents: number }[]): Promise<TeamShare[]> {
+  const teamList = await prisma.industry.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+    select: { id: true, code: true, name: true },
+  });
+  const byTeam = new Map<string, { id: string | null; code: string; name: string; count: number; cents: number }>();
+  for (const t of teamList) byTeam.set(t.id, { id: t.id, code: t.code, name: t.name, count: 0, cents: 0 });
+  const noTeam = { id: null, code: '—', name: 'No team', count: 0, cents: 0 };
+  for (const r of rows) {
+    let row = r.team ? byTeam.get(r.team.id) : noTeam;
+    if (!row) {
+      row = { id: r.team!.id, code: r.team!.code, name: r.team!.name, count: 0, cents: 0 };
+      byTeam.set(r.team!.id, row);
+    }
+    row.count++;
+    row.cents += r.cents;
+  }
+  return [...byTeam.values(), ...(noTeam.count ? [noTeam] : [])].map((t) => ({ id: t.id, code: t.code, name: t.name, count: t.count, value: t.cents / 100 }));
+}

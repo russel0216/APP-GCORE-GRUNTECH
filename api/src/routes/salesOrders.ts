@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { teamMembers, teamOf } from '../shared/team';
+import { OWNER_TEAM_SELECT, teamMembers, teamOf, teamShares } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -284,13 +284,16 @@ export async function salesOrderListSummary(
   opts: { teamWhere?: Prisma.SalesOrderWhereInput | null; margin?: boolean } = {},
 ) {
   const LIVE: Prisma.SalesOrderWhereInput = { status: { not: 'CANCELLED' } };
-  const [perStatus, live, cancelled, team, liveOrders] = await Promise.all([
+  const [perStatus, live, cancelled, team, liveOrders, owned] = await Promise.all([
     prisma.salesOrder.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
     prisma.salesOrder.aggregate({ where: { AND: [where, LIVE] }, _sum: { total: true }, _count: { _all: true } }),
     prisma.salesOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
     opts.teamWhere ? prisma.salesOrder.aggregate({ where: { AND: [where, LIVE, opts.teamWhere] }, _sum: { total: true }, _count: { _all: true } }) : null,
     opts.margin ? prisma.salesOrder.findMany({ where: { AND: [where, LIVE] }, select: { id: true, discountPct: true, vatRate: true, vatInclusive: true } }) : null,
+    // A card per team (2026-10-09): the booked value split by the order's owner's team.
+    prisma.salesOrder.findMany({ where: { AND: [where, LIVE] }, select: { total: true, owner: OWNER_TEAM_SELECT } }),
   ]);
+  const teams = await teamShares(owned.map((o) => ({ team: o.owner.employee?.industry ?? null, cents: Math.round(num(o.total) * 100) })));
   // The totals row's margin: every live order with a costed line, the row's
   // own figure summed, against the orders' sums without tax (the quotation
   // list's rule, over SalesOrderLine).
@@ -333,6 +336,7 @@ export async function salesOrderListSummary(
     count: live._count._all + cancelled,
     value: num(live._sum.total),
     cancelledCount: cancelled,
+    teams,
     ...(team ? { team: { count: team._count._all, value: num(team._sum.total) } } : {}),
     ...(margin ? { margin } : {}),
   };

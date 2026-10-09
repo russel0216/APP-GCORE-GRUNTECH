@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
-import { Stat } from '../../components/charts';
+import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { ActivityLog } from '../../components/ActivityLog';
 import {
@@ -241,6 +241,8 @@ interface LeadSummary {
   weighted?: number;
   /** The viewer's team's share of the set; only for a viewer with a team. */
   team?: { count: number; value: number; weighted: number };
+  /** The set split by the owner's team — a card per team. */
+  teams?: TeamShare[];
 }
 
 // ── Mass actions: Change status, Assign to ──────────────────────────────────
@@ -579,16 +581,14 @@ export function Leads() {
         rowLabel={(l) => `${l.number} ${l.companyName}`}
         bulkActions={(ctx) => <LeadBulkActions ctx={ctx} people={people} />}
         teamScope={!!me?.user.team && can('gops.leads.view_all')}
-        summary={(raw, total, scope) => {
+        summary={(raw, total) => {
           const sum = raw as LeadSummary;
           return (
             <>
-              <Stat label="Leads" value={total} />
+              <Stat label="Leads" value={total} sub={noTeamNote(sum.teams)} />
               <Stat label="Estimated value" value={formatMoney(sum.value ?? 0)} figure />
               <Stat label="Weighted" value={formatMoney(sum.weighted ?? 0)} figure />
-              {sum.team && scope !== 'team' && (
-                <Stat label="My team" value={sum.team.count} sub={formatMoney(sum.team.value)} />
-              )}
+              {teamCards(sum.teams, formatMoney, 'lead')}
             </>
           );
         }}

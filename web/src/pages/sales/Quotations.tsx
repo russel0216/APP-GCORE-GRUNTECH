@@ -4,7 +4,7 @@ import { ApiError, api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
-import { Stat } from '../../components/charts';
+import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
@@ -141,15 +141,6 @@ export function stageLabelFor(outcome: string, stages?: StageOption[] | null): s
   return stages?.find((s) => s.key === key)?.label ?? STAGE_TABS.find((t) => t.value === key)?.label ?? outcomeLabel(outcome);
 }
 
-/** One line of the "Quotes by team" card: a team and its share of the listed set. */
-interface TeamQuotes {
-  id: string | null;
-  code: string;
-  name: string;
-  count: number;
-  value: number;
-}
-
 interface QuotationSummary {
   count?: number;
   value?: number;
@@ -158,25 +149,9 @@ interface QuotationSummary {
   /** The viewer's team's share of the set; only for a viewer with a team. */
   team?: { count: number; value: number };
   /** The set split by the owner's team — every active team, "No team" last while anybody has none. */
-  teams?: TeamQuotes[];
+  teams?: TeamShare[];
   /** The stages as Admin › Pipeline Stages names them — the Stage filter's choices. */
   tabs?: { value: string; label: string }[];
-}
-
-/**
- * The teams' cards (2026-10-09, the owner's call: "there should be 8
- * cards, separate card by team"): after Quotations, Sum and Margin, one
- * card per active team — KAT, HIT, UIT, GIB, SIT — each its count over its
- * value, the set split by the OWNER's team (`Employee.industryId`,
- * shared/team.ts). Quotations whose owner has no team are said on the
- * Quotations card, never a ninth card.
- */
-function teamCards(teams: TeamQuotes[]) {
-  return teams
-    .filter((t) => t.id !== null)
-    .map((t) => (
-      <Stat key={t.id} label={t.code} value={formatMoney(t.value)} figure sub={`${t.count} quotation${t.count === 1 ? '' : 's'}`} />
-    ));
 }
 
 /**
@@ -394,10 +369,7 @@ export function Quotations() {
               <Stat
                 label="Quotations"
                 value={total}
-                sub={(() => {
-                  const none = (s.teams ?? []).find((t) => t.id === null);
-                  return none?.count ? `${none.count} with no team` : undefined;
-                })()}
+                sub={noTeamNote(s.teams)}
               />
               <Stat label="Sum" value={formatMoney(s.value ?? 0)} figure />
               {s.margin && (
@@ -408,7 +380,7 @@ export function Quotations() {
                   sub={`${s.margin.pct !== null ? `${s.margin.pct}% · ` : ''}${s.margin.costed} costed`}
                 />
               )}
-              {teamCards(s.teams ?? [])}
+              {teamCards(s.teams, formatMoney)}
             </>
           );
         }}
