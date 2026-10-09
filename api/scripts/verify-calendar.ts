@@ -25,7 +25,7 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
-import { activityEmailText, activityWhere, sendDueReminders } from '../src/shared/activities';
+import { activityEmailText, activityWhere, repeatOccurrences, sendDueReminders } from '../src/shared/activities';
 import { seedActivityTypes } from '../src/shared/activityTypes';
 import { annualDayIn, fillGreeting, occurrencesBetween, sendDueGreetings } from '../src/shared/celebrations';
 import { GREETING_DEFAULTS } from '../src/shared/hr';
@@ -492,6 +492,133 @@ async function main() {
         mail.includes('Maybe: https://app/g-ops/calendar/activities/1?respond=TENTATIVE') &&
         oldMail.includes('Going: https://app/g-ops/calendar?activity=1&date=2031-03-03&respond=ACCEPTED') &&
         !activityEmailText({ title: 'Moved: x', body: 'when' }, 'https://app/x').includes('respond='),
+    );
+
+    // ══ SCORO's New event dialog (2026-10-08) ═══════════════════════════════
+    console.log('\nNew event dialog: all day, private, call link, links, repeats');
+    const badCall = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} bad call`,
+      startsAt: startsAt.toISOString(),
+      callLink: 'javascript:alert(1)',
+    });
+    const contactAlone = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} contact alone`,
+      startsAt: startsAt.toISOString(),
+      contactId: 'no-such-contact',
+    });
+    const badJob = await apiSend(salesToken, 'POST', '/activities', { subject: `${TAG} bad job`, startsAt: startsAt.toISOString(), jobId: 'no-such-job' });
+    check(
+      'a call link that is not http(s), a contact person without their customer, and a project that does not exist are each refused (400)',
+      badCall.status === 400 && contactAlone.status === 400 && badJob.status === 400,
+      `${badCall.status} ${contactAlone.status} ${badJob.status}`,
+    );
+    // 11:30 Manila on 10 March; an all-day booking snaps to that day's Manila midnight.
+    const wholeDay = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} all day`,
+      allDay: true,
+      startsAt: '2031-03-10T03:30:00Z',
+      durationMinutes: 1440,
+      isPrivate: true,
+      callLink: 'https://meet.google.com/abc-defg-hij',
+      notes: 'the quiet part',
+      inviteeIds: [colleague.id],
+    });
+    check(
+      'an all-day activity snaps to the Manila midnight of its day, runs the day, and keeps its call link',
+      wholeDay.status === 201 &&
+        wholeDay.body.allDay === true &&
+        wholeDay.body.startsAt === '2031-03-09T16:00:00.000Z' &&
+        wholeDay.body.durationMinutes === 1440 &&
+        wholeDay.body.callLink === 'https://meet.google.com/abc-defg-hij' &&
+        (wholeDay.body.createdBy as { id: string } | null)?.id === sales.id,
+      `${wholeDay.status} ${JSON.stringify(wholeDay.body).slice(0, 220)}`,
+    );
+    const halfDay = await apiSend(salesToken, 'POST', '/activities', { subject: `${TAG} half day`, allDay: true, startsAt: '2031-03-10T03:30:00Z', durationMinutes: 600 });
+    check('an all-day activity runs whole days or is refused (400)', halfDay.status === 400, String(halfDay.status));
+    const privId = String(wholeDay.body.id);
+    const stranger = await makeUser(`${TAG} Stranger`, 'stranger@verifycal.local', [role.id]);
+    const strangerToken = signToken(stranger.id, stranger.email);
+    const seenByStranger = (await apiGet(strangerToken, `/activities/${privId}`)).body as {
+      subject?: string;
+      notes?: string | null;
+      callLink?: string | null;
+      masked?: boolean;
+      invitees?: unknown[];
+      googleCalendarUrl?: string | null;
+    };
+    const listedToStranger = (
+      (await apiGet(strangerToken, '/activities?from=2031-03-09T00:00:00Z&to=2031-03-11T00:00:00Z')).body as { id: string; subject: string; masked?: boolean }[]
+    ).find((a) => a.id === privId);
+    check(
+      'a private activity reads as "Busy" to someone not on it — no notes, call link, invitees or Google hand-off — on the page and on the calendar',
+      seenByStranger.masked === true &&
+        seenByStranger.subject === 'Busy' &&
+        seenByStranger.notes === null &&
+        seenByStranger.callLink === null &&
+        seenByStranger.invitees?.length === 0 &&
+        seenByStranger.googleCalendarUrl === null &&
+        listedToStranger?.subject === 'Busy' &&
+        listedToStranger.masked === true,
+      JSON.stringify(seenByStranger).slice(0, 220),
+    );
+    const seenByInvitee = (await apiGet(colleagueToken, `/activities/${privId}`)).body as { subject?: string; notes?: string | null; masked?: boolean };
+    check(
+      'while an invitee sees it whole',
+      seenByInvitee.subject === `${TAG} all day` && seenByInvitee.notes === 'the quiet part' && !seenByInvitee.masked,
+      JSON.stringify(seenByInvitee).slice(0, 120),
+    );
+    const strangerEdit = await apiSend(strangerToken, 'PATCH', `/activities/${privId}`, { subject: `${TAG} hijacked` });
+    const strangerDel = await apiSend(strangerToken, 'DELETE', `/activities/${privId}`, undefined);
+    check('and only the people on it may change or remove it (403)', strangerEdit.status === 403 && strangerDel.status === 403, `${strangerEdit.status} ${strangerDel.status}`);
+
+    const weekly = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} weekly call`,
+      startsAt: '2031-03-03T01:00:00Z',
+      durationMinutes: 30,
+      inviteeIds: [colleague.id],
+      repeat: { every: 'WEEK', until: '2031-03-24' },
+    });
+    const seriesId = String(weekly.body.id);
+    const series = await prisma.salesActivity.findMany({
+      where: { seriesId },
+      orderBy: { startsAt: 'asc' },
+      select: { id: true, startsAt: true, invitees: { select: { userId: true } } },
+    });
+    check(
+      'a weekly booking until the 24th makes four occurrences a week apart, each an activity of its own carrying the series and the invitees',
+      weekly.status === 201 &&
+        weekly.body.occurrences === 4 &&
+        series.length === 4 &&
+        series.every((r, i) => r.startsAt.getTime() === new Date('2031-03-03T01:00:00Z').getTime() + i * 7 * 86_400_000 && r.invitees.length === 1),
+      `${weekly.status} ${String(weekly.body.occurrences)} ${series.length}`,
+    );
+    const invitedToSeries = await prisma.notification.findMany({ where: { userId: colleague.id, title: `Invited: ${TAG} weekly call` } });
+    check(
+      'the invitee is told once for the whole series, and told how it repeats',
+      invitedToSeries.length === 1 && invitedToSeries[0].body.includes('repeats weekly until') && invitedToSeries[0].body.includes('(4 times)'),
+      JSON.stringify(invitedToSeries.map((n) => n.body)),
+    );
+    const tooMany = await apiSend(salesToken, 'POST', '/activities', {
+      subject: `${TAG} daily forever`,
+      startsAt: '2031-03-03T01:00:00Z',
+      repeat: { every: 'DAY', until: '2031-06-30' },
+    });
+    check(
+      'more than 60 occurrences is refused before anything is written (400)',
+      tooMany.status === 400 && (await prisma.salesActivity.count({ where: { subject: `${TAG} daily forever` } })) === 0,
+      String(tooMany.status),
+    );
+    const monthly = repeatOccurrences(new Date('2031-01-31T01:00:00Z'), 'MONTH', '2031-04-30').map((d) => d.toISOString().slice(0, 10));
+    check(
+      'a monthly booking on the 31st falls on 28 February and is back on 31 March (pure, Manila wall clock)',
+      monthly.join(' ') === '2031-01-31 2031-02-28 2031-03-31 2031-04-30',
+      monthly.join(' '),
+    );
+    const removedUpcoming = await apiSend(salesToken, 'DELETE', `/activities/${series[1].id}?series=upcoming`, undefined);
+    check(
+      'removing "this and later ones" takes the occurrence and every later planned one, and leaves the earlier',
+      removedUpcoming.status === 200 && removedUpcoming.body.removed === 3 && (await prisma.salesActivity.count({ where: { seriesId } })) === 1,
+      `${removedUpcoming.status} ${String(removedUpcoming.body.removed)}`,
     );
 
     // ══ Activity types as data (2026-10-08) ═══════════════════════════════

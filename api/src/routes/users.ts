@@ -146,6 +146,8 @@ userRoutes.get(
         name: true,
         email: true,
         position: true,
+        // The photo (an attachment id) for a picker that shows faces (the activity form's participants).
+        photoPath: true,
         department: { select: { id: true, name: true } },
       },
       orderBy: [{ department: { name: 'asc' } }, { name: 'asc' }],

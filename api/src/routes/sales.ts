@@ -47,11 +47,17 @@ import {
   activityLink,
   activityWhen,
   activityWhere,
+  isOnActivity,
+  maskPrivate,
   MAX_ACTIVITY_MINUTES,
   REMINDER_MINUTES,
+  REPEAT_EVERY,
+  repeatOccurrences,
   tellAboutActivity,
   type ActivityQuery,
+  type RepeatEvery,
 } from '../shared/activities';
+import { safeHttpUrl } from '../shared/partners';
 import { toCsv } from '../shared/insights';
 import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
@@ -3266,20 +3272,25 @@ activityRoutes.get(
     for (const key of ['from', 'to', 'leadId', 'quotationId', 'customerId', 'assignedToId'] as const) {
       if (q[key] !== undefined && q[key] !== '') query[key] = String(q[key]);
     }
+    const me = currentUser(req);
     const [rows, names] = await Promise.all([
       prisma.salesActivity.findMany({ ...activityWhere(query), include: ACTIVITY_INCLUDE }),
       activityTypeNames(),
     ]);
-    res.json(rows.map((r) => presentActivity(r, names)));
+    // A private activity leaves as "Busy" for anyone not on it.
+    res.json(rows.map((r) => maskPrivate(presentActivity(r, names), me)));
   }),
 );
 
 const ACTIVITY_INCLUDE = {
   // The photo (an attachment id) draws the faces on the activity's page.
   assignedTo: { select: { id: true, name: true, photoPath: true } },
+  createdBy: { select: { id: true, name: true } },
   lead: { select: { id: true, number: true, companyName: true } },
   quotation: { select: { id: true, number: true } },
   customer: { select: { id: true, name: true } },
+  contact: { select: { id: true, name: true, position: true } },
+  job: { select: { id: true, number: true, name: true } },
   invitees: {
     select: { userId: true, notifiedAt: true, response: true, respondedAt: true, user: { select: { id: true, name: true, photoPath: true } } },
     orderBy: { createdAt: 'asc' },
@@ -3397,9 +3408,9 @@ activityRoutes.get(
     });
     if (!row) throw notFound('Activity not found');
     const names = await activityTypeNames();
-    const shown = presentActivity(row, names);
+    const shown = maskPrivate(presentActivity(row, names), currentUser(req));
     let googleUrl: string | null = null;
-    if (row.status === 'PLANNED') {
+    if (row.status === 'PLANNED' && !shown.masked) {
       const guests = await prisma.user.findMany({
         where: { id: { in: [row.assignedToId, ...row.invitees.map((i) => i.userId)] }, isActive: true },
         select: { email: true },
@@ -3409,7 +3420,7 @@ activityRoutes.get(
           uid: row.id,
           number: shown.typeName,
           title: row.subject,
-          description: row.notes,
+          description: [row.callLink ? `Call: ${row.callLink}` : null, row.notes].filter(Boolean).join('\n\n') || null,
           location: row.location,
           startsAt: row.startsAt,
           endsAt: shown.endsAt,
@@ -3449,7 +3460,47 @@ const activitySchema = z.object({
     .refine((m) => (REMINDER_MINUTES as readonly number[]).includes(m), 'Remind 15 minutes, 1 hour, 2 hours or 1 day before')
     .nullable()
     .optional(),
+  // ── SCORO's New event dialog (2026-10-08) ──
+  /** A whole day: Starts is snapped to the day's Manila midnight and the duration must be whole days. */
+  allDay: z.boolean().optional(),
+  /** "Personal": only the people on it see what it is; everyone else sees "Busy". */
+  isPrivate: z.boolean().optional(),
+  /** Conference call link, http(s) only. */
+  callLink: z.string().trim().max(500).optional().nullable(),
+  /** The customer's contact person — one of the customer's contacts. */
+  contactId: z.string().optional().nullable(),
+  /** The project it is for. */
+  jobId: z.string().optional().nullable(),
+  /** On create only: repeat every day / week / month until a Manila day (at most MAX_OCCURRENCES rows). */
+  repeat: z
+    .object({ every: z.enum(REPEAT_EVERY), until: z.string().trim().min(1, 'Repeat until needs a date') })
+    .optional()
+    .nullable(),
 });
+
+const REPEAT_WORD: Record<RepeatEvery, string> = { DAY: 'daily', WEEK: 'weekly', MONTH: 'monthly' };
+
+/**
+ * The links a booking may carry (SCORO's Links): a contact person must be one
+ * of the customer's contacts — so a contact needs the customer — and a
+ * project must exist and not be cancelled. Checked before anything is written.
+ */
+async function checkActivityLinks(links: { customerId: string | null; contactId: string | null; jobId: string | null }): Promise<void> {
+  if (links.contactId) {
+    if (!links.customerId) throw badRequest('Pick the customer before the contact person');
+    const contact = await prisma.customerContact.findUnique({ where: { id: links.contactId }, select: { customerId: true } });
+    if (!contact || contact.customerId !== links.customerId) throw badRequest("The contact person is not one of that customer's contacts");
+  }
+  if (links.jobId) {
+    const job = await prisma.job.findUnique({ where: { id: links.jobId }, select: { status: true } });
+    if (!job || job.status === 'CANCELLED') throw badRequest('That project does not exist, or is cancelled');
+  }
+}
+
+/** An all-day activity starts at the day's Manila midnight and runs whole days. */
+function allDayStart(at: Date): Date {
+  return manilaDayStart(manilaDayKey(at));
+}
 
 /** The duration an activity's Starts and Ends describe, checked. */
 function minutesBetween(startsAt: string, endsAt: string): number {
@@ -3486,47 +3537,74 @@ activityRoutes.post(
     const me = currentUser(req);
     const body = parseBody(activitySchema, req.body);
     const assignedToId = body.assignedToId || me.id;
+    const allDay = body.allDay ?? false;
     const durationMinutes = body.endsAt ? minutesBetween(body.startsAt, body.endsAt) : body.durationMinutes;
+    if (allDay && durationMinutes % 1440 !== 0) throw badRequest('An all-day activity runs whole days');
     const inviteeIds = await checkInvitees(body.inviteeIds ?? [], assignedToId);
     const typeKey = await resolveActivityType(body.type);
+    const links = { customerId: body.customerId || null, contactId: body.contactId || null, jobId: body.jobId || null };
+    await checkActivityLinks(links);
+    const callLink = body.callLink ? safeHttpUrl(body.callLink) : null;
     const names = await activityTypeNames();
+    const firstStart = allDay ? allDayStart(new Date(body.startsAt)) : new Date(body.startsAt);
+    // A repeating booking (SCORO's "Recurring"): every occurrence is a row of its own.
+    const starts = body.repeat ? repeatOccurrences(firstStart, body.repeat.every, body.repeat.until) : [firstStart];
 
-    const activity = await prisma.salesActivity.create({
-      data: {
-        type: activityEnumOf(typeKey),
-        typeKey,
-        subject: body.subject,
-        notes: body.notes || null,
-        location: body.location || null,
-        assignedToId,
-        leadId: body.leadId || null,
-        quotationId: body.quotationId || null,
-        customerId: body.customerId || null,
-        startsAt: new Date(body.startsAt),
-        durationMinutes,
-        reminderMinutes: body.reminderMinutes ?? null,
-        invitees: { create: inviteeIds.map((userId) => ({ userId, notifiedAt: new Date() })) },
-        /*
-          The schema has accepted a status since this was written and the
-          create never wrote one, so everything came back PLANNED. Nothing
-          noticed while the only caller was the calendar, which books things
-          that have not happened — logging a call you have just made is the
-          first use that says DONE, and it was silently recorded as still
-          owed. `completedAt` is set here the same way the patch sets it.
-        */
-        status: body.status ?? 'PLANNED',
-        completedAt: body.status === 'DONE' ? new Date() : null,
-      },
+    const dataFor = (startsAt: Date, seriesId: string | null) => ({
+      type: activityEnumOf(typeKey),
+      typeKey,
+      subject: body.subject,
+      notes: body.notes || null,
+      location: body.location || null,
+      callLink,
+      allDay,
+      isPrivate: body.isPrivate ?? false,
+      assignedToId,
+      createdById: me.id,
+      leadId: body.leadId || null,
+      quotationId: body.quotationId || null,
+      customerId: links.customerId,
+      contactId: links.contactId,
+      jobId: links.jobId,
+      startsAt,
+      durationMinutes,
+      reminderMinutes: body.reminderMinutes ?? null,
+      seriesId,
+      invitees: { create: inviteeIds.map((userId) => ({ userId, notifiedAt: new Date() })) },
+      /*
+        The schema has accepted a status since this was written and the
+        create never wrote one, so everything came back PLANNED. Nothing
+        noticed while the only caller was the calendar, which books things
+        that have not happened — logging a call you have just made is the
+        first use that says DONE, and it was silently recorded as still
+        owed. `completedAt` is set here the same way the patch sets it.
+      */
+      status: body.status ?? 'PLANNED',
+      completedAt: body.status === 'DONE' ? new Date() : null,
     });
+    // Written whole or not at all: the first occurrence names the series, the rest carry its id.
+    const rows = await prisma.$transaction(async (tx) => {
+      const first = await tx.salesActivity.create({ data: dataFor(starts[0], null) });
+      if (starts.length === 1) return [first];
+      const out = [await tx.salesActivity.update({ where: { id: first.id }, data: { seriesId: first.id } })];
+      for (const at of starts.slice(1)) out.push(await tx.salesActivity.create({ data: dataFor(at, first.id) }));
+      return out;
+    });
+    const activity = rows[0];
+    const last = rows[rows.length - 1];
+    const repeats =
+      rows.length > 1 && body.repeat
+        ? ` · repeats ${REPEAT_WORD[body.repeat.every]} until ${last.startsAt.toLocaleDateString('en-PH', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' })} (${rows.length} times)`
+        : '';
 
     // Manila-pinned, like every timestamp a document prints; the link lands
-    // on the activity itself, on the day it falls in Manila. A bell each, and
-    // an email each where email is set up.
+    // on the activity's page. A bell each, and an email each where email is
+    // set up — once for a series, naming how it repeats.
     if (assignedToId !== me.id) {
       await tellAboutActivity([assignedToId], {
         type: 'system',
         title: `Scheduled for you: ${activity.subject}`,
-        body: `${activityWhen(activity)} · from ${me.name}`,
+        body: `${activityWhen(activity)}${repeats} · from ${me.name}`,
         link: activityLink(activity),
       });
     }
@@ -3535,22 +3613,27 @@ activityRoutes.post(
       {
         type: 'activity.invited',
         title: `Invited: ${activity.subject}`,
-        body: `${activityWhen(activity)}${activity.location ? ` · ${activity.location}` : ''} · from ${me.name}`,
+        body: `${activityWhen(activity)}${activity.location ? ` · ${activity.location}` : ''}${repeats} · from ${me.name}`,
         link: activityLink(activity),
       },
       { respondLinks: true },
     );
-    await audit(
-      {
-        entityType: 'sales_activity',
-        entityId: activity.id,
-        action: 'CREATED',
-        summary: `${activity.status === 'DONE' ? 'Logged' : 'Scheduled'} ${(names.get(typeKey) ?? humaniseTypeKey(typeKey)).toLowerCase()}: ${activity.subject}`,
-        after: { ...activity, inviteeIds },
-      },
-      req,
-    );
-    res.status(201).json(presentActivity(activity, names));
+    const typeName = (names.get(typeKey) ?? humaniseTypeKey(typeKey)).toLowerCase();
+    for (const [i, row] of rows.entries()) {
+      await audit(
+        {
+          entityType: 'sales_activity',
+          entityId: row.id,
+          action: 'CREATED',
+          summary: `${row.status === 'DONE' ? 'Logged' : 'Scheduled'} ${typeName}: ${row.subject}${rows.length > 1 ? ` (${i + 1} of ${rows.length})` : ''}`,
+          after: { ...row, inviteeIds },
+        },
+        req,
+      );
+    }
+    // Read back whole — with its people and links — so the response is the page's own shape.
+    const whole = await prisma.salesActivity.findUniqueOrThrow({ where: { id: activity.id }, include: ACTIVITY_INCLUDE });
+    res.status(201).json({ ...presentActivity(whole, names), occurrences: rows.length });
   }),
 );
 
@@ -3565,24 +3648,40 @@ activityRoutes.patch(
       include: { invitees: { select: { userId: true } } },
     });
     if (!existing) throw notFound('Activity not found');
+    // A private activity is changed only by the people on it.
+    if (existing.isPrivate && !me.isSuperAdmin && !isOnActivity(existing, me.id)) {
+      throw forbidden('A private activity is changed only by the people on it');
+    }
 
-    const startsAt = body.startsAt !== undefined ? body.startsAt : existing.startsAt.toISOString();
+    const allDay = body.allDay ?? existing.allDay;
+    const startsAtText = body.startsAt !== undefined ? body.startsAt : existing.startsAt.toISOString();
+    const startsAtDate = allDay ? allDayStart(new Date(startsAtText)) : new Date(startsAtText);
+    const startsAt = startsAtDate.toISOString();
     const durationMinutes = body.endsAt
       ? minutesBetween(startsAt, body.endsAt)
       : body.durationMinutes !== undefined
         ? body.durationMinutes
         : existing.durationMinutes;
+    if (allDay && durationMinutes % 1440 !== 0) throw badRequest('An all-day activity runs whole days');
     const assignedToId = body.assignedToId ?? existing.assignedToId;
     const before = existing.invitees.map((i) => i.userId);
     const inviteeIds =
       body.inviteeIds !== undefined ? await checkInvitees(body.inviteeIds, assignedToId, before) : before.filter((id) => id !== assignedToId);
     const added = inviteeIds.filter((id) => !before.includes(id));
     const removed = before.filter((id) => !inviteeIds.includes(id));
-    const moved =
-      new Date(startsAt).getTime() !== existing.startsAt.getTime() || durationMinutes !== existing.durationMinutes;
+    const moved = startsAtDate.getTime() !== existing.startsAt.getTime() || durationMinutes !== existing.durationMinutes;
     const reminderChanged = body.reminderMinutes !== undefined && body.reminderMinutes !== existing.reminderMinutes;
     // The type it has may stay even if since deactivated; a new choice must be on offer.
     const typeKey = body.type !== undefined ? await resolveActivityType(body.type, existing.typeKey ?? existing.type) : undefined;
+    // The links, checked together: the form sends all of them, so a changed customer brings its contact.
+    if (body.customerId !== undefined || body.contactId !== undefined || body.jobId !== undefined) {
+      await checkActivityLinks({
+        customerId: body.customerId !== undefined ? body.customerId || null : existing.customerId,
+        contactId: body.contactId !== undefined ? body.contactId || null : existing.contactId,
+        jobId: body.jobId !== undefined ? body.jobId || null : existing.jobId,
+      });
+    }
+    const callLink = body.callLink !== undefined ? (body.callLink ? safeHttpUrl(body.callLink) : null) : undefined;
 
     const { invitees: _invitees, ...existingRow } = existing;
     void _invitees;
@@ -3591,6 +3690,11 @@ activityRoutes.patch(
         data: {
           ...(typeKey !== undefined ? { type: activityEnumOf(typeKey), typeKey } : {}),
           ...(body.reminderMinutes !== undefined ? { reminderMinutes: body.reminderMinutes } : {}),
+          ...(body.allDay !== undefined ? { allDay: body.allDay } : {}),
+          ...(body.isPrivate !== undefined ? { isPrivate: body.isPrivate } : {}),
+          ...(callLink !== undefined ? { callLink } : {}),
+          ...(body.contactId !== undefined ? { contactId: body.contactId || null } : {}),
+          ...(body.jobId !== undefined ? { jobId: body.jobId || null } : {}),
           // A new time or a new reminder is a reminder not yet sent.
           ...(moved || reminderChanged ? { reminderSentAt: null } : {}),
           ...(added.length || removed.length
@@ -3610,7 +3714,8 @@ activityRoutes.patch(
           ...(body.leadId !== undefined ? { leadId: body.leadId || null } : {}),
           ...(body.quotationId !== undefined ? { quotationId: body.quotationId || null } : {}),
           ...(body.customerId !== undefined ? { customerId: body.customerId || null } : {}),
-          ...(body.startsAt !== undefined ? { startsAt: new Date(body.startsAt) } : {}),
+          // Snapped to Manila midnight for an all-day booking, so a change of All day alone moves it.
+          ...(startsAtDate.getTime() !== existing.startsAt.getTime() ? { startsAt: startsAtDate } : {}),
           ...(durationMinutes !== existing.durationMinutes ? { durationMinutes } : {}),
           ...(body.status !== undefined
             ? { status: body.status, completedAt: body.status === 'DONE' ? new Date() : null }
@@ -3654,28 +3759,51 @@ activityRoutes.patch(
       },
       req,
     );
-    res.json(presentActivity(updated, await activityTypeNames()));
+    const whole = await prisma.salesActivity.findUniqueOrThrow({ where: { id: updated.id }, include: ACTIVITY_INCLUDE });
+    res.json(presentActivity(whole, await activityTypeNames()));
   }),
 );
 
+/**
+ * Removes an activity — or, with `?series=upcoming`, this occurrence and
+ * every later PLANNED one of its series (SCORO's "this and following"): a
+ * past or done occurrence is a record of what happened and stays.
+ */
 activityRoutes.delete(
   '/:id',
   require_('gops.calendar.view_all'),
   handler(async (req, res) => {
-    const existing = await prisma.salesActivity.findUnique({ where: { id: req.params.id } });
+    const me = currentUser(req);
+    const existing = await prisma.salesActivity.findUnique({
+      where: { id: req.params.id },
+      include: { invitees: { select: { userId: true } } },
+    });
     if (!existing) throw notFound('Activity not found');
-    await prisma.salesActivity.delete({ where: { id: req.params.id } });
+    if (existing.isPrivate && !me.isSuperAdmin && !isOnActivity(existing, me.id)) {
+      throw forbidden('A private activity is removed only by the people on it');
+    }
+    const upcoming =
+      req.query.series === 'upcoming' && existing.seriesId
+        ? await prisma.salesActivity.findMany({
+            where: { seriesId: existing.seriesId, status: 'PLANNED', startsAt: { gte: existing.startsAt }, id: { not: existing.id } },
+            select: { id: true, startsAt: true },
+          })
+        : [];
+    const ids = [existing.id, ...upcoming.map((r) => r.id)];
+    await prisma.salesActivity.deleteMany({ where: { id: { in: ids } } });
+    const { invitees: _invitees, ...row } = existing;
+    void _invitees;
     await audit(
       {
         entityType: 'sales_activity',
         entityId: existing.id,
         action: 'DELETED',
-        summary: `Deleted activity: ${existing.subject}`,
-        before: existing,
+        summary: `Deleted activity: ${existing.subject}${upcoming.length ? ` and ${upcoming.length} later occurrence${upcoming.length === 1 ? '' : 's'}` : ''}`,
+        before: { ...row, removedIds: ids },
       },
       req,
     );
-    res.json({ ok: true });
+    res.json({ ok: true, removed: ids.length });
   }),
 );
 

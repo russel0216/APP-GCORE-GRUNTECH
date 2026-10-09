@@ -73,6 +73,7 @@ model User {
   quotationsOwned   Quotation[]            @relation("QuotationOwner")
   revisionsApproved QuotationRevision[]    @relation("RevisionApprover")
   activities        SalesActivity[]        @relation("ActivityAssignee")
+  activitiesBooked  SalesActivity[]        @relation("ActivityCreator")
   activityInvites   SalesActivityInvitee[]
 
   clearancesRaised       EmployeeClearance[]  @relation("ClearanceRaiser")
@@ -589,6 +590,7 @@ model CustomerContact {
   jobs        Job[]
   jobOrders   JobOrder[]
   salesOrders SalesOrder[]
+  activities  SalesActivity[]
 
   @@index([customerId])
 }
@@ -1692,6 +1694,32 @@ model SalesActivity {
   durationMinutes Int       @default(60)
   completedAt     DateTime?
 
+  /// SCORO's "All day" (2026-10-08): `startsAt` is the day's Manila midnight
+  /// and the duration whole days; the calendar draws it in the all-day row.
+  allDay    Boolean @default(false)
+  /// SCORO's "Personal": only the people on it — booked for it, invited, or
+  /// the one who booked it — see what it is; everyone else's calendar shows
+  /// "Busy" for the time (`maskPrivate` in shared/activities.ts).
+  isPrivate Boolean @default(false)
+  /// Conference call link, http(s) only (`safeHttpUrl`).
+  callLink  String?
+
+  /// The customer's contact person it is with — one of the customer's contacts.
+  contactId String?
+  contact   CustomerContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  /// The project it is for.
+  jobId     String?
+  job       Job?             @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  /// Who booked it (null on rows written before 2026-10-08).
+  createdById String?
+  createdBy   User?   @relation("ActivityCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// A repeating booking (SCORO's "Recurring"): every occurrence is an
+  /// ordinary activity carrying the FIRST one's id, so one can be moved on
+  /// its own and the rest removed together (`DELETE /activities/:id?series=upcoming`).
+  seriesId String?
+
   /// Minutes before `startsAt` to remind the assignee and invitees: null (none),
   /// 15, 60, 120 or 1440. Sent by the API's once-a-minute timer
   /// (`sendDueReminders` in shared/activities.ts).
@@ -1707,6 +1735,7 @@ model SalesActivity {
 
   @@index([assignedToId, startsAt])
   @@index([startsAt])
+  @@index([seriesId])
 }
 
 /// Someone else asked along to a sales activity: told on save, reminded with
@@ -1820,6 +1849,7 @@ model Job {
   serviceContract  ServiceContract?
   serviceReports   ServiceReport[]   @relation("ServiceReportJob")
   jobOrders        JobOrder[]        @relation("JobOrderChargeTo")
+  salesActivities  SalesActivity[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

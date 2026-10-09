@@ -212,8 +212,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**2,646 assertions across twenty-two scripts** (counted 2026-10-08): foundation 235,
-masters 74, sales 423, costing 120, pipeline 86, calendar 85, numbering 46,
+**2,657 assertions across twenty-two scripts** (counted 2026-10-09): foundation 235,
+masters 74, sales 423, costing 120, pipeline 86, calendar 96, numbering 46,
 partners 117, delivery 103, chain 72, hr 125, plantilla 99, meetings 86,
 evaluations 130, academy 97, finance 189, aftermarket 174, archive 113,
 insights 97, insights-brief 50, workspace 39, accounts 86. They cover permission resolution, numbering
@@ -1071,10 +1071,11 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   `?createdById=` filter, and the lead page's "Added by" row. It is not the
   owner — a manager often records an enquiry and assigns it on.
 - **The calendar's activity form picks no lead, quotation or customer**
-  (2026-10-07, the owner's call): the calendar books time; an activity gets
-  its links where the record lives — `ActivityLog` on the lead, quotation and
-  customer pages still sends them. An already-linked activity keeps its links
-  (the form never sends a value it did not load) and still shows the banner.
+  (2026-10-07, the owner's call) — **reversed on 2026-10-08**, when the
+  owner asked for SCORO's New event dialog, whose Links panel names the
+  customer, contact person, project, quotation and lead (see "The activity
+  form is SCORO's New event dialog" under the calendar notes). `ActivityLog`
+  on the lead, quotation and customer pages still sends its own links.
 - **"Start costing" moves a lead forwards only** (from NEW, CONTACTED, QUALIFIED
   or SITE_VISIT to COSTING), and the lead lookup runs before `nextNumber` so an
   unknown lead burns no number. `PATCH { leadId }` is a correction and moves
@@ -1176,6 +1177,63 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   invitation email carries Going / Not going / Maybe links
   (`activityEmailText`, `respondLinks`): `?respond=` on the page records
   the answer on opening, for the invitee only, then drops out of the URL.
+- **The activity form is SCORO's "New event" dialog** (2026-10-08, the
+  owner's first screenshot: "make it as reference for calendar"):
+  `ActivityModal` in `pages/sales/ActivityForm.tsx`, opened by "+ Schedule"
+  and a time-grid slot on the calendar and by Modify on the activity's page;
+  what the three screens share (the `Activity` row, the answers, the
+  reminders, the types' stand-ins) is `pages/sales/activityShared.ts`, no
+  React, so none imports another. The event on the left — Date, Start,
+  Duration in hours and minutes with "Ends 11:30 AM" under it, All day,
+  Private, Repeat (new only), Title, Activity type, Booked for, Address,
+  Conference call link, Description, Reminder, Status (existing) — and
+  beside it **Participants** (`PeoplePicker`, now with faces: `photoId` on
+  its `Person`, which `/users/lookup` sends as `photoPath`) and **Links**:
+  Customer (`CustomerPicker`), Contact person (the customer's contacts from
+  `GET /customers/:id`), Project (`/jobs/lookup`), Quotation and Lead (the
+  ordinary lists' `search=`), each offered only to a viewer who may read
+  that record and otherwise shown as "(kept)". **This reverses the
+  2026-10-07 "the calendar's form picks no lead, quotation or customer"
+  decision** — SCORO's dialog has them and the owner asked for SCORO's
+  dialog; `ActivityLog` on the record pages still sends its own links. The
+  foot is SCORO's: Save, **Save and open** (the page) and **Save and add
+  another** (the form stays, blank, on the same time; `onSaved(saved,
+  action)`), and Remove — "Remove this one" / "Remove this and later ones"
+  on an occurrence of a series. Not here, on purpose: SCORO's Busy (no
+  availability view), Shared resources (no resource booking), rich text
+  (every note in the app is plain) and Add file (files go on the page once
+  it exists). The columns: `SalesActivity.allDay`, `isPrivate`, `callLink`
+  (http(s) only, `safeHttpUrl`), `contactId` (must be one of the customer's
+  contacts, so a contact needs its customer — `checkActivityLinks()`),
+  `jobId` (exists, not cancelled), `createdById` (who booked it, shown on
+  the page), `seriesId`.
+  - **All day** snaps Starts to the day's Manila midnight
+    (`allDayStart()`) and runs whole days (a 10-hour "all day" is a 400);
+    `toEvent` gives it `time: null`, so the grids draw it in the all-day
+    row beside the service visits.
+  - **Private is SCORO's "Personal"**: `maskPrivate()` in
+    `shared/activities.ts` is applied to every read that leaves the API
+    (the list and the one; My Work lists only the viewer's own). Someone
+    not on it — not booked for it, not invited, not the one who booked it
+    (`isOnActivity()`) — reads "Busy" with the time and the person and
+    nothing else: no notes, address, call link, links, invitees or Google
+    hand-off, `masked: true`; the page shows the title "Busy", one line,
+    and no buttons; the PATCH and DELETE are a 403 for them. A super admin
+    sees it whole, as they do every record.
+  - **Repeat is rows, never a rule**: `repeatOccurrences(first, every,
+    until)` (pure, verify-calendar) steps a day, a week or a month on the
+    Manila wall clock — a monthly booking on the 31st falls on 28 February
+    and is back on 31 March, counted from the first each time — up to and
+    including the last Manila day `until` names, at most `MAX_OCCURRENCES`
+    (60; more is a 400 before anything is written). `POST /activities`
+    writes every occurrence in ONE transaction, each an ordinary activity
+    carrying the first one's id as `seriesId` (the first carries its own),
+    with its own invitees, reminder and audit row; the invitees are told
+    ONCE, the body saying how it repeats ("repeats weekly until Mar 24,
+    2031 (4 times)"); the response carries `occurrences`. Editing an
+    occurrence edits that one. `DELETE /activities/:id?series=upcoming`
+    removes it and every LATER PLANNED occurrence of its series (a past or
+    done one is a record and stays), answering `removed`.
 - **Reminders are the one thing G-CORE runs on a timer.** `reminderMinutes`
   is null, 15, 60, 120 or 1440 (`REMINDER_MINUTES`).
   `startActivityReminders()` (called from `index.ts` after `listen`, never

@@ -5,10 +5,10 @@ import { useAuth } from '../../lib/auth';
 import { dayKeyOf } from '../../lib/day';
 import { Attachments } from '../../components/Attachments';
 import { Avatar, ErrorBox, Loading, StatusBadge, formatDateTime, useToast } from '../../components/ui';
+import { ActivityModal } from './ActivityForm';
 import {
   ACTIVITY_TONES,
   ANSWERS,
-  ActivityModal,
   BUILTIN_TYPES,
   REMINDERS,
   RSVP_LABEL,
@@ -17,7 +17,7 @@ import {
   type ActivityTypeDef,
   type Person,
   type Rsvp,
-} from './Calendar';
+} from './activityShared';
 
 // ════════════════════════════════════════════════════════════════════
 //  THE ACTIVITY'S PAGE  (2026-10-08, SCORO's event page)
@@ -141,7 +141,7 @@ export function ActivityPage() {
   useEffect(() => {
     api
       .get<Person[]>(`/users/lookup${qs({ holding: 'gops.calendar.view_all' })}`)
-      .then((rows) => setPeople(rows.map((p) => ({ id: p.id, name: p.name }))))
+      .then((rows) => setPeople(rows.map((p) => ({ id: p.id, name: p.name, photoPath: p.photoPath ?? null }))))
       .catch(() => {});
     api
       .get<ActivityTypeDef[]>('/reference/activity-types')
@@ -215,15 +215,33 @@ export function ActivityPage() {
           <div className="act-head-tags">
             <StatusBadge status={activity.status} extra={ACTIVITY_TONES} />
             <span className="act-type">{activity.typeName ?? activity.type}</span>
+            {activity.isPrivate && (
+              <span className="act-tag" title="Only the people on it see what it is">
+                Private
+              </span>
+            )}
+            {activity.seriesId && (
+              <span className="act-tag" title="One of a repeating booking">
+                Repeats
+              </span>
+            )}
           </div>
           <p className="act-when">
-            <strong>{whenText}</strong>
-            <span className="faint"> · {durationLabel(activity.durationMinutes)}</span>
+            <strong>{activity.allDay ? (activity.durationMinutes > 1440 ? `All day, ${activity.durationMinutes / 1440} days` : 'All day') : whenText}</strong>
+            {!activity.allDay && <span className="faint"> · {durationLabel(activity.durationMinutes)}</span>}
           </p>
           {activity.location && <p className="act-where">{activity.location}</p>}
+          {activity.masked && <p className="faint">A private activity — only the people on it see the details.</p>}
+          {activity.callLink && (
+            <p className="act-call">
+              <a className="btn btn-sm" href={activity.callLink} target="_blank" rel="noopener noreferrer">
+                Join the call ↗
+              </a>
+            </p>
+          )}
         </div>
         <div className="act-head-actions">
-          {planned &&
+          {activity.masked ? null : planned &&
             (confirmCancel ? (
               <>
                 <span className="act-confirm">Cancel this activity? Everyone on it is told.</span>
@@ -244,14 +262,18 @@ export function ActivityPage() {
                 </button>
               </>
             ))}
-          <button type="button" className="btn btn-primary" onClick={() => setEditing(true)} disabled={busy}>
-            Modify
-          </button>
+          {!activity.masked && (
+            <button type="button" className="btn btn-primary" onClick={() => setEditing(true)} disabled={busy}>
+              Modify
+            </button>
+          )}
         </div>
       </header>
 
       <ErrorBox error={actionError} />
 
+      {!activity.masked && (
+        <>
       <section className="card act-people">
         <div className="act-section-head">
           <h3>Participants</h3>
@@ -299,7 +321,31 @@ export function ActivityPage() {
             <dt>Where</dt>
             <dd>{activity.location || <span className="faint">—</span>}</dd>
             <dt>Booked for</dt>
-            <dd>{activity.assignedTo.name}</dd>
+            <dd>
+              {activity.assignedTo.name}
+              {activity.createdBy && activity.createdBy.id !== activity.assignedTo.id && (
+                <span className="faint"> · booked by {activity.createdBy.name}</span>
+              )}
+            </dd>
+            {activity.contact && (
+              <>
+                <dt>Contact person</dt>
+                <dd>
+                  {activity.contact.name}
+                  {activity.contact.position && <span className="faint"> · {activity.contact.position}</span>}
+                </dd>
+              </>
+            )}
+            {activity.job && (
+              <>
+                <dt>Project</dt>
+                <dd>
+                  <Link to={`/g-ops/projects/${activity.job.id}`}>
+                    {activity.job.number} — {activity.job.name}
+                  </Link>
+                </dd>
+              </>
+            )}
             <dt>Linked to</dt>
             <dd>
               {linked ? (
@@ -391,8 +437,10 @@ export function ActivityPage() {
       </section>
 
       <Attachments entityType="sales_activity" entityId={activity.id} title="Files" hint="Agenda, directions, a photo from the site — anything the people on it need." />
+        </>
+      )}
 
-      {editing && (
+      {editing && !activity.masked && (
         <ActivityModal
           activity={activity}
           people={people}
@@ -404,8 +452,8 @@ export function ActivityPage() {
             toast('ok', 'Saved');
             void load();
           }}
-          onRemoved={() => {
-            toast('ok', 'Removed');
+          onRemoved={(removed) => {
+            toast('ok', removed > 1 ? `Removed ${removed} occurrences` : 'Removed');
             navigate(calendarPath, { replace: true });
           }}
         />

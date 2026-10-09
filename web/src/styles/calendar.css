@@ -287,6 +287,123 @@ button.cal-head[aria-pressed='true'] {
   margin-bottom: 0;
 }
 
+/* The page's private and series notes, and the call link, under the title. */
+.act-tag {
+  font-size: var(--fs-xs);
+  padding: 0 var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+
+/* ── The activity form (2026-10-08, SCORO's New event dialog) ─────────────── */
+
+/* The event on the left, Participants and Links beside it. */
+.act-form {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr);
+  gap: var(--s-5);
+}
+
+@media (max-width: 900px) {
+  .act-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+.act-form-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.act-form-side section {
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.act-form-side h4 {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.act-side-note {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-xs);
+}
+
+/* Date · Start · Duration on one line, SCORO's way. */
+.act-when-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: var(--s-3);
+  align-items: start;
+}
+
+.act-duration {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.act-duration input {
+  width: 4.5rem;
+}
+
+/* "Ends 5:00 PM" under the time line, before the toggles. */
+.act-ends {
+  margin: calc(-1 * var(--s-2)) 0 var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.act-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+  margin: 0 0 var(--s-3);
+}
+
+.act-repeat {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: var(--s-3);
+}
+
+/* A picked record on the Links panel: its name, and × to clear it. */
+.lookup-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: var(--fs-md);
+}
+
+.lookup-picked .chip-remove {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-base);
+  line-height: 1;
+  padding: 0 var(--s-1);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.lookup-picked .chip-remove:hover {
+  color: var(--danger);
+}
+
 /* A birthday or anniversary chip: warm, and never dimmed like a done activity. */
 .cal-item.people {
   border-left-color: var(--warn);

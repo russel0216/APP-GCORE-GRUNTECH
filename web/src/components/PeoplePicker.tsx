@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Avatar } from './ui';
 
 /**
  * Pick several people from a list — meeting invitees, session attendees,
@@ -22,6 +23,8 @@ export interface Person {
   sub?: string;
   /** Rows are grouped under this heading; absent rows go under "Everyone". */
   group?: string;
+  /** The person's photo (an attachment id); given, the row shows their face. */
+  photoId?: string | null;
 }
 
 const UNGROUPED = 'Everyone';
@@ -146,13 +149,14 @@ export function PeoplePicker({
                 {list.map((p) => {
                   const on = selected.has(p.id);
                   return (
-                    <label key={p.id} className={`person${on ? ' on' : ''}`}>
+                    <label key={p.id} className={`person${on ? ' on' : ''}${p.photoId !== undefined ? ' faced' : ''}`}>
                       <input
                         type="checkbox"
                         checked={on}
                         disabled={!on && full}
                         onChange={() => toggle(p.id)}
                       />
+                      {p.photoId !== undefined && <Avatar name={p.name} photoId={p.photoId} size={24} />}
                       <span className="person-name">{p.name}</span>
                       {p.sub && <span className="person-sub faint">{p.sub}</span>}
                     </label>

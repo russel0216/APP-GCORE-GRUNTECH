@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { env } from '../env';
+import { badRequest } from '../http/kit';
 import { mailConfig, sendMail } from './mail';
 import { notify, type NotificationType } from './notifications';
 import { formatDateTime } from './pdf';
@@ -56,6 +57,95 @@ export function activityWhere(q: ActivityQuery): {
       ...(assignedToId ? { OR: [{ assignedToId }, { invitees: { some: { userId: assignedToId } } }] } : {}),
     },
     orderBy: { startsAt: forRecord ? 'desc' : 'asc' },
+  };
+}
+
+// ── SCORO's New event dialog (2026-10-08): repeats and "Personal" ───────────
+
+/** How often a repeating booking recurs, and the most occurrences one save may make. */
+export const REPEAT_EVERY = ['DAY', 'WEEK', 'MONTH'] as const;
+export type RepeatEvery = (typeof REPEAT_EVERY)[number];
+export const MAX_OCCURRENCES = 60;
+
+/** Manila's offset: no daylight saving, so a fixed shift makes wall-clock arithmetic exact. */
+const MANILA_OFFSET_MS = 8 * 3_600_000;
+
+/**
+ * `months` after `d` on the Manila wall clock, keeping the time of day and
+ * the day of month, clamped to the month's end — counted from the FIRST
+ * date each time, so a booking on the 31st falls on 28 February and is back
+ * on 31 March, which is what a monthly call means.
+ */
+function addMonthsManila(d: Date, months: number): Date {
+  const local = new Date(d.getTime() + MANILA_OFFSET_MS);
+  const day = local.getUTCDate();
+  local.setUTCDate(1);
+  local.setUTCMonth(local.getUTCMonth() + months);
+  const last = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth() + 1, 0)).getUTCDate();
+  local.setUTCDate(Math.min(day, last));
+  return new Date(local.getTime() - MANILA_OFFSET_MS);
+}
+
+/**
+ * The starts of a repeating booking: the first, then every day, week or
+ * month after it, up to and including the last Manila day `until` names.
+ * Each occurrence is an ordinary activity (`seriesId` = the first's id); no
+ * rule row, so a later occurrence moved on its own stays moved. More than
+ * MAX_OCCURRENCES is refused: a year of daily calls is 365 rows nobody
+ * meant, and the form asked for an end date.
+ */
+export function repeatOccurrences(first: Date, every: RepeatEvery, until: string): Date[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(until)) throw badRequest('Repeat until needs a date');
+  if (until < manilaDayKey(first)) throw badRequest('Repeat until must be on or after the first day');
+  const out: Date[] = [];
+  for (let n = 0; ; n++) {
+    const at = every === 'MONTH' ? addMonthsManila(first, n) : new Date(first.getTime() + n * (every === 'DAY' ? 1 : 7) * 86_400_000);
+    if (manilaDayKey(at) > until) break;
+    out.push(at);
+    if (out.length > MAX_OCCURRENCES) throw badRequest(`That repeats more than ${MAX_OCCURRENCES} times — bring the end date closer`);
+  }
+  return out;
+}
+
+/** Whether this person is on the activity: booked for it, invited, or the one who booked it. */
+export function isOnActivity(
+  a: { assignedToId: string; createdById?: string | null; invitees?: { userId: string }[] },
+  userId: string,
+): boolean {
+  return a.assignedToId === userId || a.createdById === userId || (a.invitees ?? []).some((i) => i.userId === userId);
+}
+
+/**
+ * SCORO's "Personal": a private activity shows the people on it everything,
+ * and everyone else only that the time is taken — "Busy", with no notes,
+ * address, call link, links or invitees. Every read that leaves the API
+ * goes through it (the list and the one; My Work lists only the viewer's
+ * own). A super admin sees it whole, as they do every record.
+ */
+export function maskPrivate<
+  A extends { isPrivate: boolean; assignedToId: string; createdById?: string | null; invitees?: { userId: string }[] },
+>(a: A, viewer: { id: string; isSuperAdmin: boolean }): A & { masked?: boolean } {
+  if (!a.isPrivate || viewer.isSuperAdmin || isOnActivity(a, viewer.id)) return a;
+  return {
+    ...a,
+    subject: 'Busy',
+    notes: null,
+    location: null,
+    callLink: null,
+    lead: null,
+    quotation: null,
+    customer: null,
+    contact: null,
+    job: null,
+    leadId: null,
+    quotationId: null,
+    customerId: null,
+    contactId: null,
+    jobId: null,
+    reminderMinutes: null,
+    invitees: [],
+    responses: undefined,
+    masked: true,
   };
 }
 

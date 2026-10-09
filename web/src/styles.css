@@ -2286,6 +2286,15 @@ hr.rule {
   margin: 0;
 }
 
+/* A row with a face (the activity form's participants): box, face, name. */
+.people-picker .person.faced {
+  grid-template-columns: auto auto 1fr;
+}
+
+.people-picker .person.faced .person-sub {
+  grid-column: 3;
+}
+
 .people-picker .person-sub {
   grid-column: 2;
   font-size: var(--fs-xs);

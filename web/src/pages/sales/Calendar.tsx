@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf, parseDay, todayLocal, weekDays } from '../../lib/day';
 import { blockSpan, minutesLabel, placeInLanes } from '../../lib/timeGrid';
-import { Checkbox, ErrorBox, Field, Modal, statusTone, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, statusTone, useToast } from '../../components/ui';
 import { KIND_LABEL } from '../service/Reports';
 import {
   CalendarToolbar,
@@ -12,80 +12,12 @@ import {
   useCalendarNav,
   type CalendarEvent,
 } from '../../components/MonthCalendar';
-import { PeoplePicker } from '../../components/PeoplePicker';
+import { ActivityModal } from './ActivityForm';
+import { ACTIVITY_TONES, BUILTIN_TYPES, type Activity, type ActivityTypeDef, type Person, type Rsvp } from './activityShared';
 
 // ════════════════════════════════════════════════════════════════════
 //  SALES CALENDAR
 // ════════════════════════════════════════════════════════════════════
-
-/**
- * An activity type as Admin › Categories › Activity types has it (2026-10-08,
- * SCORO's customisable types). The list is data; an activity carries the key.
- */
-export interface ActivityTypeDef {
-  id: string;
-  key: string;
-  name: string;
-  color: string | null;
-  isActive: boolean;
-}
-
-/** The six built-ins, standing in until the list loads. */
-export const BUILTIN_TYPES: ActivityTypeDef[] = [
-  { id: 'SITE_VISIT', key: 'SITE_VISIT', name: 'Site visit', color: null, isActive: true },
-  { id: 'MEETING', key: 'MEETING', name: 'Meeting', color: null, isActive: true },
-  { id: 'CALL', key: 'CALL', name: 'Call', color: null, isActive: true },
-  { id: 'FOLLOW_UP', key: 'FOLLOW_UP', name: 'Follow-up', color: null, isActive: true },
-  { id: 'SUBMISSION', key: 'SUBMISSION', name: 'Submission', color: null, isActive: true },
-  { id: 'OTHER', key: 'OTHER', name: 'Other', color: null, isActive: true },
-];
-
-/** Planned is the default chip; done reads as settled. Cancelled falls to statusTone's danger. */
-export const ACTIVITY_TONES = { PLANNED: '', DONE: 'ok' } as const;
-
-/** An invitee's answer (InviteeResponse): PENDING is "No reply". */
-export type Rsvp = 'PENDING' | 'ACCEPTED' | 'TENTATIVE' | 'DECLINED';
-export const RSVP_LABEL: Record<Rsvp, string> = { ACCEPTED: 'Going', TENTATIVE: 'Maybe', DECLINED: 'Not going', PENDING: 'No reply' };
-/** The marks a chip carries — readable without colour, and without the words. */
-export const RSVP_MARK: Record<Rsvp, string> = { ACCEPTED: '✓', TENTATIVE: '~', DECLINED: '✗', PENDING: '?' };
-export const ANSWERS: Rsvp[] = ['ACCEPTED', 'TENTATIVE', 'DECLINED'];
-
-export interface Activity {
-  id: string;
-  /** The type's key (SalesActivityType.key). */
-  type: string;
-  /** The type's name as Admin › Categories has it. */
-  typeName?: string;
-  status: string;
-  subject: string;
-  notes: string | null;
-  location: string | null;
-  startsAt: string;
-  /** Derived by the API: startsAt + durationMinutes. */
-  endsAt: string;
-  durationMinutes: number;
-  reminderMinutes: number | null;
-  /** `photoPath` is the person's photo — an attachment id — for the faces on the activity's page. */
-  assignedTo: { id: string; name: string; photoPath?: string | null };
-  invitees: {
-    userId: string;
-    response: Rsvp;
-    respondedAt: string | null;
-    user: { id: string; name: string; photoPath?: string | null };
-  }[];
-  /** The API's tally of the invitees' answers. */
-  responses?: { going: number; maybe: number; notGoing: number; noReply: number };
-  lead: { id: string; number: string; companyName: string } | null;
-  quotation: { id: string; number: string } | null;
-  customer: { id: string; name: string } | null;
-  /** On GET /activities/:id, for a planned activity: SCORO's "Open in Google Calendar" hand-off. */
-  googleCalendarUrl?: string | null;
-}
-
-export interface Person {
-  id: string;
-  name: string;
-}
 
 /** "✓2 ✗1 ?3" (and "~1" only when somebody said maybe), or null with nobody invited. */
 function tallyText(a: Activity): string | null {
@@ -104,7 +36,8 @@ function toEvent(a: Activity, colors: Map<string, string>): CalendarEvent {
     date: dayKeyOf(at),
     sortAt: at.getTime(),
     endAt: new Date(a.endsAt).getTime(),
-    time: at.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
+    // An all-day activity (SCORO's "All day") sits in the all-day row, like a service visit.
+    time: a.allDay ? null : at.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
     label: a.subject,
     detail: `${a.assignedTo.name}${tally ? ` · ${tally}` : ''}${
       a.lead ? ` · ${a.lead.companyName}` : a.customer ? ` · ${a.customer.name}` : ''
@@ -175,20 +108,6 @@ function visitToEvent(v: ServiceVisitChip): CalendarEvent {
     tone: '',
     done: true,
   };
-}
-
-/** The reminder offsets the API accepts (REMINDER_MINUTES in shared/activities.ts). */
-export const REMINDERS = [
-  { value: '', label: 'No reminder' },
-  { value: '15', label: '15 minutes before' },
-  { value: '60', label: '1 hour before' },
-  { value: '120', label: '2 hours before' },
-  { value: '1440', label: '1 day before' },
-];
-
-/** Local wall-clock value for a datetime-local input. */
-function toLocalInput(d: Date): string {
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
 /**
@@ -358,7 +277,7 @@ export function SalesCalendar() {
     api
       // Only people who can open this calendar can be booked on it.
       .get<Person[]>(`/users/lookup${qs({ holding: 'gops.calendar.view_all' })}`)
-      .then((rows) => setPeople(rows.map((p) => ({ id: p.id, name: p.name }))))
+      .then((rows) => setPeople(rows.map((p) => ({ id: p.id, name: p.name, photoPath: p.photoPath ?? null }))))
       .catch(() => {});
   }, []);
 
@@ -474,10 +393,11 @@ export function SalesCalendar() {
           types={types}
           defaultStart={newStart ?? defaultStart}
           onClose={closeModal}
-          onSaved={() => {
-            closeModal();
+          onSaved={(saved, action) => {
             setTick((t) => t + 1);
-            toast('ok', 'Saved');
+            toast('ok', action === 'another' ? 'Saved — add the next one' : 'Saved');
+            if (action === 'open') navigate(`/g-ops/calendar/activities/${saved.id}`);
+            else if (action === 'close') closeModal();
           }}
         />
       )}
@@ -657,244 +577,5 @@ function TimeGrid({
         ))}
       </div>
     </div>
-  );
-}
-
-/** The activity form — "+ Schedule" on the calendar, Modify on the activity's page. */
-export function ActivityModal({
-  activity,
-  people,
-  types,
-  defaultStart,
-  onClose,
-  onSaved,
-  onRemoved,
-}: {
-  activity: Activity | null;
-  people: Person[];
-  /** The types on file; the form offers the active ones, plus the one the activity already has. */
-  types: ActivityTypeDef[];
-  defaultStart: Date;
-  onClose: () => void;
-  onSaved: () => void;
-  /** After Remove; the activity's page leaves for the calendar. Defaults to `onSaved`. */
-  onRemoved?: () => void;
-}) {
-  const { me } = useAuth();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const typeOptions = types.filter((t) => t.isActive || t.key === activity?.type);
-  const [form, setForm] = useState({
-    type: activity?.type ?? (typeOptions.some((t) => t.key === 'FOLLOW_UP') ? 'FOLLOW_UP' : (typeOptions[0]?.key ?? 'OTHER')),
-    subject: activity?.subject ?? '',
-    location: activity?.location ?? '',
-    notes: activity?.notes ?? '',
-    assignedToId: activity?.assignedTo.id ?? me?.user.id ?? '',
-    leadId: activity?.lead?.id ?? '',
-    quotationId: activity?.quotation?.id ?? '',
-    customerId: activity?.customer?.id ?? '',
-    startsAt: toLocalInput(activity ? new Date(activity.startsAt) : defaultStart),
-    endsAt: toLocalInput(activity ? new Date(activity.endsAt) : new Date(defaultStart.getTime() + 3600000)),
-    reminderMinutes: activity?.reminderMinutes != null ? String(activity.reminderMinutes) : '',
-    inviteeIds: activity?.invitees.map((i) => i.userId) ?? ([] as string[]),
-    status: activity?.status ?? 'PLANNED',
-  });
-
-  /** Moving the start keeps the length: Ends follows Starts, as a calendar's does. */
-  function setStarts(value: string) {
-    const oldStart = new Date(form.startsAt).getTime();
-    const oldEnd = new Date(form.endsAt).getTime();
-    const next = new Date(value).getTime();
-    const length = Number.isFinite(oldEnd - oldStart) && oldEnd > oldStart ? oldEnd - oldStart : 3600000;
-    setForm({ ...form, startsAt: value, endsAt: Number.isFinite(next) ? toLocalInput(new Date(next + length)) : form.endsAt });
-  }
-  const endsBeforeStart = !!form.startsAt && !!form.endsAt && new Date(form.endsAt) <= new Date(form.startsAt);
-
-  /*
-    The record links (lead, quotation, customer) are no longer picked here
-    (2026-10-07, the owner's call): the calendar books time, and an activity
-    gets its links where the record lives — the lead page's activity log, or
-    a quotation's. One already linked keeps its links (the banner above says
-    so), because the form never sends a value it did not load.
-  */
-  // Someone who has since lost calendar access is still who it was booked for.
-  const peopleOptions =
-    activity && !people.some((p) => p.id === activity.assignedTo.id) ? [activity.assignedTo, ...people] : people;
-  // Invited people who have since lost calendar access stay on the list.
-  const inviteOptions = [
-    ...peopleOptions,
-    ...(activity?.invitees ?? []).map((i) => i.user).filter((u) => !peopleOptions.some((p) => p.id === u.id)),
-  ];
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      const payload = {
-        type: form.type,
-        subject: form.subject,
-        location: form.location || null,
-        notes: form.notes || null,
-        assignedToId: form.assignedToId,
-        leadId: form.leadId || null,
-        quotationId: form.quotationId || null,
-        customerId: form.customerId || null,
-        startsAt: new Date(form.startsAt).toISOString(),
-        endsAt: new Date(form.endsAt).toISOString(),
-        reminderMinutes: form.reminderMinutes ? Number(form.reminderMinutes) : null,
-        inviteeIds: form.inviteeIds.filter((id) => id !== form.assignedToId),
-        status: form.status,
-      };
-      if (activity) await api.patch(`/activities/${activity.id}`, payload);
-      else await api.post('/activities', payload);
-      onSaved();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  async function remove() {
-    if (!activity) return;
-    setBusy(true);
-    try {
-      await api.del(`/activities/${activity.id}`);
-      (onRemoved ?? onSaved)();
-    } catch (err) {
-      setError(err);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={activity ? 'Modify activity' : 'Schedule activity'}
-      onClose={onClose}
-      footer={
-        <>
-          {activity && (
-            <button type="button" className="btn btn-danger" onClick={remove} disabled={busy}>
-              Remove
-            </button>
-          )}
-          <div className="topbar-spacer" />
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={save}
-            disabled={busy || form.subject.length < 2 || endsBeforeStart}
-          >
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </>
-      }
-    >
-      <ErrorBox error={error} />
-
-      {activity && (activity.lead || activity.quotation || activity.customer) && (
-        <div className="alert info">
-          Linked to{' '}
-          {activity.lead && (
-            <Link to={`/g-ops/leads/${activity.lead.id}`} onClick={onClose}>
-              {activity.lead.number} — {activity.lead.companyName}
-            </Link>
-          )}
-          {activity.lead && activity.quotation && ' · '}
-          {activity.quotation && (
-            <Link to={`/g-ops/quotations/${activity.quotation.id}`} onClick={onClose}>
-              {activity.quotation.number}
-            </Link>
-          )}
-          {(activity.lead || activity.quotation) && activity.customer && ' · '}
-          {activity.customer && (
-            <Link to={`/g-ops/customers/${activity.customer.id}`} onClick={onClose}>
-              {activity.customer.name}
-            </Link>
-          )}
-        </div>
-      )}
-
-      <div className="grid grid-2">
-        <Field label="Type">
-          <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
-            {typeOptions.map((t) => (
-              <option key={t.key} value={t.key}>
-                {t.name}
-                {!t.isActive ? ' (no longer offered)' : ''}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Who">
-          <select
-            value={form.assignedToId}
-            onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}
-          >
-            {peopleOptions.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </div>
-
-      <Field label="What">
-        <input value={form.subject} autoFocus onChange={(e) => setForm({ ...form, subject: e.target.value })} />
-      </Field>
-
-      <div className="grid grid-2">
-        <Field label="Starts">
-          <input type="datetime-local" value={form.startsAt} onChange={(e) => setStarts(e.target.value)} />
-        </Field>
-        <Field label="Ends" error={endsBeforeStart ? 'Ends must be after Starts' : null}>
-          <input
-            type="datetime-local"
-            value={form.endsAt}
-            min={form.startsAt}
-            onChange={(e) => setForm({ ...form, endsAt: e.target.value })}
-          />
-        </Field>
-      </div>
-
-      <Field label="Reminder" hint="A notification — and an email where email is set up — to everyone on it">
-        <select value={form.reminderMinutes} onChange={(e) => setForm({ ...form, reminderMinutes: e.target.value })}>
-          {REMINDERS.map((r) => (
-            <option key={r.value} value={r.value}>
-              {r.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      <Field label="Invite" hint="They are told when you save, and it shows on their calendar and in My Work">
-        <PeoplePicker
-          people={inviteOptions.map((p) => ({ id: p.id, name: p.name }))}
-          value={form.inviteeIds}
-          onChange={(ids) => setForm({ ...form, inviteeIds: ids })}
-          exclude={[form.assignedToId]}
-        />
-      </Field>
-
-      <Field label="Location">
-        <input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} />
-      </Field>
-      <Field label="Notes">
-        <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-      </Field>
-
-      {activity && (
-        <Field label="Status">
-          <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-            <option value="PLANNED">Planned</option>
-            <option value="DONE">Done</option>
-            <option value="CANCELLED">Cancelled</option>
-          </select>
-        </Field>
-      )}
-    </Modal>
   );
 }
