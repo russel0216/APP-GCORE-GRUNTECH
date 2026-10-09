@@ -2385,14 +2385,16 @@ Cost Estimate" PDF) in G-CORE's own style.
   team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
   Manager**, a seeded role that reads every costing), step 2 a SUPERVISOR
   step named **Team Leader** (the author's "Reports to", falling back to
-  `sales_manager` as the quotation's and the sales order's do), step 3 ROLE
-  `ctg` (**CTG** — the owner's name for the signatory; rename the role in
-  Admin › Roles if it stands for somebody's initials, the key stays). The
-  `project_engineer` role now raises and edits its own costings. "Costing —
-  management approval" (one step, executive) is in the seed's RETIRED list;
-  a costing pending on it finishes on it. **Assign the two new roles in
-  Admin › Users** — until somebody holds them, costings stall at step 1 and
-  `audit-workflows.ts` says so (it also knows engineers raise costings).
+  `sales_manager` as the quotation's and the sales order's do), step 3
+  "CEO (CTG)" ROLE `executive` — **CTG is the CEO's initials, Carter T.
+  Gasiong**, so the step is the executive role like every other CEO step
+  (a `ctg` role seeded for a few minutes is deleted by the seed where
+  nobody holds it). The `project_engineer` role now raises and edits its
+  own costings. "Costing — management approval" (one step, executive) is
+  in the seed's RETIRED list; a costing pending on it finishes on it.
+  **Assign Technical Manager in Admin › Users** — until somebody holds it,
+  costings stall at step 1 and `audit-workflows.ts` says so (it also knows
+  engineers raise costings).
   FINAL takes every signature (verify-costing proves two of three leave it
   pending, and that CTG cannot sign out of turn). With the route active the
   author cannot PATCH to FINAL; `POST /:id/submit` claims DRAFT →
@@ -2425,7 +2427,7 @@ Cost Estimate" PDF) in G-CORE's own style.
   which `safeSpec` must carry through) — never a table. The sign-offs come
   from `approvalSlots('costing', …)`: Prepared by, then one line per step
   of the route with the step's name as the capacity it signs in (TECHNICAL
-  MANAGER, TEAM LEADER, CTG), who signed and when, "Pending" until they do;
+  MANAGER, TEAM LEADER, CEO (CTG)), who signed and when, "Pending" until they do;
   a draft prints the route submitting would take, and a costing with no
   route at all one open APPROVED BY.
 - **Predictions never widen visibility**: `GET /costings/suggest?q=` offers past

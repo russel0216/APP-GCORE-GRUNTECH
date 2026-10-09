@@ -199,27 +199,6 @@ const ROLES: RoleSeed[] = [
     ],
   },
   {
-    // The costing's second approval, after the team leader. "CTG" is the
-    // owner's name for the signatory (2026-10-09); rename the role in Admin ›
-    // Roles if it stands for somebody's initials — the key stays.
-    key: 'ctg',
-    name: 'CTG',
-    description: 'The second approval on the costing route, after the team leader',
-    only: [
-      'gops.dashboard.view_all',
-      'gops.costing.view_all',
-      'gops.costing.export',
-      'gops.quotations.view_all',
-      'gops.quote_archive.view_all',
-      'gops.customers.view_all',
-      'gops.projects.view_all',
-      'gops.plans.view_all',
-      ...VIEW_OWN_SELF('gfin', 'expenses'),
-      ...VIEW_OWN_SELF('gfin', 'cash_advances'),
-      ...VIEW_OWN_SELF('ghr', 'meetings'),
-    ],
-  },
-  {
     key: 'project_manager',
     name: 'Project Manager',
     description: 'Runs projects — budget, procurement requests, progress and billing',
@@ -675,14 +654,22 @@ const WORKFLOWS: WorkflowSeed[] = [
     // a deactivated one is left alone, and the page returns to "Mark final".
     // The costing route (2026-10-09, the owner's call: "creator engineer ›
     // reviewer technical manager › approval team leader › 2nd approval
-    // CTG"). Step 2 is a SUPERVISOR step — the author's "Reports to" —
-    // falling back to the sales managers, as the quotation's and the sales
-    // order's Team Leader steps do; audit-workflows.ts checks the fallback
-    // is held. "Costing — management approval" (one step, the executive
-    // role) is RETIRED below: a costing pending on it finishes on it.
+    // CTG" — CTG being the CEO's initials, Carter T. Gasiong, so the last
+    // step is the executive role, as the quotation's and the sales order's
+    // CEO steps are). Step 2 is a SUPERVISOR step — the author's "Reports
+    // to" — falling back to the sales managers, as the other Team Leader
+    // steps do; audit-workflows.ts checks the fallback is held. "Costing —
+    // management approval" (one step, the executive role) is RETIRED below:
+    // a costing pending on it finishes on it. `previously` is the route as
+    // it was seeded for a few minutes with a role of its own for CTG.
     documentType: 'costing',
     name: 'Costing — technical manager, team leader, CTG',
     steps: [
+      { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
+    ],
+    previously: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
       { sequence: 3, name: 'CTG', approverType: 'ROLE', roleKey: 'ctg' },
@@ -967,6 +954,16 @@ async function main() {
   console.log(
     `  ✓ Roles (${ROLES.length})${grantedLater ? ` — granted ${grantedLater} newly introduced permission(s)` : ''}`,
   );
+  // A "CTG" role was seeded for the costing route's last step for a few
+  // minutes on 2026-10-09 before the owner said CTG is the CEO: that step is
+  // the executive role, and the role goes — unless somebody was given it.
+  {
+    const ctg = await prisma.role.findUnique({ where: { key: 'ctg' }, include: { _count: { select: { users: true } } } });
+    if (ctg && ctg._count.users === 0) {
+      await prisma.role.delete({ where: { id: ctg.id } });
+      console.log('  · Removed the unused "CTG" role — the costing route\'s last step is the CEO (executive)');
+    }
+  }
 
   // ── Numbering ──────────────────────────────────────────────────────────────
   // A type's own default (the quotation's per-salesperson monthly pattern)

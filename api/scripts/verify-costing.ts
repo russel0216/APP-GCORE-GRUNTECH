@@ -196,7 +196,8 @@ async function main() {
     return role;
   };
   const technicalManagerRole = await roleByKey('technical_manager');
-  const ctgRole = await roleByKey('ctg');
+  // CTG is the CEO (Carter T. Gasiong): the executive role, as on every CEO step.
+  const ctgRole = await roleByKey('executive');
 
   const estimator = await makeUser(`${TAG} Estimator`, `estimator${MAIL}`, [ownRole.id]);
   const colleague = await makeUser(`${TAG} Colleague`, `colleague${MAIL}`, [ownRole.id]);
@@ -204,7 +205,7 @@ async function main() {
   const reader = await makeUser(`${TAG} Reader`, `reader${MAIL}`, [readRole.id]);
   const reviewer = await makeUser(`${TAG} Technical Manager`, `techmgr${MAIL}`, [technicalManagerRole.id]);
   const teamLeader = await makeUser(`${TAG} Team Leader`, `teamleader${MAIL}`, [allRole.id]);
-  const ctg = await makeUser(`${TAG} CTG`, `ctg${MAIL}`, [ctgRole.id]);
+  const ctg = await makeUser(`${TAG} CEO`, `ctg${MAIL}`, [ctgRole.id]);
   await prisma.user.update({ where: { id: estimator.id }, data: { supervisorId: teamLeader.id } });
 
   /** The route's signatures, in the order given — each on the request still open. */
