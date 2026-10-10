@@ -104,7 +104,7 @@ ul.svc-legend {
 /* ── Shared page parts ────────────────────────────────────────────────────── */
 
 .svc-kpis {
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
 }
 
 .svc-footnote {
@@ -149,7 +149,7 @@ ul.svc-legend {
 .svc-detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--s-4);
+  gap: var(--block-gap);
 }
 
 .svc-text {

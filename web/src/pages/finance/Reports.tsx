@@ -227,7 +227,7 @@ export function FinanceDashboard() {
     data.invoicedThisYear > 0 ? (data.collectedThisYear / data.invoicedThisYear) * 100 : 0;
 
   return (
-    <div>
+    <div className="stack">
       <div className="page-head">
         <div>
           <h1>Executive Dashboard</h1>
@@ -488,7 +488,7 @@ export function FinanceReports() {
   const [tab, setTab] = useState<'ar' | 'ap'>(can('gfin.ar.view_all') ? 'ar' : 'ap');
 
   return (
-    <div>
+    <div className="stack">
       <div className="page-head">
         <div>
           <h1>Finance Reports</h1>
@@ -499,7 +499,7 @@ export function FinanceReports() {
         </div>
       </div>
 
-      <div className="scope-switch fin-gap-bottom">
+      <div className="scope-switch">
         {can('gfin.ar.view_all') && (
           <button className={tab === 'ar' ? 'active' : ''} onClick={() => setTab('ar')}>
             Receivables aging
@@ -519,7 +519,7 @@ export function FinanceReports() {
 
 function BucketStrip({ buckets, total }: { buckets: AgingBucket[]; total: number }) {
   return (
-    <div className="grid grid-4 fin-gap-bottom">
+    <div className="grid grid-4">
       {buckets.map((b) => (
         <div key={b.label} className="card">
           <div className="faint fin-bucket-label">
@@ -551,7 +551,7 @@ function ArAgingReport() {
   if (!data.rows.length) return <Empty title="Nothing outstanding" hint="Every issued invoice has been collected." />;
 
   return (
-    <div>
+    <div className="stack">
       <BucketStrip buckets={data.buckets} total={data.totalOutstanding} />
 
       {data.withheldAwaitingCertificate > 0 && (
@@ -649,7 +649,7 @@ function ApAgingReport() {
   if (!data) return <Loading />;
 
   return (
-    <div>
+    <div className="stack">
       <BucketStrip buckets={data.buckets} total={data.totalOutstanding} />
 
       <div className="card">
@@ -852,7 +852,7 @@ export function CashFlow() {
   const peak = Math.max(1, ...data.months.map((m) => Math.max(m.in, m.out)));
 
   return (
-    <div>
+    <div className="stack">
       <div className="page-head">
         <div>
           <h1>Cash Flow</h1>

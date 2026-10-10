@@ -36,7 +36,7 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: var(--s-3);
-  margin-top: var(--s-3);
+  margin-top: var(--block-gap);
   background: var(--surface-2);
 }
 

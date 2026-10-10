@@ -5,7 +5,7 @@
 
 /* The notice above the list ("one customer's history", "N not linked"). */
 .archive-scope {
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--block-gap);
 }
 
 /* "not linked" after a client name in a cell. */
@@ -35,7 +35,7 @@ table.data.archive-lines td .archive-pre {
 }
 
 .archive-card {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 /* Sum without tax / VAT / Total, under the lines, right-hand side. */
@@ -71,7 +71,7 @@ table.data.archive-lines td .archive-pre {
 }
 
 .archive-report {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .archive-report h4 {

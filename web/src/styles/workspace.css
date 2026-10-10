@@ -3,7 +3,7 @@
 /* ── My Work ─────────────────────────────────────────────────────────────── */
 
 .mywork-card {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .card-title-count {

@@ -307,7 +307,7 @@
 .pipe-lanes {
   display: flex;
   flex-direction: column;
-  gap: var(--s-4);
+  gap: var(--block-gap);
 }
 
 .pipe-lane {
@@ -369,7 +369,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--s-2);
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .pipe-toolbar .pipe-select {
@@ -464,8 +464,8 @@
 }
 
 .sales-card-gap {
-  margin-top: var(--s-4);
-  margin-bottom: var(--s-4);
+  margin-top: var(--block-gap);
+  margin-bottom: var(--block-gap);
 }
 
 .sales-card-head {
@@ -783,7 +783,7 @@
 
 /* The Customise panel sits in the page, so it can never open off-screen. */
 .pipe-customise {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .pipe-customise fieldset {
@@ -871,8 +871,8 @@
 /* SCORO's summary strip, squeezed: label and figure, no caption. */
 .kpi-grid.pipe-kpis {
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: var(--s-2);
-  margin-bottom: var(--s-3);
+  gap: var(--block-gap);
+  margin-bottom: var(--block-gap);
 }
 
 .pipe-kpis .kpi-card {

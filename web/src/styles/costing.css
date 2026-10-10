@@ -326,7 +326,7 @@ table.data.cs-tasks {
 }
 
 .cs-stats {
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
 }
 
 .cs-stat-label {

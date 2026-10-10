@@ -229,7 +229,7 @@
 */
 
 .org-switch {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .org-lead {

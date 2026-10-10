@@ -4,7 +4,7 @@
 
 /* Spacing that used to be inline pixel values across the finance screens. */
 .fin-gap-top {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .fin-gap-top-sm {
@@ -15,12 +15,8 @@
   margin-bottom: 0;
 }
 
-.fin-gap-bottom {
-  margin-bottom: var(--s-4);
-}
-
 .fin-section-title {
-  margin: var(--s-5) 0 var(--s-2);
+  margin: var(--block-gap) 0 var(--s-2);
 }
 
 /* A money figure typed into a table cell reads the way it prints. */

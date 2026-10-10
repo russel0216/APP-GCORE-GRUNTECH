@@ -390,7 +390,7 @@ export function Account() {
         same line, so the button is hidden there — and a way out of the
         application that exists only on a wide screen is not a way out.
       */}
-      <div className="card" style={{ marginTop: 'var(--s-4)' }}>
+      <div className="card" style={{ marginTop: 'var(--block-gap)' }}>
         <h3 className="card-title">Session</h3>
         <div className="row">
           <button className="btn btn-danger" onClick={signOut}>

@@ -3,7 +3,7 @@
 
 /* A card that is followed by another card on a record page. */
 .proc-card {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 /* Card heading with an action on the right ("Order lines" … "+ Add line"). */
@@ -20,7 +20,7 @@
 
 /* Stat row on a record page. */
 .proc-stats {
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
 }
 
 /* An alert that closes a card — no trailing gap inside the card. */

@@ -116,7 +116,7 @@ export function HrSettingsPage() {
     setSettings({ ...settings, [key]: value });
 
   return (
-    <div>
+    <div className="stack">
       <div className="page-head">
         <div>
           <h1>HR Settings</h1>

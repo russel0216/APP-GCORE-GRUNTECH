@@ -125,7 +125,7 @@ export function SalesAnalytics() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile
           label="Open pipeline"
           value={formatMoney(data.totals.openValue)}
@@ -504,7 +504,7 @@ export function CashForecast() {
         <ExportButton path="/insights/cash-forecast.csv" />
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile
           label="Invoiced, owed to us"
           value={formatMoney(data.totals.invoiced)}
@@ -749,7 +749,7 @@ export function InventoryAnalytics() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile label="Stock value" value={formatMoney(data.totalValue)} sub={`${data.lines} item lines`} />
         <Tile
           label="Not moving"

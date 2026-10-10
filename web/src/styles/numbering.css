@@ -62,7 +62,7 @@ table.data td.numbering-actions {
 /* ── Company settings ─────────────────────────────────────────────────────── */
 
 .company-actions {
-  margin-top: var(--s-5);
+  margin-top: var(--block-gap);
 }
 
 .company-logo-name {

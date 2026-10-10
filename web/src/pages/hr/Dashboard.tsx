@@ -177,7 +177,7 @@ export function HrDashboard() {
     : [];
 
   return (
-    <div>
+    <div className="stack">
       <div className="page-head">
         <div>
           <h1>HR Dashboard</h1>

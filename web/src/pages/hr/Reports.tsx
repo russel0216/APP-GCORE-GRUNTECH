@@ -71,7 +71,7 @@ export function HrReports() {
         </div>
       </div>
 
-      <div className="scope-switch" role="tablist" style={{ marginBottom: 'var(--s-4)' }}>
+      <div className="scope-switch" role="tablist" style={{ marginBottom: 'var(--block-gap)' }}>
         <button
           role="tab"
           aria-selected={tab === 'overtime'}

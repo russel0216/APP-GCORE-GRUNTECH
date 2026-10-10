@@ -395,7 +395,7 @@ export function CompanyOverview() {
       </div>
 
       {briefLines.length > 0 && (
-        <div style={{ marginBottom: 'var(--s-5)' }}>
+        <div style={{ marginBottom: 'var(--block-gap)' }}>
           <Panel
             title="The company at a glance"
             blurb="One line per division, each read through that division's own dashboard — where they differ, this page is wrong. Every figure opens the list it counts; a line you cannot see is a dashboard you cannot open."
@@ -414,7 +414,7 @@ export function CompanyOverview() {
       )}
 
       <h3 className="section-label">Winning work</h3>
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile
           label="Open pipeline"
           value={formatMoney(data.sales.openPipeline)}
@@ -443,7 +443,7 @@ export function CompanyOverview() {
       </div>
 
       <h3 className="section-label">Delivering it</h3>
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile
           label="Active projects"
           value={data.delivery.activeJobs}
@@ -472,7 +472,7 @@ export function CompanyOverview() {
       </div>
 
       <h3 className="section-label">Getting paid</h3>
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile
           label="Receivable"
           value={formatMoney(data.finance.receivable)}
@@ -511,7 +511,7 @@ export function CompanyOverview() {
       </div>
 
       <h3 className="section-label">Everything else</h3>
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile
           label="Stock value"
           value={formatMoney(data.chain.stockValue)}
@@ -654,7 +654,7 @@ export function Profitability() {
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 'var(--s-5)' }}>
+      <div className="grid grid-4" style={{ marginBottom: 'var(--block-gap)' }}>
         <Tile label="Contract value" value={formatMoney(data.totals.contractValue)} sub={`${data.totals.jobs} job${data.totals.jobs === 1 ? '' : 's'}`} />
         <Tile label="Budgeted cost" value={formatMoney(data.totals.budgetedCost)} sub="what they were costed at" />
         <Tile

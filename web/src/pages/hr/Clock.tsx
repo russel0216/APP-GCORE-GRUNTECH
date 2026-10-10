@@ -475,7 +475,7 @@ export function Clock() {
 
   if (!state.employee) {
     return (
-      <div>
+      <div className="stack">
         <div className="page-head">
           <div>
             <h1>Clock In / Out</h1>
@@ -555,7 +555,7 @@ export function Clock() {
             : idle;
 
   return (
-    <div>
+    <div className="stack">
       <div className="page-head">
         <div>
           <h1>Clock In / Out</h1>
@@ -754,7 +754,7 @@ export function Clock() {
           )}
         </div>
 
-        <div>
+        <div className="stack">
           <div className="card">
             <h3 className="card-title">Today</h3>
             {today ? (

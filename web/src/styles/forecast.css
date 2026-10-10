@@ -3,7 +3,7 @@
 .forecast .fc-controls {
   align-items: flex-end;
   gap: var(--s-3);
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
   flex-wrap: wrap;
 }
 
@@ -21,11 +21,11 @@
 }
 
 .forecast .fc-stats {
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
 }
 
 .forecast .fc-panels {
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
 }
 
 .forecast .fc-periods td.fc-period {
@@ -57,7 +57,7 @@
 }
 
 .forecast .fc-owners {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .forecast .fc-owners h4 {
@@ -68,7 +68,7 @@
 }
 
 .forecast .fc-group + .fc-group {
-  margin-top: var(--s-5);
+  margin-top: var(--block-gap);
 }
 
 .forecast .fc-group-head {

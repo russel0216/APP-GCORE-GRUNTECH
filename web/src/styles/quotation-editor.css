@@ -9,7 +9,7 @@
 */
 
 .qe-card {
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
 }
 
 .qe-head {

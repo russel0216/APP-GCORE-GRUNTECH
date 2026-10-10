@@ -90,6 +90,9 @@
   --s-6: 24px;
   --s-7: 32px;
   --s-8: 40px;
+  /* The one space between cards, blocks, and a page's title and its first block
+     (2026-10-10, the owner's call: "make the spacing between cards uniform"). */
+  --block-gap: var(--s-4);
 
   /* Type. Six sizes, replacing the eight that were in use ad hoc. */
   --fs-xs: 11px;
@@ -818,7 +821,7 @@ textarea {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--s-4);
-  margin-bottom: var(--s-5);
+  margin-bottom: var(--block-gap);
   flex-wrap: wrap;
 }
 
@@ -919,7 +922,7 @@ a.card:hover {
 
 .grid {
   display: grid;
-  gap: var(--s-4);
+  gap: var(--block-gap);
 }
 
 /*
@@ -967,7 +970,23 @@ a.card:hover {
 .stack {
   display: flex;
   flex-direction: column;
-  gap: var(--s-3);
+  gap: var(--block-gap);
+}
+
+/* A stack spaces its children itself: a child that carries its own bottom
+   margin for the bare-div case (the page head, an alert, a KPI row, a record
+   head, a confirm bar) would otherwise double the gap. */
+.stack > .page-head,
+.stack > .alert,
+.stack > .kpi-grid,
+.stack > .record-head,
+.stack > .confirm-bar,
+.stack > .page-foot {
+  margin-bottom: 0;
+}
+
+.stack > .page-foot {
+  margin-top: 0;
 }
 
 /*
@@ -1038,7 +1057,7 @@ a.card:hover {
   align-items: center;
   gap: var(--s-2);
   flex-wrap: wrap;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--block-gap);
 }
 
 .list-search {
@@ -1153,7 +1172,7 @@ a.card:hover {
 /* The summary cards over a list: eight on the quotation list (count, sum, margin, a card per team), on one row where the width allows. */
 .kpi-grid.list-summary {
   grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--block-gap);
 }
 
 /* Eight across leaves each card narrow: the figure comes down a size and never breaks mid-number. */
@@ -1257,7 +1276,7 @@ a.card:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s-2);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--block-gap);
   font-size: var(--fs-sm);
   color: var(--muted);
 }
@@ -1320,7 +1339,7 @@ a.card:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s-2) var(--s-3);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--block-gap);
   padding: var(--s-2) var(--s-3);
   border: 1px solid var(--neon-dim);
   border-radius: var(--radius-sm);
@@ -1779,7 +1798,7 @@ table.data .mono {
   border-radius: var(--radius-sm);
   font-size: var(--fs-md);
   border: 1px solid;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .alert.error {
@@ -2897,6 +2916,12 @@ hr.rule {
   gap: var(--s-3);
 }
 
+/* A panel spaces its children too: a KPI row inside one (Face health) keeps
+   the page-level margin off, or it sat 24px over what followed it. */
+.panel-block > .kpi-grid {
+  margin-bottom: 0;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -3193,8 +3218,8 @@ a.funnel-row:hover .funnel-label {
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--s-3);
-  margin-bottom: var(--s-4);
+  gap: var(--block-gap);
+  margin-bottom: var(--block-gap);
 }
 
 .kpi-card {
@@ -3458,7 +3483,7 @@ a.funnel-row:hover .funnel-label {
   justify-content: space-between;
   gap: var(--s-4);
   flex-wrap: wrap;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
   padding: var(--s-4) var(--s-5);
   background: var(--surface);
   border: 1px solid var(--line);
@@ -4479,7 +4504,7 @@ a.icon-row:hover {
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .lead-progress-head {
@@ -4867,7 +4892,7 @@ a.icon-row:hover {
    Print, ⋯, Modify — and the confirm bar under it. See components/Navigation,
    RecordHeader and Confirm. */
 .back-row {
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--block-gap);
 }
 
 .back-link {
@@ -4897,7 +4922,7 @@ a.icon-row:hover {
   flex-wrap: wrap;
   align-items: flex-end;
   gap: var(--s-3);
-  margin: 0 0 var(--s-4);
+  margin: 0 0 var(--block-gap);
   padding: var(--s-3) var(--s-4);
   border: 1px solid rgb(var(--danger-rgb) / 0.45);
   border-radius: var(--radius-sm);

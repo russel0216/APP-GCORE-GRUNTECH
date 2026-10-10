@@ -67,7 +67,7 @@
 /* ── Tabs on a record page (partner detail) — the scope-switch buttons ──── */
 
 .m-tabs {
-  margin: var(--s-4) 0 var(--s-3);
+  margin: 0 0 var(--block-gap);
   flex-wrap: wrap;
 }
 
@@ -153,11 +153,11 @@
 }
 
 .m-industries {
-  margin-top: var(--s-3);
+  margin-top: var(--block-gap);
 }
 
 .m-supplier-history {
-  margin-top: var(--s-3);
+  margin-top: var(--block-gap);
 }
 
 .m-stock-grid {

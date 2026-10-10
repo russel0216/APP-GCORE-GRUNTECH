@@ -39,9 +39,9 @@
 .eval-body {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: var(--s-4);
+  gap: var(--block-gap);
   align-items: start;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 @media (max-width: 960px) {
@@ -51,11 +51,11 @@
 }
 
 .eval-side {
-  gap: var(--s-4);
+  gap: var(--block-gap);
 }
 
 .eval-attachments {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .eval-flush {
@@ -254,7 +254,7 @@
 .eval-tab {
   display: flex;
   flex-direction: column;
-  gap: var(--s-4);
+  gap: var(--block-gap);
 }
 
 .eval-tab-head {
@@ -272,7 +272,7 @@
 .eval-settings {
   display: flex;
   flex-direction: column;
-  gap: var(--s-4);
+  gap: var(--block-gap);
 }
 
 .eval-settings-fields {
@@ -294,7 +294,7 @@
 /* ── Spacing between blocks the shared components leave flush ───────────── */
 
 .eval-due-block {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .eval-ratings-head {

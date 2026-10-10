@@ -40,7 +40,7 @@
 }
 
 .meeting-respond {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .respond-group {
@@ -49,7 +49,7 @@
 
 .meeting-body {
   align-items: start;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 /* Agendas are written as lines; keep them as lines. */
@@ -74,7 +74,7 @@
 }
 
 .meeting-attachments {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 @media (max-width: 860px) {

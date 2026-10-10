@@ -8,7 +8,7 @@
 /* The workspace's section switch — thirteen tabs at most, so it wraps. */
 .del-tabs {
   flex-wrap: wrap;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 /* A card's title with its one action on the right. */
@@ -42,7 +42,7 @@
 }
 
 .del-gap-top {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .del-span-all {
@@ -355,7 +355,7 @@
 }
 
 .gantt-editor {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
   padding: var(--s-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);

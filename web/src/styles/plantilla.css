@@ -32,7 +32,7 @@
 }
 
 .plantilla-holder-list {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .plantilla-holder-list ul {
@@ -61,14 +61,14 @@
 .clearance-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-  gap: var(--s-4);
+  gap: var(--block-gap);
   align-items: start;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .clearance-areas {
   display: grid;
-  gap: var(--s-4);
+  gap: var(--block-gap);
   min-width: 0;
 }
 
@@ -115,8 +115,8 @@
 .turnover-charts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--s-8) * 8)), 1fr));
-  gap: var(--s-4);
-  margin-bottom: var(--s-4);
+  gap: var(--block-gap);
+  margin-bottom: var(--block-gap);
 }
 
 .turnover-charts .card {

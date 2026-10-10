@@ -11,11 +11,11 @@
 
 .academy-body {
   align-items: start;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .academy-section {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 .academy-split {
@@ -39,7 +39,7 @@
 }
 
 .academy-attachments {
-  margin-top: var(--s-4);
+  margin-top: var(--block-gap);
 }
 
 .academy-list {
@@ -65,7 +65,7 @@
 }
 
 .academy-tabs {
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--block-gap);
 }
 
 /* ── Attendees and results ───────────────────────────────────────────────── */
@@ -106,7 +106,7 @@
 .academy-calendar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(16em, 22em);
-  gap: var(--s-4);
+  gap: var(--block-gap);
   align-items: start;
 }
 

@@ -125,7 +125,7 @@
 .pt-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 20rem;
-  gap: var(--s-4);
+  gap: var(--block-gap);
   align-items: start;
 }
 
