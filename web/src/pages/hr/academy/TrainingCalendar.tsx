@@ -113,7 +113,7 @@ export function TrainingCalendar() {
       <div className="page-head">
         <h1>Training Calendar</h1>
         {canCreate && (
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => setBooking(atNine(nav.focus))}>
+          <button type="button" className="btn btn-primary" onClick={() => setBooking(atNine(nav.focus))}>
             + New session
           </button>
         )}

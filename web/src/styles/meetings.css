@@ -32,6 +32,7 @@
 }
 
 .meeting-card-head {
+  align-items: center;
   margin-bottom: var(--card-gap);
 }
 

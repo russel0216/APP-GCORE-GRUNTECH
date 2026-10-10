@@ -286,7 +286,7 @@ export function ServiceSchedule() {
             </button>
           </div>
           {can('gops.pm_reports.create') && (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+            <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}>
               + New call-out
             </button>
           )}

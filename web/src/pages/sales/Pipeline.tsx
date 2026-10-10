@@ -803,7 +803,7 @@ export function Pipeline() {
   const newMenuButton = (canCreateLead || canCreateQuote) && (
     <div className="pipe-menu-wrap">
       <button
-        className="btn btn-primary btn-sm"
+        className="btn btn-primary"
         aria-haspopup="menu"
         aria-expanded={newMenu}
         onClick={() => setNewMenu((o) => !o)}

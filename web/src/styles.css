@@ -107,6 +107,16 @@
   --fs-xl: 20px;
   --fs-2xl: 24px;
 
+  /* Buttons. Two boxes and no third (2026-10-10, the owner's call: "make the
+     button sizes uniform in all cards"): the page's button, 35 tall (14pt
+     text, 8 × 16 padding), on a page head and a record head; the card's,
+     29 tall (12pt, 6 × 12), everywhere inside a card — its head, its body,
+     its foot, a table cell, a list toolbar. A fixed height, so a flex
+     parent cannot stretch one against a taller sibling and a card's 13pt
+     body cannot shrink one. */
+  --btn-h: 35px;
+  --btn-h-sm: 29px;
+
   /* Elevation. Three steps: resting, raised, floating. */
   --shadow-sm: 0 1px 2px rgb(var(--shade-rgb) / 0.4);
   --shadow-md: 0 4px 14px rgb(var(--shade-rgb) / 0.45);
@@ -482,11 +492,21 @@ textarea {
 
 /* ─────────────────────────────── Buttons ───────────────────────────────── */
 
+/*
+  Two sizes, each a fixed box (the tokens say why): .btn on a page head and a
+  record head, .btn-sm inside a card. The height is set outright rather than
+  left to padding + line-height, because a button in a flex row used to read
+  32 beside a taller sibling, and one in a card read the card's 13pt — the
+  measured spread was 29, 32 and 35 for the same button. The coarse-pointer
+  min-height below still wins on a tablet. The clock's big button and a
+  modal's foot are the only ones that keep their own box.
+*/
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--s-2);
+  height: var(--btn-h);
   padding: 8px var(--s-4);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
@@ -550,6 +570,7 @@ textarea {
 }
 
 .btn-sm {
+  height: var(--btn-h-sm);
   padding: 6px var(--s-3);
   font-size: var(--fs-sm);
 }
@@ -565,12 +586,17 @@ textarea {
 
 /*
   A button that is only an icon needs an accessible name, which it carries as
-  aria-label - and a square target, which it did not have.
+  aria-label - and a square target, which it did not have: the same box as
+  the text button beside it, in either size.
 */
 .btn-icon {
   padding: 6px;
-  min-width: 30px;
+  min-width: var(--btn-h);
   justify-content: center;
+}
+
+.btn-icon.btn-sm {
+  min-width: var(--btn-h-sm);
 }
 
 .btn-block {
@@ -893,7 +919,8 @@ textarea {
     value     .kpi-value and every stat figure    --fs-xl  700
     caption   .kpi-subtext, .hint, a block note   --fs-xs  (rule below .faint)
     body      everything else, cells included     --fs-md  (this rule)
-    button    .btn stays the page's 14            --fs-base
+    button    .btn-sm, the card's own box          --fs-sm   (--btn-h-sm)
+  (A page head and a record head keep the page's .btn at --fs-base, --btn-h.)
   The card sets the body size, so a plain paragraph, a list item or an
   unclassed span reads 13 wherever it sits (the page body is 14), and `.mono`
   inherits (below). A stat figure's exceptions are documented at the rule.
@@ -2690,6 +2717,8 @@ hr.rule {
 }
 
 .clock-btn {
+  /* The one deliberately big button: the clock's, pressed at arm's length. */
+  height: auto;
   font-size: 16px;
   padding: 14px;
   margin-bottom: 8px;

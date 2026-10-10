@@ -56,13 +56,13 @@ export function RangePicker({
         <input type="date" value={to} onChange={(e) => onChange(from, e.target.value)} />
       </Field>
       <button
-        className={`btn btn-sm${from === monthStart && to === today ? ' btn-active' : ''}`}
+        className={`btn${from === monthStart && to === today ? ' btn-active' : ''}`}
         onClick={() => onChange(monthStart, today)}
       >
         This month
       </button>
       <button
-        className={`btn btn-sm${from === yearStart && to === today ? ' btn-active' : ''}`}
+        className={`btn${from === yearStart && to === today ? ' btn-active' : ''}`}
         onClick={() => onChange(yearStart, today)}
       >
         This year
@@ -72,7 +72,7 @@ export function RangePicker({
 }
 
 /** Downloads a report's CSV twin, with the token the API expects. */
-export function ExportButton({ path, label = 'Export CSV' }: { path: string; label?: string }) {
+export function ExportButton({ path, label = 'Export CSV', small }: { path: string; label?: string; small?: boolean }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
 
@@ -89,7 +89,7 @@ export function ExportButton({ path, label = 'Export CSV' }: { path: string; lab
   }
 
   return (
-    <button className="btn btn-sm" onClick={run} disabled={busy}>
+    <button className={small ? 'btn btn-sm' : 'btn'} onClick={run} disabled={busy}>
       {busy ? 'Building…' : label}
     </button>
   );
@@ -401,7 +401,7 @@ export function CompanyOverview() {
             blurb="One line per division, each read through that division's own dashboard — where they differ, this page is wrong. Every figure opens the list it counts; a line you cannot see is a dashboard you cannot open."
             action={
               can('insights.dashboard.export') ? (
-                <ExportButton path={`/insights/summary.csv${qs({ from, to })}`} label="Export summary" />
+                <ExportButton path={`/insights/summary.csv${qs({ from, to })}`} label="Export summary" small />
               ) : undefined
             }
           >

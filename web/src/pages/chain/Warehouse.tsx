@@ -1448,7 +1448,7 @@ export function BorrowSlipDetail() {
         {/* The card's own act, at its foot under the quantities it takes. */}
         {!done && can('gchain.borrow_slips.edit_all') && (
           <div className="proc-row-actions proc-card-note">
-            <button className="btn btn-primary" onClick={receiveBack}>
+            <button className="btn btn-sm btn-primary" onClick={receiveBack}>
               Receive back into stock
             </button>
           </div>

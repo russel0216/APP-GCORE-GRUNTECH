@@ -125,7 +125,7 @@ export function TurnoverReport() {
             <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
           </Field>
           {can('ghr.reports.export') && (
-            <button className="btn" onClick={download} disabled={busy || !data}>
+            <button className="btn btn-sm" onClick={download} disabled={busy || !data}>
               {busy ? 'Preparing…' : 'Download CSV'}
             </button>
           )}

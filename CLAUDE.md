@@ -307,6 +307,20 @@ four databases and four copies of "customer".
       way to the same place, or leads somewhere that no longer fits, is
       removed — never the only way to perform an action, which moves into
       ⋯ instead.
+    - **Two button sizes, one per place** (2026-10-10, the owner's call:
+      "make the button sizes uniform in all cards"): the page's `.btn`
+      (`--btn-h`, 35 tall, `--fs-base`) on a `.page-head`, a `RecordHeader`,
+      a page editor's Save (`.qe-actions`, `.qe-foot`, `.page-foot`), the
+      confirm bar and a modal; the card's `.btn-sm` (`--btn-h-sm`, 29 tall,
+      `--fs-sm`) everywhere INSIDE a card — its head, its body, its foot
+      (`.card-foot`, `.panel-foot`), a table cell, a list toolbar, a
+      calendar's own toolbar, the pager. Both are fixed boxes, so a flex
+      parent cannot stretch one against a taller sibling and a card's 13pt
+      body cannot shrink one; `.btn-icon` is the same box square (the ⋯ in
+      a record head is a 35 square). `ExportButton` takes `small` inside a
+      card. The clock's `clock-btn` is the one deliberately bigger button;
+      the scope-switch pills and the calendar grid's own controls are not
+      buttons in this sense.
 
 20. **One way to pick, one way to state a fact** (2026-10-09, rule 19's
     content half: the editors of every module read alike, not only their

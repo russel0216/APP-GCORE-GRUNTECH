@@ -1103,10 +1103,10 @@ function AssignCostingPanel({
       )}
       {/* [Cancel] [Assign], right — the order every form's foot keeps. */}
       <div className="panel-foot">
-        <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+        <button type="button" className="btn btn-sm" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className="btn btn-primary" disabled={!assigneeId || busy} onClick={assign}>
+        <button type="button" className="btn btn-sm btn-primary" disabled={!assigneeId || busy} onClick={assign}>
           {busy ? 'Assigning…' : assigneeId && assigneeId === me?.user.id ? 'Start costing' : 'Assign'}
         </button>
       </div>

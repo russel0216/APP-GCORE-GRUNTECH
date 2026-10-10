@@ -1544,10 +1544,10 @@ export function TemplateSavePanel({
       </div>
       <Checkbox checked={withPrices} onChange={setWithPrices} label="Keep the unit costs (untick to keep quantities and names only)" />
       <div className="row cs-row-actions">
-        <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+        <button type="button" className="btn btn-sm" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || name.trim().length < 2}>
+        <button type="button" className="btn btn-sm btn-primary" onClick={() => void submit()} disabled={busy || name.trim().length < 2}>
           {busy ? 'Saving…' : 'Save'}
         </button>
       </div>

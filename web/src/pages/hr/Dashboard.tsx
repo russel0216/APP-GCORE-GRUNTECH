@@ -190,11 +190,11 @@ export function HrDashboard() {
         </div>
         <div className="row">
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-          <button className="btn btn-sm" onClick={() => setDate(today())}>
+          <button className="btn" onClick={() => setDate(today())}>
             Today
           </button>
           <button
-            className="btn btn-sm"
+            className="btn"
             onClick={() => setRange({ from: date, to: date })}
             disabled={exporting}
           >

@@ -999,12 +999,12 @@ export function CadJobOrderDetail() {
             />
           </Field>
           <div className="cad-panel-actions">
-            <button type="button" className="btn" onClick={() => setPanel(null)} disabled={busy}>
+            <button type="button" className="btn btn-sm" onClick={() => setPanel(null)} disabled={busy}>
               Cancel
             </button>
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn btn-sm btn-primary"
               disabled={busy || assignee === (r.assignedTo?.id ?? '')}
               onClick={() => run(assignee ? 'Assigned' : 'Back in the queue', () => api.post(`/cad-job-orders/${r.id}/assign`, { userId: assignee || null }))}
             >
@@ -1262,10 +1262,10 @@ function SubmitRevisionPanel({
         <input value={externalUrl} placeholder="https://…" onChange={(e) => setExternalUrl(e.target.value)} />
       </Field>
       <div className="cad-panel-actions">
-        <button type="button" className="btn" onClick={onClose} disabled={busy}>
+        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className="btn btn-primary" disabled={busy || !hasPdf || note.trim().length < 2} onClick={() => void submit()}>
+        <button type="button" className="btn btn-sm btn-primary" disabled={busy || !hasPdf || note.trim().length < 2} onClick={() => void submit()}>
           {busy ? 'Uploading…' : `Submit ${next}`}
         </button>
       </div>
@@ -1382,12 +1382,12 @@ function FilePlanPanel({
         </Field>
       </div>
       <div className="cad-panel-actions">
-        <button type="button" className="btn" onClick={onClose} disabled={busy}>
+        <button type="button" className="btn btn-sm" onClick={onClose} disabled={busy}>
           Cancel
         </button>
         <button
           type="button"
-          className="btn btn-primary"
+          className="btn btn-sm btn-primary"
           disabled={busy || title.trim().length < 2}
           onClick={() =>
             onRun('Filed on the project’s Approved Plans', () =>

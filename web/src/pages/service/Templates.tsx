@@ -90,7 +90,7 @@ export function ReportTemplates() {
         <div className="row">
           <Checkbox checked={showAll} onChange={setShowAll} label="Show old versions" />
           {editable && (
-            <button className="btn btn-primary btn-sm" onClick={() => setEditing('new')}>
+            <button className="btn btn-primary" onClick={() => setEditing('new')}>
               + New template
             </button>
           )}
@@ -760,7 +760,7 @@ export function AftermarketSettings() {
           <p>How long a warranty runs, how often equipment is visited, and how far ahead expiry is flagged.</p>
         </div>
         {editable && (
-          <button className="btn btn-primary btn-sm" onClick={save} disabled={busy}>
+          <button className="btn btn-primary" onClick={save} disabled={busy}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         )}

@@ -245,7 +245,7 @@ function ContactDetails() {
         </>
       )}
       <div className="card-foot">
-        <button className="btn btn-primary" type="submit" disabled={busy || snapshot(phone, personal) === saved}>
+        <button className="btn btn-sm btn-primary" type="submit" disabled={busy || snapshot(phone, personal) === saved}>
           {busy ? 'Saving…' : 'Save'}
         </button>
       </div>
@@ -377,7 +377,7 @@ export function Account() {
             />
           </Field>
           <div className="card-foot">
-            <button className="btn btn-primary" type="submit" disabled={busy}>
+            <button className="btn btn-sm btn-primary" type="submit" disabled={busy}>
               {busy ? 'Saving…' : 'Save'}
             </button>
           </div>
@@ -393,7 +393,7 @@ export function Account() {
       <div className="card" style={{ marginTop: 'var(--block-gap)' }}>
         <h3 className="card-title">Session</h3>
         <div className="row">
-          <button className="btn btn-danger" onClick={signOut}>
+          <button className="btn btn-sm btn-danger" onClick={signOut}>
             Sign out
           </button>
           <span className="muted">Ends this session on this device only.</span>

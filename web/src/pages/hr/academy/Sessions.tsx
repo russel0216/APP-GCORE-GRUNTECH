@@ -1039,7 +1039,7 @@ export function SessionDetail() {
                     ? `${pending} attendee(s) still need a result before the session can be completed.`
                     : ''}
               </span>
-              <button type="button" className="btn btn-primary" onClick={saveResults} disabled={!dirty || busy === 'results'}>
+              <button type="button" className="btn btn-sm btn-primary" onClick={saveResults} disabled={!dirty || busy === 'results'}>
                 {busy === 'results' ? 'Saving…' : 'Save'}
               </button>
             </div>

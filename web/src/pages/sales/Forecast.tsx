@@ -178,7 +178,7 @@ export function Forecast() {
           <ExportButton path={`/pipeline/forecast.csv${query}`} />
           <button
             type="button"
-            className="btn btn-sm"
+            className="btn"
             onClick={() => openPdf(`/api/pipeline/forecast.pdf${query}`, () => toast('error', 'The PDF could not be opened'))}
           >
             Print

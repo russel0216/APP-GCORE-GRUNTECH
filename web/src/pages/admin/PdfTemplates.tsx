@@ -722,7 +722,7 @@ function PdfTemplateEditor({ docType }: { docType: DocType }) {
               <button
                 key={o.type}
                 type="button"
-                className={`btn btn-sm${o.type === docType ? ' btn-active' : ''}`}
+                className={`btn${o.type === docType ? ' btn-active' : ''}`}
                 aria-pressed={o.type === docType}
                 onClick={() => switchDoc(o.type)}
               >
@@ -1997,7 +1997,7 @@ function PreviewControl({
             )}
           </div>
         ))}
-      <button type="button" className="btn" onClick={onPreview} disabled={busy}>
+      <button type="button" className="btn btn-sm" onClick={onPreview} disabled={busy}>
         Preview PDF
       </button>
     </div>
