@@ -3,7 +3,7 @@ import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
 import { z } from 'zod';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, notFound, badRequest } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
 import { act, approversForStep, contactOf, historyFor, pendingFor } from '../shared/approvals';
@@ -672,8 +672,12 @@ myWorkRoutes.get(
           take: TAKE,
         }),
         prisma.notification.count({ where: { userId: me.id, isRead: false } }),
+        // The person's own trail, as one line each: never the before/after,
+        // which can hold what the line deliberately leaves out (whose face a
+        // refused clock-in came near is HR's, not the person's).
         prisma.auditLog.findMany({
           where: { actorId: me.id },
+          select: { id: true, at: true, action: true, entityType: true, entityId: true, summary: true },
           orderBy: { at: 'desc' },
           take: 8,
         }),
@@ -735,6 +739,8 @@ attachmentRoutes.get(
     const row = await prisma.attachment.findUnique({ where: { id: req.params.id } });
     if (!row) throw notFound('Attachment not found');
     // Knowing a file's id is not the same right as seeing the record it is on.
+    // (An account photo is filed under `user`, which every signed-in person
+    // reads; a face sample's photo never is one — see accountPhotoFrom.)
     if (!(await mayAccessAttachments(currentUser(req), row.entityType, row.entityId))) {
       throw notFound('Attachment not found');
     }
@@ -759,6 +765,21 @@ const guardRecord = handler(async (req, _res, next) => {
   next();
 });
 
+/**
+ * Adding a file: the record's own rule, and for a record whose files its own
+ * routes manage (a face sample, a clock-in photo), a refusal — those files
+ * come and go with their record, never through this door.
+ */
+const guardWrite = handler(async (req, _res, next) => {
+  const me = currentUser(req);
+  const { entityType, entityId } = req.params;
+  if (!(await mayAccessAttachments(me, entityType, entityId))) throw notFound('Record not found');
+  if (!(await mayAccessAttachments(me, entityType, entityId, 'write'))) {
+    throw forbidden('Files on this record are added and removed through its own screen');
+  }
+  next();
+});
+
 attachmentRoutes.get(
   '/:entityType/:entityId',
   guardRecord,
@@ -774,7 +795,7 @@ attachmentRoutes.get(
 
 attachmentRoutes.post(
   '/:entityType/:entityId',
-  guardRecord,
+  guardWrite,
   // A CAD record's files take the CAD ceiling (MAX_CAD_UPLOAD_MB); everything else the ordinary one.
   (req, res, next) => (isCadEntity(req.params.entityType) ? cadUpload : upload).array('files', 20)(req, res, next),
   handler(async (req, res) => {
@@ -807,6 +828,9 @@ attachmentRoutes.delete(
     if (!row) throw notFound('Attachment not found');
     if (row.uploadedById !== me.id && !me.isSuperAdmin) {
       throw badRequest('Only the person who uploaded a file can remove it');
+    }
+    if (!(await mayAccessAttachments(me, row.entityType, row.entityId, 'write'))) {
+      throw forbidden('Files on this record are added and removed through its own screen');
     }
     await deleteAttachment(req.params.id);
     res.json({ ok: true });

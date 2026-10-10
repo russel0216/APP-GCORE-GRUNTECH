@@ -2722,12 +2722,16 @@ model InventoryTransaction {
 //  to the settled outcome — never to an intermediate approval.
 // ════════════════════════════════════════════════════════════════════
 
-/// A face descriptor captured at enrolment. Several per employee improves
-/// matching across lighting, glasses and angle.
+/// A face sample captured at enrolment: three to five per employee
+/// (MIN_FACE_SAMPLES / MAX_FACE_SAMPLES in shared/hr.ts), so a match holds
+/// across lighting, glasses and angle.
 ///
-/// The 128-float descriptor is computed in the browser and matched on the
-/// server by Euclidean distance. See docs: this trusts the client to compute
-/// honestly, which is why the capture photo is always stored as evidence.
+/// The browser sends a photo and nothing else; the 128-float descriptor is
+/// computed on the SERVER from it (`describeFace()` in shared/face.ts) and
+/// matched there by Euclidean distance, so a client can never assert whose
+/// face it is. The photo (`photoPath`, an attachment on `face_enrollment`
+/// whose entityId is the employee) is kept as the evidence, and is what a
+/// sample is re-derived from when the engine changes.
 model FaceEnrollment {
   id         String   @id @default(cuid())
   employeeId String
@@ -2735,6 +2739,16 @@ model FaceEnrollment {
 
   /// 128 floats.
   descriptor Json
+  /// The pipeline that computed `descriptor` (FACE_ENGINE in shared/face.ts).
+  /// Only samples of the current engine are matched — two pipelines describe
+  /// the same photo ~0.1 apart — so a null or older value is a LEGACY sample:
+  /// counted and listed, never compared, until the boot-time re-derivation
+  /// recomputes it from its photo (shared/faceSamples.ts).
+  engine     String?
+  /// How good the capture was (`FaceQuality`: score, eyeDistance, brightness,
+  /// yaw, tilt, levelled, contrastRetry), or `{ rederiveFailed: <reason> }`
+  /// for a legacy sample whose photo could not be described again.
+  quality    Json?
   photoPath  String?
   label      String?
 
@@ -2785,7 +2799,11 @@ model Attendance {
   /// Net of the unpaid break, so it is hours actually worked.
   workedMinutes Int              @default(0)
 
+  /// The clock-in fallback's written reason (or HR's note on a correction).
   notes        String?
+  /// The clock-OUT fallback's written reason — a PIN or the biometric device
+  /// always carries one, at either end of the day (Phase 6 notes).
+  timeOutNotes String?
   recordedById String?
   recordedBy   User?   @relation("AttendanceRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
 

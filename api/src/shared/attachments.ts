@@ -113,6 +113,42 @@ export async function saveAttachment(input: SaveAttachmentInput) {
   });
 }
 
+/**
+ * Files a buffer the server made itself (an account picture derived from a
+ * face capture), under a random name like an upload's. The file is removed
+ * again if the row cannot be written.
+ */
+export async function saveAttachmentBytes(input: {
+  entityType: string;
+  entityId: string;
+  bytes: Buffer;
+  fileName: string;
+  mimeType: string;
+  uploadedById: string;
+  caption?: string;
+}) {
+  const storedName = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(input.fileName).slice(0, 12)}`;
+  const file = attachmentPath(storedName);
+  fs.writeFileSync(file, input.bytes);
+  try {
+    return await prisma.attachment.create({
+      data: {
+        entityType: input.entityType,
+        entityId: input.entityId,
+        fileName: input.fileName,
+        storedName,
+        mimeType: input.mimeType,
+        size: input.bytes.length,
+        caption: input.caption ?? null,
+        uploadedById: input.uploadedById,
+      },
+    });
+  } catch (err) {
+    fs.rmSync(file, { force: true });
+    throw err;
+  }
+}
+
 export function attachmentPath(storedName: string): string {
   // Guard against a stored name escaping the upload directory.
   const resolved = path.resolve(env.uploadDir, storedName);
@@ -148,17 +184,36 @@ export async function deleteAttachment(id: string): Promise<void> {
 export type AttachmentGuard = (user: ResolvedUser, entityId: string) => Promise<boolean>;
 
 const guards = new Map<string, AttachmentGuard>();
+const writeGuards = new Map<string, AttachmentGuard>();
 
-export function registerAttachmentGuard(entityType: string, guard: AttachmentGuard): void {
+/**
+ * `guard` answers reading (listing, serving) and — unless `write` is given —
+ * adding and removing too. `write` is for a record whose files are managed by
+ * its own routes: the generic upload and DELETE ask it instead, and a super
+ * admin does not pass over it, because it is a rule about the route rather
+ * than about rights (a face sample's photo is removed with its sample, never
+ * on its own).
+ */
+export function registerAttachmentGuard(
+  entityType: string,
+  guard: AttachmentGuard,
+  options: { write?: AttachmentGuard } = {},
+): void {
   guards.set(entityType, guard);
+  if (options.write) writeGuards.set(entityType, options.write);
+  else writeGuards.delete(entityType);
 }
 
 export async function mayAccessAttachments(
   user: ResolvedUser,
   entityType: string,
   entityId: string,
+  mode: 'read' | 'write' = 'read',
 ): Promise<boolean> {
+  const write = mode === 'write' ? writeGuards.get(entityType) : undefined;
+  if (write) return write(user, entityId);
   const guard = guards.get(entityType);
   if (!guard || user.isSuperAdmin) return true;
   return guard(user, entityId);
 }
+

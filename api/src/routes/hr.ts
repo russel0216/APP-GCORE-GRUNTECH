@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { Prisma, AttendanceStatus, LeaveStatus, OtStage } from '@prisma/client';
@@ -13,6 +14,7 @@ import {
   notFound,
   badRequest,
   forbidden,
+  HttpError,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
@@ -30,8 +32,21 @@ import {
 import { registerSearch } from '../shared/search';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
-import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../shared/attachments';
-import { describeFace, faceEngineReady } from '../shared/face';
+import { upload, saveAttachment, attachmentPath, deleteAttachment, registerAttachmentGuard } from '../shared/attachments';
+import { throttled } from '../shared/throttle';
+import { FACE_ENGINE, describeFace, faceEngineReady, faceQualityProblem, type FaceQuality } from '../shared/face';
+import {
+  FACE_REFUSAL_REASONS,
+  deletePhotoIfUnused,
+  describeRefusalReason,
+  dropAccountPhotoFromSamples,
+  faceHealth,
+  listSamples,
+  sampleCounts,
+  setAccountPhotoFromSample,
+  type EnrolRefusalReason,
+  type FaceRefusalReason,
+} from '../shared/faceSamples';
 import { toCsv } from '../shared/csv';
 import { sweepSeparations } from '../shared/clearance';
 import {
@@ -50,6 +65,11 @@ import {
   myEmployee,
   attendanceDay,
   matchFace,
+  decideFace,
+  FACE_MARGIN,
+  MIN_FACE_SAMPLES,
+  MAX_FACE_SAMPLES,
+  type FaceRefusal,
   classifyArrival,
   workedMinutes,
   overtimeHours,
@@ -210,12 +230,70 @@ async function isApproverOf(userId: string, documentTypes: string[], documentId:
 export const clockRoutes = Router();
 clockRoutes.use(authenticate);
 
+/*
+  Face photos are the person's and HR's. A sample's photo (`face_enrollment`)
+  and a clock-in capture (`attendance`) are both filed under the EMPLOYEE's id,
+  and knowing an attachment id must not open a colleague's face.
+
+  - A sample's photo: the person's own login, and HR — the employee EDIT
+    right, the one the Face samples tab takes. Not the employee register's
+    read right: finance holds that for labour rates, and a reference photo of
+    somebody's face is not a labour rate.
+  - A clock capture: the person, HR (the same edit right), whoever reads the
+    attendance register's every entry (`ghr.attendance.view_all`), and a
+    supervisor (the dashboard right) for their OWN direct reports only — a
+    supervisor sees the whole register, but a colleague's face at the door is
+    not theirs to look at. The register sends a photo's id only where it
+    would open (`captureReader`).
+
+  A super admin reads both. Neither is added or removed through the generic
+  attachment routes — a sample's photo goes with its sample (DELETE
+  /clock/enrollments/:id), and a clock-in photo is the evidence of the entry
+  it belongs to. Nobody's account photo is a sample's photo: the avatar an
+  enrolment gives a person is a small picture of its own (`accountPhotoFrom`).
+*/
+async function isOwnEmployee(user: ResolvedUser, employeeId: string): Promise<boolean> {
+  const row = await prisma.employee.findUnique({ where: { id: employeeId }, select: { userId: true } });
+  return !!row?.userId && row.userId === user.id;
+}
+
+/**
+ * Whose clock captures one person may open, as a test on an employee id —
+ * built once per request, so the attendance register asks it of every row
+ * without a query each. Mirrors the `attendance` attachment guard.
+ */
+async function captureReader(me: ResolvedUser): Promise<(employeeId: string) => boolean> {
+  if (me.isSuperAdmin || can(me, 'ghr.attendance.view_all') || can(me, 'ghr.employees.edit_all')) return () => true;
+  const mine = await myEmployee(me.id);
+  const reports = can(me, 'ghr.dashboard.view_all')
+    ? await prisma.employee.findMany({ where: { user: { supervisorId: me.id } }, select: { id: true } })
+    : [];
+  const open = new Set([...(mine ? [mine.id] : []), ...reports.map((r) => r.id)]);
+  return (employeeId) => open.has(employeeId);
+}
+
+const neverThroughGenericRoutes = async () => false;
+registerAttachmentGuard(
+  'face_enrollment',
+  async (user, employeeId) => can(user, 'ghr.employees.edit_all') || isOwnEmployee(user, employeeId),
+  { write: neverThroughGenericRoutes },
+);
+registerAttachmentGuard(
+  'attendance',
+  async (user, employeeId) => (await captureReader(user))(employeeId),
+  { write: neverThroughGenericRoutes },
+);
+
 /**
  * Where today's attendance stands for the signed-in person.
  *
  * "Any one who access the web application can clock in clock out" — so this is
  * deliberately available to every authenticated user, not gated behind an HR
  * permission.
+ *
+ * `faceSamples` counts only samples the clock can match — the current face
+ * engine's, with a readable descriptor — and `legacySamples` the rest; face
+ * clock-in needs `samplesNeeded` of the first (`enrolled`).
  */
 clockRoutes.get(
   '/me',
@@ -259,13 +337,16 @@ clockRoutes.get(
       prisma.attendance.findUnique({
         where: { employeeId_date: { employeeId: employee.id, date: today } },
       }),
-      prisma.faceEnrollment.count({ where: { employeeId: employee.id } }),
+      sampleCounts(employee.id),
     ]);
 
     res.json({
       employee,
-      enrolled: faces > 0,
-      faceSamples: faces,
+      enrolled: faces.current >= MIN_FACE_SAMPLES,
+      faceSamples: faces.current,
+      legacySamples: faces.legacy,
+      samplesNeeded: MIN_FACE_SAMPLES,
+      maxSamples: MAX_FACE_SAMPLES,
       faceEngineReady: faceEngineReady(),
       today: attendance
         ? {
@@ -292,101 +373,371 @@ function capturedPhoto(req: Request): Buffer {
   return fs.readFileSync(attachmentPath(req.file.filename));
 }
 
+/**
+ * Multer wrote the capture before the route could decide. A refused capture
+ * is thrown away, as a refused CAD upload is: a face nobody accepted is not
+ * kept on disk with no record pointing at it.
+ */
+function discardCapture(req: Request) {
+  if (!req.file) return;
+  try {
+    fs.unlinkSync(req.file.path);
+  } catch {
+    /* already gone */
+  }
+}
+
+const fourPlaces = (d: number | null | undefined) => (d == null ? null : Math.round(d * 10000) / 10000);
+
+/**
+ * How often one person may knock on the face clock or its enrolment: each
+ * attempt costs the server a second of the face engine, on a host it shares
+ * with a safety-critical system. Generous for a person at the door (a retry
+ * every five seconds), a brake on a loop. Checked before the upload is even
+ * written to disk.
+ */
+const FACE_ATTEMPTS_PER_MINUTE = 12;
+const faceThrottle = (door: 'clock' | 'enrol') =>
+  handler(async (req, _res, next) => {
+    const me = currentUser(req);
+    if (throttled(`face:${door}:${me.id}`, FACE_ATTEMPTS_PER_MINUTE, 60_000)) {
+      throw new HttpError(429, 'Too many tries in a minute — wait a moment, then try again.');
+    }
+    next();
+  });
+
+/**
+ * Whose face samples a request is about: the caller's own (no employeeId, or
+ * their own), or — holding `right` — anybody's.
+ */
+async function sampleOwner(me: ResolvedUser, employeeId: string | undefined, right: string): Promise<string> {
+  const mine = await myEmployee(me.id);
+  if (!employeeId || employeeId === mine?.id) {
+    if (!mine) throw badRequest('Your account is not linked to an employee record');
+    return mine.id;
+  }
+  if (!can(me, right)) throw forbidden("Only HR can see or change another employee's face samples");
+  const target = await prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true } });
+  if (!target) throw notFound('Employee not found');
+  return target.id;
+}
+
+// ── Enrolment ───────────────────────────────────────────────────────────────
+
+const ENROL_MESSAGES = {
+  full: 'Five samples are on file — remove one before adding another.',
+  inconsistent: (whose: string) =>
+    `This does not look like the samples already on ${whose}. Retake facing the camera in good light — if those ` +
+    'samples are of someone else, remove them first.',
+  collision:
+    "This face is too close to another employee's enrolled face for the clock to tell you apart. Use the fallback " +
+    'and tell HR.',
+};
+
+/**
+ * One enrolment at a time, across everybody: counting a person's samples,
+ * matching the new one against every face on file and writing it happen under
+ * one transaction-scoped lock. Two captures sent at once (a double tap, two
+ * tabs) used to both pass the count, or both be first samples — two different
+ * faces on one account, neither checked against the other — and two people
+ * enrolling the same face at once could each miss the other. The face itself
+ * is described before the lock, so the lock is held for milliseconds.
+ */
+const ENROL_LOCK = Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('face_enrollment'))::text AS locked`;
+
+type EnrolDecision =
+  | { refused: 'full' }
+  | {
+      refused: EnrolRefusalReason;
+      own: number | null;
+      nearestOther: { employeeId: string; name: string; distance: number } | null;
+      limit: number;
+      onFile: number;
+    }
+  | { refused: null; id: string };
+
+/**
+ * Adding a face sample: three are needed before the face clock opens, five at
+ * most.
+ *
+ * A sample is what every later capture — of this person and of everybody
+ * else — is measured against, so it is held to more than the clock is: the
+ * strict quality gate, no contrast rescue (`purpose: 'enrol'`), it must look
+ * like the person's samples already on file, and it must not come within the
+ * threshold plus the margin of anybody else's, which is the collision that
+ * let one person clock in on another's account. Only HR is told whose face it
+ * came close to; the person is told to see HR. The audit row's one line names
+ * nobody (the person reads their own trail on My Work); its `after` and HR's
+ * Face health do.
+ */
 clockRoutes.post(
   '/enroll',
+  faceThrottle('enrol'),
   upload.single('photo'),
   handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(
-      z.object({
-        employeeId: z.string().optional(),
-        label: z.string().optional(),
-      }),
-      req.body,
-    );
+    let kept = false;
+    try {
+      const me = currentUser(req);
+      const body = parseBody(
+        z.object({
+          employeeId: z.string().optional(),
+          label: z.string().optional(),
+        }),
+        req.body,
+      );
+      const photo = capturedPhoto(req);
+      const mine = await myEmployee(me.id);
+      const isHr = can(me, 'ghr.employees.edit_all');
 
-    const { descriptor, score } = await describeFace(capturedPhoto(req));
-    const mine = await myEmployee(me.id);
-
-    // Enrolling someone else needs the employee permission; enrolling yourself
-    // does not — people set up their own face.
-    let employeeId: string;
-    if (body.employeeId && body.employeeId !== mine?.id) {
-      if (!me.isSuperAdmin && !me.permissions.has('ghr.employees.edit_all')) {
-        throw forbidden('You can only enrol your own face');
+      // Enrolling someone else needs the employee permission; enrolling yourself
+      // does not — people set up their own face.
+      let employeeId: string;
+      if (body.employeeId && body.employeeId !== mine?.id) {
+        if (!isHr) throw forbidden('You can only enrol your own face');
+        employeeId = body.employeeId;
+      } else {
+        if (!mine) throw badRequest('Your account is not linked to an employee record');
+        employeeId = mine.id;
       }
-      employeeId = body.employeeId;
-    } else {
-      if (!mine) throw badRequest('Your account is not linked to an employee record');
-      employeeId = mine.id;
-    }
+      const target = await prisma.employee.findUnique({
+        where: { id: employeeId },
+        select: { id: true, firstName: true, lastName: true, isActive: true, userId: true },
+      });
+      if (!target) throw notFound('Employee not found');
+      if (!target.isActive) throw badRequest('That employee record is inactive');
+      const forSomeoneElse = target.id !== mine?.id;
 
-    // A face already enrolled to someone ELSE means this capture would make
-    // clock-in ambiguous. Refuse rather than quietly create a collision.
-    const { best, threshold } = await matchFace(descriptor);
-    if (best && best.employeeId !== employeeId && best.distance < threshold) {
-      throw badRequest(
-        `That face already matches ${best.name}. Enrolling it again would make clock-in ambiguous.`,
+      // Full already: said before a second of the detector is spent. Counted
+      // again under the lock below, which is the count that decides.
+      if ((await sampleCounts(target.id)).current >= MAX_FACE_SAMPLES) throw badRequest(ENROL_MESSAGES.full);
+
+      const capture = await describeFace(photo, { purpose: 'enrol' });
+      const problem = faceQualityProblem(capture.quality, 'enrol');
+      if (problem) throw badRequest(problem);
+
+      // The photo is kept so HR can see whose face a sample actually is,
+      // rather than only a row of 128 numbers — and so a later engine can
+      // describe it again. Filed first so the sample row is written with it
+      // in the same breath; removed again if the sample is not.
+      const attachment = await saveAttachment({
+        entityType: 'face_enrollment',
+        entityId: target.id,
+        file: req.file!,
+        uploadedById: me.id,
+        caption: `Face sample (detector confidence ${capture.score})`,
+      });
+      kept = true;
+
+      let decision: EnrolDecision;
+      try {
+        decision = await prisma.$transaction(
+          async (tx): Promise<EnrolDecision> => {
+            // Everything under the lock reads through its own transaction.
+            await tx.$queryRaw(ENROL_LOCK);
+            const onFile = await sampleCounts(target.id, tx);
+            if (onFile.current >= MAX_FACE_SAMPLES) return { refused: 'full' };
+
+            const { own, nearestOther, threshold } = await matchFace(capture.descriptor, target.id, tx);
+            const limit = threshold + FACE_MARGIN;
+            // Consistency: a person's samples must look like one another, or
+            // the account is holding somebody else's face.
+            if (own != null && own > limit) {
+              return { refused: 'inconsistent', own, nearestOther, limit, onFile: onFile.current };
+            }
+            // Collision: too near anybody else's face for the clock to tell
+            // the two apart, whoever is enrolling it.
+            if (nearestOther && nearestOther.distance <= limit) {
+              return { refused: 'collision', own, nearestOther, limit, onFile: onFile.current };
+            }
+
+            const created = await tx.faceEnrollment.create({
+              data: {
+                employeeId: target.id,
+                descriptor: capture.descriptor as unknown as Prisma.InputJsonValue,
+                engine: FACE_ENGINE,
+                quality: capture.quality as unknown as Prisma.InputJsonValue,
+                photoPath: attachment.id,
+                label: body.label || null,
+                enrolledById: me.id,
+              },
+            });
+            return { refused: null, id: created.id };
+          },
+          { timeout: 15_000 },
+        );
+      } catch (err) {
+        await deleteAttachment(attachment.id);
+        throw err;
+      }
+
+      if (decision.refused) {
+        await deleteAttachment(attachment.id);
+        if (decision.refused === 'full') throw badRequest(ENROL_MESSAGES.full);
+        const { own, nearestOther, limit, onFile } = decision;
+        await audit(
+          {
+            entityType: 'employee',
+            entityId: target.id,
+            action: 'REJECTED',
+            summary:
+              decision.refused === 'inconsistent'
+                ? `Face sample refused — it does not look like the ${onFile} sample(s) already on file`
+                : "Face sample refused — too close to another employee's enrolled face",
+            after: {
+              faceEnrolRefusal: decision.refused,
+              ownDistance: fourPlaces(own),
+              nearestOther: nearestOther ? { ...nearestOther, distance: fourPlaces(nearestOther.distance) } : null,
+              limit,
+              quality: capture.quality,
+            } as unknown as Prisma.InputJsonValue,
+          },
+          req,
+        );
+        if (decision.refused === 'inconsistent') {
+          throw badRequest(
+            ENROL_MESSAGES.inconsistent(forSomeoneElse ? `${target.firstName} ${target.lastName}'s record` : 'your account'),
+          );
+        }
+        throw badRequest(
+          isHr && nearestOther
+            ? `This face is too close to ${nearestOther.name}'s enrolled face for the clock to tell them apart. ` +
+                "Check both people's face samples before enrolling it."
+            : ENROL_MESSAGES.collision,
+        );
+      }
+
+      const after = await sampleCounts(target.id);
+      await audit(
+        {
+          entityType: 'employee',
+          entityId: target.id,
+          action: 'UPDATED',
+          summary:
+            `Face sample added (${after.current} on file` +
+            (after.current < MIN_FACE_SAMPLES ? `, ${MIN_FACE_SAMPLES} needed for face clock-in)` : ')'),
+        },
+        req,
+      );
+
+      // A live enrolment capture makes a better account photo than anything a
+      // plain upload could offer — verified, current and provably one person —
+      // so whoever the enrolment was for (self or, with the employee
+      // permission, someone else) gets a picture made FROM it: the face, small
+      // (`accountPhotoFrom`). Never the capture itself: every account photo is
+      // seen by everyone, and a sample's own bytes posted back to the clock
+      // used to clock its owner in at a distance of 0. Removing this sample
+      // takes the picture with it. A picture that cannot be made is not worth
+      // failing the enrolment over.
+      if (target.userId) {
+        await setAccountPhotoFromSample({
+          userId: target.userId,
+          sampleId: decision.id,
+          image: photo,
+          box: capture.box,
+          uploadedById: me.id,
+        }).catch((err) => console.error(`Account photo from face sample ${decision.id} failed:`, err));
+      }
+
+      res.status(201).json({
+        id: decision.id,
+        samples: after.current,
+        legacySamples: after.legacy,
+        samplesNeeded: MIN_FACE_SAMPLES,
+        maxSamples: MAX_FACE_SAMPLES,
+        enrolled: after.current >= MIN_FACE_SAMPLES,
+        quality: capture.quality,
+      });
+    } finally {
+      if (!kept) discardCapture(req);
+    }
+  }),
+);
+
+/**
+ * A person's face samples: their own, or — HR, with the employee edit right —
+ * anybody's. `current` samples are the ones the clock matches; the rest are
+ * LEGACY (an older engine's, or one whose photo could not be described again).
+ */
+clockRoutes.get(
+  '/enrollments',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const employeeId = typeof req.query.employeeId === 'string' ? req.query.employeeId : undefined;
+    const owner = await sampleOwner(me, employeeId, 'ghr.employees.edit_all');
+    const list = await listSamples(owner);
+    if (!list) throw notFound('Employee not found');
+    res.json(list);
+  }),
+);
+
+/** Starting over: every sample of one person, current and legacy. Their own, or HR's. */
+clockRoutes.delete(
+  '/enrollments',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const employeeId = typeof req.query.employeeId === 'string' ? req.query.employeeId : undefined;
+    const owner = await sampleOwner(me, employeeId, 'ghr.employees.edit_all');
+    const rows = await prisma.faceEnrollment.findMany({
+      where: { employeeId: owner },
+      select: { id: true, photoPath: true, employee: { select: { userId: true } } },
+    });
+    const removed = await prisma.faceEnrollment.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+    // The photos go with their samples, and an account picture cut from one of them.
+    await dropAccountPhotoFromSamples(rows[0]?.employee.userId ?? null, rows.map((r) => r.id));
+    for (const r of rows) await deletePhotoIfUnused(r.photoPath);
+    if (removed.count) {
+      await audit(
+        {
+          entityType: 'employee',
+          entityId: owner,
+          action: 'UPDATED',
+          summary: `Face samples reset (${removed.count} removed)`,
+        },
+        req,
       );
     }
+    res.json({ removed: removed.count });
+  }),
+);
 
-    // The enrolment photo is kept so HR can see whose face a sample actually
-    // is, rather than only a row of 128 numbers.
-    const attachment = await saveAttachment({
-      entityType: 'face_enrollment',
-      entityId: employeeId,
-      file: req.file!,
-      uploadedById: me.id,
-      caption: `Face enrolment (detector confidence ${score})`,
+/** One sample removed: by the person it belongs to, or by HR. */
+clockRoutes.delete(
+  '/enrollments/:id',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await prisma.faceEnrollment.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, employeeId: true, photoPath: true, employee: { select: { userId: true } } },
     });
-
-    const enrollment = await prisma.faceEnrollment.create({
-      data: {
-        employeeId,
-        descriptor: descriptor as unknown as Prisma.InputJsonValue,
-        photoPath: attachment.id,
-        label: body.label || null,
-        enrolledById: me.id,
-      },
-    });
-
-    const count = await prisma.faceEnrollment.count({ where: { employeeId } });
+    if (!row) throw notFound('Face sample not found');
+    if (row.employee.userId !== me.id && !can(me, 'ghr.employees.edit_all')) {
+      throw forbidden('You can only remove your own face samples');
+    }
+    await prisma.faceEnrollment.delete({ where: { id: row.id } });
+    // A sample "of someone else" removed must not leave that face as this
+    // account's picture.
+    await dropAccountPhotoFromSamples(row.employee.userId, [row.id]);
+    await deletePhotoIfUnused(row.photoPath);
+    const left = await sampleCounts(row.employeeId);
     await audit(
       {
         entityType: 'employee',
-        entityId: employeeId,
+        entityId: row.employeeId,
         action: 'UPDATED',
-        summary: `Face enrolled (${count} sample${count === 1 ? '' : 's'})`,
+        summary: `Face sample removed (${left.current} on file)`,
       },
       req,
     );
+    res.status(204).end();
+  }),
+);
 
-    // A live enrolment capture is a BETTER account photo than anything a
-    // plain upload could offer — it is verified, current and, per the note in
-    // describeFace, provably one person. Whoever the enrolment was for (self
-    // or, with the employee permission, someone else) gets it as their
-    // picture too, replacing whichever the account had before. This is the
-    // only path that touches User.photoPath from a face capture; nothing
-    // enrols FROM a profile photo, only the other way round.
-    const enrolledUser = await prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: { userId: true },
-    });
-    if (enrolledUser?.userId) {
-      const previous = await prisma.user.findUnique({
-        where: { id: enrolledUser.userId },
-        select: { photoPath: true },
-      });
-      await prisma.user.update({
-        where: { id: enrolledUser.userId },
-        data: { photoPath: attachment.id },
-      });
-      if (previous?.photoPath && previous.photoPath !== attachment.id) {
-        await deleteAttachment(previous.photoPath).catch(() => {});
-      }
-    }
-
-    res.status(201).json({ id: enrollment.id, samples: count });
+/** HR's view of the enrolled faces: who can use the clock, who it may confuse, and why it refused. */
+clockRoutes.get(
+  '/face-health',
+  require_('ghr.settings.view_all'),
+  handler(async (_req, res) => {
+    res.json(await faceHealth());
   }),
 );
 
@@ -398,9 +749,25 @@ clockRoutes.post(
  * distance and the capture photo, so a questionable entry can be reviewed
  * rather than merely trusted.
  *
- * A fallback always demands a written reason. That is not bureaucracy: the
- * fallback is the weak door, and an unexplained one is the only thing an
- * audit would have to go on.
+ * A fallback always demands a written reason, at either end of the day
+ * (`notes` for the clock-in's, `timeOutNotes` for the clock-out's). That is
+ * not bureaucracy: the fallback is the weak door, and an unexplained one is
+ * the only thing an audit would have to go on.
+ *
+ * A face is accepted only when it is the caller's, clearly: within the
+ * threshold of their own samples and leading everybody else's by the margin
+ * (`decideFace`). A refusal never names the colleague the face resembled —
+ * that would tell anyone at the camera whose account a face opens — and
+ * neither does the one-line summary of the audit row it writes, which the
+ * person reads on My Work; the row's `after` does, for the audit trail and
+ * HR's Face health. The capture is thrown away.
+ *
+ * What this does NOT do is tell a live face from a photograph of one: there
+ * is no liveness check. A sample's or an earlier capture's own bytes sent
+ * again are refused (`replay`), and nobody can fetch them to try — but a
+ * fresh picture of the person taken elsewhere, held up to a camera or sent
+ * as a file, still passes. The photo kept with every entry is what HR checks
+ * a doubtful one against.
  */
 const clockSchema = z.object({
   action: z.enum(['IN', 'OUT']),
@@ -408,139 +775,263 @@ const clockSchema = z.object({
   fallbackReason: z.string().optional(),
 });
 
+const CLOCK_MESSAGES: Record<FaceRefusal | 'replay', string> = {
+  not_recognised: 'Face not recognised. Face the camera in good light and try again, or use the fallback.',
+  not_this_account: 'That face does not match the one enrolled on this account.',
+  unsure:
+    'The camera could not be sure it is you. Face it squarely in good light and try again — if this keeps ' +
+    'happening, ask HR to check your face samples.',
+  replay: 'That picture has been sent before. Look at the camera and take a new one.',
+};
+
+/**
+ * Nearer than this to one of the person's own samples is the same picture
+ * again, not a new look at the same face: two frames from a camera differ by
+ * 0.05 and more, and even a re-encoded copy of a sample lands about 0.1 away.
+ */
+const REPLAY_DISTANCE = 0.01;
+
+const sha256 = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * Whether these exact bytes are already on file as one of the person's face
+ * photos — a sample's, or an earlier clock capture's. Compared by size first,
+ * so only a file the same length is read and hashed.
+ */
+async function sentBefore(photo: Buffer, employeeId: string): Promise<boolean> {
+  const sameSize = await prisma.attachment.findMany({
+    where: { entityType: { in: ['face_enrollment', 'attendance'] }, entityId: employeeId, size: photo.length },
+    select: { storedName: true },
+  });
+  const hash = sha256(photo);
+  for (const f of sameSize) {
+    try {
+      if (sha256(fs.readFileSync(attachmentPath(f.storedName))) === hash) return true;
+    } catch {
+      /* the file is gone */
+    }
+  }
+  return false;
+}
+
+const alreadyIn = (at: Date) => badRequest(`You already clocked in at ${at.toLocaleTimeString('en-PH')}`);
+const alreadyOut = (at: Date) => badRequest(`You already clocked out at ${at.toLocaleTimeString('en-PH')}`);
+
 clockRoutes.post(
   '/',
+  faceThrottle('clock'),
   upload.single('photo'),
   handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(clockSchema, req.body);
-    const settings = await hrSettings();
+    let kept = false;
+    try {
+      const me = currentUser(req);
+      const body = parseBody(clockSchema, req.body);
+      const settings = await hrSettings();
 
-    // Somebody separated yesterday is still flagged active until a sweep runs,
-    // and nothing else guarantees one ran today. Narrowed to the caller: this
-    // route only needs their own flag to be true, and an HR screen sweeps the
-    // rest when it opens.
-    await sweepSeparations(undefined, { userId: me.id });
+      // Somebody separated yesterday is still flagged active until a sweep runs,
+      // and nothing else guarantees one ran today. Narrowed to the caller: this
+      // route only needs their own flag to be true, and an HR screen sweeps the
+      // rest when it opens.
+      await sweepSeparations(undefined, { userId: me.id });
 
-    const mine = await myEmployee(me.id);
-    if (!mine) throw badRequest('Your account is not linked to an employee record');
-    if (!mine.isActive) throw badRequest('That employee record is inactive');
+      const mine = await myEmployee(me.id);
+      if (!mine) throw badRequest('Your account is not linked to an employee record');
+      if (!mine.isActive) throw badRequest('That employee record is inactive');
 
-    let matchedScore: number | null = null;
-
-    if (body.method === 'FACE') {
-      const { descriptor } = await describeFace(capturedPhoto(req));
-      const { best, runnerUp, threshold } = await matchFace(descriptor);
-
-      if (!best || best.distance > threshold) {
-        throw badRequest(
-          'Face not recognised. Try again in better light, or use the fallback if it keeps failing.',
-        );
-      }
-      if (best.employeeId !== mine.id) {
-        throw badRequest(
-          `That face matches ${best.name}, not you. Each person clocks in on their own account.`,
-        );
-      }
-      // Two people nearly as close means the match is not trustworthy, even
-      // though the closest one passed.
-      if (runnerUp && runnerUp.distance - best.distance < 0.05) {
-        throw badRequest(
-          'That face matches two people almost equally. Use the fallback and ask HR to re-enrol.',
-        );
-      }
-      matchedScore = Math.round(best.distance * 10000) / 10000;
-    } else if (!body.fallbackReason) {
-      throw badRequest('Say why face recognition was not used — it is recorded against the entry');
-    }
-
-    // Always kept, on every method: the photo is the evidence, the match is
-    // only the convenience. A fallback entry with a photo can still be checked.
-    let photoId: string | null = null;
-    if (req.file) {
-      const attachment = await saveAttachment({
-        entityType: 'attendance',
-        entityId: mine.id,
-        file: req.file,
-        uploadedById: me.id,
-        caption: `Clock ${body.action}`,
-        capturedAt: new Date(),
+      // What today already holds is checked before the face, so a second
+      // clock-in costs no second of the detector and keeps no photo.
+      const already = await prisma.attendance.findUnique({
+        where: { employeeId_date: { employeeId: mine.id, date: dayKey(new Date()) } },
       });
-      photoId = attachment.id;
-    }
+      if (body.action === 'IN' && already?.timeIn) throw alreadyIn(already.timeIn);
+      if (body.action === 'OUT' && !already?.timeIn) throw badRequest('You have not clocked in today');
+      if (body.action === 'OUT' && already?.timeOut) throw alreadyOut(already.timeOut);
 
-    const now = new Date();
-    const today = dayKey(now);
-    const existing = await prisma.attendance.findUnique({
-      where: { employeeId_date: { employeeId: mine.id, date: today } },
-    });
+      let matchedScore: number | null = null;
 
-    if (body.action === 'IN') {
-      if (existing?.timeIn) {
-        throw badRequest(`You already clocked in at ${existing.timeIn.toLocaleTimeString('en-PH')}`);
+      if (body.method === 'FACE') {
+        const photo = capturedPhoto(req);
+        const samples = await sampleCounts(mine.id);
+
+        /**
+         * Records a refused face — the reason on the row's one line, and in its
+         * `after` how near the person's own samples came and whose face came
+         * nearest — and refuses it.
+         */
+        const refuse = async (
+          reason: FaceRefusalReason,
+          message: string,
+          detail: {
+            own?: number | null;
+            nearestOther?: { employeeId: string; name: string; distance: number } | null;
+            quality?: FaceQuality;
+          } = {},
+        ) => {
+          await audit(
+            {
+              entityType: 'attendance',
+              entityId: mine.id,
+              action: 'REJECTED',
+              summary: `Face clock-${body.action.toLowerCase()} refused — ${FACE_REFUSAL_REASONS[reason]}`,
+              after: {
+                faceRefusal: reason,
+                clockAction: body.action,
+                message,
+                ownDistance: fourPlaces(detail.own),
+                nearestOther: detail.nearestOther
+                  ? { ...detail.nearestOther, distance: fourPlaces(detail.nearestOther.distance) }
+                  : null,
+                quality: detail.quality ?? null,
+                samples: samples.current,
+                threshold: settings.faceThreshold,
+              } as unknown as Prisma.InputJsonValue,
+            },
+            req,
+          );
+          return badRequest(message);
+        };
+
+        // Described first, whatever happens next: even a refusal for too few
+        // samples then records whose face it was.
+        let capture: Awaited<ReturnType<typeof describeFace>> | null = null;
+        let failure: unknown = null;
+        try {
+          capture = await describeFace(photo, { purpose: 'clock' });
+        } catch (err) {
+          failure = err;
+        }
+        const match = capture ? await matchFace(capture.descriptor, mine.id) : null;
+        const detail = match ? { own: match.own, nearestOther: match.nearestOther, quality: capture!.quality } : {};
+
+        if (samples.current < MIN_FACE_SAMPLES) {
+          throw await refuse(
+            'too_few_samples',
+            `Face clock-in needs ${MIN_FACE_SAMPLES} samples of your face — you have ${samples.current}. ` +
+              'Add them on this page, or use the fallback.',
+            detail,
+          );
+        }
+
+        if (!capture || !match) {
+          // No face, several faces, not a photo: refused in face.ts's words.
+          // Anything else (the engine busy or down) is the server's, not a refusal.
+          const reason =
+            failure instanceof HttpError && failure.status === 400 ? describeRefusalReason(failure.message) : null;
+          if (reason) throw await refuse(reason, (failure as Error).message);
+          throw failure;
+        }
+
+        if ((match.own != null && match.own < REPLAY_DISTANCE) || (await sentBefore(photo, mine.id))) {
+          throw await refuse('replay', CLOCK_MESSAGES.replay, detail);
+        }
+
+        const problem = faceQualityProblem(capture.quality, 'clock');
+        if (problem) throw await refuse('quality', problem, detail);
+
+        const decision = decideFace({
+          own: match.own,
+          nearestOther: match.nearestOther,
+          threshold: match.threshold,
+          margin: FACE_MARGIN,
+        });
+        if (!decision.ok) throw await refuse(decision.reason, CLOCK_MESSAGES[decision.reason], detail);
+        matchedScore = fourPlaces(match.own);
+      } else if (!body.fallbackReason?.trim()) {
+        throw badRequest('Say why face recognition was not used — it is recorded against the entry');
       }
-      const arrival = classifyArrival(now, settings);
-      const row = await prisma.attendance.upsert({
-        where: { employeeId_date: { employeeId: mine.id, date: today } },
-        create: {
-          employeeId: mine.id,
-          date: today,
+
+      const now = new Date();
+      const today = dayKey(now);
+      const fallbackNote = body.method === 'FACE' ? null : body.fallbackReason!.trim();
+
+      // The entry is written first, and only if nothing beat this request to
+      // it (a double tap, two tabs): IN claims a day with no time in, OUT a
+      // day with no time out. The photo is filed only once the entry stands,
+      // so the request that loses keeps nothing.
+      let entryId: string;
+      let message: string;
+      let reply: Record<string, unknown>;
+      if (body.action === 'IN') {
+        const arrival = classifyArrival(now, settings);
+        const punch = {
           timeIn: now,
           timeInMethod: body.method,
-          timeInPhoto: photoId,
           timeInScore: matchedScore != null ? D(matchedScore) : null,
           status: arrival.status,
           lateMinutes: arrival.lateMinutes,
-          notes: body.fallbackReason || null,
-        },
-        update: {
-          timeIn: now,
-          timeInMethod: body.method,
-          timeInPhoto: photoId,
-          timeInScore: matchedScore != null ? D(matchedScore) : null,
-          status: arrival.status,
-          lateMinutes: arrival.lateMinutes,
-        },
-      });
+          ...(fallbackNote ? { notes: fallbackNote } : {}),
+        };
+        // A new day's row, unless one is there already (a correction, or the
+        // other tap) — then only a row with no time in yet is claimed.
+        const made = await prisma.attendance.createMany({
+          data: [{ employeeId: mine.id, date: today, ...punch }],
+          skipDuplicates: true,
+        });
+        const claimed = made.count
+          ? made
+          : await prisma.attendance.updateMany({
+              where: { employeeId: mine.id, date: today, timeIn: null },
+              data: punch,
+            });
+        const row = await prisma.attendance.findUnique({
+          where: { employeeId_date: { employeeId: mine.id, date: today } },
+          select: { id: true, timeIn: true },
+        });
+        if (!claimed.count || !row) throw alreadyIn(row?.timeIn ?? now);
+        entryId = row.id;
+        message =
+          arrival.lateMinutes > 0
+            ? `Clocked in at ${now.toLocaleTimeString('en-PH')} — ${arrival.lateMinutes} minutes late`
+            : `Clocked in at ${now.toLocaleTimeString('en-PH')}`;
+        reply = { ok: true, action: 'IN', at: now, status: arrival.status, lateMinutes: arrival.lateMinutes };
+      } else {
+        const existing = await prisma.attendance.findUnique({
+          where: { employeeId_date: { employeeId: mine.id, date: today } },
+        });
+        if (!existing?.timeIn) throw badRequest('You have not clocked in today');
+        if (existing.timeOut) throw alreadyOut(existing.timeOut);
+        const worked = workedMinutes(existing.timeIn, now, settings);
+        const claimed = await prisma.attendance.updateMany({
+          where: { id: existing.id, timeOut: null },
+          data: {
+            timeOut: now,
+            timeOutMethod: body.method,
+            timeOutScore: matchedScore != null ? D(matchedScore) : null,
+            timeOutNotes: fallbackNote,
+            workedMinutes: worked,
+          },
+        });
+        if (!claimed.count) {
+          const row = await prisma.attendance.findUnique({ where: { id: existing.id }, select: { timeOut: true } });
+          throw alreadyOut(row?.timeOut ?? now);
+        }
+        entryId = existing.id;
+        message = `Clocked out at ${now.toLocaleTimeString('en-PH')} — ${(worked / 60).toFixed(2)} hours worked`;
+        reply = { ok: true, action: 'OUT', at: now, workedMinutes: worked };
+      }
 
-      res.json({
-        ok: true,
-        action: 'IN',
-        at: now,
-        status: row.status,
-        lateMinutes: row.lateMinutes,
-        message:
-          row.lateMinutes > 0
-            ? `Clocked in at ${now.toLocaleTimeString('en-PH')} — ${row.lateMinutes} minutes late`
-            : `Clocked in at ${now.toLocaleTimeString('en-PH')}`,
-      });
-      return;
+      // Always kept, on every method: the photo is the evidence, the match is
+      // only the convenience. A fallback entry with a photo can still be checked.
+      if (req.file) {
+        const attachment = await saveAttachment({
+          entityType: 'attendance',
+          entityId: mine.id,
+          file: req.file,
+          uploadedById: me.id,
+          caption: `Clock ${body.action}`,
+          capturedAt: now,
+        });
+        kept = true;
+        await prisma.attendance.update({
+          where: { id: entryId },
+          data: body.action === 'IN' ? { timeInPhoto: attachment.id } : { timeOutPhoto: attachment.id },
+        });
+      }
+
+      res.json({ ...reply, message });
+    } finally {
+      if (!kept) discardCapture(req);
     }
-
-    if (!existing?.timeIn) throw badRequest('You have not clocked in today');
-    if (existing.timeOut) {
-      throw badRequest(`You already clocked out at ${existing.timeOut.toLocaleTimeString('en-PH')}`);
-    }
-
-    const worked = workedMinutes(existing.timeIn, now, settings);
-    const row = await prisma.attendance.update({
-      where: { id: existing.id },
-      data: {
-        timeOut: now,
-        timeOutMethod: body.method,
-        timeOutPhoto: photoId,
-        timeOutScore: matchedScore != null ? D(matchedScore) : null,
-        workedMinutes: worked,
-      },
-    });
-
-    res.json({
-      ok: true,
-      action: 'OUT',
-      at: now,
-      workedMinutes: row.workedMinutes,
-      message: `Clocked out at ${now.toLocaleTimeString('en-PH')} — ${(worked / 60).toFixed(2)} hours worked`,
-    });
   }),
 );
 
@@ -590,6 +1081,10 @@ attendanceRoutes.get(
   handler(async (req, res) => {
     const q = listQuery(req);
     const where = attendanceListWhere(q);
+    // A capture's id goes out only where it would open (the `attendance`
+    // guard): a supervisor reads the whole register, the faces of their own
+    // reports only.
+    const mayOpen = await captureReader(currentUser(req));
 
     const [rows, total] = await Promise.all([
       prisma.attendance.findMany({
@@ -617,6 +1112,8 @@ attendanceRoutes.get(
       listResult(
         rows.map((r) => ({
           ...r,
+          timeInPhoto: mayOpen(r.employeeId) ? r.timeInPhoto : null,
+          timeOutPhoto: mayOpen(r.employeeId) ? r.timeOutPhoto : null,
           timeInScore: r.timeInScore ? num(r.timeInScore) : null,
           timeOutScore: r.timeOutScore ? num(r.timeOutScore) : null,
           workedHours: Math.round((r.workedMinutes / 60) * 100) / 100,

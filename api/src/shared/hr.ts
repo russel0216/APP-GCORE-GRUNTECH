@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { dayKey } from './day';
 import { badRequest } from '../http/kit';
+import { FACE_ENGINE } from './faceEngine';
 
 /**
  * HR rules that more than one route needs: face matching, the working day,
@@ -33,7 +34,12 @@ export interface HrSettings {
   overtimeMultiplier: number;
   /** Hours in a normal day, used to derive an hourly rate from a daily one. */
   hoursPerDay: number;
-  /** Face match threshold — lower is stricter. 0.6 is the face-api default. */
+  /**
+   * Face match threshold — lower is stricter. 0.55 since the 2026-10-10 engine
+   * (FACE_ENGINE): with three samples a person, it accepted 96% of genuine
+   * captures in the benchmark and no wrong account, impostor or stranger.
+   * face-api's own default, 0.6, was the old engine's.
+   */
   faceThreshold: number;
   /** Probation runs this long from dateHired when no period end is set. */
   probationMonths: number;
@@ -90,7 +96,7 @@ const DEFAULTS: HrSettings = {
   dinnerBreakMinutes: 60,
   overtimeMultiplier: 1.25,
   hoursPerDay: 8,
-  faceThreshold: 0.6,
+  faceThreshold: 0.55,
   probationMonths: 6,
   evaluationMilestoneMonths: [3, 5],
   evaluationNoticeDays: 14,
@@ -99,8 +105,8 @@ const DEFAULTS: HrSettings = {
   greetings: GREETING_DEFAULTS,
 };
 
-export async function hrSettings(): Promise<HrSettings> {
-  const row = await prisma.setting.findUnique({ where: { key: 'hr.rules' } });
+export async function hrSettings(db: Prisma.TransactionClient = prisma): Promise<HrSettings> {
+  const row = await db.setting.findUnique({ where: { key: 'hr.rules' } });
   if (!row) return DEFAULTS;
   const stored = row.value as Partial<HrSettings>;
   // The greetings are an object: a stored one from before a new template was
@@ -183,9 +189,31 @@ export { dayKey };
 // ── Face matching ────────────────────────────────────────────────────────────
 
 /**
+ * The gap the claimed person must lead everybody else by. A capture within
+ * this of another employee's samples is too close to call, whoever is nearer:
+ * the benchmark's wrong-account matches all sat inside it.
+ */
+export const FACE_MARGIN = 0.05;
+
+/**
+ * Current-engine samples a person needs before the clock matches their face.
+ * One sample accepted 93% of genuine captures in the benchmark, three 96% —
+ * and three is what the Clock page asks for: straight, slightly left,
+ * slightly right.
+ */
+export const MIN_FACE_SAMPLES = 3;
+
+/**
+ * The most a person may keep. More samples only widen the net a stranger can
+ * fall into; a person whose face has changed removes an old one first.
+ */
+export const MAX_FACE_SAMPLES = 5;
+
+/**
  * Euclidean distance between two 128-float face descriptors.
  *
- * face-api.js treats < 0.6 as the same person. Lower is a closer match.
+ * Lower is a closer match; the threshold (HR Settings, 0.55) says how close is
+ * the same person.
  */
 export function faceDistance(a: number[], b: number[]): number {
   if (a.length !== b.length) return Number.POSITIVE_INFINITY;
@@ -203,32 +231,73 @@ export interface FaceMatch {
   name: string;
 }
 
+/** Whether a stored sample was described by the engine this server runs. */
+export const isCurrentSample = (row: { engine: string | null }) => row.engine === FACE_ENGINE;
+
+/** A stored descriptor, or null when the row does not hold 128 numbers. */
+export function storedDescriptor(value: unknown): number[] | null {
+  return Array.isArray(value) && value.length === 128 && value.every((v) => typeof v === 'number')
+    ? (value as number[])
+    : null;
+}
+
 /**
- * Finds the closest enrolled face.
+ * Whether the clock can match against a stored sample: the current engine
+ * described it AND it holds a readable descriptor. The one test for counting
+ * (the three needed, the five allowed, `enrolled`), matching and Face health,
+ * so a row the matcher skips is never counted as one it uses.
+ */
+export const isUsableSample = (row: { engine: string | null; descriptor: unknown }) =>
+  isCurrentSample(row) && storedDescriptor(row.descriptor) !== null;
+
+/**
+ * How near a capture comes to every active employee who has samples.
  *
- * Returns the best match AND the runner-up: when two people are nearly as
- * close, the match is ambiguous and should not be trusted even if the best
- * distance is under the threshold.
+ * Per employee it is the MIN distance over their CURRENT-engine samples
+ * (`engine === FACE_ENGINE`): a person is as close as their nearest sample.
+ * A sample of another engine is LEGACY and takes no part — the same photo
+ * through two pipelines differs by ~0.1, a fifth of the threshold — until
+ * the boot-time re-derivation (shared/faceSamples.ts) recomputes it.
+ *
+ * With `claimedEmployeeId`, `own` is that person's distance (null when they
+ * have no current sample) and `nearestOther` the closest anybody ELSE comes;
+ * `decideFace()` makes the call. `best`/`runnerUp` are the two nearest
+ * people overall, kept for scripts that ask "whose face is this".
+ *
+ * `db` is the transaction to read through — enrolment matches under a lock
+ * its transaction holds, and reading on another connection there could wait
+ * on the pool behind the very enrolments the lock is holding back.
  */
 export async function matchFace(
   descriptor: number[],
-): Promise<{ best: FaceMatch | null; runnerUp: FaceMatch | null; threshold: number }> {
+  claimedEmployeeId?: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<{
+  own: number | null;
+  nearestOther: FaceMatch | null;
+  best: FaceMatch | null;
+  runnerUp: FaceMatch | null;
+  threshold: number;
+}> {
   if (descriptor.length !== 128) {
     throw badRequest('That does not look like a face descriptor — expected 128 values');
   }
 
-  const settings = await hrSettings();
-  const enrollments = await prisma.faceEnrollment.findMany({
-    include: { employee: { select: { id: true, firstName: true, lastName: true, isActive: true } } },
+  const settings = await hrSettings(db);
+  const enrollments = await db.faceEnrollment.findMany({
+    where: { engine: FACE_ENGINE, employee: { isActive: true } },
+    select: {
+      employeeId: true,
+      descriptor: true,
+      employee: { select: { firstName: true, lastName: true } },
+    },
   });
 
-  // Best distance per employee, across all their enrolled samples.
+  // Nearest sample per employee.
   const byEmployee = new Map<string, FaceMatch>();
   for (const row of enrollments) {
-    if (!row.employee.isActive) continue;
-    const stored = row.descriptor as unknown as number[];
-    if (!Array.isArray(stored) || stored.length !== 128) continue;
-
+    const stored = storedDescriptor(row.descriptor);
+    if (!stored) continue;
     const distance = faceDistance(descriptor, stored);
     const current = byEmployee.get(row.employeeId);
     if (!current || distance < current.distance) {
@@ -241,11 +310,50 @@ export async function matchFace(
   }
 
   const ranked = [...byEmployee.values()].sort((a, b) => a.distance - b.distance);
+  const others = claimedEmployeeId ? ranked.filter((m) => m.employeeId !== claimedEmployeeId) : ranked;
   return {
+    own: claimedEmployeeId ? byEmployee.get(claimedEmployeeId)?.distance ?? null : null,
+    nearestOther: claimedEmployeeId ? others[0] ?? null : null,
     best: ranked[0] ?? null,
     runnerUp: ranked[1] ?? null,
     threshold: settings.faceThreshold,
   };
+}
+
+/** Why the clock refused a face it described. */
+export type FaceRefusal = 'not_recognised' | 'not_this_account' | 'unsure';
+
+/**
+ * Whether a capture is the person it claims to be — pure, so it is tested
+ * without a camera.
+ *
+ * Accepted only when the claimed person is within the threshold AND leads
+ * everybody else by the margin. Otherwise, in this order:
+ * - `not_this_account`: someone else is within the threshold and nearer than
+ *   the claimed person (or the claimed person is not within it at all) — the
+ *   face looks like a colleague's. Checked first: a capture nearer a
+ *   colleague is that, even when it also passes for its owner.
+ * - `unsure`: the claimed person is within the threshold but somebody else is
+ *   within the margin of them — too close to call.
+ * - `not_recognised`: nobody is within the threshold.
+ */
+export function decideFace(input: {
+  own: number | null;
+  nearestOther: { employeeId: string; name: string; distance: number } | null;
+  threshold: number;
+  margin: number;
+}): { ok: true } | { ok: false; reason: FaceRefusal } {
+  const { own, nearestOther, threshold, margin } = input;
+  // Boundaries are inclusive, to a hair: 0.45 − 0.40 is 0.04999… in floating
+  // point, and a lead of exactly the margin is a lead of the margin.
+  const EPS = 1e-9;
+  const ownPasses = own != null && own <= threshold + EPS;
+  if (ownPasses && (nearestOther == null || nearestOther.distance - own >= margin - EPS)) return { ok: true };
+
+  const otherPasses = nearestOther != null && nearestOther.distance <= threshold + EPS;
+  if (otherPasses && (!ownPasses || nearestOther.distance < own!)) return { ok: false, reason: 'not_this_account' };
+  if (ownPasses) return { ok: false, reason: 'unsure' };
+  return { ok: false, reason: 'not_recognised' };
 }
 
 // ── The working day ──────────────────────────────────────────────────────────

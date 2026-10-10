@@ -67,6 +67,7 @@ import {
   hrReportRoutes,
 } from './routes/hr';
 import { warmUpFaceModels } from './shared/face';
+import { rederiveFaceSamples, separateAccountPhotos } from './shared/faceSamples';
 import {
   invoiceRoutes,
   billRoutes,
@@ -252,8 +253,16 @@ async function start() {
 
   // Loading the face models takes a few seconds. Doing it now rather than on
   // the first clock-in means nobody stands at the door thinking it is broken.
-  // Deliberately not awaited — the API serves everything else meanwhile.
-  void warmUpFaceModels();
+  // Then any face sample described by an older engine is described again from
+  // its photo (shared/faceSamples.ts), so an engine upgrade sends nobody back
+  // to the camera, and an account photo that is still a sample's own capture
+  // becomes a small picture of its own. Deliberately not awaited — the API
+  // serves everything else meanwhile, and a failure is logged, never fatal.
+  void warmUpFaceModels()
+    .then(() => rederiveFaceSamples())
+    .catch((err) => console.error('Re-deriving face samples failed:', err))
+    .then(() => separateAccountPhotos())
+    .catch((err) => console.error('Separating account photos from face samples failed:', err));
 
   // Calendar reminders: G-CORE has no scheduler, so the API checks once a
   // minute for activities whose reminder is due (shared/activities.ts).

@@ -10,6 +10,7 @@ import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
+import { FaceSamplesPanel } from '../hr/FaceSamples';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -136,8 +137,20 @@ export function Employees() {
   }, [id]);
 
   // Keep the list's own URL state (search, filters, page) across open/close.
-  const openRecord = (e: EmployeeRow) => navigate(`/g-hr/employees/${e.id}${location.search}`);
-  const closeRecord = () => navigate(`/g-hr/employees${location.search}`);
+  // `?tab=face&sample=` is a deep link into one record (HR Settings › Face
+  // health) and goes when the record closes, so the next one opens plainly.
+  const params = new URLSearchParams(location.search);
+  const initialTab = params.get('tab') === 'face' ? 'face' : undefined;
+  const flaggedSampleId = params.get('sample');
+  const listSearch = () => {
+    const kept = new URLSearchParams(location.search);
+    kept.delete('tab');
+    kept.delete('sample');
+    const s = kept.toString();
+    return s ? `?${s}` : '';
+  };
+  const openRecord = (e: EmployeeRow) => navigate(`/g-hr/employees/${e.id}${listSearch()}`);
+  const closeRecord = () => navigate(`/g-hr/employees${listSearch()}`);
 
   const columns: Column<EmployeeRow>[] = [
     {
@@ -320,6 +333,8 @@ export function Employees() {
         <EmployeeForm
           key={record.id}
           employee={record}
+          initialTab={initialTab}
+          flaggedSampleId={flaggedSampleId}
           departments={departments}
           teams={teams}
           positions={positions}
@@ -358,8 +373,12 @@ export function Employees() {
   );
 }
 
+type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face';
+
 function EmployeeForm({
   employee,
+  initialTab,
+  flaggedSampleId,
   departments,
   teams,
   positions,
@@ -367,6 +386,10 @@ function EmployeeForm({
   onSaved,
 }: {
   employee: EmployeeRow | null;
+  /** The tab a deep link asks for (`?tab=face`). */
+  initialTab?: EmployeeTab;
+  /** A face sample Face health flagged (`?sample=`), marked on the Face samples tab. */
+  flaggedSampleId?: string | null;
   departments: { id: string; name: string }[];
   teams: TeamOption[];
   positions: PositionOption[];
@@ -381,8 +404,12 @@ function EmployeeForm({
   // gets the record to read and Close, never a Save the PATCH would refuse.
   const mayEdit = employee ? can('ghr.employees.edit_all') : can('ghr.employees.create');
 
-  const [tab, setTab] = useState<'person' | 'employment' | 'login' | 'pay' | 'evaluations'>('person');
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
+  // The samples the clock matches this person against: HR's to look at and
+  // remove (a blurred one, or someone else's); they are only ever ADDED by
+  // the person on the Clock page.
+  const seeFaces = !!employee && can('ghr.employees.edit_all');
+  const [tab, setTab] = useState<EmployeeTab>(initialTab === 'face' && seeFaces ? 'face' : 'person');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   // Naming a login is not the admin right — the people lookup, not /users.
@@ -720,6 +747,11 @@ function EmployeeForm({
               Evaluations
             </button>
           )}
+          {seeFaces && (
+            <button className={tab === 'face' ? 'active' : ''} onClick={() => setTab('face')}>
+              Face samples
+            </button>
+          )}
         </div>
       </div>
 
@@ -998,6 +1030,10 @@ function EmployeeForm({
             </Field>
           )}
         </div>
+      )}
+
+      {tab === 'face' && seeFaces && employee && (
+        <FaceSamplesPanel employeeId={employee.id} self={false} editable flaggedSampleId={flaggedSampleId} />
       )}
 
       {tab === 'evaluations' && seeEvaluations && employee && (

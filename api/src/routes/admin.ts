@@ -11,9 +11,11 @@ import {
   idsFilter,
   notFound,
   badRequest,
+  forbidden,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_ } from '../auth/middleware';
+import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import {
   DOCUMENT_TYPES,
@@ -660,10 +662,27 @@ auditRoutes.get(
   }),
 );
 
-/** The lifecycle of one record — powers the Activity tab on every workspace. */
+/**
+ * Who reads one record's history without the audit right: the readers of the
+ * screens that show it (a project's Meetings & Records tab, Customer 360's
+ * history), under that screen's own right. Every other kind of record is the
+ * audit trail's — an attendance or employee row can name whose face a
+ * refused clock-in came near, which is HR's to know, not the person's.
+ */
+const HISTORY_READERS: Record<string, (me: ResolvedUser) => boolean> = {
+  job: (me) => can(me, 'gops.projects.view_all') || can(me, 'gops.projects.view_own'),
+  customer: (me) => can(me, 'gops.customers.view_all'),
+};
+
+/** The lifecycle of one record — powers the activity on a project and Customer 360. */
 auditRoutes.get(
   '/:entityType/:entityId',
   handler(async (req, res) => {
+    const me = currentUser(req);
+    const reader = HISTORY_READERS[req.params.entityType];
+    if (!can(me, 'admin.audit.view_all') && !reader?.(me)) {
+      throw forbidden("This record's history is on the audit trail");
+    }
     const rows = await prisma.auditLog.findMany({
       where: { entityType: req.params.entityType, entityId: req.params.entityId },
       orderBy: { at: 'asc' },

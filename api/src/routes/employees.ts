@@ -17,6 +17,7 @@ import {
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
+import { deletePhotoIfUnused, dropAccountPhotoFromSamples } from '../shared/faceSamples';
 import { nextNumber } from '../shared/numbering';
 import { can } from '../permissions/resolve';
 import { positionFields, setEmployeePosition } from '../shared/plantilla';
@@ -709,7 +710,20 @@ employeeRoutes.delete(
       );
     }
 
+    // The face samples go with the person (the rows cascade), and so do their
+    // photos and any clock capture filed under them: a face is not kept for a
+    // record that no longer exists — nor the account picture cut from one.
+    const samples = await prisma.faceEnrollment.findMany({ where: { employeeId: employee.id }, select: { id: true } });
     await prisma.employee.delete({ where: { id: req.params.id } });
+    await dropAccountPhotoFromSamples(
+      employee.userId,
+      samples.map((s) => s.id),
+    );
+    const faces = await prisma.attachment.findMany({
+      where: { entityType: { in: ['face_enrollment', 'attendance'] }, entityId: employee.id },
+      select: { id: true },
+    });
+    for (const f of faces) await deletePhotoIfUnused(f.id);
     await audit(
       {
         entityType: 'employee',

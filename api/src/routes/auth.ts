@@ -8,8 +8,10 @@ import { authenticate, currentUser, signToken } from '../auth/middleware';
 import { menuFor } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { unreadCount } from '../shared/notifications';
-import { upload, saveAttachment, deleteAttachment } from '../shared/attachments';
+import { upload, saveAttachment } from '../shared/attachments';
+import { setAccountPhoto } from '../shared/faceSamples';
 import { consumeToken, deliverLink, issueToken, liveToken } from '../shared/accounts';
+import { throttled } from '../shared/throttle';
 import { mailEnabled } from '../shared/mail';
 import { currentAppearance } from './appearance';
 import { teamOf } from '../shared/team';
@@ -87,12 +89,14 @@ authRoutes.get(
  * The account picture.
  *
  * A plain upload — cosmetic only, and available to everyone whether or not
- * they have a linked employee record. It never touches face recognition:
- * `describeFace` is only ever called from `/clock/enroll`, so nothing here can
- * become a match candidate. Enrolling your face there overwrites this with
- * that verified capture (see the note in hr.ts) — this endpoint exists for the
- * people that flow can't reach, and for anyone who would rather just pick a
- * picture.
+ * they have a linked employee record. It never touches face recognition: a
+ * match candidate is only ever made by `/clock/enroll` (and re-derived from
+ * that sample's own photo), so nothing here can become one. Enrolling your
+ * face there replaces this with a small picture cut from that verified
+ * capture — never the capture itself (see the note in hr.ts) — and this
+ * endpoint exists for the people that flow can't reach, and for anyone who
+ * would rather just pick a picture. Replacing or removing the picture never
+ * deletes a face sample's photo (`setAccountPhoto`).
  */
 authRoutes.post(
   '/photo',
@@ -111,9 +115,9 @@ authRoutes.post(
       caption: 'Account photo',
     });
 
-    const previous = await prisma.user.findUnique({ where: { id: me.id }, select: { photoPath: true } });
-    await prisma.user.update({ where: { id: me.id }, data: { photoPath: attachment.id } });
-    if (previous?.photoPath) await deleteAttachment(previous.photoPath).catch(() => {});
+    // The previous photo goes unless something else still holds it (a face
+    // sample's photo is never deleted from here).
+    await setAccountPhoto(me.id, attachment.id);
 
     await audit(
       { entityType: 'user', entityId: me.id, action: 'UPDATED', summary: 'Updated account photo' },
@@ -128,9 +132,8 @@ authRoutes.delete(
   authenticate,
   handler(async (req, res) => {
     const me = currentUser(req);
-    const row = await prisma.user.findUnique({ where: { id: me.id }, select: { photoPath: true } });
-    if (row?.photoPath) await deleteAttachment(row.photoPath).catch(() => {});
-    await prisma.user.update({ where: { id: me.id }, data: { photoPath: null } });
+    // Removing the picture never removes a face sample's photo.
+    await setAccountPhoto(me.id, null);
     await audit(
       { entityType: 'user', entityId: me.id, action: 'UPDATED', summary: 'Removed account photo' },
       req,
@@ -338,26 +341,7 @@ authRoutes.get('/options', (_req, res) => {
   res.json({ mail: mailEnabled() });
 });
 
-/**
- * A little memory of recent reset requests, so the sign-in page cannot be
- * used to flood somebody's inbox: per address, and a ceiling for everyone.
- * Behind the tunnel every request arrives from the same address, so counting
- * per caller would count nobody.
- */
-const recent = new Map<string, number[]>();
-function throttled(key: string, limit: number, windowMs: number): boolean {
-  const now = Date.now();
-  // Addresses nobody has asked about for a window are forgotten, so a flood of
-  // made-up emails cannot grow this without bound.
-  if (recent.size > 1_000) {
-    for (const [k, times] of recent) if (!times.some((t) => now - t < windowMs)) recent.delete(k);
-  }
-  const hits = (recent.get(key) ?? []).filter((t) => now - t < windowMs);
-  const over = hits.length >= limit;
-  if (!over) hits.push(now);
-  recent.set(key, hits);
-  return over;
-}
+// Reset requests are throttled per address and overall (shared/throttle.ts).
 
 const linkGone = () =>
   new HttpError(410, 'This link has expired or has already been used — ask for a new one');

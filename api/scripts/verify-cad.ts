@@ -173,8 +173,9 @@ async function main() {
   console.log('The seed');
   const keys = new Set((await prisma.permission.findMany({ where: { key: { startsWith: 'gops.cad_job_orders.' } }, select: { key: true } })).map((p) => p.key));
   check(
-    'the CAD J.O. permissions exist, Approve among them (the Designer Lead’s dispatch right)',
-    ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'approve', 'export', 'delete'].every((a) => keys.has(`gops.cad_job_orders.${a}`)),
+    'the CAD J.O. permissions exist, Approve among them (the Designer Lead’s dispatch right), and no Delete — a request is cancelled, never deleted',
+    ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'approve', 'export'].every((a) => keys.has(`gops.cad_job_orders.${a}`)) &&
+      !keys.has('gops.cad_job_orders.delete'),
     [...keys].join(','),
   );
   const roleKeys = async (key: string) =>

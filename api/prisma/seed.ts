@@ -12,6 +12,7 @@ import { seedActivityTypes } from '../src/shared/activityTypes';
 import { TEAMS, retireFirstIndustries } from '../src/shared/team';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
+import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -1346,7 +1347,8 @@ async function main() {
 
   // ── HR rules ───────────────────────────────────────────────────────────────
   // Written once, then owned by HR. The overtime premium is the statutory 125%
-  // for ordinary-day overtime; the face threshold is face-api's own default.
+  // for ordinary-day overtime; the face threshold is the face engine's 0.55
+  // (shared/face.ts FACE_ENGINE — face-api's own 0.6 was the old engine's).
   await prisma.setting.upsert({
     where: { key: 'hr.rules' },
     create: {
@@ -1362,7 +1364,7 @@ async function main() {
         dinnerBreakMinutes: 60,
         overtimeMultiplier: 1.25,
         hoursPerDay: 8,
-        faceThreshold: 0.6,
+        faceThreshold: 0.55,
         // Probation: the statutory six months, evaluated at the third and
         // fifth, with HR told two weeks ahead. Ratings are out of five.
         probationMonths: 6,
@@ -1374,7 +1376,14 @@ async function main() {
     },
     update: {},
   });
-  console.log('  ✓ HR rules');
+  // An install seeded before the new face engine stored 0.6; it moves to 0.55
+  // once (marked in seed.faceEngineMigrated). Any other value is HR's choice.
+  const faceThreshold = await migrateFaceThreshold();
+  console.log(
+    faceThreshold?.changed
+      ? '  ✓ HR rules (face threshold 0.6 → 0.55 for the new face engine)'
+      : '  ✓ HR rules',
+  );
 
   // ── Clearance checklist ────────────────────────────────────────────────────
   // The company-property lines on a leaver's clearance. The rest of the

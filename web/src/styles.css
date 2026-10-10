@@ -2506,8 +2506,17 @@ hr.rule {
 
 .camera-frame {
   position: relative;
-  width: 100%;
-  aspect-ratio: 4 / 3;
+  /* The camera's own shape once the video knows it (--cam-w / --cam-h, set on
+     the element), so the whole frame shows with no bars; 16:9 is what the
+     clock asks for. Never taller than 60% of the screen: a phone held upright
+     sends a portrait picture, which at full width would push the button
+     under the fold — so the frame narrows instead, keeping its shape, and the
+     oval stays on the picture. */
+  --cam-w: 16;
+  --cam-h: 9;
+  aspect-ratio: var(--cam-w) / var(--cam-h);
+  width: min(100%, calc(60vh * var(--cam-w) / var(--cam-h)));
+  margin-inline: auto;
   border-radius: 10px;
   overflow: hidden;
   background: #0b0f14;
@@ -2518,9 +2527,11 @@ hr.rule {
 .camera-video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  /* Mirrored, because a preview that moves the wrong way is disorienting. The
-     captured frame is unmirrored — only the preview is flipped. */
+  /* Contain, never cover: the preview shows every pixel that is sent, so a
+     face at the edge of the picture is seen to be at the edge. Mirrored,
+     because a preview that moves the wrong way is disorienting. The captured
+     frame is unmirrored — only the preview is flipped. */
+  object-fit: contain;
   transform: scaleX(-1);
 }
 

@@ -16,6 +16,7 @@ import {
   type Tone,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
+import { openAttachment } from '../../components/Attachments';
 import { todayLocal } from '../../lib/day';
 import { PeopleTiles } from './dashboard/PeopleTiles';
 import { ReadinessTile } from './dashboard/ReadinessTile';
@@ -346,7 +347,17 @@ interface AttendanceRow {
   lateMinutes: number;
   workedHours: number;
   timeInMethod: string | null;
+  /** The capture kept as evidence (an attachment id), whatever the method. */
+  timeInPhoto: string | null;
+  /** The face match distance at clock-in — lower is a closer match. */
+  timeInScore: number | null;
+  timeOutMethod: string | null;
+  timeOutPhoto: string | null;
+  timeOutScore: number | null;
+  /** The clock-in fallback's reason (or HR's note on a correction). */
   notes: string | null;
+  /** The clock-out fallback's reason. */
+  timeOutNotes: string | null;
   employee: {
     id: string;
     employeeNo: string;
@@ -355,6 +366,72 @@ interface AttendanceRow {
     position: string | null;
     department: { name: string } | null;
   };
+}
+
+/** A fallback is the weak door, so it stands out; a manual correction is HR's own. */
+const METHOD_TONES: Record<string, Tone> = { PIN: 'warn', BIOMETRIC: 'warn', MANUAL: 'info' };
+
+/**
+ * How one punch was identified: the method, the face match distance (two
+ * decimals — the threshold in HR Settings is on the same scale), a fallback's
+ * written reason (each end of the day its own) and the captured photo,
+ * opened through the attendance attachment guard — the API sends a photo's
+ * id only to who may open it. The button stops its click and keys at itself,
+ * so the row's correction never opens with it.
+ */
+function PunchMethod({
+  which,
+  method,
+  score,
+  photoId,
+  notes,
+}: {
+  which: 'In' | 'Out';
+  method: string | null;
+  score: number | null;
+  photoId: string | null;
+  notes: string | null;
+}) {
+  const toast = useToast();
+  if (!method) return null;
+  return (
+    <span className="att-method-line">
+      <span className="faint">{which}</span>
+      {method === 'FACE' ? (
+        <span className="faint">face</span>
+      ) : (
+        <StatusBadge status={method} extra={METHOD_TONES} label={method.toLowerCase()} />
+      )}
+      {method !== 'FACE' && notes && (
+        <span className="faint att-reason" title={notes}>
+          {notes}
+        </span>
+      )}
+      {method === 'FACE' && score != null && (
+        <span className="mono" title="Match distance — lower is a closer match">
+          {score.toFixed(2)}
+        </span>
+      )}
+      {photoId && (
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          aria-label={`Open the clock-${which.toLowerCase()} photo`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void openAttachment({ id: photoId, fileName: `clock-${which.toLowerCase()}.jpg`, mimeType: 'image/jpeg' }).then(
+              (ok) => {
+                if (!ok) toast('error', 'The photo could not be opened');
+              },
+            );
+          }}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          Photo
+        </button>
+      )}
+    </span>
+  );
 }
 
 export function AttendanceRegister() {
@@ -405,16 +482,25 @@ export function AttendanceRegister() {
       render: (r) => <span className="mono">{r.workedHours.toFixed(2)}</span>,
     },
     {
-      key: 'method',
+      // Shown by default now that it carries the match distance and the photo
+      // (HR's way to check a doubtful face match); a new key, so a choice
+      // stored while it was hidden by default does not hide it again.
+      key: 'identified',
       label: 'Identified by',
-      optional: true,
       render: (r) =>
-        r.timeInMethod === 'FACE' ? (
-          <span className="faint">face</span>
-        ) : (
-          <span className="badge warn" title={r.notes ?? undefined}>
-            {r.timeInMethod?.toLowerCase() ?? '—'}
+        r.timeInMethod || r.timeOutMethod ? (
+          <span className="att-method">
+            <PunchMethod which="In" method={r.timeInMethod} score={r.timeInScore} photoId={r.timeInPhoto} notes={r.notes} />
+            <PunchMethod
+              which="Out"
+              method={r.timeOutMethod}
+              score={r.timeOutScore}
+              photoId={r.timeOutPhoto}
+              notes={r.timeOutNotes}
+            />
           </span>
+        ) : (
+          <span className="faint">—</span>
         ),
     },
     {

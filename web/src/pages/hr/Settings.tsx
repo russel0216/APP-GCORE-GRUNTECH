@@ -7,6 +7,7 @@ import { ProbationCard } from './settings/ProbationCard';
 import { ClearanceChecklistCard } from './settings/ClearanceChecklistCard';
 import { AcademyCard } from './settings/AcademyCard';
 import { GreetingsCard } from './settings/GreetingsCard';
+import { FaceHealthPanel } from './settings/FaceHealthPanel';
 import { NumberInput } from '../../components/NumberInput';
 
 /**
@@ -70,6 +71,8 @@ export function HrSettingsPage() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [editingType, setEditingType] = useState<Partial<LeaveType> | null>(null);
+  /** Bumped by a save, so Face health reads the threshold just saved. */
+  const [saved, setSaved] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -94,6 +97,7 @@ export function HrSettingsPage() {
     setError(null);
     try {
       setSettings(edited(await api.put<HrSettings>('/hr-settings', edited(settings))));
+      setSaved((n) => n + 1);
       toast('ok', 'HR rules saved');
     } catch (err) {
       setError(err);
@@ -241,7 +245,7 @@ export function HrSettingsPage() {
             <h3 className="card-title">Face recognition</h3>
             <Field
               label="Match threshold"
-              hint="Lower is stricter. 0.6 is the library default; 0.5 turns away more genuine people, 0.7 lets more strangers through."
+              hint="Lower is stricter. 0.55 is the default. The clock accepts a face only when it is within this distance of the person's own samples AND clearly nearer to them than to anyone else's (by 0.05) — otherwise it refuses and offers the fallback. 0.50 turns away more genuine people; 0.60 and above let doubtful matches through."
             >
               <NumberInput
                 kind="decimal"
@@ -253,9 +257,10 @@ export function HrSettingsPage() {
               />
             </Field>
             <div className="alert warn" style={{ marginBottom: 0 }}>
-              Recognition runs on the server, from the photo the camera sends. Every clock entry
-              keeps its photo — a match that later looks wrong can be checked against the picture
-              rather than argued about.
+              Recognition runs on the server, from the photo the camera sends. Each person enrols
+              three samples on the Clock page. Every clock entry keeps its photo and its match
+              distance — a match that later looks wrong can be checked against the picture rather
+              than argued about, and every refusal is in the audit trail.
             </div>
           </div>
         </div>
@@ -268,6 +273,8 @@ export function HrSettingsPage() {
           </div>
         )}
       </fieldset>
+
+      <FaceHealthPanel reloadToken={saved} />
 
       <div className="card">
         <div className="panel-head">

@@ -370,13 +370,14 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,470 assertions across twenty-three scripts** (counted 2026-10-10, after
-the one dress, the sign-off and money rules, the printed lists and the
-permission trim): foundation 308, masters 79, sales 447, costing 157,
-pipeline 92, calendar 96, numbering 46, partners 120, delivery 144, chain
-191, hr 227, plantilla 123, meetings 97, evaluations 152, academy 120,
-finance 315, aftermarket 258, cad 97, archive 106, insights 98,
-insights-brief 50, workspace 46, accounts 101. The verify scripts share
+**3,606 assertions across twenty-three scripts** (counted 2026-10-10, after
+the one dress, the sign-off and money rules, the printed lists, the
+permission trim and the face clock-in upgrade and its review): foundation
+308, masters 79, sales 447, costing 157, pipeline 92, calendar 96, numbering
+46, partners 120, delivery 144, chain 191, hr 362, plantilla 123, meetings
+97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
+archive 106, insights 98, insights-brief 50, workspace 46, accounts 102. The
+verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
 already holds: count only the script's own TAG (verify-cad's lead queue), and
@@ -385,7 +386,9 @@ concurrency and the per-employee counters, the approval engine, the overtime
 two-step rule, amount bands, the audit trail, the PDF engine and the sign-offs,
 margins and money it prints, CSV parsing, the import contract, Phase 3's money
 paths (contract amount, schedule-of-values reconciliation, VAT both ways,
-revision immutability), Phase 6's HR arithmetic and face pipeline, Phase 7's
+revision immutability), Phase 6's HR arithmetic and the face clock (the
+engine on the vendor's demo photographs, `decideFace` at its edges, the
+quality gates, enrolment, refusals, sample routes and guards), Phase 7's
 tax, aging and allocation arithmetic, Phase 8's schedule dates and template
 versioning, Phase 9's reconciliation between the reports and the records, and
 Phase 10's rules listed below.
@@ -425,7 +428,13 @@ administrator's saved quotation AND sales order layouts aside for the run
 which also runs first — puts them back. `verify-finance.ts` does the same
 with the finance rules (`finance.rules.__verify__`): it changes the
 liquidation days to prove which rule a deadline read, and a run that dies
-leaves the stash for the next run's `cleanup()` to restore.
+leaves the stash for the next run's `cleanup()` to restore. `verify-hr.ts`
+sets the stored face threshold and removes `seed.faceEngineMigrated` to prove
+the once-only migration, and puts both back in a `finally`; it also deletes
+the FILES of its uploads (a face sample, a clock capture, an account photo),
+because their rows cascade with the uploader and the files on disk do not,
+and it proves a refused capture is not kept by looking for its exact bytes
+among the new files, so another script's upload cannot fool the count.
 
 `verify-sales.ts` imports `src/routes/sales` purely for its side effect, because
 that import is what registers the quotation's `onApprovalSettled` subscriber. If
@@ -657,8 +666,181 @@ launcher as the way out) — never a stale phase sentence.
   the client the right to assert who it is. The photo is stored on every clock
   entry, whatever the method — it is the evidence, the match is the convenience.
 - **Refuse a photo with more than one face.** Picking the largest is how you
-  clock in a colleague who is not there. Covered by a test against the sample
-  group photo.
+  clock in a colleague who is not there, and such a frame is never retried.
+  Covered by a test against the sample group photo. Under the SSD detector
+  every demo `sampleN.jpg` is a group (sample2, which the old tiny detector
+  read as one face, holds three); verify-hr's single face is the demo's
+  `screenshot-webcam.png`, its second person a face cut out of sample6.
+- **The face engine is a version string, and two engines' descriptors are
+  never compared** (2026-10-10, the owner's report: "sometimes they matched
+  other account faces"). `FACE_ENGINE` (`'ssd-l68-level-1'`, defined in
+  `shared/faceEngine.ts` — a module importing nothing, so `shared/hr.ts`, the
+  seed and every script that only needs the string never load sharp or the
+  models — and re-exported by `shared/face.ts`) is stored on every
+  `FaceEnrollment.engine` beside its `quality`, and `matchFace()` reads only
+  rows of that engine with a readable descriptor (`isUsableSample`, the one
+  test for counting, matching and Face health alike); anything else is
+  LEGACY — counted, listed, never matched. One photo through the old and the new
+  pipeline lands ~0.1 apart (0.3 at worst), a fifth of the threshold. Change
+  anything that alters a descriptor — detector, landmark net, working size,
+  levelling, retry — and change the string.
+- **The pipeline**: SSD MobileNet v1 (minConfidence 0.5), the FULL 68-point
+  landmark net and the recognition net, on the image EXIF-turned and fitted
+  inside 960×1280, never enlarged. **The eyes are levelled**: at a 3° slope
+  or more the frame is turned back and described again, the levelled
+  descriptor kept only when exactly one face is found again — face-api crops
+  along the landmarks but never rotates, and in the benchmark a tilted head
+  was the main road to a wrong-account match. **The contrast retry**
+  (`normalise()`) runs once, only when the plain pass found NO face, and only
+  for `purpose: 'clock'` — never `'enrol'` (a sample that needs rescuing is
+  no sample) nor `'rederive'`; `describeFace(image, { purpose })` throws
+  without one. No L2-normalising, no flip-averaging: both measured worse.
+  **One face at a time**: the engine is WebAssembly on the API's own thread,
+  on a host shared with gasion-vision, so `describeFace` runs one capture
+  after another with at most eight waiting, and answers 429 ("The face clock
+  is busy …") past that — a dozen at once used to stall every request for
+  six seconds; `'rederive'` always waits its turn. On top, `/clock` and
+  `/clock/enroll` take twelve attempts a minute per person
+  (`shared/throttle.ts`, the password reset's brake, checked before the
+  upload is written).
+- **Quality is measured, then judged by purpose.** `describeFace` returns
+  `quality` (confidence, eye distance in the original's pixels, face
+  brightness, yaw, tilt before levelling, `levelled`, `contrastRetry`,
+  `frameScale`); `faceQualityProblem(quality, purpose)` answers null or words
+  the person can act on at the camera ("Come closer to the camera — …", "It
+  is too dark …", "Look straight at the camera."). Enrolment is strict; the
+  clock refuses only what makes a descriptor unreliable, because the
+  decision's own threshold and margin refuse an uncertain match; `rederive`
+  has no gate. The limits carry their benchmark figures in `face.ts` — tune
+  them there.
+- **The decision is `decideFace()`** (`shared/hr.ts`, pure): a person is as
+  near as their nearest CURRENT sample; a face is accepted only when its
+  claimed owner is within the threshold (HR Settings, **0.55** default) AND
+  leads every colleague by `FACE_MARGIN` (0.05), both edges inclusive.
+  Otherwise `not_this_account` (a colleague within the threshold and nearer,
+  or the owner not within it), `unsure` (within, but a colleague inside the
+  margin) or `not_recognised`. **The words never name the colleague** — "That
+  face does not match the one enrolled on this account." — because telling
+  the person at the camera whose account a face opens is the leak; the audit
+  row's `after` names them, for HR (below).
+- **Three samples before the face clock opens, five at most**
+  (`MIN_FACE_SAMPLES`, `MAX_FACE_SAMPLES`). A face clock with fewer is
+  refused ("Face clock-in needs 3 samples of your face — you have N. …"), the
+  fallback staying open; the Clock page stays in enrol mode until three
+  (straight, slightly left, slightly right). `/clock/me` sends `faceSamples`
+  (current only), `legacySamples`, `samplesNeeded`, `maxSamples`, `enrolled`.
+- **A sample must look like its owner and like nobody else.**
+  `POST /clock/enroll` takes the strict gate, refuses a sixth current sample,
+  refuses one further than threshold + margin from the person's own samples
+  (consistency: someone else's face on this account) and one within threshold
+  + margin of ANY other active employee's (collision: the fault that let one
+  face open two accounts). Only a `ghr.employees.edit_all` holder is told
+  whose face it came close to (and, enrolling somebody else, "the samples
+  already on <name>'s record"); anyone else is told to use the fallback and
+  tell HR. Both refusals are audited (`employee`, REJECTED), the name and the
+  distances in `after` only. **Enrolments are decided one at a time**: the
+  count, the match and the insert run in one transaction under
+  `pg_advisory_xact_lock(hashtext('face_enrollment'))` (the face is described
+  before it, so the lock is held for milliseconds) — two first samples sent
+  at once used to put two faces on one account, and two at the cap were
+  both refused. The photo is filed first and deleted again if no sample is
+  written. Consistency is measured against the NEAREST sample on file, so
+  Face health also flags an account whose two furthest samples are further
+  apart than that (`mixedAccounts`).
+- **Every face refusal at the clock is audited, and its capture deleted** —
+  too few samples, no face, several faces, an unreadable file, a replay, the
+  quality gate and each `decideFace` reason: `attendance` / REJECTED on the
+  employee's id, `after.faceRefusal` the key (`FACE_REFUSAL_REASONS`,
+  `shared/faceSamples.ts`). **The one-line summary says the reason and
+  nothing else** ("Face clock-in refused — Looked like another employee's
+  face"); their own distance and the nearest colleague's NAME and distance
+  are in `after`, because the refused person reads their own trail on My
+  Work (`/my-work` sends `recentActivity` as id, at, action, entityType,
+  entityId and summary — never before/after), and `GET /audit/:type/:id` is
+  the audit trail's (`admin.audit.view_all`) except a project's history for
+  the project readers and a customer's for `gops.customers.view_all`
+  (`HISTORY_READERS` in `routes/admin.ts`). The capture is described first,
+  so even "too few samples" records whose face it was. The file multer
+  wrote is unlinked (`discardCapture`, CAD's `discard()` rule); only an
+  accepted capture is kept, its distance in `timeInScore`/`timeOutScore`.
+- **A picture sent before is refused (`replay`)**: the upload's bytes equal
+  one of the person's sample photos or earlier clock captures (SHA-256,
+  compared by size first), or it lands within 0.01 of a sample — two camera
+  frames differ by 0.05 and more. **There is no liveness check**: a fresh
+  photograph of the person taken elsewhere still passes; the kept capture is
+  what HR checks a doubtful entry against (model §14).
+- **The entry is claimed before its photo is filed**: IN writes a new day's
+  row (`createMany … skipDuplicates`) or claims one with no time in, OUT
+  claims the row with no time out (`updateMany`); the capture is saved only
+  once that stands, so the losing tap of a double tap keeps nothing. A
+  fallback's reason is kept at both ends of the day — `notes` the
+  clock-in's, `Attendance.timeOutNotes` the clock-out's — and the register
+  shows each beside its punch.
+- **Samples have routes of their own**, above any `/:id`:
+  `GET /clock/enrollments?employeeId=`, `DELETE /clock/enrollments/:id` and
+  `DELETE /clock/enrollments?employeeId=` (start over) — the person, or HR
+  with `ghr.employees.edit_all` (not `view_all`: finance holds that for
+  labour rates), audited, the photo going with its sample.
+  `GET /clock/face-health` (`ghr.settings.view_all`) is HR Settings' Face
+  health panel: who is ready, partly enrolled, legacy-only or not enrolled
+  (and the legacy-only by name, `unprotected` — the clock cannot refuse a
+  colleague enrolling their face until they add new samples), pairs of
+  people within threshold + 0.10 (closest first, 20 at most), samples unlike
+  their owner's others, `mixedAccounts`, 30 days of refusals by reason, and
+  the latest 20 refusals one by one (`recentRefusals`, clock and enrolment)
+  with whose face each came near — the only screen that names them. The
+  screens are the Clock page's "Your face samples", the employee record's
+  Face samples tab (`edit_all`) and that panel, whose links to that tab show
+  only for `edit_all` (an executive reads the panel, not the tab).
+- **Face photos have attachment guards.** `face_enrollment` (a sample's
+  photo) is read by the employee's own login, `ghr.employees.edit_all` or a
+  super admin; `attendance` (a clock capture) by the employee,
+  `ghr.employees.edit_all`, `ghr.attendance.view_all`, a super admin, and a
+  `ghr.dashboard.view_all` holder for their OWN direct reports only
+  (`captureReader()` in `routes/hr.ts` — the register sends a photo's id
+  only where it would open). A `write` guard refuses both on the generic
+  attachment routes for everyone, super admins included — a sample's photo
+  leaves with its sample, a capture is evidence. Deleting an employee
+  deletes both kinds of photo.
+- **An account photo is never a face sample's photo.** Every account photo
+  is read by everyone signed in, and a sample's own bytes posted back to the
+  clock used to clock its owner in at distance 0. An enrolment gives the
+  person a picture CUT from the capture — the face, square, at 96 px
+  (`accountPhotoFrom()` in `face.ts`; SSD finds no face in it, even blown
+  back up) — filed as a `user` attachment captioned with its sample's id
+  (`setAccountPhotoFromSample()`); removing or resetting that sample clears
+  the picture (`dropAccountPhotoFromSamples()`). At boot,
+  `separateAccountPhotos()` gives every account still pointing at a sample's
+  capture a picture of its own (idempotent, audited once).
+- **A sample's photo is never deleted to make room for an account photo.**
+  Enrolling, and uploading or removing a photo on My Account, go through
+  `setAccountPhoto()` / `deletePhotoIfUnused()`, which keep any attachment
+  that is a sample's `photoPath` or anybody's account photo. Until
+  2026-10-10 each enrolment deleted the previous account photo — usually the
+  previous sample's — and so did every change of account photo.
+- **Legacy samples are re-derived at boot, where their photo survives.**
+  `rederiveFaceSamples()` runs after `warmUpFaceModels()` in `index.ts`,
+  never awaited and never fatal: each legacy row whose photo file still exists
+  is described again (`'rederive'`), CLAIMED with a conditional `updateMany`
+  on the engine AND the quality it was read with (two processes never both
+  write it, a failure or a success) and stored with the current engine and
+  its quality, one audit row per run that changed anything. A photo with no
+  face or several records `{ rederiveFailed, engine }` and is not retried
+  under that engine — and so does one that comes out within threshold +
+  margin of ANOTHER employee's current samples (the reason names nobody):
+  enrolment refuses that collision, and re-derivation must not let it in by
+  the back door. A missing file leaves the row as it is. **Most old samples cannot be re-derived**:
+  the old Clock page stopped after one sample, and the photo deletion above
+  took every earlier sample's photo (and the last one's at the next change of
+  account photo). So nearly everybody has at most one current sample after
+  the upgrade, and the Clock page asks for the rest ("Face recognition was
+  upgraded — add N new samples to use it again").
+- **The threshold moved from 0.6 to 0.55 once.** `migrateFaceThreshold()`
+  (`shared/faceSamples.ts`, called by the seed on every deploy) rewrites a
+  STORED 0.6 — face-api's default, written by every seed — to 0.55, marked
+  by the `seed.faceEngineMigrated` setting and audited. Any other stored
+  value is an administrator's choice and stays, as does 0.6 set again
+  afterwards. Lower is stricter.
 - **Prior approval moves no money.** `overtime_prior` settles to
   `PRIOR_APPROVED` and writes nothing to the ledger. Only `overtime_request` —
   the actual filing, through the seeded two-step supervisor → HR workflow —

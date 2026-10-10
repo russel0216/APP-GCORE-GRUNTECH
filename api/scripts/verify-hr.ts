@@ -13,7 +13,12 @@
  *     cancellation — never on filing, or a rejected request would cost someone
  *     their entitlement.
  *   · A face match must refuse when it is ambiguous, not pick the nearer of two
- *     similar people.
+ *     similar people — and must never let one person's face open another
+ *     person's account (2026-10-10, "sometimes they matched other account
+ *     faces"): three samples before the face clock opens, samples that look
+ *     like each other and like nobody else, only the current engine's
+ *     descriptors compared, and every refusal on HR's audit trail without the
+ *     colleague's name in the person's face.
  *
  * The arithmetic is checked directly. The route guards — double clock-in,
  * filing actual hours before authorisation, clocking in as somebody else — are
@@ -22,6 +27,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import sharp from 'sharp';
 import { Prisma } from '@prisma/client';
@@ -38,14 +44,21 @@ import {
   overtimeRate,
   leaveDays,
   leaveBalance,
+  saveHrSettings,
   faceDistance,
   matchFace,
+  decideFace,
+  FACE_MARGIN,
+  MIN_FACE_SAMPLES,
+  MAX_FACE_SAMPLES,
   attendanceDay,
   dayKey,
   toMinutes,
   fromMinutes,
 } from '../src/shared/hr';
-import { describeFace } from '../src/shared/face';
+import { describeFace, faceQualityProblem, FACE_ENGINE, type FaceQuality } from '../src/shared/face';
+import { migrateFaceThreshold, rederiveFaceSamples, separateAccountPhotos } from '../src/shared/faceSamples';
+import { attachmentPath, deleteAttachment } from '../src/shared/attachments';
 import { formatAmount, formatMoney, statusLabel } from '../src/shared/pdf';
 // Registers the leave and overtime approval subscribers (a side effect), and
 // lends the overtime paper's stage words.
@@ -110,6 +123,22 @@ async function cleanup() {
     select: { id: true },
   });
   const employeeIds = employees.map((e) => e.id);
+  const testUsers = await prisma.user.findMany({
+    where: { email: { endsWith: '@verifyhr.local' } },
+    select: { id: true },
+  });
+  // Face samples, clock-in captures and account photos: their rows go with
+  // the uploader (a cascade), but the files on disk would stay for good.
+  const files = await prisma.attachment.findMany({
+    where: {
+      OR: [
+        { uploadedById: { in: testUsers.map((u) => u.id) } },
+        { entityType: { in: ['face_enrollment', 'attendance'] }, entityId: { in: employeeIds } },
+      ],
+    },
+    select: { id: true },
+  });
+  for (const file of files) await deleteAttachment(file.id);
   if (employeeIds.length) {
     await prisma.leaveBalance.deleteMany({ where: { employeeId: { in: employeeIds } } });
     await prisma.attendance.deleteMany({ where: { employeeId: { in: employeeIds } } });
@@ -189,27 +218,62 @@ function descriptor(seed: number, jitter = 0): number[] {
 /**
  * Real photographs, for testing the detector rather than the distance maths.
  *
- * @vladmandic/face-api ships sample images with its demo. sample2 is one
- * person; sample1 is a group of three, whose left third is one person — a
- * different one. Both are used as fixtures so the whole pipeline (decode →
- * detect → 128 floats) is exercised on actual faces, not on numbers this
- * script made up.
+ * @vladmandic/face-api ships sample images with its demo. Under the SSD
+ * detector every `sampleN.jpg` is a group (sample2, which the old tiny
+ * detector read as one face, holds three); the one single face is the demo's
+ * webcam screenshot — person A here. Person B is one face cut out of
+ * sample6, framed with the margin a webcam would give it. The whole pipeline
+ * (decode → detect → level → 128 floats) is exercised on actual faces, not on
+ * numbers this script made up.
  */
 const SAMPLES = path.join(process.cwd(), 'node_modules/@vladmandic/face-api/demo');
 const sample = (file: string) => fs.readFileSync(path.join(SAMPLES, file));
+const webcamPhoto = () => sample('screenshot-webcam.png');
 
-/** The left third of the group photo: one face, a different person. */
-async function otherPersonPhoto(): Promise<Buffer> {
-  const buf = sample('sample1.jpg');
-  const meta = await sharp(buf).metadata();
-  return sharp(buf)
-    .extract({ left: 0, top: 0, width: Math.floor(meta.width! / 3), height: meta.height! })
-    .jpeg()
+/**
+ * The threshold the engine was calibrated for (HR Settings' default since
+ * FACE_ENGINE). The photograph checks hold to it rather than to whatever this
+ * database stores, because it is the stricter of the two values in use.
+ */
+const FACE_DEFAULT_THRESHOLD = 0.55;
+
+/** One face of sample6 (the second from the left), with room around it: a different person. */
+async function personBPhoto(): Promise<Buffer> {
+  return sharp(sample('sample6.jpg'))
+    .extract({ left: 994, top: 165, width: 560, height: 560 })
+    .resize(400, 400)
+    .jpeg({ quality: 92 })
     .toBuffer();
 }
 
 /** The same photo through a different camera pipeline — smaller and lossier. */
 const recompressed = (buf: Buffer) => sharp(buf).resize(400).jpeg({ quality: 60 }).toBuffer();
+/** The head tilted: the frame turned, its corners filled grey as a webcam's would not be, but no matter. */
+const rotated = (buf: Buffer, degrees: number) =>
+  sharp(buf).rotate(degrees, { background: { r: 128, g: 128, b: 128 } }).jpeg({ quality: 92 }).toBuffer();
+const asJpeg = (buf: Buffer) => sharp(buf).jpeg({ quality: 92 }).toBuffer();
+const sha256 = (buf: Buffer) => crypto.createHash('sha256').update(buf).digest('hex');
+
+/** The upload folder's file names, to see what a request left behind. */
+const uploadedFiles = () => new Set(fs.readdirSync(env.uploadDir));
+/**
+ * Files written since `before` holding exactly these bytes. Compared by
+ * content, not by count, so another script uploading at the same moment
+ * cannot make a refused capture look kept, or a kept one look refused.
+ */
+function leftBehind(before: Set<string>, bytes: Buffer): number {
+  const hash = sha256(bytes);
+  let n = 0;
+  for (const name of fs.readdirSync(env.uploadDir)) {
+    if (before.has(name)) continue;
+    try {
+      if (sha256(fs.readFileSync(path.join(env.uploadDir, name))) === hash) n++;
+    } catch {
+      /* removed meanwhile */
+    }
+  }
+  return n;
+}
 
 interface HttpResult {
   status: number;
@@ -247,6 +311,28 @@ async function apiReachable(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** A multipart request, as the Clock page sends a capture. */
+async function apiForm(
+  token: string,
+  path: string,
+  image: Buffer,
+  fields: Record<string, string> = {},
+  fileField = 'photo',
+): Promise<HttpResult> {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.set(key, value);
+  form.set(fileField, new Blob([image], { type: 'image/jpeg' }), 'capture.jpg');
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
+  const text = await res.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    parsed = { raw: text };
+  }
+  return { status: res.status, body: parsed };
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
@@ -420,40 +506,182 @@ async function main() {
     faceDistance(descriptor(1), descriptor(2)) > faceDistance(descriptor(1), descriptor(1, 0.02)),
   );
 
-  await prisma.faceEnrollment.create({
-    data: { employeeId: employee.id, descriptor: descriptor(1) as unknown as Prisma.InputJsonValue },
-  });
+  /** A sample described by the engine this server runs — the only kind the clock compares with. */
+  const currentSample = (employeeId: string, d: number[]) =>
+    prisma.faceEnrollment.create({
+      data: { employeeId, descriptor: d as unknown as Prisma.InputJsonValue, engine: FACE_ENGINE },
+    });
+  const decide = (m: { own: number | null; nearestOther: { employeeId: string; name: string; distance: number } | null; threshold: number }) =>
+    decideFace({ own: m.own, nearestOther: m.nearestOther, threshold: m.threshold, margin: FACE_MARGIN });
+  const verdict = (d: ReturnType<typeof decideFace>) => (d.ok ? 'ok' : d.reason);
 
-  const hit = await matchFace(descriptor(1, 0.02));
+  await currentSample(employee.id, descriptor(1));
+
+  const hit = await matchFace(descriptor(1, 0.02), employee.id);
   check(
     'a fresh capture of an enrolled face matches its owner',
-    hit.best?.employeeId === employee.id && hit.best.distance < hit.threshold,
-    `best ${hit.best?.name} at ${hit.best?.distance.toFixed(3)} vs threshold ${hit.threshold}`,
+    hit.best?.employeeId === employee.id && hit.own != null && hit.own < hit.threshold,
+    `own ${hit.own?.toFixed(3)} vs threshold ${hit.threshold}`,
   );
+  check('and the decision accepts it', verdict(decide(hit)) === 'ok', verdict(decide(hit)));
 
-  const miss = await matchFace(descriptor(9));
+  const miss = await matchFace(descriptor(9), employee.id);
   check(
-    'a stranger does not match anyone under the threshold',
-    !miss.best || miss.best.distance > miss.threshold,
-    `best ${miss.best?.distance.toFixed(3)} vs threshold ${miss.threshold}`,
+    'a stranger does not match anyone under the threshold, and is refused as not recognised',
+    (miss.own == null || miss.own > miss.threshold) && verdict(decide(miss)) === 'not_recognised',
+    `own ${miss.own?.toFixed(3)} vs threshold ${miss.threshold}: ${verdict(decide(miss))}`,
   );
 
-  // A near-duplicate enrolment is the ambiguity the clock route has to catch.
-  await prisma.faceEnrollment.create({
-    data: { employeeId: other.id, descriptor: descriptor(1, 0.03) as unknown as Prisma.InputJsonValue },
+  /*
+    LEGACY samples — another engine's, or none recorded — take no part. The
+    same photo through two pipelines lands ~0.1 apart, so comparing a capture
+    with an old descriptor measures the pipelines as much as the faces. Here
+    the colleague's legacy rows are an EXACT copy of the face, and still the
+    owner is matched as though they were not there.
+  */
+  await prisma.faceEnrollment.createMany({
+    data: [
+      { employeeId: other.id, descriptor: descriptor(1) as unknown as Prisma.InputJsonValue },
+      { employeeId: other.id, descriptor: descriptor(1) as unknown as Prisma.InputJsonValue, engine: 'tiny-legacy-0' },
+    ],
   });
-  const ambiguous = await matchFace(descriptor(1, 0.015));
+  const withLegacy = await matchFace(descriptor(1, 0.02), employee.id);
   check(
-    'two similar enrolments are reported as nearly equal, not silently resolved',
-    !!ambiguous.runnerUp && ambiguous.runnerUp.distance - ambiguous.best!.distance < 0.05,
-    `gap ${(ambiguous.runnerUp!.distance - ambiguous.best!.distance).toFixed(4)}`,
+    "another person's legacy samples are ignored by matching, even an exact copy of the face",
+    withLegacy.nearestOther?.employeeId !== other.id && verdict(decide(withLegacy)) === 'ok',
+    `nearest other ${withLegacy.nearestOther?.name ?? 'none'}: ${verdict(decide(withLegacy))}`,
+  );
+  const legacyOnly = await matchFace(descriptor(1), other.id);
+  check(
+    'a person whose only samples are legacy has no distance of their own — their face is not matched at all',
+    legacyOnly.own === null,
+    `own ${legacyOnly.own}`,
+  );
+  check(
+    "and that face, claimed on their account, is the enrolled colleague's: not this account",
+    verdict(decide(legacyOnly)) === 'not_this_account' && legacyOnly.nearestOther?.employeeId === employee.id,
+    verdict(decide(legacyOnly)),
   );
   await prisma.faceEnrollment.deleteMany({ where: { employeeId: other.id } });
 
-  const inactive = await matchFace(descriptor(1, 0.02));
-  check('the match still works once the duplicate is removed', inactive.best?.employeeId === employee.id);
+  // A near-duplicate enrolment is the ambiguity the clock route has to catch.
+  await currentSample(other.id, descriptor(1, 0.03));
+  const ambiguous = await matchFace(descriptor(1, 0.015), employee.id);
+  check(
+    'two similar enrolments are reported as nearly equal, not silently resolved',
+    !!ambiguous.nearestOther && ambiguous.own != null && Math.abs(ambiguous.nearestOther.distance - ambiguous.own) < FACE_MARGIN,
+    `own ${ambiguous.own?.toFixed(4)}, other ${ambiguous.nearestOther?.distance.toFixed(4)}`,
+  );
+  check(
+    'and the clock refuses to pick between them — neither person is accepted',
+    !decide(ambiguous).ok && !decide(await matchFace(descriptor(1, 0.015), other.id)).ok,
+  );
+  await prisma.faceEnrollment.deleteMany({ where: { employeeId: other.id } });
+
+  const alone = await matchFace(descriptor(1, 0.02), employee.id);
+  check('the match is accepted again once the duplicate is removed', decide(alone).ok);
+
+  // ── The decision, at its edges ───────────────────────────────────────────
+  //
+  // decideFace() is pure. Threshold 0.55 and the 0.05 margin; both edges are
+  // inclusive — exactly the threshold passes, a lead of exactly the margin
+  // passes — and 0.45 − 0.40 must not lose to floating point.
+  console.log('\nThe face decision (decideFace)');
+  const rival = (distance: number) => ({ employeeId: 'zz-other', name: 'ZZ Colleague', distance });
+  const edge = (own: number | null, near: ReturnType<typeof rival> | null) =>
+    verdict(decideFace({ own, nearestOther: near, threshold: 0.55, margin: FACE_MARGIN }));
+  const decisions: [string, number | null, ReturnType<typeof rival> | null, string][] = [
+    ['accepted: within the threshold, nobody else near', 0.4, null, 'ok'],
+    ['accepted at exactly the threshold', 0.55, null, 'ok'],
+    ['accepted: a lead of exactly the margin (0.45 against 0.40)', 0.4, rival(0.45), 'ok'],
+    ['accepted: a colleague far behind does not get in the way', 0.3, rival(0.9), 'ok'],
+    ['not recognised: just over the threshold, nobody near', 0.5501, null, 'not_recognised'],
+    ['not recognised: no samples of their own and nobody near', null, null, 'not_recognised'],
+    ['not recognised: over the threshold, the nearest colleague just over it too', 0.7, rival(0.5501), 'not_recognised'],
+    ['unsure: a lead just short of the margin', 0.4, rival(0.4499), 'unsure'],
+    ['unsure: a dead heat', 0.4, rival(0.4), 'unsure'],
+    ['unsure: a colleague within the margin, though over the threshold', 0.54, rival(0.56), 'unsure'],
+    ['not this account: a colleague nearer than the owner, both within', 0.45, rival(0.4), 'not_this_account'],
+    ['not this account: the owner over the threshold, a colleague within', 0.7, rival(0.5), 'not_this_account'],
+    ['not this account: the colleague at exactly the threshold', 0.6, rival(0.55), 'not_this_account'],
+    ['not this account: no samples of their own, a colleague within', null, rival(0.3), 'not_this_account'],
+  ];
+  for (const [label, own, near, want] of decisions) {
+    const got = edge(own, near);
+    check(`decideFace — ${label}`, got === want, `got ${got}`);
+  }
+
+  // ── The quality gates ────────────────────────────────────────────────────
+  //
+  // faceQualityProblem() is pure too. Enrolment is strict (a sample is what
+  // everybody is measured against); the clock refuses only what makes a
+  // descriptor unreliable; re-deriving a stored sample has no gate at all.
+  console.log('\nThe capture quality gates');
+  const SMALL = 'Come closer to the camera — your face is too small in the picture.';
+  const DARK = 'It is too dark to see your face clearly — face the light, or turn a light on.';
+  const TURNED = 'Look straight at the camera.';
+  const goodQuality: FaceQuality = {
+    score: 0.95,
+    eyeDistance: 90,
+    brightness: 120,
+    yaw: 0.05,
+    tilt: 1,
+    levelled: false,
+    contrastRetry: false,
+    frameScale: 1,
+  };
+  const q = (patch: Partial<FaceQuality>): FaceQuality => ({ ...goodQuality, ...patch });
+  const gate = (patch: Partial<FaceQuality>, purpose: 'enrol' | 'clock' | 'rederive') =>
+    faceQualityProblem(q(patch), purpose);
+  check(
+    'a good capture passes both gates',
+    gate({}, 'enrol') === null && gate({}, 'clock') === null,
+  );
+  check(
+    'a dim face (luma 30) is refused for enrolment as too dark, and passed at the clock',
+    gate({ brightness: 30 }, 'enrol') === DARK && gate({ brightness: 30 }, 'clock') === null,
+    String(gate({ brightness: 30 }, 'enrol')),
+  );
+  check('a face nearly black (luma 10) is refused at the clock too', gate({ brightness: 10 }, 'clock') === DARK);
+  check(
+    'eyes 30 px apart are too small to enrol, and fine at the clock; 15 px is too small for either',
+    gate({ eyeDistance: 30 }, 'enrol') === SMALL && gate({ eyeDistance: 30 }, 'clock') === null && gate({ eyeDistance: 15 }, 'clock') === SMALL,
+  );
+  check(
+    'the size is judged on the pixels the nets saw: 50 px in a frame shrunk by a third is 37.5, too small to enrol',
+    gate({ eyeDistance: 50, frameScale: 4 / 3 }, 'enrol') === SMALL && gate({ eyeDistance: 50 }, 'enrol') === null,
+  );
+  check(
+    'a head turned well aside (yaw 0.45) is refused for enrolment, passed at the clock; past 0.6 the clock refuses it too',
+    gate({ yaw: -0.45 }, 'enrol') === TURNED && gate({ yaw: -0.45 }, 'clock') === null && gate({ yaw: 0.7 }, 'clock') === TURNED,
+  );
+  check(
+    'a tilted sample enrols only when it was levelled, and never past 20°',
+    gate({ tilt: 8, levelled: true }, 'enrol') === null &&
+      /upright/.test(String(gate({ tilt: 8, levelled: false }, 'enrol'))) &&
+      /upright/.test(String(gate({ tilt: 25, levelled: true }, 'enrol'))),
+  );
+  check(
+    'at the clock a levelled tilt passes at any angle; an unlevelled one past 15° does not',
+    gate({ tilt: 25, levelled: true }, 'clock') === null && /upright/.test(String(gate({ tilt: 20, levelled: false }, 'clock'))),
+  );
+  check(
+    'a low detector confidence (0.6) is refused for enrolment only',
+    /could not see your face clearly/.test(String(gate({ score: 0.6 }, 'enrol'))) && gate({ score: 0.6 }, 'clock') === null,
+  );
+  check(
+    're-deriving a stored sample has no gate: the photo was accepted when it was taken',
+    gate({ eyeDistance: 10, brightness: 5, yaw: 0.9, tilt: 40, score: 0.3 }, 'rederive') === null,
+  );
 
   // ── The detector, on real photographs ──────────────────────────────────
+  console.log('\nThe face engine, on real photographs');
+
+  await expectRejection(
+    'describing a face without saying why (clock, enrol or rederive) is a programming error',
+    () => describeFace(webcamPhoto(), {} as { purpose: 'clock' }),
+    'needs a purpose',
+  );
 
   const blank = await sharp({
     create: { width: 480, height: 640, channels: 3, background: { r: 120, g: 130, b: 140 } },
@@ -462,36 +690,51 @@ async function main() {
     .toBuffer();
   await expectRejection(
     'a photo with no face in it is refused',
-    () => describeFace(blank),
+    () => describeFace(blank, { purpose: 'clock' }),
     'no face was found',
   );
 
   // Two people in frame is how you would clock in a colleague who is not
-  // there. Picking the largest face would make that work.
+  // there. Picking the largest face would make that work — and a frame with
+  // several faces is never retried.
   await expectRejection(
     'a photo with more than one face in it is refused',
-    () => describeFace(sample('sample1.jpg')),
+    () => describeFace(sample('sample1.jpg'), { purpose: 'clock' }),
     'faces are in that photo',
   );
 
-  const personA = await describeFace(sample('sample2.jpg'));
-  const personB = await describeFace(await otherPersonPhoto());
+  const personA = await describeFace(webcamPhoto(), { purpose: 'enrol' });
+  const personB = await describeFace(await personBPhoto(), { purpose: 'enrol' });
   check('a real photograph yields 128 floats', personA.descriptor.length === 128);
   check('the detector reports its confidence', personA.score > 0.5, `score ${personA.score}`);
+  check(
+    'and how good a capture it was: eye distance, brightness, turn and tilt, none of it rescued',
+    personA.quality.eyeDistance > 45 &&
+      personA.quality.brightness > 45 &&
+      Math.abs(personA.quality.yaw) < 0.35 &&
+      typeof personA.quality.tilt === 'number' &&
+      personA.quality.contrastRetry === false &&
+      faceQualityProblem(personA.quality, 'enrol') === null,
+    JSON.stringify(personA.quality),
+  );
+  check(
+    'the second fixture is a single, enrollable face of somebody else',
+    faceQualityProblem(personB.quality, 'enrol') === null,
+    JSON.stringify(personB.quality),
+  );
 
-  const personAAgain = await describeFace(await recompressed(sample('sample2.jpg')));
+  const personAAgain = await describeFace(await recompressed(webcamPhoto()), { purpose: 'clock' });
   const sameDistance = faceDistance(personA.descriptor, personAAgain.descriptor);
   const differentDistance = faceDistance(personA.descriptor, personB.descriptor);
-
   check(
     'the same face through a smaller, lossier capture still matches',
-    sameDistance < settings.faceThreshold,
-    `distance ${sameDistance.toFixed(3)} vs threshold ${settings.faceThreshold}`,
+    sameDistance < FACE_DEFAULT_THRESHOLD,
+    `distance ${sameDistance.toFixed(3)} vs threshold ${FACE_DEFAULT_THRESHOLD}`,
   );
   check(
     'two different people are further apart than the threshold',
-    differentDistance > settings.faceThreshold,
-    `distance ${differentDistance.toFixed(3)} vs threshold ${settings.faceThreshold}`,
+    differentDistance > FACE_DEFAULT_THRESHOLD,
+    `distance ${differentDistance.toFixed(3)} vs threshold ${FACE_DEFAULT_THRESHOLD}`,
   );
   check(
     'and the gap between the two is wide, not marginal',
@@ -499,44 +742,381 @@ async function main() {
     `same ${sameDistance.toFixed(3)}, different ${differentDistance.toFixed(3)}`,
   );
 
-  // The whole pipeline: enrol from a photo, then recognise a later capture.
-  await prisma.faceEnrollment.deleteMany({ where: { employeeId: employee.id } });
-  await prisma.faceEnrollment.create({
-    data: {
-      employeeId: employee.id,
-      descriptor: personA.descriptor as unknown as Prisma.InputJsonValue,
-    },
-  });
-  await prisma.faceEnrollment.create({
-    data: {
-      employeeId: other.id,
-      descriptor: personB.descriptor as unknown as Prisma.InputJsonValue,
-    },
-  });
+  /*
+    Levelling. face-api crops the descriptor's face along the landmarks but
+    never turns it, so a tilted head used to read as a somewhat different
+    face — the benchmark's main source of wrong-account matches. The engine
+    now turns the frame until the eyes are level and describes it again.
+  */
+  const tilted = await describeFace(await rotated(webcamPhoto(), 12), { purpose: 'clock' });
+  const tiltedDistance = faceDistance(personA.descriptor, tilted.descriptor);
+  check(
+    'a head tilted 12° is levelled before it is described',
+    tilted.quality.levelled === true && Math.abs(tilted.quality.tilt) >= 3,
+    JSON.stringify(tilted.quality),
+  );
+  check(
+    'and still matches its upright self under the threshold',
+    tiltedDistance < FACE_DEFAULT_THRESHOLD,
+    `distance ${tiltedDistance.toFixed(3)}`,
+  );
+  check(
+    'while somebody else stays over it',
+    faceDistance(tilted.descriptor, personB.descriptor) > FACE_DEFAULT_THRESHOLD,
+    `distance ${faceDistance(tilted.descriptor, personB.descriptor).toFixed(3)}`,
+  );
 
-  const recognised = await matchFace(personAAgain.descriptor);
+  // The enrolment gate on real frames, and the clock's leniency.
+  const far = await describeFace(await sharp(webcamPhoto()).resize(240).jpeg({ quality: 92 }).toBuffer(), {
+    purpose: 'enrol',
+  });
+  check(
+    'a small, far-away copy is refused for enrolment with the size message',
+    faceQualityProblem(far.quality, 'enrol') === SMALL,
+    `${faceQualityProblem(far.quality, 'enrol')} ${JSON.stringify(far.quality)}`,
+  );
+  check(
+    'the clock lets the same frame through, and it still matches its owner',
+    faceQualityProblem(far.quality, 'clock') === null && faceDistance(personA.descriptor, far.descriptor) < FACE_DEFAULT_THRESHOLD,
+    `distance ${faceDistance(personA.descriptor, far.descriptor).toFixed(3)}`,
+  );
+  const glare = await describeFace(await sharp(webcamPhoto()).linear(2.4, 0).jpeg({ quality: 92 }).toBuffer(), {
+    purpose: 'enrol',
+  });
+  check(
+    'a face washed out by glare is refused for enrolment, passed at the clock',
+    /too much light/.test(String(faceQualityProblem(glare.quality, 'enrol'))) && faceQualityProblem(glare.quality, 'clock') === null,
+    `${faceQualityProblem(glare.quality, 'enrol')} (luma ${glare.quality.brightness})`,
+  );
+
+  /*
+    The contrast retry: a dark office is the commonest reason the detector
+    sees nothing, so the clock — and only the clock — tries once more on a
+    contrast-stretched copy when the plain pass found no face. An enrolment
+    sample is never rescued that way, nor is a stored photo re-derived.
+  */
+  const dark = await sharp(webcamPhoto()).linear(0.3, 0).jpeg({ quality: 92 }).toBuffer();
+  await expectRejection(
+    'a dark frame finds no face for enrolment — a sample is never rescued by stretching the contrast',
+    () => describeFace(dark, { purpose: 'enrol' }),
+    'no face was found',
+  );
+  await expectRejection(
+    'nor when a stored photo is re-derived',
+    () => describeFace(dark, { purpose: 'rederive' }),
+    'no face was found',
+  );
+  const darkAtTheDoor = await describeFace(dark, { purpose: 'clock' });
+  check(
+    "at the clock the contrast retry finds it, says so, and reports the room's darkness, not the stretched copy's",
+    darkAtTheDoor.quality.contrastRetry === true && darkAtTheDoor.quality.brightness < 45,
+    JSON.stringify(darkAtTheDoor.quality),
+  );
+  check(
+    'and the rescued capture passes the clock gate and matches its owner',
+    faceQualityProblem(darkAtTheDoor.quality, 'clock') === null &&
+      faceDistance(personA.descriptor, darkAtTheDoor.descriptor) < FACE_DEFAULT_THRESHOLD,
+    `distance ${faceDistance(personA.descriptor, darkAtTheDoor.descriptor).toFixed(3)}`,
+  );
+
+  // The whole pipeline: enrol from a photo, then recognise a later capture.
+  await prisma.faceEnrollment.deleteMany({ where: { employeeId: { in: [employee.id, other.id] } } });
+  await currentSample(employee.id, personA.descriptor);
+  await currentSample(other.id, personB.descriptor);
+
+  const recognised = await matchFace(personAAgain.descriptor, employee.id);
   check(
     'a later capture of an enrolled person is recognised as them',
-    recognised.best?.employeeId === employee.id && recognised.best.distance < recognised.threshold,
+    recognised.best?.employeeId === employee.id && recognised.own != null && recognised.own < recognised.threshold,
     `matched ${recognised.best?.name} at ${recognised.best?.distance.toFixed(3)}`,
   );
   check(
-    'and the other enrolled person is clearly the runner-up, not a tie',
-    !!recognised.runnerUp &&
-      recognised.runnerUp.distance - recognised.best!.distance > 0.05,
-    `gap ${(recognised.runnerUp!.distance - recognised.best!.distance).toFixed(3)}`,
+    'and accepted: the other enrolled person is far behind, not a tie',
+    decide(recognised).ok && !!recognised.nearestOther && recognised.nearestOther.distance - recognised.own! > FACE_MARGIN,
+    `gap ${((recognised.nearestOther?.distance ?? 0) - (recognised.own ?? 0)).toFixed(3)}`,
   );
 
-  const strangerAtTheDoor = await matchFace(personB.descriptor);
+  const strangerAtTheDoor = await matchFace(personB.descriptor, employee.id);
   check(
-    'the other person is recognised as themselves, not as the first',
-    strangerAtTheDoor.best?.employeeId === other.id,
-    `matched ${strangerAtTheDoor.best?.name}`,
+    "the other person's face on the first person's account is refused as not this account",
+    verdict(decide(strangerAtTheDoor)) === 'not_this_account' && strangerAtTheDoor.nearestOther?.employeeId === other.id,
+    `${verdict(decide(strangerAtTheDoor))}, nearest other ${strangerAtTheDoor.nearestOther?.name}`,
+  );
+  check(
+    'and on their own account it is accepted',
+    decide(await matchFace(personB.descriptor, other.id)).ok,
+  );
+  await prisma.faceEnrollment.deleteMany({ where: { employeeId: { in: [employee.id, other.id] } } });
+
+  // One face at a time, and only a few waiting: the engine is WebAssembly on
+  // the API's own thread. Ten captures at once — the eight that fit are
+  // described, the rest are told the clock is busy; the boot-time
+  // re-derivation always waits its turn.
+  const small = await sharp(webcamPhoto()).resize(320).jpeg({ quality: 85 }).toBuffer();
+  const rush = await Promise.allSettled(Array.from({ length: 10 }, () => describeFace(small, { purpose: 'clock' })));
+  const busy = rush.filter(
+    (r) => r.status === 'rejected' && (r.reason as { status?: number }).status === 429 && /busy/.test(String((r.reason as Error).message)),
+  ).length;
+  const queuedRederive = await Promise.allSettled([
+    ...Array.from({ length: 8 }, () => describeFace(small, { purpose: 'clock' })),
+    describeFace(small, { purpose: 'rederive' }),
+  ]);
+  check(
+    'the face engine describes one capture at a time with at most eight waiting: the rest are a 429, never a pile-up',
+    rush.filter((r) => r.status === 'fulfilled').length === 8 && busy === 2,
+    rush.map((r) => (r.status === 'fulfilled' ? 'ok' : (r.reason as { status?: number }).status)).join(','),
+  );
+  check(
+    'and the re-derivation is never turned away — it waits its turn',
+    queuedRederive[8].status === 'fulfilled',
+    queuedRederive.map((r) => r.status).join(','),
   );
 
-  // Put the synthetic enrolment back so the HTTP section still sees an
-  // enrolled employee.
-  await prisma.faceEnrollment.deleteMany({ where: { employeeId: other.id } });
+  // ══ Re-deriving legacy samples ═══════════════════════════════════════════
+  //
+  // A sample described by an older engine is LEGACY: it is never compared
+  // with a new capture. At boot the API describes every legacy sample again
+  // from its photo — rederiveFaceSamples() — so an upgrade sends nobody back
+  // to the camera if their photo is still on disk.
+  console.log('\nRe-deriving legacy samples');
+  {
+    /** A stored file as the upload route would have left it, filed under the worker. */
+    const storedPhoto = async (bytes: Buffer | null, fileName: string) => {
+      const storedName = `zzhr-${crypto.randomBytes(8).toString('hex')}.jpg`;
+      if (bytes) fs.writeFileSync(path.join(env.uploadDir, storedName), bytes);
+      return prisma.attachment.create({
+        data: {
+          entityType: 'face_enrollment',
+          entityId: employee.id,
+          fileName,
+          storedName,
+          mimeType: 'image/jpeg',
+          size: bytes?.length ?? 0,
+          uploadedById: worker.id,
+        },
+      });
+    };
+    const legacy = (photoPath: string | null, engine: string | null) =>
+      prisma.faceEnrollment.create({
+        data: {
+          employeeId: employee.id,
+          // An older engine's numbers: nothing like what the new one says.
+          descriptor: descriptor(5) as unknown as Prisma.InputJsonValue,
+          engine,
+          photoPath,
+        },
+      });
+
+    // Legacy rows that are not this script's are re-derived too (the API
+    // would do the same at its next boot); only a run that touched nothing
+    // else leaves no audit row behind.
+    const foreign = await prisma.faceEnrollment.count({
+      where: {
+        OR: [{ engine: null }, { engine: { not: FACE_ENGINE } }],
+        photoPath: { not: null },
+        employeeId: { notIn: [employee.id] },
+      },
+    });
+    const rederiveStarted = new Date();
+
+    const goodPhoto = await storedPhoto(webcamPhoto(), 'legacy-good.png');
+    const groupPhoto = await storedPhoto(sample('sample1.jpg'), 'legacy-group.jpg');
+    const lostPhoto = await storedPhoto(null, 'legacy-lost.jpg');
+    const recoverable = await legacy(goodPhoto.id, null);
+    const crowded = await legacy(groupPhoto.id, 'tiny-legacy-0');
+    const noPhoto = await legacy(null, null);
+    const fileGone = await legacy(lostPhoto.id, null);
+
+    const run = await rederiveFaceSamples();
+    const [recoverableAfter, crowdedAfter, noPhotoAfter, fileGoneAfter] = await Promise.all(
+      [recoverable, crowded, noPhoto, fileGone].map((r) => prisma.faceEnrollment.findUnique({ where: { id: r.id } })),
+    );
+    const recomputedDescriptor = (recoverableAfter?.descriptor ?? []) as number[];
+    check(
+      'a legacy sample whose photo is on disk is described again under the current engine, with its quality',
+      recoverableAfter?.engine === FACE_ENGINE &&
+        typeof (recoverableAfter.quality as { eyeDistance?: unknown } | null)?.eyeDistance === 'number' &&
+        faceDistance(recomputedDescriptor, personA.descriptor) < 1e-6,
+      `${recoverableAfter?.engine} ${faceDistance(recomputedDescriptor, personA.descriptor)}`,
+    );
+    const crowdedQuality = crowdedAfter?.quality as { rederiveFailed?: string; engine?: string } | null;
+    check(
+      'one whose photo holds several faces keeps its old engine and records why, against this engine',
+      crowdedAfter?.engine === 'tiny-legacy-0' &&
+        /faces are in that photo/.test(String(crowdedQuality?.rederiveFailed)) &&
+        crowdedQuality?.engine === FACE_ENGINE,
+      JSON.stringify(crowdedAfter?.quality),
+    );
+    check(
+      'one with no photo, or whose file is gone from disk, stays exactly as it was',
+      noPhotoAfter?.engine === null && noPhotoAfter.quality === null && fileGoneAfter?.engine === null && fileGoneAfter.quality === null,
+    );
+    check(
+      'the run reports what it did',
+      run.recomputed >= 1 && run.failed >= 1,
+      JSON.stringify(run),
+    );
+    const rederiveAudit = await prisma.auditLog.findMany({
+      where: { entityType: 'setting', entityId: 'hr.rules', at: { gte: rederiveStarted }, summary: { contains: 're-derived' } },
+    });
+    check('and leaves one audit row saying so', rederiveAudit.length === 1, `${rederiveAudit.length} row(s)`);
+
+    const again = await rederiveFaceSamples();
+    const crowdedAgain = await prisma.faceEnrollment.findUnique({ where: { id: crowded.id } });
+    check(
+      'a second run changes nothing — a photo that failed is not retried under the same engine',
+      again.recomputed === 0 && again.failed === 0 && JSON.stringify(crowdedAgain?.quality) === JSON.stringify(crowdedAfter?.quality),
+      JSON.stringify(again),
+    );
+    const afterUpgrade = await matchFace(personAAgain.descriptor, employee.id);
+    check(
+      'and the re-derived sample matches a new capture of its owner',
+      afterUpgrade.own != null && afterUpgrade.own < afterUpgrade.threshold,
+      `own ${afterUpgrade.own?.toFixed(3)}`,
+    );
+
+    // The same face's old sample on ANOTHER person: re-deriving it without the
+    // collision check enrolment applies would let one face open two accounts.
+    const twinPhoto = await storedPhoto(webcamPhoto(), 'legacy-twin.png');
+    const twin = await prisma.faceEnrollment.create({
+      data: {
+        employeeId: other.id,
+        descriptor: descriptor(6) as unknown as Prisma.InputJsonValue,
+        engine: null,
+        photoPath: twinPhoto.id,
+      },
+    });
+    const third = await rederiveFaceSamples();
+    const twinAfter = await prisma.faceEnrollment.findUnique({ where: { id: twin.id } });
+    const twinQuality = twinAfter?.quality as { rederiveFailed?: string } | null;
+    check(
+      "a legacy sample that comes out as another employee's face is not taken into use — and its reason names nobody",
+      third.failed === 1 &&
+        twinAfter?.engine === null &&
+        /too close to another employee/i.test(String(twinQuality?.rederiveFailed)) &&
+        !/Zeno|Worker/.test(String(twinQuality?.rederiveFailed)),
+      `${JSON.stringify(third)} ${JSON.stringify(twinAfter?.quality)}`,
+    );
+    const rederiveAudits = await prisma.auditLog.findMany({
+      where: { entityType: 'setting', entityId: 'hr.rules', at: { gte: rederiveStarted }, summary: { contains: 're-derived' } },
+    });
+
+    // An account photo that IS a sample's capture (every enrolment before the
+    // separation made it so) becomes a small picture of its own at boot.
+    const separationStarted = new Date();
+    await prisma.user.update({ where: { id: worker.id }, data: { photoPath: goodPhoto.id } });
+    const separated = await separateAccountPhotos();
+    const workerPhoto = await prisma.user.findUnique({ where: { id: worker.id }, select: { photoPath: true } });
+    const avatar = workerPhoto?.photoPath
+      ? await prisma.attachment.findUnique({ where: { id: workerPhoto.photoPath } })
+      : null;
+    const avatarSize = avatar ? await sharp(fs.readFileSync(attachmentPath(avatar.storedName))).metadata() : null;
+    check(
+      "an account photo that is a face sample's capture becomes a 96-pixel picture of its own, the capture left with its sample",
+      separated >= 1 &&
+        avatar?.entityType === 'user' &&
+        avatar.entityId === worker.id &&
+        avatarSize?.width === 96 &&
+        avatarSize.height === 96 &&
+        (avatar.caption ?? '').includes(recoverable.id) &&
+        !!(await prisma.attachment.findUnique({ where: { id: goodPhoto.id } })),
+      `${separated} ${avatar?.entityType} ${avatarSize?.width}x${avatarSize?.height} ${avatar?.caption}`,
+    );
+    check('and a second run finds nothing left to separate', (await separateAccountPhotos()) === 0);
+    await prisma.user.update({ where: { id: worker.id }, data: { photoPath: null } });
+    if (avatar) await deleteAttachment(avatar.id);
+
+    await prisma.faceEnrollment.deleteMany({ where: { employeeId: { in: [employee.id, other.id] } } });
+    for (const a of [goodPhoto, groupPhoto, lostPhoto, twinPhoto]) await deleteAttachment(a.id);
+    if (foreign === 0) await prisma.auditLog.deleteMany({ where: { id: { in: rederiveAudits.map((r) => r.id) } } });
+    if (separated === 1) {
+      await prisma.auditLog.deleteMany({
+        where: { entityType: 'setting', at: { gte: separationStarted }, summary: { startsWith: 'Account photos separated' } },
+      });
+    }
+  }
+
+  // ══ The threshold migration ══════════════════════════════════════════════
+  //
+  // Every install's seed stored 0.6, face-api's default for the old engine.
+  // The seed moves a stored 0.6 to 0.55 exactly once; any other stored value
+  // is somebody's choice and stays. The real setting is put back afterwards.
+  console.log('\nThe face threshold migration');
+  {
+    const MARKER = 'seed.faceEngineMigrated';
+    const realRules = await prisma.setting.findUnique({ where: { key: 'hr.rules' } });
+    const realMarker = await prisma.setting.findUnique({ where: { key: MARKER } });
+    const migrationStarted = new Date();
+    const stored = async () => (await hrSettings()).faceThreshold;
+    try {
+      await prisma.setting.deleteMany({ where: { key: MARKER } });
+      await saveHrSettings({ faceThreshold: 0.6 });
+      const first = await migrateFaceThreshold();
+      check(
+        'a stored 0.6 — the old engine default — becomes 0.55',
+        first?.changed === true && first.from === 0.6 && first.to === 0.55 && (await stored()) === 0.55,
+        `${JSON.stringify(first)} → ${await stored()}`,
+      );
+      const marked = await prisma.setting.findUnique({ where: { key: MARKER } });
+      const moved = await prisma.auditLog.findFirst({
+        where: { entityType: 'setting', entityId: 'hr.rules', at: { gte: migrationStarted }, summary: { startsWith: 'Face match threshold moved' } },
+      });
+      check('the move is marked as done, and audited', !!marked && !!moved);
+
+      const second = await migrateFaceThreshold();
+      check('it happens once: a second run does nothing', second === null && (await stored()) === 0.55, JSON.stringify(second));
+
+      await saveHrSettings({ faceThreshold: 0.6 });
+      const afterChoice = await migrateFaceThreshold();
+      check(
+        'so HR setting 0.6 again afterwards is kept',
+        afterChoice === null && (await stored()) === 0.6,
+        `${JSON.stringify(afterChoice)} → ${await stored()}`,
+      );
+
+      await prisma.setting.deleteMany({ where: { key: MARKER } });
+      await saveHrSettings({ faceThreshold: 0.5 });
+      const kept = await migrateFaceThreshold();
+      check(
+        "another stored value is an administrator's choice: kept, and the migration still marked as done",
+        kept?.changed === false && (await stored()) === 0.5 && !!(await prisma.setting.findUnique({ where: { key: MARKER } })),
+        `${JSON.stringify(kept)} → ${await stored()}`,
+      );
+    } finally {
+      if (realRules) {
+        await prisma.setting.update({
+          where: { key: 'hr.rules' },
+          data: { value: realRules.value as Prisma.InputJsonValue },
+        });
+      } else {
+        await prisma.setting.deleteMany({ where: { key: 'hr.rules' } });
+      }
+      await prisma.setting.deleteMany({ where: { key: MARKER } });
+      if (realMarker) {
+        await prisma.setting.create({
+          data: {
+            key: MARKER,
+            value: realMarker.value as Prisma.InputJsonValue,
+            description: realMarker.description,
+          },
+        });
+      }
+      await prisma.auditLog.deleteMany({
+        where: {
+          entityType: 'setting',
+          entityId: 'hr.rules',
+          at: { gte: migrationStarted },
+          summary: { startsWith: 'Face match threshold moved' },
+        },
+      });
+    }
+    check(
+      'the real setting is back as it was',
+      JSON.stringify((await prisma.setting.findUnique({ where: { key: 'hr.rules' } }))?.value ?? null) ===
+        JSON.stringify(realRules?.value ?? null) &&
+        !!(await prisma.setting.findUnique({ where: { key: MARKER } })) === !!realMarker,
+    );
+  }
 
   // ══ Leave ════════════════════════════════════════════════════════════════
   console.log('\nLeave');
@@ -895,48 +1475,14 @@ async function main() {
 
     const me = await api(workerToken, 'GET', '/clock/me');
     check(
-      'clock/me knows who the signed-in person is and that they are enrolled',
-      me.status === 200 && (me.body.employee as { id: string } | null)?.id === employee.id && me.body.enrolled === true,
+      'clock/me knows who the signed-in person is — and that with no face samples they are not enrolled',
+      me.status === 200 &&
+        (me.body.employee as { id: string } | null)?.id === employee.id &&
+        me.body.enrolled === false &&
+        me.body.faceSamples === 0 &&
+        me.body.samplesNeeded === MIN_FACE_SAMPLES &&
+        me.body.maxSamples === MAX_FACE_SAMPLES,
       JSON.stringify(me.body).slice(0, 160),
-    );
-
-    /*
-      Enrolling over HTTP — the actual /clock/enroll route, not the direct
-      prisma.faceEnrollment.create() used above for the matching unit tests.
-      This is what verifies the account-photo propagation: a live capture is
-      supposed to overwrite User.photoPath with the SAME attachment id the
-      enrolment stored, so the topbar avatar and the enrolment photo are
-      provably one file, not two that happen to look alike.
-    */
-    const enrolForm = new FormData();
-    enrolForm.set('photo', new Blob([sample('sample2.jpg')], { type: 'image/jpeg' }), 'enrol.jpg');
-    const enrolRes = await fetch(`${BASE}/clock/enroll`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${workerToken}` },
-      body: enrolForm,
-    });
-    const enrolBody = (await enrolRes.json()) as { id: string; samples: number };
-    check(
-      'enrolling over HTTP accepts a real photo',
-      enrolRes.status === 201 && enrolBody.samples > 0,
-      `${enrolRes.status} ${JSON.stringify(enrolBody)}`,
-    );
-
-    const enrolledRow = await prisma.faceEnrollment.findUnique({ where: { id: enrolBody.id } });
-    const workerAfter = await prisma.user.findUnique({ where: { id: worker.id }, select: { photoPath: true } });
-    check(
-      'the capture becomes the account photo — same attachment id, not a copy',
-      !!enrolledRow?.photoPath && enrolledRow.photoPath === workerAfter?.photoPath,
-      `enrolment ${enrolledRow?.photoPath} vs account ${workerAfter?.photoPath}`,
-    );
-
-    const photoRes = await fetch(`${BASE}/attachments/file/${workerAfter?.photoPath}`, {
-      headers: { Authorization: `Bearer ${workerToken}` },
-    });
-    check(
-      'and that photo is actually fetchable — the /file/:id route is not shadowed',
-      photoRes.status === 200 && (photoRes.headers.get('content-type') ?? '').startsWith('image/'),
-      `${photoRes.status} ${photoRes.headers.get('content-type')}`,
     );
 
     // Filing actual hours on an overtime that was never authorised.
@@ -1088,6 +1634,838 @@ async function main() {
       csv.ok && csvText.includes('Employee No') && csvText.includes(employee.employeeNo),
       `${csv.status}, ${csvText.length} bytes`,
     );
+
+    // ══ Face clock-in over HTTP ═══════════════════════════════════════════
+    //
+    // The routes as the Clock page uses them: three samples before the face
+    // clock opens, five at most, samples that look like their owner and like
+    // nobody else, and a refusal that never tells the person at the camera
+    // whose account their face came close to — while HR's audit trail does.
+    console.log('\nFace clock-in (over HTTP)');
+    {
+      // A supervisor (the dashboard right, as the seeded role holds it) with
+      // Faye reporting to them, one without, and somebody holding only the
+      // employee register's read right — finance's, for labour rates.
+      const bossRole = await makeRole('zzhr_face_boss', `${TAG} Face supervisor`, ['ghr.dashboard.view_all']);
+      const readerRole = await makeRole('zzhr_face_reader', `${TAG} Register reader`, ['ghr.employees.view_all']);
+      const boss = await makeUser('ZZ Face Boss', 'faceboss@verifyhr.local', [bossRole.id]);
+      const otherBoss = await makeUser('ZZ Other Boss', 'otherboss@verifyhr.local', [bossRole.id]);
+      const reader = await makeUser('ZZ Register Reader', 'facereader@verifyhr.local', [readerRole.id]);
+      const bossToken = signToken(boss.id, boss.email);
+      const otherBossToken = signToken(otherBoss.id, otherBoss.email);
+      const readerToken = signToken(reader.id, reader.email);
+      const person = async (key: string, first: string, last: string, no: string, supervisorId?: string) => {
+        const user = await makeUser(`ZZ ${first} ${last}`, `${key}@verifyhr.local`, [workerRole.id], supervisorId);
+        const row = await prisma.employee.create({
+          data: { employeeNo: `${TAG}-${no}`, firstName: first, lastName: last, userId: user.id },
+        });
+        return { user, employee: row, token: signToken(user.id, user.email) };
+      };
+      const faye = await person('face', 'Faye', 'Facet', '011', boss.id);
+      const tomas = await person('twin', 'Tomas', 'Twin', '012');
+      const peeker = await person('peeker', 'Pia', 'Peeker', '013');
+      const gone = await prisma.employee.create({
+        data: { employeeNo: `${TAG}-014`, firstName: 'Ivo', lastName: 'Inactive', isActive: false },
+      });
+      const threshold = (await hrSettings()).faceThreshold;
+
+      // Faye is the webcam face, Tomas the face from sample6, and the stranger
+      // one face of sample3 — each a capture the way a camera would vary it.
+      const A = await asJpeg(webcamPhoto());
+      const aLeft = await rotated(webcamPhoto(), 6);
+      const aRight = await rotated(webcamPhoto(), -6);
+      const aDim = await sharp(webcamPhoto()).modulate({ brightness: 0.9 }).jpeg({ quality: 92 }).toBuffer();
+      const aTilted = await rotated(webcamPhoto(), 12);
+      const aSmall = await recompressed(webcamPhoto());
+      const aFar = await sharp(webcamPhoto()).resize(240).jpeg({ quality: 92 }).toBuffer();
+      // Across the room: the face 110 px wide in a 640×480 frame, its eyes some 15 px apart.
+      const aAcrossTheRoom = await sharp({
+        create: { width: 640, height: 480, channels: 3, background: { r: 128, g: 128, b: 128 } },
+      })
+        .composite([{ input: await sharp(webcamPhoto()).resize(110).toBuffer(), left: 200, top: 100 }])
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      const B = await personBPhoto();
+      const bLeft = await rotated(B, 6);
+      const bRight = await rotated(B, -6);
+      const bDim = await sharp(B).modulate({ brightness: 0.9 }).jpeg({ quality: 92 }).toBuffer();
+      const stranger = await sharp(sample('sample3.jpg'))
+        .extract({ left: 414, top: 194, width: 542, height: 542 })
+        .resize(400, 400)
+        .jpeg({ quality: 92 })
+        .toBuffer();
+
+      const CLOCK_SAYS = {
+        not_recognised: 'Face not recognised. Face the camera in good light and try again, or use the fallback.',
+        not_this_account: 'That face does not match the one enrolled on this account.',
+        replay: 'That picture has been sent before. Look at the camera and take a new one.',
+      };
+      const ENROL_SAYS = {
+        full: 'Five samples are on file — remove one before adding another.',
+        inconsistent:
+          'This does not look like the samples already on your account. Retake facing the camera in good light — if ' +
+          'those samples are of someone else, remove them first.',
+        collision:
+          "This face is too close to another employee's enrolled face for the clock to tell you apart. Use the " +
+          'fallback and tell HR.',
+      };
+      const needsSamples = (n: number) =>
+        `Face clock-in needs ${MIN_FACE_SAMPLES} samples of your face — you have ${n}. Add them on this page, or use the fallback.`;
+
+      const enrol = (token: string, image: Buffer, employeeId?: string) =>
+        apiForm(token, '/clock/enroll', image, employeeId ? { employeeId } : {});
+      const faceClock = (action: 'IN' | 'OUT', image: Buffer) =>
+        apiForm(faye.token, '/clock', image, { action, method: 'FACE' });
+      const fileStatus = async (token: string, id: string) => {
+        const res = await fetch(`${BASE}/attachments/file/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+        await res.arrayBuffer();
+        return res.status;
+      };
+      const accountPhoto = async (userId: string) =>
+        (await prisma.user.findUnique({ where: { id: userId }, select: { photoPath: true } }))?.photoPath ?? null;
+      const refusals = () =>
+        prisma.auditLog.findMany({
+          where: { entityType: 'attendance', entityId: faye.employee.id, action: 'REJECTED' },
+          orderBy: { at: 'desc' },
+        });
+      type RefusalAfter = {
+        faceRefusal?: string;
+        ownDistance?: number | null;
+        nearestOther?: { name?: string; distance?: number } | null;
+      };
+
+      /** A face at Faye's clock that must be refused: the words, one audit row with its reason, no file kept. */
+      const refusedClock = async (
+        label: string,
+        action: 'IN' | 'OUT',
+        image: Buffer,
+        says: string | RegExp,
+        reason: string,
+      ) => {
+        const files = uploadedFiles();
+        const rowsBefore = (await refusals()).length;
+        const res = await faceClock(action, image);
+        const rows = await refusals();
+        const after = (rows[0]?.after ?? {}) as RefusalAfter;
+        const error = String(res.body.error ?? '');
+        const stray = leftBehind(files, image);
+        check(
+          label,
+          res.status === 400 && (typeof says === 'string' ? error === says : says.test(error)),
+          `${res.status} ${error}`,
+        );
+        check(
+          `and it is on HR's audit trail as "${reason}", the capture deleted from disk`,
+          rows.length === rowsBefore + 1 && after.faceRefusal === reason && stray === 0,
+          `${rows.length - rowsBefore} row(s), reason ${after.faceRefusal}, ${stray} file(s) left`,
+        );
+        return { res, row: rows[0], after };
+      };
+
+      const me0 = await api(faye.token, 'GET', '/clock/me');
+      check(
+        'a new person has no face samples: clock/me says 0 of the 3 needed, 5 at most, not enrolled',
+        me0.status === 200 &&
+          me0.body.faceSamples === 0 &&
+          me0.body.legacySamples === 0 &&
+          me0.body.enrolled === false &&
+          me0.body.samplesNeeded === 3 &&
+          me0.body.maxSamples === 5,
+        JSON.stringify(me0.body).slice(0, 200),
+      );
+
+      await refusedClock('a face clock-in with no samples is refused, saying how many are needed', 'IN', A, needsSamples(0), 'too_few_samples');
+
+      // ── Enrolment: three samples ──
+      const first = await enrol(faye.token, A);
+      check(
+        'the first sample is accepted — one of three, not enrolled yet',
+        first.status === 201 && first.body.samples === 1 && first.body.enrolled === false && first.body.samplesNeeded === 3,
+        `${first.status} ${JSON.stringify(first.body).slice(0, 160)}`,
+      );
+      const firstRow = await prisma.faceEnrollment.findUnique({ where: { id: String(first.body.id) } });
+      check(
+        'a sample stores the engine that described it and how good a capture it was',
+        firstRow?.engine === FACE_ENGINE &&
+          typeof (firstRow.quality as { eyeDistance?: unknown } | null)?.eyeDistance === 'number' &&
+          firstRow.enrolledById === faye.user.id,
+        `${firstRow?.engine} ${JSON.stringify(firstRow?.quality)}`,
+      );
+      const firstAccount = await accountPhoto(faye.user.id);
+      const firstAvatar = firstAccount ? await prisma.attachment.findUnique({ where: { id: firstAccount } }) : null;
+      const firstAvatarSize = firstAvatar
+        ? await sharp(fs.readFileSync(attachmentPath(firstAvatar.storedName))).metadata()
+        : null;
+      check(
+        'her account photo is made FROM the capture — a 96-pixel picture of its own, never the sample photo itself',
+        !!firstRow?.photoPath &&
+          !!firstAvatar &&
+          firstAvatar.id !== firstRow.photoPath &&
+          firstAvatar.entityType === 'user' &&
+          firstAvatarSize?.width === 96 &&
+          firstAvatarSize.height === 96,
+        `sample ${firstRow?.photoPath} vs account ${firstAccount} (${firstAvatar?.entityType} ${firstAvatarSize?.width}px)`,
+      );
+      const photoRes = await fetch(`${BASE}/attachments/file/${firstAccount}`, {
+        headers: { Authorization: `Bearer ${faye.token}` },
+      });
+      await photoRes.arrayBuffer();
+      check(
+        'and that photo is fetchable — the /file/:id route is not shadowed',
+        photoRes.status === 200 && (photoRes.headers.get('content-type') ?? '').startsWith('image/'),
+        `${photoRes.status} ${photoRes.headers.get('content-type')}`,
+      );
+
+      await refusedClock('with one sample the face clock is still closed', 'IN', A, needsSamples(1), 'too_few_samples');
+
+      const second = await enrol(faye.token, aLeft);
+      check('a second sample, the head turned a little, is accepted', second.status === 201 && second.body.samples === 2, `${second.status} ${JSON.stringify(second.body).slice(0, 160)}`);
+      const firstPhoto = await prisma.attachment.findUnique({ where: { id: firstRow?.photoPath ?? '' } });
+      const secondAccount = await accountPhoto(faye.user.id);
+      check(
+        "a second sample gives her a new picture: the first picture goes, the first sample's photo stays",
+        !!firstPhoto &&
+          fs.existsSync(attachmentPath(firstPhoto.storedName)) &&
+          !!secondAccount &&
+          secondAccount !== firstAccount &&
+          !(await prisma.attachment.findUnique({ where: { id: firstAccount ?? '' } })),
+      );
+      await refusedClock('with two it is still closed', 'IN', A, needsSamples(2), 'too_few_samples');
+
+      const third = await enrol(faye.token, aDim);
+      check(
+        'the third sample enrols her',
+        third.status === 201 && third.body.samples === 3 && third.body.enrolled === true,
+        `${third.status} ${JSON.stringify(third.body).slice(0, 160)}`,
+      );
+      const me3 = await api(faye.token, 'GET', '/clock/me');
+      check('clock/me agrees: three current samples, enrolled', me3.body.faceSamples === 3 && me3.body.enrolled === true, JSON.stringify(me3.body).slice(0, 120));
+
+      const farFiles = uploadedFiles();
+      const far = await enrol(faye.token, aFar);
+      check(
+        'a sample taken from too far away is refused with the size message, and its file is not kept',
+        far.status === 400 && far.body.error === SMALL && leftBehind(farFiles, aFar) === 0,
+        `${far.status} ${String(far.body.error)}`,
+      );
+
+      // ── The clock ──
+      const inFiles = uploadedFiles();
+      const clockedIn = await faceClock('IN', aTilted);
+      const todayRow = await prisma.attendance.findUnique({
+        where: { employeeId_date: { employeeId: faye.employee.id, date: dayKey(new Date()) } },
+      });
+      check(
+        'with three samples her face clocks her in — the head tilted 12°',
+        clockedIn.status === 200 && todayRow?.timeInMethod === 'FACE',
+        `${clockedIn.status} ${JSON.stringify(clockedIn.body).slice(0, 160)}`,
+      );
+      check(
+        'the match distance is stored with the entry, under the threshold',
+        todayRow?.timeInScore != null && Number(todayRow.timeInScore) < threshold,
+        String(todayRow?.timeInScore),
+      );
+      const inPhoto = todayRow?.timeInPhoto
+        ? await prisma.attachment.findUnique({ where: { id: todayRow.timeInPhoto } })
+        : null;
+      check(
+        'and the capture is kept as the evidence',
+        !!inPhoto && leftBehind(inFiles, aTilted) === 1 && fs.existsSync(attachmentPath(inPhoto.storedName)),
+      );
+      if (inPhoto) {
+        check(
+          "a clock-in photo is the person's and HR's: she and HR open it, a colleague cannot",
+          (await fileStatus(faye.token, inPhoto.id)) === 200 &&
+            (await fileStatus(hrToken, inPhoto.id)) === 200 &&
+            (await fileStatus(peeker.token, inPhoto.id)) === 404,
+        );
+        check(
+          'her own supervisor opens it; a supervisor she does not report to does not, nor somebody with only the register',
+          (await fileStatus(bossToken, inPhoto.id)) === 200 &&
+            (await fileStatus(otherBossToken, inPhoto.id)) === 404 &&
+            (await fileStatus(readerToken, inPhoto.id)) === 404,
+        );
+        const registerRow = async (token: string) => {
+          const list = await api(token, 'GET', `/attendance?employeeId=${faye.employee.id}`);
+          return ((list.body.rows ?? []) as { timeInPhoto?: string | null; timeInScore?: number | null }[])[0];
+        };
+        const [bossRow, otherBossRow] = [await registerRow(bossToken), await registerRow(otherBossToken)];
+        check(
+          'and the attendance register sends the photo only to who may open it — both see the entry and its distance',
+          bossRow?.timeInPhoto === inPhoto.id &&
+            otherBossRow !== undefined &&
+            otherBossRow.timeInPhoto === null &&
+            typeof otherBossRow.timeInScore === 'number',
+          `${bossRow?.timeInPhoto} / ${otherBossRow?.timeInPhoto}`,
+        );
+        const dropEvidence = await api(faye.token, 'DELETE', `/attachments/${inPhoto.id}`);
+        check(
+          'and nobody deletes clock-in evidence through the generic attachment route, not even who uploaded it',
+          dropEvidence.status === 403 && !!(await prisma.attachment.findUnique({ where: { id: inPhoto.id } })),
+          String(dropEvidence.status),
+        );
+      }
+
+      await refusedClock(
+        "a sample's own bytes sent to the clock are refused as a picture sent before — not clocked in at distance 0",
+        'OUT',
+        A,
+        CLOCK_SAYS.replay,
+        'replay',
+      );
+      await refusedClock(
+        "and so is the photo of an earlier clock-in, whose bytes are on file as that entry's evidence",
+        'OUT',
+        aTilted,
+        CLOCK_SAYS.replay,
+        'replay',
+      );
+      await refusedClock('a face across the room is refused at the clock, saying to come closer', 'OUT', aAcrossTheRoom, SMALL, 'quality');
+      const strangerRefused = await refusedClock(
+        'a stranger at her clock is refused as not recognised',
+        'OUT',
+        stranger,
+        CLOCK_SAYS.not_recognised,
+        'not_recognised',
+      );
+      check(
+        "the audit row records the reason and how near her own samples came",
+        /Face not recognised/.test(strangerRefused.row?.summary ?? '') && typeof strangerRefused.after.ownDistance === 'number',
+        strangerRefused.row?.summary ?? '',
+      );
+      await refusedClock('a frame with two people in it is refused, never matched', 'OUT', sample('sample1.jpg'), /faces are in that photo/, 'several_faces');
+
+      // ── Collision and consistency at enrolment ──
+      const collisionFiles = uploadedFiles();
+      const collision = await enrol(tomas.token, aRight);
+      check(
+        "a colleague enrolling a face too close to Faye's is refused — and not told whose it is",
+        collision.status === 400 && collision.body.error === ENROL_SAYS.collision && !String(collision.body.error).includes('Faye'),
+        `${collision.status} ${String(collision.body.error)}`,
+      );
+      const collisionAudit = await prisma.auditLog.findFirst({
+        where: { entityType: 'employee', entityId: tomas.employee.id, action: 'REJECTED' },
+        orderBy: { at: 'desc' },
+      });
+      const collisionAfter = (collisionAudit?.after ?? {}) as RefusalAfter;
+      check(
+        "the audit row names whose face it came close to in its detail, never on its one line — and the capture is not kept",
+        collisionAfter.nearestOther?.name === 'Faye Facet' &&
+          !/Faye|\d\.\d/.test(collisionAudit?.summary ?? '') &&
+          leftBehind(collisionFiles, aRight) === 0 &&
+          (await prisma.faceEnrollment.count({ where: { employeeId: tomas.employee.id } })) === 0,
+        collisionAudit?.summary ?? 'no audit row',
+      );
+      const tomasHome = await api(tomas.token, 'GET', '/my-work');
+      check(
+        'his own My Work shows the refusal without her name',
+        tomasHome.status === 200 &&
+          JSON.stringify(tomasHome.body.recentActivity ?? []).includes('Face sample refused') &&
+          !JSON.stringify(tomasHome.body.recentActivity ?? []).includes('Faye'),
+        JSON.stringify(tomasHome.body.recentActivity ?? []).slice(0, 200),
+      );
+      const hrCollision = await enrol(hrToken, aRight, tomas.employee.id);
+      check(
+        'HR enrolling the same face for him is told whose face it is',
+        hrCollision.status === 400 && String(hrCollision.body.error).includes('Faye Facet'),
+        `${hrCollision.status} ${String(hrCollision.body.error)}`,
+      );
+
+      const wrongTarget = [
+        await enrol(hrToken, A, gone.id),
+        await enrol(hrToken, A, 'no-such-employee'),
+        await enrol(peeker.token, A, faye.employee.id),
+      ];
+      check(
+        'nobody is enrolled on an inactive record (400) or an unknown one (404), and only HR enrols somebody else (403)',
+        wrongTarget[0].status === 400 &&
+          /inactive/i.test(String(wrongTarget[0].body.error)) &&
+          wrongTarget[1].status === 404 &&
+          wrongTarget[2].status === 403,
+        wrongTarget.map((r) => `${r.status} ${String(r.body.error)}`).join(' · '),
+      );
+
+      const tomasSamples = [await enrol(tomas.token, B), await enrol(tomas.token, bLeft), await enrol(tomas.token, bRight)];
+      check(
+        'Tomas enrols his own face beside hers — three samples',
+        tomasSamples.every((r) => r.status === 201) && tomasSamples[2].body.enrolled === true,
+        tomasSamples.map((r) => `${r.status} ${String(r.body.error ?? '')}`).join(' · '),
+      );
+
+      const wrongFace = await refusedClock(
+        "Tomas's face at Faye's clock is refused as not her account",
+        'OUT',
+        bDim,
+        CLOCK_SAYS.not_this_account,
+        'not_this_account',
+      );
+      check(
+        "the person at the camera is never told whose face it was; the audit row's detail says, its one line does not",
+        !String(wrongFace.res.body.error).includes('Tomas') &&
+          wrongFace.after.nearestOther?.name === 'Tomas Twin' &&
+          !/Tomas|\d\.\d/.test(wrongFace.row?.summary ?? ''),
+        wrongFace.row?.summary ?? '',
+      );
+      const fayeHome = await api(faye.token, 'GET', '/my-work');
+      const fayeTrail = await api(faye.token, 'GET', `/audit/attendance/${faye.employee.id}`);
+      const peekTrail = await api(peeker.token, 'GET', `/audit/attendance/${faye.employee.id}`);
+      const fayeRecent = JSON.stringify(fayeHome.body.recentActivity ?? []);
+      check(
+        'nor can she read it afterwards: My Work lists the refusal by its one line, and the record\'s own history is the audit trail\'s (403)',
+        fayeHome.status === 200 &&
+          fayeRecent.includes('refused') &&
+          !fayeRecent.includes('Tomas') &&
+          !fayeRecent.includes('nearestOther') &&
+          fayeTrail.status === 403 &&
+          !JSON.stringify(fayeTrail.body).includes('Tomas') &&
+          peekTrail.status === 403,
+        `${fayeHome.status} ${fayeRecent.slice(0, 160)} / ${fayeTrail.status} / ${peekTrail.status}`,
+      );
+
+      const inconsistentFiles = uploadedFiles();
+      const inconsistent = await enrol(faye.token, bDim);
+      check(
+        "a sample that does not look like her own samples is refused (another person's face on her account)",
+        inconsistent.status === 400 && inconsistent.body.error === ENROL_SAYS.inconsistent && leftBehind(inconsistentFiles, bDim) === 0,
+        `${inconsistent.status} ${String(inconsistent.body.error)}`,
+      );
+
+      const clockedOut = await faceClock('OUT', aSmall);
+      const outRow = await prisma.attendance.findUnique({
+        where: { employeeId_date: { employeeId: faye.employee.id, date: dayKey(new Date()) } },
+      });
+      check(
+        'her own face, a smaller lossier capture, clocks her out — the distance stored',
+        clockedOut.status === 200 && outRow?.timeOutMethod === 'FACE' && outRow.timeOutScore != null && Number(outRow.timeOutScore) < threshold,
+        `${clockedOut.status} ${JSON.stringify(clockedOut.body).slice(0, 120)} ${outRow?.timeOutScore}`,
+      );
+
+      // ── The cap ──
+      const fourth = await enrol(faye.token, aRight);
+      const fifth = await enrol(faye.token, aSmall);
+      check(
+        'a fourth and a fifth sample are accepted',
+        fourth.status === 201 && fifth.status === 201 && fifth.body.samples === 5,
+        `${fourth.status} ${fifth.status} ${String(fourth.body.error ?? fifth.body.error ?? '')}`,
+      );
+      const capFiles = uploadedFiles();
+      const sixth = await enrol(faye.token, aDim);
+      check(
+        'a sixth is refused: five is the most a person keeps',
+        sixth.status === 400 && sixth.body.error === ENROL_SAYS.full && leftBehind(capFiles, aDim) === 0,
+        `${sixth.status} ${String(sixth.body.error)}`,
+      );
+
+      // ── Listing the samples ──
+      type SampleRow = {
+        id: string;
+        photoId: string | null;
+        createdAt: string;
+        enrolledBy: { id: string } | null;
+        current: boolean;
+        quality: { eyeDistance?: number } | null;
+      };
+      const listed = await api(faye.token, 'GET', `/clock/enrollments?employeeId=${faye.employee.id}`);
+      const samples = (listed.body.samples ?? []) as SampleRow[];
+      check(
+        'GET /clock/enrollments lists her five samples: current, each with its photo, date, who added it and its quality',
+        listed.status === 200 &&
+          samples.length === 5 &&
+          listed.body.current === 5 &&
+          listed.body.legacy === 0 &&
+          listed.body.samplesNeeded === 3 &&
+          listed.body.maxSamples === 5 &&
+          (listed.body.employee as { id?: string } | undefined)?.id === faye.employee.id &&
+          samples.every(
+            (s) => !!s.photoId && !!s.createdAt && s.enrolledBy?.id === faye.user.id && s.current === true && typeof s.quality?.eyeDistance === 'number',
+          ),
+        `${listed.status} ${JSON.stringify(listed.body).slice(0, 200)}`,
+      );
+      const ownList = await api(faye.token, 'GET', '/clock/enrollments');
+      check('without an employee id the list is her own', ownList.status === 200 && ownList.body.current === 5, String(ownList.status));
+      const peekList = await api(peeker.token, 'GET', `/clock/enrollments?employeeId=${faye.employee.id}`);
+      const readerList = await api(readerToken, 'GET', `/clock/enrollments?employeeId=${faye.employee.id}`);
+      const hrList = await api(hrToken, 'GET', `/clock/enrollments?employeeId=${faye.employee.id}`);
+      const hrUnknown = await api(hrToken, 'GET', '/clock/enrollments?employeeId=no-such-employee');
+      check(
+        "a colleague cannot list her samples (403), nor somebody with only the register's read right (403); HR can; an unknown employee is a 404",
+        peekList.status === 403 &&
+          readerList.status === 403 &&
+          hrList.status === 200 &&
+          hrList.body.current === 5 &&
+          hrUnknown.status === 404,
+        `${peekList.status} / ${readerList.status} / ${hrList.status} / ${hrUnknown.status}`,
+      );
+
+      // ── The face photos' guard ──
+      const accountNow = await accountPhoto(faye.user.id);
+      const privateSample = samples[0];
+      if (privateSample?.photoId && accountNow) {
+        check(
+          "a sample's photo is hers and HR's: a colleague who knows its id cannot open it, nor the register's reader",
+          (await fileStatus(faye.token, privateSample.photoId)) === 200 &&
+            (await fileStatus(hrToken, privateSample.photoId)) === 200 &&
+            (await fileStatus(peeker.token, privateSample.photoId)) === 404 &&
+            (await fileStatus(readerToken, privateSample.photoId)) === 404,
+        );
+        const peekAll = await Promise.all(samples.map((x) => (x.photoId ? fileStatus(peeker.token, x.photoId) : 404)));
+        check(
+          'none of her five sample photos is her account photo, so a colleague opens none of them — and opens her picture, as every avatar is',
+          !samples.some((x) => x.photoId === accountNow) &&
+            peekAll.every((status) => status === 404) &&
+            (await fileStatus(peeker.token, accountNow)) === 200,
+          peekAll.join(','),
+        );
+        const genericDelete = await api(faye.token, 'DELETE', `/attachments/${privateSample.photoId}`);
+        const genericAdd = await apiForm(faye.token, `/attachments/face_enrollment/${faye.employee.id}`, A, {}, 'files');
+        const peekAdd = await apiForm(peeker.token, `/attachments/face_enrollment/${faye.employee.id}`, A, {}, 'files');
+        check(
+          'sample photos are never added or deleted through the generic attachment routes (403; 404 for a colleague)',
+          genericDelete.status === 403 && genericAdd.status === 403 && peekAdd.status === 404,
+          `${genericDelete.status} / ${genericAdd.status} / ${peekAdd.status}`,
+        );
+      } else {
+        check('a sample photo other than the account photo exists to test the guard on', false);
+      }
+
+      // ── Face health (HR Settings) ──
+      const peekHealth = await api(peeker.token, 'GET', '/clock/face-health');
+      check('face health is HR settings: a colleague is refused', peekHealth.status === 403, String(peekHealth.status));
+
+      // A lookalike on file: Faye's face and Tomas's both filed on a third
+      // person — a close pair with each, two samples unlike each other, and
+      // an account holding two faces. And somebody with only an older
+      // engine's sample: not protected by the clock yet.
+      const lookalike = await prisma.employee.create({
+        data: { employeeNo: `${TAG}-015`, firstName: 'Lena', lastName: 'Lookalike' },
+      });
+      const unprotectedOne = await prisma.employee.create({
+        data: { employeeNo: `${TAG}-016`, firstName: 'Uma', lastName: 'Unprotected' },
+      });
+      await prisma.faceEnrollment.create({
+        data: { employeeId: unprotectedOne.id, descriptor: descriptor(9) as unknown as Prisma.InputJsonValue },
+      });
+      const fayeSample = await prisma.faceEnrollment.findFirst({ where: { employeeId: faye.employee.id, engine: FACE_ENGINE } });
+      const tomasSample = await prisma.faceEnrollment.findFirst({ where: { employeeId: tomas.employee.id, engine: FACE_ENGINE } });
+      await prisma.faceEnrollment.createMany({
+        data: [fayeSample, tomasSample].map((row) => ({
+          employeeId: lookalike.id,
+          descriptor: (row?.descriptor ?? []) as Prisma.InputJsonValue,
+          engine: FACE_ENGINE,
+        })),
+      });
+      const health = await api(hrToken, 'GET', '/clock/face-health');
+      const people = (health.body.people ?? {}) as Record<string, number>;
+      const pairs = (health.body.closePairs ?? []) as { a: { id: string }; b: { id: string }; distance: number }[];
+      const outliers = (health.body.outliers ?? []) as { employee: { id: string }; sampleId: string; distance: number }[];
+      const mixed = (health.body.mixedAccounts ?? []) as { employee: { id: string }; distance: number; sampleIds: string[] }[];
+      const unprotected = (health.body.unprotected ?? []) as { id: string; name: string }[];
+      const refused30 = (health.body.refusals30d ?? { total: 0, reasons: [] }) as {
+        total: number;
+        reasons: { reason: string; label: string; count: number }[];
+      };
+      type RecentRefusal = {
+        kind: string;
+        reason: string;
+        employee: { id: string; name: string };
+        nearestOther: { id: string; name: string; distance: number | null } | null;
+      };
+      const recent = (health.body.recentRefusals ?? []) as RecentRefusal[];
+      const pairOf = (x: string, y: string) =>
+        pairs.find((p) => (p.a.id === x && p.b.id === y) || (p.a.id === y && p.b.id === x));
+      check(
+        'face health reports the engine, the threshold and margin, and how many people are ready, partly enrolled, legacy-only or not at all',
+        health.status === 200 &&
+          health.body.engine === FACE_ENGINE &&
+          health.body.threshold === threshold &&
+          health.body.margin === FACE_MARGIN &&
+          ['ready', 'partial', 'legacyOnly', 'none'].every((k) => typeof people[k] === 'number') &&
+          people.ready >= 2,
+        `${health.status} ${JSON.stringify(health.body).slice(0, 200)}`,
+      );
+      check(
+        'it names who has only an older engine\'s samples — not protected by the clock until they add new ones',
+        unprotected.some((u) => u.id === unprotectedOne.id && u.name === 'Uma Unprotected') &&
+          !unprotected.some((u) => u.id === faye.employee.id),
+        JSON.stringify(unprotected.slice(0, 4)),
+      );
+      check(
+        'it names two people the clock could confuse, closest first — and not two who are far apart',
+        !!pairOf(faye.employee.id, lookalike.id) &&
+          pairOf(faye.employee.id, lookalike.id)!.distance <= threshold + 0.1 &&
+          !!pairOf(tomas.employee.id, lookalike.id) &&
+          !pairOf(faye.employee.id, tomas.employee.id) &&
+          pairs.length <= 20 &&
+          pairs.every((p, i) => i === 0 || pairs[i - 1].distance <= p.distance),
+        JSON.stringify(pairs.slice(0, 4)),
+      );
+      check(
+        "it flags a sample unlike its owner's other samples, and none of Faye's",
+        outliers.filter((o) => o.employee.id === lookalike.id).length === 2 &&
+          !outliers.some((o) => o.employee.id === faye.employee.id) &&
+          outliers.every((o) => o.distance > threshold + FACE_MARGIN),
+        JSON.stringify(outliers.slice(0, 4)),
+      );
+      check(
+        'and an account holding two faces, by the two samples furthest apart — not Faye\'s, whose five are one face',
+        mixed.some((m) => m.employee.id === lookalike.id && m.distance > threshold + FACE_MARGIN && m.sampleIds.length === 2) &&
+          !mixed.some((m) => m.employee.id === faye.employee.id),
+        JSON.stringify(mixed.slice(0, 3)),
+      );
+      const refusedFor = (reason: string) => refused30.reasons.find((r) => r.reason === reason)?.count ?? 0;
+      check(
+        'the refusals of the last 30 days by reason, counted from the audit rows',
+        refused30.total >= 9 &&
+          refusedFor('too_few_samples') >= 3 &&
+          refusedFor('replay') >= 2 &&
+          refusedFor('quality') >= 1 &&
+          refusedFor('not_recognised') >= 1 &&
+          refusedFor('several_faces') >= 1 &&
+          refusedFor('not_this_account') >= 1 &&
+          refused30.reasons.every((r) => typeof r.label === 'string' && r.label.length > 0),
+        JSON.stringify(refused30).slice(0, 300),
+      );
+      check(
+        'and the latest one by one, for HR: whose face the refused clock-in came near, and whose the refused sample did',
+        recent.some(
+          (r) =>
+            r.kind === 'clock' &&
+            r.reason === 'not_this_account' &&
+            r.employee.id === faye.employee.id &&
+            r.nearestOther?.name === 'Tomas Twin',
+        ) &&
+          recent.some(
+            (r) =>
+              r.kind === 'enrol' &&
+              r.reason === 'collision' &&
+              r.employee.id === tomas.employee.id &&
+              r.nearestOther?.name === 'Faye Facet',
+          ) &&
+          recent.length <= 20,
+        JSON.stringify(recent.slice(0, 3)),
+      );
+      await prisma.faceEnrollment.deleteMany({ where: { employeeId: { in: [lookalike.id, unprotectedOne.id] } } });
+
+      // ── Legacy, removing one, the account photo, starting over ──
+      await prisma.faceEnrollment.create({
+        data: { employeeId: faye.employee.id, descriptor: descriptor(5) as unknown as Prisma.InputJsonValue },
+      });
+      const meLegacy = await api(faye.token, 'GET', '/clock/me');
+      check(
+        "a sample of an older engine is counted apart, and does not count toward the three",
+        meLegacy.body.faceSamples === 5 && meLegacy.body.legacySamples === 1 && meLegacy.body.enrolled === true,
+        JSON.stringify(meLegacy.body).slice(0, 160),
+      );
+      // A current-engine row whose descriptor cannot be read is not a sample
+      // the clock can use, so it is not counted as one either.
+      const unreadable = await prisma.faceEnrollment.create({
+        data: { employeeId: faye.employee.id, descriptor: [1, 2, 3] as Prisma.InputJsonValue, engine: FACE_ENGINE },
+      });
+      const meUnreadable = await api(faye.token, 'GET', '/clock/me');
+      check(
+        'a current-engine row with no readable descriptor counts with the legacy ones, never toward the three',
+        meUnreadable.body.faceSamples === 5 && meUnreadable.body.legacySamples === 2,
+        JSON.stringify(meUnreadable.body).slice(0, 160),
+      );
+      await prisma.faceEnrollment.delete({ where: { id: unreadable.id } });
+
+      // Her account picture was cut from her LAST sample; removing another
+      // sample leaves it, removing that one takes it.
+      const pictureNow = await accountPhoto(faye.user.id);
+      const picture = pictureNow ? await prisma.attachment.findUnique({ where: { id: pictureNow } }) : null;
+      const pictureSample = samples.find((x) => (picture?.caption ?? '').endsWith(x.id));
+      const otherSample = samples.find((x) => x.id !== pictureSample?.id);
+      if (otherSample?.photoId && pictureSample?.photoId && picture) {
+        const peekRemove = await api(peeker.token, 'DELETE', `/clock/enrollments/${otherSample.id}`);
+        const otherPhoto = await prisma.attachment.findUnique({ where: { id: otherSample.photoId } });
+        const removed = await api(faye.token, 'DELETE', `/clock/enrollments/${otherSample.id}`);
+        check(
+          "a colleague cannot remove her sample (403); she can (204), and its photo goes with it",
+          peekRemove.status === 403 &&
+            removed.status === 204 &&
+            !(await prisma.faceEnrollment.findUnique({ where: { id: otherSample.id } })) &&
+            !(await prisma.attachment.findUnique({ where: { id: otherSample.photoId } })) &&
+            !!otherPhoto &&
+            !fs.existsSync(attachmentPath(otherPhoto.storedName)),
+          `${peekRemove.status} / ${removed.status}`,
+        );
+        check(
+          'the removal is audited, an unknown sample is a 404, and her picture — cut from another sample — stays',
+          !!(await prisma.auditLog.findFirst({
+            where: { entityType: 'employee', entityId: faye.employee.id, summary: { startsWith: 'Face sample removed' } },
+          })) &&
+            (await api(faye.token, 'DELETE', '/clock/enrollments/no-such-sample')).status === 404 &&
+            (await accountPhoto(faye.user.id)) === picture.id,
+        );
+        const removedSource = await api(faye.token, 'DELETE', `/clock/enrollments/${pictureSample.id}`);
+        check(
+          'removing the sample her picture was cut from takes the picture too — a face removed from her samples is not left as her avatar',
+          removedSource.status === 204 &&
+            (await accountPhoto(faye.user.id)) === null &&
+            !(await prisma.attachment.findUnique({ where: { id: picture.id } })),
+          `${removedSource.status} ${await accountPhoto(faye.user.id)}`,
+        );
+      } else {
+        check('her account picture names the sample it was cut from', false, picture?.caption ?? 'no picture');
+      }
+
+      // A plain account photo is replaced and removed as any upload is, and
+      // never takes a face sample's photo with it.
+      const plainOne = await sharp({ create: { width: 200, height: 200, channels: 3, background: { r: 40, g: 90, b: 160 } } })
+        .jpeg()
+        .toBuffer();
+      const plainTwo = await sharp({ create: { width: 200, height: 200, channels: 3, background: { r: 160, g: 90, b: 40 } } })
+        .jpeg()
+        .toBuffer();
+      const sampleFiles = () => prisma.attachment.count({ where: { entityType: 'face_enrollment', entityId: faye.employee.id } });
+      const filesBefore = await sampleFiles();
+      const upOne = await apiForm(faye.token, '/auth/photo', plainOne);
+      const upTwo = await apiForm(faye.token, '/auth/photo', plainTwo);
+      check(
+        'a plain account photo nothing else holds is deleted when it is replaced',
+        upOne.status === 201 && upTwo.status === 201 && !(await prisma.attachment.findUnique({ where: { id: String(upOne.body.photoPath) } })),
+        `${upOne.status} ${upTwo.status}`,
+      );
+      const dropAvatar = await api(faye.token, 'DELETE', '/auth/photo');
+      check(
+        'removing the account photo deletes that plain photo and leaves her three sample photos',
+        dropAvatar.status === 200 &&
+          !(await prisma.attachment.findUnique({ where: { id: String(upTwo.body.photoPath) } })) &&
+          filesBefore === 3 &&
+          (await sampleFiles()) === 3,
+        `${dropAvatar.status} ${filesBefore}`,
+      );
+
+      const peekReset = await api(peeker.token, 'DELETE', `/clock/enrollments?employeeId=${faye.employee.id}`);
+      const reset = await api(faye.token, 'DELETE', '/clock/enrollments');
+      const meReset = await api(faye.token, 'GET', '/clock/me');
+      check(
+        'starting over: a colleague cannot (403); she removes every sample, the older engine\'s too, and their photos with them',
+        peekReset.status === 403 &&
+          reset.status === 200 &&
+          reset.body.removed === 4 &&
+          meReset.body.faceSamples === 0 &&
+          meReset.body.legacySamples === 0 &&
+          (await prisma.attachment.count({ where: { entityType: 'face_enrollment', entityId: faye.employee.id } })) === 0,
+        `${peekReset.status} / ${reset.status} ${JSON.stringify(reset.body)}`,
+      );
+      const tomasPicture = await accountPhoto(tomas.user.id);
+      const hrReset = await api(hrToken, 'DELETE', `/clock/enrollments?employeeId=${tomas.employee.id}`);
+      check(
+        "HR resets somebody else's — his picture, cut from one of them, with them — and both resets are audited",
+        hrReset.status === 200 &&
+          hrReset.body.removed === 3 &&
+          !!tomasPicture &&
+          (await accountPhoto(tomas.user.id)) === null &&
+          (await prisma.auditLog.count({
+            where: {
+              entityType: 'employee',
+              entityId: { in: [faye.employee.id, tomas.employee.id] },
+              summary: { startsWith: 'Face samples reset' },
+            },
+          })) === 2,
+        `${hrReset.status} ${JSON.stringify(hrReset.body)}`,
+      );
+
+      // ── Two at once ──
+      // Enrolment counts, matches and writes under one lock, so two captures
+      // sent together are decided one after the other.
+      const pia = peeker;
+      const race = await Promise.all([enrol(pia.token, A), enrol(pia.token, B)]);
+      const raceStatuses = race.map((r) => r.status).sort();
+      check(
+        'two different faces sent at once as somebody\'s first samples: one is taken, the other refused as unlike it',
+        raceStatuses[0] === 201 &&
+          raceStatuses[1] === 400 &&
+          race.some((r) => r.body.error === ENROL_SAYS.inconsistent) &&
+          (await prisma.faceEnrollment.count({ where: { employeeId: pia.employee.id } })) === 1,
+        race.map((r) => `${r.status} ${String(r.body.error ?? '')}`).join(' · '),
+      );
+      await api(pia.token, 'DELETE', '/clock/enrollments');
+      for (const image of [A, aLeft, aRight, aDim]) await enrol(pia.token, image);
+      const capRace = await Promise.all([enrol(pia.token, aSmall), enrol(pia.token, aTilted)]);
+      const capStatuses = capRace.map((r) => r.status).sort();
+      check(
+        'and two sent at once with four on file: one is the fifth, the other is told five are on file — five kept, not four',
+        (await prisma.faceEnrollment.count({ where: { employeeId: pia.employee.id } })) === 5 &&
+          capStatuses[0] === 201 &&
+          capStatuses[1] === 400 &&
+          capRace.some((r) => r.body.error === ENROL_SAYS.full),
+        capRace.map((r) => `${r.status} ${String(r.body.error ?? '')}`).join(' · '),
+      );
+      await api(pia.token, 'DELETE', '/clock/enrollments');
+
+      // ── The brake ──
+      const brakeFiles = uploadedFiles();
+      const knocks: number[] = [];
+      for (let i = 0; i < 13; i++) {
+        knocks.push((await apiForm(tomas.token, '/clock', bDim, { action: 'IN', method: 'PIN' })).status);
+      }
+      check(
+        'one person knocking on the clock more than twelve times a minute is told to wait (429), and no capture is kept',
+        knocks.slice(0, 12).every((st) => st === 400) && knocks[12] === 429 && leftBehind(brakeFiles, bDim) === 0,
+        knocks.join(','),
+      );
+
+      // ── A fallback at both ends of the day ──
+      const fallbackPerson = await person('fallback', 'Fran', 'Fallback', '017');
+      const fbIn = await apiForm(fallbackPerson.token, '/clock', plainOne, { action: 'IN', method: 'PIN', fallbackReason: 'Camera broken this morning' });
+      const fbOut = await apiForm(fallbackPerson.token, '/clock', plainTwo, { action: 'OUT', method: 'BIOMETRIC', fallbackReason: 'Used the reader at the gate' });
+      const fbRow = await prisma.attendance.findUnique({
+        where: { employeeId_date: { employeeId: fallbackPerson.employee.id, date: dayKey(new Date()) } },
+      });
+      check(
+        "a fallback's written reason is kept at both ends of the day — the clock-in's and the clock-out's, each its own",
+        fbIn.status === 200 &&
+          fbOut.status === 200 &&
+          fbRow?.timeInMethod === 'PIN' &&
+          fbRow.notes === 'Camera broken this morning' &&
+          fbRow.timeOutMethod === 'BIOMETRIC' &&
+          fbRow.timeOutNotes === 'Used the reader at the gate',
+        `${fbIn.status} ${fbOut.status} ${fbRow?.notes} / ${fbRow?.timeOutNotes}`,
+      );
+
+      // A double tap: the entry is claimed before its photo is filed, so the
+      // tap that loses keeps nothing.
+      const tapper = await person('tapper', 'Tad', 'Tapper', '019');
+      const tapFiles = uploadedFiles();
+      const tapOne = await sharp({ create: { width: 220, height: 220, channels: 3, background: { r: 10, g: 120, b: 60 } } }).jpeg().toBuffer();
+      const tapTwo = await sharp({ create: { width: 220, height: 220, channels: 3, background: { r: 120, g: 10, b: 60 } } }).jpeg().toBuffer();
+      const taps = await Promise.all([
+        apiForm(tapper.token, '/clock', tapOne, { action: 'IN', method: 'PIN', fallbackReason: 'First tap' }),
+        apiForm(tapper.token, '/clock', tapTwo, { action: 'IN', method: 'PIN', fallbackReason: 'Second tap' }),
+      ]);
+      const tapRow = await prisma.attendance.findUnique({
+        where: { employeeId_date: { employeeId: tapper.employee.id, date: dayKey(new Date()) } },
+      });
+      const tapStatuses = taps.map((t) => t.status).sort();
+      check(
+        'two clock-ins at once: one stands, the other is told it already did — and only the standing one keeps its photo',
+        tapStatuses[0] === 200 &&
+          tapStatuses[1] === 400 &&
+          leftBehind(tapFiles, tapOne) + leftBehind(tapFiles, tapTwo) === 1 &&
+          !!tapRow?.timeInPhoto &&
+          (await prisma.attachment.count({ where: { entityType: 'attendance', entityId: tapper.employee.id } })) === 1,
+        taps.map((t) => `${t.status} ${String(t.body.error ?? '')}`).join(' · '),
+      );
+
+      // ── A deleted employee's faces go with them ──
+      const leaver = await prisma.employee.create({
+        data: { employeeNo: `${TAG}-018`, firstName: 'Leo', lastName: 'Leaver' },
+      });
+      const leaverSample = await enrol(hrToken, A, leaver.id);
+      const leaverPhotos = await prisma.attachment.findMany({ where: { entityType: 'face_enrollment', entityId: leaver.id } });
+      const dropLeaver = await api(hrToken, 'DELETE', `/employees/${leaver.id}`);
+      check(
+        "deleting an employee deletes their face samples' photos too, files and all",
+        leaverSample.status === 201 &&
+          leaverPhotos.length === 1 &&
+          dropLeaver.status === 200 &&
+          (await prisma.attachment.count({ where: { entityType: 'face_enrollment', entityId: leaver.id } })) === 0 &&
+          !fs.existsSync(attachmentPath(leaverPhotos[0].storedName)),
+        `${leaverSample.status} ${String(leaverSample.body.error ?? '')} ${dropLeaver.status} ${leaverPhotos.length}`,
+      );
+    }
 
     // ══ One record, one URL (audit fix 21) ════════════════════════════════
     console.log('\nLeave and overtime by id (over HTTP)');

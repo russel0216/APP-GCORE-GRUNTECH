@@ -32,6 +32,7 @@ import './styles/costing.css';
 import './styles/pdf-templates.css';
 import './styles/file-viewer.css';
 import './styles/cad.css';
+import './styles/face.css';
 
 /*
   Before React draws anything. The server's copy arrives with /auth/me a

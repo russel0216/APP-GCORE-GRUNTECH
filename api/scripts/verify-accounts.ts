@@ -612,6 +612,18 @@ async function main() {
   const realDay = await http(adminT, 'GET', '/audit?from=2028-02-29&to=2028-02-29');
   check('Audit trail: a real day still filters (29 February in a leap year)', realDay.status === 200, String(realDay.status));
   check('Audit trail: the printed trail is refused to anyone without the audit right', (await printed(nobodyT, '/audit/pdf')).status === 403);
+  // One record's history is the audit trail's too — an attendance or employee
+  // row can name whose face a refused clock-in came near — except where a
+  // screen shows it to that screen's readers (a project, Customer 360).
+  const histories = await Promise.all(
+    ['employee', 'attendance', 'user', 'job', 'customer'].map((type) => http(nobodyT, 'GET', `/audit/${type}/${admin.id}`)),
+  );
+  const ownHistory = await http(adminT, 'GET', `/audit/user/${admin.id}`);
+  check(
+    "Audit trail: one record's history is refused to anyone without the audit right or that screen's own (403), and read with it",
+    histories.every((r) => r.status === 403) && ownHistory.status === 200 && Array.isArray(ownHistory.body),
+    `${histories.map((r) => r.status).join(',')} / ${ownHistory.status}`,
+  );
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -1173,11 +1173,54 @@ with time.
    unwind. Whether Gruntech is classified as a Top Withholding Agent — which is
    what makes withholding on purchases compulsory rather than optional — is a
    question for its accountant, not a decision this system should make.
-4. **The face-match threshold** — shipped at 0.6, the library's own default, and
-   editable in G-HR › Settings. On the sample photographs the same person lands at
-   0.13–0.28 and two different people at 0.69–0.73, so 0.6 sits in a wide gap. That
-   gap will narrow with real site conditions — poor light, hard hats, dust — and
-   the number is worth revisiting after a month of use rather than guessing now.
+4. **The face-match threshold** — shipped at 0.6, the library's own default,
+   with face-api's tiny detector. In use, one person's face sometimes clocked
+   in on another person's account. A benchmark (8 people × 5 photos and 22
+   strangers, through simulated webcam, dark and tilted captures) traced
+   those matches to a tilted head and to poor samples. So on 2026-10-10 the
+   engine changed: SSD MobileNet with the full 68-point landmarks, the eyes
+   levelled before the face is described, and a contrast retry at the clock
+   only. It is recorded as `ssd-l68-level-1` on every sample, and the old
+   engine's samples are never compared with the new.
+
+   **Threshold and margin.** The threshold is now **0.55**, plus a **0.05
+   margin**. A face is accepted only when it is within 0.55 of its owner's
+   nearest sample *and* at least 0.05 nearer to the owner than to any
+   colleague. Anything else is refused without naming the colleague.
+
+   **Samples and results.** Everyone needs three samples. In the benchmark,
+   with three samples a person, this accepted 96% of genuine captures (93%
+   with one sample). It matched no one to a wrong account and accepted no
+   impostor or stranger. The seed moved a stored 0.6 to 0.55 once; any
+   other stored value is HR's choice and stays. The threshold is still
+   editable in G-HR › Settings; lower is stricter.
+
+   **The caveat is the benchmark itself:** eight identities and *simulated*
+   captures — not Gruntech's staff, cameras, lighting, hard hats or dust.
+
+   **Recheck after a month of real use**, on G-HR › Settings › Face health.
+   It shows the pairs of people the clock may confuse, the samples unlike
+   their owner's others, and the clock's refusals by reason over 30 days.
+   - Mostly "not recognised": lighting or samples are the problem, not the
+     number.
+   - Any close pair, or "not this account": tighten the threshold, or retake
+     those people's samples, before loosening anything.
+
+   **Who sees a face.** A person's face samples are theirs and HR's (the
+   employee edit right) — not the register's readers, since finance holds that
+   right for labour rates. A clock capture is the person's, HR's, the
+   executive's (every attendance entry) and their own supervisor's, never a
+   supervisor of somebody else. The face beside a name on every screen is a
+   small picture cut from a capture, never the capture itself: a sample's own
+   bytes, posted back to the clock, used to open its owner's account.
+
+   **What the clock does not do: tell a live face from a picture of one.**
+   There is no liveness check. A photo already on file sent again is refused,
+   and nobody can fetch one to try; but a fresh photograph of a colleague,
+   taken elsewhere and held up to the camera or sent as a file, still passes.
+   The capture kept with every entry is what HR checks a doubtful one against.
+   A liveness check (a blink or a turn asked for at random, or a depth camera
+   at the door) is a decision for the owner, with a cost in time at the door.
 5. **Phase 10 left these for a deliberate decision.** Each was noticed while
    building and left alone because changing it changes who can see or do what.
    - **Attachments have no per-record guard.** The attachment service checks that

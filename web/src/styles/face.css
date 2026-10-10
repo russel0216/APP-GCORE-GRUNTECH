@@ -1,0 +1,176 @@
+/* Face clock-in — the camera's framing guide, the face samples, Face health.
+   Package FACE (2026-10-10). Tokens only. */
+
+/* ── The camera ──────────────────────────────────────────────────────────────
+   An oval where the face should go, drawn over the live picture and dimming
+   what is outside it, so the person centres their face at a useful size:
+   the oval is about the height of a face at arm's length in a 16:9 frame. */
+
+.camera-guide {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: 78%;
+  aspect-ratio: 3 / 4;
+  /* A portrait picture is narrower than the oval would be: it narrows with
+     it rather than running off both sides. */
+  max-width: 90%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 2px dashed var(--neon);
+  box-shadow: 0 0 0 100vmax rgb(var(--shade-rgb) / 0.32);
+  pointer-events: none;
+}
+
+.camera-hint {
+  margin: calc(-1 * var(--s-2)) 0 var(--s-3);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+/* The instruction for the next enrolment sample, read out as it changes. */
+.face-prompt {
+  margin: 0 0 var(--s-3);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  text-align: center;
+}
+
+/* ── Face samples (the Clock page, the employee record) ───────────────────── */
+
+.face-samples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.face-samples-count {
+  margin: 0;
+}
+
+.face-samples-note {
+  font-size: var(--fs-sm);
+}
+
+.face-sample-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--s-3);
+}
+
+.face-sample {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.face-sample.flagged {
+  border-color: var(--danger);
+}
+
+.face-sample-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  font-size: var(--fs-sm);
+}
+
+.face-sample .btn {
+  align-self: flex-start;
+}
+
+.face-samples-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* A capture, as a button that opens it full size. */
+.face-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--faint);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.face-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.face-thumb-empty {
+  cursor: default;
+}
+
+/* ── HR Settings › Face health ────────────────────────────────────────────── */
+
+.face-health-lists {
+  align-items: start;
+}
+
+.face-health-lists h4 {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-md);
+}
+
+.face-health-lists p {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+/* People named one after another (Not protected yet). */
+.face-health-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4);
+  margin: 0 0 var(--s-3);
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+
+/* The latest refusals' moment, kept on one line. */
+.face-health-when {
+  white-space: nowrap;
+}
+
+/* ── The attendance register: how the face matched ────────────────────────── */
+
+.att-method {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.att-method-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+/* A fallback's written reason, on the line of its punch; the whole of it in the tooltip. */
+.att-reason {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
