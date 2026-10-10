@@ -201,8 +201,9 @@ table.data.qe-lines td {
 .qe-lines input,
 .qe-lines textarea,
 .qe-lines select {
-  padding: var(--s-2);
-  font-size: var(--fs-md);
+  /* The one place a box pads 8 sideways instead of 12: the quantity, price
+     and cost boxes are narrow, and the box's height is the shared one. */
+  padding-inline: var(--s-2);
 }
 
 .qe-lines td > input + input,
@@ -359,7 +360,7 @@ tr.qe-line-heading td {
 /* The Tax dropdown sits where the discount's box does. */
 .quote-discount select {
   width: auto;
-  padding: var(--s-1) var(--s-2);
+  padding-inline: var(--s-2);
 }
 
 /* Append quote, in the page: a find box and the matches under it. */

@@ -336,6 +336,19 @@ four databases and four copies of "customer".
       line's descender room with it); a select pads 9 × 12 so it is the
       text box's 38 and not 40. Never give a module's cells a padding or a
       row height of their own.
+    - **One text box** (2026-10-10, the owner's call: "make the form input
+      sizes uniform in all cards"): every text box and select is
+      `--field-h` tall (38 — "Text box height" in Modify layout) at
+      `--fs-md`, padded sideways only, so a date, a time, a search box or a
+      select — each with its own idea of content height — is the same box
+      as a text box, in a card, a modal, a table cell or a list toolbar
+      alike. Before: 38 in most cards, 39 at 14pt in a list's search, 37 at
+      12pt in the pager, 36 and 28 in the quotation editor, 40 for a date,
+      42 for a time, 11pt on the forecast. A textarea is as tall as its
+      rows and takes the same type. The quotation editor's line boxes pad
+      8 sideways instead of 12 (the quantity and price boxes are narrow),
+      and the Ctrl+K palette's box is deliberately bigger; nothing else
+      sets a control's height, padding or type of its own.
 
 20. **One way to pick, one way to state a fact** (2026-10-09, rule 19's
     content half: the editors of every module read alike, not only their

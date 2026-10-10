@@ -76,6 +76,7 @@ export const TOKEN_GROUPS: TokenGroup[] = [
       { name: 'block-gap', label: 'Space between cards', kind: 'length', min: 0, max: 48 },
       { name: 'card-pad-x', label: 'Card padding, sides', kind: 'length', min: 0, max: 48 },
       { name: 'row-h', label: 'Table row height', kind: 'length', min: 32, max: 80 },
+      { name: 'field-h', label: 'Text box height', kind: 'length', min: 28, max: 56 },
       {
         name: 'page-head-basis',
         label: 'Page title minimum width',

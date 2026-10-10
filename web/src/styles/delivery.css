@@ -68,7 +68,7 @@
 
 .del-pct-input {
   text-align: right;
-  padding: var(--s-1) var(--s-2);
+  padding-inline: var(--s-2);
 }
 
 /* The budget table's "Used" meter needs room for its printed percentage. */

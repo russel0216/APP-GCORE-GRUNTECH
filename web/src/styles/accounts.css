@@ -161,7 +161,6 @@
 .link-delivery-row input {
   flex: 1;
   min-width: 0;
-  font-size: var(--fs-xs);
 }
 
 /* ── Admin › Users and the employee form ──────────────────────────────────── */

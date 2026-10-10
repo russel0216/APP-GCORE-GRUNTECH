@@ -179,7 +179,7 @@ table.data.cs-summary tbody tr:hover {
 
 .cs-rate input {
   width: 6.5rem;
-  padding: var(--s-1) var(--s-2);
+  padding-inline: var(--s-2);
 }
 
 .cs-rate span {
@@ -247,7 +247,7 @@ table.data.cs-summary tbody tr:hover {
 
 .cs-phase-value input {
   width: 9rem;
-  padding: var(--s-1) var(--s-2);
+  padding-inline: var(--s-2);
 }
 
 .cs-phase-span {

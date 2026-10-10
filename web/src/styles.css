@@ -116,6 +116,14 @@
      body cannot shrink one. */
   --btn-h: 35px;
   --btn-h-sm: 29px;
+  /* Text boxes and selects. One box (2026-10-10, the owner's call: "make the
+     form input sizes uniform in all cards"): 38 tall at --fs-md, whatever
+     the control (text, date, time, search, select) and wherever it sits —
+     a card, a modal, a table cell, a list toolbar. Measured before: 38 in
+     most cards, 39 at 14pt in a list's search box, 37 at 12pt in the pager,
+     36 and 28 in the quotation editor, 40 for a date, 42 for a time, 11pt
+     on the forecast. A textarea keeps its rows and takes the same type. */
+  --field-h: 38px;
 
   /* Table rows. One height for every ordinary row (2026-10-10, the owner's
      call: "make the table row spacing uniform in all cards"): a row is at
@@ -418,20 +426,16 @@ textarea {
   background: var(--field-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  /* 9px gave a 36px control. 10px gives 38px, and on a touch screen the rule
-     below takes it the rest of the way to a 44px target. */
-  padding: 10px var(--s-3);
+  /* The box is --field-h and the text is centred in it by the browser; the
+     padding is only sideways, so a date, a time or a select (each with its
+     own idea of content height) is the same box as a text box. On a touch
+     screen the rule below takes it to a 44px target. */
+  height: var(--field-h);
+  padding: 0 var(--s-3);
+  font-size: var(--fs-md);
   color: var(--text);
   outline: none;
   transition: border-color 0.12s, box-shadow 0.12s;
-}
-
-/* A select's own content runs two pixels taller than a text box's, so 9px
-   brings it to the same 38px box — in a table row, beside an input, the
-   two used to decide different row heights. */
-select {
-  padding-top: 9px;
-  padding-bottom: 9px;
 }
 
 /*
@@ -490,8 +494,11 @@ textarea:-webkit-autofill {
   transition: background-color 9999s ease-in-out 0s;
 }
 
+/* A textarea is as tall as its rows say, never the one-line box. */
 textarea {
+  height: auto;
   min-height: 84px;
+  padding: var(--s-2) var(--s-3);
   resize: vertical;
 }
 
