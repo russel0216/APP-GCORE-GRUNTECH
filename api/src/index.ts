@@ -88,7 +88,6 @@ import { insightRoutes } from './routes/insights';
 import { gopsRoutes } from './routes/gops';
 import { chainRoutes } from './routes/chain';
 import { partnerRoutes } from './routes/partners';
-import { quoteArchiveRoutes } from './routes/quoteArchive';
 import { advanceRoutes } from './routes/advances';
 import { jobOrderRoutes } from './routes/jobOrders';
 import { cadJobOrderRoutes } from './routes/cadJobOrders';
@@ -167,8 +166,6 @@ app.use('/api/activities', activityRoutes);
 app.use('/api/pipeline', pipelineRoutes);
 app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/partners', partnerRoutes);
-// The read-only SCORO quotation archive.
-app.use('/api/quote-archive', quoteArchiveRoutes);
 
 // Delivery (Phase 4)
 app.use('/api/jobs', jobRoutes);

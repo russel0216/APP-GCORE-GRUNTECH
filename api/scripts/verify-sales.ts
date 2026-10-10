@@ -14,7 +14,7 @@ import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
-import { nextNumber, previewNext, employeeToken } from '../src/shared/numbering';
+import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
 import { submitForApproval, act, pendingFor, pickWorkflow } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
@@ -168,8 +168,36 @@ async function putSavedLayoutBack() {
   }
 }
 
+/*
+  The typed-number checks move the author's REAL quotation series (the row
+  the template's own pattern keys for them). Where it stood is kept in a
+  Setting of its own, like the layouts, and put back by cleanup() — first and
+  last, and after a crash — so a run that dies between the first typed number
+  and the end never leaves a live series moved.
+*/
+const SERIES_STASH_KEY = 'numbering.quotation.__verify__';
+
+async function setSeriesAside(periodKey: string, row: { lastNumber: number } | null) {
+  await prisma.setting.upsert({
+    where: { key: SERIES_STASH_KEY },
+    create: { key: SERIES_STASH_KEY, value: { periodKey, lastNumber: row?.lastNumber ?? null }, description: 'verify-sales: the quotation series as it stood' },
+    update: { value: { periodKey, lastNumber: row?.lastNumber ?? null } },
+  });
+}
+
+async function putSeriesBack() {
+  const stash = await prisma.setting.findUnique({ where: { key: SERIES_STASH_KEY } });
+  if (!stash) return;
+  const { periodKey, lastNumber } = stash.value as { periodKey: string; lastNumber: number | null };
+  // The row put back where it stood, or removed where none was.
+  if (lastNumber === null) await prisma.numberSequence.deleteMany({ where: { documentType: 'quotation', periodKey } });
+  else await prisma.numberSequence.updateMany({ where: { documentType: 'quotation', periodKey }, data: { lastNumber } });
+  await prisma.setting.delete({ where: { key: SERIES_STASH_KEY } });
+}
+
 async function cleanup() {
   await putSavedLayoutBack();
+  await putSeriesBack();
   if (await editorTokenIsSpare()) {
     await prisma.numberSequence.deleteMany({
       where: { documentType: 'quotation', periodKey: { endsWith: `@${EDITOR_TOKEN}` } },
@@ -2404,8 +2432,13 @@ async function main() {
     );
     check('and the preview names the author’s last quotation', 'lastNumber' in taxFor.body);
 
-    // A number typed by hand is used as typed; a duplicate is refused before anything is written.
+    // A number typed by hand is used as typed; a duplicate is refused before
+    // anything is written. ZZQ-… is outside the template's pattern, so it
+    // names no series and moves no counter (2026-10-10).
     const handNumber = `ZZQ-${Date.now() % 100000}`;
+    const seriesSum = async () =>
+      (await prisma.numberSequence.aggregate({ where: { documentType: 'quotation' }, _sum: { lastNumber: true } }))._sum.lastNumber ?? 0;
+    const sumBeforeHand = await seriesSum();
     const typed = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Hand-numbered`,
@@ -2413,46 +2446,144 @@ async function main() {
       lines: [editorLines[2]],
     });
     check('a quote number typed by hand is the number it gets', typed.status === 201 && typed.body.number === handNumber, typed.text.slice(0, 160));
+    check('and, outside the template’s shape, moves no series', (await seriesSum()) === sumBeforeHand);
+    check(
+      'its audit row says the number was typed, and not that a series continues',
+      (await prisma.auditLog.count({
+        where: { entityType: 'quotation', entityId: String(typed.body.id), summary: { contains: '(number typed by hand)' } },
+      })) === 1,
+    );
     const free = await http(salesToken, 'GET', `/quotations/number-available?number=${encodeURIComponent(handNumber.toLowerCase())}`);
     check('the editor is told, as it types, that the number is taken — case-blind', free.status === 200 && free.body.available === false, JSON.stringify(free.body));
     const fresh = await http(salesToken, 'GET', `/quotations/number-available?number=${encodeURIComponent(`${handNumber}-X`)}`);
     check('and that an unused one is free', fresh.body.available === true);
     const badShape = await http(salesToken, 'GET', '/quotations/number-available?number=' + encodeURIComponent('two words'));
     check('a number with spaces is not a number', badShape.body.available === false);
-    const counterBefore = await prisma.numberSequence.aggregate({ where: { documentType: 'quotation' }, _sum: { lastNumber: true } });
+    const counterBefore = await seriesSum();
     const dupe = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Dupe`, number: handNumber });
     check('a duplicate number is refused (409)', dupe.status === 409, dupe.text.slice(0, 160));
-    const counterAfter = await prisma.numberSequence.aggregate({ where: { documentType: 'quotation' }, _sum: { lastNumber: true } });
-    check('and burns no number in any series', counterBefore._sum.lastNumber === counterAfter._sum.lastNumber);
+    check('and burns no number in any series', counterBefore === (await seriesSum()));
     check('and writes no quotation', (await prisma.quotation.count({ where: { subject: `${TAG} Dupe` } })) === 0);
 
-    // The next number in the series steps over one typed by hand ahead of it.
+    // The series continues from a typed number (2026-10-10, the owner's call:
+    // "remember the manual edit, start there from the last edit"): a number
+    // in the template's own shape names its series — the number's year,
+    // month and employee digits — and the counter follows it, up or down.
+    // The counter row the checks move is put back where it stood at the end,
+    // so a database whose quotation template is company-wide keeps its series.
+    const numberTemplate = await prisma.numberSequence.findFirstOrThrow({ where: { documentType: 'quotation', periodKey: '' } });
+    const numberPrefix = (await prisma.company.findUnique({ where: { id: 'company' }, select: { numberPrefix: true } }))?.numberPrefix ?? 'GT';
     const suggested = await http(salesToken, 'GET', '/quotations/next-number');
+    const parsedSuggestion = parseNumber(numberTemplate, numberPrefix, String(suggested.body.number));
+    check('the suggestion parses on the template’s own pattern', parsedSuggestion !== null, `${suggested.body.number} under ${numberTemplate.pattern}`);
+    const seriesKey = parsedSuggestion?.periodKey ?? '';
+    const seriesRowBefore = await prisma.numberSequence.findUnique({
+      where: { documentType_periodKey: { documentType: 'quotation', periodKey: seriesKey } },
+      select: { lastNumber: true },
+    });
+    const seriesBefore = seriesRowBefore?.lastNumber ?? 0;
+    await setSeriesAside(seriesKey, seriesRowBefore);
+    const now = new Date();
+    const seriesAt = new Date(parsedSuggestion?.year ?? now.getFullYear(), (parsedSuggestion?.month ?? now.getMonth() + 1) - 1, 1);
+    const inSeries = (seq: number) =>
+      renderPattern(numberTemplate.pattern, {
+        prefix: numberPrefix,
+        typeCode: numberTemplate.typeCode,
+        seq,
+        padding: numberTemplate.padding,
+        at: seriesAt,
+        emp: parsedSuggestion?.emp ?? '000',
+      });
+    const baseSeq = parsedSuggestion?.seq ?? 0;
+    check('and the parser and the renderer agree on it', inSeries(baseSeq) === String(suggested.body.number), `${inSeries(baseSeq)} vs ${suggested.body.number}`);
+    const typedSeq = baseSeq + 5;
     const ahead = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
-      subject: `${TAG} Took the suggestion by hand`,
-      number: String(suggested.body.number),
+      subject: `${TAG} Typed five ahead`,
+      number: inSeries(typedSeq),
       lines: [editorLines[2]],
     });
-    check('the suggested number can be typed in by hand', ahead.status === 201 && ahead.body.number === suggested.body.number, ahead.text.slice(0, 160));
+    check('a number typed five ahead of the series is the number it gets', ahead.status === 201 && ahead.body.number === inSeries(typedSeq), ahead.text.slice(0, 160));
+    check(`and the counter for its series (${seriesKey}) now reads the typed SEQ`, (await counter(seriesKey)) === typedSeq, `${await counter(seriesKey)} vs ${typedSeq}`);
     const afterwards = await http(salesToken, 'GET', '/quotations/next-number');
-    check('the next suggestion steps past it', afterwards.body.number !== suggested.body.number, `${afterwards.body.number}`);
+    check('the next suggestion is the typed number plus one', afterwards.body.number === inSeries(typedSeq + 1), `${afterwards.body.number} vs ${inSeries(typedSeq + 1)}`);
     const issued = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Issued after`, lines: [editorLines[2]] });
     check(
-      'and the number issued on save is never the one taken by hand',
-      issued.status === 201 && issued.body.number !== suggested.body.number,
-      `${issued.body.number} vs ${suggested.body.number}`,
+      'and the number issued on save is the typed number plus one',
+      issued.status === 201 && issued.body.number === inSeries(typedSeq + 1),
+      `${issued.body.number} vs ${inSeries(typedSeq + 1)}`,
+    );
+    const aheadTrail = await prisma.auditLog.findFirst({
+      where: { entityType: 'quotation', entityId: String(ahead.body.id), action: 'CREATED' },
+    });
+    const aheadCounter = (aheadTrail?.after as { counter?: { periodKey: string; before: number; after: number } } | null)?.counter;
+    check(
+      'the create is audited as typed by hand, the series continuing, with the counter’s move',
+      !!aheadTrail?.summary?.includes('(number typed by hand, the series continues from it)') &&
+        aheadCounter?.periodKey === seriesKey && aheadCounter.before === seriesBefore && aheadCounter.after === typedSeq,
+      `${aheadTrail?.summary} ${JSON.stringify(aheadCounter)}`,
+    );
+    const dupeAhead = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Dupe ahead`, number: inSeries(typedSeq) });
+    check(
+      'a refused duplicate of a number in the series leaves the counter where it was',
+      dupeAhead.status === 409 && (await counter(seriesKey)) === typedSeq + 1,
+      `${dupeAhead.status} ${await counter(seriesKey)}`,
     );
 
-    // Renumbering an existing quotation.
-    const renumbered = await http(salesToken, 'PATCH', `/quotations/${typed.body.id}`, { number: `${handNumber}-R` });
-    check('a quotation can be renumbered', renumbered.status === 200 && renumbered.body.number === `${handNumber}-R`, renumbered.text.slice(0, 160));
+    // Renumbering an existing quotation moves the series too; a refused one does not.
+    const renumberSeq = typedSeq + 9;
+    const renumbered = await http(salesToken, 'PATCH', `/quotations/${typed.body.id}`, { number: inSeries(renumberSeq) });
+    check('a quotation can be renumbered', renumbered.status === 200 && renumbered.body.number === inSeries(renumberSeq), renumbered.text.slice(0, 160));
+    check('and a renumbering to a number in the series moves the counter to it', (await counter(seriesKey)) === renumberSeq, `${await counter(seriesKey)}`);
     const clash = await http(salesToken, 'PATCH', `/quotations/${typed.body.id}`, { number: String(issued.body.number) });
     check('but not onto another quotation’s number (409)', clash.status === 409, clash.text.slice(0, 160));
+    check('and the refused renumbering left the counter alone', (await counter(seriesKey)) === renumberSeq);
+    const renumberTrail = await prisma.auditLog.findFirst({
+      where: { entityType: 'quotation', entityId: String(typed.body.id), summary: { contains: `${handNumber} → ${inSeries(renumberSeq)}` } },
+    });
+    const renumberCounter = (renumberTrail?.after as { counter?: { before: number; after: number } } | null)?.counter;
     check(
-      'the renumbering is audited from → to',
-      (await prisma.auditLog.count({ where: { entityType: 'quotation', entityId: String(typed.body.id), summary: { contains: `${handNumber} → ${handNumber}-R` } } })) === 1,
+      'the renumbering is audited from → to, the series continuing, with the counter’s move',
+      renumberTrail !== null && !!renumberTrail.summary?.includes('the series continues from it') &&
+        renumberCounter?.before === typedSeq + 1 && renumberCounter.after === renumberSeq,
+      `${renumberTrail?.summary} ${JSON.stringify(renumberCounter)}`,
     );
+
+    // A number typed BELOW the counter sets the series back to it; the next
+    // automatic number then steps over what is already taken past it.
+    const lowSeq = baseSeq + 4;
+    const lowered = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Typed below the counter`, number: inSeries(lowSeq) });
+    check('a number typed below the counter sets the series back to it', lowered.status === 201 && (await counter(seriesKey)) === lowSeq, `${lowered.status} ${await counter(seriesKey)}`);
+    const stepped = await http(salesToken, 'GET', '/quotations/next-number');
+    check('the next suggestion steps over the two numbers already taken past it', stepped.body.number === inSeries(typedSeq + 2), `${stepped.body.number} vs ${inSeries(typedSeq + 2)}`);
+    const steppedIssued = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Issued past the taken`, lines: [editorLines[2]] });
+    check('as does the number issued on save', steppedIssued.status === 201 && steppedIssued.body.number === inSeries(typedSeq + 2), `${steppedIssued.body.number}`);
+    check('leaving the counter at the number it issued', (await counter(seriesKey)) === typedSeq + 2);
+
+    // A thousand taken in a row is a 409 naming Admin › Numbering, reached
+    // INSIDE the save's transaction: the walk is one read per candidate (the
+    // review of 2026-10-10 — re-running the whole issue per candidate outran
+    // the transaction's five seconds and the save answered 500), and the
+    // refusal leaves the counter where it stood. Every number from the
+    // counter to a thousand and one past it is taken, one of them already.
+    const walkFrom = typedSeq + 2;
+    const takenSeqs = Array.from({ length: FREE_NUMBER_TRIES + 1 }, (_, i) => walkFrom + 1 + i).filter((n) => n !== renumberSeq);
+    await prisma.quotation.createMany({
+      data: takenSeqs.map((n) => ({ number: inSeries(n), customerId: clinic.id, ownerId: sales.id, subject: `${TAG} Taken ${n}` })),
+    });
+    const walkStarted = Date.now();
+    const exhausted = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Nowhere to go`, lines: [editorLines[2]] });
+    check(
+      'a thousand taken numbers in a row is a 409 naming Admin › Numbering, inside the save’s transaction',
+      exhausted.status === 409 && exhausted.text.includes('Admin › Numbering'),
+      `${exhausted.status} ${exhausted.text.slice(0, 160)} (${Date.now() - walkStarted} ms)`,
+    );
+    check('and the refused save left the counter where it was', (await counter(seriesKey)) === walkFrom, String(await counter(seriesKey)));
+    check('and wrote no quotation', (await prisma.quotation.count({ where: { subject: `${TAG} Nowhere to go` } })) === 0);
+    await prisma.quotation.deleteMany({ where: { subject: { startsWith: `${TAG} Taken ` } } });
+
+    // The series as it stood: its row put back, or removed where none was.
+    await putSeriesBack();
 
     // Subheadings: words only, no money, not counted as lines.
     const headed = await http(salesToken, 'POST', '/quotations', {

@@ -61,7 +61,6 @@ previous implementation traces back to its absence.
 | **Pipeline board** over leads and quotations — move by drag or keyboard, SCORO's six stages, CSV | `/g-ops/pipeline` |
 | **Forecast** — every open quotation by its expected closing, by week, month, quarter or year | `/g-ops/forecast` |
 | **Partners** — principals' catalogues, price lists, software and links to their other sites | `/g-ops/partners` |
-| **SCORO archive** — the read-only history of quotations raised in SCORO; "Continue in G-CORE" | `/g-ops/quote-archive` (off the menu, reached by link) |
 
 **Phase 4 — Delivery.** Job → budget → progress → billing.
 
@@ -380,7 +379,7 @@ total. A job that has spent 1% of its budget is flagged as too early to judge
 rather than reporting a 99% margin. Slow-moving stock ranks by value, not age.
 And the whole module refuses to write anything at all.
 
-Phase 10 and the work since added fourteen more, one per area, each named for
+Phase 10 and the work since added thirteen more, one per area, each named for
 what it covers:
 
 | Script | Assertions | What it holds to |
@@ -388,29 +387,28 @@ what it covers:
 | `verify-costing` | 139 | assigning a costing moves a lead forwards only; a duplicate copies numbers, not history; the margin arithmetic; the three-signature route |
 | `verify-pipeline` | 86 | the board reconciles to Sales Analytics to the centavo; the move rules over HTTP; a stage sets the odds |
 | `verify-calendar` | 96 | calendar windows never count a boundary instant twice; the time grid; repeats; birthdays and the greetings |
-| `verify-numbering` | 46 | per-employee counters, the collision rules, "issued this period" |
+| `verify-numbering` | 79 | per-employee counters, the collision rules, "issued this period"; a typed number read back through the pattern and the series that follows it |
 | `verify-partners` | 117 | a partner is a supplier; the price list never carries a cost; the "what they supply" filter |
 | `verify-plantilla` | 99 | filled/vacant derived; clearance items derive from records; separation on approval |
 | `verify-meetings` | 85 | invitations on send, not save; `.ics` sequence; visibility |
 | `verify-evaluations` | 130 | regularisation only after every approval; the subject never approves or peeks |
 | `verify-academy` | 97 | the passport is derived; two doors write a training record |
 | `verify-cad` | 86 | the design team's queue: who may do what, revisions as rows with a PDF on each, the thread |
-| `verify-archive` | 113 | the SCORO import, the numbering continuation and "Continue in G-CORE" |
 | `verify-insights-brief` | 50 | every brief figure equals the module dashboard's own |
 | `verify-workspace` | 39 | My Work fills from every module; every row links to a record |
 | `verify-accounts` | 86 | a login made with its person; invitations and resets; the SMTP sender, against a fake mail server |
 
-**3,006 assertions across twenty-three scripts.** Run them all:
+**3,625 assertions across twenty-two scripts** (CLAUDE.md keeps the count). Run them all:
 
 ```bash
-cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
 Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
 API (and the SMTP half of `verify-accounts`, which talks to a fake mail server
-it starts itself); the other twenty check route guards over HTTP against
+it starts itself); the other nineteen check route guards over HTTP against
 `http://localhost:5100` and fail loudly if the API is not running. All
-twenty-three create their own records and clean up after themselves,
+twenty-two create their own records and clean up after themselves,
 notifications included. Run them after touching anything in `api/src/shared/`
 or `api/src/permissions/`.
 
@@ -503,7 +501,7 @@ cd api && npx prisma db push
 api/
   prisma/schema.prisma      one schema for the whole business
   prisma/seed.ts            permissions, roles, workflows, numbering, admin
-  scripts/                  verify-*.ts, audit-workflows, reset-password, the SCORO import
+  scripts/                  verify-*.ts, audit-workflows, reset-password, the sample quotation
   src/permissions/          the registry — source of truth for access AND the menu
   src/shared/               approvals, numbering, audit, notifications,
                             attachments, search, pdf  ← reused by every module
@@ -514,7 +512,7 @@ web/
   src/lib/                      DOM-free rules the verify scripts import
   src/pages/
 deploy/                     the production server's scripts (its own README)
-tools/scoro/                workstation-side SCORO converters, never on the server
+tools/scoro/                the workstation-side SCORO customer converter, never on the server
 docs/                       the model, the gap analysis, notes/ (an index of what remains)
 ```
 

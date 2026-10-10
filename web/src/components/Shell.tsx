@@ -257,8 +257,8 @@ export function Shell() {
   const sectioned = navGroups.length > 1 && navGroups.every((g) => g.name);
 
   const activeGroup = sectioned
-    ? // A hidden screen (the SCORO Archive) lists in no group, so its page opens
-      // the section it is declared under rather than the first one.
+    ? // A hidden screen (a project register) lists in no group, so its page
+      // opens the section it is declared under rather than the first one.
       (navGroups.find((g) => g.items.some((s) => s.key === activeKey)) ??
       navGroups.find((g) => g.name === activeModule?.submodules.find((s) => s.key === activeKey)?.group) ??
       navGroups[0])

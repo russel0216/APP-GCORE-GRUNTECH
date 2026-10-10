@@ -16,6 +16,12 @@
  *     cosmetic `User.employeeNo` is the fallback, and nobody borrows a run.
  *   · A per-employee counter configured without {EMP} — refused when it is
  *     saved in Admin › Numbering, and again if one ever reaches issue time.
+ *   · A number typed by hand moving the wrong series, or none (2026-10-10,
+ *     the owner's call: "remember the manual edit, start there from the
+ *     last edit"): `parseNumber` reads a number back through the pattern —
+ *     its own year, month and employee digits name the counter row — and
+ *     `setCounter` moves that row, down as well as up on `set`, only up on
+ *     `raise` (the coming SCORO upload's mode).
  *
  * Everything runs on throwaway document types, so it does not depend on how a
  * given database's real quotation template happens to be configured.
@@ -31,6 +37,8 @@ import {
   employeeToken,
   periodKeyFor,
   scopedPeriodKey,
+  parseNumber,
+  setCounter,
 } from '../src/shared/numbering';
 import { issuedThisPeriod } from '../src/routes/admin';
 
@@ -321,6 +329,146 @@ async function main() {
   const flat2 = await nextNumber(flat, prisma, { employeeNo: '4' });
   const flat3 = await nextNumber(flat, prisma, { employeeNo: '3' });
   check('a NONE + per-employee counter still runs per author', flat1 === '003-001' && flat2 === '004-001' && flat3 === '003-002', [flat1, flat2, flat3].join(' '));
+
+  // ══ A typed number names its series ═══════════════════════════════════════
+  console.log('\nA number read back through the pattern, and the series it moves');
+
+  const prefix = (await prisma.company.findUnique({ where: { id: 'company' }, select: { numberPrefix: true } }))?.numberPrefix ?? 'GT';
+  const stockTpl = { pattern: '{PREFIX}-{TYPE}-{YYYY}-{SEQ}', typeCode: 'QT', period: 'YEAR', scope: 'GLOBAL' };
+  const stockRead = parseNumber(stockTpl, prefix, `${prefix}-QT-2026-0012`);
+  check(
+    'the stock pattern reads its year and running number back',
+    stockRead?.periodKey === '2026' && stockRead.seq === 12 && stockRead.year === 2026 && stockRead.emp === undefined,
+    JSON.stringify(stockRead),
+  );
+  check('the literals are case-blind', parseNumber(stockTpl, prefix, `${prefix.toLowerCase()}-qt-2026-0012`)?.seq === 12);
+  check('a shorter running number than the padding still reads', parseNumber(stockTpl, prefix, `${prefix}-QT-2026-7`)?.seq === 7);
+  check('another type’s code is not this series', parseNumber(stockTpl, prefix, `${prefix}-PO-2026-0012`) === null);
+  check('a string outside the pattern is null', parseNumber(stockTpl, prefix, 'ZZQ-12') === null && parseNumber(stockTpl, prefix, '') === null);
+  check('a running number past what a counter holds is null', parseNumber(stockTpl, prefix, `${prefix}-QT-2026-99999999999`) === null);
+
+  const houseTpl = { pattern: '{EMP}{YY}{MM}{SEQ}', typeCode: 'QT', period: 'YEAR', scope: 'OWNER' };
+  const houseRead = parseNumber(houseTpl, prefix, '0012610060');
+  check(
+    '0012610060 under the house pattern is employee 001’s 2026 series at 60, issued in October',
+    houseRead?.periodKey === '2026@001' && houseRead.seq === 60 && houseRead.emp === '001' && houseRead.year === 2026 && houseRead.month === 10,
+    JSON.stringify(houseRead),
+  );
+  const fourDigits = parseNumber(houseTpl, prefix, '98712610001');
+  check(
+    'a four-digit employee token reads whole — the month rule turns 987·12·61 away and 9871·26·10 is kept',
+    fourDigits?.periodKey === '2026@9871' && fourDigits.seq === 1 && fourDigits.emp === '9871',
+    JSON.stringify(fourDigits),
+  );
+  check(
+    'a monthly per-employee pattern keys the month too',
+    parseNumber({ ...houseTpl, period: 'MONTH' }, prefix, '0012610060')?.periodKey === '2026-10@001',
+  );
+  check('a string outside the house pattern is null', parseNumber(houseTpl, prefix, 'ZZQ-12') === null);
+  const monthTpl = { pattern: '{EMP}-{YY}{MM}-{SEQ}', typeCode: 'QT', period: 'MONTH', scope: 'OWNER' };
+  check(
+    'a thirteenth month is null, and the twelfth is a month',
+    parseNumber(monthTpl, prefix, '001-2613-060') === null && parseNumber(monthTpl, prefix, '001-2612-060')?.periodKey === '2026-12@001',
+  );
+  // The two bounds that keep a typo out of ANOTHER series (the review of
+  // 2026-10-10): a `{SEQ}` of 0 is no place — a counter never stands there —
+  // and `{EMP}` is three digits or a wider token not starting with 0, as
+  // `employeeToken` pads. Without them a thirteenth month under the house
+  // pattern re-parsed as employee 00126's 2013 series, and `setCounter`
+  // wrote that row.
+  check(
+    'a thirteenth month under the house pattern itself is null — never another employee’s year',
+    parseNumber(houseTpl, prefix, '0012613060') === null && parseNumber(houseTpl, prefix, '0012613061') === null,
+    `${JSON.stringify(parseNumber(houseTpl, prefix, '0012613060'))} ${JSON.stringify(parseNumber(houseTpl, prefix, '0012613061'))}`,
+  );
+  check(
+    'a running number of 0 is no place in a series',
+    parseNumber(houseTpl, prefix, '0012610000') === null && parseNumber(stockTpl, prefix, `${prefix}-QT-2026-0000`) === null,
+  );
+  check('SCORO’s 8-digit shape, its leading zeros dropped, is outside the pattern', parseNumber(houseTpl, prefix, '12610060') === null);
+  check(
+    'an employee token wider than three digits never starts with 0',
+    parseNumber(houseTpl, prefix, '00012610005') === null && parseNumber(houseTpl, prefix, '10002610005')?.periodKey === '2026@1000',
+  );
+  check(
+    'a period whose token the pattern lacks names no series',
+    parseNumber({ pattern: '{EMP}-{SEQ}', typeCode: 'QT', period: 'YEAR', scope: 'OWNER' }, prefix, '001-060') === null &&
+      parseNumber({ pattern: '{YY}{MM}{SEQ}', typeCode: 'QT', period: 'YEAR', scope: 'OWNER' }, prefix, '2610060') === null,
+  );
+  check(
+    'a flat company-wide pattern keys the template row itself',
+    parseNumber({ pattern: '{PREFIX}-{SEQ}', typeCode: 'QT', period: 'NONE', scope: 'GLOBAL' }, prefix, `${prefix}-0042`)?.periodKey === '',
+  );
+
+  // setCounter on a throwaway house type: set moves the counter either way,
+  // raise never lowers, both make a missing row from the template.
+  const moved = await makeType('typed', HOUSE);
+  const made = await setCounter(moved, '0012609040', prisma, { mode: 'set' });
+  const madeRow = await prisma.numberSequence.findUnique({ where: { documentType_periodKey: { documentType: moved, periodKey: '2026-09@001' } } });
+  check(
+    'set makes the missing counter row from the template and puts the number’s SEQ in it',
+    made?.periodKey === '2026-09@001' && made.before === 0 && made.after === 40 && madeRow?.lastNumber === 40 &&
+      madeRow.pattern === HOUSE.pattern && madeRow.period === 'MONTH' && madeRow.scope === 'OWNER' && madeRow.padding === 3 && madeRow.typeCode === 'VN',
+    `${JSON.stringify(made)} ${JSON.stringify(madeRow)}`,
+  );
+  const afterSet = await nextNumber(moved, prisma, { employeeNo: `${TAG}-EMP-0001`, at: sept });
+  check('and the next number issued is the typed one plus one', afterSet === '0012609041', afterSet);
+  const lowered = await setCounter(moved, '0012609010', prisma, { mode: 'set' });
+  check('set lowers a counter as readily as it raises one', lowered?.before === 41 && lowered.after === 10, JSON.stringify(lowered));
+  check('and the series continues from there', (await nextNumber(moved, prisma, { employeeNo: `${TAG}-EMP-0001`, at: sept })) === '0012609011');
+  const notLowered = await setCounter(moved, '0012609005', prisma, { mode: 'raise' });
+  check('raise never lowers', notLowered?.before === 11 && notLowered.after === 11, JSON.stringify(notLowered));
+  const raised = await setCounter(moved, '0012609099', prisma, { mode: 'raise' });
+  check('but raises past the counter', raised?.before === 11 && raised.after === 99, JSON.stringify(raised));
+  const raisedNew = await setCounter(moved, '0022609007', prisma, { mode: 'raise' });
+  const raisedRow = await prisma.numberSequence.findUnique({ where: { documentType_periodKey: { documentType: moved, periodKey: '2026-09@002' } } });
+  check(
+    'raise makes a missing row from the template too',
+    raisedNew?.periodKey === '2026-09@002' && raisedNew.after === 7 && raisedRow?.lastNumber === 7 && raisedRow.pattern === HOUSE.pattern,
+    JSON.stringify(raisedNew),
+  );
+  const rowsBefore = await prisma.numberSequence.count({ where: { documentType: moved } });
+  check(
+    'a number outside the pattern moves nothing and makes no row',
+    (await setCounter(moved, 'ZZQ-1', prisma, { mode: 'set' })) === null && (await prisma.numberSequence.count({ where: { documentType: moved } })) === rowsBefore,
+  );
+  check('a type with no template moves nothing', (await setCounter(`${TAG}_nothing`, '0012609001', prisma, { mode: 'set' })) === null);
+  const stock = await makeType('stock', { pattern: '{PREFIX}-{TYPE}-{YYYY}-{SEQ}', padding: 4, period: 'YEAR', scope: 'GLOBAL' });
+  const stockSet = await setCounter(stock, `${prefix}-VN-2026-0100`, prisma, { mode: 'set' });
+  check(
+    'a company-wide yearly series follows a typed number too',
+    stockSet?.periodKey === '2026' && stockSet.after === 100 && (await nextNumber(stock, prisma, { at: sept })) === `${prefix}-VN-2026-0101`,
+    JSON.stringify(stockSet),
+  );
+
+  // The issue steps past taken numbers on `nextNumber`'s own walk — one read
+  // per candidate, the counter landing on the number issued — and a thousand
+  // taken in a row is a 409 that rolls back with the caller's transaction
+  // (the review of 2026-10-10: re-running the whole issue per candidate
+  // outran a transaction's five seconds before the 409 could be reached).
+  const walked = await makeType('walk', HOUSE);
+  const held = new Set(['0012609001', '0012609002', '0012609003']);
+  const walkedRow = () =>
+    prisma.numberSequence.findUnique({ where: { documentType_periodKey: { documentType: walked, periodKey: '2026-09@001' } } });
+  const past = await nextNumber(walked, prisma, { employeeNo: `${TAG}-EMP-0001`, at: sept }, async (n) => held.has(n));
+  check('the issue steps past the numbers somebody holds', past === '0012609004', past);
+  check('and leaves the counter on the number it issued', (await walkedRow())?.lastNumber === 4, String((await walkedRow())?.lastNumber));
+  const plain = await nextNumber(walked, prisma, { employeeNo: `${TAG}-EMP-0001`, at: sept }, async () => false);
+  check('a free number is issued as it is, the counter one on', plain === '0012609005' && (await walkedRow())?.lastNumber === 5, plain);
+  let asked = 0;
+  await expectRejection(
+    'a thousand taken in a row is a 409 naming Admin › Numbering',
+    () =>
+      prisma.$transaction((tx) =>
+        nextNumber(walked, tx, { employeeNo: `${TAG}-EMP-0001`, at: sept }, async () => {
+          asked++;
+          return true;
+        }),
+      ),
+    'set the counter in Admin › Numbering',
+  );
+  check('after a thousand and one candidates', asked === 1001, String(asked));
+  check('and the refused issue rolled the counter back', (await walkedRow())?.lastNumber === 5, String((await walkedRow())?.lastNumber));
 
   // ══ "Issued this period" ═════════════════════════════════════════════════
   console.log('\nIssued this period');

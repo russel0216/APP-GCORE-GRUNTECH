@@ -33,8 +33,7 @@ netOfTax       = net, or net - vatAmount when inclusive   ("Sum without tax")
   **before** the discount, as SCORO shows it.
 - `recalcQuotationRevision(revisionId, tx)` stores the result. Every writer of
   a revision's totals goes through it: the line routes, a new revision, filling
-  from a costing, and the revision PATCH. **The SCORO "Continue in G-CORE"
-  action must call it too** after it creates the lines.
+  from a costing, and the revision PATCH.
 - `lineAmount(qty, price)` gives the stored `amount` and `costAmount`. The
   server computes both and never accepts them from the client.
 - `quotationValue()` in `shared/pipeline.ts` is unchanged. It reads
@@ -71,8 +70,6 @@ The PDF never reads a cost field.
 - `POST /quotations` accepts the same three header fields. **Payment terms
   default to `Customer.paymentTerms`.**
 - A new revision copies the new line and header fields.
-- `GET /quotations` and `GET /quotations/:id` include
-  `legacyQuote { id, number, status }`.
 
 ## PDF
 
@@ -108,8 +105,6 @@ field names the customer, and a long reference wrapped into the first field row.
   unit cost and a cost note.
 - **Modify:** now takes PR number, payment terms (prefilled from the customer)
   and delivery.
-- **SCORO link:** "Continued from SCORO <number>" links to
-  `/g-ops/quote-archive/<id>`.
 
 The styles are appended to `web/src/styles/pipeline.css`, which `main.tsx`
 already imports, so no import line is needed.

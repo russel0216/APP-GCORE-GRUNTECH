@@ -1697,9 +1697,9 @@ export function AppendQuotePanel({
  */
 /**
  * The quote number: the next free one in the author's series, suggested and
- * already filled in — or typed by hand. A number already used (by another
- * quotation, or by a SCORO quote in the archive) is said beside the box as it
- * is typed, and Save refuses it; "Use the suggested number" puts it back.
+ * already filled in — or typed by hand. A number another quotation already
+ * uses is said beside the box as it is typed, and Save refuses it; "Use the
+ * suggested number" puts it back.
  */
 function NumberField({
   value,
@@ -1718,10 +1718,12 @@ function NumberField({
   editing: boolean;
   onChange: (v: string) => void;
 }) {
+  // A typed number moves its series (2026-10-10, the owner's call: "remember
+  // the manual edit, start there from the last edit"), and the hint says so.
   const hint = editing
-    ? 'Changing it renumbers this quotation; a number already used is refused.'
+    ? 'Changing it renumbers this quotation, and the series continues from the new number; a number already used is refused.'
     : suggestion
-      ? `Suggested: the next in your series${lastNumber ? ` after ${lastNumber}` : ''}. Type another if you need to.`
+      ? `Suggested: the next in your series${lastNumber ? ` after ${lastNumber}` : ''}. Type another if you need to — the series continues from it.`
       : 'The next in your series is filled in when it loads.';
   return (
     <div className={`field${error ? ' invalid' : ''}`}>

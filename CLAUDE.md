@@ -330,7 +330,7 @@ four databases and four copies of "customer".
       65 depending on what the first cell held. A cell whose content really
       runs longer (a description, a stack of three) still grows — that is
       content, not spacing — and a line table whose descriptions run long
-      (`.qe-lines`, `.quote-lines`, `.archive-lines`, `.meeting-invitees`)
+      (`.qe-lines`, `.quote-lines`, `.meeting-invitees`)
       keeps `vertical-align: top` by its own rule. The head is 41 on every
       table (the list's tick box is a block, so it no longer takes the
       line's descender room with it); a select pads 9 × 12 so it is the
@@ -409,17 +409,22 @@ four databases and four copies of "customer".
 ## Verification
 
 ```bash
-cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
+cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,675 assertions across twenty-three scripts** (counted 2026-10-10, after
+**3,625 assertions across twenty-two scripts** (counted 2026-10-10, after
 the one dress, the sign-off and money rules, the printed lists, the
-permission trim, the face clock-in upgrade and its review, and the liveness
-check): foundation
-308, masters 79, sales 447, costing 157, pipeline 92, calendar 96, numbering
-46, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
+permission trim, the face clock-in upgrade and its review, the liveness
+check, and the SCORO archive's removal, which took verify-archive and two
+foundation checks with it and added nine — the removal's once-only rule —
+and the series that follows a typed quotation number with its review — the
+parser's two bounds and the walk that fits a transaction — 16 on sales and
+33 on numbering):
+foundation
+315, masters 79, sales 463, costing 157, pipeline 92, calendar 96, numbering
+79, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
-archive 106, insights 98, insights-brief 50, workspace 46, accounts 102. The
+insights 98, insights-brief 50, workspace 46, accounts 102. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -438,7 +443,7 @@ Phase 10's rules listed below.
 
 **Only `verify-foundation`, `verify-masters` and `verify-sales` run without the
 API** (and the SMTP half of `verify-accounts`, which talks to a fake mail server
-it starts on 127.0.0.1). The other twenty check route guards and responses over HTTP against
+it starts on 127.0.0.1). The other nineteen check route guards and responses over HTTP against
 `http://localhost:5100`, and say so loudly — a failed "API is not reachable"
 line — rather than skipping them if the API is down or restarting (under
 `tsx watch` an edit elsewhere restarts it mid-run; rerun that script). All create
@@ -1246,6 +1251,16 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **Samples on Admin › Numbering carry the viewer's own `{EMP}` digits**, and a
   template that cannot issue shows a `problem` instead of failing the screen —
   the administrator is the one who can fix it.
+- **The quotation count runs through the YEAR and restarts each January**, as
+  SCORO's did (`0012609059` is employee 001's 59th quotation of 2026); the month
+  is printed, never counted. The seed's default is `{EMP}{YY}{MM}{SEQ}`, YEAR,
+  OWNER — an installation seeded before that keeps MONTH until an administrator
+  changes it in Admin › Numbering.
+- **A counter is never lowered by a seed.** The counters the past SCORO
+  imports raised (`<YYYY>@<code>`, keyed per CODE, so a number issued under a
+  colleague's code stays unissuable) stay raised after the archive's removal
+  (2026-10-10); only ever raising a counter is what keeps a number from being
+  issued twice.
 
 ### Masters and partners
 
@@ -2326,50 +2341,33 @@ leave the approver deciding on stale figures).
 ## SCORO migration notes
 
 Gruntech moved from SCORO. Customers came across through the ordinary CSV
-import; quotations come across as a **read-only archive**, and new work starts
-in G-CORE. `tools/scoro/` holds the workstation-side converters (Python +
-PyMuPDF — never installed on the server); `docs/notes/{S,C,Q,A,R}-*.md` carry
-the detail.
+import (`tools/scoro/scoro_convert.py`, a workstation-side Python converter
+never installed on the server), and new work starts in G-CORE. SCORO's
+quotations and invoices are still to come: the owner will upload them later,
+and they will be REAL quotations and sales orders (2026-10-10: "later I will
+upload data of SCORO Quotation, it will act as part of the G-CORE; also the
+invoices from SCORO which will become a Sales Order in G-CORE") — not built
+yet. `docs/notes/{S,C,Q,R}-*.md` carry the detail of what was patterned on
+SCORO.
 
-- **`LegacyQuote` is history, not a quotation.** Nothing live points at it; the
-  only link is one-way, `continuedQuotationId`, set by "Continue in G-CORE",
-  which creates a real quotation with the SAME number from an OPEN SCORO status.
-  Never report archive values as pipeline — Insights and the board read
-  `Quotation` only.
-- **The SCORO Archive is off the menu** (2026-10-04, the owner's call):
-  `hidden: true` on its registry entry keeps it out of the sidebar, the
-  section strip and Ctrl+K's screen list, while its route, its
-  `gops.quote_archive.*` permissions and every link to it (Customer 360, a
-  continued quotation, a search hit) work as before. `menuFor()` still sends it,
-  flagged, so an archive page opens under Sales. Hide a screen this way —
-  never by deleting its registry entry, which would drop its permissions.
-  (The hidden G-OPS "Purchase Requests" entry keeps its keys for the same
-  reason: the API routes check `gchain.purchase_requests.*`, but the
-  project's Purchase Requisition tab and its routes in `App.tsx` are guarded
-  by `gops.purchase_requests.*`.)
-- **Import is `importBundle()` in `shared/legacyQuotes.ts`**, from the CLI
-  (`scripts/import-scoro-quotes.ts <bundle> [--commit]`) or the archive's Import
-  button — one function, dry run by default. Re-import upserts on
-  `(source, sourceId)` and never clears `continuedQuotationId`. A quote with
-  `pdf: null` is archived without an attachment. `readBundle()` strips control
-  characters from every string (`cleanText`): SCORO's PDFs leave NULs in some
-  descriptions, PostgreSQL refuses a NUL in text and jsonb, and one rolled back a
-  whole import on the server. The converter strips them too.
-- **The quotation count runs through the YEAR and restarts each January**, as
-  SCORO's did (`0012609059` is employee 001's 59th quotation of 2026); the month
-  is printed, never counted. The seed's default is `{EMP}{YY}{MM}{SEQ}`, YEAR,
-  OWNER — an installation seeded before that keeps MONTH until an administrator
-  changes it in Admin › Numbering.
-- **Counters continue SCORO's numbering, and are only ever raised.** The key
-  follows the template's period: YEAR seeds `<YYYY>@<code>` from every house
-  number of the current year (`parseYearNumber` — code and year must match the
-  quote's date, the month part only has to be a month, because SCORO's month
-  part often lagged); MONTH seeds `<YYYY-MM>@<code>` from house numbers whose
-  YYMM equals the quote's own date, for the current month onward. Keyed per CODE, not per owner: salespeople issued
-  numbers under colleagues' codes, and every such number must stay unissuable.
-  SCORO dropped leading zeros on some (`12609060` is `0012609060`), so 8/9-digit
-  numbers are padded before the date test. Numbers that fail (Camille's
-  `83`+YYMM+run, Erica's frozen `2601` month) are archived as-is and seed nothing.
+- **The SCORO archive was removed on 2026-10-10** (the owner's call: "remove
+  also scoro data"): `removeScoroArchive()` (`shared/scoroArchive.ts`), run by
+  the seed on every deploy, empties `LegacyQuote` and deletes its PDFs once,
+  audited (`legacy_quote` / `archive`, DELETED, marked in
+  `seed.scoroArchiveRemoved`); the model and its four relation fields stay
+  in the schema until the next push (db push cannot drop a full table, and
+  the deploy pushes before it seeds — drop them once every install has run
+  this one); nothing but that function reads or writes `prisma.legacyQuote`.
+  verify-foundation pins the once-only rule on the archive's leavings (a
+  `legacy_quote` PDF and a saved view — never a row of the retired table),
+  parking the install's own mark in `seed.scoroArchiveRemoved.__verify__`
+  meanwhile, as the tagline is. The seed logs the removal only when it
+  removed something — the mark is stamped on a fresh install too.
+  The quotations continued from SCORO keep their numbers as ordinary
+  quotations, and `checkQuoteNumber()` no longer refuses an old SCORO number.
+  The read-only screen, its `gops.quote_archive.*` keys, the search provider,
+  Customer 360's "SCORO history", the import CLI and `verify-archive` are
+  gone with it.
 - **One quotation arithmetic: `shared/quotation.ts`.** `subtotal` is PRE-discount;
   net = subtotal − discountAmount; VAT on net (honouring `vatInclusive` and the
   snapshotted rate); margin is measured against net of tax, never a VAT-inclusive
@@ -2439,7 +2437,7 @@ the detail.
   from a zero-rated quotation is billed VAT — an open item: billing should
   read the rate of the revision the job came from.
 - **The discount is to six decimals** (2026-10-08): `discountPct` is
-  `Decimal(9,6)` on the revision, the sales order and the archive;
+  `Decimal(9,6)` on the revision and the sales order;
   `quotationTotals` and its mirror return it to six. **SCORO's discount
   calculator** is `DiscountCalculator` in `editorParts.tsx`, opened by the
   Σ beside the Discount box on both editors — in the page, never a dialog:
@@ -2461,16 +2459,46 @@ the detail.
   asks its reason in the confirm bar, Delete asks there too, Append quote is
   a panel, "Fill from costing" asks in the bar and leaving unsaved changes
   asks in the Shell's leave bar (rule 19).
-- **The quote number may be typed by hand.** `number` on `POST` and `PATCH
-  /quotations/:id`, checked by `checkQuoteNumber()` — shape, then case-blind
-  against every quotation and every SCORO archive number (a continued
-  quotation keeps its own). A duplicate is a 409 before anything is written,
-  so it burns no number. Unsent, the next number comes from
-  `nextFreeQuoteNumber()`, which STEPS OVER numbers taken by hand rather than
-  issuing them twice; `previewNext(..., isTaken)` does the same for the
-  suggestion. Counters are never raised for a typed number, so a typo far
-  ahead does not move the series. `/next-number` also returns `lastNumber` and
-  `taxOptions`; `/number-available` answers the page as the number is typed.
+- **The quote number may be typed by hand, and the series FOLLOWS it**
+  (2026-10-10, the owner's call: "remember the manual edit, start there from
+  the last edit"). `number` on `POST` and `PATCH /quotations/:id`, checked by
+  `checkQuoteNumber()` — shape, then case-blind against every quotation. A
+  duplicate is a 409 before anything is written, so it burns no number and
+  moves no counter. A typed number that fits the template's own pattern
+  names its series — `parseNumber(template, prefix, number)` in
+  `shared/numbering.ts`, the inverse of `renderPattern`: the number's OWN
+  year, month and employee digits give the counter row's key (`2026@001`;
+  a number typed under a colleague's digits moves the colleague's series,
+  which is the number's) and its SEQ — and `setCounter('quotation', number,
+  tx, { mode: 'set' })`, the one writer of a counter from a number, puts
+  that row AT the typed SEQ, raising or LOWERING it, inside the create's or
+  the renumbering's transaction after the uniqueness check and the row
+  itself (a refused number rolls it back). So the next automatic number is
+  the typed one plus one. A number outside the pattern's shape (`ZZQ-12`) is
+  used as typed and moves nothing — and the shape is TIGHT: `{EMP}` is
+  what `employeeToken` yields (three digits, or wider and not starting with
+  0) and `{SEQ}` is never 0, a place no counter stands at, so a typo such
+  as `0012613060` (a thirteenth month) or SCORO's 8-digit `12610060` is
+  outside it and moves nothing, never re-read as another employee's year
+  (the review of 2026-10-10; verify-numbering pins both on the house
+  pattern itself). `mode: 'raise'` (a conditional `updateMany`, never lowering) is
+  for the coming upload of SCORO's quotations, whose numbers must leave every
+  series at its highest. Both audit rows say "the series continues from it"
+  and carry `after.counter` (`periodKey`, `before`, `after`) when a series
+  moved. Unsent, the next number comes from `nextFreeQuoteNumber()`, which
+  still STEPS OVER taken numbers (a lowered series lands on numbers already
+  issued; a colleague's digits may sit ahead) — `nextNumber(…, isTaken)`'s
+  own walk: the increment first (the row lock that keeps two saves apart),
+  then ONE read per candidate rendered in hand and one write landing the
+  counter on the number issued, so a thousand candidates fit the save's
+  transaction (re-running the whole issue per candidate used to outrun its
+  five seconds and answer 500 before the 409); `FREE_NUMBER_TRIES` (1,000)
+  of them and the save is a 409 naming Admin › Numbering, rolled back with
+  the counter — verify-sales takes a thousand and one real quotations
+  through it; `previewNext(..., isTaken)` walks on the same budget. `/next-number` also returns
+  `lastNumber` and `taxOptions`; `/number-available` answers the page as the
+  number is typed; the editor's hint says the series continues from a typed
+  number, and so does the Admin › Numbering page.
 - **A line may be a subheading** (`QuotationItem.isHeading`): its title is the
   heading; `lineData()` stores it with no quantity, price, cost or provider,
   whatever was sent. `quotationTotals` (and the `quotationMath` mirror) leave
@@ -2622,8 +2650,7 @@ the detail.
   called them) — so a group typed on a quotation joins the master with
   nobody filing it first. `createMany … skipDuplicates`: an administrator's
   spelling or a deactivated group is never overwritten. The seed's
-  `seedQuotationGroups()` adds the groups lines already use, and any `group`
-  a SCORO archive line carries (the PDF converter keeps none today).
+  `seedQuotationGroups()` adds the groups lines already use.
 - **"By group" in Sales Analytics splits each quotation's value across its
   value revision's groups in proportion to the line amounts**
   (`groupShares()` in `shared/pipeline.ts`, exact in centavos, remainder on
@@ -3032,6 +3059,16 @@ Requests, Budget Requests, Progress & Billing — are `hidden: true`: each is a
 tab inside a project, and the Projects page keeps them one click away
 (`.del-registers`). Routes, permissions and links are unchanged.
 
+- **Hide a screen with `hidden: true` on its registry entry — never by
+  deleting the entry, which would drop its permissions.** A hidden entry is
+  kept off the sidebar, the section strip and Ctrl+K's screen list while its
+  route, its keys and every link to it work as before; `menuFor()` still
+  sends it, flagged, so its page opens under the section it is declared in
+  (`Shell.tsx` finds the group by the declaration). The hidden G-OPS
+  "Purchase Requests" entry keeps its keys for the same reason: the API
+  routes check `gchain.purchase_requests.*`, but the project's Purchase
+  Requisition tab and its routes in `App.tsx` are guarded by
+  `gops.purchase_requests.*`. verify-foundation lists the hidden entries.
 - **A project's tabs are, in order**: Overview, Meetings & Records, Approved
   Plans, Budget Monitoring, Purchase Requisition, Budget Requests, Scope of
   Work (Gantt), Progress & Billing — then Finance and Service, which hold the

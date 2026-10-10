@@ -1326,8 +1326,7 @@ model Quotation {
   jobOrders  JobOrder[]
   cadJobOrders CadJobOrder[]
 
-  /// Set when this quotation was continued from a SCORO quote. The archive
-  /// row points here, never the other way round.
+  /// RETIRED 2026-10-10 with the SCORO archive; dropped with the model.
   legacyQuote LegacyQuote?
 
   createdAt   DateTime     @default(now())
@@ -1545,16 +1544,8 @@ model QuotationItem {
   salesOrderLines SalesOrderLine[]
 }
 
-// ── SCORO archive ────────────────────────────────────────────────────────────
+// ── Quotation groups ─────────────────────────────────────────────────────────
 
-/// The read-only SCORO quotation archive. This is NOT a quotation: it is
-/// history carried over when Gruntech moved from SCORO to G-CORE, kept so an
-/// old quote can still be looked up and its PDF reopened. Nothing in live work
-/// links from it: no job, costing, billing or ledger row may reference a
-/// LegacyQuote. The one link is outbound and one-way: an open SCORO quote may
-/// be "continued in G-CORE", which raises a real Quotation under the SAME
-/// number and records it in continuedQuotationId. Figures are stored exactly as
-/// SCORO held them; nothing recomputes them.
 /// The groups a quotation line is filed under ("Gruntech Installation",
 /// "Trading") — SCORO's Group column. A line keeps its group as TEXT
 /// (`QuotationItem.group`), so this is the list the editor suggests from and
@@ -1578,6 +1569,15 @@ model QuotationGroup {
   updatedAt DateTime @updatedAt
 }
 
+// ── SCORO archive (retired) ──────────────────────────────────────────────────
+
+/// RETIRED 2026-10-10. The SCORO archive is gone: the seed's
+/// removeScoroArchive() empties this table on deploy and nothing reads or
+/// writes it. Drop the model and its four relation fields (User
+/// legacyQuotesOwned / legacyQuotesImported, Customer legacyQuotes, Quotation
+/// legacyQuote) in a LATER push, once every install has deployed this one —
+/// db push drops an empty table without --accept-data-loss, and refuses a
+/// full one.
 model LegacyQuote {
   id       String @id @default(cuid())
   source   String @default("SCORO")

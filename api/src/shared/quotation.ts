@@ -216,8 +216,8 @@ export function lineAmount(quantity: Money, unitPrice: Money): Prisma.Decimal {
 /**
  * Recomputes a revision's stored money from its lines and its own snapshot of
  * the VAT rate and discount. Every writer of a revision's totals calls this —
- * the line routes, a new revision, filling from a costing, and continuing a
- * SCORO quote — so there is one arithmetic, not one per caller.
+ * the line routes, a new revision, a revision's header change, filling from
+ * a costing — so there is one arithmetic, not one per caller.
  */
 export async function recalcQuotationRevision(revisionId: string, tx: Prisma.TransactionClient = prisma) {
   const rev = await tx.quotationRevision.findUnique({

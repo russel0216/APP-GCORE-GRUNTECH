@@ -98,9 +98,10 @@ export function Numbering() {
             Every document type in the system is registered here, including the ones whose modules
             ship later — so numbering is decided once rather than improvised per module. A counter
             resets yearly, monthly or never, and counts company-wide or per employee: the quotation
-            follows the house scheme, where each salesperson's run restarts every month. Numbers
-            are handed out atomically, so two people saving at the same moment cannot get the same
-            one.
+            follows the house scheme, where each salesperson's run restarts every January (the
+            month is printed, never counted). Numbers are handed out atomically, so two people
+            saving at the same moment cannot get the same one. A quotation number typed by hand
+            moves its series: the next automatic number follows the typed one.
           </p>
         </div>
       </div>

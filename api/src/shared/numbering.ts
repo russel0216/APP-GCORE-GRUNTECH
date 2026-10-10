@@ -1,6 +1,6 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type NumberSequence } from '@prisma/client';
 import { prisma } from '../prisma';
-import { badRequest, notFound } from '../http/kit';
+import { badRequest, conflict, notFound } from '../http/kit';
 
 /**
  * Document numbering (model §7).
@@ -17,8 +17,8 @@ import { badRequest, notFound } from '../http/kit';
  * SCOPE: GLOBAL shares that row across the company, OWNER gives each author
  * their own. The quotation is the live example — the business already numbers
  * quotations `<employee><yy><mm><seq>`, so each salesperson's run restarts
- * monthly and never collides with a colleague's because the pattern carries
- * `{EMP}`. An OWNER counter without `{EMP}` in its pattern is refused for
+ * each January (the month is printed, never counted) and never collides with
+ * a colleague's because the pattern carries `{EMP}`. An OWNER counter without `{EMP}` in its pattern is refused for
  * exactly that reason: two people would be issued the same number.
  *
  * The template row is always the one with periodKey ''. Counter rows are
@@ -205,6 +205,29 @@ async function prefixFor(tx: Prisma.TransactionClient): Promise<string> {
   return company?.numberPrefix ?? 'GT';
 }
 
+/** The fields a counter row copies from its template. Those of the one row with periodKey ''. */
+type CounterTemplate = Pick<NumberSequence, 'documentType' | 'label' | 'pattern' | 'typeCode' | 'period' | 'scope' | 'padding'>;
+
+/**
+ * A counter row, made from its template: the ONE copy of the template's
+ * fields, used wherever a counter row is created (`nextNumber`'s first number
+ * of a period, `setCounter`'s typed one) — a second copy of this block would
+ * be a second place for a template field to be forgotten.
+ */
+function counterCreate(template: CounterTemplate, periodKey: string, lastNumber: number) {
+  return {
+    documentType: template.documentType,
+    label: template.label,
+    pattern: template.pattern,
+    typeCode: template.typeCode,
+    period: template.period,
+    scope: template.scope,
+    periodKey,
+    padding: template.padding,
+    lastNumber,
+  };
+}
+
 /**
  * Reserves the next number for a document type.
  *
@@ -212,11 +235,24 @@ async function prefixFor(tx: Prisma.TransactionClient): Promise<string> {
  * creating a quotation at the same moment cannot be handed the same number.
  * Call this from inside the caller's own transaction where one exists, so a
  * rollback does not burn a number.
+ *
+ * Where numbers may also be typed by hand (the quotation's), `isTaken` says
+ * which are: the number issued is the first past the counter that nobody
+ * holds, and the counter lands ON it, as the increment alone would have left
+ * it. The candidates are rendered here and asked about one by one — ONE read
+ * each and one write at the end (the review of 2026-10-10: the walk used to
+ * re-run the whole issue per candidate, five round trips each, and a
+ * thousand of those outran the transaction's five seconds before the 409
+ * could be reached — the save then answered 500). The increment has locked
+ * the row for this transaction, so a colleague's save waits on it exactly as
+ * before. Past `FREE_NUMBER_TRIES` taken in a row the issue is a 409 naming
+ * Admin › Numbering, which rolls back with the caller's transaction.
  */
 export async function nextNumber(
   documentType: string,
   tx: Prisma.TransactionClient = prisma,
   ctx: NumberContext = {},
+  isTaken?: (number: string) => Promise<boolean>,
 ): Promise<string> {
   const at = ctx.at ?? new Date();
   const { template, period, scope, emp } = await templateFor(documentType, tx, ctx);
@@ -231,28 +267,32 @@ export async function nextNumber(
   // native INSERT … ON CONFLICT rather than a read-then-write.
   const seq = await tx.numberSequence.upsert({
     where: { documentType_periodKey: { documentType, periodKey } },
-    create: {
-      documentType,
-      label: template.label,
-      pattern: template.pattern,
-      typeCode: template.typeCode,
-      period: template.period,
-      scope: template.scope,
-      periodKey,
-      padding: template.padding,
-      lastNumber: 1,
-    },
+    create: counterCreate(template, periodKey, 1),
     update: { lastNumber: { increment: 1 } },
   });
 
-  return renderPattern(seq.pattern, {
-    prefix: await prefixFor(tx),
-    typeCode: seq.typeCode,
-    seq: seq.lastNumber,
-    padding: seq.padding,
-    at,
-    emp,
-  });
+  const prefix = await prefixFor(tx);
+  const render = (n: number) =>
+    renderPattern(seq.pattern, { prefix, typeCode: seq.typeCode, seq: n, padding: seq.padding, at, emp });
+  let place = seq.lastNumber;
+  let number = render(place);
+  if (isTaken) {
+    for (let tries = 0; await isTaken(number); tries++) {
+      if (tries >= FREE_NUMBER_TRIES) {
+        throw conflict(
+          `No free ${seq.label.toLowerCase()} number within ${FREE_NUMBER_TRIES.toLocaleString('en-US')} of the series — set the counter in Admin › Numbering`,
+        );
+      }
+      number = render(++place);
+    }
+    if (place !== seq.lastNumber) {
+      await tx.numberSequence.update({
+        where: { documentType_periodKey: { documentType, periodKey } },
+        data: { lastNumber: place },
+      });
+    }
+  }
+  return number;
 }
 
 /** Renders what the next number would look like, without consuming it. */
@@ -306,9 +346,11 @@ export async function previewNext(
     renderPattern(template.pattern, { prefix, typeCode: template.typeCode, seq, padding: template.padding, at, emp });
   let seq = (counter?.lastNumber ?? 0) + 1;
   let number = render(seq);
-  // A bounded walk: a run of 200 hand-typed numbers ahead of the counter is
-  // not a series anyone means to continue.
-  for (let tries = 0; isTaken && tries < 200 && (await isTaken(number)); tries++) number = render(++seq);
+  // A bounded walk, on the same budget as the issue (`FREE_NUMBER_TRIES`): a
+  // run of a thousand taken numbers ahead of the counter is not a series
+  // anyone means to continue. The preview stops on the last one tried; the
+  // save behind it is what refuses.
+  for (let tries = 0; isTaken && tries < FREE_NUMBER_TRIES && (await isTaken(number)); tries++) number = render(++seq);
 
   return {
     number,
@@ -316,4 +358,160 @@ export async function previewNext(
     linked: employeeNo !== null,
     periodKey,
   };
+}
+
+/**
+ * How far past the counter a free number is looked for, where numbers may
+ * also be typed by hand (the quotation's). A typed number moves its series
+ * (below), so the walk only meets numbers a LOWERED series lands on again or
+ * numbers typed under a colleague's digits; a thousand of them in a row is a
+ * counter somebody has to set by hand, and the issue says so (409). The
+ * walk is `nextNumber(…, isTaken)`'s and `previewNext(…, isTaken)`'s, on
+ * the same budget, so the preview and the save agree.
+ */
+export const FREE_NUMBER_TRIES = 1000;
+
+/** What `parseNumber` reads off a number: the counter row it sits in, and its place in it. */
+export interface ParsedNumber {
+  /** The counter row's key — `2026`, `2026-09@001`, '' for a flat company-wide counter. */
+  periodKey: string;
+  seq: number;
+  /** The `{EMP}` digits as a counter keys them (`employeeToken`), where the pattern has the token. */
+  emp?: string;
+  year?: number;
+  month?: number;
+}
+
+const PATTERN_TOKEN = /\{(PREFIX|TYPE|YYYY|YY|MM|EMP|SEQ)\}/g;
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\\/-]/g, '\\$&');
+
+/**
+ * Reads a number back through the template's own pattern — the one parser,
+ * the inverse of `renderPattern` (2026-10-10, the owner's call: "remember the
+ * manual edit, start there from the last edit"): a number typed by hand names
+ * the series it belongs to by its OWN year, month and employee digits, and
+ * `setCounter` moves that series. Null for a number outside the pattern's
+ * shape (`ZZQ-12` under `{EMP}{YY}{MM}{SEQ}`), which then moves nothing.
+ *
+ * The tokens: `{PREFIX}` and `{TYPE}` are the literals, case-blind; `{YYYY}`
+ * four digits, `{YY}` two (2000 + YY); `{MM}` 01–12 — the range is IN the
+ * expression, so a digit string re-parses under a longer `{EMP}` rather than
+ * failing (the 4-digit employee 9871's `98712610001` reads 9871 · 26 · 10 ·
+ * 001, not 987 · 12 · 61 · …); `{EMP}` exactly what `employeeToken` yields —
+ * three digits, or four or more NOT starting with 0 (a number is padded to
+ * three, never wider), the fewest that fit; `{SEQ}` one digit or more with at
+ * least one of them not 0 — a hand-typed number need not carry the padding,
+ * but a counter never stands at 0 (`nextNumber` makes a row at 1), so place 0
+ * is no place. Those two bounds are what keep a TYPO out of another series
+ * (the review of 2026-10-10): `0012613060`, a thirteenth month, is null —
+ * neither employee 00126's 2013 series at 0 nor, with a 1 at the end, at 1 —
+ * `0012610000` is null, and SCORO's 8-digit `12610060` is null rather than
+ * employee 12610's 2006 series. Everything else is literal. The period
+ * key is the one `scopedPeriodKey` builds, from the number's own tokens:
+ * YEAR → `<year>`, MONTH → `<year>-<MM>`, NONE → '', `@<emp>` for an OWNER
+ * counter — PER CODE, so a number typed under a colleague's digits moves the
+ * colleague's series, which is the number's. A period whose token the pattern
+ * lacks (the PUT guard in Admin › Numbering normally prevents it) is null.
+ */
+export function parseNumber(
+  template: { pattern: string; typeCode: string; period: string; scope: string },
+  prefix: string,
+  number: string,
+): ParsedNumber | null {
+  const names: string[] = [];
+  let source = '^';
+  let last = 0;
+  for (const m of template.pattern.matchAll(PATTERN_TOKEN)) {
+    source += escapeRegExp(template.pattern.slice(last, m.index));
+    last = (m.index ?? 0) + m[0].length;
+    const token = m[1];
+    if (token === 'PREFIX') source += escapeRegExp(prefix);
+    else if (token === 'TYPE') source += escapeRegExp(template.typeCode);
+    else {
+      names.push(token);
+      source +=
+        token === 'YYYY' ? '(\\d{4})'
+        : token === 'YY' ? '(\\d{2})'
+        : token === 'MM' ? '(0[1-9]|1[0-2])'
+        : token === 'EMP' ? '(\\d{3}|[1-9]\\d{3,}?)'
+        : '(\\d*[1-9]\\d*)';
+    }
+  }
+  source += escapeRegExp(template.pattern.slice(last)) + '$';
+  const m = new RegExp(source, 'i').exec(number.trim());
+  if (!m) return null;
+  const got: Partial<Record<string, string>> = {};
+  names.forEach((name, i) => (got[name] = m[i + 1]));
+  if (got.SEQ === undefined) return null;
+
+  // A counter is an Int: a run of digits past it is not a place in a series.
+  const seq = Number(got.SEQ);
+  if (!Number.isSafeInteger(seq) || seq > 2_147_483_647) return null;
+  const year = got.YYYY !== undefined ? Number(got.YYYY) : got.YY !== undefined ? 2000 + Number(got.YY) : undefined;
+  const month = got.MM !== undefined ? Number(got.MM) : undefined;
+  const emp = got.EMP !== undefined ? employeeToken(got.EMP) : undefined;
+
+  const period = template.period as Period;
+  let periodKey = '';
+  if (period === 'YEAR') {
+    if (year === undefined) return null;
+    periodKey = String(year);
+  } else if (period === 'MONTH') {
+    if (year === undefined || month === undefined) return null;
+    periodKey = `${year}-${String(month).padStart(2, '0')}`;
+  }
+  if ((template.scope as Scope) === 'OWNER') {
+    if (emp === undefined) return null;
+    periodKey += `@${emp}`;
+  }
+  return { periodKey, seq, ...(emp !== undefined ? { emp } : {}), ...(year !== undefined ? { year } : {}), ...(month !== undefined ? { month } : {}) };
+}
+
+/** What `setCounter` did: the row it moved and where it stood before and after, for the caller's audit row. */
+export interface CounterMove {
+  periodKey: string;
+  seq: number;
+  before: number;
+  after: number;
+}
+
+/**
+ * Moves a series to a number somebody typed — the ONE writer of a counter
+ * from a number (2026-10-10, the owner's call). `set` writes the number's
+ * SEQ whether that raises or lowers the counter ("start there from the last
+ * edit"); `raise` writes it only past the counter's own figure — a conditional
+ * `updateMany`, the guarantee the old SCORO seeding gave, for the coming
+ * upload of SCORO's quotations, whose numbers must leave every series at
+ * its highest. A missing row is made from the template through
+ * `counterCreate`, as `nextNumber` makes one. Null, and nothing written,
+ * for a type with no template or a number outside its pattern's shape.
+ *
+ * Call it inside the caller's transaction AFTER the number's uniqueness
+ * check, so a refused number rolls the counter back with the document.
+ */
+export async function setCounter(
+  documentType: string,
+  number: string,
+  tx: Prisma.TransactionClient,
+  opts: { mode: 'set' | 'raise' },
+): Promise<CounterMove | null> {
+  const template = await tx.numberSequence.findFirst({ where: { documentType, periodKey: '' } });
+  if (!template) return null;
+  const parsed = parseNumber(template, await prefixFor(tx), number);
+  if (!parsed) return null;
+  const { periodKey, seq } = parsed;
+  const where = { documentType_periodKey: { documentType, periodKey } };
+
+  const existing = await tx.numberSequence.findUnique({ where, select: { lastNumber: true } });
+  const before = existing?.lastNumber ?? 0;
+  if (opts.mode === 'set') {
+    await tx.numberSequence.upsert({ where, create: counterCreate(template, periodKey, seq), update: { lastNumber: seq } });
+  } else {
+    // The row first (a no-op update when it exists), then the raise as one
+    // conditional write — so two raises at once never lower each other.
+    if (!existing) await tx.numberSequence.upsert({ where, create: counterCreate(template, periodKey, seq), update: {} });
+    await tx.numberSequence.updateMany({ where: { documentType, periodKey, lastNumber: { lt: seq } }, data: { lastNumber: seq } });
+  }
+  const row = await tx.numberSequence.findUniqueOrThrow({ where, select: { lastNumber: true } });
+  return { periodKey, seq, before, after: row.lastNumber };
 }

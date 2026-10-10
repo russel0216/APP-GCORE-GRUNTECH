@@ -3,12 +3,12 @@
  * project carried over from SCORO — as a live quotation to walk the whole
  * setup with: approve it, book a sales order, win it, build the project.
  *
- * The quotation takes the SCORO number itself and CONTINUES the archive row
- * where the archive holds it (continuedQuotationId, the archive's one-way
- * link), the way "Continue in G-CORE" does — although that button refuses a
- * quote SCORO marked Completed. This is the owner's call for this one: the
- * project is still running, so the live record carries the number. A
- * quotation an earlier run filed as 0062602018.2 is renamed and linked.
+ * The quotation takes the SCORO number itself: the project is still running,
+ * so the live record carries the number (the owner's call). A quotation an
+ * earlier run filed as 0062602018.2 is renamed to it. (Until 2026-10-10 the
+ * script also linked the read-only SCORO archive's row to it; the archive is
+ * gone — the owner's call, "remove also scoro data" — and a sample quotation
+ * is an ordinary quotation.)
  *
  *   npx tsx scripts/seed-sample-quotation.ts
  *   OWNER_EMAIL=someone@gruntech.com npx tsx scripts/seed-sample-quotation.ts
@@ -30,7 +30,6 @@ import { nextNumber } from '../src/shared/numbering';
 import { recalcQuotationRevision } from '../src/shared/quotation';
 import { rememberGroups } from '../src/shared/quotationGroups';
 import { audit } from '../src/shared/audit';
-import { LEGACY_QUOTE_ENTITY } from '../src/shared/legacyQuotes';
 import { recalcOrder } from '../src/routes/salesOrders';
 import { valueRevision } from '../src/shared/pipeline';
 
@@ -160,7 +159,6 @@ async function deleteStray(id: string, actor: { actorId: string; actorName: stri
       revisions: { select: { status: true, jobs: { select: { id: true } } } },
       salesOrders: { select: { id: true } },
       jobOrders: { select: { id: true } },
-      legacyQuote: { select: { id: true } },
     },
   });
   const reasons: string[] = [];
@@ -169,7 +167,6 @@ async function deleteStray(id: string, actor: { actorId: string; actorName: stri
   if (q.jobOrders.length) reasons.push('a job order points at it');
   if (q.revisions.some((r) => r.jobs.length)) reasons.push('a project was built from it');
   if (q.revisions.some((r) => r.status === 'PENDING_APPROVAL')) reasons.push('a revision is pending approval');
-  if (q.legacyQuote) reasons.push('it continues an archive row');
   if (reasons.length) {
     console.log(`${OLD_NUMBER} (an earlier sample) left on file — ${reasons.join(', ')}: /g-ops/quotations/${id}`);
     return;
@@ -183,51 +180,6 @@ async function deleteStray(id: string, actor: { actorId: string; actorName: stri
     );
   });
   console.log(`${OLD_NUMBER} (an earlier sample) deleted`);
-}
-
-/**
- * The archive's one-way link to the live quotation, where the archive holds
- * the SCORO quote: the archive page then says "Continued in G-CORE as …",
- * and the number check lets the quotation keep the number. The archive row
- * is also pointed at the customer when the import could not match it.
- */
-async function linkArchive(quotationId: string, actor: { actorId: string; actorName: string }) {
-  const lq = await prisma.legacyQuote.findFirst({
-    where: { number: { equals: NUMBER, mode: 'insensitive' } },
-    select: { id: true, number: true, status: true, continuedQuotationId: true, customerId: true },
-  });
-  if (!lq) {
-    console.log(`The SCORO archive does not hold ${NUMBER} here — nothing to link`);
-    return;
-  }
-  if (lq.continuedQuotationId === quotationId) {
-    console.log(`SCORO quote ${lq.number} already continued as this quotation`);
-    return;
-  }
-  if (lq.continuedQuotationId) {
-    console.log(`SCORO quote ${lq.number} is continued as another quotation — left alone`);
-    return;
-  }
-  const quotation = await prisma.quotation.findUniqueOrThrow({ where: { id: quotationId }, select: { customerId: true } });
-  await prisma.$transaction(async (tx) => {
-    const linked = await tx.legacyQuote.updateMany({
-      where: { id: lq.id, continuedQuotationId: null },
-      data: { continuedQuotationId: quotationId, ...(lq.customerId ? {} : { customerId: quotation.customerId }) },
-    });
-    if (linked.count !== 1) throw new Error('Somebody continued this quote a moment ago');
-    await audit(
-      {
-        entityType: LEGACY_QUOTE_ENTITY,
-        entityId: lq.id,
-        action: 'CONVERTED',
-        summary: `Continued in G-CORE as quotation ${NUMBER} (SCORO status ${lq.status}; ongoing project, sample seed)`,
-        ...actor,
-      },
-      undefined,
-      tx,
-    );
-  });
-  console.log(`SCORO quote ${lq.number} (${lq.status}) linked: continued in G-CORE`);
 }
 
 /**
@@ -367,9 +319,8 @@ async function main() {
   const actor = { actorId: owner.id, actorName: owner.name };
   console.log(`Owner: ${owner.name} <${owner.email}>`);
 
-  // The live quotation is the one carrying the SCORO number — on the server
-  // that is the one "Continue in G-CORE" raised. Only when there is none is
-  // an earlier run's 0062602018.2 renumbered to take its place.
+  // The live quotation is the one carrying the SCORO number. Only when there
+  // is none is an earlier run's 0062602018.2 renumbered to take its place.
   const live = await prisma.quotation.findFirst({ where: { number: { equals: NUMBER, mode: 'insensitive' } }, select: { id: true, number: true } });
   const old = await prisma.quotation.findFirst({ where: { number: { equals: OLD_NUMBER, mode: 'insensitive' } }, select: { id: true, number: true } });
   if (live && old) await deleteStray(old.id, actor);
@@ -386,7 +337,6 @@ async function main() {
       });
       console.log(`${existing.number} renumbered ${NUMBER}`);
     }
-    await linkArchive(existing.id, actor);
     console.log(`${NUMBER} is filed (/g-ops/quotations/${existing.id})`);
     await seedOrders(existing.id, actor);
     return;
@@ -554,7 +504,6 @@ async function main() {
   console.log(`Quotation ${result.number} — ${SUBJECT}`);
   console.log(`  subtotal ${Number(t?.subtotal ?? 0).toLocaleString()}  VAT ${Number(t?.vatAmount ?? 0).toLocaleString()}  total ${Number(t?.total ?? 0).toLocaleString()}`);
   console.log(`  open it at /g-ops/quotations/${result.quotation.id}`);
-  await linkArchive(result.quotation.id, actor);
   await seedOrders(result.quotation.id, actor);
 }
 

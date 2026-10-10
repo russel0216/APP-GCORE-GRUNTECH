@@ -83,9 +83,11 @@ export interface SubmoduleDef {
   /**
    * Kept off the sidebar, the strip and Ctrl+K's screen list, but still a
    * screen: its route, permissions and every link to it work as before. The
-   * owner's call for the SCORO Archive (2026-10-04) — reached from a
-   * customer, a continued quotation or a search hit, not browsed — and for
-   * the project registers (2026-10-06), each a tab inside the project.
+   * owner's call for the project registers (2026-10-06), each a tab inside
+   * the project and a link from the Projects page, and for the three
+   * duplicate entries of 2026-10-10 (C3), each opening a screen another label
+   * already opens. Hide a screen this way, never by deleting its entry, which
+   * would drop its permission keys.
    */
   hidden?: boolean;
 }
@@ -120,10 +122,6 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'partners', group: 'Sales', label: 'Partners', path: '/g-ops/partners', actions: SHARED, phase: 3,
         note: 'Principals whose equipment Gruntech sells and services: catalogues, price lists, software. One supplier record, seen from Sales.' },
       { key: 'calendar', group: 'Sales', label: 'Calendar', path: '/g-ops/calendar', actions: READ, phase: 3 },
-      // The SCORO history, read-only. Continuing an open SCORO quote raises a live
-      // quotation under the quotations permission; 'create' here is the admin import.
-      { key: 'quote_archive', group: 'Sales', label: 'SCORO Archive', path: '/g-ops/quote-archive', actions: ['view_all', 'export', 'create'], phase: 3, hidden: true,
-        note: 'Read-only SCORO quotation history. Create = run the SCORO import; continuing a quote uses the Quotations create permission.' },
       // Project Management (2026-10-06, the owner's order): Costing, Job
       // Orders, Projects — the way the old gasiontech G-CORE arranged it. The
       // registers that follow are hidden (rule: hidden, never deleted): each

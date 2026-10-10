@@ -13,6 +13,7 @@ import { TEAMS, retireFirstIndustries } from '../src/shared/team';
 import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
+import { removeScoroArchive } from '../src/shared/scoroArchive';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -68,8 +69,6 @@ const ROLES: RoleSeed[] = [
       // Their own only: the route also requires authorship (canEditRecord),
       // and refuses a won, delivered or pending quotation.
       'gops.quotations.delete',
-      // The SCORO history they are continuing from. Read-only.
-      'gops.quote_archive.view_all',
       ...VIEW_OWN_SELF('gops', 'costing'),
       // Books their own quotations as sales orders, and sees everyone's.
       ...VIEW_OWN_SELF('gops', 'sales_orders'),
@@ -110,10 +109,6 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.projects.view_all',
-      // The SCORO archive, seen and exported whole. Not create: the import is
-      // an administrator's job, done once.
-      'gops.quote_archive.view_all',
-      'gops.quote_archive.export',
       // The pipeline analytics are their own numbers, seen whole.
       'insights.pipeline.view_all',
       'insights.pipeline.export',
@@ -141,7 +136,6 @@ const ROLES: RoleSeed[] = [
       'gops.dashboard.view_all',
       'gops.sales_orders.view_all',
       'gops.quotations.view_all',
-      'gops.quote_archive.view_all',
       'gops.customers.view_all',
       'gops.partners.view_all',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
@@ -161,7 +155,6 @@ const ROLES: RoleSeed[] = [
       'gops.sales_orders.view_all',
       'gops.quotations.view_all',
       'gops.costing.view_all',
-      'gops.quote_archive.view_all',
       'gops.customers.view_all',
       'gops.partners.view_all',
       'gops.projects.view_all',
@@ -184,7 +177,6 @@ const ROLES: RoleSeed[] = [
       'gops.dashboard.view_all',
       'gops.costing.view_all',
       'gops.quotations.view_all',
-      'gops.quote_archive.view_all',
       'gops.customers.view_all',
       'gops.projects.view_all',
       'gops.plans.view_all',
@@ -259,7 +251,6 @@ const ROLES: RoleSeed[] = [
       'gops.installed_base.view_all',
       'gops.visits.view_all',
       'gops.quotations.view_all',
-      'gops.quote_archive.view_all',
       'gops.job_orders.view_all',
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       'gops.cad_job_orders.view_all',
@@ -1199,6 +1190,21 @@ async function main() {
     // The owner's twelve, with what each covers and its brand; blanks filled, nothing overwritten.
     const owned = await seedOwnerGroups();
     if (owned) console.log(`  · Seeded ${owned} of the owner's quotation group(s)`);
+  }
+
+  // The SCORO archive is gone (2026-10-10, the owner's call: "remove also
+  // scoro data" — SCORO's quotations and invoices will arrive again later as
+  // real quotations and sales orders). Its rows and PDFs are removed here,
+  // audited once; the LegacyQuote table stays, empty, until a later push
+  // drops it (db push refuses to drop a full table, and it pushes before it
+  // seeds).
+  {
+    const archive = await removeScoroArchive();
+    // The step still stamps its setting on an install that never had an
+    // archive; only a removal that removed something is worth a line.
+    if (archive && archive.quotes + archive.pdfs + archive.views > 0) {
+      console.log(`  · Removed the SCORO archive: ${archive.quotes} quote(s), ${archive.pdfs} PDF(s), ${archive.views} saved view(s)`);
+    }
   }
 
   // Activity types as data (2026-10-08): the six built-ins under the enum's

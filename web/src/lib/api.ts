@@ -187,7 +187,7 @@ export interface MenuSubmodule {
   /**
    * Not listed in the menu, but still a screen this person may open by link.
    * Kept in the payload so the sidebar still knows which module and section a
-   * page such as /g-ops/quote-archive/:id belongs to.
+   * page such as /g-ops/budget-requests/:id belongs to.
    */
   hidden?: boolean;
   actions: string[];

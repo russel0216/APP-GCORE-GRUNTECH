@@ -62,7 +62,6 @@ interface QuotationRow {
   owner: { id: string; name: string };
   createdAt: string;
   updatedAt: string;
-  legacyQuote: LegacyRef | null;
   /** `quotationValue()`: the approved revision's total, else the latest's. */
   value: number;
   /** The revision the value comes from — and the one the PDF icon prints. */
@@ -77,13 +76,6 @@ interface QuotationRow {
   canEdit: boolean;
   hasApprovedRevision: boolean;
   hasJob: boolean;
-}
-
-/** The SCORO quote a live quotation carries on, under the same number. */
-interface LegacyRef {
-  id: string;
-  number: string;
-  status: string;
 }
 
 /**
@@ -214,10 +206,7 @@ export function Quotations() {
       sortKey: 'number',
       width: '140px',
       render: (q) => (
-        <div>
-          <span className="mono">{q.number}</span>
-          {q.legacyQuote && <div className="faint">from SCORO</div>}
-        </div>
+        <span className="mono">{q.number}</span>
       ),
     },
     {
@@ -706,7 +695,6 @@ export interface QuotationDetail {
   site: { id: string; name: string; address?: string | null; city?: string | null } | null;
   lead: { id: string; number: string; companyName: string } | null;
   owner: { id: string; name: string };
-  legacyQuote: LegacyRef | null;
   revisions: Revision[];
   /** Oldest first. */
   statusHistory?: StatusChange[];
@@ -1128,17 +1116,6 @@ export function QuotationDetail() {
           );
         })()}
       {bookingOrder && <CreateSalesOrderPanel quotation={quotation} onClose={() => setBookingOrder(false)} />}
-
-      {quotation.legacyQuote && (
-        <div className="alert info">
-          Continued from SCORO{' '}
-          <Link to={`/g-ops/quote-archive/${quotation.legacyQuote.id}`} className="mono">
-            {quotation.legacyQuote.number}
-          </Link>{' '}
-          ({quotation.legacyQuote.status}). The SCORO record stays in the archive, read-only; this is
-          the live quotation from here on.
-        </div>
-      )}
 
       {/*
         SCORO's "Quote details": the same labels in the same two columns, so a

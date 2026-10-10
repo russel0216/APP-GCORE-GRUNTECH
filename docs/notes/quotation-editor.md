@@ -87,11 +87,24 @@ drops you on a record page to add lines one dialog at a time.
 
 - **`POST /quotations`** also takes `lines[]` (each an `itemSchema` row),
   `ownerId`, `notes`, `discountPct` and `vatInclusive`. ONE transaction: the
-  number (`nextNumber('quotation', tx, { ownerId })`), the quotation and its R0,
-  each line checked (`checkLine(line, tx, 'Line n: ')`) and written in order
-  (`sortOrder` = position), `recalcQuotationRevision(revisionId, tx)`, and the
-  lead's move to QUOTATION_CREATED. A refused line rolls all of it back,
-  including the number. Without `lines`/`ownerId` it behaves exactly as before.
+  number (`nextFreeQuoteNumber(tx, ownerId)` over `nextNumber('quotation',
+  tx, { ownerId }, isTaken)` — the walk past taken numbers is `nextNumber`'s
+  own: the atomic increment, one read per candidate, one write landing the
+  counter on the number issued, a 409 past 1,000 — or the typed `number` —
+  checked for shape and, case-blind,
+  for uniqueness, then handed to `setCounter('quotation', number, tx,
+  { mode: 'set' })` so the series continues from it: the counter row the
+  number's own year, month and employee digits name is put AT its SEQ, up or
+  down (2026-10-10, the owner's call: "remember the manual edit, start there
+  from the last edit"); a number outside the template's pattern moves
+  nothing), the quotation and its R0, each line checked (`checkLine(line,
+  tx, 'Line n: ')`) and written in order (`sortOrder` = position),
+  `recalcQuotationRevision(revisionId, tx)`, and the lead's move to
+  QUOTATION_CREATED. A refused line rolls all of it back, including the
+  number and the counter (`setCounter` runs after the row is written, so the
+  number's unique index has had its say). Without `lines`/`ownerId` it
+  behaves exactly as before. A renumbering through `PATCH /quotations/:id`
+  runs the same re-check, update and `setCounter` in one transaction.
 - **`ownerId`** is honoured only for `edit_all` (or super admin); anyone else
   naming somebody other than themselves gets a **403** rather than a quotation
   quietly filed under the caller. The named person must hold
@@ -111,7 +124,13 @@ drops you on a record page to add lines one dialog at a time.
 - **`GET /quotations/next-number?ownerId=`** previews another author's number
   for `edit_all` (ignored for anyone else), and now also returns `vatRate` and
   `currency` — what the new revision will snapshot — so the editor's tax line
-  is the one the saved quotation stores.
+  is the one the saved quotation stores. The suggestion is `previewNext(...,
+  isTaken)`: the counter's next, stepping over numbers already taken (a
+  lowered series lands on issued numbers again; a number typed under a
+  colleague's digits may sit ahead) on the same 1,000-try budget as the save,
+  which answers 409 past it. After a typed number the suggestion is that
+  number plus one, because the counter followed it; the hint under the box
+  says so ("the series continues from it").
 - `lineData()` is the one place a line's stored fields (amount and cost amount
   computed from quantity × unit figures) are built; the single-line POST, the
   create and the PUT all use it.

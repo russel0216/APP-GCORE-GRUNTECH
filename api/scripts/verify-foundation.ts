@@ -90,6 +90,7 @@ import {
 } from '../../web/src/lib/spreadsheet';
 import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
 import { workingDayDate } from '../src/shared/day';
+import { ARCHIVE_ATTACHMENT, ARCHIVE_LIST_KEY, SCORO_ARCHIVE_REMOVED, removeScoroArchive } from '../src/shared/scoroArchive';
 import { recordLink } from '../../web/src/lib/links';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
@@ -143,8 +144,46 @@ async function restoreTagline() {
   await prisma.setting.delete({ where: { key: TAGLINE_STASH } });
 }
 
+/**
+ * Where the archive section parks the install's own `seed.scoroArchiveRemoved`
+ * while it proves the removal is marked once. The stash also records when the
+ * run began, which is how the audit rows the removal wrote during it are told
+ * from the install's own.
+ */
+const ARCHIVE_STASH = `${SCORO_ARCHIVE_REMOVED}.__verify__`;
+/** The fixture PDF's stored name under the upload folder. */
+const ARCHIVE_FIXTURE_FILE = '__verify__-scoro-quote.pdf';
+
+async function restoreArchiveMark() {
+  const stash = await prisma.setting.findUnique({ where: { key: ARCHIVE_STASH } });
+  if (!stash) return;
+  const { setting, startedAt } = stash.value as {
+    setting: { value: Prisma.InputJsonValue; description: string | null } | null;
+    startedAt: string;
+  };
+  await prisma.auditLog.deleteMany({
+    where: { entityType: ARCHIVE_ATTACHMENT, entityId: 'archive', at: { gte: new Date(startedAt) } },
+  });
+  if (setting) {
+    await prisma.setting.upsert({
+      where: { key: SCORO_ARCHIVE_REMOVED },
+      create: { key: SCORO_ARCHIVE_REMOVED, value: setting.value, description: setting.description },
+      update: { value: setting.value, description: setting.description },
+    });
+  } else {
+    await prisma.setting.deleteMany({ where: { key: SCORO_ARCHIVE_REMOVED } });
+  }
+  try {
+    fs.unlinkSync(path.join(env.uploadDir, ARCHIVE_FIXTURE_FILE));
+  } catch {
+    /* already gone — the removal takes the file with the row */
+  }
+  await prisma.setting.delete({ where: { key: ARCHIVE_STASH } });
+}
+
 async function cleanup() {
   await restoreTagline();
+  await restoreArchiveMark();
   await prisma.notification.deleteMany({ where: { title: { contains: SUBJECT } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verify.local' } },
@@ -277,23 +316,21 @@ async function main() {
     [...permissionKeys].filter((k) => k.endsWith('.approve')).join(),
   );
 
-  // The SCORO Archive is off the menu but still a screen: its permissions
-  // stay (the guards and the links depend on them) and the menu carries it
-  // flagged hidden, so the sidebar knows which section its page sits in.
-  check('the SCORO Archive keeps its permissions', permissionKeys.has('gops.quote_archive.view_all') && permissionKeys.has('gops.quote_archive.create'));
+  // A hidden screen is still a screen: the menu carries it flagged hidden, so
+  // the sidebar knows which section its page sits in, and its permission keys
+  // survive. The project registers are hidden (2026-10-06): each is a tab
+  // inside the project, and Project Management's strip is Costing, Job
+  // Orders, Projects — the owner's order, which the registry's order carries.
+  // Three duplicate entries went the same way on 2026-10-10 (C3): Service
+  // Costing (the costing list filtered), Employee Pay Rates (the employees
+  // list) and Document Templates (the Report Templates screen) — hidden,
+  // never deleted. The SCORO Archive, hidden since 2026-10-04, was removed
+  // outright on 2026-10-10 (the owner's call) and is no longer a screen.
   const superMenu = menuFor(superUser).flatMap((m) => m.submodules.map((s) => ({ id: `${m.key}.${s.key}`, hidden: s.hidden === true })));
-  check('the SCORO Archive is in the menu payload marked hidden', superMenu.some((s) => s.id === 'gops.quote_archive' && s.hidden));
-  // The project registers are hidden too (2026-10-06): each is a tab inside
-  // the project, and Project Management's strip is Costing, Job Orders,
-  // Projects — the owner's order, which the registry's order carries. Three
-  // duplicate entries went the same way on 2026-10-10 (C3): Service Costing
-  // (the costing list filtered), Employee Pay Rates (the employees list) and
-  // Document Templates (the Report Templates screen) — hidden, never deleted,
-  // so their permission keys survive.
   check(
-    'the hidden screens are the SCORO Archive, the five project registers and the three duplicates',
+    'the hidden screens are the five project registers and the three duplicates',
     superMenu.filter((s) => s.hidden).map((s) => s.id).sort().join() ===
-      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.quote_archive,gops.service_costing',
+      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.service_costing',
     superMenu.filter((s) => s.hidden).map((s) => s.id).join(),
   );
   const pmStrip = menuFor(superUser)
@@ -2252,6 +2289,98 @@ async function main() {
       'the Filters badge counts filters — a date range once, the tab strip never',
       countActiveFilters({ stage: 'LOST', createdTo: '2026-03-31', createdFrom: '2026-03-01', ownerId: 'u1' }, defs) === 2,
     );
+  }
+
+  // ── The SCORO archive's removal (shared/scoroArchive.ts) ───────────────────
+  // The seed runs removeScoroArchive() on every deploy (2026-10-10, the
+  // owner's call: "remove also scoro data"). Its rule: whatever it finds goes,
+  // row and file; the audit row and the completion setting are written ONCE;
+  // a later run with the setting present and nothing to remove does nothing.
+  // The fixture is the archive's leavings — a PDF attached under its entity
+  // type and a saved view of its list — never a row of the retired table
+  // itself, which nothing but that function may write.
+  console.log('\nThe SCORO archive, removed');
+  {
+    const started = new Date();
+    const mark = await prisma.setting.findUnique({ where: { key: SCORO_ARCHIVE_REMOVED } });
+    // The install's own completion mark is parked in a Setting first, as the
+    // tagline is, so a run killed mid-section never leaves it missing.
+    const stash = { setting: mark ? { value: mark.value, description: mark.description } : null, startedAt: started.toISOString() };
+    await prisma.setting.upsert({ where: { key: ARCHIVE_STASH }, create: { key: ARCHIVE_STASH, value: stash }, update: { value: stash } });
+    await prisma.setting.deleteMany({ where: { key: SCORO_ARCHIVE_REMOVED } });
+    try {
+      // Count only the script's own: a database that has not seeded since the
+      // removal may still hold the real archive's leavings, and they go too.
+      const before = {
+        pdfs: await prisma.attachment.count({ where: { entityType: ARCHIVE_ATTACHMENT } }),
+        views: await prisma.savedFilter.count({ where: { listKey: ARCHIVE_LIST_KEY } }),
+      };
+      const pdfFile = path.join(env.uploadDir, ARCHIVE_FIXTURE_FILE);
+      fs.writeFileSync(pdfFile, '%PDF-1.4\n');
+      const pdf = await prisma.attachment.create({
+        data: {
+          entityType: ARCHIVE_ATTACHMENT,
+          entityId: `${TAG}-scoro-quote`,
+          fileName: 'SCORO quote.pdf',
+          storedName: ARCHIVE_FIXTURE_FILE,
+          mimeType: 'application/pdf',
+          size: 9,
+          uploadedById: salesUser.id,
+        },
+      });
+      const view = await prisma.savedFilter.create({
+        data: { userId: salesUser.id, listKey: ARCHIVE_LIST_KEY, name: `${SUBJECT} archive view`, query: { q: 'x' } },
+      });
+      const archiveRows = () =>
+        prisma.auditLog.findMany({
+          where: { entityType: ARCHIVE_ATTACHMENT, entityId: 'archive', at: { gte: started } },
+          orderBy: { at: 'asc' },
+        });
+
+      const first = await removeScoroArchive();
+      check(
+        'the first run removes the PDF and the saved view, and marks the removal',
+        first?.pdfs === before.pdfs + 1 && first?.views === before.views + 1 && first?.marked === true,
+        JSON.stringify(first),
+      );
+      check('the PDF goes row and file', !(await prisma.attachment.findUnique({ where: { id: pdf.id } })) && !fs.existsSync(pdfFile));
+      check('and the saved view with it', !(await prisma.savedFilter.findUnique({ where: { id: view.id } })));
+      const rows = await archiveRows();
+      check(
+        'one audit row, by the system, saying what went',
+        rows.length === 1 &&
+          rows[0].actorName === 'system' &&
+          rows[0].action === 'DELETED' &&
+          rows[0].summary === `Removed the SCORO archive: ${first?.quotes ?? 0} quotes, ${before.pdfs + 1} PDFs`,
+        rows.map((r) => `${r.actorName}: ${r.summary}`).join(' | ') || 'none',
+      );
+      const written = (await prisma.setting.findUnique({ where: { key: SCORO_ARCHIVE_REMOVED } }))?.value as
+        | { at?: string; pdfs?: number; views?: number }
+        | undefined;
+      check(
+        'and the completion setting, dated, carrying the counts',
+        typeof written?.at === 'string' && written.pdfs === before.pdfs + 1 && written.views === before.views + 1,
+        JSON.stringify(written),
+      );
+
+      check('a second run with nothing to remove does nothing', (await removeScoroArchive()) === null);
+      check('— and writes no second audit row', (await archiveRows()).length === 1);
+
+      // A leaving found after the mark still goes, counted, but is neither
+      // marked nor audited again: the mark says the archive was removed once.
+      await prisma.savedFilter.create({
+        data: { userId: salesUser.id, listKey: ARCHIVE_LIST_KEY, name: `${SUBJECT} stray view`, query: {} },
+      });
+      const later = await removeScoroArchive();
+      check(
+        'a saved view found after the mark is removed and counted, never marked again',
+        later?.views === 1 && later?.marked === false,
+        JSON.stringify(later),
+      );
+      check('— and the audit row stays one', (await archiveRows()).length === 1);
+    } finally {
+      await restoreArchiveMark();
+    }
   }
 
   // ── Spreadsheet viewer (web/src/lib/spreadsheet*.ts) ───────────────────────

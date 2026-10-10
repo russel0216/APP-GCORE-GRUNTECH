@@ -18,7 +18,7 @@ import {
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { nextNumber, previewNext } from '../shared/numbering';
+import { nextNumber, previewNext, setCounter, type CounterMove } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { rememberGroups } from '../shared/quotationGroups';
 import {
@@ -895,9 +895,11 @@ const recalcRevision = recalcQuotationRevision;
 /**
  * Quote numbers may be typed by hand (SCORO allowed it, and a customer's own
  * reference sometimes has to be honoured), so a number is checked in ONE
- * place: its shape, and that no other quotation — and no quote in the SCORO
- * archive, whose numbers stay unissuable — already carries it. Case-blind,
- * because "q-12" and "Q-12" on two letters to one customer is the same number.
+ * place: its shape, and that no other quotation already carries it.
+ * Case-blind, because "q-12" and "Q-12" on two letters to one customer is the
+ * same number. (Until 2026-10-10 the SCORO archive's numbers were refused
+ * too; the archive is gone, and the owner's coming upload of SCORO's
+ * quotations makes them real quotations, which this check then sees.)
  */
 const QUOTE_NUMBER = /^[A-Za-z0-9][A-Za-z0-9\-/_.]{0,39}$/;
 
@@ -911,14 +913,6 @@ async function numberTakenBy(
     select: { number: true, subject: true },
   });
   if (live) return `already used by another quotation (${live.subject})`;
-  const archived = await tx.legacyQuote.findFirst({
-    where: { number: { equals: number, mode: 'insensitive' } },
-    select: { number: true, continuedQuotationId: true },
-  });
-  // The quotation that continues an archived SCORO quote keeps its number.
-  if (archived && (!excludeId || archived.continuedQuotationId !== excludeId)) {
-    return `a SCORO quote in the archive (${archived.number}) — archive numbers are never reissued`;
-  }
   return null;
 }
 
@@ -933,16 +927,17 @@ async function checkQuoteNumber(number: string, excludeId?: string | null, tx: P
 }
 
 /**
- * The next number in the author's series that nobody has taken — a number
- * typed by hand ahead of the counter is stepped over, not issued twice. Inside
- * the caller's transaction, so a rollback burns nothing.
+ * The next number in the author's series that nobody has taken. A typed
+ * number moves its series (`setCounter`, 2026-10-10), so what the walk steps
+ * over is a number a LOWERED series lands on again, or one typed under a
+ * colleague's digits — never issued twice. The walk is `nextNumber`'s own
+ * (one read per candidate, the counter landing on the number issued): a
+ * thousand taken in a row (`FREE_NUMBER_TRIES`) is a counter somebody has to
+ * set by hand, and the save says so (409). Inside the caller's transaction,
+ * so a rollback burns nothing.
  */
 async function nextFreeQuoteNumber(tx: Prisma.TransactionClient, ownerId: string): Promise<string> {
-  let number = await nextNumber('quotation', tx, { ownerId });
-  for (let tries = 0; tries < 200 && (await numberTakenBy(number, null, tx)); tries++) {
-    number = await nextNumber('quotation', tx, { ownerId });
-  }
-  return number;
+  return nextNumber('quotation', tx, { ownerId }, async (n) => (await numberTakenBy(n, null, tx)) !== null);
 }
 
 /** A revision re-read with its lines, for the line routes to answer with. */
@@ -989,8 +984,6 @@ async function loadQuotation(id: string) {
       site: { select: { id: true, name: true, address: true, city: true } },
       lead: { select: { id: true, number: true, companyName: true } },
       owner: { select: { id: true, name: true, position: true, email: true, phone: true } },
-      // Set when this quotation carries on a SCORO quote under the same number.
-      legacyQuote: { select: { id: true, number: true, status: true } },
       revisions: {
         orderBy: { revision: 'desc' },
         include: {
@@ -1229,7 +1222,6 @@ quotationRoutes.get(
           customer: { select: { id: true, name: true } },
           contact: { select: { id: true, name: true } },
           owner: { select: { id: true, name: true } },
-          legacyQuote: { select: { id: true, number: true, status: true } },
           revisions: { orderBy: { revision: 'desc' }, select: { ...LIST_REVISION_SELECT, jobs: { select: { id: true }, take: 1 } } },
           _count: { select: { salesOrders: true } },
           // The S.O. column (2026-10-09, the owner's call): the orders still standing, by number.
@@ -1303,7 +1295,6 @@ quotationRoutes.get(
             owner: r.owner,
             createdAt: r.createdAt,
             updatedAt: r.updatedAt,
-            legacyQuote: r.legacyQuote,
             value: quotationValue(r.revisions),
             // The id is what the list's PDF icon opens (2026-10-08): the value revision's paper, without opening the quote.
             valueRevision: valued ? { id: valued.id, revision: valued.revision, status: valued.status } : null,
@@ -2095,7 +2086,7 @@ quotationRoutes.post(
       and the lead's move. A line refused half-way rolls back everything —
       including the number, which is why nextNumber is handed `tx`.
     */
-    const quotation = await prisma.$transaction(async (tx) => {
+    const { quotation, counterMove } = await prisma.$transaction(async (tx) => {
       // A number typed on the page is used as it is (checked again here, in the
       // transaction, against a race); otherwise the next free one in the
       // author's series — their employee digits, {EMP}{YY}{MM}{SEQ}.
@@ -2136,6 +2127,13 @@ quotationRoutes.post(
         },
         include: { revisions: true },
       });
+      // A typed number moves its series (2026-10-10, the owner's call:
+      // "remember the manual edit, start there from the last edit"): the next
+      // automatic number is the typed one plus one. After the uniqueness
+      // check and the row itself (its unique index has the last word on a
+      // race), inside the transaction, so a refused number leaves the counter
+      // where it was; a number outside the pattern's shape moves nothing.
+      const counterMove: CounterMove | null = body.number ? await setCounter('quotation', number, tx, { mode: 'set' }) : null;
 
       if (lines.length) {
         const revisionId = created.revisions[0].id;
@@ -2156,9 +2154,10 @@ quotationRoutes.post(
         });
       }
       // Re-read so the answer carries the totals the lines just produced.
-      return lines.length
-        ? tx.quotation.findUniqueOrThrow({ where: { id: created.id }, include: { revisions: true } })
+      const quotation = lines.length
+        ? await tx.quotation.findUniqueOrThrow({ where: { id: created.id }, include: { revisions: true } })
         : created;
+      return { quotation, counterMove };
     });
 
     await audit(
@@ -2168,9 +2167,11 @@ quotationRoutes.post(
         action: 'CREATED',
         summary:
           `Created quotation ${quotation.number} — ${quotation.subject}` +
-          (body.number ? ' (number typed by hand)' : '') +
+          (body.number ? ` (number typed by hand${counterMove ? ', the series continues from it' : ''})` : '') +
           (lines.length ? ` (${lines.length} line${lines.length === 1 ? '' : 's'})` : '') +
           (ownerId !== me.id ? `, authored for ${ownerName}` : ''),
+        // Where the series stood and where the typed number put it.
+        ...(counterMove ? { after: { counter: counterMove } } : {}),
       },
       req,
     );
@@ -2262,7 +2263,15 @@ quotationRoutes.patch(
       }
     }
 
-    const quotation = await prisma.quotation.update({ where: { id: req.params.id }, data });
+    // A renumbering moves the series too (2026-10-10, the owner's call), in
+    // one transaction with the uniqueness re-check and the update: a number
+    // taken a moment ago rolls the counter back with the refusal.
+    const { quotation, counterMove } = await prisma.$transaction(async (tx) => {
+      if (renumber) await checkQuoteNumber(body.number!, before.id, tx);
+      const updated = await tx.quotation.update({ where: { id: req.params.id }, data });
+      const counterMove: CounterMove | null = renumber ? await setCounter('quotation', updated.number, tx, { mode: 'set' }) : null;
+      return { quotation: updated, counterMove };
+    });
 
     // The lead follows the quotation's outcome, so the pipeline stays honest
     // without anyone maintaining two statuses.
@@ -2320,11 +2329,15 @@ quotationRoutes.patch(
         summary: moved
           ? `Quotation ${quotation.number}: ${before.outcome} → ${body.outcome}`
           : renumber
-            ? `Renumbered quotation ${before.number} → ${quotation.number}`
+            ? `Renumbered quotation ${before.number} → ${quotation.number}${counterMove ? ', the series continues from it' : ''}`
             : `Updated quotation ${quotation.number}`,
         // The move itself, which is what the quotation page's status history
-        // reads (outcomeChanges in shared/pipeline.ts).
-        ...(moved ? { before: { outcome: before.outcome }, after: { outcome: body.outcome } } : {}),
+        // reads (outcomeChanges in shared/pipeline.ts) — and, on a renumbering
+        // that moved a series, where the counter stood and where it is now.
+        ...(moved ? { before: { outcome: before.outcome } } : {}),
+        ...(moved || counterMove
+          ? { after: { ...(moved ? { outcome: body.outcome } : {}), ...(counterMove ? { counter: counterMove } : {}) } }
+          : {}),
       },
       req,
     );
@@ -2336,8 +2349,8 @@ quotationRoutes.patch(
  * Deletes a quotation — the author's, or anyone's for edit_all, and only with
  * gops.quotations.delete. Refused while it is a commercial fact somebody built
  * on: won, made into a project or a job order, or with the approver (decide
- * first). Its revisions and lines go with it; a SCORO quote it continued can
- * be continued again; calendar activities keep their place without it.
+ * first). Its revisions and lines go with it; calendar activities keep their
+ * place without it.
  *
  * Its lead: when this was the lead's last quotation, the lead steps back to
  * Costing (it has one) or Qualified, rather than sitting at "quotation created"

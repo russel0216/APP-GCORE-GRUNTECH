@@ -21,28 +21,11 @@ packages fill in.
   `providerUserId` (in-house, relation `QuoteLineProvider`), `costNote`.
   **Internal only**: cost and margin never print on the customer PDF, and the
   server strips them for callers who may not see them.
-- **LegacyQuote**: the read-only SCORO archive. It is *not* a quotation, and
-  nothing in live work links to it. Its only link is the one-way
-  `continuedQuotationId` (unique), set when an open SCORO quote is continued as
-  a live Quotation under the same number. `@@unique([source, sourceId])` and
-  `number @unique` make a repeated import an upsert, not a duplicate.
 
-## Permissions
-
-`gops.quote_archive` sits in the G-OPS **Sales** group right after Quotations,
-with the actions `view_all`, `export` and `create`. `create` means *run the SCORO
-import*. Continuing a quote is gated by `gops.quotations.create`, not by this
-entry.
-
-Seeded grants (the never-offered rule is unchanged):
-
-| Role | view_all | export | create |
-|---|---|---|---|
-| sales | yes | | |
-| sales_manager | yes | yes | |
-| project_manager | yes | | |
-| executive (computed) | yes | yes | |
-| super admin | yes (by being super admin) | yes | yes |
+(The read-only SCORO archive this package also laid the groundwork for — its
+table, its permission entry and its seeded grants — was removed on
+2026-10-10, the owner's call; the retired model waits for a later push to
+drop it.)
 
 ## Company seed
 
@@ -51,10 +34,3 @@ name, address, TIN, Reg. No., phone, fax, email, website, BPI Marikina account
 and the tagline. `update` is still `{}`, so the seed never touches an existing
 database. On the current dev and production databases these new columns stay
 empty until someone enters them in Admin > Company.
-
-## Sales group size
-
-Sales now holds eight screens: Leads, Customers, Calendar, Quotations, SCORO
-Archive, Pipeline, Costing and Partners. That is more than the "roughly six" in
-CLAUDE.md rule 14. Once the migration is finished and the archive is only looked
-up occasionally, consider moving it to its own group.
