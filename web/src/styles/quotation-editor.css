@@ -162,15 +162,6 @@
   gap: var(--s-1) var(--s-2);
 }
 
-.qe-lines-head {
-  justify-content: space-between;
-  margin-bottom: var(--s-3);
-}
-
-.qe-lines-head .card-title {
-  margin: 0;
-}
-
 /*
   The lines table scrolls sideways inside its card on a narrow screen — never
   the page. The min-width keeps every column usable rather than squeezing a
@@ -469,7 +460,11 @@ tr.qe-line-heading td {
   max-width: 100%;
 }
 
-/* Product suggestions: the name, then what it went for and where from. */
+/*
+  Product suggestions: the name, then what it went for and where from. The
+  costing sheet's name box (CostingSheet.tsx) draws the same menu with the
+  same classes.
+*/
 .qe-suggest {
   min-width: 24rem;
 }

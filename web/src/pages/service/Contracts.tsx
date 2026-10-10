@@ -27,7 +27,7 @@ import { NumberInput } from '../../components/NumberInput';
  * Service contracts.
  *
  * A contract is a **Job of type SERVICE_CONTRACT** — it has its own costing,
- * its own budget across the same five cost categories, its own schedule of
+ * its own budget across the same six cost categories, its own schedule of
  * values and its own progress billing (model §4.5). This screen holds only
  * what a job cannot: which equipment is covered, how often it is visited, and
  * when it runs out.

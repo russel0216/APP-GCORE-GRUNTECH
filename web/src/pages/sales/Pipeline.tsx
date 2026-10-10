@@ -158,7 +158,6 @@ const FORECAST = 'FORECAST';
 /** The stage keys, so a collapsed stage is remembered like a collapsed column. */
 const STAGE_KEYS = ['OPPORTUNITY', 'NEGOTIATION', 'CLOSING', 'CONFIRMED', 'COMPLETED', 'LOST', 'HOLD'];
 const LEAD_KEYS = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', 'COSTING', 'ON_HOLD'];
-const QUOTATION_KEYS = ['QUOTED', 'SUBMITTED', 'NEGOTIATION'];
 
 const CARD_FIELDS = [
   { key: 'customer', label: 'Customer' },
@@ -835,13 +834,15 @@ export function Pipeline() {
 
   if (loading && !board) return <Loading />;
 
-  const drawColumns = (cols: Column[], laneKey = '') => (
+  // A lane is one salesperson's slice, so its "Open as list" names them too.
+  const drawColumns = (cols: Column[], laneKey = '', ownerId = view.ownerId) => (
     <div className={`pipeline${stageMode ? ' fit' : ''}`} role="list" aria-label={laneKey ? `Pipeline for ${laneKey}` : 'Pipeline'}>
       {cols.map((col) => (
         <PipeColumn
           key={col.key}
           column={col}
           color={col.color}
+          listLink={listLinkFor(col, board?.stages ?? [], ownerId)}
           collapsed={view.collapsed.includes(col.key)}
           over={over === col.key}
           refusal={refused?.key === col.key ? refused.reason : null}
@@ -1030,7 +1031,7 @@ export function Pipeline() {
                     {formatMoney(weightedOf(cards))} weighted
                   </span>
                 </div>
-                {drawColumns(columns, person.name)}
+                {drawColumns(columns, person.name, person.id)}
               </section>
             );
           })}
@@ -1086,6 +1087,33 @@ export function Pipeline() {
 function narrow(col: Column, ownerId: string): Column {
   const cards = col.cards.filter((c) => c.owner.id === ownerId);
   return { ...col, cards, count: cards.length, value: valueOf(cards), weighted: weightedOf(cards) };
+}
+
+/**
+ * "Open as list ›": the list a column's cards live on, narrowed by a key that
+ * list DECLARES — a DataList reads only its own keys (rule 16), so the old
+ * `?outcome=` opened the whole quotation list. The leads list declares
+ * `status` (a lead's own step) and `stage`; the quotation list declares
+ * `stage`. A stage column sends its own key — to the leads when it gathers a
+ * lead column (Opportunity mixes leads and drafted quotes, On hold is a
+ * lead's), else to the quotations. A fine column of the detailed view sends
+ * the stage it stands in: the one its cards share, else the first stage that
+ * gathers it (Won opens Confirmed, or Completed once every won card is
+ * booked). The board is everyone's cards narrowed to one salesperson at most,
+ * so the link says the same: `scope=all`, and the owner where one is picked.
+ */
+function listLinkFor(column: Column, stages: StageDef[], ownerId: string): string | null {
+  if (column.key === FORECAST) return null;
+  const open = (list: 'leads' | 'quotations', filter: Record<string, string>) =>
+    `/g-ops/${list}${qs({ ...filter, scope: 'all', [list === 'leads' ? 'assignedToId' : 'ownerId']: ownerId || undefined })}`;
+  if (column.kind === 'stage') {
+    const gathersLeads = (column.columns ?? []).some((k) => LEAD_KEYS.includes(k));
+    return open(gathersLeads ? 'leads' : 'quotations', { stage: column.key });
+  }
+  if (LEAD_KEYS.includes(column.key)) return open('leads', { status: column.key });
+  const inCards = new Set(column.cards.map((c) => c.stage));
+  const stage = inCards.size === 1 ? [...inCards][0] : stages.find((s) => s.columns.includes(column.key))?.key;
+  return stage ? open('quotations', { stage }) : null;
 }
 
 // ── KPI row ──────────────────────────────────────────────────────────────────
@@ -1175,6 +1203,7 @@ function KpiRow({ kpis, board, show, canInsights }: { kpis: Kpis; board: Board; 
 function PipeColumn({
   column,
   color,
+  listLink,
   collapsed,
   over,
   refusal,
@@ -1186,6 +1215,8 @@ function PipeColumn({
 }: {
   column: Column;
   color?: string;
+  /** Where "Open as list ›" goes (`listLinkFor`); null for the forecast. */
+  listLink: string | null;
   collapsed: boolean;
   over: boolean;
   refusal: string | null;
@@ -1196,16 +1227,6 @@ function PipeColumn({
   children: ReactNode;
 }) {
   const forecast = column.key === FORECAST;
-  // A stage column lists what its first fine column lists; Opportunity, which
-  // mixes leads and drafted quotes, opens the leads.
-  const listFor = (key: string) =>
-    LEAD_KEYS.includes(key)
-      ? `/g-ops/leads${qs({ status: key })}`
-      : QUOTATION_KEYS.includes(key) || key === 'WON' || key === 'LOST'
-        ? `/g-ops/quotations${qs({ outcome: key === 'QUOTED' ? 'OPEN' : key })}`
-        : null;
-  const listLink =
-    column.kind === 'stage' ? (column.key === 'OPPORTUNITY' ? '/g-ops/leads' : listFor(column.columns?.[0] ?? '')) : listFor(column.key);
   const cls = `pipe-col${forecast ? ' forecast' : ''}${collapsed ? ' collapsed' : ''}${over ? ' over' : ''}${refusal ? ' refused' : ''}${color ? ' has-color' : ''}`;
   return (
     <section

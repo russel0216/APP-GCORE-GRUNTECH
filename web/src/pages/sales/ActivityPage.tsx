@@ -7,7 +7,7 @@ import { Attachments } from '../../components/Attachments';
 import { RecordHeader, type MoreItem } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
-import { Avatar, ErrorBox, Loading, formatDateTime, useToast } from '../../components/ui';
+import { Avatar, ErrorBox, Loading, durationLabel, formatDateTime, formatTime, useToast } from '../../components/ui';
 import { usePeople } from '../../components/People';
 import { ActivityModal } from './ActivityForm';
 import {
@@ -46,23 +46,9 @@ import {
 /** The class the answer's colour comes from (readable without it: the mark and the word are there). */
 const RSVP_CLASS: Record<Rsvp, string> = { ACCEPTED: 'going', TENTATIVE: 'maybe', DECLINED: 'not-going', PENDING: 'no-reply' };
 
-/** "8h 00min", as SCORO prints a duration; a whole day or more says so. */
-export function durationLabel(minutes: number): string {
-  const days = Math.floor(minutes / 1440);
-  const h = Math.floor((minutes % 1440) / 60);
-  const m = minutes % 60;
-  if (days && !h && !m) return `${days} day${days === 1 ? '' : 's'}`;
-  const hm = `${h}h ${String(m).padStart(2, '0')}min`;
-  return days ? `${days}d ${hm}` : hm;
-}
-
 /** The faces strip names people by their first name, as SCORO does; the full name is in the tooltip. */
 function firstName(name: string): string {
   return name.trim().split(/\s+/)[0] ?? name;
-}
-
-function timeOf(d: Date): string {
-  return d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' });
 }
 
 export function ActivityPage() {
@@ -173,7 +159,7 @@ export function ActivityPage() {
   const end = new Date(activity.endsAt);
   const dayKey = dayKeyOf(start);
   const sameDay = dayKey === dayKeyOf(end);
-  const whenText = sameDay ? `${timeOf(start)} – ${timeOf(end)}` : `${formatDateTime(start)} – ${formatDateTime(end)}`;
+  const whenText = sameDay ? `${formatTime(start)} – ${formatTime(end)}` : `${formatDateTime(start)} – ${formatDateTime(end)}`;
   const calendarPath = `/g-ops/calendar${qs({ view: 'day', day: dayKey })}`;
 
   const n = (r: Rsvp) => activity.invitees.filter((i) => i.response === r).length;
@@ -378,7 +364,7 @@ export function ActivityPage() {
           <dl className="act-rows">
             <dt>When</dt>
             <dd>
-              {formatDateTime(start)} – {sameDay ? timeOf(end) : formatDateTime(end)}
+              {formatDateTime(start)} – {sameDay ? formatTime(end) : formatDateTime(end)}
               <span className="faint"> · {durationLabel(activity.durationMinutes)}</span>
             </dd>
             <dt>Where</dt>

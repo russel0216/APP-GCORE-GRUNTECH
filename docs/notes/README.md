@@ -1,17 +1,30 @@
-# docs/notes — Phase 10 package notes (merged)
+# docs/notes — what is still here, and why
 
-Each file here is the hand-off note one Phase 10 package wrote for the
-maintainers. Their content has been merged, as of 2026-09-27, into:
+The Phase 10 package hand-off notes that used to live here (one per area:
+academy, calendar, costing, delivery, evaluations, finance, HR audit,
+insights, masters, meetings, numbering, plantilla, procurement, sales board,
+service, workspace, and the O-series stage notes) were merged into
+`docs/BUSINESS-OPERATIONS-MODEL.md` (§4, §5.1, §7–§10, §13–§14) and `CLAUDE.md`
+("Phase 10 notes worth carrying forward") on 2026-09-27, and removed on
+2026-10-10 once nothing cited them. Read those two; a rule that lives only in
+a note is a rule nobody follows.
 
-- `docs/BUSINESS-OPERATIONS-MODEL.md` — §4.1 (pipeline, partners, costing
-  handoffs), §4.2–§4.4 (delivery, procurement, HR record access), §4.5 (Service
-  Schedule, job orders, renewal), §4.6 / §5.1 (cash advances and liquidation),
-  §4.7 (hire-to-separate), §7 (numbering), §8 (My Work, notifications, search),
-  §9 (menus), §10 (entities), §13 (decisions 13–21 and the changelog) and §14
-  (decisions waiting on the owner).
-- `CLAUDE.md` — rule 5 (`nextNumber` context), rule 16 (DataList URL state), the
-  Verification block, and "Phase 10 notes worth carrying forward".
+Seven notes remain because `CLAUDE.md` points at them for detail it does not
+repeat:
 
-**Read those, not these.** The files are kept only while the Stage 4
-integration packages finish applying the "edits needed elsewhere" sections some
-of them contain; once that work is committed, delete this folder.
+| Note | What it holds | Cited from |
+|---|---|---|
+| `S-scoro-schema.md` | The SCORO continuation's groundwork: schema, registry, seed and route stubs (key S) | CLAUDE.md "SCORO migration notes" |
+| `C-company-letterhead.md` | Company details, the author's phone, the PDF letterhead and footer (key C) | CLAUDE.md "SCORO migration notes" |
+| `Q-scoro-quotations.md` | SCORO-style quotation lines: groups, titles, discount, terms, cost per line (key Q) | CLAUDE.md "SCORO migration notes" |
+| `A-scoro-archive.md` | The read-only SCORO archive: import, numbering continuation, "Continue in G-CORE" (key A) | CLAUDE.md "SCORO migration notes" |
+| `R-scoro-review.md` | What the 2026-09-27 integration review changed after C, Q and A landed (key R) | CLAUDE.md "SCORO migration notes" |
+| `day-boundaries.md` | The 2026-10-02 audit of where "today" was still the UTC date, group by group, and what each fix did | CLAUDE.md "Shared seams" |
+| `quotation-editor.md` | Why the quotation editor is a page, not a dialog, and how one save is one transaction | CLAUDE.md "SCORO migration notes" |
+
+The workstation-side SCORO converters these notes describe are in
+`tools/scoro/` (its own README). Line numbers inside a note are as they were
+on the day it was written; the files have moved on since.
+
+Add a note here only when `CLAUDE.md` will cite it. Otherwise put the rule in
+`CLAUDE.md` or the model doc, where it will be read.

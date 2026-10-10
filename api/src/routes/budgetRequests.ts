@@ -529,7 +529,6 @@ budgetRequestRoutes.get(
         })
       : [{ role: 'Approved by — Project Manager' }, { role: 'Approved by — Finance' }];
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Budget Request',
       documentNumber: row.number,
       date: row.createdAt,

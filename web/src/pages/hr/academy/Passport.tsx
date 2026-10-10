@@ -16,10 +16,11 @@ import {
   ModalFoot,
   StatusBadge,
   formatDate,
+  formatSpan,
   useToast,
   type Tone,
 } from '../../../components/ui';
-import { sessionWhen, useCourseOptions } from './Sessions';
+import { useCourseOptions } from './Sessions';
 
 /**
  * The training passport — one person's required courses against what they
@@ -385,7 +386,7 @@ export function PassportView({
                 <Link to={`/g-hr/academy/sessions/${s.id}`}>{s.course.title}</Link>
                 <span className="faint">
                   {' '}
-                  · {sessionWhen(s.startsAt, s.endsAt)}
+                  · {formatSpan(s.startsAt, s.endsAt)}
                   {s.venue ? ` · ${s.venue}` : ''}
                 </span>
               </li>

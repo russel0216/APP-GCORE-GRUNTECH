@@ -289,11 +289,6 @@ function RoleEditor({
                       title={sub.note}
                     >
                       {sub.label}
-                      {sub.phase > 1 && (
-                        <span className="tag" style={{ marginLeft: 6 }}>
-                          P{sub.phase}
-                        </span>
-                      )}
                     </div>
                     <div className="perm-actions">
                       {sub.actions.map((a) => (

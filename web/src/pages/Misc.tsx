@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
-import { api, SHIPPED_PHASE } from '../lib/api';
+import { Link } from 'react-router-dom';
+import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Avatar, ErrorBox, Field, Loading, useToast } from '../components/ui';
 import { useConfirm, type ConfirmApi } from '../components/Confirm';
@@ -475,49 +475,3 @@ export function SystemSettings() {
   );
 }
 
-// ── Placeholder for screens whose module ships in a later phase ──────────────
-
-export function ComingSoon() {
-  const { me } = useAuth();
-  /*
-    The full pathname, not the splat. This is mounted at `/g-hr/*`, whose
-    `params['*']` for `/g-hr/leave/abc` is `leave/abc` — a string no menu
-    path starts with, so every fall-through used to say "does not exist yet"
-    about screens that plainly did. The most specific match wins, the same
-    way the sidebar highlights (Phase 6 notes): `/g-hr` is a prefix of every
-    HR screen and must not claim them all.
-  */
-  const { pathname } = useLocation();
-
-  const found = me?.menu
-    .flatMap((m) => m.submodules.map((s) => ({ mod: m, sub: s })))
-    .filter((x) => pathname === x.sub.path || pathname.startsWith(`${x.sub.path}/`))
-    .sort((a, b) => b.sub.path.length - a.sub.path.length)[0];
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h1>{found?.sub.label ?? 'Not built yet'}</h1>
-          <p>
-            {found
-              ? `${found.mod.label} › ${found.sub.label} ships in Phase ${found.sub.phase}.`
-              : 'This screen does not exist yet.'}
-          </p>
-        </div>
-      </div>
-
-      <div className="card">
-        <p style={{ marginTop: 0 }}>
-          Phase {SHIPPED_PHASE} — the foundation — is what is built: authentication, users, roles and
-          granular permissions, company settings, document numbering, the approval engine, audit log,
-          attachments, notifications, global search, the shared list pattern and the PDF engine.
-        </p>
-        <p className="muted">
-          {found?.sub.note ??
-            'Its access can already be configured in Admin › Roles & Permissions, and its numbering in Admin › Numbering — so when the screen arrives, the surrounding configuration is already in place.'}
-        </p>
-      </div>
-    </div>
-  );
-}

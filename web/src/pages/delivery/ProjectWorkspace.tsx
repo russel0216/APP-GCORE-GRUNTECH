@@ -517,25 +517,10 @@ export function ProjectWorkspace() {
           <div className="card">
             <h3 className="card-title">Contract</h3>
             <dl className="kv">
-              <Row label="Number" value={<span className="mono">{job.number}</span>} />
+              {/* The number, the costing and the quotation are the header's (rule 19: lineage in the meta line). */}
               <Row label="Type" value={job.type === 'PROJECT' ? 'Project' : 'Service contract'} />
               <Row label="Customer P.O." value={job.customerPoNumber} />
               <Row label="P.O. date" value={job.customerPoDate ? formatDate(job.customerPoDate) : null} />
-              <Row label="Contract value" value={formatMoney(job.contractValue)} />
-              <Row
-                label="From costing"
-                value={job.costing ? <Link to={`/g-ops/costing/${job.costing.id}`}>{job.costing.number}</Link> : null}
-              />
-              <Row
-                label="Quotation"
-                value={
-                  job.quotationRevision ? (
-                    <Link to={`/g-ops/quotations/${job.quotationRevision.quotation.id}`}>
-                      {job.quotationRevision.quotation.number} R{job.quotationRevision.revision}
-                    </Link>
-                  ) : null
-                }
-              />
               <Row label="Estimated cost" value={job.costing ? formatMoney(job.costing.totalCost) : null} />
               {job.serviceContract && (
                 <Row

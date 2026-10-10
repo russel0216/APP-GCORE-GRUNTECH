@@ -46,7 +46,7 @@ import {
   cancelOpenRequest,
   approversForStep,
 } from '../src/shared/approvals';
-import { renderDocument, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe } from '../src/shared/pdf';
+import { renderDocument, companyCurrency, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe, websiteForPrint } from '../src/shared/pdf';
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
 import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
 // The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
@@ -76,6 +76,7 @@ import {
 } from '../../web/src/lib/spreadsheet';
 import { readWorkbook } from '../../web/src/lib/spreadsheetRead';
 import { workingDayDate } from '../src/shared/day';
+import { recordLink } from '../../web/src/lib/links';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 
@@ -116,7 +117,19 @@ const TAG = '__verify__';
  */
 const SUBJECT = 'ZZFOUNDATION';
 
+/** Where the Letterhead section parks the company's tagline while it prints without one. */
+const TAGLINE_STASH = 'company.documentTagline.__verify__';
+
+async function restoreTagline() {
+  const stash = await prisma.setting.findUnique({ where: { key: TAGLINE_STASH } });
+  if (!stash) return;
+  const { tagline } = stash.value as { tagline: string | null };
+  await prisma.company.update({ where: { id: 'company' }, data: { documentTagline: tagline } });
+  await prisma.setting.delete({ where: { key: TAGLINE_STASH } });
+}
+
 async function cleanup() {
+  await restoreTagline();
   await prisma.notification.deleteMany({ where: { title: { contains: SUBJECT } } });
   const users = await prisma.user.findMany({
     where: { email: { endsWith: '@verify.local' } },
@@ -979,15 +992,21 @@ async function main() {
   check('a PDF renders', pdf.length > 1000, `${pdf.length} bytes`);
   check('it is a valid PDF', pdf.subarray(0, 5).toString() === '%PDF-');
 
-  // 60 table rows over three pages. It was two until the rows were given the
-  // height the reference documents use — a deliberate change, and the exact
-  // number is kept here so the next change to row metrics is deliberate too.
+  // 60 table rows over FOUR pages (2026-10-10). It was three on the house
+  // dress (~22pt a row, 14pt margins); on the one dress every row is the
+  // designed quotation's — 9pt type on 20pt of padding, 30.4pt — under a
+  // letterhead with its DETAILS block, inside 36pt margins, above a
+  // strapline: page 1 holds thirteen or fourteen rows (fewer when the
+  // company's details run to a fifth line), each page after it 22, and the
+  // sixtieth row goes over to a fourth page. A deliberate change, and the
+  // exact number is kept here so the next change to row metrics is
+  // deliberate too.
   //
   // What this really guards is the footer: it sits below the bottom margin, and
   // when PDFKit treated that as overflow it gave every footer a page of its own
   // and turned this document into six.
   const pageCount = Number((pdf.toString('latin1').match(/\/Count\s+(\d+)/) ?? [])[1] ?? 0);
-  check('long content paginates without runaway pages', pageCount === 3, `${pageCount} pages`);
+  check('long content paginates without runaway pages', pageCount === 4, `${pageCount} pages`);
 
   // ── 8. Signature timestamps ────────────────────────────────────────────────
   console.log('\nSignature timestamps');
@@ -1073,21 +1092,23 @@ async function main() {
     ).includes('PHP 1,562.20'),
   );
 
-  // The margin is the "maximise the print margin" the layout was asked for.
-  // Measured off the page rather than read back off the constant.
+  // The margin is the quotation template's, 36pt — one dress for every
+  // document (2026-10-10). Measured off the page rather than read back off
+  // the constant.
   const edges = pdfEdges(signed);
-  check('content starts 14pt from the edge', edges.left === 14, `${edges.left}pt`);
+  check('content starts 36pt from the edge, as the designed quotation does', edges.left === 36, `${edges.left}pt`);
   check('and nothing runs off the bottom', edges.bottom > 12, `${edges.bottom}pt clear`);
 
   // ── 10. The letterhead every document carries ──────────────────────────────
   console.log('\nLetterhead');
 
   /*
-    The company block and the strapline are drawn by the engine, never by a
-    module, so one document proves them for all of them. The fields are only
-    borrowed when the database has none: a value an administrator already set
-    is asserted as it stands and never overwritten, and whatever this sets is
-    put back to null afterwards.
+    The letterhead, the strapline and the sign-offs are drawn by the engine,
+    never by a module, so one document proves them for all of them — in the
+    one dress every document wears (2026-10-10): the designed quotation's.
+    The fields are only borrowed when the database has none: a value an
+    administrator already set is asserted as it stands and never overwritten,
+    and whatever this sets is put back to null afterwards.
   */
   const companyBefore = await prisma.company.findUnique({ where: { id: 'company' } });
   const borrowed: Prisma.CompanyUpdateInput = {};
@@ -1112,53 +1133,235 @@ async function main() {
           rows: [['Compressor overhaul ₱1,000 allowance', formatMoney(1562.2)]],
         },
       ],
+      signatories: [
+        { role: 'Requested by', name: 'Erwin Dela Pena', position: 'Never Printed Position', phone: '0917 555 0177', email: `${TAG}.erwin@verify.local`, at: new Date('2026-01-02T03:04:00Z') },
+        { role: 'Approved by — Project Manager' },
+      ],
       footerNote: 'Pesos ₱ only — net of discount',
     });
     const letteredText = pdfText(lettered);
-    check('the footer prints REG. NO.', letteredText.includes('REG. NO.'));
+    const letteredLines = letteredText.split('\n');
+    const site = websiteForPrint(co.website);
+    // The letterhead: the registered name in capitals, then the details by
+    // the designed rule — "TIN: … | REG NO: …", "Tel No.: … | Fax No.: …".
+    check('the letterhead names the company in capitals', letteredText.includes((co.legalName?.trim() || co.name).toUpperCase()));
+    check('and prints REG NO as the designed quotation does', letteredText.includes('REG NO: '));
     check('with the registration number itself', letteredText.includes(co.regNo ?? '\u0000'));
-    check('and the tagline', letteredText.includes(co.documentTagline ?? '\u0000'));
-    check('and Tel / Fax when set', !co.fax || letteredText.includes(`Fax: ${co.fax}`));
+    check('and Tel / Fax when set', !co.fax || (letteredText.includes('Fax No.: ') && letteredText.includes(co.fax)));
+    check('and the website as www.…', !co.website || letteredText.includes(`Website: ${site}`));
+    check('it names the document in capitals with "# number"', letteredText.includes('QUOTATION') && letteredText.includes(`# ${TAG}-LH`));
+    // The strapline: the tagline alone, in capitals; the website is never
+    // appended to it (it has its own line on the letterhead).
+    const tagline = (co.documentTagline ?? '\u0000').toUpperCase();
+    check('the foot carries the tagline in capitals', letteredLines.includes(tagline));
     check(
-      'the website rides on the tagline line',
-      !co.website ||
-        letteredText.includes(
-          co.website.replace(/^https?:\/\//i, '').replace(/\/+$/, '').toUpperCase(),
-        ),
+      'and nothing more — the website is not appended to it',
+      !site || tagline.includes(site.toUpperCase()) || !letteredLines.some((l) => l.includes(tagline) && l.includes(site.toUpperCase())),
     );
     check('no peso sign ever reaches the page as ±', !letteredText.includes('±'));
     check('it prints as the currency code instead', letteredText.includes('PHP 1,000 allowance'));
     check('and the footer note is cleaned the same way', letteredText.includes('Pesos PHP only'));
+    // The sign-offs: the role in capitals (a long one on two lines, never cut),
+    // the name, the contact number and the email on lines of their own, the
+    // date — and Pending where nobody has signed. No position.
+    check(
+      'the sign-offs name who signed, with their contact lines, and say Pending where nobody has',
+      letteredLines.includes('REQUESTED BY') &&
+        letteredLines.includes('Erwin Dela Pena') &&
+        letteredLines.includes('0917 555 0177') &&
+        letteredLines.includes(`${TAG}.erwin@verify.local`) &&
+        letteredText.includes(stamp(new Date('2026-01-02T03:04:00Z'))) &&
+        letteredLines.includes('Pending'),
+    );
+    check('a long role wraps to a second line rather than losing a word', letteredText.includes('APPROVED BY') && letteredText.includes('MANAGER') && !letteredText.includes('…'));
+    check('and no position', !letteredText.includes('Never Printed'));
+    const signerAt = textAt(lettered, 'Erwin Dela Pena');
+    const signerPhoneAt = textAt(lettered, '0917 555 0177');
+    check('the name sits over the contact number, larger', !!signerAt && !!signerPhoneAt && signerPhoneAt.y - signerAt.y > 9, `${signerAt?.y} → ${signerPhoneAt?.y}`);
     const letteredEdges = pdfEdges(lettered);
     check('the strapline stays clear of the bottom edge', letteredEdges.bottom > 12, `${letteredEdges.bottom}pt clear`);
-    check('and still starts 14pt from the edge', letteredEdges.left === 14, `${letteredEdges.left}pt`);
+    check('and the content starts 36pt from the edge', letteredEdges.left === 36, `${letteredEdges.left}pt`);
     check('a letterhead does not cost a page', pages(lettered) === 1, `${pages(lettered)} pages`);
+    check('and a one-page document carries no "Page 1 of 1"', !letteredText.includes('Page 1 of 1'));
 
-    // The quotation's dress for the G-OPS paper (2026-10-09, the owner's
-    // call): 36pt margins, the letterhead top-left, the strapline along the
-    // foot, side-by-side sign-offs — the same sections, a different dress.
-    const dressed = await renderDocument({
-      style: 'quote',
+    // With no tagline the strapline is the website — never blank, never both.
+    // The real tagline is put back whatever happens.
+    // The real tagline is stashed in a Setting first (`cleanup()` puts it
+    // back too), so a run killed between the two never leaves the company
+    // without its tagline.
+    if (co.website) {
+      await prisma.setting.upsert({
+        where: { key: TAGLINE_STASH },
+        create: { key: TAGLINE_STASH, value: { tagline: co.documentTagline } },
+        update: { value: { tagline: co.documentTagline } },
+      });
+      await prisma.company.update({ where: { id: 'company' }, data: { documentTagline: null } });
+      try {
+        const noTagline = pdfText(await renderDocument({ title: 'Quotation', documentNumber: `${TAG}-NT`, sections: [{ kind: 'text', body: 'x' }] }));
+        check('with no tagline the strapline is the website, in capitals', noTagline.split('\n').includes(site.toUpperCase()));
+      } finally {
+        await restoreTagline();
+      }
+    }
+
+    // A document long enough for a second page carries the running header
+    // — reference, document and number, the date as MM/DD/YYYY — on every
+    // page after the first, and "Page n of m" on every page.
+    const twoPages = await renderDocument({
       title: 'Job Order',
-      documentNumber: `${TAG}-JO`,
-      reference: 'Oxygen plant, Building B',
+      documentNumber: `${TAG}-RH`,
+      date: new Date('2026-08-17T02:00:00Z'),
+      reference: `${TAG} Customer Inc.`,
+      sections: [{ kind: 'table', head: ['Item', 'Amount'], align: ['left', 'right'], rows: Array.from({ length: 30 }, (_, i) => [`Row ${i + 1}`, '1.00']) }],
+    });
+    const twoText = pdfText(twoPages);
+    const twoCount = pages(twoPages);
+    check('a long document runs over', twoCount >= 2, `${twoCount} pages`);
+    const runningLines = twoText.split('\n').filter((l) => l.includes(`${TAG} Customer Inc.`) && l.includes(`Job Order # ${TAG}-RH`) && l.includes('08/17/2026'));
+    check('every page after the first carries the running header', runningLines.length === twoCount - 1, `${runningLines.length} on ${twoCount} pages`);
+    check('and every page "Page n of m"', twoText.includes(`Page ${twoCount} of ${twoCount}`) && twoText.includes(`Page 1 of ${twoCount}`));
+    check('the table head repeats on the next page, in capitals', twoText.split('\n').filter((l) => l === 'ITEM').length === twoCount);
+    // The second ITEM is page two's head: 11pt into a head band that starts
+    // at the template's flowTop, 50 — the baseline reads 8.5pt's ascender lower.
+    const headOnTwo = textAt(twoPages, 'ITEM', 1);
+    check('the continuation page starts 50pt down, as the template does', !!headOnTwo && Math.abs(headOnTwo.y - (50 + 11 + 8.5 * 0.718)) < 1, `${headOnTwo?.y}`);
+
+    // ── The one dress, measured against the template (2026-10-10) ────────
+    // Under the rule the engine heads its date and reference DETAILS, as the
+    // quotation heads its own: the heading 22.75 under the rule, its lines
+    // 22 under the heading, and every `fields` section in the same bold
+    // "Label: value". The rule itself sits 14.75 under the last letterhead
+    // line's bottom (its baseline plus 3.29 at 7.5pt) and never above 114.25
+    // — the designed engine's push for a box that grew.
+    check('a field prints as one "Label: value" line, the DETAILS style', signedText.split('\n').includes('Checked: Yes'));
+    const detailsAt = textAt(lettered, 'DETAILS');
+    const regNoAt = textAt(lettered, 'REG NO: ');
+    const ruleAt = regNoAt ? Math.max(114.25, regNoAt.y - 7.5 * 0.718 + 7.5 * 1.156 + 14.75) : NaN;
+    check(
+      'DETAILS heads the date 22.75 under the letterhead rule, where the template puts it',
+      !!detailsAt && Math.abs(detailsAt.y - (ruleAt + 22.75 + 8.5 * 0.718)) < 0.5,
+      `${detailsAt?.y} vs ${(ruleAt + 22.75 + 8.5 * 0.718).toFixed(2)}`,
+    );
+    const dateAt = textAt(lettered, 'Date: ');
+    check('and its lines sit 22 under the heading', !!detailsAt && !!dateAt && Math.abs(dateAt.y - detailsAt.y - (22 + (9.5 - 8.5) * 0.718)) < 0.5, `${detailsAt?.y} → ${dateAt?.y}`);
+    // An untitled table hangs 23 under the DETAILS box (41pt, or its lines at
+    // 14.98), as the template's line table hangs under its details: 22 + 41 + 23, then the head's 11.
+    const headAt = textAt(lettered, 'PRODUCT DESCRIPTION');
+    check(
+      "an untitled table starts where the template's line table does",
+      !!headAt && !!detailsAt && Math.abs(headAt.y - detailsAt.y - (22 + 41 + 23 + 11)) < 0.5,
+      `${headAt && detailsAt ? (headAt.y - detailsAt.y).toFixed(2) : '?'} under DETAILS`,
+    );
+
+    // The totals box measures its rows: a figure is never wrapped (PDFKit
+    // wraps any box given a width, whatever `lineBreak` says), and a label
+    // longer than its 122.6pt box wraps inside the room the figure leaves,
+    // making its row taller — the next row sits under its last line.
+    const wide = await renderDocument({
+      title: 'Progress Billing',
+      documentNumber: `${TAG}-TOT`,
       sections: [
-        { kind: 'fields', title: 'Project', fields: [{ label: 'Customer', value: 'Hospital' }] },
-        { kind: 'table', head: ['Item', 'Amount'], align: ['left', 'right'], rows: [{ heading: 'Compressors' }, ['Overhaul', formatMoney(1562.2)]] },
-      ],
-      signatories: [
-        { role: 'Requested by', name: 'Erwin Dela Pena', position: 'Sales', at: new Date('2026-01-02T03:04:00Z') },
-        { role: 'Approved by' },
+        {
+          kind: 'table',
+          head: ['No.', 'Description', 'Unit', 'Qty', 'Unit cost', 'Amount'],
+          widths: [7, 47, 8, 8, 14, 16],
+          headingSpan: 2,
+          rows: [{ heading: '1   Materials and consumables' }, ['101', { title: 'Line', body: 'x' }, 'lot', '1', '1.00', '1.00']],
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: 'Margin (33.333333% of the price)', value: formatMoney(41_152_263.02) },
+            { label: 'Subtotal', value: formatMoney(123_456_789.06) },
+            { label: 'GRAND TOTAL', value: formatMoney(138_271_603.75), bold: true },
+          ],
+        },
       ],
     });
-    const dressedText = pdfText(dressed);
-    const dressedEdges = pdfEdges(dressed);
-    check('the G-OPS dress starts 36pt from the edge, as the quotation does', dressedEdges.left === 36, `${dressedEdges.left}pt`);
-    check('it names the document in capitals with its number', dressedText.includes('JOB ORDER') && dressedText.includes(`# ${TAG}-JO`));
-    check('the letterhead carries the company and the foot the strapline', dressedText.includes(co.name.toUpperCase()) && dressedText.includes((co.documentTagline ?? '').toUpperCase().slice(0, 12)));
-    check('the sign-offs name who signed and say Pending where nobody has', dressedText.includes('REQUESTED BY') && dressedText.includes('Erwin Dela Pena') && dressedText.includes('Pending'));
-    check('and the dress costs no page', pages(dressed) === 1, `${pages(dressed)} pages`);
-    check('the house style is untouched: 14pt', pdfEdges(lettered).left === 14);
+    const wideLines = pdfText(wide).split('\n');
+    check('a nine-digit total prints as one run, never "PHP" over a second line', wideLines.includes('PHP 123,456,789.06') && wideLines.includes('PHP 138,271,603.75'));
+    const marginAt = textAt(wide, 'Margin (33.333333%');
+    const marginValueAt = textAt(wide, 'PHP 41,152,263.02');
+    const marginEnd = textAt(wide, 'price)');
+    const subtotalAt = textAt(wide, 'Subtotal');
+    check(
+      "a label longer than its box wraps inside it and takes the row's height",
+      !!marginAt && !!marginValueAt && !!marginEnd && !!subtotalAt && marginAt.y === marginValueAt.y && marginEnd.y > marginAt.y && subtotalAt.y > marginEnd.y + 9,
+      `${marginAt?.y}/${marginValueAt?.y} … ${marginEnd?.y} → ${subtotalAt?.y}`,
+    );
+    // A subheading wraps inside the table's leading columns (No. + Description
+    // here, the product column on the designed table) rather than across the
+    // whole row — 30 characters at 9.5pt fit in two columns, never in "No.".
+    check('a subheading spans the columns the table names', wideLines.includes('1   Materials and consumables'));
+    // The title: 24pt, wrapped inside its 185pt box like the template's title
+    // box (two lines of 27.74 against a 28pt box) — never shrunk to fit one
+    // line — pushing the number and the rule down by what it grew.
+    check('a long title wraps in its box rather than shrinking', wideLines.includes('PROGRESS') && wideLines.includes('BILLING'));
+    const numberAt = textAt(wide, `# ${TAG}-TOT`);
+    const numberShort = textAt(lettered, `# ${TAG}-LH`);
+    check(
+      'and pushes the number line down by exactly what it grew',
+      !!numberAt && !!numberShort && Math.abs(numberAt.y - numberShort.y - (2 * 24 * 1.156 - 28)) < 0.5,
+      `${numberShort?.y} → ${numberAt?.y}`,
+    );
+
+    // A row taller than a page is split as the designed table splits it: what
+    // fits above the foot, then the rest under a repeated head — its short
+    // cells on the first page, beside the start of the long one — never drawn
+    // off the page, never a page of its own for each stray cell.
+    const tallEngine = await renderDocument({
+      title: 'Progress Report',
+      documentNumber: `${TAG}-TALL`,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Item', 'Qty', 'Amount'],
+          widths: [3, 1, 1],
+          align: ['left', 'right', 'right'],
+          rows: [
+            [{ title: 'Spec sheet', body: Array.from({ length: 90 }, (_, i) => `Spec line ${i + 1}`).join('\n') }, '1 lot', 'PHP 1.00'],
+            ['After the spec', '2', 'PHP 2.00'],
+          ],
+        },
+      ],
+    });
+    const tallLines = pdfText(tallEngine).split('\n');
+    check(
+      'a row taller than a page is carried over under a repeated head, not cut off',
+      pages(tallEngine) === 2 && tallLines.includes('Spec line 90') && tallLines.filter((l) => l === 'ITEM').length === 2,
+      `${pages(tallEngine)} pages`,
+    );
+    check(
+      'its short cells print on the first page, beside the start of the long one',
+      pageOf(tallEngine, '1 lot') === 1 && pageOf(tallEngine, 'Spec sheet') === 1 && pageOf(tallEngine, 'After the spec') === 2,
+      `${pageOf(tallEngine, '1 lot')} / ${pageOf(tallEngine, 'After the spec')}`,
+    );
+    check('and nothing is drawn off the bottom', pdfEdges(tallEngine).bottom > 12, `${pdfEdges(tallEngine).bottom}pt clear`);
+
+    // A section title goes over WITH what it heads: whatever room is left at
+    // the foot of a page, the title and the table head share a page.
+    const orphans: string[] = [];
+    for (const n of [38, 44, 46, 48]) {
+      const doc = await renderDocument({
+        title: 'Job Order',
+        documentNumber: `${TAG}-ORPHAN-${n}`,
+        sections: [
+          { kind: 'text', body: Array.from({ length: n }, (_, i) => `Line ${i + 1}`).join('\n') },
+          { kind: 'table', title: 'Cost summary', head: ['Item', 'Description', 'Amount'], rows: [['x', 'y', '1.00']] },
+        ],
+      });
+      if (pageOf(doc, 'COST SUMMARY') !== pageOf(doc, 'ITEM')) orphans.push(`${n} lines: title on page ${pageOf(doc, 'COST SUMMARY')}, head on ${pageOf(doc, 'ITEM')}`);
+    }
+    check('a section title never ends a page with its table head on the next', orphans.length === 0, orphans.join('; ') || 'none orphaned');
+
+    // The currency a route prints is read every time: a changed setting
+    // prints at once, with nothing cached in the process to go stale.
+    await prisma.company.update({ where: { id: 'company' }, data: { currency: 'USD' } });
+    try {
+      check('a changed currency prints at once — nothing caches it', (await companyCurrency()) === 'USD');
+    } finally {
+      await prisma.company.update({ where: { id: 'company' }, data: { currency: co.currency } });
+    }
 
     // ── 11. The quotation: a layout the administrator draws, the engine prints ──
     console.log('\nDesigned documents (the quotation)');
@@ -1206,6 +1409,17 @@ async function main() {
     const letter = await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: longRows }));
     const letterText = pdfText(letter);
     const letterPages = pages(letter);
+    // The engine's DETAILS is the designed quotation's DETAILS, to the
+    // hundredth: both read the same letterhead, both push the rule by the
+    // same amount, both set the heading and its lines at the same distances.
+    const designedDetails = textAt(letter, 'DETAILS');
+    const designedDate = textAt(letter, 'Date: 08/17/2026');
+    check(
+      'the engine heads its details where the designed quotation heads its own',
+      !!designedDetails && !!detailsAt && Math.abs(designedDetails.y - detailsAt.y) < 0.01,
+      `${detailsAt?.y} vs ${designedDetails?.y}`,
+    );
+    check('and dates them on the same line', !!designedDate && !!dateAt && Math.abs(designedDate.y - dateAt.y) < 0.01, `${dateAt?.y} vs ${designedDate?.y}`);
     check('the standard layout names itself QUOTATION, with "# number" and the revision', letterText.includes('QUOTATION') && letterText.includes(`# ${TAG}-LT R2`));
     check('CUSTOMER and DETAILS head the two blocks', letterText.includes('CUSTOMER') && letterText.includes('DETAILS'));
     check('the details print as labelled lines — the date the 08/17/2026 way', letterText.includes('Date: 08/17/2026') && letterText.includes('PR Number: PR-77'));
@@ -1585,6 +1799,15 @@ async function main() {
     check('the source scan found the web app', files.length > 100, `${files.length} files`);
   }
 
+  // A printed list audits as EXPORTED with entityId 'list'; that row opens
+  // the list, never a record page asking the API for a record called "list"
+  // (the link crawl of 2026-10-10 found seven such 404s).
+  check(
+    "a record link for 'list' opens the list itself, and a real id its record",
+    recordLink('lead', 'list') === '/g-ops/leads' && recordLink('lead', 'abc') === '/g-ops/leads/abc' && recordLink('customer', 'list') === '/g-ops/customers',
+    `${recordLink('lead', 'list')} ${recordLink('lead', 'abc')}`,
+  );
+
   // ── The list pattern's URL (web/src/lib/listUrl.ts, rule 16) ───────────────
   console.log('\nList URLs, filters and saved views');
   {
@@ -1878,10 +2101,11 @@ function pdfText(pdf: Buffer): string {
  * edge and y from the top of its page, at the baseline — PDFKit sets each run
  * with its own "1 0 0 1 x y Tm" just before the TJ that shows it.
  */
-function textAt(pdf: Buffer, needle: string): { x: number; y: number } | null {
+function textAt(pdf: Buffer, needle: string, nth = 0): { x: number; y: number } | null {
   const raw = pdf.toString('latin1');
   const stream = /stream\r?\n/g;
   let m: RegExpExecArray | null;
+  let seen = 0;
   while ((m = stream.exec(raw))) {
     const start = m.index + m[0].length;
     const end = raw.indexOf('endstream', start);
@@ -1902,7 +2126,40 @@ function textAt(pdf: Buffer, needle: string): { x: number; y: number } | null {
       for (const part of t[3].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
         piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
       }
-      if (at && piece.includes(needle)) return at;
+      if (at && piece.includes(needle) && seen++ === nth) return at;
+    }
+  }
+  return null;
+}
+
+/**
+ * Which page (from 1) first shows a text run containing `needle`: PDFKit
+ * writes one content stream per page, in page order, and a stream that
+ * inflates to text operators is a page's.
+ */
+function pageOf(pdf: Buffer, needle: string): number | null {
+  const raw = pdf.toString('latin1');
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  let page = 0;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    if (!/\]\s*TJ/.test(body)) continue;
+    page++;
+    for (const t of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of t[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece.includes(needle)) return page;
     }
   }
   return null;

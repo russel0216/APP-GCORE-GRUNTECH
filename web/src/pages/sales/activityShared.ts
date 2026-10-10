@@ -110,8 +110,3 @@ export const REPEATS = [
   { value: 'WEEK', label: 'Every week' },
   { value: 'MONTH', label: 'Every month' },
 ];
-
-/** Local wall-clock value for a datetime-local input. */
-export function toLocalInput(d: Date): string {
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}

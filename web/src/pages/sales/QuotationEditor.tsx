@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { addDays, dayKeyOf, isDayKey, parseDay, todayLocal } from '../../lib/day';
+import { addDays, dayKeyOf, daysBetween, isDayKey, parseDay, todayLocal } from '../../lib/day';
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, loadPeople, type PersonRow } from '../../components/People';
@@ -172,8 +172,6 @@ export function linesFromItems(items: Item[]): Line[] {
 function fromCostingLine(c: CostingLine): Line {
   return { ...blankLine(), productType: c.title, title: c.title, description: c.description, quantity: String(c.quantity), unit: c.unit, unitPrice: String(c.unitPrice) };
 }
-
-const daysBetween = (from: string, to: string) => Math.round((parseDay(to).getTime() - parseDay(from).getTime()) / 86_400_000);
 
 export function QuotationEditor() {
   const { id } = useParams<{ id: string }>();

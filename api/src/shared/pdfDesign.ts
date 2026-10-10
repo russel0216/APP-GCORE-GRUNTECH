@@ -39,21 +39,21 @@ import { formatDateTime, pdfSafe, websiteForPrint, type PdfCell, type PdfTotal, 
  * Every string reaches the page through `pdfSafe`, as in the house style.
  */
 
-export const PAGE_WIDTH = 595.28;
-export const PAGE_HEIGHT = 841.89;
+const PAGE_WIDTH = 595.28;
+const PAGE_HEIGHT = 841.89;
 
-export const ORIENTATIONS = ['portrait', 'landscape'] as const;
-export type DesignOrientation = (typeof ORIENTATIONS)[number];
+const ORIENTATIONS = ['portrait', 'landscape'] as const;
+type DesignOrientation = (typeof ORIENTATIONS)[number];
 
 /** The page a layout draws on: A4 upright, or on its side (the sales order). */
-export function pageSizeOf(design: { orientation?: DesignOrientation }): { w: number; h: number } {
+function pageSizeOf(design: { orientation?: DesignOrientation }): { w: number; h: number } {
   return design.orientation === 'landscape' ? { w: PAGE_HEIGHT, h: PAGE_WIDTH } : { w: PAGE_WIDTH, h: PAGE_HEIGHT };
 }
 
-export const ANCHORS = ['first', 'every', 'later', 'after', 'last'] as const;
-export type DesignAnchor = (typeof ANCHORS)[number];
-export const ALIGNS = ['left', 'center', 'right'] as const;
-export type DesignAlign = (typeof ALIGNS)[number];
+const ANCHORS = ['first', 'every', 'later', 'after', 'last'] as const;
+type DesignAnchor = (typeof ANCHORS)[number];
+const ALIGNS = ['left', 'center', 'right'] as const;
+type DesignAlign = (typeof ALIGNS)[number];
 
 /** What a column of the line table can print. */
 export const ITEM_COLUMNS = ['no', 'product', 'qtyUnit', 'qty', 'unit', 'unitPrice', 'amount', 'group', 'cost', 'margin'] as const;
@@ -185,7 +185,7 @@ const signoffsBlock = z.object({
   showEmail: z.boolean().default(true),
 });
 
-export const designBlockSchema = z.discriminatedUnion('type', [
+const designBlockSchema = z.discriminatedUnion('type', [
   textBlock,
   lineBlock,
   boxBlock,
@@ -232,12 +232,12 @@ export const designSchema = z
   });
 
 export type PdfDesign = z.infer<typeof designSchema>;
-export type DesignBlock = z.infer<typeof designBlockSchema>;
+type DesignBlock = z.infer<typeof designBlockSchema>;
 export type TextBlock = Extract<DesignBlock, { type: 'text' }>;
 export type ItemsBlock = Extract<DesignBlock, { type: 'items' }>;
-export type TotalsBlock = Extract<DesignBlock, { type: 'totals' }>;
-export type SignoffsBlock = Extract<DesignBlock, { type: 'signoffs' }>;
-export type LogoBlock = Extract<DesignBlock, { type: 'logo' }>;
+type TotalsBlock = Extract<DesignBlock, { type: 'totals' }>;
+type SignoffsBlock = Extract<DesignBlock, { type: 'signoffs' }>;
+type LogoBlock = Extract<DesignBlock, { type: 'logo' }>;
 
 /** A box as a person reads it in an error: its name, else what it is. */
 function label(b: { name?: string; type: string; id: string }): string {
@@ -287,13 +287,8 @@ export const PAGE_FIELDS: DesignField[] = [
 
 type CompanyRow = Awaited<ReturnType<typeof prisma.company.findUnique>>;
 
-/** "https://www.gruntechnology.com/" → "www.gruntechnology.com", as the letterhead prints it. */
-function siteForPrint(website?: string | null): string {
-  return (website ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-}
-
 export function companyValues(c: CompanyRow): Record<string, string> {
-  const site = siteForPrint(c?.website);
+  const site = websiteForPrint(c?.website);
   return {
     'company.name': c?.legalName?.trim() || c?.name || '',
     'company.tradeName': c?.name ?? '',
@@ -316,7 +311,7 @@ export function companyValues(c: CompanyRow): Record<string, string> {
 const PLACEHOLDER = /\{\{\s*([A-Za-z][A-Za-z0-9.]*)\s*(?:\|([^{}]*))?\}\}/g;
 
 /** Every field a piece of template text names. */
-export function fieldsIn(text: string): string[] {
+function fieldsIn(text: string): string[] {
   return [...text.matchAll(PLACEHOLDER)].map((m) => m[1]);
 }
 
@@ -347,7 +342,7 @@ export function unknownFields(design: PdfDesign, known: Set<string>): { field: s
 
 // ── Template text ─────────────────────────────────────────────────────────────
 
-export interface Run {
+interface Run {
   text: string;
   bold: boolean;
 }
@@ -430,7 +425,7 @@ function merge(runs: Run[]): Run[] {
 }
 
 /** Template text resolved flat, for one-line labels such as a column's. */
-export function resolveInline(text: string, values: Record<string, string | undefined>): string {
+function resolveInline(text: string, values: Record<string, string | undefined>): string {
   return resolveTemplate(text, values)
     .map((line) => line.map((r) => r.text).join(''))
     .join(' ');
@@ -566,9 +561,7 @@ function drawLaid(doc: PDFKit.PDFDocument, line: Laid, x: number, y: number, wid
 // ── What a module supplies ────────────────────────────────────────────────────
 
 /** A row of the line table: a subheading, or a line's cells by column key. */
-export type DesignRow =
-  | { heading: string; /** A SCORO group, not a subheading: left out when the table has a Group column. */ group?: boolean }
-  | { cells: Partial<Record<ItemColumnKey, PdfCell>> };
+export type DesignRow = { heading: string } | { cells: Partial<Record<ItemColumnKey, PdfCell>> };
 
 export interface DesignData {
   /** The document's own fields; the company's are added by the engine. */
@@ -913,7 +906,6 @@ class Renderer {
       x += width;
       return col;
     });
-    const hasGroup = cols.some((c) => c.key === 'group');
     const product = cols.find((c) => c.key === 'product');
     const headingWidth = product ? product.x + product.width - b.x : b.w;
     const body: Style = { size: b.size, italic: false, spacing: 0, upper: false };
@@ -981,7 +973,7 @@ class Renderer {
     }
     head();
 
-    const rows = this.data.rows.filter((r) => !('heading' in r && r.group && hasGroup));
+    const rows = this.data.rows;
     const rowCells = (r: DesignRow) => ('cells' in r ? cols.map((c) => cellLines(r.cells[c.key], c.width - padX * 2)) : []);
     const fresh = flowBottom - flowTop - headH;
 

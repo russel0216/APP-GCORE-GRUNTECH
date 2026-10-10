@@ -5,8 +5,8 @@ import { useAuth } from '../../../lib/auth';
 import { CalendarToolbar, MonthCalendar, useCalendarNav, type CalendarEvent } from '../../../components/MonthCalendar';
 import { Panel } from '../../../components/charts';
 import { dayKeyOf, parseDay } from '../../../lib/day';
-import { ErrorBox, Loading, Modal, ModalFoot, StatusBadge, statusTone, useToast } from '../../../components/ui';
-import { RESULT_LABEL, RESULT_TONES, SESSION_TONES, SessionModal, sessionWhen, type SessionDetailData } from './Sessions';
+import { ErrorBox, Loading, Modal, ModalFoot, StatusBadge, formatSpan, statusTone, useToast } from '../../../components/ui';
+import { RESULT_LABEL, RESULT_TONES, SESSION_TONES, SessionModal, type SessionDetailData } from './Sessions';
 
 /**
  * Training Calendar — every scheduled session, company-wide (item 13).
@@ -147,7 +147,7 @@ export function TrainingCalendar() {
                   <button type="button" className="academy-month-item" onClick={() => setPreview(r.id)}>
                     <span className="academy-month-title">{r.label}</span>
                     <span className="faint">
-                      {sessionWhen(r.startsAt, r.endsAt)} · {r.trainerName}
+                      {formatSpan(r.startsAt, r.endsAt)} · {r.trainerName}
                     </span>
                     <span className="academy-month-meta">
                       <StatusBadge status={r.status} extra={SESSION_TONES} />
@@ -291,7 +291,7 @@ function SessionPreview({
           </div>
           <dl className="kv">
             <dt>When</dt>
-            <dd>{sessionWhen(s.startsAt, s.endsAt)}</dd>
+            <dd>{formatSpan(s.startsAt, s.endsAt)}</dd>
             <dt>Where</dt>
             <dd>
               {s.venue ?? (s.meetLink ? 'Online — Google Meet' : '—')}

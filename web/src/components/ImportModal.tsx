@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { api, getToken } from '../lib/api';
+import { api, downloadBlob } from '../lib/api';
 import { ErrorBox, Modal, useToast } from './ui';
 
 /**
@@ -78,19 +78,9 @@ export function ImportModal({
   }
 
   function downloadTemplate() {
-    fetch(`/api/imports/${entity}/template`, {
-      headers: { Authorization: `Bearer ${getToken()}` },
-    })
-      .then((r) => r.blob())
-      .then((b) => {
-        const url = URL.createObjectURL(b);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `gcore-${entity}-template.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-      })
-      .catch(() => toast('error', 'Could not download the template'));
+    downloadBlob(`/imports/${entity}/template`, `gcore-${entity}-template.csv`).catch(() =>
+      toast('error', 'Could not download the template'),
+    );
   }
 
   const clean = report && report.errors === 0;

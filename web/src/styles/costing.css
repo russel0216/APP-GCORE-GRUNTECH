@@ -303,32 +303,8 @@ table.data.cs-tasks {
   border-top: 1px solid var(--line-soft);
 }
 
-/* The name box's suggestions: the name, then what it cost and where from. */
-.cs-suggest {
-  min-width: 22rem;
-}
-
-.cs-suggest button {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-
-.cs-suggest-name {
-  font-weight: 600;
-}
-
-.cs-suggest-meta,
-.cs-suggest-desc {
-  font-size: var(--fs-xs);
-}
-
-.cs-suggest-desc {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
+/* The name box's suggestions (.cs-suggest-*) are the quotation editor's
+   .qe-suggest-* rules, in quotation-editor.css — one menu, two prefixes. */
 
 .cs-template-save {
   padding: var(--s-4);

@@ -21,6 +21,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { ProgressBar } from '../delivery/Projects';
 import { NumberInput } from '../../components/NumberInput';
+import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 
 // ════════════════════════════════════════════════════════════════════
 //  CANVASS
@@ -460,19 +461,17 @@ function AddSupplierModal({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
-  const [form, setForm] = useState({ supplierId: '', leadTimeDays: '', terms: '' });
-
-  useEffect(() => {
-    api.get<typeof suppliers>('/suppliers/lookup').then(setSuppliers).catch(() => {});
-  }, []);
+  // One more supplier to canvass: anyone on the master not already on it.
+  const [supplier, setSupplier] = useState<SupplierRef | null>(null);
+  const [form, setForm] = useState({ leadTimeDays: '', terms: '' });
 
   async function save() {
+    if (!supplier) return;
     setBusy(true);
     setError(null);
     try {
       await api.post(`/canvasses/${canvassId}/suppliers`, {
-        supplierId: form.supplierId,
+        supplierId: supplier.id,
         leadTimeDays: form.leadTimeDays === '' ? null : Number(form.leadTimeDays),
         terms: form.terms || null,
       });
@@ -483,30 +482,21 @@ function AddSupplierModal({
     }
   }
 
-  const available = suppliers.filter((s) => !existing.includes(s.id));
-
   return (
     <Modal
       title="Add supplier"
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || !form.supplierId}>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !supplier}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
       }
     >
       <ErrorBox error={error} />
-      <Field label="Supplier">
-        <select value={form.supplierId} onChange={(e) => setForm({ ...form, supplierId: e.target.value })}>
-          <option value="">— choose —</option>
-          {available.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+      <Field label="Supplier" required>
+        <SupplierPicker value={supplier} onChange={setSupplier} onError={setError} exclude={existing} autoFocus />
       </Field>
       <div className="grid grid-2">
         <Field label="Lead time (days)">
@@ -877,13 +867,9 @@ function NewPoModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  const [supplier, setSupplier] = useState<SupplierRef | null>(null);
   const [context, setContext] = useState<string | null>(null);
-  const [form, setForm] = useState({ supplierId: '', deliveryDate: '', terms: '', vatInclusive: false });
-
-  useEffect(() => {
-    api.get<typeof suppliers>('/suppliers/lookup').then(setSuppliers).catch(() => {});
-  }, []);
+  const [form, setForm] = useState({ deliveryDate: '', terms: '', vatInclusive: false });
 
   // From an awarded canvass the supplier is decided — preselect and explain.
   useEffect(() => {
@@ -893,7 +879,7 @@ function NewPoModal({
       .then((c) => {
         const winner = c.suppliers.find((s) => s.isSelected);
         if (winner) {
-          setForm((f) => ({ ...f, supplierId: winner.supplier.id }));
+          setSupplier({ id: winner.supplier.id, name: winner.supplier.name });
           setContext(`From ${c.number}, awarded to ${winner.supplier.name} at ${formatMoney(winner.total)}.`);
         }
       })
@@ -909,11 +895,12 @@ function NewPoModal({
   }, [fromRequest, fromCanvass]);
 
   async function create() {
+    if (!supplier) return;
     setBusy(true);
     setError(null);
     try {
       const created = await api.post<{ id: string }>('/purchase-orders', {
-        supplierId: form.supplierId,
+        supplierId: supplier.id,
         requestId: fromRequest || null,
         canvassId: fromCanvass || null,
         deliveryDate: form.deliveryDate || null,
@@ -934,7 +921,7 @@ function NewPoModal({
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={create} disabled={busy || !form.supplierId}>
+          <button className="btn btn-primary" onClick={create} disabled={busy || !supplier}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
@@ -943,19 +930,14 @@ function NewPoModal({
       <ErrorBox error={error} />
       {context && <div className="alert info">{context}</div>}
 
-      <Field label="Supplier">
-        <select
-          value={form.supplierId}
+      <Field label="Supplier" required>
+        <SupplierPicker
+          value={supplier}
+          onChange={setSupplier}
+          onError={setError}
           disabled={!!fromCanvass}
-          onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
-        >
-          <option value="">— choose —</option>
-          {suppliers.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+          autoFocus={!fromCanvass}
+        />
       </Field>
       <div className="grid grid-2">
         <Field label="Required by">
@@ -1373,9 +1355,9 @@ function PoHeaderModal({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  // The order's own supplier is the picked value; the lookup need not list it.
+  const [supplier, setSupplier] = useState<SupplierRef | null>({ id: po.supplier.id, name: po.supplier.name });
   const [form, setForm] = useState({
-    supplierId: po.supplier.id,
     deliveryDate: dateInput(po.deliveryDate),
     terms: po.terms ?? '',
     deliverTo: po.deliverTo ?? '',
@@ -1383,16 +1365,13 @@ function PoHeaderModal({
     vatInclusive: po.vatInclusive,
   });
 
-  useEffect(() => {
-    api.get<typeof suppliers>('/suppliers/lookup').then(setSuppliers).catch(() => {});
-  }, []);
-
   async function save() {
+    if (!supplier) return;
     setBusy(true);
     setError(null);
     try {
       await api.patch(`/purchase-orders/${po.id}`, {
-        ...(po.fromCanvass ? {} : { supplierId: form.supplierId }),
+        ...(po.fromCanvass ? {} : { supplierId: supplier.id }),
         deliveryDate: form.deliveryDate || null,
         terms: form.terms || null,
         deliverTo: form.deliverTo || null,
@@ -1406,18 +1385,13 @@ function PoHeaderModal({
     }
   }
 
-  // The current supplier stays pickable even if the lookup omits it.
-  const options = suppliers.some((s) => s.id === po.supplier.id)
-    ? suppliers
-    : [{ id: po.supplier.id, name: po.supplier.name }, ...suppliers];
-
   return (
     <Modal
       title={`Modify purchase order ${po.number}`}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
-          <button className="btn btn-primary" onClick={save} disabled={busy || !form.supplierId}>
+          <button className="btn btn-primary" onClick={save} disabled={busy || !supplier}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </ModalFoot>
@@ -1426,19 +1400,10 @@ function PoHeaderModal({
       <ErrorBox error={error} />
       <Field
         label="Supplier"
+        required
         hint={po.fromCanvass ? `Awarded on ${po.fromCanvass.number} — raise a new canvass to change it` : undefined}
       >
-        <select
-          value={form.supplierId}
-          disabled={!!po.fromCanvass}
-          onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
-        >
-          {options.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+        <SupplierPicker value={supplier} onChange={setSupplier} onError={setError} disabled={!!po.fromCanvass} />
       </Field>
       <div className="grid grid-2">
         <Field label="Required by">

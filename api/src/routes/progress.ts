@@ -540,7 +540,6 @@ progressRoutes.get(
     }
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Progress Report',
       documentNumber: report.number,
       date: report.periodTo,
@@ -868,7 +867,6 @@ billingRoutes.get(
     );
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Progress Billing',
       documentNumber: billing.number,
       date: billing.billingDate,

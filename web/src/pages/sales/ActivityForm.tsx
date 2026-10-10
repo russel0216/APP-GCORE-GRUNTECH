@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FocusEvent } from 'react';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf } from '../../lib/day';
-import { Checkbox, ErrorBox, Field, Modal, ModalFoot, formatDateTime } from '../../components/ui';
+import { Checkbox, ErrorBox, Field, Modal, ModalFoot, formatDateTime, formatTime } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { PeoplePicker } from '../../components/PeoplePicker';
 import { PersonSelect, toPerson } from '../../components/People';
@@ -152,7 +152,7 @@ export function ActivityModal({
         ? `Through ${new Date(endsAt.getTime() - 1).toLocaleDateString('en-PH', { weekday: 'short', month: 'short', day: 'numeric' })}`
         : 'All day'
       : dayKeyOf(endsAt) === form.date
-        ? `Ends ${endsAt.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })}`
+        ? `Ends ${formatTime(endsAt)}`
         : `Ends ${formatDateTime(endsAt)}`;
   const repeatBad = !!form.repeatEvery && (!form.repeatUntil || form.repeatUntil < form.date);
   const callLinkBad = !!form.callLink.trim() && !/^https?:\/\//i.test(form.callLink.trim());

@@ -125,7 +125,7 @@ export interface FieldDef {
 export type PdfCell = string | { title: string; body?: string };
 
 export interface Sample {
-  rows: ({ heading: string; group?: boolean } | { cells: Partial<Record<ColumnKey, PdfCell>> })[];
+  rows: ({ heading: string } | { cells: Partial<Record<ColumnKey, PdfCell>> })[];
   totals: { label: string; value: string; bold?: boolean }[] | null;
   signatories: { role: string; name?: string; position?: string; phone?: string; email?: string; at?: string | null }[];
 }

@@ -400,7 +400,6 @@ cadJobOrderRoutes.get(
       f.ids ? 'the rows selected' : null,
     ].filter(Boolean);
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'CAD Job Orders',
       date: new Date(),
       reference: `${summary.open} open, ${summary.overdue} overdue${rows.length === 1000 ? ', first 1,000 printed' : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
@@ -1083,7 +1082,6 @@ cadJobOrderRoutes.get(
       { role: 'Accepted by', name: row.completedBy?.name, at: row.completedAt ?? undefined },
     ];
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'CAD Job Order',
       documentNumber: row.number,
       date: row.createdAt,

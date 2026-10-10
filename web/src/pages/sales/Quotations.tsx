@@ -11,7 +11,8 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
 import { loadPeople } from '../../components/People';
-import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
+import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, initials, useToast, type Tone } from '../../components/ui';
+import type { CostPanel } from '../../lib/quotationMath';
 
 export const OUTCOMES = [
   { value: 'OPEN', label: 'Open' },
@@ -618,26 +619,6 @@ export interface Item {
   providerUserId?: string | null;
   providerUser?: Person | null;
   costNote?: string | null;
-}
-
-/** SCORO's right-hand panel. Percentages are of the sum without tax. */
-export interface CostPanel {
-  totalCost: number;
-  inHouseCost: number;
-  outsourcedCost: number;
-  unassignedCost: number;
-  totalMargin: number;
-  inHouseMargin: number;
-  outsourcedMargin: number;
-  unassignedMargin: number;
-  totalCostPct: number | null;
-  inHouseCostPct: number | null;
-  outsourcedCostPct: number | null;
-  totalMarginPct: number | null;
-  inHouseMarginPct: number | null;
-  outsourcedMarginPct: number | null;
-  costedLines: number;
-  lineCount: number;
 }
 
 export interface Revision {
@@ -1746,14 +1727,6 @@ function Stamp({ at, by }: { at: string | null | undefined; by?: { name: string 
 
 const outcomeLabel = (o: string) => OUTCOMES.find((x) => x.value === o)?.label ?? o;
 const dayCount = (n: number) => `${n} day${n === 1 ? '' : 's'}`;
-const initials = (name: string) =>
-  name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => w[0])
-    .slice(0, 3)
-    .join('')
-    .toUpperCase();
 
 
 

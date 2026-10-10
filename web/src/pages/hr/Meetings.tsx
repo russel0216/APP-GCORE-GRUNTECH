@@ -15,7 +15,7 @@ import {
   useCalendarNav,
   type CalendarEvent,
 } from '../../components/MonthCalendar';
-import { dayKeyOf, parseDay } from '../../lib/day';
+import { dayKeyOf, parseDay, toLocalInput } from '../../lib/day';
 import {
   Checkbox,
   Empty,
@@ -25,8 +25,10 @@ import {
   Modal,
   ModalFoot,
   StatusBadge,
+  durationLabel,
   formatDate,
   formatDateTime,
+  formatSpan,
   statusTone,
   useToast,
   type Tone,
@@ -141,29 +143,9 @@ interface CalendarRow {
   mine: boolean;
 }
 
-/** Local wall-clock value for a datetime-local input. */
-function toLocalInput(d: Date): string {
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-
-/** "Sep 28, 2026, 09:00 AM – 10:00 AM", or both dates when it crosses midnight. */
-function whenText(startsAt: string, endsAt: string): string {
-  const s = new Date(startsAt);
-  const e = new Date(endsAt);
-  const time = (d: Date) => d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' });
-  if (s.toDateString() === e.toDateString()) {
-    return `${formatDate(s)}, ${time(s)} – ${time(e)}`;
-  }
-  return `${formatDateTime(s)} – ${formatDateTime(e)}`;
-}
-
-/** Minutes between two ISO stamps, as people say them. */
+/** How long a meeting runs, as SCORO prints a duration ("1h 30min") — the one `durationLabel`. */
 function durationText(startsAt: string, endsAt: string): string {
-  const minutes = Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000);
-  if (minutes < 60) return `${minutes} min`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m ? `${h} h ${m} min` : `${h} h`;
+  return durationLabel(Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000));
 }
 
 /** Everyone with a login, as the invitee picker takes them — the one people lookup. */
@@ -228,7 +210,7 @@ export function Meetings() {
       width: '220px',
       render: (r) => (
         <div>
-          <div>{whenText(r.startsAt, r.endsAt)}</div>
+          <div>{formatSpan(r.startsAt, r.endsAt)}</div>
           <div className="faint">{durationText(r.startsAt, r.endsAt)}</div>
         </div>
       ),
@@ -784,7 +766,7 @@ export function MeetingDetail() {
         statusExtra={MEETING_TONES}
         meta={
           <>
-            <strong>{whenText(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised
+            <strong>{formatSpan(m.startsAt, m.endsAt)}</strong> · {durationText(m.startsAt, m.endsAt)} · organised
             by {m.isOrganizer ? 'you' : m.organizer.name}
             {m.location ? ` · ${m.location}` : ''}
             {m.job && (

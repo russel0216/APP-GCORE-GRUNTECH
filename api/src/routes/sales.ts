@@ -364,7 +364,6 @@ leadRoutes.get(
     ].filter(Boolean);
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Leads',
       date: new Date(),
       reference: `${summary.count} lead(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
@@ -515,7 +514,6 @@ leadRoutes.get(
     if (lead.notes) sections.push({ kind: 'text', title: 'Notes', body: lead.notes });
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Lead',
       documentNumber: lead.number,
       date: lead.createdAt,
@@ -1382,7 +1380,6 @@ quotationRoutes.get(
     ].filter(Boolean);
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Quotations',
       date: new Date(),
       reference: `${summary.count} quotation(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
@@ -4284,7 +4281,6 @@ pipelineRoutes.get(
       ),
     ];
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Sales Forecast',
       date: new Date(),
       reference: `${PERIOD_WORD[forecast.period]}, ${forecast.from} to ${forecast.to}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,

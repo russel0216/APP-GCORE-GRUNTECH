@@ -1232,9 +1232,8 @@ function cellText(cell: PdfCell | undefined): { title?: string; body?: string } 
 
 function ItemsBody({ block, sample, values, scale, rows }: { block: ItemsBlock; sample: Sample; values: Record<string, string>; scale: number; rows: number }) {
   const total = block.columns.reduce((n, c) => n + c.width, 0) || 1;
-  const hasGroup = block.columns.some((c) => c.key === 'group');
   const k = block.size / 9;
-  const list = sample.rows.filter((r) => !('heading' in r && r.group && hasGroup));
+  const list = sample.rows;
   // Later pages are lines and more lines; page 1 shows the sample as it starts.
   const lines = list.filter((r) => 'cells' in r);
   const shownRows = rows > 3 && lines.length ? Array.from({ length: rows }, (_, i) => lines[i % lines.length]) : list.slice(0, rows);

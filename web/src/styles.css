@@ -788,16 +788,6 @@ textarea {
   box-shadow: inset 2px 0 0 var(--magenta);
 }
 
-.nav-item.soon {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.nav-item.soon:hover {
-  background: none;
-  color: var(--muted);
-}
-
 .tag {
   font-size: 9px;
   letter-spacing: 0.8px;
@@ -2074,58 +2064,6 @@ hr.rule {
   text-shadow: 0 0 4px rgb(var(--shade-rgb) / 0.8);
 }
 
-/* ─────────────────────────────── Sales calendar ────────────────────────── */
-
-.calendar-week {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(120px, 1fr));
-  gap: 8px;
-  overflow-x: auto;
-}
-
-.cal-day {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  min-height: 190px;
-  display: flex;
-  flex-direction: column;
-}
-
-.cal-day.today {
-  border-color: var(--magenta);
-  box-shadow: 0 0 0 1px var(--magenta-soft);
-}
-
-.cal-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-  font-size: var(--fs-xs);
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.cal-head strong {
-  font-size: var(--fs-lg);
-  color: var(--text);
-}
-
-.cal-day.today .cal-head strong {
-  color: var(--neon);
-}
-
-.cal-body {
-  flex: 1;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
 /*
   A <button> now rather than a div with onClick (rule 13), so the reset comes
   first and the chip's own look is layered over it.
@@ -2309,60 +2247,7 @@ hr.rule {
   margin-top: var(--s-3);
 }
 
-/* ─────────────────────────────── Pipeline ──────────────────────────────── */
-
-.pipeline {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(190px, 1fr);
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 8px;
-}
-
-.pipe-col {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  padding: 10px;
-  min-height: 200px;
-}
-
-.pipe-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.pipe-total {
-  font-size: 12px;
-  color: var(--neon-dim);
-  margin-top: 4px;
-}
-
-.pipe-body {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  margin-top: 10px;
-}
-
-/* A <Link> now rather than a div with onClick, so it is keyboard reachable. */
-.pipe-card {
-  display: block;
-  padding: var(--s-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  cursor: pointer;
-}
-
-.pipe-card:hover {
-  border-color: var(--magenta);
-  background: var(--surface-3);
-}
+/* The sales board's rules are all in styles/pipeline.css. */
 
 /* ── Narrow-screen module navigation ─────────────────────────────────────── */
 /* The sidebar's replacement below 860px: the same screens, scrolled sideways. */
@@ -2446,16 +2331,6 @@ hr.rule {
   font-weight: 600;
 }
 
-.sub-nav-item.soon {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.sub-nav-item.soon:hover {
-  color: var(--muted);
-  border-bottom-color: transparent;
-}
-
 @media (max-width: 860px) {
   .sub-nav {
     padding: 0 var(--s-3);
@@ -2484,10 +2359,6 @@ hr.rule {
   background: rgb(var(--magenta-rgb) / 0.2);
   border-color: var(--magenta);
   color: var(--neon);
-}
-
-.strip-item.soon {
-  opacity: 0.4;
 }
 
 @media (max-width: 860px) {

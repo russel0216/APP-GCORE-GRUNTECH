@@ -64,13 +64,6 @@
   white-space: nowrap;
 }
 
-/* ── Industry select: a native <select> with its hint under it ───────────── */
-
-.m-industry-code {
-  font-family: var(--mono);
-  margin-right: var(--s-1);
-}
-
 /* ── Tabs on a record page (partner detail) — the scope-switch buttons ──── */
 
 .m-tabs {

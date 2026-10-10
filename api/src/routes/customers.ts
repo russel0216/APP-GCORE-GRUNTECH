@@ -214,7 +214,6 @@ customerRoutes.get(
     ].filter(Boolean);
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Customers',
       date: new Date(),
       reference: `${summary.count} customer(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,

@@ -102,7 +102,12 @@ export const api = {
     const token = getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(`/api${path}`, { headers });
-    if (!res.ok) throw new ApiError(res.status, `Request failed (${res.status})`);
+    if (!res.ok) {
+      // The server says why in JSON ({ error: string }); say the same.
+      const body = await res.json().catch(() => null);
+      const message = body && typeof body.error === 'string' ? body.error : `Request failed (${res.status})`;
+      throw new ApiError(res.status, message);
+    }
     return res.blob();
   },
 };
@@ -176,7 +181,6 @@ export interface MenuSubmodule {
   key: string;
   label: string;
   path: string;
-  phase: number;
   note?: string;
   /** Sidebar heading, set in the permission registry. Absent means "flat". */
   group?: string;
@@ -223,11 +227,3 @@ export interface Me {
   unread: number;
 }
 
-/**
- * Screens at or below this phase are live; anything above renders as upcoming.
- *
- * Bumped as each phase lands. The registry on the server already declares every
- * screen and its phase, so this is the only place the front end needs to know
- * how far the build has got.
- */
-export const SHIPPED_PHASE = 9;

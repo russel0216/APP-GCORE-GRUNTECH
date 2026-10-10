@@ -2402,7 +2402,7 @@ async function main() {
       check(`${label} prints as a PDF`, res.status === 200 && res.type.includes('application/pdf'), `${res.status} ${res.type}`);
       check(
         `${label} names itself, prints money as PHP and never as ±`,
-        text.toUpperCase().includes(title.toUpperCase()) && text.includes('PHP') && !text.includes('±'),
+        text.replace(/\s+/g, ' ').toUpperCase().includes(title.toUpperCase()) && text.includes('PHP') && !text.includes('±'),
         text.slice(0, 160),
       );
     }

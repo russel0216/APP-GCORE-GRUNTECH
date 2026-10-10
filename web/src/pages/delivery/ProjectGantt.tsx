@@ -1,6 +1,6 @@
 import { useId, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
-import { addDays, mondayOf, parseDay, todayLocal } from '../../lib/day';
+import { addDays, daysBetween, mondayOf, parseDay, todayLocal } from '../../lib/day';
 import { Empty, ErrorBox, Field, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { PersonSelect, usePeople } from '../../components/People';
@@ -48,11 +48,6 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 /** A DATE from the API ('2026-01-05T00:00:00.000Z') as its day key. */
 const keyOf = (iso: string | null | undefined): string | null => (iso ? iso.slice(0, 10) : null);
-
-/** Days between two keys, inclusive of neither end's time: b − a. */
-function daysBetween(a: string, b: string): number {
-  return Math.round((parseDay(b).getTime() - parseDay(a).getTime()) / 86_400_000);
-}
 
 type Row =
   | { kind: 'phase'; item: GanttScopeItem; start: string | null; end: string | null; pct: number | null; tasks: number }

@@ -126,3 +126,21 @@ export function windowFor(view: CalendarViewKey, key: string): { from: Date; to:
 export function todayLocal(): string {
   return dayKeyOf(new Date());
 }
+
+/**
+ * Whole days from `a` to `b` (b − a), both day keys. Local midnights, so a
+ * DST change between them does not shave the count to 0.96 of a day. The
+ * Gantt chart's columns and a quotation's validity both count this way.
+ */
+export function daysBetween(a: string, b: string): number {
+  return Math.round((parseDay(b).getTime() - parseDay(a).getTime()) / 86_400_000);
+}
+
+/**
+ * The value a `<input type="datetime-local">` takes for an instant: the LOCAL
+ * wall clock as 'YYYY-MM-DDTHH:MM'. `toISOString()` alone would give UTC —
+ * 08:00 Manila would come back as 00:00 — so the offset is folded in first.
+ */
+export function toLocalInput(d: Date): string {
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}

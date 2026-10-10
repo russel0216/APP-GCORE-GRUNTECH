@@ -236,7 +236,6 @@ assetRoutes.get(
     ].filter(Boolean);
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Installed Base',
       date: new Date(),
       reference: `${rows.length} machine(s)${filters.length ? ` — ${filters.join(' · ')}` : ''}`,

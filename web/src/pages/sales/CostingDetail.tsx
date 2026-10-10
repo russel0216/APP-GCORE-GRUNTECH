@@ -11,7 +11,7 @@ import { PlanBar, TemplateSavePanel } from './CostingSheet';
 
 /**
  * The costing, as the estimate reads: its details, the project budgeted cost
- * in the five buckets, the cost summary, the scope of work on its working-day
+ * in the six buckets, the cost summary, the scope of work on its working-day
  * plan, the terms, and where it has gone since. Nothing is edited here — Modify
  * opens the sheet (`/g-ops/costing/:id/edit`), a page rather than a dialog.
  *
@@ -217,7 +217,7 @@ export function CostingDetailPage() {
     setTemplatePanel(false);
   }
 
-  // Cost lines grouped into the five buckets, in the model's order.
+  // Cost lines grouped into the six buckets, in the model's order.
   const buckets = new Map<string, { category: CostLine['costCategory']; lines: CostLine[]; total: number }>();
   for (const line of costing.lines) {
     const b = buckets.get(line.costCategory.id) ?? { category: line.costCategory, lines: [], total: 0 };
@@ -430,7 +430,7 @@ export function CostingDetailPage() {
           Project budgeted cost
         </h2>
         {costing.lines.length === 0 ? (
-          <Empty title="No cost lines yet" hint="Modify the costing to add what the job will cost, in the five buckets." />
+          <Empty title="No cost lines yet" hint="Modify the costing to add what the job will cost, in the six buckets." />
         ) : (
           <div className="table-wrap">
             <table className="data cs-view">

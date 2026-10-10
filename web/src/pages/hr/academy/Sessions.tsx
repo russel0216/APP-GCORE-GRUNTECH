@@ -18,12 +18,13 @@ import {
   Modal,
   ModalFoot,
   StatusBadge,
-  formatDate,
   formatDateTime,
+  formatSpan,
   useToast,
   type Tone,
 } from '../../../components/ui';
 import { NumberInput } from '../../../components/NumberInput';
+import { toLocalInput } from '../../../lib/day';
 
 /**
  * Training sessions — G-HR › Academy (item 13).
@@ -152,20 +153,6 @@ interface EmployeeLookup {
   department: { id: string; name: string } | null;
 }
 
-/** Local wall-clock value for a datetime-local input. */
-export function toLocalInput(d: Date): string {
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-
-/** "Sep 28, 2026, 09:00 AM – 05:00 PM", or both dates when it runs over days. */
-export function sessionWhen(startsAt: string, endsAt: string): string {
-  const s = new Date(startsAt);
-  const e = new Date(endsAt);
-  const time = (d: Date) => d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' });
-  if (s.toDateString() === e.toDateString()) return `${formatDate(s)}, ${time(s)} – ${time(e)}`;
-  return `${formatDateTime(s)} – ${formatDateTime(e)}`;
-}
-
 export function useCourseOptions(): CourseOption[] {
   const [rows, setRows] = useState<CourseOption[]>([]);
   useEffect(() => {
@@ -275,7 +262,7 @@ export function Sessions() {
       label: 'When',
       sortKey: 'startsAt',
       width: '230px',
-      render: (r) => sessionWhen(r.startsAt, r.endsAt),
+      render: (r) => formatSpan(r.startsAt, r.endsAt),
     },
     {
       key: 'course',
@@ -777,7 +764,7 @@ export function SessionDetail() {
         statusExtra={SESSION_TONES}
         meta={
           <>
-            <strong>{sessionWhen(s.startsAt, s.endsAt)}</strong> · trained by {s.isTrainer ? 'you' : s.trainer.name}
+            <strong>{formatSpan(s.startsAt, s.endsAt)}</strong> · trained by {s.isTrainer ? 'you' : s.trainer.name}
             {s.venue ? ` · ${s.venue}` : s.meetLink ? ' · online' : ''}
             {s.provider ? ` · ${s.provider}` : ''}
             {s.capacity ? ` · ${s.attendees.length} of ${s.capacity} places taken` : ''}

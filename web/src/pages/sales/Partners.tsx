@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { openAttachment } from '../../components/Attachments';
+import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 import { Stat } from '../../components/charts';
 import { useConfirm } from '../../components/Confirm';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -487,9 +488,9 @@ function PartnerForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const [supplierQuery, setSupplierQuery] = useState('');
-  const [suppliers, setSuppliers] = useState<{ id: string; code: string; name: string }[]>([]);
-  const [supplierId, setSupplierId] = useState('');
+  // The supplier being flagged as a partner; "A new company" is how one is
+  // filed from here, so the picker offers no quick-add.
+  const [supplier, setSupplier] = useState<SupplierRef | null>(null);
 
   const [form, setForm] = useState({
     name: partner?.name ?? '',
@@ -510,19 +511,6 @@ function PartnerForm({
     contactMobile: '',
   });
 
-  useEffect(() => {
-    if (partner || mode !== 'existing' || !mayPickSupplier) return;
-    const t = setTimeout(() => {
-      api
-        .get<{ id: string; code: string; name: string }[]>(
-          `/suppliers/lookup${supplierQuery ? `?q=${encodeURIComponent(supplierQuery)}` : ''}`,
-        )
-        .then(setSuppliers)
-        .catch(() => setSuppliers([]));
-    }, 250);
-    return () => clearTimeout(t);
-  }, [supplierQuery, mode, partner, mayPickSupplier]);
-
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -541,8 +529,9 @@ function PartnerForm({
           notes: form.notes || null,
         });
       } else if (mode === 'existing') {
+        if (!supplier) return;
         saved = await api.post<{ id: string }>('/partners', {
-          supplierId,
+          supplierId: supplier.id,
           brand: form.brand || null,
           partnerSince: form.partnerSince || null,
         });
@@ -578,7 +567,7 @@ function PartnerForm({
     }
   }
 
-  const valid = partner ? form.name.trim().length >= 2 : mode === 'existing' ? !!supplierId : form.name.trim().length >= 2;
+  const valid = partner ? form.name.trim().length >= 2 : mode === 'existing' ? !!supplier : form.name.trim().length >= 2;
 
   return (
     <Modal
@@ -627,18 +616,8 @@ function PartnerForm({
             orders and bills are untouched.
           </p>
           <div className="grid grid-2">
-            <Field label="Find the supplier" hint="Name or code">
-              <input value={supplierQuery} autoFocus onChange={(e) => setSupplierQuery(e.target.value)} />
-            </Field>
-            <Field label="Supplier" required>
-              <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
-                <option value="">— choose —</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} · {s.code}
-                  </option>
-                ))}
-              </select>
+            <Field label="Supplier" required hint="Name or code">
+              <SupplierPicker value={supplier} onChange={setSupplier} onError={setError} allowCreate={false} autoFocus />
             </Field>
             <Field label="Brand" hint="Trading name when it differs from the registered name">
               <input value={form.brand} onChange={set('brand')} />

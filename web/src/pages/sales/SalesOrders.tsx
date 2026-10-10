@@ -619,14 +619,7 @@ export function SalesOrderDetail() {
           <h3 className="card-title">Order</h3>
           <Row label="Customer" value={order.customer.name} />
           <Row label="Contact" value={order.contact ? `${order.contact.name}${order.contact.position ? `, ${order.contact.position}` : ''}` : null} />
-          <Row
-            label="Quotation"
-            value={
-              <Link to={`/g-ops/quotations/${order.quotation.id}`}>
-                <span className="mono">{order.quotation.number}</span> — {order.quotation.subject}
-              </Link>
-            }
-          />
+          {/* The quotation it books is the header's "Per …" line (rule 19: lineage lives in the meta), not a row here too. */}
           <Row label="Date of issue" value={formatDate(order.orderDate)} />
           <Row label="Payment terms" value={`${order.termsDays} days`} />
           <Row label="Payment method" value={order.paymentMethod} />

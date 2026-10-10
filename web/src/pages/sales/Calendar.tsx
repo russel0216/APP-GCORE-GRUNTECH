@@ -4,7 +4,7 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { dayKeyOf, parseDay, todayLocal, weekDays } from '../../lib/day';
 import { blockSpan, minutesLabel, placeInLanes } from '../../lib/timeGrid';
-import { Checkbox, ErrorBox, statusTone, useToast } from '../../components/ui';
+import { Checkbox, ErrorBox, formatTime, statusTone, useToast } from '../../components/ui';
 import { KIND_LABEL } from '../service/Reports';
 import {
   CalendarToolbar,
@@ -38,7 +38,7 @@ function toEvent(a: Activity, colors: Map<string, string>): CalendarEvent {
     sortAt: at.getTime(),
     endAt: new Date(a.endsAt).getTime(),
     // An all-day activity (SCORO's "All day") sits in the all-day row, like a service visit.
-    time: a.allDay ? null : at.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
+    time: a.allDay ? null : formatTime(at),
     label: a.subject,
     detail: `${a.assignedTo.name}${tally ? ` · ${tally}` : ''}${
       a.lead ? ` · ${a.lead.companyName}` : a.customer ? ` · ${a.customer.name}` : ''

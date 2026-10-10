@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { api, qs, SHIPPED_PHASE, type ListResult } from '../lib/api';
+import { api, qs, type ListResult } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { CommandPalette } from './CommandPalette';
 import { Avatar, relativeTime } from './ui';
@@ -264,9 +264,8 @@ export function Shell() {
       navGroups[0])
     : null;
 
-  /** Where a section's name points: its first screen that actually exists. */
-  const sectionTarget = (group: (typeof navGroups)[number]) =>
-    group.items.find((s) => s.phase <= SHIPPED_PHASE)?.path ?? null;
+  /** Where a section's name points: its first screen. A group is made around its first member, so it always has one. */
+  const sectionTarget = (group: (typeof navGroups)[number]) => group.items[0].path;
 
   /*
     Daylight everywhere except the launcher. The launcher is the product's
@@ -416,19 +415,11 @@ export function Shell() {
           <nav className="module-strip" aria-label={`${activeModule.label} sections`}>
             {sectioned
               ? navGroups.map((group) => {
-                  const target = sectionTarget(group);
                   const active = group === activeGroup;
-                  if (!target) {
-                    return (
-                      <span key={group.name} className="strip-item soon">
-                        {group.name}
-                      </span>
-                    );
-                  }
                   return (
                     <Link
                       key={group.name}
-                      to={target}
+                      to={sectionTarget(group)}
                       className={`strip-item${active ? ' active' : ''}`}
                       aria-current={active ? 'true' : undefined}
                     >
@@ -437,19 +428,7 @@ export function Shell() {
                   );
                 })
               : activeModule.submodules.filter((sub) => !sub.hidden).map((sub) => {
-                  const upcoming = sub.phase > SHIPPED_PHASE;
                   const active = sub.key === activeKey;
-                  if (upcoming) {
-                    return (
-                      <span
-                        key={sub.key}
-                        className="strip-item soon"
-                        title={`Ships in Phase ${sub.phase}`}
-                      >
-                        {sub.label}
-                      </span>
-                    );
-                  }
                   return (
                     <Link
                       key={sub.key}
@@ -497,32 +476,22 @@ export function Shell() {
             */}
             {sectioned
               ? navGroups.map((group) => {
-                  const target = sectionTarget(group);
                   const active = group === activeGroup;
-                  const live = group.items.filter((s) => s.phase <= SHIPPED_PHASE).length;
-                  if (!target) {
-                    return (
-                      <div key={group.name} className="nav-item soon" title={group.name ?? ''}>
-                        <Icon name={sectionIcon(group.name)} size={17} />
-                        <span className="nav-label">{group.name}</span>
-                        <span className="tag">soon</span>
-                      </div>
-                    );
-                  }
+                  const screens = group.items.length;
                   return (
                     <Link
                       key={group.name}
-                      to={target}
+                      to={sectionTarget(group)}
                       className={`nav-item${active ? ' active' : ''}`}
                       aria-current={active ? 'true' : undefined}
                       // The title is the only name a railed item has on screen,
                       // and aria-label is the only one it has to a reader.
                       title={group.name ?? ''}
-                      aria-label={railed ? `${group.name} — ${live} screen${live === 1 ? '' : 's'}` : undefined}
+                      aria-label={railed ? `${group.name} — ${screens} screen${screens === 1 ? '' : 's'}` : undefined}
                     >
                       <Icon name={sectionIcon(group.name)} size={17} />
                       <span className="nav-label">{group.name}</span>
-                      <span className="tag">{live}</span>
+                      <span className="tag">{screens}</span>
                     </Link>
                   );
                 })
@@ -530,20 +499,7 @@ export function Shell() {
               <div key={group.name ?? `g${i}`}>
                 {group.name && <div className="nav-group">{group.name}</div>}
                 {group.items.map((sub) => {
-                  const upcoming = sub.phase > SHIPPED_PHASE;
                   const active = sub.key === activeKey;
-                  if (upcoming) {
-                    return (
-                      <div
-                        key={sub.key}
-                        className="nav-item soon"
-                        title={sub.note ?? 'Ships in a later phase'}
-                      >
-                        <span>{sub.label}</span>
-                        <span className="tag">P{sub.phase}</span>
-                      </div>
-                    );
-                  }
                   return (
                     <Link
                       key={sub.key}
@@ -573,20 +529,7 @@ export function Shell() {
         {sectioned && activeGroup && (
           <nav className="sub-nav" aria-label={`${activeGroup.name} menu`}>
             {activeGroup.items.map((sub) => {
-              const upcoming = sub.phase > SHIPPED_PHASE;
               const active = sub.key === activeKey;
-              if (upcoming) {
-                return (
-                  <span
-                    key={sub.key}
-                    className="sub-nav-item soon"
-                    title={sub.note ?? `Ships in Phase ${sub.phase}`}
-                  >
-                    {sub.label}
-                    <span className="tag">P{sub.phase}</span>
-                  </span>
-                );
-              }
               return (
                 <Link
                   key={sub.key}

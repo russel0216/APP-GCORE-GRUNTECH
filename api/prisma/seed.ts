@@ -464,6 +464,9 @@ const ROLES: RoleSeed[] = [
       'insights.cash.export',
       'gops.projects.view_all',
       'gops.progress_billing.view_all',
+      // Finance raises the supplier bill (Phase 7 notes), so it must find the
+      // supplier on the bill form (SupplierPicker reads /suppliers/lookup).
+      'gchain.suppliers.view_all',
       'gops.customers.view_all',
       // A job order is what a service invoice will be raised against.
       'gops.job_orders.view_all',
@@ -490,6 +493,7 @@ const ROLES: RoleSeed[] = [
       'gfin.ap.create',
       'gfin.ap.edit_all',
       'gfin.ap.export',
+      'gchain.suppliers.view_all',
       'gfin.expenses.view_all',
       'gfin.cash_advances.view_all',
       'gfin.reports.view_all',

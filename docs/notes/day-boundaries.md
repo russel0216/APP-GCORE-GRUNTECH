@@ -196,8 +196,9 @@ day", and `periodWhere`'s boundary being "deliberately left alone". It also
 moves any figure whose range starts on a day that has early-morning records.
 These would change with it:
 
-- CLAUDE.md's Insights notes ("three day conventions")
-- `docs/notes/insights.md:56–61`
+- CLAUDE.md's Insights notes ("A range is Manila's days, with a pair of edges for each kind of column")
+- the Insights hand-off note's day conventions (that note was merged into
+  CLAUDE.md's Insights notes and removed on 2026-10-10)
 - the comments at `shared/insights.ts:420` and `shared/gops.ts:35`
 - the brief's caption (`Overview.tsx:418`), which could then simply say that
   every range counts on Manila's day

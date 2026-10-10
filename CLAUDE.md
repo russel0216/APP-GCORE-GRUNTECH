@@ -45,58 +45,72 @@ four databases and four copies of "customer".
    (`{ at?, ownerId?, employeeNo? }`), never a bare `Date`.
 6. **Every printable document goes through `renderDocument(...)`.** Uniform PDFs
    across all menus is an explicit requirement. A module supplies sections; it
-   never draws a header, sign-off block, footer or page number. The layout is
-   patterned on the paperwork the business already issues (`P00340`,
-   `REQ-00073`): a **14pt margin**, the document naming itself top-left, the
-   logo top-right, a slate table head in white, the company block in the footer,
-   and sign-offs as one line each — `APPROVED BY : Name (Position), Sep 17,
-   2026, 9:13 AM` — with **no signature rules**.
+   never draws a letterhead, sign-off block, strapline or page number.
+   **One dress for every document** (2026-10-10, the owner's call, closing
+   "pattern other PDF output to the quote template" of the day before): the
+   house dress (14pt margins, slate head band, the company block in the
+   footer, one-line sign-offs) is gone, and `renderDocument` draws the
+   quotation template's dress and nothing else, matched to
+   `STANDARD_QUOTATION_DESIGN` to the point — 36pt margins; the letterhead
+   top-left (the logo, the registered name — else the trading name — in 15pt
+   purple capitals, then the address, "Tel No.: … | Fax No.: … | Email: …",
+   "Website: www.…", "TIN: … | REG NO: …", a part whose fields are empty
+   dropping out of its line); the document's name in 24pt regular purple
+   top-right, wrapped in its 185pt box when long, "# number" in bold green
+   under it, a 1.5pt green rule; a DETAILS block (Date, Reference, a Revision)
+   in bold 9.5 kept to the template's 41pt box, so every document's first
+   table starts where the quotation's does; 8.5pt purple capitals for section
+   titles and table heads (capitals, one rule UNDER the head), 30pt rows with
+   bold titles over #555 descriptions, 9.5pt regular green subheading rows
+   (no tint — `shade` is gone; a `table`'s `headingSpan` says how many
+   leading columns a subheading spans); a `totals` box 231.8 wide at the
+   right, the final row 11pt bold purple over a 2pt rule, every figure drawn
+   whole and never wrapped; side-by-side sign-offs (the role in purple
+   capitals wrapping to two lines at most, the NAME in bold 10pt, the phone,
+   the email, the date or "Pending"; no position — `Signatory.position` is
+   not printed) kept to the foot of the last page; the strapline (the tagline
+   in green capitals, else the website, never both) over a 0.75pt rule along
+   the foot of every page; "Page n of m" bottom-right on a multi-page
+   document and a running header from page two. The engine does its own
+   line breaking (the designed engine's rule — PDFKit never wraps a cell),
+   so a row taller than a page is split under a repeated head, and a section
+   title is never left alone at the foot of a page. A trailing landscape
+   `gantt` section is an appendix drawn after the sign-offs. Every string
+   reaches the page through `pdfSafe`; what the dress sets in capitals goes
+   through `caps()` (capitals first — 'µ' would otherwise become a Greek
+   capital outside WinAnsi). verify-foundation measures the margin, pins the
+   60-row fixture at 4 pages, and proves the letterhead, the strapline (and
+   its website fallback, the real tagline stashed in a Setting meanwhile), the
+   sign-offs, the running header and the continuation start.
    **Give every signatory an `at`**, so a document dates its own sign-offs. For
    anything routed through the approval engine,
-   `approvalSignoffs(documentType, documentId)` returns the name and timestamp
-   per step; spread it into the matching slot. Leave `at` off where nothing has
-   happened — the slot then prints "Pending", which is the truth, rather than
-   borrowing the document's date.
+   `approvalSlots(documentType, documentId)` returns one slot per step — the
+   name, phone and email of whoever signed, or who is assigned — and
+   "Pending" prints where nothing has happened, which is the truth, rather
+   than borrowing the document's date.
    **Money is `formatMoney`, which prints `PHP 1,562.20`** — the currency code,
    not `₱`. U+20B1 is outside WinAnsiEncoding, so a standard PDF font draws it
    as `±`. Never put a non-Latin-1 character in a PDF without embedding a font.
-   **The quotation and the sales order are the exceptions: designed
-   documents.** Each layout is DATA — boxes on an A4 page that an
-   administrator places in Admin › PDF Templates — and prints through
-   `renderDesigned(design, data)` in `shared/pdfDesign.ts`, the same
-   engine's other door. The module still draws nothing:
-   `quotationPrintData()` / `salesOrderPrintData()` supply fields, rows,
-   totals and signatories; the engine places every box, keeps the dated
-   sign-offs, and puts every string through `pdfSafe`. A layout carries its
-   `orientation`: the sales order's standard is LANDSCAPE, in the
+   `companyCurrency()` (one indexed read per print, never cached) is the code a
+   route names in a table head or a total; `statusLabel()` is how an enum
+   prints ("Pending approval"); `formatDate` is a record's date ("October 9,
+   2026"), `formatShortDate` a list's (MM/DD/YYYY).
+   **The quotation and the sales order are designed documents.** Each
+   layout is DATA — boxes on an A4 page that an administrator places in
+   Admin › PDF Templates — and prints through `renderDesigned(design, data)`
+   in `shared/pdfDesign.ts`, the same engine's other door. The module still
+   draws nothing: `quotationPrintData()` / `salesOrderPrintData()` supply
+   fields, rows, totals and signatories; the engine places every box, keeps
+   the dated sign-offs, and puts every string through `pdfSafe`. A layout
+   carries its `orientation`: the sales order's standard is LANDSCAPE, in the
    quotation template's dress, because the cost and margin columns do not
-   fit portrait. The standard layout
-   (`STANDARD_QUOTATION_DESIGN`) is the owner's Quotation_Template (36pt
-   margins, purple #5B2A8C heads, green #2E9A4B number and subheadings, light
-   #D9D9D9 rules, totals flush right, sign-offs side by side, the strapline on
-   every page, a running header after page one, no Conforme); table figures
-   are `formatAmount`, because the currency is named in the head and the
-   total. Every other document stays on the house style, which is code — see
-   "Quotation PDF template" below. **The house engine has two dresses**
-   (2026-10-09, the owner's call: "pattern other PDF output to the quote
-   template — focus only on G-OPS"): `renderDocument({ style: 'quote', … })`
-   prints the SAME sections in the Quotation_Template's dress — 36pt
-   margins, the letterhead top-left (logo, the company in purple capitals,
-   its details), the document's name in purple and its number in green
-   top-right, a green rule, purple section titles and table heads on white
-   over light rules, green subheading rows, side-by-side sign-offs (role in
-   purple, name in bold, position, contact, the date or "Pending"), the
-   strapline centred in green along the foot, "Page n of m" on a multi-page
-   document and a running header from page two. Every G-OPS printout asks
-   for it — job order, CAD J.O., costing (its Gantt appendix included),
-   lead, progress report and billing, budget request, installed base, and
-   the printed lists of leads, quotations, sales orders, customers and
-   partners. G-CHAIN, G-FIN and G-HR paper stays on `house` (the default):
-   14pt margins, the document naming itself top-left, the company block in
-   the footer, slate heads, one-line sign-offs. The dress is `T`, a module
-   `Theme` set at the top of `renderDocument` before any drawing (all of
-   which is synchronous), never a parameter threaded through every helper;
-   verify-foundation renders one of each and measures the margin.
+   fit portrait. The standard layout (`STANDARD_QUOTATION_DESIGN`) is the
+   owner's Quotation_Template (36pt margins, purple #5B2A8C heads, green
+   #2E9A4B number and subheadings, light #D9D9D9 rules, totals flush right,
+   sign-offs side by side, the strapline on every page, a running header
+   after page one, no Conforme); table figures are `formatAmount`, because
+   the currency is named in the head and the total — the rule every
+   document's table follows. See "Quotation PDF template" below.
 7. **Record ownership is real.** Use `canEditRecord(user, module, sub, ownerId)`.
    "Only the author can edit the quotation, super admin can edit all."
 8. **Audit through `audit(...)`**, and keep `redact()` in front of anything
@@ -164,7 +178,7 @@ four databases and four copies of "customer".
    failed load.
 9a. **A menu entry must open what its label says.** Both halves of that: the
    path in the registry has to have a route (G-OPS Purchase Requests had none
-   and fell through to "Not built yet"), and the screen has to show what the
+   and fell through to "No screen at this address"), and the screen has to show what the
    label promises ("Progress & Billing" showed progress reports only). Run the
    label-to-component map before adding a menu entry, not after.
 10. **Money is `Decimal` in Prisma**, converted with `Number()` only at the API
@@ -301,7 +315,23 @@ four databases and four copies of "customer".
       (`allowCreate` — not on Modify of a registered machine). The lead form
       keeps its own lookup: its text is the lead's company name, saved
       whether or not a customer is linked.
-    - **Both are `fieldControl`s**, like `NumberInput`: inside a `Field` the
+    - **A supplier** (2026-10-10, the owner's call: "separate Customer to
+      Supplier"): `SupplierPicker` (`components/SupplierPicker.tsx`), the
+      customer picker's twin on `GET /suppliers/lookup?q=` — the purchase
+      order, the canvass's "+ Add supplier" (`exclude` keeps the ones already
+      asked off the list), the supplier bill, the item master's preferred
+      supplier and "+ New partner › An existing supplier". "Add … as a new
+      supplier" files one by name through the ordinary `POST /suppliers` for
+      a `gchain.suppliers.create` holder; `disabled` shows a supplier the
+      document has decided (an order from an awarded canvass, a bill on an
+      order). The quotation editor's provider cell stays its own narrower
+      list (`/quotations/providers`, readable by sales without the supplier
+      right). The seeded `finance` and `accounting` roles hold
+      `gchain.suppliers.view_all`, or the bill form could name nobody.
+      **Both pickers say why nothing is listed** — "could not be listed"
+      when the lookup failed, "no … matches" once it answered — and offer
+      the quick-add only after the lookup has answered for what was typed.
+    - **All three are `fieldControl`s**, like `NumberInput`: inside a `Field` the
       label, the hint and the error reach the control, and a control marked
       `required` puts the asterisk on its label.
     - **Read-only facts**: `<dl className="kv">` with dt/dd pairs — the
@@ -325,8 +355,8 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,010 assertions across twenty-three scripts** (counted 2026-10-09, after
-the Modify work; foundation 239 since its source scan): foundation 239, masters 76, sales 425, costing 139, pipeline
+**3,028 assertions across twenty-three scripts** (counted 2026-10-09, after
+the Modify work; foundation 257 since its source scan and the one dress): foundation 257, masters 76, sales 425, costing 139, pipeline
 86, calendar 96, numbering 46, partners 117, delivery 103, chain 135, hr 198,
 plantilla 99, meetings 85, evaluations 130, academy 97, finance 244,
 aftermarket 224, cad 86, archive 113, insights 97, insights-brief 50,
@@ -506,11 +536,12 @@ changes to a live system rather than as
 phases: add a case to the matching `verify-*.ts` for anything that touches
 `api/src/shared/`.
 
-`SHIPPED_PHASE` in `web/src/lib/api.ts` is the single switch that turns a
-phase's screens from "upcoming" to live. Bump it when a phase lands.
-
-Screens from later phases already appear in the menu tagged with their phase and
-are permission-configurable — that is deliberate, not a stub left behind.
+Every phase has landed, so the web no longer knows phases (2026-10-10):
+`SHIPPED_PHASE`, the "soon" menu branches and the `P<n>` tags on the Roles and
+Users screens are gone. The registry's `phase` field stays as history; nothing
+reads it. A path under a module that no screen answers renders `NotFound` in
+`App.tsx` ("No screen at this address", with the module's first screen and the
+launcher as the way out) — never a stale phase sentence.
 
 ## Phase 2 notes worth carrying forward
 
@@ -812,8 +843,10 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **`redact()` strips `dailyRate, burdenMultiplier, sssNo, philhealthNo,
   pagibigNo, tin`.** Anything that audits an employee goes through it.
 - **A `recordLink()` of null prints text, never a link** — a link that lands on
-  "Not built yet" is worse than none. `ComingSoon` matches on
-  `useLocation().pathname`, most specific wins.
+  "No screen at this address" is worse than none. An entityId of `list` (the
+  printed lists' EXPORTED audit rows) opens the list itself, never a record
+  page that would ask the API for a record called "list" (found by the link
+  crawl of 2026-10-10; verify-foundation pins it).
 - **`openAttachment()` in `components/Attachments.tsx` is the one way to open a
   stored file** outside the Attachments card (bearer token → blob; a
   spreadsheet opens the viewer, see "Spreadsheet attachments"). The
@@ -861,9 +894,18 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **Shared web pieces from Phase 10**: `PeoplePicker` (pure UI over
   `{ id, name, sub?, group? }[]`), `MeetLink`, `SettingListCard` (the
   `/hr-settings/lists/:key` editor), `RecordHeader`'s `statusExtra`,
-  `openPdf(fullPath)` and `downloadBlob(apiPath, filename)` in `lib/api.ts`. A
-  package's own styles go in one file under `web/src/styles/`, imported from
-  `main.tsx` after `styles.css`, tokens only.
+  `openPdf(fullPath, onError)` and `downloadBlob(apiPath, filename)` in
+  `lib/api.ts` — the ONLY way a screen opens or saves a file (five hand-rolled
+  copies went on 2026-10-10; a refusal shows the server's own reason). One
+  copy of each small helper: `toLocalInput` and `daysBetween` in `lib/day.ts`;
+  `formatTime` (en-PH; `{ hour12, seconds }` for the clock and the attendance
+  table), `formatSpan` (a start and an end as one phrase), `durationLabel`
+  (SCORO's "1h 30min") and `initials` (the Avatar's two letters) beside
+  `formatDate` in `components/ui.tsx`; `CostPanel` typed once in
+  `lib/quotationMath.ts`. Admin › Categories is one `CategorySpec` per
+  reference list in `masters/Reference.tsx` — a new list is a spec and one
+  line, never an eighth modal. A package's own styles go in one file under
+  `web/src/styles/`, imported from `main.tsx` after `styles.css`, tokens only.
 
 ### Numbering
 
@@ -1167,7 +1209,7 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   activities a query means (inclusive `lte`, 14-day default). Activity writes are
   audited like every other write.
 - **Leads print** (2026-10-07): `GET /leads/:id/pdf` is the whole lead on
-  house-style paper (details, enquiry, costings, quotations, activities,
+  paper (details, enquiry, costings, quotations, activities,
   notes) under the lead's own visibility rule, and `GET /leads/pdf` — above
   `/:id`, the route-order trap — is the LIST as the screen shows it, through
   `leadListWhere()`, the same where-builder the list uses, so the paper never
@@ -2017,8 +2059,9 @@ the detail.
   never reads cost at all.
 - **The letterhead lives in the engine**: Tel/Fax, TIN, REG. NO. and the
   company's `documentTagline` print on every document when set; unset lines are
-  left out — in the footer on the house style, and through the `company.*`
-  fields (which `renderDesigned` reads itself) on the quotation's layout. The
+  left out — in `renderDocument`'s letterhead and strapline, and through the
+  `company.*` fields (which `renderDesigned` reads itself) on the quotation's
+  layout. The
   standard quotation layout prints no subject and no validity; both are fields
   an administrator can place. `PdfCell` (`string | { title, body? }`) is how a
   table cell prints a bold title over its description. Bank details are
@@ -2544,7 +2587,7 @@ import for the wrong document is refused.
   linked employee's `mobile` (kept on My Account). `approvalSlots()` returns
   each approver's phone and email; the author's are read in
   `quotationPrintData()` for the paper only — `GET /quotations/:id` never
-  carries a mobile. The house style's one-line sign-offs are unchanged.
+  carries a mobile. `renderDocument`'s sign-offs print the same lines.
 - **A layout travels as a FILE, never with a push.** It is a Setting row in
   one database, so a layout tried on the laptop reaches the live server by
   Export layout (`{ type, exportedAt, layout }`, downloaded in the browser)
@@ -2590,8 +2633,8 @@ tab inside a project, and the Projects page keeps them one click away
   invoices and the turnover register and belong nowhere else. `TAB_ALIASES`
   in `ProjectWorkspace.tsx` keeps every old `?tab=` landing: `billing` →
   progress, `tasks` → scope, `documents` and `activity` → meetings. A new
-  link to a tab uses the new key (the budget-request notification sends
-  `?tab=requests`).
+  link to a tab uses the new key. (A budget request's notifications link to
+  the request's own page, `/g-ops/budget-requests/:id`, not to the tab.)
 - **Meetings & Records** is the meetings held for the project
   (`Meeting.jobId`, optional, SetNull; `GET /meetings?jobId=`, the usual
   `visibleWhere`), its documents and its activity. The meeting form offers
@@ -2747,7 +2790,7 @@ Cost Estimate" PDF) in G-CORE's own style.
   (approval, "Mark final", a job built on a draft) and cleared on reopen;
   the seed dates older final costings from `updatedAt`, once. The G-OPS
   funnel no longer has a "Being costed" stage.
-- **The PDF is "Material Cost Estimate"** (house style): details, one table with
+- **The PDF is "Material Cost Estimate"**: details, one table with
   numbered bucket headings, name-over-description cells, subtotals, the summary
   as `totals`, Terms & Conditions — **never the internal notes** — the
   sign-offs, then the Scope of Work as the engine's **`gantt` section** on

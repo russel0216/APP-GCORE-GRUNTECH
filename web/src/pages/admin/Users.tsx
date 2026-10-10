@@ -665,7 +665,6 @@ function UserEditor({
                   <div key={sub.key} className="perm-row">
                     <div className="name">
                       {sub.label}
-                      {sub.phase > 1 && <span className="tag hraud-inline-gap">P{sub.phase}</span>}
                     </div>
                     <div className="perm-actions">
                       {sub.actions.map((a) => {

@@ -1876,7 +1876,7 @@ costingRoutes.get(
       buckets.set(l.costCategory.id, b);
     }
     for (const b of [...buckets.values()].sort((a, c) => a.rank - c.rank)) {
-      rows.push({ heading: `${b.rank}   ${b.name}`, shade: true });
+      rows.push({ heading: `${b.rank}   ${b.name}` });
       let subtotal = 0;
       for (const l of b.lines) {
         if (l.isHeading) {
@@ -1903,6 +1903,9 @@ costingRoutes.get(
         head: ['No.', 'Description', 'Unit', 'Qty', 'Unit cost', 'Amount (PHP)'],
         widths: [7, 47, 8, 8, 14, 16],
         align: ['left', 'left', 'left', 'right', 'right', 'right'],
+        // A bucket's heading wraps inside No. + Description, the way the
+        // designed table keeps a subheading to its product column.
+        headingSpan: 2,
         rows,
       });
     }
@@ -1964,7 +1967,6 @@ costingRoutes.get(
     ];
 
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Material Cost Estimate',
       documentNumber: costing.number,
       date: costing.createdAt,

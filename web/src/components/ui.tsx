@@ -518,7 +518,8 @@ export type Tone = 'ok' | 'warn' | 'danger' | 'info' | '';
  *
  * This was written nine times — in PurchaseRequests, Leave, Overtime,
  * Contracts, Receivables, Leads, Quotations (twice) and service/Reports, plus
- * STATUS_TONE in the HR dashboard — and had already drifted: Leave treated
+ * STATUS_TONE in the HR dashboard (the last to go, 2026-10-10: it now passes
+ * its attendance words as `extra`) — and had already drifted: Leave treated
  * DRAFT as neutral where Contracts did not handle it at all, so the same word
  * was a different colour depending on which menu you reached it from.
  *
@@ -618,6 +619,53 @@ export function formatDate(value: string | Date | null | undefined): string {
   return d.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+/**
+ * The time of day — "09:30 AM", in en-PH like every other date on screen,
+ * never the browser's locale (My Work's clock used to follow the viewer's
+ * machine while the rest of the page did not). This was written inline ten
+ * times before. `hour12: false` is the attendance table's "14:30"; `seconds`
+ * is the Clock screen's face, "14:30:05".
+ */
+export function formatTime(
+  value: string | Date | null | undefined,
+  { hour12 = true, seconds = false }: { hour12?: boolean; seconds?: boolean } = {},
+): string {
+  if (!value) return '—';
+  const d = typeof value === 'string' ? new Date(value) : value;
+  return d.toLocaleTimeString('en-PH', {
+    hour: '2-digit',
+    minute: '2-digit',
+    ...(seconds ? { second: '2-digit' as const } : {}),
+    ...(hour12 ? {} : { hour12: false }),
+  });
+}
+
+/**
+ * A span of time: "Sep 28, 2026, 09:00 AM – 05:00 PM" within one day, or both
+ * date-times when it runs over midnight. A meeting's When and a training
+ * session's were two copies of this.
+ */
+export function formatSpan(startsAt: string | Date, endsAt: string | Date): string {
+  const s = typeof startsAt === 'string' ? new Date(startsAt) : startsAt;
+  const e = typeof endsAt === 'string' ? new Date(endsAt) : endsAt;
+  if (s.toDateString() === e.toDateString()) return `${formatDate(s)}, ${formatTime(s)} – ${formatTime(e)}`;
+  return `${formatDateTime(s)} – ${formatDateTime(e)}`;
+}
+
+/**
+ * A duration in minutes as SCORO prints it — "8h 00min"; a whole day or more
+ * says so ("2 days", "1d 2h 30min"). The one duration format: a meeting used
+ * to say "1 h 30 min" where an activity said "1h 30min".
+ */
+export function durationLabel(minutes: number): string {
+  const days = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
+  const m = minutes % 60;
+  if (days && !h && !m) return `${days} day${days === 1 ? '' : 's'}`;
+  const hm = `${h}h ${String(m).padStart(2, '0')}min`;
+  return days ? `${days}d ${hm}` : hm;
+}
+
 export function formatMoney(value: number | null | undefined, currency = 'PHP'): string {
   if (value === null || value === undefined) return '—';
   return new Intl.NumberFormat('en-PH', { style: 'currency', currency }).format(value);
@@ -636,9 +684,16 @@ export function relativeTime(value: string | Date): string {
   return formatDate(d);
 }
 
+/**
+ * "Maria Santos" → "MS": the first letter of the first two words. The one
+ * rule — the Avatar's disc and the quotation list's Author column (which had
+ * a three-letter copy) print the same thing for the same person.
+ */
 export function initials(name: string): string {
   return name
+    .trim()
     .split(/\s+/)
+    .filter(Boolean)
     .slice(0, 2)
     .map((p) => p[0]?.toUpperCase() ?? '')
     .join('');

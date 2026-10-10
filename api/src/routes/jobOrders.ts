@@ -773,7 +773,6 @@ jobOrderRoutes.get(
       { role: 'Acknowledged by (customer)', name: row.customerAcknowledgedBy ?? undefined, at: row.customerAcknowledgedAt },
     ];
     const pdf = await renderDocument({
-      style: 'quote',
       title: 'Job Order',
       documentNumber: row.number,
       date: row.createdAt,

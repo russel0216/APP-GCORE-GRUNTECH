@@ -1458,7 +1458,7 @@ function SuggestInput({
         onPaste={onPaste}
       />
       {open && matches.length > 0 && (
-        <ul className="lookup-menu cs-suggest" ref={menuRef}>
+        <ul className="lookup-menu qe-suggest" ref={menuRef}>
           {matches.map((s, i) => (
             <li key={`${s.source}-${s.name}-${i}`}>
               <button
@@ -1479,14 +1479,14 @@ function SuggestInput({
                   }
                 }}
               >
-                <span className="cs-suggest-name">{s.name}</span>
-                <span className="faint cs-suggest-meta">
+                <span className="qe-suggest-name">{s.name}</span>
+                <span className="faint qe-suggest-meta">
                   {s.unitCost != null ? `${formatMoney(s.unitCost)} / ${s.unit}` : s.unit}
                   {s.source === 'item'
                     ? ` · item ${s.itemCode ?? ''}`
                     : ` · costed ${s.uses}×${s.lastNumber ? `, last on ${s.lastNumber}` : ''}`}
                 </span>
-                {s.description && <span className="faint cs-suggest-desc">{s.description}</span>}
+                {s.description && <span className="faint qe-suggest-desc">{s.description}</span>}
               </button>
             </li>
           ))}

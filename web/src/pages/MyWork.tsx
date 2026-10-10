@@ -8,6 +8,7 @@ import {
   StatusBadge,
   formatDate,
   formatMoney,
+  formatTime,
   humanise,
   relativeTime,
   useToast,
@@ -73,11 +74,6 @@ interface MyWorkData {
   todaysSchedule: ScheduleRow[];
   myDrafts: WorkRow[];
   renewals: Renewal[];
-}
-
-/** `09:30`, in the viewer's clock. */
-export function clockTime(value: string): string {
-  return new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
 /** What kind of thing a work row is, as a short readable word. */
@@ -326,8 +322,8 @@ export function MyWork() {
                     <span className="faint">all day</span>
                   ) : (
                     <>
-                      {clockTime(s.startsAt)}
-                      <span className="faint"> – {clockTime(s.endsAt)}</span>
+                      {formatTime(s.startsAt)}
+                      <span className="faint"> – {formatTime(s.endsAt)}</span>
                     </>
                   )}
                 </span>

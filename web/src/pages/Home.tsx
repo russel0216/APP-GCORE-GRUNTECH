@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, SHIPPED_PHASE } from '../lib/api';
+import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { recordLink } from '../lib/links';
-import { Loading, formatMoney, relativeTime } from '../components/ui';
-import { clockTime, kindLabel, type ScheduleRow, type WorkRow } from './MyWork';
+import { Loading, formatMoney, formatTime, relativeTime } from '../components/ui';
+import { kindLabel, type ScheduleRow, type WorkRow } from './MyWork';
 
 /**
  * The launcher.
@@ -110,8 +110,7 @@ export function Home() {
           page that failed to load the rest. */}
       <div className={`module-grid${cards.length < 3 ? ' module-grid-few' : ''}`}>
         {cards.map(({ key, art, alt, module }) => {
-          const live = module!.submodules.filter((s) => s.phase <= SHIPPED_PHASE);
-          const target = live[0]?.path ?? module!.submodules[0]?.path ?? '/';
+          const target = module!.submodules[0]?.path ?? '/';
           return (
             <Link key={key} to={target} className="module-card" title={module!.blurb}>
               <div className="module-art">
@@ -229,7 +228,7 @@ export function Home() {
                 <div className="stack">
                   {today.slice(0, PREVIEW).map((s) => (
                     <Link key={`${s.kind}:${s.id}`} to={s.link} className="row home-row">
-                      <span className="mono today-time">{clockTime(s.startsAt)}</span>
+                      <span className="mono today-time">{formatTime(s.startsAt)}</span>
                       <span className="home-row-main">
                         <span className="home-row-title">{s.title}</span>
                         <span className="faint">

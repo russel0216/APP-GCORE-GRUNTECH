@@ -22,6 +22,7 @@ import {
 import { RecordPaymentModal, CellLink, paymentLink } from './Receivables';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
+import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 
 /**
  * Accounts Payable — supplier bills and expense claims.
@@ -373,7 +374,6 @@ function NewBillModal({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [settings, setSettings] = useState<{
@@ -387,8 +387,15 @@ function NewBillModal({
   // A bill entered VAT-inclusive stores its lines as typed and its subtotal
   // with the VAT backed out — so the two differ exactly when it was.
   const existingLineTotal = existing ? existing.lines.reduce((s, l) => s + l.amount, 0) : 0;
+  // The draft's own supplier, or the order's behind the receiving; else picked.
+  const [supplier, setSupplier] = useState<SupplierRef | null>(
+    existing
+      ? { id: existing.supplier.id, name: existing.supplier.name }
+      : from
+        ? { id: from.order.supplier.id, name: from.order.supplier.name }
+        : null,
+  );
   const [form, setForm] = useState({
-    supplierId: existing?.supplier.id ?? from?.order.supplier.id ?? '',
     jobId: existing?.job?.id ?? from?.order.job?.id ?? '',
     costCategoryId: existing?.costCategory?.id ?? '',
     supplierInvoiceNo: existing?.supplierInvoiceNo ?? from?.invoiceRefNo ?? '',
@@ -414,7 +421,6 @@ function NewBillModal({
   const onOrder = !!from || !!existing?.order;
 
   useEffect(() => {
-    api.get<{ rows: { id: string; name: string }[] }>('/suppliers?pageSize=200').then((d) => setSuppliers(d.rows)).catch(() => {});
     api.get<typeof jobs>('/jobs/lookup?includeClosed=true').then(setJobs).catch(() => {});
     api.get<{ id: string; name: string }[]>('/reference/cost-categories').then(setCategories).catch(() => {});
     api
@@ -450,11 +456,12 @@ function NewBillModal({
   })();
 
   async function create() {
+    if (!supplier) return;
     setBusy(true);
     setError(null);
     try {
       const body = {
-        supplierId: form.supplierId,
+        supplierId: supplier.id,
         orderId: existing ? existing.order?.id ?? null : from?.order.id ?? null,
         receivingId: existing ? existing.receiving?.id ?? null : from?.id ?? null,
         jobId: form.jobId || null,
@@ -496,7 +503,7 @@ function NewBillModal({
           <button
             className="btn btn-primary"
             onClick={create}
-            disabled={busy || !form.supplierId || lineTotal <= 0}
+            disabled={busy || !supplier || lineTotal <= 0}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
@@ -520,20 +527,15 @@ function NewBillModal({
       )}
 
       <div className="grid grid-2">
-        <Field label="Supplier">
-          <select
-            value={form.supplierId}
-            onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
-            // The order fixes the supplier.
+        <Field label="Supplier" required>
+          {/* The order fixes the supplier. */}
+          <SupplierPicker
+            value={supplier}
+            onChange={setSupplier}
+            onError={setError}
             disabled={onOrder}
-          >
-            <option value="">— choose —</option>
-            {suppliers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+            autoFocus={!onOrder}
+          />
         </Field>
         <Field label="Their invoice number">
           <input

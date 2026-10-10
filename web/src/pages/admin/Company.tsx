@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, getToken } from '../../lib/api';
+import { api, openPdf } from '../../lib/api';
 import { ErrorBox, Field, Loading, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 
@@ -98,13 +98,9 @@ export function Company() {
     }
   }
 
+  /** The one specimen button (C10): every other PDF opens the same way, through `openPdf`. */
   function openSpecimen() {
-    // The PDF route needs the bearer token, so fetch it and open the blob
-    // rather than pointing the browser straight at the URL.
-    fetch('/api/pdf/specimen', { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then((r) => r.blob())
-      .then((b) => window.open(URL.createObjectURL(b), '_blank'))
-      .catch(() => toast('error', 'Could not render the specimen'));
+    openPdf('/api/pdf/specimen', (message) => toast('error', message || 'Could not render the specimen'));
   }
 
   if (loading) return <Loading />;
@@ -227,7 +223,7 @@ export function Company() {
           </div>
           <Field
             label="Document tagline"
-            hint="Printed in every document's footer, e.g. INDUSTRIAL UTILITY SOLUTIONS. The website is added after it unless you type it in yourself."
+            hint="Printed along the foot of every document, e.g. INDUSTRIAL UTILITY SOLUTIONS. Leave it empty and the website prints there instead."
           >
             <input
               value={data.documentTagline ?? ''}

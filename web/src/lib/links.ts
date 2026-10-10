@@ -116,7 +116,10 @@ export function recordLink(entityType: string, id: string): string | null {
   if (!entityType) return null;
   const type = entityType.toLowerCase();
   if (type === 'setting') return settingLink(id);
-  if (type in DETAIL) return id ? `${DETAIL[type]}/${encodeURIComponent(id)}` : DETAIL[type];
+  // A printed list audits as EXPORTED with entityId 'list' (CLAUDE.md, the
+  // printed lists): that row opens the list itself, never a record page that
+  // would ask the API for a record called "list".
+  if (type in DETAIL) return id && id !== 'list' ? `${DETAIL[type]}/${encodeURIComponent(id)}` : DETAIL[type];
   if (type in QUERY) return id ? `${QUERY[type]}${encodeURIComponent(id)}` : null;
   if (type in SCREEN) return SCREEN[type];
   // partner_resource: it lives inside its partner's page and carries no

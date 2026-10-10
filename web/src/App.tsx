@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
 import { ToastProvider, Loading } from './components/ui';
 import { Shell } from './components/Shell';
@@ -7,7 +7,7 @@ import { ForgotPassword, ResetPassword, Welcome } from './pages/AccountLinks';
 import { Home } from './pages/Home';
 import { FileViewer } from './pages/FileViewer';
 import { MyWork } from './pages/MyWork';
-import { Account, SystemSettings, ComingSoon } from './pages/Misc';
+import { Account, SystemSettings } from './pages/Misc';
 import { OpsDashboard } from './pages/OpsDashboard';
 import { Users } from './pages/admin/Users';
 import { Roles } from './pages/admin/Roles';
@@ -1366,11 +1366,9 @@ function Routed() {
           }
         />
 
-        {/* Screens whose module ships in a later phase — their access and
-            numbering are already configurable, so this is a signpost, not a 404. */}
         {/* Document Templates is the service report template editor — the
             registry lists it under Admin as well as Aftermarket, and it used to
-            fall through to ComingSoon from here. */}
+            fall through to the catch-all from here. */}
         <Route
           path="/admin/templates"
           element={
@@ -1379,17 +1377,61 @@ function Routed() {
             </Guard>
           }
         />
-        <Route path="/g-ops/*" element={<ComingSoon />} />
-        <Route path="/g-hr/*" element={<ComingSoon />} />
-        <Route path="/g-hr" element={<ComingSoon />} />
-        <Route path="/g-fin/*" element={<ComingSoon />} />
-        <Route path="/g-fin" element={<ComingSoon />} />
-        <Route path="/g-chain/*" element={<ComingSoon />} />
-        <Route path="/g-chain" element={<ComingSoon />} />
+        {/* An address inside a module that no screen answers to. Every
+            registry screen has a route (rule 9a) and the module roots are
+            declared above, so what lands here is a stale or mistyped link —
+            said plainly, with a way back, rather than sent to the launcher. */}
+        <Route path="/g-ops/*" element={<NotFound />} />
+        <Route path="/g-hr/*" element={<NotFound />} />
+        <Route path="/g-fin/*" element={<NotFound />} />
+        <Route path="/g-chain/*" element={<NotFound />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
+  );
+}
+
+/**
+ * Where a path inside a module matches no screen. Nothing is "coming": every
+ * screen the registry declares is built and routed, so this is a link that
+ * went stale or an address mistyped. It says which, and offers the module's
+ * own first screen (the Shell draws the Back row above it as on any page).
+ */
+function NotFound() {
+  const { me } = useAuth();
+  const { pathname } = useLocation();
+  const module = me?.menu.find((m) =>
+    m.submodules.some((s) => pathname === s.path || pathname.startsWith(`${s.path}/`)),
+  );
+  const first = module?.submodules.find((s) => !s.hidden) ?? module?.submodules[0];
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <h1>No screen at this address</h1>
+          <p>
+            Nothing in G-CORE answers to <span className="mono">{pathname}</span> — the link may be out of date, or
+            the address mistyped.
+          </p>
+        </div>
+      </div>
+      <div className="card muted">
+        {module && first ? (
+          <>
+            Open{' '}
+            <Link to={first.path}>
+              {module.label} › {first.label}
+            </Link>
+            , or go <Link to="/">back to the launcher</Link>.
+          </>
+        ) : (
+          <>
+            Go <Link to="/">back to the launcher</Link>.
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -16,6 +16,7 @@ import {
   useToast,
 } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
+import { SupplierPicker, type SupplierRef } from '../../components/SupplierPicker';
 
 const ITEM_TYPES = [
   { value: 'MATERIAL', label: 'Material' },
@@ -278,7 +279,9 @@ function ItemForm({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  const [preferredSupplier, setPreferredSupplier] = useState<SupplierRef | null>(
+    item?.preferredSupplier ? { id: item.preferredSupplier.id, name: item.preferredSupplier.name } : null,
+  );
 
   const [form, setForm] = useState({
     code: item?.code ?? '',
@@ -296,17 +299,9 @@ function ItemForm({
     isStocked: item?.isStocked ?? true,
     minStock: item?.minStock?.toString() ?? '',
     reorderLevel: item?.reorderLevel?.toString() ?? '',
-    preferredSupplierId: item?.preferredSupplier?.id ?? '',
     isActive: item?.isActive ?? true,
     notes: item?.notes ?? '',
   });
-
-  useEffect(() => {
-    api
-      .get<{ id: string; name: string }[]>('/suppliers/lookup')
-      .then(setSuppliers)
-      .catch(() => {});
-  }, []);
 
   async function save() {
     setBusy(true);
@@ -328,7 +323,7 @@ function ItemForm({
         isStocked: form.isStocked,
         minStock: form.minStock === '' ? null : Number(form.minStock),
         reorderLevel: form.reorderLevel === '' ? null : Number(form.reorderLevel),
-        preferredSupplierId: form.preferredSupplierId || null,
+        preferredSupplierId: preferredSupplier?.id ?? null,
         isActive: form.isActive,
         notes: form.notes || null,
       };
@@ -468,17 +463,7 @@ function ItemForm({
           />
         </Field>
         <Field label="Preferred supplier" hint="A partner's items appear on its price list in G-OPS › Partners">
-          <select
-            value={form.preferredSupplierId}
-            onChange={(e) => setForm({ ...form, preferredSupplierId: e.target.value })}
-          >
-            <option value="">— none —</option>
-            {suppliers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <SupplierPicker value={preferredSupplier} onChange={setPreferredSupplier} onError={setError} />
         </Field>
       </div>
 

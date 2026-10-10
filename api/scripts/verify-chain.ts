@@ -1373,13 +1373,16 @@ async function main() {
     const pendingPdf = await apiBytes(requesterToken, `/purchase-requests/${big.id}/pdf`);
     const pendingText = pendingPdf.bytes ? pdfText(pendingPdf.bytes) : '';
     const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
+    // A step's name prints in capitals and may wrap to a second line in its
+    // sign-off column: read the words, not the line breaks.
+    const flat = (t: string) => t.replace(/\s+/g, ' ');
     check(
       'pending at step 2 of three, the paper prints the project manager who signed, and the two steps still to sign as Pending',
       big.submitted === 200 &&
         bigSteps.length === 3 &&
         pendingText.includes('Verify PM') &&
         pendingCount(pendingText) === 2 &&
-        bigSteps.every((st) => pendingText.includes(st.name.toUpperCase())),
+        bigSteps.every((st) => flat(pendingText).includes(st.name.toUpperCase())),
       `${big.submitted} ${bigSteps.length} steps, ${pendingCount(pendingText)} pending, PM ${pendingText.includes('Verify PM')}`,
     );
     const bigPulled = await api(requesterToken, 'POST', `/purchase-requests/${big.id}/withdraw`);
@@ -1391,7 +1394,7 @@ async function main() {
         draftPdf.status === 200 &&
         !draftText.includes('Verify PM') &&
         pendingCount(draftText) === bigSteps.length &&
-        bigSteps.every((st) => draftText.includes(st.name.toUpperCase())),
+        bigSteps.every((st) => flat(draftText).includes(st.name.toUpperCase())),
       `${bigPulled.status} ${draftPdf.status} ${pendingCount(draftText)} pending, PM ${draftText.includes('Verify PM')}`,
     );
 

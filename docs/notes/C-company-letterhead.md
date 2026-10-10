@@ -7,29 +7,21 @@ and the layout stays rule 6's layout.
 
 ## What prints, and where
 
-The company block is still the footer (rule 6). Three columns and a strapline
-row, drawn by `paginate()` in `api/src/shared/pdf.ts`:
+Since 2026-10-10 every document wears one dress, the quotation template's
+(`renderDocument` in `api/src/shared/pdf.ts`; CLAUDE.md rule 6):
 
-| Column 1          | Column 2        | Column 3                             |
-|-------------------|-----------------|--------------------------------------|
-| NAME (bold)       | Tel: ...        | TIN: ...          (Page n of m)      |
-| address           | Fax: ...        | REG. NO.: ...                        |
-| city, country     | email           | footerNote (wraps to 2 rows, then ...) |
-| STRAPLINE: tagline + website, slate, letter-spaced | | |
-
-- Any line whose value is unset is left out. Nothing prints a label with no
-  value after it.
-- `footerTagline(company)` returns the tagline with the website added
-  (`http://www.x.com/` becomes `WWW.X.COM`), unless the tagline already
-  contains the website. With no tagline, the website prints on the strapline
-  row by itself. The website never prints twice.
-- "Page n of m" moved to the right end of the TIN row. That leaves the rows
-  below free for a module's `footerNote` to wrap into. It is still left out on
-  single-page documents.
-- `FOOTER_TOP` did not change, so pagination is unchanged. The existing
-  "60 rows paginate to 3 pages" assertion still holds.
+- **The letterhead, top-left of page 1**: the logo, the registered name (else
+  the trading name) in purple capitals, then the address, "Tel No.: … | Fax
+  No.: … | Email: …", "Website: www.…" and "TIN: … | REG NO: …". A part whose
+  fields are all empty drops out of its line; a line with nothing left drops
+  out. Nothing prints a label with no value after it.
+- **The strapline, along the foot of every page**: the tagline in green
+  capitals — or, with no tagline, the website. Never both.
+- **"Page n of m"** bottom-right, on multi-page documents only; a running
+  header (reference · document # number · date) from page two.
+- A module's `footerNote` prints above the strapline rule.
 - Bank details (`bankName`, `bankBranch`, `bankAccount`) do **not** print in
-  the footer. They belong on documents that ask for payment, which means
+  the letterhead. They belong on documents that ask for payment, which means
   invoices and billing. That module should read them from `prisma.company` and
   put them in a `fields` section. It must not draw them itself.
 

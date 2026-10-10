@@ -67,8 +67,11 @@ export function CustomerPicker({
   const [text, setText] = useState(value?.name ?? '');
   const [picking, setPicking] = useState(false);
   const [matches, setMatches] = useState<CustomerRef[]>([]);
-  // The term the matches answer, so "nothing matches" waits for the answer.
+  // The term the matches answer, so "nothing matches" — and the offer to add —
+  // wait for the answer. A failed lookup answers too, as `failed`: "nothing
+  // matches" is not what a refused or dropped lookup means.
   const [answered, setAnswered] = useState('');
+  const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const menuRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -82,18 +85,32 @@ export function CustomerPicker({
     const term = text.trim();
     if (!picking || term.length < 2 || value) {
       setMatches([]);
+      setAnswered('');
+      setFailed(false);
       return;
     }
+    // A reply to an earlier term must not pass for this one's answer.
+    let stale = false;
     const t = setTimeout(() => {
       api
         .get<CustomerRef[]>(`/customers/lookup${qs({ q: term })}`)
         .then((rows) => {
+          if (stale) return;
           setMatches(rows);
+          setFailed(false);
           setAnswered(term);
         })
-        .catch(() => setMatches([]));
+        .catch(() => {
+          if (stale) return;
+          setMatches([]);
+          setFailed(true);
+          setAnswered(term);
+        });
     }, 180);
-    return () => clearTimeout(t);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
   }, [text, picking, value]);
 
   function pick(c: CustomerRef) {
@@ -141,6 +158,19 @@ export function CustomerPicker({
 
   const term = text.trim();
   const open = picking && !value && term.length >= 2;
+  // The lookup has answered for exactly what is typed.
+  const settled = answered === term;
+  const sameName = matches.some((m) => m.name === term);
+  const offerCreate = mayCreate && settled && !failed && !sameName;
+  // One line that says why nothing is listed — or nothing, while matches are.
+  const notice = !settled
+    ? null
+    : failed
+      ? 'Customers could not be listed.'
+      : matches.length || mayCreate
+        ? null
+        : `No customer on file matches “${term}”.`;
+  const showMenu = open && (matches.length > 0 || notice !== null || offerCreate);
   return (
     <div
       className="lookup"
@@ -159,7 +189,7 @@ export function CustomerPicker({
         placeholder="Create or choose a customer"
         aria-invalid={invalid || fieldInvalid || undefined}
         aria-describedby={[describedBy, fieldDescribedBy].filter(Boolean).join(' ') || undefined}
-        aria-expanded={open}
+        aria-expanded={showMenu}
         aria-autocomplete="list"
         onFocus={() => setPicking(true)}
         onKeyDown={onKeyDown}
@@ -175,7 +205,7 @@ export function CustomerPicker({
         </span>
       )}
 
-      {open && (
+      {showMenu && (
         <ul className="lookup-menu" ref={menuRef}>
           {matches.map((c) => (
             <li key={c.id}>
@@ -184,10 +214,8 @@ export function CustomerPicker({
               </button>
             </li>
           ))}
-          {!matches.length && !mayCreate && answered === term && (
-            <li className="lookup-none">No customer on file matches “{term}”.</li>
-          )}
-          {mayCreate && !matches.some((m) => m.name === term) && (
+          {notice && <li className="lookup-none">{notice}</li>}
+          {offerCreate && (
             <li className="lookup-new">
               <div className="lookup-new-row">
                 <button type="button" onClick={createCustomer} disabled={busy}>

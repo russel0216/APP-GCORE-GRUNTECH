@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, getToken, qs } from '../../lib/api';
+import { api, downloadBlob, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import {
@@ -9,8 +9,11 @@ import {
   Loading,
   Modal,
   ModalFoot,
+  StatusBadge,
   formatDateTime,
+  formatTime,
   useToast,
+  type Tone,
 } from '../../components/ui';
 import { Stat } from '../../components/charts';
 import { todayLocal } from '../../lib/day';
@@ -32,7 +35,8 @@ import { EvaluationsDuePanel, EvaluationsDueStat } from './dashboard/Evaluations
  * them without checking permissions itself.
  */
 
-const STATUS_TONE: Record<string, string> = {
+/** The day's attendance words, as `extra` to the one `statusTone` — none of them is a document status. */
+const ATTENDANCE_TONES: Record<string, Tone> = {
   PRESENT: 'ok',
   LATE: 'warn',
   ON_LEAVE: 'info',
@@ -105,17 +109,7 @@ export function HrDashboard() {
   async function exportCsv(from: string, to: string) {
     setExporting(true);
     try {
-      const res = await fetch(`/api/attendance/export${qs({ from, to })}`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
-      });
-      if (!res.ok) throw new Error('The export was refused');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `attendance-${from}-to-${to}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadBlob(`/attendance/export${qs({ from, to })}`, `attendance-${from}-to-${to}.csv`);
       setRange(null);
       toast('ok', 'Export downloaded');
     } catch (err) {
@@ -275,34 +269,18 @@ export function HrDashboard() {
                       </td>
                       <td className="faint">{r.employee.department?.name ?? '—'}</td>
                       <td className="mono">
-                        {r.timeIn
-                          ? new Date(r.timeIn).toLocaleTimeString('en-PH', {
-                              hour12: false,
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })
-                          : '—'}
+                        {formatTime(r.timeIn, { hour12: false })}
                         {r.method && r.method !== 'FACE' && (
                           <span className="faint"> ({r.method.toLowerCase()})</span>
                         )}
                       </td>
-                      <td className="mono">
-                        {r.timeOut
-                          ? new Date(r.timeOut).toLocaleTimeString('en-PH', {
-                              hour12: false,
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })
-                          : '—'}
-                      </td>
+                      <td className="mono">{formatTime(r.timeOut, { hour12: false })}</td>
                       <td className="right mono">
                         {r.lateMinutes > 0 ? <span className="warn">{r.lateMinutes}m</span> : '—'}
                       </td>
                       <td className="right mono">{r.workedHours ? r.workedHours.toFixed(2) : '—'}</td>
                       <td>
-                        <span className={`badge ${STATUS_TONE[r.status] ?? ''}`}>
-                          {r.leaveType ?? label(r.status)}
-                        </span>
+                        <StatusBadge status={r.status} extra={ATTENDANCE_TONES} label={r.leaveType ?? label(r.status)} />
                       </td>
                     </tr>
                   ))}
@@ -442,7 +420,7 @@ export function AttendanceRegister() {
     {
       key: 'status',
       label: 'Status',
-      render: (r) => <span className={`badge ${STATUS_TONE[r.status] ?? ''}`}>{label(r.status)}</span>,
+      render: (r) => <StatusBadge status={r.status} extra={ATTENDANCE_TONES} label={label(r.status)} />,
     },
   ];
 

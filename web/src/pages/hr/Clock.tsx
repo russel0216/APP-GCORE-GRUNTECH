@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { ErrorBox, Field, Loading, formatDateTime, useToast } from '../../components/ui';
+import { ErrorBox, Field, Loading, formatDateTime, formatTime, useToast } from '../../components/ui';
 
 /**
  * The time clock.
@@ -259,7 +259,7 @@ export function Clock() {
         <div className="card">
           <div className="clock-now">
             <div className="clock-time mono">
-              {now.toLocaleTimeString('en-PH', { hour12: false })}
+              {formatTime(now, { hour12: false, seconds: true })}
             </div>
             <div className="faint">
               {now.toLocaleDateString('en-PH', {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, qs, getToken } from '../../lib/api';
-import { ErrorBox, Field, Loading, formatMoney, useToast } from '../../components/ui';
+import { api, downloadBlob, qs } from '../../lib/api';
+import { ErrorBox, Field, Loading, formatMoney, formatTime, useToast } from '../../components/ui';
 import {
   Brief,
   MiniBar as Bar,
@@ -79,15 +79,7 @@ export function ExportButton({ path, label = 'Export CSV' }: { path: string; lab
   async function run() {
     setBusy(true);
     try {
-      const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${getToken()}` } });
-      if (!res.ok) throw new Error('The export was refused');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${path.split('/').pop()?.split('?')[0] ?? 'export.csv'}`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadBlob(path, path.split('/').pop()?.split('?')[0] ?? 'export.csv');
       toast('ok', 'Downloaded');
     } catch {
       toast('error', 'That export is not available to you');
@@ -286,9 +278,9 @@ function show(f: SummaryFigure): string {
   return String(f.value);
 }
 
+/** "as of 09:30 AM" — the one `formatTime`; nothing when the server sent no stamp. */
 function clockOf(iso: string | undefined): string {
-  if (!iso) return '';
-  return new Date(iso).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' });
+  return iso ? formatTime(iso) : '';
 }
 
 /** Four sentences from the server's figures — numbers, labels and paths only. */
