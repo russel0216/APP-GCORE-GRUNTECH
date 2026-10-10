@@ -339,6 +339,8 @@ export function Shell() {
           <span className="kbd">Ctrl K</span>
         </button>
 
+        <span id="layout-launch" className="layout-launch" />
+
         <button
           className="bell"
           onClick={() => setDrawerOpen((d) => !d)}

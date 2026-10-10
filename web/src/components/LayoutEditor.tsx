@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { applyAppearance, normalise, type Appearance } from '../lib/appearance';
@@ -167,6 +168,10 @@ export function LayoutEditor() {
   const toast = useToast();
 
   const [on, setOn] = useState(false);
+  /* The top bar's slot for the launch button — looked up once mounted, since
+     the header and this editor are committed together. */
+  const [launchSlot, setLaunchSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => setLaunchSlot(document.getElementById('layout-launch')), []);
   const [sel, setSel] = useState<Selection | null>(null);
   const [mode, setMode] = useState<Mode>('idle');
   /* Which corner the panel is in, and whether it is rolled up out of the way. */
@@ -771,14 +776,22 @@ export function LayoutEditor() {
   if (!allowed) return null;
 
   if (!on) {
-    return (
+    // The way in lives in the top bar (`#layout-launch`, drawn by the Shell)
+    // rather than floating over the page: a fixed button in the corner sat
+    // on the last card's edge once the page gutter became the same at both
+    // ends. The editor itself stays mounted here — its frame and panel are
+    // fixed, and the top bar's backdrop blur would make it their containing
+    // block.
+    if (!launchSlot) return null;
+    return createPortal(
       <button
         className="le-ui le-launch"
         onClick={() => setOn(true)}
         title="Move and resize things on this screen"
       >
         Modify layout
-      </button>
+      </button>,
+      launchSlot,
     );
   }
 

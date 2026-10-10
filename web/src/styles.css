@@ -4193,26 +4193,26 @@ a.icon-row:hover {
 */
 
 .le-launch {
-  position: fixed;
-  right: var(--s-4);
-  bottom: var(--s-4);
-  /* Above a modal (100): a dialog is opened normally and edited once it is
-     up, so the way in has to be reachable while one is on screen. Under the
-     toasts (200), which report what just happened and outrank everything. */
-  z-index: 150;
-  padding: 8px var(--s-4);
+  /* A top-bar pill beside the bell (the Shell's `#layout-launch` slot), in
+     the bar's own muted weight; it was a fixed button in the page's corner
+     until 2026-10-10, where it covered the last card's edge. */
+  padding: 4px var(--s-3);
   border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--muted);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
   cursor: pointer;
-  box-shadow: var(--shadow-md);
 }
 
 .le-launch:hover {
   color: var(--neon);
   border-color: var(--neon);
+}
+
+.layout-launch:empty {
+  display: none;
 }
 
 /* A border round the viewport, so edit mode is never a surprise. */
