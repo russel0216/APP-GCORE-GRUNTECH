@@ -751,14 +751,17 @@ function drawGantt(
   sectionTitle(doc, section.title, 20 + 17 + 18);
 
   const usable = usableWidth(doc);
+  const total = Math.max(1, ganttEnd(section.groups));
   const colTask = Math.max(150, usable * 0.24);
-  const colStart = 40;
-  const colEnd = 40;
+  // Start and End are as wide as the longest "Day n" a phase prints in bold,
+  // so a year-long plan's "Day 360" stays on one line.
+  doc.font('Helvetica-Bold').fontSize(8);
+  const colStart = Math.max(40, Math.ceil(doc.widthOfString(`Day ${total}`)) + 12);
+  const colEnd = colStart;
   const colDays = 30;
   const fixed = colTask + colStart + colEnd + colDays;
   const gridX = T.left + fixed;
   const gridW = usable - fixed;
-  const total = Math.max(1, ganttEnd(section.groups));
   const dayW = gridW / total;
   const step = dayStep(dayW);
   const size = 8;
