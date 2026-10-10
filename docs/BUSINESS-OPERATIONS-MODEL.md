@@ -1198,7 +1198,9 @@ with time.
    **The caveat is the benchmark itself:** eight identities and *simulated*
    captures — not Gruntech's staff, cameras, lighting, hard hats or dust.
 
-   **Recheck after a month of real use**, on G-HR › Settings › Face health.
+   **Recheck after a month of real use** (the owner's decision, 2026-10-10:
+   the 0.55 is re-checked against Face health then, not tuned on the
+   benchmark again), on G-HR › Settings › Face health.
    It shows the pairs of people the clock may confuse, the samples unlike
    their owner's others, and the clock's refusals by reason over 30 days.
    - Mostly "not recognised": lighting or samples are the problem, not the
@@ -1206,21 +1208,31 @@ with time.
    - Any close pair, or "not this account": tighten the threshold, or retake
      those people's samples, before loosening anything.
 
-   **Who sees a face.** A person's face samples are theirs and HR's (the
-   employee edit right) — not the register's readers, since finance holds that
-   right for labour rates. A clock capture is the person's, HR's, the
-   executive's (every attendance entry) and their own supervisor's, never a
-   supervisor of somebody else. The face beside a name on every screen is a
-   small picture cut from a capture, never the capture itself: a sample's own
-   bytes, posted back to the clock, used to open its owner's account.
+   **Who sees a face** (the owner's decision, 2026-10-10). A person's face
+   samples are theirs and HR's (the employee edit right) — not the
+   register's readers, since finance holds that right for labour rates. A
+   clock capture is the person's, HR's, the executive's (every attendance
+   entry) and their own supervisor's — a supervisor sees their direct
+   reports' captures only, never another team's. The face beside a name on
+   every screen is a small picture cut from a capture, never the capture
+   itself: a sample's own bytes, posted back to the clock, used to open its
+   owner's account.
 
-   **What the clock does not do: tell a live face from a picture of one.**
-   There is no liveness check. A photo already on file sent again is refused,
-   and nobody can fetch one to try; but a fresh photograph of a colleague,
-   taken elsewhere and held up to the camera or sent as a file, still passes.
-   The capture kept with every entry is what HR checks a doubtful one against.
-   A liveness check (a blink or a turn asked for at random, or a depth camera
-   at the door) is a decision for the owner, with a cost in time at the door.
+   **A live face is told from a picture of one** (the owner's decision,
+   2026-10-10: wanted, and built). The clock asks for a movement at random —
+   blink once, or turn the head slightly left and right — and the server
+   checks a short burst of camera frames for it: the eye aspect ratio for
+   the blink, the head's yaw for the turn, and the same face at both ends of
+   the burst, so a photo cannot be swapped for a face mid-way. A printed
+   photo or a phone screen held to the camera is refused; so is a photo
+   already on file sent again, and nobody can fetch one to try. The check is
+   on by default and HR can switch it off (G-HR › Settings), at which point
+   a fresh photograph of a colleague passes again. **Its limit**: a video of
+   the person performing the movement, played to the camera, can pass — the
+   random choice of movement makes a prepared video unlikely to match, not
+   impossible. The capture kept with every entry remains what HR checks a
+   doubtful one against; a depth camera at the door would be the next step,
+   and is not planned.
 5. **Phase 10 left these for a deliberate decision.** Each was noticed while
    building and left alone because changing it changes who can see or do what.
    - **Attachments have no per-record guard.** The attachment service checks that

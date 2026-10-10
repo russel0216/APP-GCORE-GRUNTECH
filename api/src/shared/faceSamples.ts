@@ -403,6 +403,7 @@ export const FACE_REFUSAL_REASONS = {
   several_faces: 'More than one face in the photo',
   unreadable: 'Not a readable photo',
   replay: 'A photo sent before, sent again',
+  liveness: 'Liveness check failed',
   not_recognised: 'Face not recognised',
   not_this_account: "Looked like another employee's face",
   unsure: 'Too close to another employee to tell',
@@ -414,6 +415,7 @@ export type FaceRefusalReason = keyof typeof FACE_REFUSAL_REASONS;
 export const ENROL_REFUSAL_REASONS = {
   inconsistent: "Unlike the person's own samples",
   collision: "Too close to another employee's enrolled face",
+  liveness: 'Liveness check failed',
 } as const;
 
 export type EnrolRefusalReason = keyof typeof ENROL_REFUSAL_REASONS;

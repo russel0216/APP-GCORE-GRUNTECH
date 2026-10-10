@@ -370,11 +370,12 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,606 assertions across twenty-three scripts** (counted 2026-10-10, after
+**3,675 assertions across twenty-three scripts** (counted 2026-10-10, after
 the one dress, the sign-off and money rules, the printed lists, the
-permission trim and the face clock-in upgrade and its review): foundation
+permission trim, the face clock-in upgrade and its review, and the liveness
+check): foundation
 308, masters 79, sales 447, costing 157, pipeline 92, calendar 96, numbering
-46, partners 120, delivery 144, chain 191, hr 362, plantilla 123, meetings
+46, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
 archive 106, insights 98, insights-brief 50, workspace 46, accounts 102. The
 verify scripts share
@@ -429,6 +430,9 @@ which also runs first — puts them back. `verify-finance.ts` does the same
 with the finance rules (`finance.rules.__verify__`): it changes the
 liquidation days to prove which rule a deadline read, and a run that dies
 leaves the stash for the next run's `cleanup()` to restore. `verify-hr.ts`
+does the same with the HR rules (`hr.rules.__verify__`): the liveness check
+defaults on, so the run switches `faceLiveness` off for the face checks that
+are not about it and its liveness section switches it on; it also
 sets the stored face threshold and removes `seed.faceEngineMigrated` to prove
 the once-only migration, and puts both back in a `finally`; it also deletes
 the FILES of its uploads (a face sample, a clock capture, an account photo),
@@ -766,9 +770,70 @@ launcher as the way out) — never a stale phase sentence.
 - **A picture sent before is refused (`replay`)**: the upload's bytes equal
   one of the person's sample photos or earlier clock captures (SHA-256,
   compared by size first), or it lands within 0.01 of a sample — two camera
-  frames differ by 0.05 and more. **There is no liveness check**: a fresh
-  photograph of the person taken elsewhere still passes; the kept capture is
-  what HR checks a doubtful entry against (model §14).
+  frames differ by 0.05 and more.
+- **A live person is told from a picture of one by a CHALLENGE** (2026-10-10,
+  the owner's call: "a printed photo or a phone screen held to the camera
+  must not pass"; `shared/liveness.ts`, `faceLiveness` in HR Settings,
+  default ON). G-Core has no liveness model: the person does what the ring
+  asks — blink once, or turn the head slightly left and right — and the
+  server verifies it from a short burst of frames with the 68-point
+  landmarks it already runs. `GET /clock/challenge` (behind the clock's own
+  twelve-a-minute brake, issued whether or not the setting is on) answers
+  `{ challenge, kind, seconds: 2.5, expiresAt }`: the kind is RANDOM, the
+  token an HMAC over `userId.kind.issuedAt.nonce` with the JWT secret —
+  stateless, the caller's alone, good for 90 seconds and ONCE (a set of
+  spent nonces, which a restart forgets; `verifyChallenge` spends it before
+  the frames are read). The capture (`POST /clock`, `POST /clock/enroll`)
+  carries it as `challenge` beside the still (`photo`) and 8–24 `frames`
+  (`MIN_FRAMES`, `captureUpload`); the gate runs AFTER the replay and
+  quality gates at the clock, so a refused photo's audit row still says how
+  near the face came, and BEFORE the quality gate at enrolment (a photo is
+  refused as a photo, not for its light). **The verdict is `livenessVerdict`,
+  pure**: fewer than eight readable frames `too_few_frames`; the eye aspect
+  ratio AND the yaw both still across every frame (`STILL_EAR_RANGE` /
+  `STILL_YAW_RANGE`, 0.02 — identical frames read exactly 0.000, a live face
+  jitters by 0.03) `not_live`; a blink is the lowest EAR under `BLINK_RATIO`
+  (0.7) of the median with the eyes seen open two frames before and two
+  after — the ratio is PHYSIOLOGY, not the fixture: an open eye sits at
+  0.25–0.35 and a closed one under 0.15 (Soukupová & Čech, 2016), so a blink
+  halves it; a turn is the yaw swinging `TURN_RANGE` (0.1) with both sides of
+  the median reached — the figure comes from the FORESHORTENING fixture
+  (one half of the face squashed to 60%, what a turned head looks like to
+  the camera, swings the yaw by 0.18; real people in the enrolment benchmark
+  turned to 0.28). `checkLiveness` measures each frame through the landmark
+  net ALONE on the still's face box padded by `CROP_PADDING` (0.2 —
+  measured: at 35% the net loses the turn, at 0–10% the alignment runs off
+  the crop), and describes the FIRST and LAST usable frames: a face more
+  than `SAME_FACE_DISTANCE` (0.5) from the still's at either end is
+  `not_live` — a photo swapped for a face mid-burst (a stranger pasted over
+  the frame reads 0.80; the still itself 0.13). The frames are NEVER kept
+  (`discardCapture`); every refusal is audited as `liveness` with
+  `after.liveness.{kind, reason, frames, usable, sameFace, ms}` (reason
+  `missing` when no challenge or no frames came, `challenge` when the token
+  was refused) and the words are `LIVENESS_MESSAGES` / `CHALLENGE_MESSAGES`
+  ("No blink was seen — blink once, clearly, while the ring runs.", "That
+  liveness check was already used", "Not your liveness check"). Face health
+  counts them. **The accepted limit**: a VIDEO of the person performing the
+  movement, played to the camera, can pass — the random challenge makes a
+  prepared one unlikely to match, not impossible; the kept still is what HR
+  checks a doubtful entry against. **The fixtures are
+  `scripts/lib/faceFixtures.ts`** (sharp only): `turnFrames` is the one that
+  passes; `shearFrames` (the nose pushed off the eye line) and `eyesShut`
+  (skin-toned patches over the eyes) are NEGATIVE fixtures BY DESIGN — the
+  net regularises the nose onto the faces it knows (±0.18 of shear reads as
+  0.02–0.04 of yaw) and places the eye points where an eye should be
+  (painted lids drop the EAR by 8–18%), so neither passes, and verify-hr
+  asserts the refusal; a passing blink cannot be built from a still, which
+  is the point. verify-hr switches the setting off for the face checks that
+  are not about it (`hr.rules.__verify__`), and its challenges are issued in
+  the script with the same secret, since each ask at the route is one of
+  the person's twelve knocks.
+- **The owner's three decisions of 2026-10-10 on the face clock**: (1) face
+  SAMPLES are readable only by the person and HR with
+  `ghr.employees.edit_all`, and a supervisor sees their DIRECT REPORTS' clock
+  captures only — never another team's; (2) the liveness check was wanted
+  and is built (above); (3) the 0.55 threshold is to be RE-CHECKED against
+  Face health after a month of real use — not tuned on the benchmark again.
 - **The entry is claimed before its photo is filed**: IN writes a new day's
   row (`createMany … skipDuplicates`) or claims one with no time in, OUT
   claims the row with no time out (`updateMany`); the capture is saved only

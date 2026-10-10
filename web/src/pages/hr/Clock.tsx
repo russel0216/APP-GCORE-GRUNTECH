@@ -26,6 +26,17 @@ import { FaceSamplesPanel } from './FaceSamples';
  * and the preview shows the whole frame — never cropped — with an oval to put
  * the face in, so what the person sees is what is sent. Enrolment takes three
  * samples, each with its own instruction, before face clock-in is offered.
+ *
+ * With the liveness check on (`liveness` from /clock/me; HR Settings ›
+ * "Ask for a blink or a head turn"), one press of Capture sample / Clock In /
+ * Clock Out is one sequence: a fresh challenge is fetched FIRST
+ * (GET /clock/challenge — blink or turn, 2.5 s, single use), then the settle
+ * and burst as before for the still, then the challenge itself — the prompt
+ * under the oval says what to do, a ring around it drains over the 2.5 s
+ * (a plain countdown under prefers-reduced-motion) while a frame is grabbed
+ * every ~125 ms at 480 px wide — and the still, the frames and the token go
+ * up together. The server decides whether the movement was seen; its refusal
+ * shows verbatim, as every other does. Off, nothing of this happens.
  */
 
 interface ClockState {
@@ -46,6 +57,8 @@ interface ClockState {
   samplesNeeded?: number;
   maxSamples?: number;
   faceEngineReady?: boolean;
+  /** Whether a capture must answer a liveness challenge (a blink or a head turn). */
+  liveness?: boolean;
   today: {
     timeIn: string | null;
     timeOut: string | null;
@@ -71,11 +84,43 @@ const BURST_FRAMES = 3;
 const BURST_GAP_MS = 120;
 const JPEG_QUALITY = 0.92;
 
+/**
+ * The liveness burst: a small frame every ~125 ms while the ring runs (about
+ * twenty over 2.5 s, never more than the server's 24), 480 px wide at a
+ * lighter JPEG quality — the server reads landmarks off them, nothing more.
+ */
+const CHALLENGE_FRAME_GAP_MS = 125;
+const CHALLENGE_MAX_FRAMES = 24;
+const CHALLENGE_FRAME_WIDTH = 480;
+const CHALLENGE_JPEG_QUALITY = 0.7;
+
 /** The defaults the server sends (shared/hr.ts), for a /clock/me that predates them. */
 const DEFAULT_SAMPLES_NEEDED = 3;
 const DEFAULT_MAX_SAMPLES = 5;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+type ChallengeKind = 'blink' | 'turn';
+
+/** What GET /clock/challenge answers: the movement to ask for and the token the capture carries back. */
+interface Challenge {
+  challenge: string;
+  kind: ChallengeKind;
+  seconds: number;
+  expiresAt: string;
+}
+
+/** What the prompt under the oval says while the ring runs. */
+const CHALLENGE_PROMPT: Record<ChallengeKind, string> = {
+  blink: 'Blink once, clearly',
+  turn: 'Turn your head slightly left, then right',
+};
+
+/** What the button says while the ring runs. */
+const CHALLENGE_LABEL: Record<ChallengeKind, string> = {
+  blink: 'Blink…',
+  turn: 'Turn…',
+};
 
 /** What to do for the next sample: three different looks make a steadier match than three of the same. */
 function enrolPrompt(n: number, needed: number, max: number): string {
@@ -211,9 +256,45 @@ function useCamera() {
     return new Promise((resolve) => best.toBlob((b) => resolve(b), 'image/jpeg', JPEG_QUALITY));
   }, []);
 
+  /**
+   * The liveness burst: small frames of the camera view, one every
+   * `CHALLENGE_FRAME_GAP_MS` for `seconds`, in the order they were taken.
+   * `onTick` is told how much of the time is left (1 → 0) as each frame is
+   * due, for the countdown. Empty when there is no picture to grab.
+   */
+  const burst = useCallback(async (seconds: number, onTick?: (left: number) => void): Promise<Blob[]> => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return [];
+    const width = CHALLENGE_FRAME_WIDTH;
+    const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
+    const total = seconds * 1000;
+    const t0 = performance.now();
+    const pending: Promise<Blob | null>[] = [];
+    for (let i = 0; i < CHALLENGE_MAX_FRAMES; i++) {
+      const due = i * CHALLENGE_FRAME_GAP_MS;
+      if (due > total) break;
+      const now = performance.now() - t0;
+      if (due > now) await wait(due - now);
+      if (!video.videoWidth) break;
+      onTick?.(Math.max(0, 1 - (performance.now() - t0) / total));
+      const frame = document.createElement('canvas');
+      frame.width = width;
+      frame.height = height;
+      const ctx = frame.getContext('2d');
+      if (!ctx) continue;
+      ctx.drawImage(video, 0, 0, width, height);
+      pending.push(new Promise((resolve) => frame.toBlob((b) => resolve(b), 'image/jpeg', CHALLENGE_JPEG_QUALITY)));
+    }
+    // The ring runs the whole of its time, whatever the frame count.
+    const left = total - (performance.now() - t0);
+    if (left > 0) await wait(left);
+    onTick?.(0);
+    return (await Promise.all(pending)).filter((b): b is Blob => b !== null);
+  }, []);
+
   useEffect(() => stop, [stop]);
 
-  return { videoRef, mode, detail, settled, shape, start, stop, capture, onMetadata };
+  return { videoRef, mode, detail, settled, shape, start, stop, capture, burst, onMetadata };
 }
 
 export function Clock() {
@@ -222,8 +303,19 @@ export function Clock() {
   const camera = useCamera();
   const [state, setState] = useState<ClockState | null>(null);
   const [error, setError] = useState<unknown>(null);
-  /** What the button is doing: holding still for the burst, then waiting on the server. */
-  const [busy, setBusy] = useState<null | 'capturing' | 'sending'>(null);
+  /**
+   * What the button is doing: holding still for the burst, then performing
+   * the liveness challenge while the ring runs, then waiting on the server.
+   */
+  const [busy, setBusy] = useState<null | 'capturing' | 'challenge' | 'sending'>(null);
+  /** The challenge the ring is running, while it runs. */
+  const [challenge, setChallenge] = useState<ChallengeKind | null>(null);
+  /** Whole seconds left on the ring — the countdown shown where motion is turned off. */
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  /** The ring, drained by writing `--ring` on it (1 full, 0 gone) — no re-render per frame. */
+  const ringRef = useRef<HTMLDivElement | null>(null);
+  /** The animation frame draining the ring, so a finished challenge stops it. */
+  const ringFrame = useRef<number | null>(null);
   const [now, setNow] = useState(new Date());
   const [fallback, setFallback] = useState(false);
   const [fallbackForm, setFallbackForm] = useState({ method: 'PIN', reason: '' });
@@ -258,12 +350,55 @@ export function Clock() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.employee?.id]);
 
-  /** The camera's next frame, or a reason it cannot be had. */
-  async function takePhoto(): Promise<Blob | null> {
+  const liveness = !!state?.liveness;
+
+  /** Drains the ring smoothly over `seconds`, from the moment it is called; stopped by `stopRing`. */
+  function startRing(seconds: number) {
+    const t0 = performance.now();
+    const tick = () => {
+      const left = Math.max(0, 1 - (performance.now() - t0) / (seconds * 1000));
+      ringRef.current?.style.setProperty('--ring', String(left));
+      ringFrame.current = left > 0 ? window.requestAnimationFrame(tick) : null;
+    };
+    ringRef.current?.style.setProperty('--ring', '1');
+    ringFrame.current = window.requestAnimationFrame(tick);
+  }
+
+  function stopRing() {
+    if (ringFrame.current !== null) window.cancelAnimationFrame(ringFrame.current);
+    ringFrame.current = null;
+  }
+
+  useEffect(() => stopRing, []);
+
+  /**
+   * One capture, as the server wants it, put on `form`: the sharpest still of
+   * the burst as `photo` and — with the liveness check on — the challenge
+   * token and the frames taken while the person performed it. The challenge
+   * is fetched FIRST, so a refused one (the brake, a lost link) is said before
+   * the person is asked to hold still for nothing. False when the camera has
+   * no picture to give; the caller says so in its own words.
+   */
+  async function takeCapture(form: FormData, name: string, withChallenge: boolean): Promise<boolean> {
     setBusy('capturing');
     try {
-      return await camera.capture();
+      const asked = withChallenge ? await api.get<Challenge>('/clock/challenge') : null;
+      const photo = await camera.capture();
+      if (!photo) return false;
+      form.set('photo', photo, `${name}-${Date.now()}.jpg`);
+      if (asked) {
+        setChallenge(asked.kind);
+        setSecondsLeft(Math.ceil(asked.seconds));
+        setBusy('challenge');
+        startRing(asked.seconds);
+        const frames = await camera.burst(asked.seconds, (left) => setSecondsLeft(Math.ceil(left * asked.seconds)));
+        frames.forEach((frame, i) => form.append('frames', frame, `frame-${String(i).padStart(2, '0')}.jpg`));
+        form.set('challenge', asked.challenge);
+      }
+      return true;
     } finally {
+      stopRing();
+      setChallenge(null);
       setBusy('sending');
     }
   }
@@ -276,10 +411,11 @@ export function Clock() {
       form.set('method', method);
       if (method !== 'FACE') form.set('fallbackReason', fallbackForm.reason);
 
-      const photo = camera.mode === 'live' ? await takePhoto() : null;
+      // A fallback entry keeps its photo too, as evidence, but answers no
+      // challenge: the liveness gate is the face clock's.
+      const captured = camera.mode === 'live' ? await takeCapture(form, 'clock', method === 'FACE' && liveness) : false;
       setBusy('sending');
-      if (photo) form.set('photo', photo, `clock-${Date.now()}.jpg`);
-      else if (method === 'FACE') {
+      if (!captured && method === 'FACE') {
         throw new Error('The camera has not started yet — give it a moment, or use the fallback.');
       }
 
@@ -303,10 +439,10 @@ export function Clock() {
   async function enroll() {
     setError(null);
     try {
-      const photo = await takePhoto();
-      if (!photo) throw new Error('The camera has not started yet — give it a moment.');
       const form = new FormData();
-      form.set('photo', photo, `enrol-${Date.now()}.jpg`);
+      if (!(await takeCapture(form, 'enrol', liveness))) {
+        throw new Error('The camera has not started yet — give it a moment.');
+      }
       const result = await api.post<{ samples?: number }>('/clock/enroll', form);
       const fresh = await api.get<ClockState>('/clock/me');
       setState(fresh);
@@ -390,16 +526,33 @@ export function Clock() {
   const faceReady = state.enrolled ?? samples >= needed;
   const enrolling = !faceReady || adding;
   const canCapture = camera.mode === 'live' && camera.settled && busy === null;
-  const prompt = enrolPrompt(samples + 1, needed, max);
+  /**
+   * The instruction under the oval. While the ring runs it is the challenge;
+   * while the still is taken it is "look at the camera" (an enrolment sample
+   * keeps its own pose — the still is what is enrolled); otherwise the next
+   * sample's instruction, and nothing at the clock.
+   */
+  const prompt =
+    busy === 'challenge' && challenge
+      ? CHALLENGE_PROMPT[challenge]
+      : enrolling
+        ? `${enrolPrompt(samples + 1, needed, max)}${busy === 'capturing' ? ' — hold still' : ''}`
+        : busy === 'capturing' && liveness
+          ? 'Look at the camera'
+          : null;
 
   const captureLabel = (idle: string) =>
     busy === 'capturing'
       ? 'Hold still…'
-      : busy === 'sending'
-        ? 'Reading…'
-        : camera.mode === 'live' && !camera.settled
-          ? 'Camera settling…'
-          : idle;
+      : busy === 'challenge' && challenge
+        ? CHALLENGE_LABEL[challenge]
+        : busy === 'sending'
+          ? liveness
+            ? 'Checking…'
+            : 'Reading…'
+          : camera.mode === 'live' && !camera.settled
+            ? 'Camera settling…'
+            : idle;
 
   return (
     <div>
@@ -449,6 +602,20 @@ export function Clock() {
               onLoadedMetadata={camera.onMetadata}
             />
             {camera.mode === 'live' && <div className="camera-guide" aria-hidden="true" />}
+            {/*
+              The challenge's clock: a ring around the oval that drains over
+              its seconds (--ring, written by startRing), or — where motion is
+              turned off — the seconds counted down in its place. The prompt
+              under the picture is what is read out; neither of these is.
+            */}
+            {busy === 'challenge' && (
+              <>
+                <div ref={ringRef} className="face-ring" aria-hidden="true" />
+                <div className="face-countdown mono" aria-hidden="true">
+                  {secondsLeft}
+                </div>
+              </>
+            )}
             {camera.mode !== 'live' && (
               <div className="camera-overlay">
                 {camera.mode === 'starting' ? (
@@ -469,7 +636,17 @@ export function Clock() {
             )}
           </div>
           {camera.mode === 'live' && (
-            <p className="faint camera-hint">Put your face inside the oval, in good light, and hold still.</p>
+            <p className="faint camera-hint">
+              {liveness
+                ? 'Put your face inside the oval, in good light. The clock will ask you to blink or turn your head.'
+                : 'Put your face inside the oval, in good light, and hold still.'}
+            </p>
+          )}
+          {/* Read out as it changes: the sample to take, then what the ring asks for. */}
+          {(enrolling || prompt) && (
+            <p className="face-prompt" aria-live="polite">
+              {prompt}
+            </p>
           )}
 
           {enrolling ? (
@@ -494,9 +671,6 @@ export function Clock() {
                   )}
                 </div>
               )}
-              <p className="face-prompt" aria-live="polite">
-                {prompt}
-              </p>
               <button className="btn btn-primary btn-block clock-btn" onClick={enroll} disabled={!canCapture}>
                 {captureLabel(`Capture sample ${samples + 1}`)}
               </button>

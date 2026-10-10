@@ -41,6 +41,12 @@ export interface HrSettings {
    * face-api's own default, 0.6, was the old engine's.
    */
   faceThreshold: number;
+  /**
+   * The liveness challenge at the face clock and its enrolment (2026-10-10,
+   * shared/liveness.ts): blink or turn, verified from a burst of frames. Off,
+   * no challenge is asked for and none is checked.
+   */
+  faceLiveness: boolean;
   /** Probation runs this long from dateHired when no period end is set. */
   probationMonths: number;
   /** Months into probation at which an evaluation falls due, before the end one. */
@@ -97,6 +103,7 @@ const DEFAULTS: HrSettings = {
   overtimeMultiplier: 1.25,
   hoursPerDay: 8,
   faceThreshold: 0.55,
+  faceLiveness: true,
   probationMonths: 6,
   evaluationMilestoneMonths: [3, 5],
   evaluationNoticeDays: 14,

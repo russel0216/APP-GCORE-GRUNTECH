@@ -56,8 +56,27 @@ import {
   toMinutes,
   fromMinutes,
 } from '../src/shared/hr';
-import { describeFace, faceQualityProblem, FACE_ENGINE, type FaceQuality } from '../src/shared/face';
+import { describeFace, faceQualityProblem, FACE_ENGINE, type FaceCapture, type FaceQuality } from '../src/shared/face';
 import { migrateFaceThreshold, rederiveFaceSamples, separateAccountPhotos } from '../src/shared/faceSamples';
+import {
+  CHALLENGE_KINDS,
+  CHALLENGE_MESSAGES,
+  CHALLENGE_SECONDS,
+  CHALLENGE_TTL_MS,
+  MIN_FRAMES,
+  SAME_FACE_DISTANCE,
+  TURN_RANGE,
+  BLINK_RATIO,
+  checkLiveness,
+  eyeAspectRatio,
+  issueChallenge,
+  livenessVerdict,
+  measureFrame,
+  verifyChallenge,
+  type ChallengeKind,
+  type FrameReading,
+} from '../src/shared/liveness';
+import { eyesShut, frameOf, shearFrames, stillFrames, turnFrames } from './lib/faceFixtures';
 import { attachmentPath, deleteAttachment } from '../src/shared/attachments';
 import { formatAmount, formatMoney, statusLabel } from '../src/shared/pdf';
 // Registers the leave and overtime approval subscribers (a side effect), and
@@ -110,9 +129,49 @@ const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v)
 const TAG = 'ZZHR';
 const BASE = `http://localhost:${env.port}/api`;
 
+/**
+ * Where the HR rules wait while the run changes them (verify-finance's
+ * pattern with `finance.rules.__verify__`). The liveness check defaults ON,
+ * and the face checks that are not about it — samples, the clock, the
+ * collision rules — send a still and nothing else, so the run switches
+ * `faceLiveness` off at its start and the liveness section switches it on
+ * for its own cases. `cleanup()`, which also runs first, puts the real rules
+ * back — a run that dies leaves the stash for the next run to restore.
+ */
+const RULES_STASH = 'hr.rules.__verify__';
+
+async function stashRules() {
+  if (await prisma.setting.findUnique({ where: { key: RULES_STASH } })) return;
+  const real = await prisma.setting.findUnique({ where: { key: 'hr.rules' } });
+  await prisma.setting.create({
+    data: {
+      key: RULES_STASH,
+      value: { had: !!real, value: (real?.value ?? null) as Prisma.InputJsonValue } as Prisma.InputJsonObject,
+      description: 'verify-hr: the HR rules before the run',
+    },
+  });
+}
+
+async function restoreRules() {
+  const stash = await prisma.setting.findUnique({ where: { key: RULES_STASH } });
+  if (!stash) return;
+  const { had, value } = stash.value as { had: boolean; value: Prisma.InputJsonValue | null };
+  if (had && value != null) {
+    await prisma.setting.upsert({
+      where: { key: 'hr.rules' },
+      create: { key: 'hr.rules', value, description: 'Working day, breaks, overtime premium and face-match threshold' },
+      update: { value },
+    });
+  } else {
+    await prisma.setting.deleteMany({ where: { key: 'hr.rules' } });
+  }
+  await prisma.setting.delete({ where: { key: RULES_STASH } });
+}
+
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  await restoreRules();
   // Approvals route to whoever really holds the role, so real people were told
   // about this script's documents too. Every such title carries TAG.
   await prisma.notification.deleteMany({ where: { title: { contains: TAG } } });
@@ -275,6 +334,79 @@ function leftBehind(before: Set<string>, bytes: Buffer): number {
   return n;
 }
 
+// ── Liveness fixtures ───────────────────────────────────────────────────────
+//
+// A camera's burst is stood in for by frames built from the still
+// (scripts/lib/faceFixtures.ts — sharp only). A real head turn foreshortens
+// one half of the face, which `turnFrames` does; a sweep that starts and
+// ends facing the camera is what the ring sees.
+
+/** A head turn over twenty frames: 0 → 1 → 0 → −1 → 0, facing the camera at both ends. */
+const SWEEP = Array.from({ length: 20 }, (_, i) => Math.sin((i / 19) * 2 * Math.PI));
+
+/** The still described, and the burst a person turning their head would send with it. */
+async function turnBurst(still: Buffer, purpose: 'enrol' | 'clock', turns = SWEEP) {
+  const capture = await describeFace(still, { purpose });
+  const frames = await turnFrames(still, capture.box.x + capture.box.width / 2, turns);
+  return { capture, frames };
+}
+
+/** Each frame's reading through the engine's own per-frame reader, as `checkLiveness` takes them. */
+async function readingsOf(frames: Buffer[], capture: { box: FaceCapture['box']; image: { width: number } }): Promise<FrameReading[]> {
+  const out: FrameReading[] = [];
+  for (const frame of frames) {
+    const m = await measureFrame(frame, capture.box, capture.image.width);
+    if (m) out.push({ ear: m.ear, yaw: m.yaw });
+  }
+  return out;
+}
+
+/** The burst's eyes painted shut on frames 9–11: a still with a blink drawn on it. */
+async function paintedBlink(frame: Buffer, capture: { box: FaceCapture['box']; image: { width: number } }): Promise<Buffer[]> {
+  const m = await measureFrame(frame, capture.box, capture.image.width);
+  if (!m) throw new Error('the frame has no readable landmarks');
+  const shut = await eyesShut(frame, [m.leftEye, m.rightEye]);
+  return stillFrames(frame, 20).map((f, i) => (i >= 9 && i <= 11 ? shut : f));
+}
+
+/** `frame` with somebody else's face pasted over the still's face box — a swap mid-burst. */
+async function pastedFace(frame: Buffer, capture: { box: FaceCapture['box']; image: { width: number } }, otherPhoto: Buffer): Promise<Buffer> {
+  const other = await describeFace(otherPhoto, { purpose: 'clock' });
+  const meta = await sharp(frame).metadata();
+  const scale = meta.width! / capture.image.width;
+  const b = { x: capture.box.x * scale, y: capture.box.y * scale, width: capture.box.width * scale, height: capture.box.height * scale };
+  const left = Math.max(0, Math.round(other.box.x - other.box.width * 0.2));
+  const top = Math.max(0, Math.round(other.box.y - other.box.height * 0.2));
+  const face = await sharp(otherPhoto)
+    .extract({
+      left,
+      top,
+      width: Math.min(other.image.width - left, Math.round(other.box.width * 1.4)),
+      height: Math.min(other.image.height - top, Math.round(other.box.height * 1.4)),
+    })
+    .resize(Math.round(b.width * 1.4), Math.round(b.height * 1.4), { fit: 'fill' })
+    .toBuffer();
+  return sharp(frame)
+    .composite([{ input: face, left: Math.round(b.x - b.width * 0.2), top: Math.round(b.y - b.height * 0.2) }])
+    .jpeg({ quality: 80 })
+    .toBuffer();
+}
+
+/**
+ * A challenge of the kind a case needs. `GET /clock/challenge` picks the kind
+ * at random, and every ask costs one of the person's twelve knocks a minute,
+ * so the cases issue their own — the token is an HMAC over its fields with
+ * the API's own secret, which this script holds as it holds the one
+ * `signToken` signs with. One case still takes the route's own token, to
+ * prove the two agree.
+ */
+function challengeOf(userId: string, kind: ChallengeKind, now = new Date()): string {
+  for (;;) {
+    const c = issueChallenge(userId, now);
+    if (c.kind === kind) return c.challenge;
+  }
+}
+
 interface HttpResult {
   status: number;
   body: Record<string, unknown>;
@@ -313,17 +445,19 @@ async function apiReachable(): Promise<boolean> {
   }
 }
 
-/** A multipart request, as the Clock page sends a capture. */
+/** A multipart request, as the Clock page sends a capture: the still, and with the liveness check on, the burst of `frames`. */
 async function apiForm(
   token: string,
   path: string,
   image: Buffer,
   fields: Record<string, string> = {},
   fileField = 'photo',
+  frames: Buffer[] = [],
 ): Promise<HttpResult> {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
   form.set(fileField, new Blob([image], { type: 'image/jpeg' }), 'capture.jpg');
+  frames.forEach((frame, i) => form.append('frames', new Blob([frame], { type: 'image/jpeg' }), `frame-${i}.jpg`));
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
   const text = await res.text();
   let parsed: Record<string, unknown> = {};
@@ -340,6 +474,9 @@ async function apiForm(
 async function main() {
   console.log('\nG-CORE HR verification\n');
   await cleanup();
+  // The liveness check is off until its own section (see RULES_STASH).
+  await stashRules();
+  await saveHrSettings({ faceLiveness: false });
 
   const settings = await hrSettings();
 
@@ -1034,6 +1171,185 @@ async function main() {
         where: { entityType: 'setting', at: { gte: separationStarted }, summary: { startsWith: 'Account photos separated' } },
       });
     }
+  }
+
+  // ══ Liveness: the verdict, the challenge and the fixtures ═══════════════
+  //
+  // A live person is told from a picture of one by a challenge — blink once,
+  // or turn the head — verified from a burst of frames (shared/liveness.ts,
+  // 2026-10-10). The verdict is pure and is checked on made-up readings
+  // first; the challenge token is checked without the API; then the fixtures
+  // built from the webcam still go through the engine's own per-frame
+  // reader. Two of those fixtures are NEGATIVE by design: a sheared picture
+  // is not a turn, and painted lids are not a blink — the landmark net
+  // regularises both onto the faces it knows, which is what keeps a flat
+  // picture waggled about, or drawn on, from passing.
+  console.log('\nLiveness: the verdict, the challenge and the fixtures');
+  {
+    const near = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+    const reasonOf = (v: ReturnType<typeof livenessVerdict>) => (v.ok ? 'ok' : v.reason);
+    // Six points round an eye `w` wide whose lids open `h`: the ratio is h / w.
+    const eye = (w: number, h: number) => [
+      { x: 0, y: 0 },
+      { x: w / 3, y: -h / 2 },
+      { x: (2 * w) / 3, y: -h / 2 },
+      { x: w, y: 0 },
+      { x: (2 * w) / 3, y: h / 2 },
+      { x: w / 3, y: h / 2 },
+    ];
+    check(
+      "the eye aspect ratio is the lids' opening over the eye's width — 0.3 open, 0.1 nearly shut — and scale-free",
+      near(eyeAspectRatio(eye(10, 3)), 0.3) && near(eyeAspectRatio(eye(100, 30)), 0.3) && near(eyeAspectRatio(eye(10, 1)), 0.1),
+      `${eyeAspectRatio(eye(10, 3))} ${eyeAspectRatio(eye(100, 30))} ${eyeAspectRatio(eye(10, 1))}`,
+    );
+    check('fewer than six points, or an eye with no width, is 0 — never NaN', eyeAspectRatio([]) === 0 && eyeAspectRatio(eye(0, 0)) === 0);
+
+    const open = (n: number, yaw = -0.05): FrameReading[] => Array.from({ length: n }, () => ({ ear: 0.3, yaw }));
+    /** Open eyes with a blink at `at`: the lids half way on either side of it, `shut` at it. */
+    const blinkAt = (n: number, at: number, shut = 0.12): FrameReading[] =>
+      open(n).map((r, i) => ({ ...r, ear: i === at ? shut : i === at - 1 || i === at + 1 ? (0.3 + shut) / 2 : r.ear }));
+    check('a blink — open 0.30, shut 0.12, open 0.30 — passes the blink verdict', livenessVerdict('blink', blinkAt(12, 6)).ok);
+    check(
+      'the eyes must be seen open in two frames before and two after the blink: a blink in the second or the second-last frame is no blink',
+      reasonOf(livenessVerdict('blink', blinkAt(12, 1))) === 'no_blink' && reasonOf(livenessVerdict('blink', blinkAt(12, 10))) === 'no_blink',
+    );
+    check(
+      `the lids must close past ${BLINK_RATIO} of the open eye: a dip to 0.25 (painted lids reach 0.82 at best) is no blink`,
+      reasonOf(livenessVerdict('blink', blinkAt(12, 6, 0.25))) === 'no_blink' && reasonOf(livenessVerdict('blink', blinkAt(12, 6, 0.2))) === 'ok',
+    );
+    check(
+      `fewer than ${MIN_FRAMES} readable frames is too_few_frames — a reading without a number does not count`,
+      reasonOf(livenessVerdict('blink', blinkAt(7, 3))) === 'too_few_frames' &&
+        reasonOf(livenessVerdict('turn', [...open(7), { ear: NaN, yaw: 0 }, { ear: 0.3, yaw: NaN }])) === 'too_few_frames',
+    );
+    check(
+      'a series that neither blinks nor moves — a photo held still — is not_live for both kinds, and so is one jittering under the still limits',
+      reasonOf(livenessVerdict('blink', open(12))) === 'not_live' &&
+        reasonOf(livenessVerdict('turn', open(12))) === 'not_live' &&
+        reasonOf(livenessVerdict('turn', open(12).map((r, i) => ({ ear: r.ear + (i % 2 ? 0.009 : -0.009), yaw: r.yaw + (i % 3 ? 0.009 : -0.009) })))) === 'not_live',
+    );
+    check(
+      "a live face's jitter with no blink is no_blink, not not_live — the person was there and did not do what was asked",
+      reasonOf(livenessVerdict('blink', open(12).map((r, i) => ({ ...r, ear: r.ear + (i % 2 ? 0.015 : -0.015) })))) === 'no_blink',
+    );
+    const sweep = (n: number, amplitude: number, offset = 0.02): FrameReading[] =>
+      Array.from({ length: n }, (_, i) => ({ ear: 0.3, yaw: offset + amplitude * Math.sin((i / (n - 1)) * 2 * Math.PI) }));
+    check(
+      `a head turn — the yaw swinging ${TURN_RANGE} or more, left and right of centre — passes the turn verdict, in either order`,
+      livenessVerdict('turn', sweep(16, 0.12)).ok && livenessVerdict('turn', sweep(16, -0.12)).ok,
+    );
+    check(
+      'a smaller swing is no_turn, and so is a turn to one side only',
+      reasonOf(livenessVerdict('turn', sweep(16, 0.045))) === 'no_turn' &&
+        reasonOf(livenessVerdict('turn', open(16).map((r, i) => ({ ...r, yaw: i >= 4 && i <= 10 ? 0.2 * Math.sin(((i - 4) / 6) * Math.PI) : 0 })))) === 'no_turn',
+    );
+    check(
+      'the wrong movement is refused: a blink on a turn challenge is no_turn, a turn on a blink challenge no_blink',
+      reasonOf(livenessVerdict('turn', blinkAt(12, 6))) === 'no_turn' && reasonOf(livenessVerdict('blink', sweep(16, 0.12))) === 'no_blink',
+    );
+
+    // ── The challenge token ──
+    const now = new Date();
+    const issued = issueChallenge('user-one', now);
+    const kinds = new Set(Array.from({ length: 40 }, () => issueChallenge('user-one').kind));
+    check(
+      `a challenge is a signed token of one of the kinds, ${CHALLENGE_SECONDS} seconds of ring, good for ${CHALLENGE_TTL_MS / 1000} seconds — and the kind is random`,
+      /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(issued.challenge) &&
+        CHALLENGE_KINDS.includes(issued.kind) &&
+        issued.seconds === CHALLENGE_SECONDS &&
+        issued.expiresAt.getTime() === now.getTime() + CHALLENGE_TTL_MS &&
+        kinds.size === CHALLENGE_KINDS.length,
+      `${issued.kind} ${issued.seconds} ${[...kinds].join(',')}`,
+    );
+    check('it verifies once, for its owner, giving back its kind', verifyChallenge(issued.challenge, 'user-one', now).kind === issued.kind);
+    await expectRejection('and never twice', async () => verifyChallenge(issued.challenge, 'user-one', now), CHALLENGE_MESSAGES.used);
+    await expectRejection(
+      "somebody else's challenge is not yours",
+      async () => verifyChallenge(issueChallenge('user-two', now).challenge, 'user-one', now),
+      CHALLENGE_MESSAGES.foreign,
+    );
+    await expectRejection(
+      'one issued two minutes ago has timed out',
+      async () => verifyChallenge(issueChallenge('user-one', new Date(now.getTime() - 120_000)).challenge, 'user-one', now),
+      CHALLENGE_MESSAGES.expired,
+    );
+    const fresh = issueChallenge('user-one', now).challenge;
+    const [encoded, signature] = fresh.split('.');
+    const otherKind = Buffer.from(
+      Buffer.from(encoded, 'base64url').toString('utf8').replace(/\.(blink|turn)\./, (_, k) => `.${k === 'blink' ? 'turn' : 'blink'}.`),
+    ).toString('base64url');
+    for (const [label, token] of [
+      ['a tampered signature', `${encoded}.${signature.slice(0, -2)}xx`],
+      ['the kind rewritten under the old signature', `${otherKind}.${signature}`],
+      ['no signature at all', encoded],
+      ['garbage', 'not-a-challenge'],
+    ] as const) {
+      await expectRejection(`${label} is not valid`, async () => verifyChallenge(token, 'user-one', now), CHALLENGE_MESSAGES.invalid);
+    }
+    check('and the untouched token still verifies afterwards — a refused copy spends nothing', verifyChallenge(fresh, 'user-one', now).kind !== undefined);
+
+    // ── The fixtures through the engine ──
+    const still = await asJpeg(webcamPhoto());
+    const { capture: cap, frames: turning } = await turnBurst(still, 'enrol');
+    const frame = await frameOf(still);
+    const turned = await readingsOf(turning, cap);
+    const yawRange = (rs: FrameReading[]) => Math.max(...rs.map((r) => r.yaw)) - Math.min(...rs.map((r) => r.yaw));
+    check(
+      `a head turn — one half of the face foreshortened, as the camera sees a turned head — reads as a yaw swing past ${TURN_RANGE} and passes`,
+      turned.length === 20 && yawRange(turned) >= TURN_RANGE && livenessVerdict('turn', turned).ok,
+      `${turned.length} usable, yaw range ${yawRange(turned).toFixed(3)} → ${reasonOf(livenessVerdict('turn', turned))}`,
+    );
+    const stills = await readingsOf(stillFrames(frame, 20), cap);
+    check(
+      'twenty identical frames — a photo held still — read exactly alike: not_live for either kind',
+      stills.length === 20 && reasonOf(livenessVerdict('turn', stills)) === 'not_live' && reasonOf(livenessVerdict('blink', stills)) === 'not_live',
+      `${stills.length} usable, yaw range ${yawRange(stills).toFixed(3)}`,
+    );
+    const sheared = await readingsOf(
+      await shearFrames(still, SWEEP.map((t) => -0.18 * t), cap.box.y + cap.box.height / 2),
+      cap,
+    );
+    check(
+      'a NEGATIVE fixture: the picture sheared ±0.18 — the nose pushed off the eye line, a flat picture waggled about — is no_turn',
+      sheared.length >= MIN_FRAMES && yawRange(sheared) < TURN_RANGE && reasonOf(livenessVerdict('turn', sheared)) === 'no_turn',
+      `${sheared.length} usable, yaw range ${yawRange(sheared).toFixed(3)} → ${reasonOf(livenessVerdict('turn', sheared))}`,
+    );
+    const quarter = await readingsOf((await turnBurst(still, 'enrol', SWEEP.map((t) => t * 0.25))).frames, cap);
+    check(
+      'a quarter turn is no_turn',
+      reasonOf(livenessVerdict('turn', quarter)) === 'no_turn',
+      `yaw range ${yawRange(quarter).toFixed(3)}`,
+    );
+    const painted = await readingsOf(await paintedBlink(frame, cap), cap);
+    const earOpen = painted[0]?.ear ?? 0;
+    const earShut = painted[10]?.ear ?? 0;
+    check(
+      'a NEGATIVE fixture: the eyes painted shut in the cheek\'s own colour drop the EAR by under 30% — the net wants a real closed eye — and are no_blink',
+      painted.length === 20 && earShut > BLINK_RATIO * earOpen && reasonOf(livenessVerdict('blink', painted)) === 'no_blink',
+      `EAR open ${earOpen.toFixed(3)} painted ${earShut.toFixed(3)} → ${reasonOf(livenessVerdict('blink', painted))}`,
+    );
+    const input = { box: cap.box, stillWidth: cap.image.width, descriptor: cap.descriptor };
+    const whole = await checkLiveness(turning, 'turn', input);
+    check(
+      `checkLiveness: the turn passes whole — twenty usable, the first and last frames' faces within ${SAME_FACE_DISTANCE} of the still's`,
+      whole.verdict.ok &&
+        whole.frames === 20 &&
+        whole.usable === 20 &&
+        whole.sameFace.first != null &&
+        whole.sameFace.first <= SAME_FACE_DISTANCE &&
+        whole.sameFace.last != null &&
+        whole.sameFace.last <= SAME_FACE_DISTANCE,
+      JSON.stringify({ ...whole, ms: undefined }),
+    );
+    const swapped = await pastedFace(turning[0], cap, await personBPhoto());
+    const swap = await checkLiveness([...turning.slice(0, 14), ...stillFrames(swapped, 6)], 'turn', input);
+    check(
+      'another face over the last six frames is not_live — the last frame is further from the still than the same-face limit, whatever the movement',
+      !swap.verdict.ok && swap.verdict.reason === 'not_live' && swap.sameFace.last != null && swap.sameFace.last > SAME_FACE_DISTANCE,
+      JSON.stringify({ ...swap, ms: undefined }),
+    );
+    const few = await checkLiveness(turning.slice(0, MIN_FRAMES - 1), 'turn', input);
+    check('seven frames are too few before any face is compared', !few.verdict.ok && few.verdict.reason === 'too_few_frames' && few.sameFace.first === null);
   }
 
   // ══ The threshold migration ══════════════════════════════════════════════
@@ -2465,6 +2781,337 @@ async function main() {
           !fs.existsSync(attachmentPath(leaverPhotos[0].storedName)),
         `${leaverSample.status} ${String(leaverSample.body.error ?? '')} ${dropLeaver.status} ${leaverPhotos.length}`,
       );
+    }
+
+    // ══ Liveness at the door (over HTTP) ═══════════════════════════════════
+    //
+    // With `faceLiveness` on — the default; the run switched it off at its
+    // start — a face capture carries the challenge token from
+    // GET /clock/challenge and the burst of frames the ring recorded, and
+    // the server refuses a still that did not do what the ring asked, at the
+    // clock and at enrolment alike, before the match is decided. Lia enrols
+    // and clocks in through it and her clock then takes the token refusals;
+    // Mara's enrolment takes the bursts that must not pass. Each door takes
+    // twelve knocks a minute per person, so the cases issue their own
+    // challenges (`challengeOf`) and one takes the route's, to prove the two
+    // agree.
+    console.log('\nLiveness at the door (over HTTP)');
+    {
+      await saveHrSettings({ faceLiveness: true });
+      try {
+        const livePerson = async (key: string, first: string, last: string, no: string) => {
+          const user = await makeUser(`ZZ ${first} ${last}`, `${key}@verifyhr.local`, [workerRole.id]);
+          const row = await prisma.employee.create({
+            data: { employeeNo: `${TAG}-${no}`, firstName: first, lastName: last, userId: user.id },
+          });
+          return { user, employee: row, token: signToken(user.id, user.email) };
+        };
+        const lia = await livePerson('lia', 'Lia', 'Live', '021');
+        const mara = await livePerson('mara', 'Mara', 'Mirror', '022');
+        const nobody = await makeUser('ZZ Nobody Live', 'nobodylive@verifyhr.local', [workerRole.id]);
+        const webcam = webcamPhoto();
+        const stillOf = (width: number, quality: number) => sharp(webcam).resize(width).jpeg({ quality }).toBuffer();
+        const B = await personBPhoto();
+
+        type LiveAfter = {
+          faceRefusal?: string;
+          faceEnrolRefusal?: string;
+          ownDistance?: number | null;
+          liveness?: {
+            kind: string | null;
+            reason: string;
+            frames: number;
+            usable: number | null;
+            sameFace?: { first: number | null; last: number | null };
+          };
+        };
+        const refusalRows = (door: 'clock' | 'enrol', employeeId: string) =>
+          prisma.auditLog.findMany({
+            where: { entityType: door === 'clock' ? 'attendance' : 'employee', entityId: employeeId, action: 'REJECTED' },
+            orderBy: { at: 'desc' },
+          });
+        /** A capture the liveness check must refuse: the words, one audit row with the verdict and the frame count, no file kept. */
+        const refusedLive = async (
+          label: string,
+          door: 'clock' | 'enrol',
+          who: typeof lia,
+          fields: Record<string, string>,
+          still: Buffer,
+          frames: Buffer[],
+          says: RegExp,
+          reason: string,
+          kind?: ChallengeKind | null,
+        ) => {
+          const files = uploadedFiles();
+          const rowsBefore = (await refusalRows(door, who.employee.id)).length;
+          const res =
+            door === 'clock'
+              ? await apiForm(who.token, '/clock', still, { action: 'OUT', method: 'FACE', ...fields }, 'photo', frames)
+              : await apiForm(who.token, '/clock/enroll', still, fields, 'photo', frames);
+          const rows = await refusalRows(door, who.employee.id);
+          const after = (rows[0]?.after ?? {}) as LiveAfter;
+          const error = String(res.body.error ?? '');
+          const stray = leftBehind(files, still) + frames.reduce((n, f) => n + leftBehind(files, f), 0);
+          check(label, res.status === 400 && says.test(error), `${res.status} ${error}`);
+          check(
+            `and it is on HR's audit trail as a liveness refusal — ${reason}, ${frames.length} frame(s)${
+              door === 'clock' ? ', how near her own samples came' : ''
+            } — the still and the burst deleted from disk`,
+            rows.length === rowsBefore + 1 &&
+              (door === 'clock' ? after.faceRefusal === 'liveness' && typeof after.ownDistance === 'number' : after.faceEnrolRefusal === 'liveness') &&
+              after.liveness?.reason === reason &&
+              after.liveness?.frames === frames.length &&
+              (kind === undefined || after.liveness?.kind === kind) &&
+              stray === 0,
+            `${rows.length - rowsBefore} row(s), ${JSON.stringify(after.liveness)}, ${stray} file(s) left`,
+          );
+          return { res, after };
+        };
+
+        const meOn = await api(lia.token, 'GET', '/clock/me');
+        check('with the setting on, clock/me says a capture needs the liveness check', meOn.status === 200 && meOn.body.liveness === true, JSON.stringify(meOn.body).slice(0, 120));
+        const noEmployee = await api(signToken(nobody.id, nobody.email), 'GET', '/clock/challenge');
+        check('a login with no employee record gets no challenge', noEmployee.status === 400, `${noEmployee.status} ${String(noEmployee.body.error)}`);
+
+        // ── Enrolment through the check: three samples, each with a head turn ──
+        const enrolStills = [await stillOf(800, 90), await stillOf(760, 85), await stillOf(700, 70)];
+        for (const [i, still] of enrolStills.entries()) {
+          const { frames } = await turnBurst(still, 'enrol');
+          const files = uploadedFiles();
+          const res = await apiForm(lia.token, '/clock/enroll', still, { challenge: challengeOf(lia.user.id, 'turn') }, 'photo', frames);
+          check(
+            `sample ${i + 1} with a head turn on a turn challenge is accepted — the still kept, the twenty frames not`,
+            res.status === 201 &&
+              res.body.samples === i + 1 &&
+              leftBehind(files, still) === 1 &&
+              frames.every((f) => leftBehind(files, f) === 0),
+            `${res.status} ${JSON.stringify(res.body).slice(0, 120)}`,
+          );
+        }
+        const meThree = await api(lia.token, 'GET', '/clock/me');
+        const liaPicture = (await prisma.user.findUnique({ where: { id: lia.user.id }, select: { photoPath: true } }))?.photoPath ?? null;
+        check(
+          'three samples through the check enrol her, and her account picture was cut from them as always',
+          meThree.body.faceSamples === 3 && meThree.body.enrolled === true && !!liaPicture,
+          JSON.stringify(meThree.body).slice(0, 120),
+        );
+
+        // ── Enrolment refused: the bursts that must not pass ──
+        const maraStill = await stillOf(740, 80);
+        const { capture: maraCap, frames: maraTurn } = await turnBurst(maraStill, 'enrol');
+        const maraFrame = await frameOf(maraStill);
+        await refusedLive(
+          'a photo held still — twenty identical frames — is refused at enrolment as not a live person',
+          'enrol',
+          mara,
+          { challenge: challengeOf(mara.user.id, 'turn') },
+          maraStill,
+          stillFrames(maraFrame, 20),
+          /live person/,
+          'not_live',
+          'turn',
+        );
+        await refusedLive(
+          "a burst that turns, then shows somebody else's face in its last six frames, is refused as not live — the face must be the still's at both ends",
+          'enrol',
+          mara,
+          { challenge: challengeOf(mara.user.id, 'turn') },
+          maraStill,
+          [...maraTurn.slice(0, 14), ...stillFrames(await pastedFace(maraTurn[0], maraCap, B), 6)],
+          /live person/,
+          'not_live',
+          'turn',
+        );
+        await refusedLive(
+          'the eyes painted shut on a blink challenge are refused as no blink — a NEGATIVE fixture: the net wants a real closed eye',
+          'enrol',
+          mara,
+          { challenge: challengeOf(mara.user.id, 'blink') },
+          maraStill,
+          await paintedBlink(maraFrame, maraCap),
+          /No blink/,
+          'no_blink',
+          'blink',
+        );
+        await refusedLive(
+          'a head turn sent to a blink challenge is refused as no blink — the movement asked for, not any movement',
+          'enrol',
+          mara,
+          { challenge: challengeOf(mara.user.id, 'blink') },
+          maraStill,
+          maraTurn,
+          /No blink/,
+          'no_blink',
+          'blink',
+        );
+        await refusedLive(
+          'the picture sheared about on a turn challenge is refused as no head turn — a NEGATIVE fixture: a flat picture waggled is not a turn',
+          'enrol',
+          mara,
+          { challenge: challengeOf(mara.user.id, 'turn') },
+          maraStill,
+          await shearFrames(maraStill, SWEEP.map((t) => -0.18 * t), maraCap.box.y + maraCap.box.height / 2),
+          /No head turn/,
+          'no_turn',
+          'turn',
+        );
+        check(
+          'none of those left her a sample, and her My Work says only that a sample was refused for the liveness check',
+          (await prisma.faceEnrollment.count({ where: { employeeId: mara.employee.id } })) === 0 &&
+            /liveness check failed/.test(JSON.stringify((await api(mara.token, 'GET', '/my-work')).body.recentActivity ?? [])),
+        );
+
+        // ── The clock: in through the check, then every way a token or a burst is refused ──
+        const clockStill = await stillOf(640, 60);
+        const { capture: clockCap, frames: clockTurn } = await turnBurst(clockStill, 'clock');
+        const inToken = challengeOf(lia.user.id, 'turn');
+        const inFiles = uploadedFiles();
+        const clockedIn = await apiForm(lia.token, '/clock', clockStill, { action: 'IN', method: 'FACE', challenge: inToken }, 'photo', clockTurn);
+        const liaDay = await prisma.attendance.findUnique({
+          where: { employeeId_date: { employeeId: lia.employee.id, date: dayKey(new Date()) } },
+        });
+        check(
+          'her face with a head turn on a turn challenge clocks her in — the distance stored, the still kept as the evidence, the frames thrown away',
+          clockedIn.status === 200 &&
+            liaDay?.timeInMethod === 'FACE' &&
+            liaDay.timeInScore != null &&
+            !!liaDay.timeInPhoto &&
+            leftBehind(inFiles, clockStill) === 1 &&
+            clockTurn.every((f) => leftBehind(inFiles, f) === 0),
+          `${clockedIn.status} ${JSON.stringify(clockedIn.body).slice(0, 120)}`,
+        );
+        // Every later attempt sends a fresh still, or the replay gate refuses it first.
+        let quality = 41;
+        const fresh = () => stillOf(640, quality++);
+        await refusedLive('the same challenge sent again is refused as already used', 'clock', lia, { challenge: inToken }, await fresh(), clockTurn, /already used/, 'challenge', null);
+        await refusedLive(
+          "somebody else's challenge is refused as not hers",
+          'clock',
+          lia,
+          { challenge: challengeOf(mara.user.id, 'turn') },
+          await fresh(),
+          clockTurn,
+          /Not your liveness check/,
+          'challenge',
+          null,
+        );
+        await refusedLive(
+          'a challenge issued two minutes ago has timed out',
+          'clock',
+          lia,
+          { challenge: challengeOf(lia.user.id, 'turn', new Date(Date.now() - 120_000)) },
+          await fresh(),
+          clockTurn,
+          /timed out/,
+          'challenge',
+          null,
+        );
+        await refusedLive(
+          'a tampered challenge is not valid',
+          'clock',
+          lia,
+          { challenge: `${challengeOf(lia.user.id, 'turn').slice(0, -2)}xx` },
+          await fresh(),
+          clockTurn,
+          /not valid/,
+          'challenge',
+          null,
+        );
+        await refusedLive('a capture with no challenge is told the check did not run', 'clock', lia, {}, await fresh(), clockTurn, /did not run/, 'missing', null);
+        await refusedLive(
+          'and so is one with a challenge but no frames',
+          'clock',
+          lia,
+          { challenge: challengeOf(lia.user.id, 'turn') },
+          await fresh(),
+          [],
+          /did not run/,
+          'missing',
+          null,
+        );
+        await refusedLive(
+          `${MIN_FRAMES - 1} frames are too few — told to hold still a moment longer, the challenge not spent`,
+          'clock',
+          lia,
+          { challenge: challengeOf(lia.user.id, 'turn') },
+          await fresh(),
+          clockTurn.slice(0, MIN_FRAMES - 1),
+          /Hold still/,
+          'too_few_frames',
+          null,
+        );
+        const routeChallenge = await api(lia.token, 'GET', '/clock/challenge');
+        const routeKind = String(routeChallenge.body.kind);
+        check(
+          `GET /clock/challenge answers a token, its kind, ${CHALLENGE_SECONDS} seconds of ring and when it expires`,
+          routeChallenge.status === 200 &&
+            typeof routeChallenge.body.challenge === 'string' &&
+            CHALLENGE_KINDS.includes(routeKind as ChallengeKind) &&
+            routeChallenge.body.seconds === CHALLENGE_SECONDS &&
+            !Number.isNaN(Date.parse(String(routeChallenge.body.expiresAt))),
+          `${routeChallenge.status} ${JSON.stringify(routeChallenge.body).slice(0, 120)}`,
+        );
+        await refusedLive(
+          "a photo held still at the clock, on the route's own challenge, is refused as not a live person — the token verified, whichever kind it was",
+          'clock',
+          lia,
+          { challenge: String(routeChallenge.body.challenge) },
+          await fresh(),
+          stillFrames(await frameOf(clockStill), 20),
+          /live person/,
+          'not_live',
+          routeKind as ChallengeKind,
+        );
+        const stillAfter = ((await refusalRows('clock', lia.employee.id))[0]?.after ?? {}) as LiveAfter;
+        check(
+          'the match distance of a refused still is on its audit row beside the verdict, the frames read and the same-face distances',
+          typeof stillAfter.ownDistance === 'number' &&
+            stillAfter.liveness?.usable === 20 &&
+            typeof stillAfter.liveness.sameFace?.first === 'number' &&
+            typeof stillAfter.liveness.sameFace.last === 'number',
+          JSON.stringify(stillAfter).slice(0, 300),
+        );
+        check('nothing of this clocked her out: her day still has only its time in', !(await prisma.attendance.findUnique({ where: { id: liaDay?.id ?? '' } }))?.timeOut);
+
+        // ── Face health counts them ──
+        const liveHealth = await api(hrToken, 'GET', '/clock/face-health');
+        const liveReasons = ((liveHealth.body.refusals30d ?? { reasons: [] }) as { reasons: { reason: string; count: number }[] }).reasons;
+        const liveRecent = (liveHealth.body.recentRefusals ?? []) as { kind: string; reason: string; employee: { id: string } }[];
+        check(
+          'Face health counts the liveness refusals of the last 30 days, and lists the latest — the clock\'s and the enrolment\'s',
+          liveHealth.status === 200 &&
+            (liveReasons.find((r) => r.reason === 'liveness')?.count ?? 0) >= 8 &&
+            liveRecent.some((r) => r.kind === 'clock' && r.reason === 'liveness' && r.employee.id === lia.employee.id) &&
+            liveRecent.some((r) => r.kind === 'enrol' && r.reason === 'liveness' && r.employee.id === mara.employee.id),
+          `${liveHealth.status} ${JSON.stringify(liveReasons)} ${JSON.stringify(liveRecent.slice(0, 2))}`,
+        );
+
+        // ── The setting ──
+        await saveHrSettings({ faceLiveness: false });
+        const meOff = await api(lia.token, 'GET', '/clock/me');
+        const offFiles = uploadedFiles();
+        const offStill = await fresh();
+        const clockedOut = await apiForm(lia.token, '/clock', offStill, { action: 'OUT', method: 'FACE' });
+        const liaDayOut = await prisma.attendance.findUnique({ where: { id: liaDay?.id ?? '' } });
+        check(
+          'with the setting off, clock/me says no check is needed, and a capture with no challenge and no frames clocks her out — the still kept',
+          meOff.body.liveness === false &&
+            clockedOut.status === 200 &&
+            liaDayOut?.timeOutMethod === 'FACE' &&
+            leftBehind(offFiles, offStill) === 1,
+          `${JSON.stringify(meOff.body).slice(0, 80)} ${clockedOut.status} ${String(clockedOut.body.error ?? '')}`,
+        );
+        const putOn = await api(hrToken, 'PUT', '/hr-settings', { faceLiveness: true });
+        const meOnAgain = await api(lia.token, 'GET', '/clock/me');
+        const putOff = await api(hrToken, 'PUT', '/hr-settings', { faceLiveness: false });
+        check(
+          'HR switches the check on and off from HR Settings (PUT /hr-settings { faceLiveness }), and the clock reads it at once',
+          putOn.status === 200 && putOn.body.faceLiveness === true && meOnAgain.body.liveness === true && putOff.status === 200 && putOff.body.faceLiveness === false,
+          `${putOn.status} ${String(putOn.body.faceLiveness)} / ${String(meOnAgain.body.liveness)} / ${putOff.status}`,
+        );
+      } finally {
+        await saveHrSettings({ faceLiveness: false });
+      }
     }
 
     // ══ One record, one URL (audit fix 21) ════════════════════════════════

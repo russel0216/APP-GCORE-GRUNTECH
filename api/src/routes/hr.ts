@@ -34,7 +34,16 @@ import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { postJobCost } from '../shared/inventory';
 import { upload, saveAttachment, attachmentPath, deleteAttachment, registerAttachmentGuard } from '../shared/attachments';
 import { throttled } from '../shared/throttle';
-import { FACE_ENGINE, describeFace, faceEngineReady, faceQualityProblem, type FaceQuality } from '../shared/face';
+import { FACE_ENGINE, describeFace, faceEngineReady, faceQualityProblem, type FaceCapture, type FaceQuality } from '../shared/face';
+import {
+  MIN_FRAMES,
+  checkLiveness,
+  issueChallenge,
+  verifyChallenge,
+  type ChallengeKind,
+  type LivenessReason,
+  type LivenessResult,
+} from '../shared/liveness';
 import {
   FACE_REFUSAL_REASONS,
   deletePhotoIfUnused,
@@ -348,6 +357,9 @@ clockRoutes.get(
       samplesNeeded: MIN_FACE_SAMPLES,
       maxSamples: MAX_FACE_SAMPLES,
       faceEngineReady: faceEngineReady(),
+      // Whether a face capture must come with a liveness challenge
+      // (GET /clock/challenge) and the burst of frames it is verified from.
+      liveness: settings.faceLiveness,
       today: attendance
         ? {
             ...attendance,
@@ -361,30 +373,129 @@ clockRoutes.get(
 );
 
 /**
+ * What a face capture uploads: the still (`photo`) and, with the liveness
+ * check on, the burst of frames (`frames`, up to `MAX_FRAMES`) the challenge
+ * is verified from. Multer has already written every one of them to the
+ * upload directory.
+ */
+const MAX_FRAMES = 24;
+const captureUpload = upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'frames', maxCount: MAX_FRAMES },
+]);
+
+function uploadedCapture(req: Request): { photo: Express.Multer.File | null; frames: Express.Multer.File[] } {
+  const files = req.files as Record<string, Express.Multer.File[] | undefined> | undefined;
+  const list = (name: string) => (files && Array.isArray(files[name]) ? files[name]! : []);
+  return { photo: list('photo')[0] ?? null, frames: list('frames') };
+}
+
+/**
  * The camera frame, as it arrived.
  *
- * Multer has already written it to the upload directory; the bytes are read
- * back for the detector. The browser sends a picture and nothing else — the
- * descriptor is computed here, on the server, so the client never gets to
- * assert whose face it is (see src/shared/face.ts).
+ * The bytes are read back for the detector. The browser sends a picture and
+ * nothing else — the descriptor is computed here, on the server, so the
+ * client never gets to assert whose face it is (see src/shared/face.ts).
  */
 function capturedPhoto(req: Request): Buffer {
-  if (!req.file) throw badRequest('No photo was captured — allow the camera and try again');
-  return fs.readFileSync(attachmentPath(req.file.filename));
+  const { photo } = uploadedCapture(req);
+  if (!photo) throw badRequest('No photo was captured — allow the camera and try again');
+  return fs.readFileSync(attachmentPath(photo.filename));
+}
+
+/** The burst's frames, as they arrived, in the order they were sent. */
+function capturedFrames(req: Request): Buffer[] {
+  return uploadedCapture(req).frames.map((f) => fs.readFileSync(attachmentPath(f.filename)));
 }
 
 /**
  * Multer wrote the capture before the route could decide. A refused capture
  * is thrown away, as a refused CAD upload is: a face nobody accepted is not
- * kept on disk with no record pointing at it.
+ * kept on disk with no record pointing at it. The burst's frames are ALWAYS
+ * thrown away — they are read for the liveness check and nothing else; the
+ * still is the evidence that is kept — so with `keepPhoto` only the still
+ * stays, filed by the route as an attachment.
  */
-function discardCapture(req: Request) {
-  if (!req.file) return;
-  try {
-    fs.unlinkSync(req.file.path);
-  } catch {
-    /* already gone */
+function discardCapture(req: Request, options: { keepPhoto?: boolean } = {}) {
+  const { photo, frames } = uploadedCapture(req);
+  const doomed = options.keepPhoto ? frames : [...frames, ...(photo ? [photo] : [])];
+  for (const file of doomed) {
+    try {
+      fs.unlinkSync(file.path);
+    } catch {
+      /* already gone */
+    }
   }
+}
+
+const LIVENESS_MESSAGES = {
+  missing: 'The liveness check did not run — reload the page and try again.',
+  too_few_frames: 'Hold still a moment longer so the camera can see you move.',
+  no_blink: 'No blink was seen — blink once, clearly, while the ring runs.',
+  no_turn: 'No head turn was seen — turn your head slightly left, then right, while the ring runs.',
+  not_live: 'The camera needs to see a live person: hold still only for the photo, then do what the ring asks.',
+} as const;
+
+/** What a refused liveness check records in the audit row's `after`. */
+interface LivenessRefusal {
+  message: string;
+  liveness: {
+    kind: ChallengeKind | null;
+    /** The verdict's reason, `missing` (no challenge or no frames sent) or `challenge` (the token refused). */
+    reason: LivenessReason | 'missing' | 'challenge';
+    frames: number;
+    usable: number | null;
+    sameFace?: LivenessResult['sameFace'];
+    ms?: number;
+  };
+}
+
+/**
+ * The liveness gate a face capture passes before it is matched (2026-10-10,
+ * shared/liveness.ts): the challenge token spent, the burst measured against
+ * the still's face. Null when it passed; otherwise what to tell the person
+ * and what to record. With the setting off there is no gate.
+ */
+async function livenessGate(input: {
+  on: boolean;
+  challenge: string | undefined;
+  frames: Buffer[];
+  userId: string;
+  capture: FaceCapture;
+}): Promise<LivenessRefusal | null> {
+  if (!input.on) return null;
+  const count = input.frames.length;
+  const refusal = (
+    reason: LivenessRefusal['liveness']['reason'],
+    message: string,
+    kind: ChallengeKind | null,
+    result?: LivenessResult,
+  ): LivenessRefusal => ({
+    message,
+    liveness: {
+      kind,
+      reason,
+      frames: count,
+      usable: result?.usable ?? null,
+      ...(result ? { sameFace: result.sameFace, ms: result.ms } : {}),
+    },
+  });
+  if (!input.challenge || count === 0) return refusal('missing', LIVENESS_MESSAGES.missing, null);
+  if (count < MIN_FRAMES) return refusal('too_few_frames', LIVENESS_MESSAGES.too_few_frames, null);
+  let kind: ChallengeKind;
+  try {
+    kind = verifyChallenge(input.challenge, input.userId).kind;
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 400) return refusal('challenge', err.message, null);
+    throw err;
+  }
+  const result = await checkLiveness(input.frames, kind, {
+    box: input.capture.box,
+    stillWidth: input.capture.image.width,
+    descriptor: input.capture.descriptor,
+  });
+  if (result.verdict.ok) return null;
+  return refusal(result.verdict.reason, LIVENESS_MESSAGES[result.verdict.reason], kind, result);
 }
 
 const fourPlaces = (d: number | null | undefined) => (d == null ? null : Math.round(d * 10000) / 10000);
@@ -405,6 +516,25 @@ const faceThrottle = (door: 'clock' | 'enrol') =>
     }
     next();
   });
+
+/**
+ * A liveness challenge for the capture about to be sent (2026-10-10): which
+ * movement the ring asks for, how long it runs, and the signed token the
+ * capture carries back as `challenge`. Random, the caller's alone, good for
+ * 90 seconds and once. Shares the clock's own per-person brake — a challenge
+ * and the capture it guards are one attempt at the door. Issued whether or
+ * not the setting is on; `GET /clock/me` says whether one is needed.
+ */
+clockRoutes.get(
+  '/challenge',
+  faceThrottle('clock'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const mine = await myEmployee(me.id);
+    if (!mine) throw badRequest('Your account is not linked to an employee record');
+    res.json(issueChallenge(me.id));
+  }),
+);
 
 /**
  * Whose face samples a request is about: the caller's own (no employeeId, or
@@ -473,7 +603,7 @@ type EnrolDecision =
 clockRoutes.post(
   '/enroll',
   faceThrottle('enrol'),
-  upload.single('photo'),
+  captureUpload,
   handler(async (req, res) => {
     let kept = false;
     try {
@@ -482,10 +612,13 @@ clockRoutes.post(
         z.object({
           employeeId: z.string().optional(),
           label: z.string().optional(),
+          challenge: z.string().optional(),
         }),
         req.body,
       );
       const photo = capturedPhoto(req);
+      const photoFile = uploadedCapture(req).photo!;
+      const settings = await hrSettings();
       const mine = await myEmployee(me.id);
       const isHr = can(me, 'ghr.employees.edit_all');
 
@@ -512,6 +645,36 @@ clockRoutes.post(
       if ((await sampleCounts(target.id)).current >= MAX_FACE_SAMPLES) throw badRequest(ENROL_MESSAGES.full);
 
       const capture = await describeFace(photo, { purpose: 'enrol' });
+
+      // A sample must come from a live person too — a photo of a colleague
+      // enrolled on one's own account is the clock's worst case. Refused
+      // and recorded as the other enrolment refusals are, before the
+      // quality gate: a photo is refused as a photo, not for its light.
+      const notLive = await livenessGate({
+        on: settings.faceLiveness,
+        challenge: body.challenge,
+        frames: capturedFrames(req),
+        userId: me.id,
+        capture,
+      });
+      if (notLive) {
+        await audit(
+          {
+            entityType: 'employee',
+            entityId: target.id,
+            action: 'REJECTED',
+            summary: 'Face sample refused — liveness check failed',
+            after: {
+              faceEnrolRefusal: 'liveness',
+              ...notLive,
+              quality: capture.quality,
+            } as unknown as Prisma.InputJsonValue,
+          },
+          req,
+        );
+        throw badRequest(notLive.message);
+      }
+
       const problem = faceQualityProblem(capture.quality, 'enrol');
       if (problem) throw badRequest(problem);
 
@@ -522,7 +685,7 @@ clockRoutes.post(
       const attachment = await saveAttachment({
         entityType: 'face_enrollment',
         entityId: target.id,
-        file: req.file!,
+        file: photoFile,
         uploadedById: me.id,
         caption: `Face sample (detector confidence ${capture.score})`,
       });
@@ -648,7 +811,7 @@ clockRoutes.post(
         quality: capture.quality,
       });
     } finally {
-      if (!kept) discardCapture(req);
+      discardCapture(req, { keepPhoto: kept });
     }
   }),
 );
@@ -762,17 +925,23 @@ clockRoutes.get(
  * person reads on My Work; the row's `after` does, for the audit trail and
  * HR's Face health. The capture is thrown away.
  *
- * What this does NOT do is tell a live face from a photograph of one: there
- * is no liveness check. A sample's or an earlier capture's own bytes sent
- * again are refused (`replay`), and nobody can fetch them to try — but a
- * fresh picture of the person taken elsewhere, held up to a camera or sent
- * as a file, still passes. The photo kept with every entry is what HR checks
- * a doubtful one against.
+ * A live face is told from a photograph of one by the liveness challenge
+ * (2026-10-10, shared/liveness.ts, `faceLiveness` in HR Settings): the
+ * capture carries the challenge token from `GET /clock/challenge` and a
+ * burst of `frames`, and the server checks that the frames show the
+ * movement the ring asked for and the still's own face at both ends.
+ * A sample's or an earlier capture's own bytes sent again are refused
+ * (`replay`) before that. What the check cannot catch — the accepted limit
+ * — is a VIDEO of the person doing the movement; the random challenge makes
+ * a prepared one unlikely to match. The photo kept with every entry is what
+ * HR checks a doubtful one against.
  */
 const clockSchema = z.object({
   action: z.enum(['IN', 'OUT']),
   method: z.enum(['FACE', 'PIN', 'BIOMETRIC']).default('FACE'),
   fallbackReason: z.string().optional(),
+  /** The liveness challenge token the burst of `frames` answers. */
+  challenge: z.string().optional(),
 });
 
 const CLOCK_MESSAGES: Record<FaceRefusal | 'replay', string> = {
@@ -820,7 +989,7 @@ const alreadyOut = (at: Date) => badRequest(`You already clocked out at ${at.toL
 clockRoutes.post(
   '/',
   faceThrottle('clock'),
-  upload.single('photo'),
+  captureUpload,
   handler(async (req, res) => {
     let kept = false;
     try {
@@ -865,6 +1034,7 @@ clockRoutes.post(
             own?: number | null;
             nearestOther?: { employeeId: string; name: string; distance: number } | null;
             quality?: FaceQuality;
+            liveness?: LivenessRefusal['liveness'];
           } = {},
         ) => {
           await audit(
@@ -882,6 +1052,7 @@ clockRoutes.post(
                   ? { ...detail.nearestOther, distance: fourPlaces(detail.nearestOther.distance) }
                   : null,
                 quality: detail.quality ?? null,
+                ...(detail.liveness ? { liveness: detail.liveness } : {}),
                 samples: samples.current,
                 threshold: settings.faceThreshold,
               } as unknown as Prisma.InputJsonValue,
@@ -927,6 +1098,18 @@ clockRoutes.post(
 
         const problem = faceQualityProblem(capture.quality, 'clock');
         if (problem) throw await refuse('quality', problem, detail);
+
+        // A live person, not a picture of one: after the gates a photo would
+        // fail anyway, before the decision — so the audit row of a photo
+        // that was refused still says how near the face came.
+        const notLive = await livenessGate({
+          on: settings.faceLiveness,
+          challenge: body.challenge,
+          frames: capturedFrames(req),
+          userId: me.id,
+          capture,
+        });
+        if (notLive) throw await refuse('liveness', notLive.message, { ...detail, liveness: notLive.liveness });
 
         const decision = decideFace({
           own: match.own,
@@ -1011,12 +1194,14 @@ clockRoutes.post(
       }
 
       // Always kept, on every method: the photo is the evidence, the match is
-      // only the convenience. A fallback entry with a photo can still be checked.
-      if (req.file) {
+      // only the convenience. A fallback entry with a photo can still be
+      // checked. The burst's frames are never kept.
+      const photoFile = uploadedCapture(req).photo;
+      if (photoFile) {
         const attachment = await saveAttachment({
           entityType: 'attendance',
           entityId: mine.id,
-          file: req.file,
+          file: photoFile,
           uploadedById: me.id,
           caption: `Clock ${body.action}`,
           capturedAt: now,
@@ -1030,7 +1215,7 @@ clockRoutes.post(
 
       res.json({ ...reply, message });
     } finally {
-      if (!kept) discardCapture(req);
+      discardCapture(req, { keepPhoto: kept });
     }
   }),
 );
@@ -3192,6 +3377,7 @@ hrSettingsRoutes.put(
         overtimeMultiplier: z.number().min(1).max(5).optional(),
         hoursPerDay: z.number().min(1).max(24).optional(),
         faceThreshold: z.number().min(0.3).max(0.9).optional(),
+        faceLiveness: z.boolean().optional(),
         probationMonths: z.number().int().min(1).max(24).optional(),
         evaluationMilestoneMonths: z.array(z.number().int().min(1).max(24)).max(6).optional(),
         evaluationNoticeDays: z.number().int().min(0).max(90).optional(),

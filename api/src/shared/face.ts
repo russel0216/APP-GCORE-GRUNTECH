@@ -172,9 +172,12 @@ export interface FaceCapture {
   quality: FaceQuality;
   /**
    * Where the face is, in the ORIGINAL image's pixels after its EXIF turn —
-   * what `accountPhotoFrom()` crops the avatar around. Not stored.
+   * what `accountPhotoFrom()` crops the avatar around, and what the liveness
+   * check scales onto the burst's smaller frames. Not stored.
    */
   box: { x: number; y: number; width: number; height: number };
+  /** The original image's size after its EXIF turn — the frame `box` is in. Not stored. */
+  image: { width: number; height: number };
 }
 
 /** A decoded working frame: packed RGB, plus how much it was shrunk. */
@@ -186,9 +189,51 @@ interface Frame {
   scale: number;
 }
 
-interface Point {
+export interface Point {
   x: number;
   y: number;
+}
+
+/** What the engine reads off a face's 68 landmarks — face-api's `FaceLandmarks68`, or anything shaped like it. */
+export interface FaceLandmarks {
+  getLeftEye(): Point[];
+  getRightEye(): Point[];
+  positions: Point[];
+}
+
+/**
+ * The eyes' geometry: their centres, the vector from the left one (left of
+ * the PICTURE — the person's right) to the right one, its length and slope.
+ */
+export function eyeGeometry(landmarks: FaceLandmarks): {
+  leftEye: Point;
+  rightEye: Point;
+  dx: number;
+  dy: number;
+  eyePx: number;
+  /** Slope of the eyes in degrees (positive: clockwise). */
+  tilt: number;
+} {
+  const leftEye = centre(landmarks.getLeftEye());
+  const rightEye = centre(landmarks.getRightEye());
+  const dx = rightEye.x - leftEye.x;
+  const dy = rightEye.y - leftEye.y;
+  return { leftEye, rightEye, dx, dy, eyePx: Math.hypot(dx, dy), tilt: (Math.atan2(dy, dx) * 180) / Math.PI };
+}
+
+/**
+ * How far the head is turned — `FaceQuality.yaw`: the nose tip (landmark 30)
+ * against the midpoint of the eyes, measured ALONG the eye line so a tilted
+ * head does not read as a turned one, over the eye distance. Signed; positive
+ * is towards the right of the picture; about 0.5 × tan(turn). Invariant to
+ * where and how large the face is in the frame, which is what lets the
+ * liveness check (shared/liveness.ts) compare it frame to frame.
+ */
+export function yawOf(landmarks: FaceLandmarks): number {
+  const { leftEye, rightEye, dx, dy, eyePx } = eyeGeometry(landmarks);
+  const noseTip = landmarks.positions[30];
+  const mid = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
+  return eyePx > 0 ? ((noseTip.x - mid.x) * dx + (noseTip.y - mid.y) * dy) / (eyePx * eyePx) : 0;
 }
 
 /** One pass of detect → landmarks → descriptor over a frame. */
@@ -268,6 +313,20 @@ function oneAtATime<T>(work: () => Promise<T>, alwaysWait: boolean): Promise<T> 
 }
 
 /**
+ * Runs `work` with the loaded engine, in the one-at-a-time queue above — the
+ * door every other use of the nets goes through (the liveness check in
+ * shared/liveness.ts), so a burst of frames never runs beside a capture.
+ * `work` gets the face-api module itself; everything it makes with it must
+ * be disposed before it returns.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function withFaceEngine<T>(work: (api: any) => Promise<T>, options: { alwaysWait?: boolean } = {}): Promise<T> {
+  await load();
+  if (!faceapi) throw badRequest('Face recognition is not available on this server');
+  return oneAtATime(() => work(faceapi), options.alwaysWait ?? false);
+}
+
+/**
  * Extracts exactly one face from an image, with how good a capture it was.
  *
  * Refuses on none and on more than one. Two faces in frame is the obvious way
@@ -286,9 +345,7 @@ export async function describeFace(image: Buffer, options: { purpose: FacePurpos
     // an enrolment sample. That is a programming error, not a bad photo.
     throw new Error(`describeFace needs a purpose (clock, enrol or rederive), not ${String(purpose)}`);
   }
-  await load();
-  if (!faceapi) throw badRequest('Face recognition is not available on this server');
-  return oneAtATime(() => describe(image, purpose), purpose === 'rederive');
+  return withFaceEngine(() => describe(image, purpose), { alwaysWait: purpose === 'rederive' });
 }
 
 async function describe(image: Buffer, purpose: FacePurpose): Promise<FaceCapture> {
@@ -338,20 +395,10 @@ async function describe(image: Buffer, purpose: FacePurpose): Promise<FaceCaptur
   }
 
   const face = found[0];
-  const landmarks = face.landmarks;
+  const landmarks: FaceLandmarks = face.landmarks;
   // getLeftEye() is the eye on the LEFT OF THE PICTURE (the person's right).
-  const leftEye = centre(landmarks.getLeftEye());
-  const rightEye = centre(landmarks.getRightEye());
-  const dx = rightEye.x - leftEye.x;
-  const dy = rightEye.y - leftEye.y;
-  const eyePx = Math.hypot(dx, dy);
-  const tilt = (Math.atan2(dy, dx) * 180) / Math.PI;
-
-  // Yaw: the nose tip (landmark 30) against the midpoint of the eyes,
-  // measured ALONG the eye line so a tilted head does not read as a turned one.
-  const noseTip: Point = landmarks.positions[30];
-  const mid = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
-  const yaw = eyePx > 0 ? ((noseTip.x - mid.x) * dx + (noseTip.y - mid.y) * dy) / (eyePx * eyePx) : 0;
+  const { eyePx, tilt } = eyeGeometry(landmarks);
+  const yaw = yawOf(landmarks);
 
   // Brightness is read off the frame as captured, even when the face was only
   // found in the stretched copy: it reports how dark the room was.
@@ -399,7 +446,13 @@ async function describe(image: Buffer, purpose: FacePurpose): Promise<FaceCaptur
     height: round(found0.height * frame.scale, 1),
   };
 
-  return { descriptor: Array.from(descriptor), score: quality.score, quality, box };
+  return {
+    descriptor: Array.from(descriptor),
+    score: quality.score,
+    quality,
+    box,
+    image: { width: Math.round(frame.width * frame.scale), height: Math.round(frame.height * frame.scale) },
+  };
 }
 
 /**

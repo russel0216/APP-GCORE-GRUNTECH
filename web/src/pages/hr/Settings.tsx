@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Checkbox, ErrorBox, Field, Loading, Modal, ModalFoot, useToast } from '../../components/ui';
@@ -36,6 +36,8 @@ interface HrSettings {
   overtimeMultiplier: number;
   hoursPerDay: number;
   faceThreshold: number;
+  /** A capture must answer a blink-or-turn challenge (the liveness check). */
+  faceLiveness: boolean;
 }
 
 /**
@@ -55,6 +57,7 @@ const EDITED_KEYS = [
   'overtimeMultiplier',
   'hoursPerDay',
   'faceThreshold',
+  'faceLiveness',
 ] as const satisfies readonly (keyof HrSettings)[];
 
 function edited(s: HrSettings): HrSettings {
@@ -65,6 +68,7 @@ export function HrSettingsPage() {
   const { can } = useAuth();
   const toast = useToast();
   const editable = can('ghr.settings.edit_all');
+  const livenessHintId = useId();
 
   const [settings, setSettings] = useState<HrSettings | null>(null);
   const [types, setTypes] = useState<LeaveType[] | null>(null);
@@ -256,6 +260,22 @@ export function HrSettingsPage() {
                 onChange={(e) => set('faceThreshold', Number(e.target.value))}
               />
             </Field>
+            {/* A Field's label would point at the checkbox's own label; the hint is wired by hand instead. */}
+            <div className="field face-liveness">
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.faceLiveness}
+                  onChange={(e) => set('faceLiveness', e.target.checked)}
+                  aria-describedby={livenessHintId}
+                />
+                <span>Ask for a blink or a head turn (liveness check)</span>
+              </label>
+              <div className="hint" id={livenessHintId}>
+                Stops a printed photo or a phone screen from clocking in. A video of the person could
+                still pass.
+              </div>
+            </div>
             <div className="alert warn" style={{ marginBottom: 0 }}>
               Recognition runs on the server, from the photo the camera sends. Each person enrols
               three samples on the Clock page. Every clock entry keeps its photo and its match

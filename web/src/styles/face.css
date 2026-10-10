@@ -22,6 +22,63 @@
   pointer-events: none;
 }
 
+/* The liveness challenge's clock: a ring hugging the oval, the same shape one
+   step bigger, drained clockwise over the challenge's seconds. `--ring` is
+   how much is left (1 → 0), written on the element by the page as the time
+   runs; the conic gradient paints that share and a mask keeps only the band
+   (the padding) of it, so it reads as a ring and not a disc. */
+.face-ring {
+  --ring: 1;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: 78%;
+  aspect-ratio: 3 / 4;
+  max-width: 90%;
+  box-sizing: content-box;
+  padding: var(--s-1);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: conic-gradient(var(--neon) calc(var(--ring) * 1turn), transparent 0);
+  -webkit-mask:
+    linear-gradient(var(--neon) 0 0) content-box,
+    linear-gradient(var(--neon) 0 0);
+  mask:
+    linear-gradient(var(--neon) 0 0) content-box,
+    linear-gradient(var(--neon) 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Where motion is turned off the ring would only jump, so the seconds are
+   counted down over the picture instead ("2…1…"). */
+.face-countdown {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: var(--s-3);
+  transform: translateX(-50%);
+  padding: var(--s-1) var(--s-3);
+  border-radius: var(--radius);
+  background: rgb(var(--shade-rgb) / 0.6);
+  color: var(--neon);
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .face-ring {
+    display: none;
+  }
+
+  .face-countdown {
+    display: block;
+  }
+}
+
 .camera-hint {
   margin: calc(-1 * var(--s-2)) 0 var(--s-3);
   font-size: var(--fs-sm);
@@ -118,6 +175,18 @@
 
 .face-thumb-empty {
   cursor: default;
+}
+
+/* ── HR Settings › Face recognition: the liveness tick ────────────────────── */
+
+/* A field's spacing and hint, but the tick's label is its sentence, not a
+   field heading in capitals. */
+.field.face-liveness > label.checkbox {
+  font-size: var(--fs-md);
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text);
+  margin-bottom: 0;
 }
 
 /* ── HR Settings › Face health ────────────────────────────────────────────── */
