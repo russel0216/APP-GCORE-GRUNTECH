@@ -316,6 +316,7 @@ export function Sessions() {
       <DataList<SessionRow>
         listKey="hr-training-sessions"
         endpoint="/training-sessions"
+        printPath="/api/training-sessions/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

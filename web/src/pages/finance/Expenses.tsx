@@ -218,6 +218,7 @@ export function Expenses() {
       <DataList<Claim>
         listKey="expense-claims"
         endpoint="/expense-claims"
+        printPath="/api/expense-claims/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

@@ -435,6 +435,7 @@ export function AttendanceRegister() {
       <DataList<AttendanceRow>
         listKey="attendance"
         endpoint="/attendance"
+        printPath="/api/attendance/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}

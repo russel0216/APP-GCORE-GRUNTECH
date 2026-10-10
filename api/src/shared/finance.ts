@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
-import { manilaDate } from './day';
+import { addDays, dayKey, daysBetween, manilaDate } from './day';
 
 /**
  * The money arithmetic G-FIN shares, in one place.
@@ -137,11 +137,7 @@ export async function saveFinanceSettings(value: Partial<FinanceSettings>): Prom
   return merged;
 }
 
-export function addDays(date: Date, days: number): Date {
-  const out = new Date(date);
-  out.setUTCDate(out.getUTCDate() + days);
-  return out;
-}
+export { addDays };
 
 /**
  * The Manila date as UTC midnight, so a date column compares predictably.
@@ -152,14 +148,7 @@ export function addDays(date: Date, days: number): Date {
  * stored DATE or a parsed 'YYYY-MM-DD' arrives as UTC midnight — 08:00 in
  * Manila, the same day — and comes back unchanged.
  */
-export function dayKey(at: Date): Date {
-  return manilaDate(at);
-}
-
-/** Whole days between two dates; negative means the later one has not arrived. */
-export function daysBetween(from: Date, to: Date): number {
-  return Math.floor((dayKey(to).getTime() - dayKey(from).getTime()) / 86_400_000);
-}
+export { dayKey, daysBetween };
 
 // ── Allocation ───────────────────────────────────────────────────────────────
 

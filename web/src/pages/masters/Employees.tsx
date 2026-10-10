@@ -241,6 +241,7 @@ export function Employees() {
       <DataList<EmployeeRow>
         listKey="employees"
         endpoint="/employees"
+        printPath="/api/employees/pdf"
         columns={columns}
         rowKey={(e) => e.id}
         searchPlaceholder="Search name, employee number, position…"

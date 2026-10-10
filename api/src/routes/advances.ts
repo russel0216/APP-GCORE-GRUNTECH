@@ -8,9 +8,11 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
@@ -19,14 +21,26 @@ import { nextNumber } from '../shared/numbering';
 import {
   submitForApproval,
   onApprovalSettled,
-  approvalSignoffs,
   cancelOpenRequest,
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
-import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import { renderDocument, companyCurrency, formatAmount, formatMoney, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
-import { claimInclude, presentClaim } from './finance';
+import {
+  claimInclude,
+  presentClaim,
+  cashRequestSections,
+  cashRequestSignatories,
+  LIST_CAP,
+  listReference,
+  bracketed,
+  totalLabel,
+  bracketNote,
+  listNotes,
+  recordNamed,
+  sendListPdf,
+} from './finance';
 
 /**
  * Cash advances — money issued to a person BEFORE it is spent.
@@ -50,7 +64,7 @@ const advanceInclude = {
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
   liquidations: {
-    select: { id: true, number: true, status: true, total: true, claimDate: true, approvedAt: true },
+    select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
   },
 } satisfies Prisma.CashAdvanceInclude;
@@ -87,8 +101,8 @@ function presentAdvance(row: AdvanceRow, today = dayKey(new Date())) {
       row.status === 'RELEASED' && !!row.liquidationDueDate && daysBetween(row.liquidationDueDate, today) > 0,
     daysToLiquidate:
       row.status === 'RELEASED' && row.liquidationDueDate ? -daysBetween(row.liquidationDueDate, today) : null,
-    liquidation: liquidation ? { ...liquidation, total: num(liquidation.total) } : null,
-    liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total) })),
+    liquidation: liquidation ? { ...liquidation, total: num(liquidation.total), amountPaid: num(liquidation.amountPaid) } : null,
+    liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total), amountPaid: num(l.amountPaid) })),
   };
 }
 
@@ -96,38 +110,62 @@ function ownOnly(me: ReturnType<typeof currentUser>): boolean {
   return !me.isSuperAdmin && !me.permissions.has('gfin.cash_advances.view_all');
 }
 
+/**
+ * The advance list's where-builder — the screen's rows and the printed list
+ * read the same set. A `view_own` holder reads only their own advances
+ * whatever the URL says, and `?ids=` is ANDed with that, so a ticked id
+ * never prints somebody else's advance.
+ */
+function advanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery, today: Date) {
+  const where: Prisma.CashAdvanceWhereInput = {};
+  const mine = ownOnly(me) || q.scope === 'mine';
+  // Who asked: the visibility rule and the `requestedById` filter are ANDed,
+  // never one written over the other — so the filter can only narrow. A
+  // `view_own` holder naming somebody else gets nothing, not their advances.
+  const asked = q.filters.requestedById || undefined;
+  const people: Prisma.CashAdvanceWhereInput[] = [];
+  if (mine) people.push({ requestedById: me.id });
+  if (asked) people.push({ requestedById: asked });
+  if (people.length) where.AND = people;
+  const status = q.filters.status && q.filters.status in CashAdvanceStatus ? (q.filters.status as CashAdvanceStatus) : undefined;
+  if (status) where.status = status;
+  if (q.filters.jobId) where.jobId = q.filters.jobId;
+  // Overdue is not a status: released, past the deadline, no approved liquidation.
+  if (q.filters.overdue === 'true') {
+    where.status = 'RELEASED';
+    where.liquidationDueDate = { lt: today };
+  }
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { purpose: { contains: q.search, mode: 'insensitive' } },
+      { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
+    ];
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  // The person the filter names is said on paper only where it is not the
+  // caller already said as "requested by me".
+  const person = asked && !(mine && asked === me.id) ? asked : undefined;
+  return { where, mine, status, person };
+}
+
+const ADVANCE_SORTS = ['number', 'requestDate', 'amount', 'liquidationDueDate', 'createdAt'];
+
 advanceRoutes.get(
   '/',
   requireAny('gfin.cash_advances.view_all', 'gfin.cash_advances.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.CashAdvanceWhereInput = {};
     const today = dayKey(new Date());
-
-    if (ownOnly(me) || q.scope === 'mine') where.requestedById = me.id;
-    const status = q.filters.status && q.filters.status in CashAdvanceStatus ? (q.filters.status as CashAdvanceStatus) : undefined;
-    if (status) where.status = status;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.requestedById) where.requestedById = q.filters.requestedById;
-    // Overdue is not a status: released, past the deadline, no approved liquidation.
-    if (q.filters.overdue === 'true') {
-      where.status = 'RELEASED';
-      where.liquidationDueDate = { lt: today };
-    }
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { purpose: { contains: q.search, mode: 'insensitive' } },
-        { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const { where } = advanceListWhere(me, q, today);
 
     const [rows, total] = await Promise.all([
       prisma.cashAdvance.findMany({
         where,
         include: advanceInclude,
-        orderBy: orderBy(q, ['number', 'requestDate', 'amount', 'liquidationDueDate', 'createdAt'], { requestDate: 'desc' }),
+        orderBy: orderBy(q, ADVANCE_SORTS, { requestDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -135,6 +173,118 @@ advanceRoutes.get(
     ]);
 
     res.json(listResult(rows.map((r) => presentAdvance(r, today)), total, q));
+  }),
+);
+
+/** An advance that will never be handed over — listed, never summed. */
+const ADVANCE_CLOSED: CashAdvanceStatus[] = ['REJECTED', 'CANCELLED'];
+
+/**
+ * The cash advances on paper — the list as filtered (or the rows ticked),
+ * through `advanceListWhere`, so a `view_own` holder prints only their own.
+ * Asked, released and spent as the screen shows them, the deadline with how
+ * late a liquidation is; the totals run over every advance the filter
+ * matched, a rejected or cancelled one in brackets and not counted. Declared
+ * above `/:id`, or that route swallows it.
+ */
+advanceRoutes.get(
+  '/pdf',
+  requireAny('gfin.cash_advances.view_all', 'gfin.cash_advances.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const today = dayKey(new Date());
+    const { where, mine, status, person: personId } = advanceListWhere(me, q, today);
+    const [rows, count, sums, closed, currency, project, person] = await Promise.all([
+      prisma.cashAdvance.findMany({
+        where,
+        include: {
+          requestedBy: { select: { name: true } },
+          job: { select: { number: true } },
+          costCategory: { select: { name: true } },
+        },
+        orderBy: orderBy(q, ADVANCE_SORTS, { requestDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.cashAdvance.count({ where }),
+      prisma.cashAdvance.aggregate({
+        where: { AND: [where, { status: { notIn: ADVANCE_CLOSED } }] },
+        _sum: { amount: true, amountReleased: true, amountSpent: true },
+      }),
+      prisma.cashAdvance.count({ where: { AND: [where, { status: { in: ADVANCE_CLOSED } }] } }),
+      companyCurrency(),
+      recordNamed('project', q.filters.jobId),
+      recordNamed('person', personId, 'requested by'),
+    ]);
+
+    const f = q.filters;
+    const reference = listReference(count, rows.length, ['cash advance', 'cash advances'], [
+      q.search && `search "${q.search}"`,
+      f.overdue === 'true' ? 'liquidation overdue' : status && `status ${statusLabel(status)}`,
+      project,
+      person,
+      mine && 'requested by me',
+      f.ids && 'the rows selected',
+    ]);
+
+    // Nine columns: landscape (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: [
+          'Number',
+          'Requested by and purpose',
+          'Dated',
+          'Charged to',
+          `Amount (${currency})`,
+          `Released (${currency})`,
+          `Spent (${currency})`,
+          'Liquidate by',
+          'Status',
+        ],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left', 'left'],
+        rows: rows.map((r) => {
+          const inSum = !ADVANCE_CLOSED.includes(r.status);
+          const late = r.status === 'RELEASED' && r.liquidationDueDate ? daysBetween(r.liquidationDueDate, today) : 0;
+          return [
+            r.number,
+            { title: r.requestedBy.name, body: r.purpose },
+            formatShortDate(r.requestDate),
+            r.job ? { title: r.job.number, body: r.costCategory?.name ?? undefined } : 'Overheads',
+            bracketed(formatAmount(num(r.amount)), inSum),
+            num(r.amountReleased) > 0 ? formatAmount(num(r.amountReleased)) : '',
+            r.liquidatedAt ? formatAmount(num(r.amountSpent)) : '',
+            r.liquidationDueDate
+              ? late > 0
+                ? { title: formatShortDate(r.liquidationDueDate), body: `${late} day${late === 1 ? '' : 's'} overdue` }
+                : formatShortDate(r.liquidationDueDate)
+              : '',
+            statusLabel(r.status),
+          ];
+        }),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: 'Released', value: formatMoney(num(sums._sum.amountReleased), currency) },
+          { label: 'Spent', value: formatMoney(num(sums._sum.amountSpent), currency) },
+          { label: totalLabel('Requested', count, rows.length), value: formatMoney(num(sums._sum.amount), currency), bold: true },
+        ],
+      },
+    ];
+    sections.push(...listNotes([bracketNote(closed, ['rejected or cancelled advance', 'rejected or cancelled advances'])]));
+
+    const pdf = await renderDocument({ title: 'Cash Advances', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      {
+        entityType: 'cash_advance',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the cash advance list as PDF (${rows.length} advance(s))`,
+      },
+      req,
+    );
+    sendListPdf(res, pdf, 'cash-advances.pdf');
   }),
 );
 
@@ -323,26 +473,41 @@ advanceRoutes.post(
   require_('gfin.cash_advances.create'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const advance = await prisma.cashAdvance.findUnique({ where: { id: req.params.id } });
+    const advance = await prisma.cashAdvance.findUnique({
+      where: { id: req.params.id },
+      include: { requestedBy: { select: { name: true } } },
+    });
     if (!advance) throw notFound('Cash advance not found');
     if (advance.requestedById !== me.id && !me.isSuperAdmin) throw forbidden('That is someone else’s advance');
     if (advance.status !== 'DRAFT') throw badRequest('This advance has already been submitted');
 
-    await prisma.cashAdvance.update({ where: { id: advance.id }, data: { status: 'PENDING_APPROVAL' } });
+    // Claimed on the advance exactly as read — still a draft, and not changed
+    // since — never simply written: two Submit clicks file once, and a Modify
+    // that lands in between refuses the submit rather than sending a request
+    // that snapshots the old amount.
+    const claimed = await prisma.cashAdvance.updateMany({
+      where: { id: advance.id, status: 'DRAFT', updatedAt: advance.updatedAt },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
     try {
       await submitForApproval({
         documentType: 'cash_advance',
         documentId: advance.id,
         documentNumber: advance.number,
-        subject: `${me.name} — ${advance.purpose}`,
+        subject: `${advance.requestedBy.name} — ${advance.purpose}`,
         amount: num(advance.amount),
         link: `/g-fin/cash-advances/${advance.id}`,
-        requesterId: me.id,
+        // The requester, even when a super admin presses the button for
+        // them: the route runs on THEIR supervisor, the self-approval rule
+        // has to see whose advance this is, and the draft's paper previews
+        // exactly this route.
+        requesterId: advance.requestedById,
       });
     } catch (err) {
       // The engine refused (no workflow, a self-approval trap). The document
       // goes back to where it was rather than sitting PENDING with no request.
-      await prisma.cashAdvance.update({ where: { id: advance.id }, data: { status: 'DRAFT' } });
+      await prisma.cashAdvance.updateMany({ where: { id: advance.id, status: 'PENDING_APPROVAL' }, data: { status: 'DRAFT' } });
       throw err;
     }
 
@@ -442,6 +607,12 @@ advanceRoutes.post(
   }),
 );
 
+/**
+ * The advance on paper — the same document as a budget request, through the
+ * same builders (`cashRequestSections` / `cashRequestSignatories`): the
+ * request, its money as a totals block, the liquidation, and the sign-offs
+ * of the route it took (or would take, while a draft).
+ */
 advanceRoutes.get(
   '/:id/pdf',
   requireAny('gfin.cash_advances.view_all', 'gfin.cash_advances.view_own'),
@@ -453,69 +624,39 @@ advanceRoutes.get(
     const view = presentAdvance(row);
 
     const release = row.allocations.find((a) => a.payment.kind === 'DISBURSEMENT');
-    const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 3,
-        fields: [
-          { label: 'Requested by', value: row.requestedBy.name },
-          { label: 'Date', value: formatDate(row.requestDate) },
-          { label: 'Needed by', value: row.neededBy ? formatDate(row.neededBy) : '—' },
-          { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : 'Overheads' },
-          { label: 'Budget line', value: row.costCategory?.name ?? '—' },
-          { label: 'Status', value: row.status.replace(/_/g, ' ') },
-        ],
-      },
-      { kind: 'text', title: 'Purpose', body: row.purpose },
-      {
-        kind: 'table',
-        head: ['', ''],
-        widths: [72, 28],
-        align: ['right', 'right'],
-        rows: [
-          ['AMOUNT REQUESTED', formatMoney(view.amount)],
-          ['Released', release ? `${formatMoney(view.amountReleased)} on ${release.payment.number}, ${formatDate(release.payment.paymentDate)}` : 'Not yet released'],
-          ['Liquidate by', row.liquidationDueDate ? formatDate(row.liquidationDueDate) : '—'],
-          ...(row.liquidatedAt
-            ? [
-                ['Spent (per liquidation)', formatMoney(view.spent)],
-                view.excessDue > 0
-                  ? ['Excess owed to requester', formatMoney(view.excessDue)]
-                  : ['Unspent — owed back', formatMoney(view.refundDue)],
-                ['Refunded', formatMoney(view.amountRefunded)],
-              ]
-            : []),
-        ],
-      },
-    ];
-    if (view.liquidation) {
-      sections.push({
-        kind: 'fields',
-        title: 'Liquidation',
-        columns: 3,
-        fields: [
-          { label: 'Report', value: view.liquidation.number },
-          { label: 'Status', value: view.liquidation.status.replace(/_/g, ' ') },
-          { label: 'Total receipts', value: formatMoney(view.liquidation.total) },
-        ],
-      });
-    }
-    if (row.notes) sections.push({ kind: 'text', title: 'Notes', body: row.notes });
+    const sections = cashRequestSections({
+      requestedBy: row.requestedBy.name,
+      neededBy: row.neededBy,
+      project: row.job ? `${row.job.number} — ${row.job.name}` : 'Overheads',
+      budgetLine: row.costCategory?.name ?? '—',
+      status: row.status,
+      purpose: row.purpose,
+      release: release ? release.payment : null,
+      liquidationDueDate: row.liquidationDueDate,
+      liquidated: !!row.liquidatedAt,
+      figures: view,
+      liquidation: view.liquidation,
+      notes: row.notes,
+      currency: await companyCurrency(),
+    });
 
-    const signoffs = await approvalSignoffs('cash_advance', row.id);
     const pdf = await renderDocument({
       title: 'Cash Advance',
       documentNumber: row.number,
       date: row.requestDate,
       reference: row.purpose,
       sections,
-      signatories: [
-        { role: 'Requested by', name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: row.createdAt },
-        // The two approval steps, in order: supervisor, then finance.
-        { role: 'Checked by', ...signoffs[0] },
-        { role: 'Approved by', ...signoffs[1] },
-        { role: 'Received by', ...(release ? { name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: release.payment.paymentDate } : {}) },
-      ],
+      signatories: await cashRequestSignatories({
+        documentType: 'cash_advance',
+        id: row.id,
+        status: row.status,
+        amount: view.amount,
+        requester: row.requestedBy,
+        // The advance's submit names no project: its route has no project step.
+        jobId: null,
+        raisedAt: row.createdAt,
+        releasedOn: release?.createdAt ?? null,
+      }),
     });
 
     await audit(

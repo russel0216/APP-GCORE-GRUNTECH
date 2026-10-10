@@ -233,6 +233,7 @@ export function Passports() {
       <DataList<PassportRow>
         listKey="hr-training-passports"
         endpoint="/passports"
+        printPath="/api/passports/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search name, employee no., position…"

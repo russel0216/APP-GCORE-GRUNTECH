@@ -6,7 +6,7 @@ import { gopsOverview } from './gops';
 import { chainOverview } from './chain';
 import { attendanceDay, dayKey as hrDayKey } from './hr';
 import { financePosition } from './finance';
-import { manilaDate, manilaDayEnd, manilaDayStart, manilaMonthKey } from './day';
+import { dayKey, manilaDate, manilaDayEnd, manilaDayStart, manilaMonthKey } from './day';
 
 /**
  * The reporting layer.
@@ -35,7 +35,7 @@ export const pct = (part: number, whole: number) => (whole > 0 ? cents((part / w
  * the overview's position is read through. Before 08:00 the UTC date is still
  * yesterday's: "this month" on the 1st meant last month.
  */
-export const dayKey = (at: Date): Date => manilaDate(at);
+export { dayKey };
 
 /**
  * The Manila month a date or an instant falls in. A stored DATE (UTC midnight,
@@ -445,10 +445,9 @@ export async function approvalBottleneck(now = Date.now()): Promise<BottleneckRo
  * a zero that is really "not yours to know" reads as an empty queue.
  *
  * Every day on this panel is Manila's, each read the way its own module reads
- * it: G-OPS ranges through `periodWhere`, G-FIN and G-CHAIN through `dayKey`
- * (`manilaDate`) and `parseRange`, and the G-HR day through HR's local
- * `dayKey` — the server clock, which is Manila's on the server. The screen's
- * caption says so.
+ * it: G-OPS ranges through `periodWhere`, the others through the one `dayKey`
+ * (`manilaDate`, shared/day.ts — HR's used to read the server clock) and
+ * `parseRange`. The screen's caption says so.
  */
 
 export type SummaryModule = 'gops' | 'gchain' | 'ghr' | 'gfin';

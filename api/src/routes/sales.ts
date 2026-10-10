@@ -29,14 +29,18 @@ import {
   cancelOpenRequest,
   contactPhone,
   routePreview,
+  slotSignatories,
+  type ApprovalSlot,
 } from '../shared/approvals';
 import {
+  companyCurrency,
   formatAmount,
   formatDate,
   formatDateTime,
   formatMoney,
   formatShortDate,
   renderDocument,
+  statusLabel,
   type PdfSection,
   type PdfTotal,
   type Signatory,
@@ -58,6 +62,7 @@ import {
   type RepeatEvery,
 } from '../shared/activities';
 import { safeHttpUrl } from '../shared/partners';
+import { LIST_CAP, listDay, listReference, rangeNamed, recordNamed, sendListPdf, totalLabel } from './finance';
 import { toCsv } from '../shared/insights';
 import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
@@ -306,19 +311,36 @@ leadRoutes.get(
   }),
 );
 
-const LEAD_STATUS_LABEL: Record<string, string> = {
-  NEW: 'New',
-  CONTACTED: 'Contacted',
-  QUALIFIED: 'Qualified',
-  SITE_VISIT: 'Site visit',
-  COSTING: 'Costing',
-  QUOTATION_CREATED: 'Quotation created',
-  QUOTATION_SUBMITTED: 'Quotation submitted',
-  NEGOTIATION: 'Negotiation',
-  WON: 'Won',
-  LOST: 'Lost',
-  ON_HOLD: 'On hold',
-};
+/**
+ * The scope a printed list stands in, as its filter line names it: "team
+ * KAT" for the Team view (Mine for a viewer with no team — the where-
+ * builders' own fallback), "mine only" for Mine, and also when the caller
+ * may only ever see their own (`onlyOwn`), so a salesperson's paper never
+ * reads as everybody's. All says nothing.
+ */
+export function scopeNamed(
+  scope: string,
+  team: { code: string } | null,
+  onlyOwn: boolean,
+  mine = 'mine only',
+): string | null {
+  if (scope === 'team' && team && !onlyOwn) return `team ${team.code}`;
+  return onlyOwn || scope === 'mine' || scope === 'team' ? mine : null;
+}
+
+/**
+ * The contact lines a sign-off prints under a person's name — read for the
+ * PAPER only, never sent with the record (`GET …/:id` carries no mobile).
+ * `contactPhone` is the one reading of a person's number.
+ */
+async function signerContact(userId: string | null | undefined): Promise<{ phone?: string; email?: string }> {
+  if (!userId) return {};
+  const u = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, phone: true, employee: { select: { mobile: true } } },
+  });
+  return u ? { phone: contactPhone(u), email: u.email } : {};
+}
 
 /**
  * The leads list on paper (2026-10-07, the owner's call: "for reporting
@@ -335,7 +357,8 @@ leadRoutes.get(
     const stages = await pipelineStages();
     const team = await teamOf(me.id);
     const { base, where } = leadListWhere(me, q, stages, team?.id ?? null);
-    const [rows, summary] = await Promise.all([
+    const f = q.filters;
+    const [rows, summary, currency, owner, adder, customer] = await Promise.all([
       prisma.lead.findMany({
         where,
         include: {
@@ -344,39 +367,49 @@ leadRoutes.get(
           customer: { select: { name: true } },
         },
         orderBy: orderBy(q, LEAD_SORTS, { createdAt: 'desc' }),
-        take: 1000,
+        take: LIST_CAP,
       }),
       leadListSummary(base, where, stages),
+      companyCurrency(),
+      recordNamed('person', f.assignedToId, 'owner'),
+      recordNamed('person', f.createdById, 'added by'),
+      recordNamed('customer', f.clientId),
     ]);
 
-    const f = q.filters;
-    const filters = [
+    // "12 leads", or "first 1,000 of 1,234 leads printed" when the cap bit —
+    // then every filter `leadListWhere` applied, by name.
+    const reference = listReference(summary.count, rows.length, ['lead', 'leads'], [
       q.search ? `search "${q.search}"` : null,
       f.stage ? `stage ${stages.find((st) => st.key === f.stage)?.label ?? f.stage}` : null,
-      f.status ? `status ${f.status.split(',').map((v) => LEAD_STATUS_LABEL[v] ?? v).join(', ')}` : null,
-      f.assignedToId ? 'one owner' : null,
-      f.createdById ? 'added by one person' : null,
-      f.clientId ? 'one customer' : null,
-      f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
-      f.closingFrom || f.closingTo ? `closing ${f.closingFrom ?? '…'} to ${f.closingTo ?? '…'}` : null,
-      q.scope === 'mine' ? 'mine only' : null,
+      f.status ? `status ${f.status.split(',').map((v) => statusLabel(v.trim())).join(', ')}` : null,
+      owner,
+      adder,
+      customer,
+      f.source ? `came via ${f.source}` : null,
+      rangeNamed('added', f.createdFrom, f.createdTo),
+      rangeNamed('closing', f.closingFrom, f.closingTo),
+      scopeNamed(q.scope, team, !me.isSuperAdmin && !me.permissions.has('gops.leads.view_all')),
       f.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+    ]);
 
+    // Eight columns: landscape, each sized from what it holds (rule 6), so a
+    // number or a name is never broken mid-word. The money block is the
+    // column's sum over every lead the filter matched, the bold row last;
+    // the weighted figure above it.
     const pdf = await renderDocument({
       title: 'Leads',
       date: new Date(),
-      reference: `${summary.count} lead(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Company and contact', 'Status', 'Est. value', 'Prob.', 'Owner', 'Added by', 'Expected close'],
-          widths: [1.1, 2.6, 1, 1.2, 0.6, 1.3, 1.3, 1.1],
+          head: ['Number', 'Company and contact', 'Status', `Est. value (${currency})`, 'Probability', 'Owner', 'Added by', 'Expected closing'],
           align: ['left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
           rows: rows.map((l) => [
             l.number,
             { title: l.companyName, body: l.contactPerson ?? undefined },
-            LEAD_STATUS_LABEL[l.status] ?? l.status,
+            statusLabel(l.status),
             l.estimatedValue == null ? '' : formatAmount(num(l.estimatedValue)),
             `${l.probability}%`,
             l.assignedTo.name,
@@ -387,21 +420,18 @@ leadRoutes.get(
         {
           kind: 'totals',
           rows: [
-            { label: 'Estimated value, total:', value: formatMoney(summary.value), bold: true },
-            { label: 'Weighted by probability:', value: formatMoney(summary.weighted) },
+            { label: totalLabel('Weighted by probability', summary.count, rows.length), value: formatMoney(summary.weighted, currency) },
+            { label: totalLabel('Total estimated value', summary.count, rows.length), value: formatMoney(summary.value, currency), bold: true },
           ],
         },
       ],
-      signatories: [],
     });
 
     await audit(
       { entityType: 'lead', entityId: 'list', action: 'EXPORTED', summary: `Exported the leads list as PDF (${rows.length} lead(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="leads.pdf"`);
-    res.send(pdf);
+    sendListPdf(res, pdf, 'leads.pdf');
   }),
 );
 
@@ -423,7 +453,13 @@ leadRoutes.get(
             number: true,
             subject: true,
             outcome: true,
-            revisions: { select: { revision: true, status: true, total: true }, orderBy: { revision: 'desc' }, take: 1 },
+            // Every revision, newest first: the latest prints, and any with a
+            // project books the quotation (QUOTATION_BOOKED_WHERE's twin).
+            revisions: {
+              select: { revision: true, status: true, total: true, jobs: { select: { id: true }, take: 1 } },
+              orderBy: { revision: 'desc' },
+            },
+            _count: { select: { salesOrders: true } },
           },
         },
         costings: {
@@ -438,12 +474,18 @@ leadRoutes.get(
       throw forbidden('This lead is assigned to someone else');
     }
 
+    const [currency, adder, typeNames, stages] = await Promise.all([
+      companyCurrency(),
+      signerContact(lead.createdById),
+      activityTypeNames(),
+      pipelineStages(),
+    ]);
     const sections: PdfSection[] = [
       {
         kind: 'fields',
         columns: 2,
         fields: [
-          { label: 'Status', value: LEAD_STATUS_LABEL[lead.status] ?? lead.status },
+          { label: 'Status', value: statusLabel(lead.status) },
           { label: 'Company', value: lead.companyName },
           { label: 'Customer record', value: lead.customer ? `${lead.customer.code} — ${lead.customer.name}` : 'Not linked yet' },
           { label: 'Site', value: lead.site?.name ?? '' },
@@ -452,18 +494,17 @@ leadRoutes.get(
           { label: 'Phone', value: lead.contactPhone ?? '' },
           { label: 'Address', value: lead.address ?? '' },
           { label: 'Enquiry came via', value: lead.source ?? '' },
-          { label: 'Added by', value: `${lead.createdBy?.name ?? 'Unknown'}, ${formatDateTime(lead.createdAt)}` },
           { label: 'Owner', value: lead.assignedTo.name },
-          { label: 'Expected close', value: lead.expectedClosing ? formatShortDate(lead.expectedClosing) : '' },
-          { label: 'Estimated value', value: lead.estimatedValue == null ? '' : formatMoney(num(lead.estimatedValue)) },
+          { label: 'Expected closing', value: lead.expectedClosing ? formatDate(lead.expectedClosing) : '' },
+          { label: 'Estimated value', value: lead.estimatedValue == null ? '' : formatMoney(num(lead.estimatedValue), currency) },
           { label: 'Probability', value: `${lead.probability}%` },
           {
             label: 'Weighted',
-            value: lead.estimatedValue == null ? '' : formatMoney((num(lead.estimatedValue) * lead.probability) / 100),
+            value: lead.estimatedValue == null ? '' : formatMoney((num(lead.estimatedValue) * lead.probability) / 100, currency),
           },
           {
             label: 'Next action',
-            value: [lead.nextAction, lead.nextActionDate ? formatShortDate(lead.nextActionDate) : null].filter(Boolean).join(' — '),
+            value: [lead.nextAction, lead.nextActionDate ? formatDate(lead.nextActionDate) : null].filter(Boolean).join(' — '),
           },
         ].filter((f) => f.value !== ''),
       },
@@ -474,26 +515,31 @@ leadRoutes.get(
       sections.push({
         kind: 'table',
         title: 'Costings',
-        head: ['Number', 'Title', 'Contract value', 'Status', 'Prepared by'],
-        widths: [1.2, 2.6, 1.3, 1.2, 1.4],
+        head: ['Number', 'Title', `Contract value (${currency})`, 'Status', 'Prepared by'],
         align: ['left', 'left', 'right', 'left', 'left'],
-        rows: lead.costings.map((c) => [c.number, c.title, formatAmount(num(c.contractValue)), c.status.replace(/_/g, ' '), c.owner.name]),
+        rows: lead.costings.map((c) => [c.number, c.title, formatAmount(num(c.contractValue)), statusLabel(c.status), c.owner.name]),
       });
     }
     if (lead.quotations.length) {
+      // A quotation's status is its STAGE, as the quotation page and its
+      // list print it (booked-aware: a won one with an order is Completed).
+      const stageName = (key: string) => stages.find((st) => st.key === key)?.label ?? statusLabel(key);
       sections.push({
         kind: 'table',
         title: 'Quotations',
-        head: ['Number', 'Subject', 'Latest revision', 'Total', 'Status'],
-        widths: [1.2, 2.6, 1.2, 1.3, 1.2],
+        head: ['Number', 'Subject', 'Latest revision', `Total (${currency})`, 'Status'],
         align: ['left', 'left', 'left', 'right', 'left'],
-        rows: lead.quotations.map((qt) => [
-          qt.number,
-          qt.subject,
-          qt.revisions[0] ? `R${qt.revisions[0].revision} ${qt.revisions[0].status.toLowerCase().replace(/_/g, ' ')}` : '',
-          qt.revisions[0] ? formatAmount(num(qt.revisions[0].total)) : '',
-          qt.outcome.toLowerCase().replace(/_/g, ' '),
-        ]),
+        rows: lead.quotations.map((qt) => {
+          const latest = qt.revisions[0];
+          const booked = qt._count.salesOrders > 0 || qt.revisions.some((v) => v.jobs.length > 0);
+          return [
+            qt.number,
+            qt.subject,
+            latest ? `R${latest.revision} ${statusLabel(latest.status).toLowerCase()}` : '',
+            latest ? formatAmount(num(latest.total)) : '',
+            stageName(quotationStage(qt.outcome, booked, stages)),
+          ];
+        }),
       });
     }
     if (lead.activities.length) {
@@ -501,25 +547,23 @@ leadRoutes.get(
         kind: 'table',
         title: 'Activities',
         head: ['When', 'Type', 'What', 'Who', 'Status'],
-        widths: [1.5, 1, 2.6, 1.3, 0.9],
-        rows: lead.activities.map((a) => [
-          formatDateTime(a.startsAt),
-          a.type.toLowerCase().replace(/_/g, ' '),
-          a.subject,
-          a.assignedTo.name,
-          a.status.toLowerCase(),
-        ]),
+        rows: lead.activities.map((a) => {
+          const key = a.typeKey ?? a.type;
+          return [formatDateTime(a.startsAt), typeNames.get(key) ?? humaniseTypeKey(key), a.subject, a.assignedTo.name, statusLabel(a.status)];
+        }),
       });
     }
     if (lead.notes) sections.push({ kind: 'text', title: 'Notes', body: lead.notes });
 
+    // No route: the person who actually acted — who added the lead, dated,
+    // with how to reach them. Nobody approves a lead, so no such slot prints.
     const pdf = await renderDocument({
       title: 'Lead',
       documentNumber: lead.number,
       date: lead.createdAt,
       reference: lead.companyName,
       sections,
-      signatories: [],
+      signatories: lead.createdBy ? [{ role: 'Added by', name: lead.createdBy.name, ...adder, at: lead.createdAt }] : [],
     });
 
     await audit(
@@ -1326,14 +1370,6 @@ quotationRoutes.get(
   }),
 );
 
-const OUTCOME_LABEL: Record<string, string> = {
-  OPEN: 'Open',
-  SUBMITTED: 'Submitted',
-  NEGOTIATION: 'Negotiation',
-  WON: 'Won',
-  LOST: 'Lost',
-};
-
 /**
  * The quotations list on paper — the list as filtered, through
  * `quotationListWhere`, the list's own query, so the paper never shows a
@@ -1349,7 +1385,8 @@ quotationRoutes.get(
     const stages = await pipelineStages();
     const team = await teamOf(me.id);
     const { base, where } = quotationListWhere(me, q, stages, team?.id ?? null);
-    const [rows, summary] = await Promise.all([
+    const f = q.filters;
+    const [rows, summary, currency, customer, owner] = await Promise.all([
       prisma.quotation.findMany({
         where,
         include: {
@@ -1359,35 +1396,42 @@ quotationRoutes.get(
           _count: { select: { salesOrders: true } },
         },
         orderBy: quotationOrderBy(q),
-        take: 1000,
+        take: LIST_CAP,
       }),
       quotationListSummary(base, where, stages),
+      companyCurrency(),
+      recordNamed('customer', f.customerId),
+      recordNamed('person', f.ownerId, 'owner'),
     ]);
 
     const stageLabel = (key: string) => stages.find((s) => s.key === key)?.label ?? key;
-    const filters = [
+    // "12 quotations", or "first 1,000 of 1,234 quotations printed" when the
+    // cap bit — then every filter `quotationListWhere` applied, by name.
+    const reference = listReference(summary.count, rows.length, ['quotation', 'quotations'], [
       q.search ? `search "${q.search}"` : null,
-      q.filters.stage ? `stage ${stageLabel(q.filters.stage)}` : null,
-      q.filters.outcome ? `outcome ${OUTCOME_LABEL[q.filters.outcome] ?? q.filters.outcome}` : null,
-      q.filters.customerId ? 'one customer' : null,
-      q.filters.ownerId ? 'one owner' : null,
-      q.filters.createdFrom || q.filters.createdTo ? `raised ${q.filters.createdFrom ?? '…'} to ${q.filters.createdTo ?? '…'}` : null,
-      q.filters.closingFrom || q.filters.closingTo ? `closing ${q.filters.closingFrom ?? '…'} to ${q.filters.closingTo ?? '…'}` : null,
-      q.filters.revision ? `with a ${q.filters.revision.toLowerCase().replace(/_/g, ' ')} revision` : null,
-      q.filters.salesOrder === 'yes' ? 'with a sales order' : q.filters.salesOrder === 'no' ? 'without a sales order' : null,
-      q.scope === 'mine' ? 'mine only' : null,
-      q.filters.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+      f.stage ? `stage ${stageLabel(f.stage)}` : null,
+      f.outcome ? `outcome ${statusLabel(f.outcome)}` : null,
+      customer,
+      owner,
+      rangeNamed('raised', f.createdFrom, f.createdTo),
+      rangeNamed('closing', f.closingFrom, f.closingTo),
+      f.revision ? `with a ${statusLabel(f.revision).toLowerCase()} revision` : null,
+      f.salesOrder === 'yes' ? 'with a sales order' : f.salesOrder === 'no' ? 'without a sales order' : null,
+      scopeNamed(q.scope, team, !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all')),
+      f.ids ? 'the rows selected' : null,
+    ]);
 
+    // Seven columns: portrait holds them, each sized from what it holds
+    // (rule 6). Value, never cost. The money block is the Value column's
+    // sum over every quotation the filter matched.
     const pdf = await renderDocument({
       title: 'Quotations',
       date: new Date(),
-      reference: `${summary.count} quotation(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
       sections: [
         {
           kind: 'table',
-          head: ['No.', 'Quote / Project and customer', 'Stage', 'Value', 'Author', 'Issue date', 'Closing'],
-          widths: [1.6, 2.5, 1.6, 1.4, 1.4, 1.35, 1.35],
+          head: ['Number', 'Quotation and customer', 'Stage', `Value (${currency})`, 'Owner', 'Raised', 'Closing'],
           align: ['left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => {
             const booked = r._count.salesOrders > 0 || r.revisions.some((v) => v.jobs.length > 0);
@@ -1402,12 +1446,8 @@ quotationRoutes.get(
             ];
           }),
         },
-        {
-          kind: 'totals',
-          rows: [{ label: 'Value, total:', value: formatMoney(summary.value), bold: true }],
-        },
+        { kind: 'totals', rows: [{ label: totalLabel('Total', summary.count, rows.length), value: formatMoney(summary.value, currency), bold: true }] },
       ],
-      signatories: [],
     });
 
     await audit(
@@ -1419,9 +1459,7 @@ quotationRoutes.get(
       },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="quotations.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'quotations.pdf');
   }),
 );
 
@@ -3034,6 +3072,96 @@ export async function printableQuotation(me: ResolvedUser, id: string): Promise<
 }
 
 /**
+ * The route a DRAFT would take if it were submitted now, one open slot a
+ * step under who may sign it (an option the document no longer qualifies
+ * for falls back to the standard route). Not `approvalSlots(…, draft)`,
+ * which previews only while no request exists: a pulled-back quotation
+ * revision, a returned sales order or a reopened costing keeps its last
+ * request, and that request's signed steps would date an approval that no
+ * longer stands. The quotation, the sales order and the costing print a
+ * draft's route through this.
+ */
+export async function draftRouteSlots(
+  documentType: string,
+  amount: number | null,
+  requesterId: string,
+  optionId?: string | null,
+): Promise<ApprovalSlot[]> {
+  const route =
+    (optionId ? await routePreview(documentType, amount, requesterId, optionId) : null) ??
+    (await routePreview(documentType, amount, requesterId, null));
+  return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
+}
+
+/**
+ * Whether a FINAL costing's or an ISSUED order's latest request is still its
+ * approval: that request APPROVED it, and the document was not reopened
+ * after the decision (a `<reopened>…` row on its trail, which the reopen
+ * routes write). A costing returned and then made final by a project built
+ * on the draft, or an order reopened and issued again with no route active,
+ * would otherwise print the steps of a decision that no longer stands —
+ * dated signatures, or "Pending" under steps nobody will ever sign.
+ */
+export async function approvalStands(documentType: string, documentId: string, reopened: string): Promise<boolean> {
+  const request = await prisma.approvalRequest.findFirst({
+    where: { documentType, documentId },
+    orderBy: { createdAt: 'desc' },
+    select: { status: true, closedAt: true },
+  });
+  if (request?.status !== 'APPROVED' || !request.closedAt) return false;
+  const since = await prisma.auditLog.count({
+    where: { entityType: documentType, entityId: documentId, at: { gt: request.closedAt }, summary: { startsWith: reopened } },
+  });
+  return since === 0;
+}
+
+/**
+ * The slots of `approvalSlots` that still say something true. Every step of
+ * an open request is kept — signed and dated, or under who may yet sign it
+ * — and so is every step of an approved one, all signed. Of a request CLOSED
+ * without approval (withdrawn when its document was cancelled or superseded,
+ * returned, rejected) only the steps somebody signed are kept, each dated:
+ * nobody will ever sign the rest, and "Pending" under them would not be the
+ * truth (rule 6). An open request's unsigned step always carries `assigned`;
+ * a closed request's carries neither, which is the whole test.
+ */
+export function standingSlots(slots: ApprovalSlot[]): ApprovalSlot[] {
+  return slots.filter((s) => s.name || s.assigned);
+}
+
+/**
+ * A designed document's route sign-offs: `slotSignatories` — the one mapping
+ * every routed document prints (rule 6) — with each signer's position kept,
+ * because a layout in Admin › PDF Templates may tick `showPosition` (the
+ * house engine never prints one). The sales order prints through this too.
+ */
+export function designedSignatories(slots: ApprovalSlot[]): Signatory[] {
+  return slotSignatories(slots).map((sig, i) => {
+    const slot = slots[i];
+    const position = slot.name ? slot.position : slot.assigned?.length === 1 ? slot.assigned[0].position : undefined;
+    return position ? { ...sig, position } : sig;
+  });
+}
+
+/**
+ * The approval slot of a revision no request ever routed: whoever the
+ * revision names as its approver, dated; else one open "Approved by" while
+ * it can still be approved (a draft, no workflow active) — and nothing on
+ * a revision already decided with nobody named (an imported or continued
+ * one), because no one will ever sign that slot.
+ */
+async function unroutedApproval(revision: {
+  status: string;
+  approvedAt: Date | null;
+  approvedBy: { id: string; name: string } | null;
+}): Promise<Signatory[]> {
+  if (revision.approvedBy) {
+    return [{ role: 'Approved by', name: revision.approvedBy.name, ...(await signerContact(revision.approvedBy.id)), at: revision.approvedAt }];
+  }
+  return revision.status === 'DRAFT' || revision.status === 'PENDING_APPROVAL' ? [{ role: 'Approved by' }] : [];
+}
+
+/**
  * What a quotation prints — its fields, its lines, its totals and who signs
  * it — for the layout in Admin › PDF Templates to place. Cost is never read
  * here, so no layout can print it. `optionId` is an optional route the page
@@ -3045,8 +3173,7 @@ export async function quotationPrintData(
   revision: LoadedQuotation['revisions'][number],
   opts: { optionId?: string | null } = {},
 ): Promise<DesignData> {
-  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } });
-  const currency = company?.currency ?? 'PHP';
+  const currency = await companyCurrency();
   // The table's figures carry no currency; it is named once, in the head and
   // in "Total Price (PHP):".
   const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
@@ -3148,17 +3275,19 @@ export async function quotationPrintData(
   });
   totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
 
-  // Prepared by the author; then every step of the approval route, dated
-  // once it has approved and "Pending" until then — the CEO's too, when the
-  // submitter added them. A step still open names who will decide it; a draft
-  // shows the route submitting it would take. Each with how to reach them,
-  // read here for the paper only: the quotation's own response never carries
-  // a mobile.
-  const slots = await approvalSlots(
-    'quotation',
-    revision.id,
-    revision.status === 'DRAFT' ? { amount: Number(revision.total), requesterId: owner.id, optionId: opts.optionId } : undefined,
-  );
+  // Prepared by the author; then the route as the workflow names its steps
+  // (rule 6, `slotSignatories`) — who signed and when, else who is assigned
+  // with "Pending" under them, the CEO's step too when the submitter added
+  // it; a draft prints the route submitting it would take. A revision whose
+  // request closed without approving it — rejected, or superseded while it
+  // was pending — keeps only the steps signed before that (`standingSlots`):
+  // its content never changed after, and nobody will sign the rest. Each with
+  // how to reach them, read here for the paper only: the quotation's own
+  // response never carries a mobile.
+  const slots =
+    revision.status === 'DRAFT'
+      ? await draftRouteSlots('quotation', Number(revision.total), owner.id, opts.optionId)
+      : standingSlots(await approvalSlots('quotation', revision.id));
   const author = await prisma.user.findUnique({
     where: { id: owner.id },
     select: { phone: true, employee: { select: { mobile: true } } },
@@ -3172,20 +3301,7 @@ export async function quotationPrintData(
       email: owner.email ?? undefined,
       at: revision.createdAt,
     },
-    ...(slots.length
-      ? slots.map((sl): Signatory => {
-          const role = slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by';
-          if (sl.name) return { role, name: sl.name, position: sl.position, phone: sl.phone, email: sl.email, at: sl.at };
-          // Not yet signed: who will sign it, with "Pending" in place of the
-          // date. One person is named with how to reach them; where any of
-          // several may sign, all their names, and no contact to guess between.
-          const who = sl.assigned ?? [];
-          if (who.length === 1) {
-            return { role, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
-          }
-          return who.length > 1 ? { role, name: who.map((p) => p.name).join(' or ') } : { role };
-        })
-      : [{ role: 'Approved by' }]),
+    ...(slots.length ? designedSignatories(slots) : await unroutedApproval(revision)),
   ];
 
   return {
@@ -4169,11 +4285,14 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
 }
 
 /** The groups a Forecast lists, in order, each with the label the page and the paper print. */
-function forecastGroups(f: Forecast): { label: string; group: { rows: ForecastRow[]; count: number; value: number; weighted: number; overdue: number } }[] {
+function forecastGroups(
+  f: Forecast,
+  day: (key: string) => string = (key) => key,
+): { label: string; group: { rows: ForecastRow[]; count: number; value: number; weighted: number; overdue: number } }[] {
   return [
-    { label: `Before ${f.from}`, group: f.earlier },
+    { label: `Before ${day(f.from)}`, group: f.earlier },
     ...f.buckets.map((b) => ({ label: b.label, group: b })),
-    { label: `After ${f.to}`, group: f.later },
+    { label: `After ${day(f.to)}`, group: f.later },
     { label: 'No closing date', group: f.undated },
   ];
 }
@@ -4231,39 +4350,42 @@ pipelineRoutes.get(
   }),
 );
 
-/** The Forecast on house-style paper: the periods, then each period's quotations. Audited. */
+/** The Forecast on paper: the periods, then each period's quotations. Audited. */
 pipelineRoutes.get(
   '/forecast.pdf',
   require_('gops.forecast.export'),
   handler(async (req, res) => {
     const { forecast, filters } = await loadForecast(req);
-    const groups = forecastGroups(forecast).filter(({ group }) => group.count > 0);
+    const currency = await companyCurrency();
+    // A list's dates are MM/DD/YYYY (rule 6), the window's edges included.
+    const all = forecastGroups(forecast, listDay);
+    const groups = all.filter(({ group }) => group.count > 0);
     const sections: PdfSection[] = [
       {
         kind: 'table',
         title: `By period — ${PERIOD_WORD[forecast.period].toLowerCase()}`,
-        head: ['Period', 'Quotations', 'Value', 'Weighted', 'Past closing'],
-        widths: [2.4, 1, 1.6, 1.6, 1],
+        head: ['Period', 'Quotations', `Value (${currency})`, `Weighted (${currency})`, 'Past closing'],
         align: ['left', 'right', 'right', 'right', 'right'],
-        rows: forecastGroups(forecast)
-          .filter(({ group }, i, all) => group.count > 0 || (i > 0 && i < all.length - 2))
+        rows: all
+          .filter(({ group }, i) => group.count > 0 || (i > 0 && i < all.length - 2))
           .map(({ label, group }) => [label, String(group.count), formatAmount(group.value), formatAmount(group.weighted), String(group.overdue)]),
       },
+      // The money block: the window, then everything open — the grand total,
+      // the one bold row, last.
       {
         kind: 'totals',
         rows: [
-          { label: `In the window (${forecast.inWindow.count}), value:`, value: formatMoney(forecast.inWindow.value) },
-          { label: 'In the window, weighted:', value: formatMoney(forecast.inWindow.weighted) },
-          { label: `Everything open (${forecast.totals.count}), value:`, value: formatMoney(forecast.totals.value), bold: true },
-          { label: 'Everything open, weighted:', value: formatMoney(forecast.totals.weighted), bold: true },
+          { label: `In the window (${forecast.inWindow.count})`, value: formatMoney(forecast.inWindow.value, currency) },
+          { label: 'In the window, weighted', value: formatMoney(forecast.inWindow.weighted, currency) },
+          { label: 'Everything open, weighted', value: formatMoney(forecast.totals.weighted, currency) },
+          { label: `Everything open (${forecast.totals.count})`, value: formatMoney(forecast.totals.value, currency), bold: true },
         ],
       },
       ...groups.map(
         ({ label, group }): PdfSection => ({
           kind: 'table',
-          title: `${label} — ${group.count} · ${formatMoney(group.value)} · weighted ${formatMoney(group.weighted)}`,
-          head: ['Number', 'Quotation and customer', 'Owner', 'Stage', 'Odds', 'Closing', 'Value', 'Weighted'],
-          widths: [1.4, 2.4, 1.3, 1.3, 0.8, 1.3, 1.4, 1.4],
+          title: `${label} — ${group.count} · ${formatMoney(group.value, currency)} · weighted ${formatMoney(group.weighted, currency)}`,
+          head: ['Number', 'Quotation and customer', 'Owner', 'Stage', 'Probability', 'Closing', `Value (${currency})`, `Weighted (${currency})`],
           align: ['left', 'left', 'left', 'left', 'right', 'left', 'right', 'right'],
           rows: group.rows.map((r) => [
             r.number,
@@ -4271,9 +4393,7 @@ pipelineRoutes.get(
             r.owner.name,
             r.stageLabel,
             `${r.probability}%`,
-            r.expectedClosing
-              ? { title: formatShortDate(new Date(`${r.expectedClosing}T00:00:00Z`)), body: r.overdue ? 'past closing' : undefined }
-              : '',
+            r.expectedClosing ? `${listDay(r.expectedClosing)}${r.overdue ? '\npast closing' : ''}` : '',
             formatAmount(r.value),
             formatAmount(r.weighted),
           ]),
@@ -4283,9 +4403,10 @@ pipelineRoutes.get(
     const pdf = await renderDocument({
       title: 'Sales Forecast',
       date: new Date(),
-      reference: `${PERIOD_WORD[forecast.period]}, ${forecast.from} to ${forecast.to}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference: `${PERIOD_WORD[forecast.period]}, ${listDay(forecast.from)} to ${listDay(forecast.to)}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      // Eight columns under each period: landscape, as the leads list.
+      landscape: true,
       sections,
-      signatories: [],
     });
     await audit(
       {

@@ -8,10 +8,12 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
   forbidden,
   conflict,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
@@ -21,14 +23,15 @@ import { nextNumber } from '../shared/numbering';
 import { registerAttachmentGuard } from '../shared/attachments';
 import { notify, type NotifyInput } from '../shared/notifications';
 import { registerSearch } from '../shared/search';
-import { onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
-import { renderDocument, formatDate, formatDateTime, type PdfSection } from '../shared/pdf';
+import { contactPhone, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
+import { renderDocument, formatDate, formatDateTime, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { buildIcs, googleCalendarUrl, parseGoogleLink, timeWindow } from '../shared/calendar-links';
 import { myEmployee } from '../shared/hr';
 import { manilaDate, manilaDayKey } from '../shared/day';
 import { required, optional, decimal, bool, type ImportSpec } from '../shared/csv';
 import { registerSchedule } from './workspace';
 import type { Registered } from './imports';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 import {
   ATTENDEE_RESULTS,
   MY_PASSPORT_LINK,
@@ -111,52 +114,67 @@ function requirementText(r: RequirementRow): string {
   return [r.department?.name, r.position?.title].filter(Boolean).join(' · ');
 }
 
+/**
+ * The course list's where-builder — the screen's rows and the printed list
+ * read the same set; `?ids=` narrows to the rows ticked.
+ */
+function courseListWhere(q: ListQuery): Prisma.CourseWhereInput {
+  const f = q.filters;
+  const and: Prisma.CourseWhereInput[] = [];
+  if (f.category) and.push({ category: f.category });
+  if (f.active === 'true') and.push({ isActive: true });
+  if (f.active === 'false') and.push({ isActive: false });
+  if (f.required === 'true') and.push({ requirements: { some: {} } });
+  if (f.required === 'false') and.push({ requirements: { none: {} } });
+  if (q.search) {
+    and.push({
+      OR: [
+        { code: { contains: q.search, mode: 'insensitive' } },
+        { title: { contains: q.search, mode: 'insensitive' } },
+        { category: { contains: q.search, mode: 'insensitive' } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const COURSE_SORTS = ['code', 'title', 'category', 'hours', 'validityMonths'];
+
+/** What the list shows of a course, the screen's and the paper's: the counts are read with it. */
+const courseListSelect = (now: Date) =>
+  ({
+    id: true,
+    code: true,
+    title: true,
+    category: true,
+    hours: true,
+    validityMonths: true,
+    requiresAssessment: true,
+    isActive: true,
+    requirements: { select: requirementSelect },
+    _count: {
+      select: {
+        sessions: { where: { status: 'SCHEDULED', startsAt: { gte: now } } },
+        records: { where: { status: 'VERIFIED' } },
+      },
+    },
+  }) satisfies Prisma.CourseSelect;
+
 courseRoutes.get(
   '/',
   require_('ghr.courses.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const f = q.filters;
-    const and: Prisma.CourseWhereInput[] = [];
-    if (f.category) and.push({ category: f.category });
-    if (f.active === 'true') and.push({ isActive: true });
-    if (f.active === 'false') and.push({ isActive: false });
-    if (f.required === 'true') and.push({ requirements: { some: {} } });
-    if (f.required === 'false') and.push({ requirements: { none: {} } });
-    if (q.search) {
-      and.push({
-        OR: [
-          { code: { contains: q.search, mode: 'insensitive' } },
-          { title: { contains: q.search, mode: 'insensitive' } },
-          { category: { contains: q.search, mode: 'insensitive' } },
-        ],
-      });
-    }
-    const where: Prisma.CourseWhereInput = { AND: and };
-    const now = new Date();
+    const where = courseListWhere(q);
     const [rows, total] = await Promise.all([
       prisma.course.findMany({
         where,
-        orderBy: orderBy(q, ['code', 'title', 'category', 'hours', 'validityMonths'], { code: 'asc' }),
+        orderBy: orderBy(q, COURSE_SORTS, { code: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
-        select: {
-          id: true,
-          code: true,
-          title: true,
-          category: true,
-          hours: true,
-          validityMonths: true,
-          requiresAssessment: true,
-          isActive: true,
-          requirements: { select: requirementSelect },
-          _count: {
-            select: {
-              sessions: { where: { status: 'SCHEDULED', startsAt: { gte: now } } },
-              records: { where: { status: 'VERIFIED' } },
-            },
-          },
-        },
+        select: courseListSelect(new Date()),
       }),
       prisma.course.count({ where }),
     ]);
@@ -174,6 +192,74 @@ courseRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The course list on paper — the list as filtered (or the rows ticked),
+ * through `courseListWhere`, so the paper is the screen it was printed off:
+ * each course, how long, how long it stays valid, who must hold it, what is
+ * scheduled and how many hold it now. Declared above `/:id`, or that route
+ * swallows it.
+ */
+courseRoutes.get(
+  '/pdf',
+  require_('ghr.courses.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = courseListWhere(q);
+    const f = q.filters;
+    const [rows, count] = await Promise.all([
+      prisma.course.findMany({
+        where,
+        orderBy: orderBy(q, COURSE_SORTS, { code: 'asc' }),
+        take: LIST_CAP,
+        select: courseListSelect(new Date()),
+      }),
+      prisma.course.count({ where }),
+    ]);
+    const reference = listReference(count, rows.length, ['course', 'courses'], [
+      q.search && `search "${q.search}"`,
+      f.active === 'true' && 'active',
+      f.active === 'false' && 'inactive',
+      f.category && `category ${f.category}`,
+      f.required === 'true' && 'required of somebody',
+      f.required === 'false' && 'optional',
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Courses',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Course', 'Hours', 'Valid for', 'Required of', 'Upcoming', 'Certified', 'Status'],
+          align: ['left', 'left', 'right', 'left', 'left', 'right', 'right', 'left'],
+          rows: rows.map((c) => [
+            c.code,
+            {
+              title: c.title,
+              body: [c.category ?? 'Uncategorised', c.requiresAssessment ? 'assessed' : null].filter(Boolean).join(' · '),
+            },
+            String(Number(c.hours)),
+            c.validityMonths ? `${c.validityMonths} months` : 'Never expires',
+            c.requirements.length ? c.requirements.map(requirementText).join('; ') : 'Nobody — optional',
+            String(c._count.sessions),
+            String(c._count.records),
+            c.isActive ? 'Active' : 'Inactive',
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'course', entityId: 'list', action: 'EXPORTED', summary: `Exported the course list as PDF (${rows.length} course(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'courses.pdf');
   }),
 );
 
@@ -712,6 +798,8 @@ const dateTimeFmt = new Intl.DateTimeFormat('en-PH', {
   minute: '2-digit',
 });
 const timeOnly = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' });
+/** A clock time on paper, in Manila: "9:00 AM". */
+const clockFmt = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true });
 const whenText = (s: Date, e: Date) =>
   manilaDayKey(s) === manilaDayKey(e)
     ? `${dateTimeFmt.format(s)} – ${timeOnly.format(e)}`
@@ -780,43 +868,58 @@ sessionRoutes.get(
 
 // ── List ────────────────────────────────────────────────────────────────────
 
+/**
+ * The session list's where-builder — the screen's rows and the printed list
+ * read the same set. Without `view_all` a person sees the sessions they
+ * train, scheduled or attend; `?ids=` narrows to the rows ticked, ANDed with
+ * that rule.
+ */
+function sessionListWhere(me: ResolvedUser, q: ListQuery): Prisma.TrainingSessionWhereInput {
+  const f = q.filters;
+  const and: Prisma.TrainingSessionWhereInput[] = [];
+  if (!can(me, 'ghr.training_sessions.view_all')) and.push(participantWhere(me.id));
+  if (q.scope === 'mine') and.push({ trainerId: me.id });
+  if (f.status && ['SCHEDULED', 'COMPLETED', 'CANCELLED'].includes(f.status)) {
+    and.push({ status: f.status as 'SCHEDULED' | 'COMPLETED' | 'CANCELLED' });
+  }
+  const now = new Date();
+  if (f.when === 'upcoming') and.push({ endsAt: { gte: now } });
+  if (f.when === 'past') and.push({ endsAt: { lt: now } });
+  if (f.when === 'to_complete') and.push({ status: 'SCHEDULED', startsAt: { lt: now } });
+  if (f.courseId) and.push({ courseId: f.courseId });
+  if (f.trainerId) and.push({ trainerId: f.trainerId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { venue: { contains: q.search, mode: 'insensitive' } },
+        { provider: { contains: q.search, mode: 'insensitive' } },
+        { course: { title: { contains: q.search, mode: 'insensitive' } } },
+        { course: { code: { contains: q.search, mode: 'insensitive' } } },
+        { trainer: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const SESSION_SORTS = ['startsAt', 'number', 'status'];
+const sessionFallbackSort = (q: ListQuery): Record<string, 'asc' | 'desc'> =>
+  q.filters.when === 'upcoming' ? { startsAt: 'asc' } : { startsAt: 'desc' };
+
 sessionRoutes.get(
   '/',
   requireAny(...SESSION_VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const f = q.filters;
-    const and: Prisma.TrainingSessionWhereInput[] = [];
-    if (!can(me, 'ghr.training_sessions.view_all')) and.push(participantWhere(me.id));
-    if (q.scope === 'mine') and.push({ trainerId: me.id });
-    if (f.status && ['SCHEDULED', 'COMPLETED', 'CANCELLED'].includes(f.status)) {
-      and.push({ status: f.status as 'SCHEDULED' | 'COMPLETED' | 'CANCELLED' });
-    }
-    const now = new Date();
-    if (f.when === 'upcoming') and.push({ endsAt: { gte: now } });
-    if (f.when === 'past') and.push({ endsAt: { lt: now } });
-    if (f.when === 'to_complete') and.push({ status: 'SCHEDULED', startsAt: { lt: now } });
-    if (f.courseId) and.push({ courseId: f.courseId });
-    if (f.trainerId) and.push({ trainerId: f.trainerId });
-    if (q.search) {
-      and.push({
-        OR: [
-          { number: { contains: q.search, mode: 'insensitive' } },
-          { venue: { contains: q.search, mode: 'insensitive' } },
-          { provider: { contains: q.search, mode: 'insensitive' } },
-          { course: { title: { contains: q.search, mode: 'insensitive' } } },
-          { course: { code: { contains: q.search, mode: 'insensitive' } } },
-          { trainer: { name: { contains: q.search, mode: 'insensitive' } } },
-        ],
-      });
-    }
-    const where: Prisma.TrainingSessionWhereInput = { AND: and };
-    const fallback: Record<string, 'asc' | 'desc'> = f.when === 'upcoming' ? { startsAt: 'asc' } : { startsAt: 'desc' };
+    const where = sessionListWhere(me, q);
     const [rows, total] = await Promise.all([
       prisma.trainingSession.findMany({
         where,
-        orderBy: orderBy(q, ['startsAt', 'number', 'status'], fallback),
+        orderBy: orderBy(q, SESSION_SORTS, sessionFallbackSort(q)),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
         select: {
@@ -849,6 +952,102 @@ sessionRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+const SESSION_WHEN_NAMED: Record<string, string> = {
+  upcoming: 'upcoming',
+  past: 'past',
+  to_complete: 'waiting to be completed',
+};
+
+/**
+ * The session list on paper — the list as filtered (or the rows ticked),
+ * through `sessionListWhere`, so the paper is the screen it was printed
+ * off: when, which course, where, who trains it, how many are on it (and
+ * passed, once completed) and where it stands. Who attended by name, with
+ * their results, is the session's own attendance sheet. Declared above
+ * `/:id`, or that route swallows it.
+ */
+sessionRoutes.get(
+  '/pdf',
+  requireAny(...SESSION_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = sessionListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, course, trainer] = await Promise.all([
+      prisma.trainingSession.findMany({
+        where,
+        orderBy: orderBy(q, SESSION_SORTS, sessionFallbackSort(q)),
+        take: LIST_CAP,
+        select: {
+          number: true,
+          status: true,
+          startsAt: true,
+          endsAt: true,
+          venue: true,
+          meetLink: true,
+          capacity: true,
+          provider: true,
+          trainer: { select: { name: true } },
+          course: { select: { code: true, title: true } },
+          attendees: { select: { result: true } },
+        },
+      }),
+      prisma.trainingSession.count({ where }),
+      f.courseId ? prisma.course.findUnique({ where: { id: f.courseId }, select: { code: true } }) : null,
+      f.trainerId ? prisma.user.findUnique({ where: { id: f.trainerId }, select: { name: true } }) : null,
+    ]);
+    const reference = listReference(count, rows.length, ['training session', 'training sessions'], [
+      q.search && `search "${q.search}"`,
+      f.when && SESSION_WHEN_NAMED[f.when],
+      f.status && ['SCHEDULED', 'COMPLETED', 'CANCELLED'].includes(f.status) && `status ${statusLabel(f.status)}`,
+      f.courseId && `course ${course?.code ?? 'not found'}`,
+      f.trainerId && `trainer ${trainer?.name ?? 'not found'}`,
+      q.scope === 'mine' && 'mine only',
+      f.ids && 'the rows selected',
+    ]);
+    const clock = (d: Date) => clockFmt.format(d).replace(/\s+/g, ' ').toUpperCase();
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Training Sessions',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Course', 'Date', 'Time', 'Where', 'Trainer', 'People', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'left'],
+          rows: rows.map((s) => {
+            const sameDay = manilaDayKey(s.startsAt) === manilaDayKey(s.endsAt);
+            const passed = s.attendees.filter((a) => a.result === 'PASSED').length;
+            const people =
+              s.status === 'COMPLETED' ? `${passed} of ${s.attendees.length} passed` : String(s.attendees.length);
+            return [
+              s.number,
+              { title: s.course.title, body: s.course.code },
+              formatShortDate(s.startsAt),
+              sameDay
+                ? `${clock(s.startsAt)} – ${clock(s.endsAt)}`
+                : `${clock(s.startsAt)} – ${formatShortDate(s.endsAt)} ${clock(s.endsAt)}`,
+              s.venue ?? (s.meetLink ? 'Google Meet' : '—'),
+              s.provider ? { title: s.trainer.name, body: s.provider } : s.trainer.name,
+              s.capacity ? { title: people, body: `of ${s.capacity} places` } : people,
+              statusLabel(s.status),
+            ];
+          }),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'training_session', entityId: 'list', action: 'EXPORTED', summary: `Exported the training session list as PDF (${rows.length} session(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'training-sessions.pdf');
   }),
 );
 
@@ -898,7 +1097,6 @@ sessionRoutes.get(
     if (!can(me, 'ghr.training_sessions.view_all') && !canEditSession(me, s) && s.trainerId !== me.id) {
       throw forbidden('Only the trainer or HR can print the attendance sheet');
     }
-    const RESULT: Record<string, string> = { PENDING: '', PASSED: 'Passed', FAILED: 'Failed', NO_SHOW: 'No show' };
     const sections: PdfSection[] = [
       {
         kind: 'fields',
@@ -915,18 +1113,20 @@ sessionRoutes.get(
             label: 'Status',
             value:
               s.status === 'COMPLETED'
-                ? `Completed ${formatDate(s.completedAt ?? s.endsAt)}`
-                : s.status === 'CANCELLED'
-                  ? `Cancelled — ${s.cancelReason ?? ''}`
-                  : 'Scheduled',
+                ? `${statusLabel(s.status)} ${formatDate(s.completedAt ?? s.endsAt)}`
+                : s.status === 'CANCELLED' && s.cancelReason
+                  ? `${statusLabel(s.status)} — ${s.cancelReason}`
+                  : statusLabel(s.status),
           },
         ],
       },
       {
         kind: 'table',
         title: `Attendees (${s.attendees.length})`,
-        head: ['#', 'Employee No', 'Name', 'Position', 'Department', 'Result', 'Score'],
-        widths: [24, 80, 130, 110, 90, 60, 40],
+        // No widths: each column from what it holds, so a head never breaks
+        // mid-word ("SCOR / E" did in fixed shares). "No." counts the lines;
+        // "Number" is the employee's.
+        head: ['No.', 'Number', 'Name', 'Position', 'Department', 'Result', 'Score'],
         align: ['right', 'left', 'left', 'left', 'left', 'left', 'right'],
         rows: s.attendees.map((a, i) => [
           String(i + 1),
@@ -934,29 +1134,42 @@ sessionRoutes.get(
           fullName(a.employee),
           a.employee.position ?? '',
           a.employee.department?.name ?? '',
-          RESULT[a.result] ?? a.result,
+          // Blank until the trainer records one — "Pending" on every line of
+          // a sheet handed round to sign would read as a result.
+          a.result === 'PENDING' ? '' : statusLabel(a.result),
           a.score == null ? '' : String(Number(a.score)),
         ]),
       },
     ];
     if (s.notes) sections.push({ kind: 'text', title: 'Notes', body: s.notes });
+
+    // No approval routes a session, so the sheet prints the people who
+    // acted, each dated: whoever scheduled it, when they did, and the
+    // trainer, dated by the completion that is their sign-off ("Pending"
+    // until then). A cancelled session will never be conducted, so no slot
+    // waits on it; a session from before the scheduler was recorded names
+    // nobody rather than a guess.
+    const contacts = await prisma.user.findMany({
+      where: { id: { in: [s.trainerId, ...(s.createdById ? [s.createdById] : [])] } },
+      select: { id: true, email: true, phone: true, employee: { select: { mobile: true } } },
+    });
+    const contactOf = (id: string | null) => {
+      const u = contacts.find((c) => c.id === id);
+      return u ? { phone: contactPhone(u), email: u.email } : {};
+    };
+    const signatories: Signatory[] = [
+      ...(s.createdBy ? [{ role: 'Scheduled by', name: s.createdBy.name, ...contactOf(s.createdById), at: s.createdAt }] : []),
+      ...(s.status === 'CANCELLED'
+        ? []
+        : [{ role: 'Conducted by', name: s.trainer.name, ...contactOf(s.trainerId), at: s.status === 'COMPLETED' ? s.completedAt : undefined }]),
+    ];
     const pdf = await renderDocument({
       title: 'Training Attendance Sheet',
       documentNumber: s.number,
       date: s.startsAt,
       reference: `${s.course.code} ${s.course.title}`,
       sections,
-      // No approval routes a session: the trainer's completion is the sign-off.
-      // Leave `at` off until it has happened, so the slot prints Pending.
-      signatories: [
-        { role: 'Scheduled by', name: s.createdBy?.name ?? undefined, at: s.createdBy ? s.createdAt : undefined },
-        {
-          role: 'Conducted by',
-          name: s.trainer.name,
-          position: s.trainer.position ?? undefined,
-          at: s.status === 'COMPLETED' ? s.completedAt : undefined,
-        },
-      ],
+      signatories,
     });
     await audit(
       { entityType: 'training_session', entityId: s.id, action: 'EXPORTED', summary: `Printed ${s.number} attendance sheet` },
@@ -1555,72 +1768,154 @@ passportRoutes.get(
 );
 
 /**
- * The register: every employee with their readiness. Readiness is derived,
- * so the filter and sort run over the computed rows — a few hundred people
- * at most, which is cheaper than a second copy of the numbers.
+ * The passport register's rows — the screen's and the printed list's, from
+ * one query. Readiness is derived, so the standing filter and the sort run
+ * over the computed rows: a few hundred people at most, which is cheaper
+ * than a second copy of the numbers. `?ids=` narrows to the rows ticked.
  */
+async function passportRows(q: ListQuery) {
+  const f = q.filters;
+  const and: Prisma.EmployeeWhereInput[] = [];
+  if (f.active !== 'all') and.push({ isActive: f.active === 'false' ? false : true });
+  if (f.departmentId) and.push({ departmentId: f.departmentId === 'none' ? null : f.departmentId });
+  if (f.positionId) and.push({ positionId: f.positionId === 'none' ? null : f.positionId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { firstName: { contains: q.search, mode: 'insensitive' } },
+        { lastName: { contains: q.search, mode: 'insensitive' } },
+        { employeeNo: { contains: q.search, mode: 'insensitive' } },
+        { position: { contains: q.search, mode: 'insensitive' } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  const employees = await prisma.employee.findMany({
+    where: { AND: and },
+    select: {
+      id: true,
+      employeeNo: true,
+      firstName: true,
+      lastName: true,
+      position: true,
+      isActive: true,
+      departmentId: true,
+      positionId: true,
+      department: { select: { id: true, name: true } },
+    },
+    orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+  });
+  const readiness = await readinessFor(employees);
+  let rows = employees.map((e) => {
+    const r = readiness.get(e.id)!;
+    return {
+      id: e.id,
+      employeeNo: e.employeeNo,
+      name: `${e.lastName}, ${e.firstName}`,
+      position: e.position,
+      department: e.department,
+      isActive: e.isActive,
+      ...r,
+    };
+  });
+  if (f.state === 'gaps') rows = rows.filter((r) => r.missing + r.expired > 0);
+  else if (f.state === 'expiring') rows = rows.filter((r) => r.expiring > 0);
+  else if (f.state === 'ready') rows = rows.filter((r) => r.required > 0 && r.held === r.required);
+  else if (f.state === 'pending') rows = rows.filter((r) => r.pending > 0);
+  else if (f.state === 'none') rows = rows.filter((r) => r.required === 0);
+
+  const dir = q.dir === 'asc' ? 1 : -1;
+  if (q.sort === 'pct') rows.sort((a, b) => ((a.pct ?? 101) - (b.pct ?? 101)) * dir);
+  else if (q.sort === 'required') rows.sort((a, b) => (a.required - b.required) * dir);
+  else if (q.sort === 'name') rows.sort((a, b) => a.name.localeCompare(b.name) * dir);
+  else if (q.sort === 'employeeNo') rows.sort((a, b) => a.employeeNo.localeCompare(b.employeeNo) * dir);
+  return rows;
+}
+
+/** The register: every employee with their readiness (`passportRows`). */
 passportRoutes.get(
   '/',
   require_('ghr.passports.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
+    const rows = await passportRows(q);
+    res.json(listResult(rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize), rows.length, q));
+  }),
+);
+
+const STANDING_NAMED: Record<string, string> = {
+  gaps: 'with gaps',
+  expiring: 'something expiring',
+  pending: 'awaiting HR',
+  ready: 'fully ready',
+  none: 'nothing required',
+};
+
+/**
+ * The passport register on paper — the list as filtered (or the rows
+ * ticked), through `passportRows`, so the paper is the screen it was printed
+ * off: each person's readiness, what they hold of what is required, what is
+ * expiring, the gaps and what waits on HR. Each person's courses one by one
+ * are their own passport. Declared above `/:employeeId`, or that route
+ * swallows it.
+ */
+passportRoutes.get(
+  '/pdf',
+  require_('ghr.passports.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
     const f = q.filters;
-    const and: Prisma.EmployeeWhereInput[] = [];
-    if (f.active !== 'all') and.push({ isActive: f.active === 'false' ? false : true });
-    if (f.departmentId) and.push({ departmentId: f.departmentId === 'none' ? null : f.departmentId });
-    if (f.positionId) and.push({ positionId: f.positionId === 'none' ? null : f.positionId });
-    if (q.search) {
-      and.push({
-        OR: [
-          { firstName: { contains: q.search, mode: 'insensitive' } },
-          { lastName: { contains: q.search, mode: 'insensitive' } },
-          { employeeNo: { contains: q.search, mode: 'insensitive' } },
-          { position: { contains: q.search, mode: 'insensitive' } },
-        ],
-      });
-    }
-    const employees = await prisma.employee.findMany({
-      where: { AND: and },
-      select: {
-        id: true,
-        employeeNo: true,
-        firstName: true,
-        lastName: true,
-        position: true,
-        isActive: true,
-        departmentId: true,
-        positionId: true,
-        department: { select: { id: true, name: true } },
-      },
-      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-    });
-    const readiness = await readinessFor(employees);
-    let rows = employees.map((e) => {
-      const r = readiness.get(e.id)!;
-      return {
-        id: e.id,
-        employeeNo: e.employeeNo,
-        name: `${e.lastName}, ${e.firstName}`,
-        position: e.position,
-        department: e.department,
-        isActive: e.isActive,
-        ...r,
-      };
-    });
-    if (f.state === 'gaps') rows = rows.filter((r) => r.missing + r.expired > 0);
-    else if (f.state === 'expiring') rows = rows.filter((r) => r.expiring > 0);
-    else if (f.state === 'ready') rows = rows.filter((r) => r.required > 0 && r.held === r.required);
-    else if (f.state === 'pending') rows = rows.filter((r) => r.pending > 0);
-    else if (f.state === 'none') rows = rows.filter((r) => r.required === 0);
+    const all = await passportRows(q);
+    const rows = all.slice(0, LIST_CAP);
+    const [department, position] = await Promise.all([
+      f.departmentId && f.departmentId !== 'none'
+        ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } })
+        : null,
+      f.positionId && f.positionId !== 'none'
+        ? prisma.position.findUnique({ where: { id: f.positionId }, select: { title: true } })
+        : null,
+    ]);
+    const reference = listReference(all.length, rows.length, ['person', 'people'], [
+      q.search && `search "${q.search}"`,
+      f.state && STANDING_NAMED[f.state],
+      f.departmentId && (f.departmentId === 'none' ? 'no department' : `department ${department?.name ?? 'not found'}`),
+      f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
+      f.active === 'false' ? 'inactive employees' : f.active === 'all' ? 'active and inactive employees' : null,
+      f.ids && 'the rows selected',
+    ]);
 
-    const dir = q.dir === 'asc' ? 1 : -1;
-    if (q.sort === 'pct') rows.sort((a, b) => ((a.pct ?? 101) - (b.pct ?? 101)) * dir);
-    else if (q.sort === 'required') rows.sort((a, b) => (a.required - b.required) * dir);
-    else if (q.sort === 'name') rows.sort((a, b) => a.name.localeCompare(b.name) * dir);
-    else if (q.sort === 'employeeNo') rows.sort((a, b) => a.employeeNo.localeCompare(b.employeeNo) * dir);
-
-    const total = rows.length;
-    res.json(listResult(rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize), total, q));
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Training Passports',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Employee', 'Position', 'Readiness', 'Held', 'Expiring', 'Gaps', 'Awaiting HR'],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right'],
+          rows: rows.map((r) => [
+            r.employeeNo,
+            r.isActive ? r.name : { title: r.name, body: 'Inactive' },
+            { title: r.position ?? 'Unclassified', body: r.department?.name ?? 'No department' },
+            r.pct == null ? 'Nothing required' : `${r.pct}%`,
+            r.required ? `${r.held} of ${r.required}` : '—',
+            String(r.expiring),
+            r.missing + r.expired
+              ? { title: String(r.missing + r.expired), body: `${r.missing} missing, ${r.expired} expired` }
+              : '0',
+            String(r.pending),
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'training_passport', entityId: 'list', action: 'EXPORTED', summary: `Exported the training passport register as PDF (${rows.length} person(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'training-passports.pdf');
   }),
 );
 

@@ -10,12 +10,14 @@
  * creates its own people, and removes them afterwards.
  */
 import net from 'node:net';
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { addressOf, buildMessage, encodeHeader, sendMail, type SmtpConfig } from '../src/shared/mail';
 import { hashToken, linkEmail, linkFor } from '../src/shared/accounts';
+import { statusLabel } from '../src/shared/pdf';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -190,6 +192,176 @@ async function apiReachable(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation uses.
+ * PDFKit Flate-compresses its content streams and writes text as hex runs
+ * split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+// ── Printed lists (rule 6, A5) ───────────────────────────────────────────────
+//
+// `GET <list>/pdf` reads the list's own where-builder, so the paper is the
+// screen: the same set for the same query (the reference's count is the
+// screen's total, every row is on it, the search named), `?ids=` prints only
+// the row ticked and says so, a filter is named and prints the screen's count
+// for it, and each print is on the trail as EXPORTED with entityId "list".
+
+/** A reference may wrap: read the words, not the line breaks. */
+const paperWords = (t: string) => t.replace(/\s+/g, ' ');
+/** A number or a name may wrap inside a narrow cell: compare with every space gone. */
+const paperSquash = (t: string) => t.replace(/\s+/g, '');
+
+async function readPaper(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const type = res.headers.get('content-type') ?? '';
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, type, text: res.ok && type.includes('application/pdf') ? pdfText(bytes) : '' };
+}
+
+async function readScreen(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const body = (await res.json().catch(() => ({}))) as { rows?: Record<string, unknown>[]; total?: number };
+  return { status: res.status, rows: body.rows ?? [], total: body.total ?? -1 };
+}
+
+/** "Reference: 3 leave requests" — the count a printed list opens with. */
+const countedAs = (n: number, noun: readonly [string, string]) =>
+  `Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+const referenceOf = (text: string) => paperWords(text).match(/Reference:.{0,140}/)?.[0] ?? '';
+
+async function checkListPaper(o: {
+  label: string;
+  token: string;
+  actorId: string;
+  /** The list's path, '/leave'. */
+  list: string;
+  /** A query that finds this script's own rows, and how the reference names it. */
+  query: string;
+  named: string;
+  noun: readonly [string, string];
+  /** What on the paper names a row: its number, code or email. */
+  mark: (row: Record<string, unknown>) => string;
+  filter: { query: string; named: string };
+  entityType: string;
+}) {
+  const exported = () =>
+    prisma.auditLog.count({ where: { entityType: o.entityType, entityId: 'list', action: 'EXPORTED', actorId: o.actorId } });
+  const before = await exported();
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+
+  const screen = await readScreen(o.token, `${o.list}?${o.query}&pageSize=200`);
+  const paper = await readPaper(o.token, `${o.list}/pdf?${o.query}`);
+  const missing = screen.rows.map(o.mark).filter((m) => !has(paper.text, m));
+  check(
+    `${o.label}: ${o.list}/pdf prints the list as the screen shows it — the same count, every row, the search named`,
+    paper.status === 200 &&
+      paper.type.includes('application/pdf') &&
+      screen.total > 0 &&
+      paperWords(paper.text).includes(countedAs(screen.total, o.noun)) &&
+      !missing.length &&
+      paperWords(paper.text).includes(o.named),
+    `${paper.status} ${paper.type} · screen ${screen.total} · missing ${missing.join(', ')} · ${referenceOf(paper.text)}`,
+  );
+
+  const [first, ...rest] = screen.rows;
+  const others = first ? rest.map(o.mark).filter((m) => m !== o.mark(first)) : [];
+  const ticked = await readPaper(o.token, `${o.list}/pdf?ids=${String(first?.id ?? 'none')}`);
+  check(
+    `${o.label}: ?ids= prints only the row ticked, and says so`,
+    ticked.status === 200 &&
+      !!first &&
+      paperWords(ticked.text).includes(countedAs(1, o.noun)) &&
+      paperWords(ticked.text).includes('the rows selected') &&
+      has(ticked.text, o.mark(first)) &&
+      others.every((m) => !has(ticked.text, m)),
+    `${ticked.status} · ${referenceOf(ticked.text)} · ${others.filter((m) => has(ticked.text, m)).length} other row(s) printed`,
+  );
+
+  const narrowed = await readScreen(o.token, `${o.list}?${o.filter.query}&pageSize=200`);
+  const filtered = await readPaper(o.token, `${o.list}/pdf?${o.filter.query}`);
+  const lost = narrowed.rows.map(o.mark).filter((m) => !has(filtered.text, m));
+  check(
+    `${o.label}: a filter is named (${o.filter.named}) and prints the screen's rows for it`,
+    filtered.status === 200 &&
+      narrowed.status === 200 &&
+      paperWords(filtered.text).includes(o.filter.named) &&
+      paperWords(filtered.text).includes(countedAs(narrowed.total, o.noun)) &&
+      !lost.length,
+    `${filtered.status} · screen ${narrowed.total} · missing ${lost.join(', ')} · ${referenceOf(filtered.text)}`,
+  );
+  const after = await exported();
+  check(`${o.label}: each print is on the trail as EXPORTED, entityId "list"`, after === before + 3, `${after - before} new row(s)`);
+}
+
+/**
+ * A view_own holder's paper: only their own rows, whatever they search or
+ * tick — somebody else's row named in `?ids=` prints nothing of it.
+ */
+async function checkOwnPaper(o: {
+  label: string;
+  ownToken: string;
+  allToken: string;
+  list: string;
+  query: string;
+  noun: readonly [string, string];
+  mark: (row: Record<string, unknown>) => string;
+}) {
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+  const own = (await readScreen(o.ownToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const all = (await readScreen(o.allToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const ownMarks = own.map(o.mark);
+  const theirs = all.filter((r) => !ownMarks.includes(o.mark(r)));
+  const paper = await readPaper(o.ownToken, `${o.list}/pdf?${o.query}`);
+  check(
+    `${o.label}: someone who sees only their own prints only their own`,
+    paper.status === 200 &&
+      paperWords(paper.text).includes(countedAs(own.length, o.noun)) &&
+      ownMarks.every((m) => has(paper.text, m)) &&
+      theirs.every((r) => !has(paper.text, o.mark(r))),
+    `${paper.status} · own ${own.length}, others ${theirs.length} · ${referenceOf(paper.text)}`,
+  );
+  if (theirs.length) {
+    const sneaky = await readPaper(o.ownToken, `${o.list}/pdf?ids=${String(theirs[0].id)}`);
+    check(
+      `${o.label}: and ticking somebody else's row prints nothing of it`,
+      sneaky.status === 200 && !has(sneaky.text, o.mark(theirs[0])) && paperWords(sneaky.text).includes(countedAs(0, o.noun)),
+      `${sneaky.status} · ${referenceOf(sneaky.text)}`,
+    );
+  }
+}
+
+/** A status that splits the rows — some have it, some do not — so a filter keeps some and drops others. */
+const splittingValue = (rows: Record<string, unknown>[], key: string) =>
+  [...new Set(rows.map((r) => String(r[key] ?? '')))].find((v) => {
+    const n = rows.filter((r) => String(r[key] ?? '') === v).length;
+    return v && n > 0 && n < rows.length;
+  }) ?? String(rows[0]?.[key] ?? '');
 
 /** The token out of a link's #fragment. */
 const tokenOf = (link: unknown) => String(link ?? '').split('#token=')[1] ?? '';
@@ -544,6 +716,67 @@ async function main() {
   const detail = await http(adminT, 'GET', `/users/${linked.body.id}`);
   check('the account page says when the invitation went and until when', !!(detail.body.invite as { sentAt?: string } | null)?.sentAt && (detail.body.invite as { live?: boolean }).live === true);
   check('and which employee it belongs to', (detail.body.employee as { employeeNo?: string } | null)?.employeeNo === `${TAG}-004`);
+
+
+  // ── The lists on paper ─────────────────────────────────────────────────────
+  console.log('\nThe user list and the audit trail on paper');
+  const nobody = await makeUser(`${TAG} Nobody`, `nobody${DOMAIN}`, []);
+  const nobodyT = signToken(nobody.id, nobody.email);
+  // Every login this script made shares the domain; the email names the row.
+  const byDomain = `search=${encodeURIComponent(DOMAIN.slice(1))}`;
+  await checkListPaper({
+    label: 'Users',
+    token: adminT,
+    actorId: admin.id,
+    list: '/users',
+    query: byDomain,
+    named: `search "${DOMAIN.slice(1)}"`,
+    noun: ['user', 'users'],
+    mark: (r) => String(r.email),
+    filter: { query: `${byDomain}&isActive=false`, named: 'inactive' },
+    entityType: 'user',
+  });
+  const usersPaper = await readPaper(adminT, `/users/pdf?${byDomain}`);
+  check(
+    'Users: the paper says who is invited and who is switched off, and carries no password hash',
+    paperWords(usersPaper.text).includes('Invited') &&
+      paperWords(usersPaper.text).includes('Inactive') &&
+      !/\$2[aby]\$/.test(usersPaper.text),
+    referenceOf(usersPaper.text),
+  );
+  check('Users: the printed list is refused to anyone without the user admin right', (await readPaper(nobodyT, '/users/pdf')).status === 403);
+
+  // The audit trail: this script's admin is "ZZACCT Admin", so the search
+  // finds what they did. A row is named by its action, record and record id —
+  // three cells side by side on the paper.
+  const auditMark = (r: Record<string, unknown>) =>
+    `${statusLabel(String(r.action))}${statusLabel(String(r.entityType))}${String(r.entityId)}`;
+  await checkListPaper({
+    label: 'Audit trail',
+    token: adminT,
+    actorId: admin.id,
+    list: '/audit',
+    query: `search=${TAG}`,
+    named: `search "${TAG}"`,
+    noun: ['entry', 'entries'],
+    mark: auditMark,
+    filter: { query: `search=${TAG}&action=CREATED`, named: 'action Created' },
+    entityType: 'audit_log',
+  });
+  // A day that is not one: the wrong shape, a shape with no such day, and a
+  // day the calendar does not have (30 February would quietly be 2 March) —
+  // on the screen's list and on the paper alike.
+  for (const query of ['from=yesterday', 'from=2026-13-45', 'to=2026-02-30']) {
+    const [list, paper] = await Promise.all([http(adminT, 'GET', `/audit?${query}`), http(adminT, 'GET', `/audit/pdf?${query}`)]);
+    check(
+      `Audit trail: ?${query} is a 400 on the list and the paper, never a 500 or another day`,
+      list.status === 400 && paper.status === 400,
+      `${list.status} ${paper.status}`,
+    );
+  }
+  const realDay = await http(adminT, 'GET', '/audit?from=2028-02-29&to=2028-02-29');
+  check('Audit trail: a real day still filters (29 February in a leap year)', realDay.status === 200, String(realDay.status));
+  check('Audit trail: the printed trail is refused to anyone without the audit right', (await readPaper(nobodyT, '/audit/pdf')).status === 403);
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

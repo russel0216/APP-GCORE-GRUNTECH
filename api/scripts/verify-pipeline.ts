@@ -687,6 +687,25 @@ async function main() {
     `${leadPdf.status}`,
   );
   check('its enquiry prints in full, both lines', leadPdfText.includes('Two PSA oxygen generators') && leadPdfText.includes('with manifold'));
+  const leadLines = leadPdfText.split('\n');
+  check(
+    'a lead has no route: it prints the one person who acted — ADDED BY, the name — and no approval slot nobody fills',
+    leadLines.includes('ADDED BY') && leadLines.includes(manager.name) && !leadPdfText.includes('APPROVED BY') && !leadPdfText.includes('Added by:'),
+    leadLines.slice(-8).join(' | '),
+  );
+  // The lead has moved on by now (its quotation): read the status it stands in.
+  const bareStatus = (await prisma.lead.findUniqueOrThrow({ where: { id: bareLead.id }, select: { status: true } })).status;
+  const bareWords = bareStatus.toLowerCase().replace(/_/g, ' ');
+  check(
+    'its words and dates as every record prints them: the status through statusLabel, the closing date long, the money with its code',
+    leadPdfText.includes(`Status: ${bareWords.charAt(0).toUpperCase()}${bareWords.slice(1)}`) && !/Status: [A-Z_]{3,}\b/.test(leadPdfText) &&
+      leadPdfText.includes('Expected closing: November 20, 2026') && leadPdfText.includes('Estimated value: PHP 400,000.00'),
+    leadLines.filter((l) => /Status|closing|value/i.test(l)).join(' | '),
+  );
+  check(
+    'printing the lead is audited as an export',
+    !!(await prisma.auditLog.findFirst({ where: { entityType: 'lead', entityId: bareLead.id, action: 'EXPORTED', actorId: manager.id } })),
+  );
   const deniedPdf = await fetchPdf(sellerToken, `/leads/${bareLead.id}/pdf`);
   check("someone else's lead is refused on paper exactly as on screen", deniedPdf.status === 403, `${deniedPdf.status}`);
 
@@ -694,7 +713,7 @@ async function main() {
   const listPdfText = pdfText(listPdf.bytes);
   check(
     'GET /leads/pdf prints the filtered list — every tagged lead, and the total',
-    listPdf.status === 200 && listPdfText.includes(`${TAG} Bare Lead`) && listPdfText.includes(`${TAG} Not On File`) && listPdfText.includes('Estimated value, total:'),
+    listPdf.status === 200 && listPdfText.includes(`${TAG} Bare Lead`) && listPdfText.includes(`${TAG} Not On File`) && listPdfText.includes('Total estimated value'),
     `${listPdf.status}`,
   );
   const narrowedPdf = pdfText((await fetchPdf(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}&status=NEW`)).bytes);
@@ -703,6 +722,64 @@ async function main() {
     where: { entityType: 'lead', entityId: 'list', action: 'EXPORTED', actorId: manager.id },
   });
   check('the list export left an audit row', !!exportedPdf);
+
+  // ── The Forecast on paper: one money block, one bold row ─────────────────
+  /** Each text run with whether its font is the bold one (the resource map read off the file). */
+  const pdfRuns = (pdf: Buffer): { text: string; bold: boolean }[] => {
+    const raw = pdf.toString('latin1');
+    const fonts = new Map([...raw.matchAll(/(\d+) 0 obj\s*<<\s*\/Type \/Font\s*\/BaseFont \/([\w-]+)/g)].map((m) => [m[1], m[2]]));
+    const names = new Map([...raw.matchAll(/\/(F\d+) (\d+) 0 R/g)].map((m) => [m[1], fonts.get(m[2]) ?? '']));
+    const out: { text: string; bold: boolean }[] = [];
+    const stream = /stream\r?\n/g;
+    let m: RegExpExecArray | null;
+    while ((m = stream.exec(raw))) {
+      const start = m.index + m[0].length;
+      const end = raw.indexOf('endstream', start);
+      if (end < 0) continue;
+      let body: string;
+      try {
+        body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+      } catch {
+        continue;
+      }
+      let font = '';
+      for (const op of body.matchAll(/\/(F\d+)\s+[\d.]+\s+Tf|\[([^\]]*)\]\s*TJ/g)) {
+        if (op[1]) {
+          font = names.get(op[1]) ?? '';
+          continue;
+        }
+        let piece = '';
+        for (const part of op[2].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+          piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+        }
+        if (piece) out.push({ text: piece, bold: font.endsWith('-Bold') });
+      }
+    }
+    return out;
+  };
+  const fcSince = new Date();
+  const fcPaper = await fetchPdf(managerToken, `/pipeline/forecast.pdf?${fcQuery}`);
+  const fcRuns = pdfRuns(fcPaper.bytes);
+  const fcPaperText = fcRuns.map((r) => r.text).join('\n');
+  const moneyLabels = fcRuns.filter((r) => /^(In the window|Everything open)/.test(r.text));
+  check(
+    'the Forecast prints its money block once — the window, then everything open — and only the grand total, last, is bold',
+    fcPaper.status === 200 &&
+      moneyLabels.length === 4 &&
+      moneyLabels.filter((r) => r.bold).length === 1 &&
+      moneyLabels[3].bold &&
+      /^Everything open \(\d+\)$/.test(moneyLabels[3].text),
+    moneyLabels.map((r) => `${r.text}${r.bold ? ' [bold]' : ''}`).join(' | '),
+  );
+  check(
+    'its money columns name the code in the head, and its dates are a list’s (MM/DD/YYYY), the window’s edges too',
+    fcPaperText.includes('VALUE (PHP)') && fcPaperText.includes('WEIGHTED (PHP)') && fcPaperText.replace(/\s+/g, ' ').includes('11/01/2026 to 12/31/2026') && fcPaperText.includes('11/03/2026'),
+    fcPaperText.slice(0, 400).replace(/\n/g, ' | '),
+  );
+  check(
+    'and printing it is audited as an export',
+    !!(await prisma.auditLog.findFirst({ where: { entityType: 'pipeline', entityId: 'forecast', action: 'EXPORTED', actorId: manager.id, at: { gte: fcSince }, summary: { startsWith: 'Sales forecast printed' } } })),
+  );
 
   // ── SCORO's ladder: the stage sets the odds ──────────────────────────────
   console.log('\nStage odds (SCORO\u2019s ladder)');

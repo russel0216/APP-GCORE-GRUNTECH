@@ -126,6 +126,7 @@ export function Costings() {
             scoped
             searchPlaceholder="Search number, title, customer, system…"
             onRowClick={(c) => navigate(`/g-ops/costing/${c.id}`)}
+            printPath="/api/costings/pdf"
             emptyTitle="No costings yet"
             emptyHint="A costing is the first thing you make when a job looks real."
             filters={[

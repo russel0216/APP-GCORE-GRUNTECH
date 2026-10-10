@@ -8,6 +8,8 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
+  type ListQuery,
   notFound,
   badRequest,
   forbidden,
@@ -38,12 +40,16 @@ import {
   isLive,
   whenWhere,
 } from '../shared/meetings';
+import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
+import { manilaDayKey } from '../shared/day';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 
 /**
  * Meetings — G-HR › My day (item 11).
  *
- * No workflow, no PDF, no money. G-Core holds no Google credentials: the
- * organiser creates the event in their own calendar from the hand-off link
+ * No workflow, no money, and no PDF of a meeting — only the list prints.
+ * G-Core holds no Google credentials: the organiser creates the event in
+ * their own calendar from the hand-off link
  * this API builds, and pastes the Meet link back. In-app invitations go out
  * on "Send invitations", not on every save, so a meeting can be drafted and
  * corrected before anybody hears about it.
@@ -208,45 +214,58 @@ meetingRoutes.get(
 
 // ── List ────────────────────────────────────────────────────────────────────
 
+/**
+ * The meeting list's where-builder — the screen's rows and the printed list
+ * read the same set: what the caller may see (`visibleWhere`), the preset
+ * (upcoming, today, past), the filters and, with `?ids=`, the rows ticked —
+ * ANDed with that visibility, so naming an id never prints a meeting the
+ * caller is not on.
+ */
+function meetingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Prisma.MeetingWhereInput {
+  const f = q.filters;
+  const and: Prisma.MeetingWhereInput[] = [visibleWhere(me), whenWhere(f.when)];
+  if (q.scope === 'mine') and.push({ organizerId: me.id });
+  if (f.status && ['PLANNED', 'DONE', 'CANCELLED'].includes(f.status)) {
+    and.push({ status: f.status as 'PLANNED' | 'DONE' | 'CANCELLED' });
+  }
+  if (f.role === 'organizer') and.push({ organizerId: me.id });
+  if (f.role === 'invited') and.push({ invitees: { some: { userId: me.id } } });
+  if (f.organizerId) and.push({ organizerId: f.organizerId });
+  if (f.jobId) and.push({ jobId: f.jobId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { title: { contains: q.search, mode: 'insensitive' } },
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { agenda: { contains: q.search, mode: 'insensitive' } },
+        { location: { contains: q.search, mode: 'insensitive' } },
+        { organizer: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const MEETING_SORTS = ['startsAt', 'number', 'title', 'status'];
+
+/** Upcoming reads soonest-first; everything else newest-first, like every other list. */
+const meetingFallbackSort = (q: ListQuery): Record<string, 'asc' | 'desc'> =>
+  q.filters.when === 'upcoming' || q.filters.when === 'today' ? { startsAt: 'asc' } : { startsAt: 'desc' };
+
 meetingRoutes.get(
   '/',
   requireAny(...VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const f = q.filters;
-
-    const and: Prisma.MeetingWhereInput[] = [visibleWhere(me), whenWhere(f.when)];
-    if (q.scope === 'mine') and.push({ organizerId: me.id });
-    if (f.status && ['PLANNED', 'DONE', 'CANCELLED'].includes(f.status)) {
-      and.push({ status: f.status as 'PLANNED' | 'DONE' | 'CANCELLED' });
-    }
-    if (f.role === 'organizer') and.push({ organizerId: me.id });
-    if (f.role === 'invited') and.push({ invitees: { some: { userId: me.id } } });
-    if (f.organizerId) and.push({ organizerId: f.organizerId });
-    if (f.jobId) and.push({ jobId: f.jobId });
-    if (q.search) {
-      and.push({
-        OR: [
-          { title: { contains: q.search, mode: 'insensitive' } },
-          { number: { contains: q.search, mode: 'insensitive' } },
-          { agenda: { contains: q.search, mode: 'insensitive' } },
-          { location: { contains: q.search, mode: 'insensitive' } },
-          { organizer: { name: { contains: q.search, mode: 'insensitive' } } },
-        ],
-      });
-    }
-    const where: Prisma.MeetingWhereInput = { AND: and };
-
-    // Upcoming reads soonest-first; everything else newest-first, like every
-    // other list. The default sort therefore depends on the preset.
-    const fallback: Record<string, 'asc' | 'desc'> =
-      f.when === 'upcoming' || f.when === 'today' ? { startsAt: 'asc' } : { startsAt: 'desc' };
+    const where = meetingListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.meeting.findMany({
         where,
-        orderBy: orderBy(q, ['startsAt', 'number', 'title', 'status'], fallback),
+        orderBy: orderBy(q, MEETING_SORTS, meetingFallbackSort(q)),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
         select: {
@@ -280,6 +299,104 @@ meetingRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+const WHEN_NAMED: Record<string, string> = { upcoming: 'upcoming', today: 'today', past: 'past' };
+
+/**
+ * The meeting list on paper — the list as filtered (or the rows ticked),
+ * through `meetingListWhere`, so the paper is the screen it was printed off:
+ * when, what, where, who organises it, for which project, and how many of
+ * those invited said yes. The viewer's own answer stays on the screen — a
+ * printed list is nobody's in particular. Declared above `/:id`, or that
+ * route swallows it.
+ */
+meetingRoutes.get(
+  '/pdf',
+  requireAny(...VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = meetingListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, organizer, job] = await Promise.all([
+      prisma.meeting.findMany({
+        where,
+        orderBy: orderBy(q, MEETING_SORTS, meetingFallbackSort(q)),
+        take: LIST_CAP,
+        select: {
+          number: true,
+          title: true,
+          location: true,
+          startsAt: true,
+          endsAt: true,
+          status: true,
+          meetLink: true,
+          organizer: { select: { name: true } },
+          job: { select: { number: true } },
+          invitees: { select: { response: true, notifiedAt: true } },
+        },
+      }),
+      prisma.meeting.count({ where }),
+      f.organizerId ? prisma.user.findUnique({ where: { id: f.organizerId }, select: { name: true } }) : null,
+      f.jobId ? prisma.job.findUnique({ where: { id: f.jobId }, select: { number: true } }) : null,
+    ]);
+
+    const reference = listReference(count, rows.length, ['meeting', 'meetings'], [
+      q.search && `search "${q.search}"`,
+      f.when && WHEN_NAMED[f.when],
+      f.status && ['PLANNED', 'DONE', 'CANCELLED'].includes(f.status) && `status ${statusLabel(f.status)}`,
+      f.role === 'organizer' && 'organised by me',
+      f.role === 'invited' && 'I am invited',
+      f.organizerId && `organised by ${organizer?.name ?? 'not found'}`,
+      f.jobId && `project ${job?.number ?? 'not found'}`,
+      q.scope === 'mine' && 'mine only',
+      f.ids && 'the rows selected',
+    ]);
+    const clock = (d: Date) => clockFmt.format(d).replace(/\s+/g, ' ').toUpperCase();
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Meetings',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Meeting', 'Date', 'Time', 'Organiser', 'Project', 'Accepted', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'left'],
+          rows: rows.map((m) => {
+            const where = m.location ?? (m.meetLink ? 'Google Meet' : undefined);
+            const sameDay = manilaDayKey(m.startsAt) === manilaDayKey(m.endsAt);
+            const unsent = m.invitees.length > 0 && !m.invitees.some((i) => i.notifiedAt);
+            return [
+              m.number,
+              where ? { title: m.title, body: where } : m.title,
+              formatShortDate(m.startsAt),
+              sameDay
+                ? `${clock(m.startsAt)} – ${clock(m.endsAt)}`
+                : `${clock(m.startsAt)} – ${formatShortDate(m.endsAt)} ${clock(m.endsAt)}`,
+              m.organizer.name,
+              m.job?.number ?? '—',
+              m.invitees.length
+                ? {
+                    title: `${m.invitees.filter((i) => i.response === 'ACCEPTED').length} of ${m.invitees.length}`,
+                    body: unsent ? 'not sent' : undefined,
+                  }
+                : '—',
+              statusLabel(m.status),
+            ];
+          }),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'meeting', entityId: 'list', action: 'EXPORTED', summary: `Exported the meeting list as PDF (${rows.length} meeting(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'meetings.pdf');
   }),
 );
 
@@ -738,6 +855,8 @@ const dateTimeFmt = new Intl.DateTimeFormat('en-PH', {
   minute: '2-digit',
 });
 const timeOnly = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' });
+/** A clock time on paper, in Manila: "9:00 AM". */
+const clockFmt = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true });
 
 /** "Sep 28, 09:00 AM – 10:00 AM" — the notification's one line about when. */
 function whenText(startsAt: Date, endsAt: Date): string {

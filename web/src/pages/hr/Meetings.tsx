@@ -305,6 +305,7 @@ export function Meetings() {
         <DataList<MeetingRow>
           listKey="hr-meetings"
           endpoint="/meetings"
+          printPath="/api/meetings/pdf"
           columns={columns}
           rowKey={(r) => r.id}
           scoped

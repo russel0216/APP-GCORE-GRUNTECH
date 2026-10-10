@@ -11,19 +11,52 @@ import {
   notFound,
   badRequest,
   forbidden,
+  idsFilter,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { submitForApproval, onApprovalSettled, approvalSlots, type ApprovalOutcome } from '../shared/approvals';
-import { renderDocument, formatDate, formatMoney, type PdfSection, type Signatory } from '../shared/pdf';
+import {
+  submitForApproval,
+  onApprovalSettled,
+  approvalSlots,
+  slotSignatories,
+  routePreview,
+  contactPhone,
+  type ApprovalOutcome,
+  type ApprovalSlot,
+} from '../shared/approvals';
+import {
+  renderDocument,
+  formatDate,
+  formatMoney,
+  formatAmount,
+  formatShortDate,
+  statusLabel,
+  companyCurrency,
+  type PdfSection,
+  type Signatory,
+} from '../shared/pdf';
 import { registerSearch } from '../shared/search';
 import { dayKey } from '../shared/aftermarket';
 import { workingDaysBetween } from '../shared/day';
 import { valueRevision } from '../shared/pipeline';
-import { costingForJob, createJobRecord } from './jobs';
+import {
+  costingForJob,
+  createJobRecord,
+  LIST_CAP,
+  listReference,
+  totalLabel,
+  listDay,
+  namedInFilter,
+  choice,
+  bracketed,
+  bracketNote,
+  listNotes,
+} from './jobs';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -53,10 +86,6 @@ export const jobOrderRoutes = Router();
 jobOrderRoutes.use(authenticate);
 
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? null : Number(v));
-
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
-}
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -133,6 +162,38 @@ function mayOpen(me: ResolvedUser, row: JobOrderRow): boolean {
   return !onlyOwn(me) || onIt(me, row);
 }
 
+/**
+ * The order's route, one slot a step. A DRAFT or a RETURNED order shows the
+ * route submitting it now WOULD take, every step open under who may sign it
+ * — not `approvalSlots(…, draft)`, which previews only while no request
+ * exists: a returned order keeps its last request, closed, and its signed
+ * steps would date an approval nobody now gives. A CANCELLED order prints
+ * only signatures that stand: all of them when it was cancelled after its
+ * route approved it, and none when it was cancelled as a draft or while
+ * returned — a step signed before the return approved a version nobody now
+ * decides on, and an open step will never be signed. Every other order
+ * shows its latest request, each step signed and dated or still open.
+ */
+async function routeSlots(row: JobOrderRow): Promise<ApprovalSlot[]> {
+  if (row.status === 'DRAFT' || row.status === 'REJECTED') {
+    const route = await routePreview('job_order', num(row.amount), row.requestedById, null, {
+      jobId: row.jobId,
+      projectManagerId: row.projectManagerId,
+    });
+    return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
+  }
+  if (row.status === 'CANCELLED') {
+    const latest = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'job_order', documentId: row.id },
+      orderBy: { createdAt: 'desc' },
+      select: { status: true },
+    });
+    if (latest?.status !== 'APPROVED') return [];
+    return (await approvalSlots('job_order', row.id)).filter((s) => s.name);
+  }
+  return approvalSlots('job_order', row.id);
+}
+
 async function load(id: string): Promise<JobOrderRow> {
   const row = await prisma.jobOrder.findUnique({ where: { id }, include: jobOrderInclude });
   if (!row) throw notFound('Job order not found');
@@ -162,53 +223,70 @@ const mineWhere = (userId: string): Prisma.JobOrderWhereInput => ({
 
 // ── List ────────────────────────────────────────────────────────────────────
 
+const JOB_ORDER_SORTS = ['number', 'requestedFor', 'createdAt'];
+
+/** A status in the screen's words, through statusLabel: REJECTED reads "Returned" — the order goes back to whoever raised it. */
+const statusWord = (status: string) => statusLabel(status === 'REJECTED' ? 'RETURNED' : status);
+
+/**
+ * Which job orders a list query means — one rule for the list and its
+ * printed twin. A `view_own` holder sees what they raised or are sent on;
+ * `?ids=` (the rows ticked) is ANDed with that.
+ */
+function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhereInput {
+  const where: Prisma.JobOrderWhereInput = {};
+  const and: Prisma.JobOrderWhereInput[] = [];
+
+  if (onlyOwn(me) || q.scope === 'mine') and.push(mineWhere(me.id));
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+
+  const status = choice(q.filters.status, JobOrderStatus, 'Status');
+  if (status) where.status = status;
+  if (q.filters.open === 'true') where.status = 'APPROVED';
+  // The unbilled queue finance works from.
+  if (q.filters.unbilled === 'true') {
+    where.chargeBasis = 'CHARGEABLE';
+    where.status = 'COMPLETED';
+    where.invoice = { is: null };
+  }
+  for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId'] as const) {
+    if (q.filters[key]) where[key] = q.filters[key];
+  }
+  // requestedFor mirrors the target start, so one index serves both shapes.
+  if (q.filters.from || q.filters.to) {
+    where.requestedFor = {};
+    if (q.filters.from) where.requestedFor.gte = asDate(q.filters.from, 'From');
+    if (q.filters.to) where.requestedFor.lte = asDate(q.filters.to, 'To');
+  }
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { title: { contains: q.search, mode: 'insensitive' } },
+        { projectName: { contains: q.search, mode: 'insensitive' } },
+        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+        { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  if (and.length) where.AND = and;
+  return where;
+}
+
 jobOrderRoutes.get(
   '/',
   requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.JobOrderWhereInput = {};
-    const and: Prisma.JobOrderWhereInput[] = [];
-
-    if (onlyOwn(me) || q.scope === 'mine') and.push(mineWhere(me.id));
-
-    const status = asEnum(JobOrderStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.open === 'true') where.status = 'APPROVED';
-    // The unbilled queue finance works from.
-    if (q.filters.unbilled === 'true') {
-      where.chargeBasis = 'CHARGEABLE';
-      where.status = 'COMPLETED';
-      where.invoice = { is: null };
-    }
-    for (const key of ['customerId', 'jobId', 'quotationId', 'salesOrderId', 'projectManagerId', 'assignedToId'] as const) {
-      if (q.filters[key]) where[key] = q.filters[key];
-    }
-    // requestedFor mirrors the target start, so one index serves both shapes.
-    if (q.filters.from || q.filters.to) {
-      where.requestedFor = {};
-      if (q.filters.from) where.requestedFor.gte = asDate(q.filters.from, 'From');
-      if (q.filters.to) where.requestedFor.lte = asDate(q.filters.to, 'To');
-    }
-    if (q.search) {
-      and.push({
-        OR: [
-          { number: { contains: q.search, mode: 'insensitive' } },
-          { title: { contains: q.search, mode: 'insensitive' } },
-          { projectName: { contains: q.search, mode: 'insensitive' } },
-          { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-          { quotation: { number: { contains: q.search, mode: 'insensitive' } } },
-        ],
-      });
-    }
-    if (and.length) where.AND = and;
+    const where = jobOrderListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.jobOrder.findMany({
         where,
         include: jobOrderInclude,
-        orderBy: orderBy(q, ['number', 'requestedFor', 'createdAt'], { requestedFor: 'asc' }),
+        orderBy: orderBy(q, JOB_ORDER_SORTS, { requestedFor: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -216,6 +294,99 @@ jobOrderRoutes.get(
     ]);
 
     res.json(listResult(rows.map(present), total, q));
+  }),
+);
+
+/**
+ * The job orders list on paper (rule 6, A5): the list's own query and sort —
+ * or the rows ticked — on landscape pages; the targets as short dates with
+ * the working days between them, the amount before VAT with the code in the
+ * head, and the whole set's total in the totals block. A cancelled order's
+ * amount prints in brackets and is not counted, and the note under the
+ * totals says how many were left out. Declared above `/:id`.
+ */
+jobOrderRoutes.get(
+  '/pdf',
+  requireAny('gops.job_orders.view_all', 'gops.job_orders.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = jobOrderListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, live, cancelled, currency, named, assignee, quotation, salesOrder] = await Promise.all([
+      prisma.jobOrder.findMany({ where, include: jobOrderInclude, orderBy: orderBy(q, JOB_ORDER_SORTS, { requestedFor: 'asc' }), take: LIST_CAP }),
+      prisma.jobOrder.count({ where }),
+      prisma.jobOrder.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { amount: true } }),
+      prisma.jobOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+      companyCurrency(),
+      namedInFilter({ customerId: f.customerId, jobId: f.jobId, userId: f.projectManagerId }),
+      f.assignedToId ? prisma.user.findUnique({ where: { id: f.assignedToId }, select: { name: true } }) : null,
+      f.quotationId ? prisma.quotation.findUnique({ where: { id: f.quotationId }, select: { number: true } }) : null,
+      f.salesOrderId ? prisma.salesOrder.findUnique({ where: { id: f.salesOrderId }, select: { number: true } }) : null,
+    ]);
+    const reference = listReference(count, rows.length, ['job order', 'job orders'], [
+      q.search ? `search "${q.search}"` : null,
+      f.status && f.open !== 'true' && f.unbilled !== 'true' ? `status ${statusWord(f.status)}` : null,
+      f.open === 'true' ? 'open (approved)' : null,
+      f.unbilled === 'true' ? 'completed, chargeable, not yet invoiced' : null,
+      named.customer ? `customer ${named.customer}` : null,
+      named.project ? `project ${named.project}` : null,
+      f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
+      f.salesOrderId ? `sales order ${salesOrder?.number ?? 'not found'}` : null,
+      named.person ? `project manager ${named.person}` : null,
+      f.assignedToId ? `assigned to ${assignee?.name ?? 'not found'}` : null,
+      f.from || f.to ? `target start ${listDay(f.from)} to ${listDay(f.to)}` : null,
+      q.scope === 'mine' ? 'raised by me or sending me' : null,
+      f.ids ? 'the rows selected' : null,
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Job Orders',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Project', 'Customer', 'Target', `Amount (${currency})`, 'Project manager', 'Links', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
+          rows: rows.map((r) => {
+            const t = targets(r);
+            const amount = r.amount == null ? '' : formatAmount(Number(r.amount));
+            return [
+              r.number,
+              { title: r.projectName ?? r.title, body: r.projectName && r.projectName !== r.title ? r.title : undefined },
+              { title: r.customer.name, body: r.site?.name ?? r.contact?.name ?? undefined },
+              // Dates are never bold: the window, then the working days in it.
+              `${formatShortDate(t.targetStart)} – ${formatShortDate(t.targetFinish)}\n${t.durationDays} working day${t.durationDays === 1 ? '' : 's'}`,
+              amount && bracketed(amount, r.status !== 'CANCELLED'),
+              { title: r.projectManager?.name ?? 'None named', body: `Raised by ${r.requestedBy.name}` },
+              [r.quotation?.number, r.salesOrder?.number, r.job?.number].filter(Boolean).join('\n'),
+              statusWord(r.status),
+            ];
+          }),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            {
+              label: totalLabel('Total before VAT', count, rows.length),
+              value: formatMoney(Number(live._sum.amount ?? 0), currency),
+              bold: true,
+            },
+          ],
+        },
+        ...listNotes([bracketNote(cancelled, ['cancelled job order', 'cancelled job orders'])]),
+      ],
+    });
+
+    await audit(
+      { entityType: 'job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the job orders list as PDF (${listReference(count, rows.length, ['job order', 'job orders'], [])})` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="job-orders.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -474,10 +645,7 @@ jobOrderRoutes.get(
     if (!mayOpen(me, row)) throw forbidden('That is someone else’s job order');
     const owner = canEditRecord(me, 'gops', 'job_orders', row.requestedById);
     // Who would decide it, so the page can say where Submit sends it.
-    const route =
-      row.status === 'DRAFT' || row.status === 'REJECTED'
-        ? await approvalSlots('job_order', row.id, { amount: num(row.amount), requesterId: row.requestedById, projectManagerId: row.projectManagerId })
-        : [];
+    const route = row.status === 'DRAFT' || row.status === 'REJECTED' ? await routeSlots(row) : [];
     res.json({
       ...present(row),
       canEdit: owner && (row.status === 'DRAFT' || row.status === 'REJECTED'),
@@ -584,9 +752,22 @@ jobOrderRoutes.post(
       throw badRequest('Only a draft or a returned job order can be submitted');
     }
 
+    // Claimed on the order exactly as read — still a draft or returned, and
+    // not modified since (`updatedAt`, which every write to an order moves).
+    // The request snapshots this read's amount, subject and project manager,
+    // so a Modify that lands between the read and the claim refuses the
+    // submit rather than sending stale facts to the approver.
     const before = row.status;
-    await prisma.jobOrder.update({ where: { id: row.id }, data: { status: 'PENDING_APPROVAL' } });
+    const claimed = await prisma.jobOrder.updateMany({
+      where: { id: row.id, status: before, updatedAt: row.updatedAt },
+      data: { status: 'PENDING_APPROVAL' },
+    });
+    if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
     try {
+      // Filed in the name of whoever RAISED the order, whoever presses the
+      // button: the route (the team leader is the requester's supervisor) is
+      // the one the page and the draft PDF named, and the self-approval rule
+      // keeps the author — not the presser — off their own order.
       await submitForApproval({
         documentType: 'job_order',
         documentId: row.id,
@@ -594,7 +775,7 @@ jobOrderRoutes.post(
         subject: subjectOf(row),
         amount: num(row.amount),
         link: `/g-ops/job-orders/${row.id}`,
-        requesterId: me.id,
+        requesterId: row.requestedById,
         jobId: row.jobId,
         projectManagerId: row.projectManagerId,
       });
@@ -717,6 +898,12 @@ jobOrderRoutes.get(
     if (!mayOpen(me, row)) throw forbidden('That is someone else’s job order');
     const t = targets(row);
     const nameOf = (p: { name: string; position: string | null } | null) => (p ? [p.name, p.position].filter(Boolean).join(' · ') : '—');
+    const currency = await companyCurrency();
+    // The requester's contact lines, for the paper only (the JSON never carries a mobile).
+    const requester = await prisma.user.findUnique({
+      where: { id: row.requestedById },
+      select: { email: true, phone: true, employee: { select: { mobile: true } } },
+    });
 
     const sections: PdfSection[] = [
       {
@@ -744,7 +931,7 @@ jobOrderRoutes.get(
           { label: 'Sales order', value: row.salesOrder?.number ?? '—' },
           { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : '—' },
           { label: 'Customer PO', value: row.customerPoNumber ?? '—' },
-          { label: 'Amount (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount)) : 'To be billed on completion' },
+          { label: 'Amount (before VAT)', value: row.amount != null ? formatMoney(Number(row.amount), currency) : 'To be billed on completion' },
         ],
       },
       { kind: 'text', title: 'Scope of work', body: row.scope ?? row.description },
@@ -764,13 +951,26 @@ jobOrderRoutes.get(
       sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
     }
 
-    // Requested by, then each step of the route — the project manager, the
-    // team leader — "Pending" until it acts, then the customer's slot.
-    const slots = await approvalSlots('job_order', row.id, { amount: num(row.amount), requesterId: row.requestedById, projectManagerId: row.projectManagerId });
+    // Requested by, then the route as the workflow names its steps — the
+    // project manager, the team leader — who signed and when, else who is
+    // assigned with "Pending" under them (a draft or a returned order prints
+    // the route submitting it would take), then the customer's slot last.
+    // A cancelled order prints only the signatures that stand (routeSlots)
+    // and no slot left "Pending" for ever.
+    const route = await routeSlots(row);
+    const cancelled = row.status === 'CANCELLED';
     const signatories: Signatory[] = [
-      { role: 'Requested by', name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: row.createdAt },
-      ...(slots.length ? slots.map((s) => ({ role: s.step, name: s.name, position: s.position, at: s.at })) : [{ role: 'Approved by' }]),
-      { role: 'Acknowledged by (customer)', name: row.customerAcknowledgedBy ?? undefined, at: row.customerAcknowledgedAt },
+      {
+        role: 'Requested by',
+        name: row.requestedBy.name,
+        phone: requester ? contactPhone(requester) : undefined,
+        email: requester?.email,
+        at: row.createdAt,
+      },
+      ...(route.length ? slotSignatories(route) : cancelled ? [] : [{ role: 'Approved by' }]),
+      ...(row.customerAcknowledgedBy || !cancelled
+        ? [{ role: 'Acknowledged by (customer)', name: row.customerAcknowledgedBy ?? undefined, at: row.customerAcknowledgedAt }]
+        : []),
     ];
     const pdf = await renderDocument({
       title: 'Job Order',

@@ -12,6 +12,7 @@
  * a sent invitation cannot be deleted.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -31,6 +32,7 @@ import {
 import { visibleWhere, meetingToCalendarEvent, isLive } from '../src/shared/meetings';
 // Side-effect import: registers the meeting search and schedule providers.
 import '../src/routes/meetings';
+import { statusLabel } from '../src/shared/pdf';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -147,6 +149,176 @@ async function apiReachable(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation uses.
+ * PDFKit Flate-compresses its content streams and writes text as hex runs
+ * split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+// ── Printed lists (rule 6, A5) ───────────────────────────────────────────────
+//
+// `GET <list>/pdf` reads the list's own where-builder, so the paper is the
+// screen: the same set for the same query (the reference's count is the
+// screen's total, every row is on it, the search named), `?ids=` prints only
+// the row ticked and says so, a filter is named and prints the screen's count
+// for it, and each print is on the trail as EXPORTED with entityId "list".
+
+/** A reference may wrap: read the words, not the line breaks. */
+const paperWords = (t: string) => t.replace(/\s+/g, ' ');
+/** A number or a name may wrap inside a narrow cell: compare with every space gone. */
+const paperSquash = (t: string) => t.replace(/\s+/g, '');
+
+async function readPaper(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const type = res.headers.get('content-type') ?? '';
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, type, text: res.ok && type.includes('application/pdf') ? pdfText(bytes) : '' };
+}
+
+async function readScreen(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const body = (await res.json().catch(() => ({}))) as { rows?: Record<string, unknown>[]; total?: number };
+  return { status: res.status, rows: body.rows ?? [], total: body.total ?? -1 };
+}
+
+/** "Reference: 3 leave requests" — the count a printed list opens with. */
+const countedAs = (n: number, noun: readonly [string, string]) =>
+  `Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+const referenceOf = (text: string) => paperWords(text).match(/Reference:.{0,140}/)?.[0] ?? '';
+
+async function checkListPaper(o: {
+  label: string;
+  token: string;
+  actorId: string;
+  /** The list's path, '/leave'. */
+  list: string;
+  /** A query that finds this script's own rows, and how the reference names it. */
+  query: string;
+  named: string;
+  noun: readonly [string, string];
+  /** What on the paper names a row: its number, code or email. */
+  mark: (row: Record<string, unknown>) => string;
+  filter: { query: string; named: string };
+  entityType: string;
+}) {
+  const exported = () =>
+    prisma.auditLog.count({ where: { entityType: o.entityType, entityId: 'list', action: 'EXPORTED', actorId: o.actorId } });
+  const before = await exported();
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+
+  const screen = await readScreen(o.token, `${o.list}?${o.query}&pageSize=200`);
+  const paper = await readPaper(o.token, `${o.list}/pdf?${o.query}`);
+  const missing = screen.rows.map(o.mark).filter((m) => !has(paper.text, m));
+  check(
+    `${o.label}: ${o.list}/pdf prints the list as the screen shows it — the same count, every row, the search named`,
+    paper.status === 200 &&
+      paper.type.includes('application/pdf') &&
+      screen.total > 0 &&
+      paperWords(paper.text).includes(countedAs(screen.total, o.noun)) &&
+      !missing.length &&
+      paperWords(paper.text).includes(o.named),
+    `${paper.status} ${paper.type} · screen ${screen.total} · missing ${missing.join(', ')} · ${referenceOf(paper.text)}`,
+  );
+
+  const [first, ...rest] = screen.rows;
+  const others = first ? rest.map(o.mark).filter((m) => m !== o.mark(first)) : [];
+  const ticked = await readPaper(o.token, `${o.list}/pdf?ids=${String(first?.id ?? 'none')}`);
+  check(
+    `${o.label}: ?ids= prints only the row ticked, and says so`,
+    ticked.status === 200 &&
+      !!first &&
+      paperWords(ticked.text).includes(countedAs(1, o.noun)) &&
+      paperWords(ticked.text).includes('the rows selected') &&
+      has(ticked.text, o.mark(first)) &&
+      others.every((m) => !has(ticked.text, m)),
+    `${ticked.status} · ${referenceOf(ticked.text)} · ${others.filter((m) => has(ticked.text, m)).length} other row(s) printed`,
+  );
+
+  const narrowed = await readScreen(o.token, `${o.list}?${o.filter.query}&pageSize=200`);
+  const filtered = await readPaper(o.token, `${o.list}/pdf?${o.filter.query}`);
+  const lost = narrowed.rows.map(o.mark).filter((m) => !has(filtered.text, m));
+  check(
+    `${o.label}: a filter is named (${o.filter.named}) and prints the screen's rows for it`,
+    filtered.status === 200 &&
+      narrowed.status === 200 &&
+      paperWords(filtered.text).includes(o.filter.named) &&
+      paperWords(filtered.text).includes(countedAs(narrowed.total, o.noun)) &&
+      !lost.length,
+    `${filtered.status} · screen ${narrowed.total} · missing ${lost.join(', ')} · ${referenceOf(filtered.text)}`,
+  );
+  const after = await exported();
+  check(`${o.label}: each print is on the trail as EXPORTED, entityId "list"`, after === before + 3, `${after - before} new row(s)`);
+}
+
+/**
+ * A view_own holder's paper: only their own rows, whatever they search or
+ * tick — somebody else's row named in `?ids=` prints nothing of it.
+ */
+async function checkOwnPaper(o: {
+  label: string;
+  ownToken: string;
+  allToken: string;
+  list: string;
+  query: string;
+  noun: readonly [string, string];
+  mark: (row: Record<string, unknown>) => string;
+}) {
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+  const own = (await readScreen(o.ownToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const all = (await readScreen(o.allToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const ownMarks = own.map(o.mark);
+  const theirs = all.filter((r) => !ownMarks.includes(o.mark(r)));
+  const paper = await readPaper(o.ownToken, `${o.list}/pdf?${o.query}`);
+  check(
+    `${o.label}: someone who sees only their own prints only their own`,
+    paper.status === 200 &&
+      paperWords(paper.text).includes(countedAs(own.length, o.noun)) &&
+      ownMarks.every((m) => has(paper.text, m)) &&
+      theirs.every((r) => !has(paper.text, o.mark(r))),
+    `${paper.status} · own ${own.length}, others ${theirs.length} · ${referenceOf(paper.text)}`,
+  );
+  if (theirs.length) {
+    const sneaky = await readPaper(o.ownToken, `${o.list}/pdf?ids=${String(theirs[0].id)}`);
+    check(
+      `${o.label}: and ticking somebody else's row prints nothing of it`,
+      sneaky.status === 200 && !has(sneaky.text, o.mark(theirs[0])) && paperWords(sneaky.text).includes(countedAs(0, o.noun)),
+      `${sneaky.status} · ${referenceOf(sneaky.text)}`,
+    );
+  }
+}
+
+/** A status that splits the rows — some have it, some do not — so a filter keeps some and drops others. */
+const splittingValue = (rows: Record<string, unknown>[], key: string) =>
+  [...new Set(rows.map((r) => String(r[key] ?? '')))].find((v) => {
+    const n = rows.filter((r) => String(r[key] ?? '') === v).length;
+    return v && n > 0 && n < rows.length;
+  }) ?? String(rows[0]?.[key] ?? '');
 
 const at = (iso: string) => new Date(iso);
 
@@ -531,6 +703,49 @@ async function main() {
   const actions = new Set(audits.map((a) => a.action));
   check('the meeting\'s audit trail runs CREATED → UPDATED → SUBMITTED → EXPORTED → CANCELLED',
     ['CREATED', 'UPDATED', 'SUBMITTED', 'EXPORTED', 'CANCELLED'].every((a) => actions.has(a)), [...actions].join(','));
+
+
+  // ══ The list on paper ════════════════════════════════════════════════════
+  console.log('\nThe list on paper');
+  const nobody = await makeUser(`${TAG} Nobody`, `nobody${DOMAIN}`, []);
+  const searched = `search=${TAG}`;
+  const meetingRows = (await readScreen(tok.hr, `/meetings?${searched}&pageSize=200`)).rows;
+  const meetingStatus = splittingValue(meetingRows, 'status');
+  await checkListPaper({
+    label: 'Meetings',
+    token: tok.hr,
+    actorId: hr.id,
+    list: '/meetings',
+    query: searched,
+    named: `search "${TAG}"`,
+    noun: ['meeting', 'meetings'],
+    mark: (r) => String(r.number),
+    filter: { query: `${searched}&status=${meetingStatus}`, named: `status ${statusLabel(meetingStatus)}` },
+    entityType: 'meeting',
+  });
+  // An invitee holding only view_own prints the meetings they are on.
+  await checkOwnPaper({
+    label: 'Meetings',
+    ownToken: tok.optional,
+    allToken: tok.hr,
+    list: '/meetings',
+    query: searched,
+    noun: ['meeting', 'meetings'],
+    mark: (r) => String(r.number),
+  });
+  const upcomingPaper = await readPaper(tok.hr, `/meetings/pdf?${searched}&when=upcoming`);
+  const upcomingScreen = await readScreen(tok.hr, `/meetings?${searched}&when=upcoming&pageSize=200`);
+  check(
+    'Meetings: the screen\'s preset (upcoming) is named on the paper and keeps its count',
+    upcomingPaper.status === 200 &&
+      paperWords(upcomingPaper.text).includes('upcoming') &&
+      paperWords(upcomingPaper.text).includes(countedAs(upcomingScreen.total, ['meeting', 'meetings'])),
+    referenceOf(upcomingPaper.text),
+  );
+  check(
+    'Meetings: the printed list is refused to anyone the list refuses',
+    (await readPaper(signToken(nobody.id, nobody.email), '/meetings/pdf')).status === 403,
+  );
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

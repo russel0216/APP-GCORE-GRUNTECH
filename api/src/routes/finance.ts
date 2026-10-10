@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { z } from 'zod';
 import {
   Prisma,
@@ -15,9 +15,11 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
@@ -28,12 +30,27 @@ import { notify } from '../shared/notifications';
 import {
   submitForApproval,
   onApprovalSettled,
-  approvalSignoffs,
+  approvalSlots,
+  slotSignatories,
+  routePreview,
+  contactPhone,
   cancelOpenRequest,
   type ApprovalOutcome,
+  type ApprovalSlot,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
-import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import {
+  renderDocument,
+  formatMoney,
+  formatAmount,
+  formatDate,
+  formatShortDate,
+  statusLabel,
+  companyCurrency,
+  type PdfSection,
+  type PdfTotal,
+  type Signatory,
+} from '../shared/pdf';
 import {
   cents,
   D,
@@ -51,6 +68,7 @@ import {
   refreshBudgetRequest,
   claimPayable,
   liquidatedReleased,
+  LIQUIDATION_SOURCES,
   financePosition,
   bucketFor,
   summarise,
@@ -66,6 +84,297 @@ function asDate(value: string, label: string): Date {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw badRequest(`${label} is not a valid date`);
   return dayKey(date);
+}
+
+// ── On paper (rule 6) ────────────────────────────────────────────────
+
+/** A rate as a document prints it in a label: 0.12 → "12%", 0.075 → "7.5%". */
+export const ratePct = (rate: number) => `${+(rate * 100).toFixed(2)}%`;
+
+// ── The printed lists (rule 6, A5) ───────────────────────────────────
+//
+// Every G-FIN register has a printed twin, `GET <list>/pdf` declared above
+// `/:id`: the SAME where-builder the list reads (with `?ids=`, the rows
+// ticked, ANDed with the visibility rule), the list's own sort, at most
+// LIST_CAP rows, a reference naming every filter that narrowed it, figures
+// as `formatAmount` under a head naming the currency, totals over EVERY row
+// the filter matched (not only those printed), and an EXPORTED audit row
+// with entityId 'list'. advances.ts and budgetRequests.ts import these.
+
+/** The most rows a printed list carries; the reference says when it was cut. */
+export const LIST_CAP = 1000;
+
+/**
+ * A printed list's reference: "12 invoices", or, cut at the cap, "first
+ * 1,000 of 1,234 invoices printed" — then every filter that narrowed it, so
+ * the paper says which set it is.
+ */
+export function listReference(
+  count: number,
+  printed: number,
+  noun: readonly [string, string],
+  filters: (string | null | false | undefined)[],
+): string {
+  const n = (v: number) => v.toLocaleString('en-PH');
+  const head =
+    count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
+  const named = filters.filter(Boolean);
+  return named.length ? `${head} — ${named.join(' · ')}` : head;
+}
+
+/** A figure that is listed but not summed (a draft or cancelled document's), in brackets. */
+export const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
+
+/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
+export const totalLabel = (label: string, count: number, printed: number) =>
+  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
+
+/** "1 draft invoice" / "3 draft invoices" — a count in a note under a list. */
+export const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+
+/** The note under a list whose closed documents (cancelled, rejected) print in brackets. */
+export const bracketNote = (n: number, noun: readonly [string, string]) =>
+  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
+
+/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
+export const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
+  const said = notes.filter((v): v is string => !!v);
+  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
+};
+
+/** A 'YYYY-MM-DD' a filter names, as a list prints a date (MM/DD/YYYY); a half-open range's missing end as "…". */
+export const listDay = (key: unknown) =>
+  typeof key === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(key) ? formatShortDate(new Date(`${key}T00:00:00Z`)) : '…';
+
+/** A date a list's filter names — a 400 when it is not one, never a 500 from the database. */
+export function filterDay(value: string, label: string): Date {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw badRequest(`${label} is not a valid date`);
+  return date;
+}
+
+/** A from–to pair as a filter line prints it, or null when neither end is set. */
+export const rangeNamed = (label: string, from: string | undefined, to: string | undefined) =>
+  from || to ? `${label} ${listDay(from)} to ${listDay(to)}` : null;
+
+/**
+ * The record a `?<key>Id=` filter names, as a filter line prints it —
+ * "customer ACME Hospital", "project GT-PRJ-2026-0112" — or "… not found"
+ * for an id that matches nothing (the list is then empty, and says why).
+ */
+export async function recordNamed(
+  kind: 'customer' | 'supplier' | 'person' | 'project' | 'advance' | 'budget request',
+  id: string | undefined,
+  /** What the line says before the name, when not the kind — "requested by", "with". */
+  label: string = kind,
+): Promise<string | null> {
+  if (!id) return null;
+  const name =
+    kind === 'customer'
+      ? (await prisma.customer.findUnique({ where: { id }, select: { name: true } }))?.name
+      : kind === 'supplier'
+        ? (await prisma.supplier.findUnique({ where: { id }, select: { name: true } }))?.name
+        : kind === 'person'
+          ? (await prisma.user.findUnique({ where: { id }, select: { name: true } }))?.name
+          : kind === 'project'
+            ? (await prisma.job.findUnique({ where: { id }, select: { number: true } }))?.number
+            : kind === 'advance'
+              ? (await prisma.cashAdvance.findUnique({ where: { id }, select: { number: true } }))?.number
+              : (await prisma.budgetRequest.findUnique({ where: { id }, select: { number: true } }))?.number;
+  return `${label} ${name ?? 'not found'}`;
+}
+
+/** A printed list goes out inline, under its own file name. */
+export function sendListPdf(res: Response, pdf: Buffer, filename: string) {
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+  res.send(pdf);
+}
+
+/**
+ * The name and contact lines a sign-off prints under a person — read for
+ * the PAPER only, never sent with the record (the quotation's rule: a
+ * record's JSON carries no mobile). `contactPhone` is the one reading of a
+ * person's number.
+ */
+export async function printPeople(ids: (string | null | undefined)[]) {
+  const wanted = [...new Set(ids.filter((v): v is string => !!v))];
+  const rows = wanted.length
+    ? await prisma.user.findMany({
+        where: { id: { in: wanted } },
+        select: { id: true, name: true, email: true, phone: true, employee: { select: { mobile: true } } },
+      })
+    : [];
+  return new Map(rows.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
+}
+
+/** A document's statuses after which no approval is coming: it was refused, or withdrawn. */
+const CLOSED_STATUSES: readonly string[] = ['REJECTED', 'CANCELLED'];
+
+/**
+ * The approval half of a routed finance document's sign-offs, by the
+ * document's own status: every step of its route through the engine's one
+ * mapping (`slotSignatories`) — the step's name as the role, who signed it
+ * with the date, else who is assigned over "Pending".
+ *
+ * - DRAFT prints the route submitting it WOULD take, every step open, with
+ *   the requester, amount and project the submit itself passes. Not
+ *   `approvalSlots(…, draft)`: that previews only while NO request exists,
+ *   and a draft pulled back keeps its last request — CANCELLED, with
+ *   whatever step had signed — so printing it would date an approval nobody
+ *   now gives.
+ * - REJECTED or CANCELLED prints the steps that DID sign, dated, and nothing
+ *   else: no approval is coming, so no step is "Pending" — least of all the
+ *   one that refused it.
+ * - Anything else prints the latest request's steps as they stand.
+ *
+ * One open "Approved by" only while an approval is still to come (a draft
+ * or a pending document) and no workflow covers it; a document past
+ * approval with no request on file prints no approval line rather than an
+ * empty one.
+ */
+export async function routeSignatories(
+  documentType: string,
+  documentId: string,
+  opts: { status: string; draft: { amount: number; requesterId: string; jobId?: string | null } },
+): Promise<Signatory[]> {
+  const { status, draft } = opts;
+  if (CLOSED_STATUSES.includes(status)) {
+    return slotSignatories((await approvalSlots(documentType, documentId)).filter((s) => s.name));
+  }
+  const slots: ApprovalSlot[] =
+    status === 'DRAFT'
+      ? ((await routePreview(documentType, draft.amount, draft.requesterId, null, { jobId: draft.jobId }))?.steps ?? []).map((st) => ({
+          step: st.name,
+          assigned: st.approvers,
+        }))
+      : await approvalSlots(documentType, documentId);
+  if (slots.length) return slotSignatories(slots);
+  return status === 'DRAFT' || status === 'PENDING_APPROVAL' ? [{ role: 'Approved by' }] : [];
+}
+
+/**
+ * A cash advance and a budget request on paper. They are one document in
+ * structure — cash asked for, approved, released, spent and accounted for —
+ * so both print the same sections through this one builder: the request,
+ * its purpose, the money as the quotation's totals block (the last row, in
+ * bold, is where it stands now), the liquidation that accounts for it, the
+ * notes. A section a module adds of its own (a cancellation's reason) goes
+ * after these.
+ */
+export function cashRequestSections(input: {
+  requestedBy: string;
+  neededBy: Date | null;
+  project: string;
+  budgetLine: string;
+  status: string;
+  purpose: string;
+  release: { number: string; paymentDate: Date } | null;
+  liquidationDueDate: Date | null;
+  liquidated: boolean;
+  figures: { amount: number; amountReleased: number; spent: number; excessDue: number; refundDue: number; amountRefunded: number };
+  /** The live liquidation; `amountPaid` is what has been reimbursed on it — an excess is paid there. */
+  liquidation: { number: string; status: string; total: number; amountPaid: number } | null;
+  notes: string | null;
+  currency: string;
+}): PdfSection[] {
+  const { figures: f, currency } = input;
+  const money = (n: number) => formatMoney(n, currency);
+  const totals: PdfTotal[] = [{ label: 'Amount requested', value: money(f.amount) }];
+  if (input.release) totals.push({ label: 'Released', value: money(f.amountReleased) });
+  if (input.liquidated) {
+    totals.push({ label: 'Spent (per liquidation)', value: money(f.spent) });
+    if (f.excessDue > 0) {
+      // Spending beyond the cash is owed to the requester ON THE LIQUIDATION
+      // REPORT, never on this document: what that claim has reimbursed comes
+      // off, so a paid excess reads nothing still owed.
+      const reimbursed = input.liquidation?.amountPaid ?? 0;
+      totals.push(
+        { label: 'Excess spent', value: money(f.excessDue) },
+        {
+          label: input.liquidation ? `Less: reimbursed on ${input.liquidation.number}` : 'Less: reimbursed',
+          value: money(reimbursed),
+        },
+        { label: 'Still owed to requester', value: money(cents(Math.max(0, f.excessDue - reimbursed))) },
+      );
+    } else {
+      totals.push({ label: 'Unspent — owed back', value: money(f.refundDue) });
+      if (f.refundDue > 0) {
+        totals.push(
+          { label: 'Less: refunded', value: money(f.amountRefunded) },
+          { label: 'Still to refund', value: money(cents(Math.max(0, f.refundDue - f.amountRefunded))) },
+        );
+      }
+    }
+  }
+  totals[totals.length - 1].bold = true;
+
+  const sections: PdfSection[] = [
+    {
+      kind: 'fields',
+      columns: 3,
+      fields: [
+        { label: 'Requested by', value: input.requestedBy },
+        { label: 'Needed by', value: input.neededBy ? formatDate(input.neededBy) : '—' },
+        { label: 'Status', value: statusLabel(input.status) },
+        { label: 'Project', value: input.project },
+        { label: 'Budget line', value: input.budgetLine },
+        {
+          label: 'Released',
+          value: input.release ? `${input.release.number}, ${formatDate(input.release.paymentDate)}` : 'Not yet released',
+        },
+        { label: 'Liquidate by', value: input.liquidationDueDate ? formatDate(input.liquidationDueDate) : '—' },
+      ],
+    },
+    { kind: 'text', title: 'Purpose', body: input.purpose },
+    { kind: 'totals', rows: totals },
+  ];
+  if (input.liquidation) {
+    sections.push({
+      kind: 'fields',
+      title: 'Liquidation',
+      columns: 3,
+      fields: [
+        { label: 'Report', value: input.liquidation.number },
+        { label: 'Status', value: statusLabel(input.liquidation.status) },
+        { label: 'Total receipts', value: money(input.liquidation.total) },
+      ],
+    });
+  }
+  if (input.notes) sections.push({ kind: 'text', title: 'Notes', body: input.notes });
+  return sections;
+}
+
+/**
+ * The sign-offs of a cash advance or a budget request: whoever asked, dated
+ * when they asked; every step of the route (`routeSignatories` — a draft
+ * prints the route it would take, with the project for a PROJECT_MANAGER
+ * step); and, once the cash is out, the requester again as "Received by",
+ * dated when the release was recorded (a voucher's own date is a DATE, which
+ * has no time to print). Nothing for a receipt that has not happened.
+ */
+export async function cashRequestSignatories(input: {
+  documentType: 'cash_advance' | 'budget_request';
+  id: string;
+  status: string;
+  amount: number;
+  requester: { id: string; name: string };
+  jobId: string | null;
+  raisedAt: Date;
+  releasedOn: Date | null;
+}): Promise<Signatory[]> {
+  const people = await printPeople([input.requester.id]);
+  const who = people.get(input.requester.id);
+  const requester = { name: input.requester.name, phone: who?.phone, email: who?.email };
+  const route = await routeSignatories(input.documentType, input.id, {
+    status: input.status,
+    draft: { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId },
+  });
+  return [
+    { role: 'Requested by', ...requester, at: input.raisedAt },
+    ...route,
+    ...(input.releasedOn ? [{ role: 'Received by', ...requester, at: input.releasedOn }] : []),
+  ];
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -106,45 +415,64 @@ function presentInvoice(row: InvoiceRow) {
   };
 }
 
+/** An invoice something is owed on — the receivable, as `financePosition` reads it. */
+const INVOICE_OWED: InvoiceStatus[] = ['ISSUED', 'PARTIALLY_PAID'];
+/** A bill something is payable on — the payable, as `financePosition` reads it. */
+const BILL_OWED: BillStatus[] = ['APPROVED', 'PARTIALLY_PAID'];
+
+/**
+ * The invoice list's where-builder — the screen's rows and the printed list
+ * read the same set. A/R is `gfin.ar.view_all` throughout, so there is no
+ * own-scope to apply; `?ids=` narrows to the rows ticked.
+ */
+function invoiceListWhere(q: ListQuery): Prisma.InvoiceWhereInput {
+  const where: Prisma.InvoiceWhereInput = {};
+
+  const status = asEnum(InvoiceStatus, q.filters.status);
+  if (status) where.status = status;
+  if (q.filters.customerId) where.customerId = q.filters.customerId;
+  if (q.filters.jobId) where.jobId = q.filters.jobId;
+  if (q.filters.from || q.filters.to) {
+    where.invoiceDate = {};
+    if (q.filters.from) where.invoiceDate.gte = filterDay(q.filters.from, 'From');
+    if (q.filters.to) where.invoiceDate.lte = filterDay(q.filters.to, 'To');
+  }
+  // "Outstanding" is not a status — a partially paid invoice and an issued
+  // one are both outstanding, and a paid one never is.
+  if (q.filters.outstanding === 'true') {
+    where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
+  }
+  if (q.filters.overdue === 'true') {
+    where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
+    where.dueDate = { lt: dayKey(new Date()) };
+  }
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { poReference: { contains: q.search, mode: 'insensitive' } },
+      { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      { job: { number: { contains: q.search, mode: 'insensitive' } } },
+    ];
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
+const INVOICE_SORTS = ['number', 'invoiceDate', 'dueDate', 'createdAt'];
+
 invoiceRoutes.get(
   '/',
   require_('gfin.ar.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.InvoiceWhereInput = {};
-
-    const status = asEnum(InvoiceStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.from || q.filters.to) {
-      where.invoiceDate = {};
-      if (q.filters.from) where.invoiceDate.gte = new Date(q.filters.from);
-      if (q.filters.to) where.invoiceDate.lte = new Date(q.filters.to);
-    }
-    // "Outstanding" is not a status — a partially paid invoice and an issued
-    // one are both outstanding, and a paid one never is.
-    if (q.filters.outstanding === 'true') {
-      where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
-    }
-    if (q.filters.overdue === 'true') {
-      where.status = { in: ['ISSUED', 'PARTIALLY_PAID'] };
-      where.dueDate = { lt: dayKey(new Date()) };
-    }
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { poReference: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-        { job: { number: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = invoiceListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.invoice.findMany({
         where,
         include: invoiceInclude,
-        orderBy: orderBy(q, ['number', 'invoiceDate', 'dueDate', 'createdAt'], { invoiceDate: 'desc' }),
+        orderBy: orderBy(q, INVOICE_SORTS, { invoiceDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -152,6 +480,119 @@ invoiceRoutes.get(
     ]);
 
     res.json(listResult(rows.map(presentInvoice), total, q));
+  }),
+);
+
+
+/**
+ * The A/R register on paper — the list as filtered (or the rows ticked),
+ * through `invoiceListWhere`, so the paper is the screen. The figures are the
+ * screen's: invoiced, net collectible (the EWT the customer withholds never
+ * arrives as cash) and outstanding against what is collectible. Invoiced, net
+ * collectible and collected run over every invoice the filter matched, a
+ * cancelled one in brackets and not counted. Outstanding is the RECEIVABLE —
+ * issued and partly paid invoices only, `financePosition`'s rule — so a draft,
+ * on which nothing is owed yet, prints "—" there and a note says how many are
+ * in the other totals; the unfiltered paper's Outstanding equals the
+ * `?outstanding=true` paper's. Declared above `/:id`, or that route swallows it.
+ */
+invoiceRoutes.get(
+  '/pdf',
+  require_('gfin.ar.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = invoiceListWhere(q);
+    const countedWhere: Prisma.InvoiceWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
+    // What is owed: an issued invoice, paid in part or not at all.
+    const owedWhere: Prisma.InvoiceWhereInput = { AND: [where, { status: { in: INVOICE_OWED } }] };
+    const [rows, count, sums, owed, byStatus, currency, customer, project] = await Promise.all([
+      prisma.invoice.findMany({
+        where,
+        include: {
+          customer: { select: { name: true } },
+          job: { select: { number: true, name: true } },
+          jobOrder: { select: { number: true } },
+        },
+        orderBy: orderBy(q, INVOICE_SORTS, { invoiceDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.invoice.count({ where }),
+      prisma.invoice.aggregate({ where: countedWhere, _sum: { invoiceTotal: true, netCollectible: true, amountCollected: true } }),
+      prisma.invoice.aggregate({ where: owedWhere, _sum: { netCollectible: true, amountCollected: true } }),
+      prisma.invoice.groupBy({ by: ['status'], where, _count: { _all: true } }),
+      companyCurrency(),
+      recordNamed('customer', q.filters.customerId),
+      recordNamed('project', q.filters.jobId),
+    ]);
+
+    const f = q.filters;
+    const status = asEnum(InvoiceStatus, f.status);
+    const reference = listReference(count, rows.length, ['invoice', 'invoices'], [
+      q.search && `search "${q.search}"`,
+      f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
+      customer,
+      project,
+      rangeNamed('dated', f.from, f.to),
+      f.ids && 'the rows selected',
+    ]);
+    const today = dayKey(new Date());
+    const invoiced = num(sums._sum.invoiceTotal);
+    const collectible = num(sums._sum.netCollectible);
+    const collected = num(sums._sum.amountCollected);
+    const receivable = cents(num(owed._sum.netCollectible) - num(owed._sum.amountCollected));
+
+    // Eight columns: landscape (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Customer and project', 'Dated', 'Due', `Invoiced (${currency})`, `Collectible (${currency})`, `Outstanding (${currency})`, 'Status'],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
+        rows: rows.map((r) => {
+          const inSum = r.status !== 'CANCELLED';
+          const outstanding = cents(num(r.netCollectible) - num(r.amountCollected));
+          const late = (r.status === 'ISSUED' || r.status === 'PARTIALLY_PAID') && outstanding > 0 ? daysBetween(r.dueDate, today) : 0;
+          return [
+            r.number,
+            {
+              title: r.customer.name,
+              body: r.job ? `${r.job.number} — ${r.job.name}` : r.jobOrder ? `Job order ${r.jobOrder.number}` : 'No project',
+            },
+            formatShortDate(r.invoiceDate),
+            late > 0 ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` } : formatShortDate(r.dueDate),
+            bracketed(formatAmount(num(r.invoiceTotal)), inSum),
+            bracketed(formatAmount(num(r.netCollectible)), inSum),
+            // Nothing is owed on a draft until it is issued.
+            r.status === 'DRAFT' ? '—' : bracketed(formatAmount(outstanding), inSum),
+            statusLabel(r.status),
+          ];
+        }),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: 'Invoiced', value: formatMoney(invoiced, currency) },
+          { label: 'Net collectible', value: formatMoney(collectible, currency) },
+          { label: 'Collected', value: formatMoney(collected, currency) },
+          { label: totalLabel('Outstanding', count, rows.length), value: formatMoney(receivable, currency), bold: true },
+        ],
+      },
+    ];
+    const inStatus = (st: InvoiceStatus) => byStatus.find((g) => g.status === st)?._count._all ?? 0;
+    const drafts = inStatus('DRAFT');
+    sections.push(
+      ...listNotes([
+        bracketNote(inStatus('CANCELLED'), ['cancelled invoice', 'cancelled invoices']),
+        drafts > 0 &&
+          `${counted(drafts, ['draft invoice is', 'draft invoices are'])} counted in Invoiced and Net collectible but not in Outstanding — nothing is owed on ${drafts === 1 ? 'it' : 'them'} until ${drafts === 1 ? 'it is' : 'they are'} issued.`,
+      ]),
+    );
+
+    const pdf = await renderDocument({ title: 'Invoices', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      { entityType: 'invoice', entityId: 'list', action: 'EXPORTED', summary: `Exported the invoice list as PDF (${rows.length} invoice(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'invoices.pdf');
   }),
 );
 
@@ -194,7 +635,12 @@ invoiceRoutes.get(
  *
  * Prints the figures the invoice carries, never recomputed: gross, VAT,
  * the total, the EWT the customer will withhold and what will actually
- * arrive. "Received by" is left blank on purpose — the customer signs it.
+ * arrive — as the quotation's totals block, the line figures without the
+ * code, which the column head names.
+ *
+ * An invoice has no approval route, so it prints the people who actually
+ * acted, each dated: who prepared it, and who issued it — the trail's issue
+ * row, "Pending" while it is a draft. Never its creator as an approver.
  */
 invoiceRoutes.get(
   '/:id/pdf',
@@ -205,10 +651,11 @@ invoiceRoutes.get(
       include: {
         ...invoiceInclude,
         customer: { select: { id: true, code: true, name: true, tin: true } },
-        createdBy: { select: { name: true, position: true } },
+        createdBy: { select: { id: true, name: true } },
       },
     });
     if (!inv) throw notFound('Invoice not found');
+    const currency = await companyCurrency();
 
     const sections: PdfSection[] = [
       {
@@ -224,36 +671,68 @@ invoiceRoutes.get(
           inv.jobOrder
             ? { label: 'Job order', value: inv.jobOrder.number }
             : { label: 'Billing no.', value: inv.progressBilling ? `${inv.progressBilling.number} (#${inv.progressBilling.billingNo})` : '—' },
-          { label: 'Status', value: inv.status.replace(/_/g, ' ') },
+          { label: 'Status', value: statusLabel(inv.status) },
         ],
       },
+      // An invoice raised from a billing with no line breakdown has nothing
+      // to list: no table, rather than a head over nothing.
+      ...(inv.lines.length
+        ? [
+            {
+              kind: 'table' as const,
+              title: 'Particulars',
+              head: ['No.', 'Description', `Amount (${currency})`],
+              widths: [8, 68, 24],
+              align: ['right' as const, 'left' as const, 'right' as const],
+              rows: inv.lines.map((l, n) => [
+                String(n + 1),
+                l.detail ? `${l.description} — ${l.detail}` : l.description,
+                formatAmount(num(l.amount)),
+              ]),
+            },
+          ]
+        : []),
+      // The money block: a "Less:" row names its own sign, so the figure
+      // prints as the amount taken off; the bold row is what will arrive.
       {
-        kind: 'table',
-        title: 'Particulars',
-        head: ['#', 'Description', 'Amount'],
-        widths: [6, 70, 24],
-        align: ['right', 'left', 'right'],
-        rows: inv.lines.map((l, n) => [
-          String(n + 1),
-          l.detail ? `${l.description} — ${l.detail}` : l.description,
-          formatMoney(num(l.amount)),
-        ]),
-      },
-      {
-        kind: 'table',
-        head: ['', ''],
-        widths: [72, 28],
-        align: ['right', 'right'],
+        kind: 'totals',
         rows: [
-          ['Gross', formatMoney(num(inv.grossAmount))],
-          [`VAT (${(num(inv.vatRate) * 100).toFixed(0)}%)`, formatMoney(num(inv.vatAmount))],
-          ['INVOICE TOTAL', formatMoney(num(inv.invoiceTotal))],
-          [`Less EWT (${(num(inv.ewtRate) * 100).toFixed(0)}%)`, formatMoney(num(inv.ewtAmount))],
-          ['NET COLLECTIBLE', formatMoney(num(inv.netCollectible))],
+          { label: 'Gross', value: formatMoney(num(inv.grossAmount), currency) },
+          { label: `VAT (${ratePct(num(inv.vatRate))})`, value: formatMoney(num(inv.vatAmount), currency) },
+          { label: 'Invoice total', value: formatMoney(num(inv.invoiceTotal), currency) },
+          { label: `Less: EWT (${ratePct(num(inv.ewtRate))})`, value: formatMoney(num(inv.ewtAmount), currency) },
+          { label: 'Net collectible', value: formatMoney(num(inv.netCollectible), currency), bold: true },
         ],
       },
     ];
     if (inv.notes) sections.push({ kind: 'text', title: 'Notes', body: inv.notes });
+
+    // Who issued it is the trail's issue row (the one route that issues);
+    // an invoice issued outside the routes names nobody rather than a guess.
+    const issueRow = inv.issuedAt
+      ? await prisma.auditLog.findFirst({
+          where: { entityType: 'invoice', entityId: inv.id, action: 'SUBMITTED', OR: [{ actorId: { not: null } }, { actorName: { not: null } }] },
+          orderBy: { at: 'desc' },
+          select: { actorId: true, actorName: true, at: true },
+        })
+      : null;
+    const people = await printPeople([inv.createdBy.id, issueRow?.actorId]);
+    const preparer = people.get(inv.createdBy.id);
+    const issuer = issueRow?.actorId ? people.get(issueRow.actorId) : undefined;
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: inv.createdBy.name, phone: preparer?.phone, email: preparer?.email, at: inv.createdAt },
+    ];
+    if (!inv.issuedAt) {
+      if (inv.status === 'DRAFT') signatories.push({ role: 'Issued by' });
+    } else if (issueRow) {
+      signatories.push({
+        role: 'Issued by',
+        name: issuer?.name ?? issueRow.actorName ?? undefined,
+        phone: issuer?.phone,
+        email: issuer?.email,
+        at: inv.issuedAt,
+      });
+    }
 
     const pdf = await renderDocument({
       title: 'Sales Invoice',
@@ -261,11 +740,7 @@ invoiceRoutes.get(
       date: inv.invoiceDate,
       reference: inv.customer.name,
       sections,
-      signatories: [
-        { role: 'Prepared by', name: inv.createdBy.name, position: inv.createdBy.position ?? undefined, at: inv.createdAt },
-        { role: 'Approved by', ...(inv.issuedAt ? { name: inv.createdBy.name, position: inv.createdBy.position ?? undefined, at: inv.issuedAt } : {}) },
-        { role: 'Received by' },
-      ],
+      signatories,
     });
 
     await audit(
@@ -852,35 +1327,49 @@ function presentBill(row: BillRow) {
   };
 }
 
+/**
+ * The supplier bill list's where-builder — the screen's rows and the printed
+ * list read the same set (`gfin.ap.view_all` throughout; `?ids=` narrows to
+ * the rows ticked).
+ */
+function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
+  const where: Prisma.SupplierBillWhereInput = {};
+
+  const status = asEnum(BillStatus, q.filters.status);
+  if (status) where.status = status;
+  if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
+  if (q.filters.jobId) where.jobId = q.filters.jobId;
+  if (q.filters.outstanding === 'true') where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
+  if (q.filters.overdue === 'true') {
+    where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
+    where.dueDate = { lt: dayKey(new Date()) };
+  }
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { supplierInvoiceNo: { contains: q.search, mode: 'insensitive' } },
+      { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
+    ];
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
+const BILL_SORTS = ['number', 'billDate', 'dueDate', 'createdAt'];
+
 billRoutes.get(
   '/',
   require_('gfin.ap.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.SupplierBillWhereInput = {};
-
-    const status = asEnum(BillStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.outstanding === 'true') where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
-    if (q.filters.overdue === 'true') {
-      where.status = { in: ['APPROVED', 'PARTIALLY_PAID'] };
-      where.dueDate = { lt: dayKey(new Date()) };
-    }
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { supplierInvoiceNo: { contains: q.search, mode: 'insensitive' } },
-        { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = billListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.supplierBill.findMany({
         where,
         include: billInclude,
-        orderBy: orderBy(q, ['number', 'billDate', 'dueDate', 'createdAt'], { billDate: 'desc' }),
+        orderBy: orderBy(q, BILL_SORTS, { billDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -888,6 +1377,126 @@ billRoutes.get(
     ]);
 
     res.json(listResult(rows.map(presentBill), total, q));
+  }),
+);
+
+/**
+ * The A/P register on paper — the list as filtered (or the rows ticked),
+ * through `billListWhere`. Billed, net payable (less what we withhold) and
+ * outstanding, as the screen shows them. Billed, net payable and paid run over
+ * every bill the filter matched, a cancelled one in brackets and not counted.
+ * Outstanding is the PAYABLE — approved and partly paid bills only,
+ * `financePosition`'s rule — so a bill not approved yet prints "—" there and a
+ * note says how many are in the other totals; the unfiltered paper's
+ * Outstanding equals the `?outstanding=true` paper's. Above `/:id`.
+ */
+billRoutes.get(
+  '/pdf',
+  require_('gfin.ap.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = billListWhere(q);
+    const countedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
+    // What is payable: an approved bill, paid in part or not at all.
+    const owedWhere: Prisma.SupplierBillWhereInput = { AND: [where, { status: { in: BILL_OWED } }] };
+    const [rows, count, sums, owed, byStatus, currency, supplier, project] = await Promise.all([
+      prisma.supplierBill.findMany({
+        where,
+        include: {
+          supplier: { select: { name: true } },
+          job: { select: { number: true, name: true } },
+          receiving: { select: { number: true } },
+        },
+        orderBy: orderBy(q, BILL_SORTS, { billDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.supplierBill.count({ where }),
+      prisma.supplierBill.aggregate({ where: countedWhere, _sum: { total: true, netPayable: true, amountPaid: true } }),
+      prisma.supplierBill.aggregate({ where: owedWhere, _sum: { netPayable: true, amountPaid: true } }),
+      prisma.supplierBill.groupBy({ by: ['status'], where, _count: { _all: true } }),
+      companyCurrency(),
+      recordNamed('supplier', q.filters.supplierId),
+      recordNamed('project', q.filters.jobId),
+    ]);
+
+    const f = q.filters;
+    const status = asEnum(BillStatus, f.status);
+    const reference = listReference(count, rows.length, ['supplier bill', 'supplier bills'], [
+      q.search && `search "${q.search}"`,
+      f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
+      supplier,
+      project,
+      f.ids && 'the rows selected',
+    ]);
+    const today = dayKey(new Date());
+    const billed = num(sums._sum.total);
+    const payable = num(sums._sum.netPayable);
+    const paid = num(sums._sum.amountPaid);
+    const owing = cents(num(owed._sum.netPayable) - num(owed._sum.amountPaid));
+
+    // Eight columns: landscape (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Supplier and project', 'Dated', 'Due', `Billed (${currency})`, `Payable (${currency})`, `Outstanding (${currency})`, 'Status'],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
+        rows: rows.map((r) => {
+          const inSum = r.status !== 'CANCELLED';
+          const outstanding = cents(num(r.netPayable) - num(r.amountPaid));
+          const late = (r.status === 'APPROVED' || r.status === 'PARTIALLY_PAID') && outstanding > 0 ? daysBetween(r.dueDate, today) : 0;
+          return [
+            r.number,
+            {
+              title: r.supplier.name,
+              body: [
+                r.supplierInvoiceNo && `Their invoice ${r.supplierInvoiceNo}`,
+                r.job ? `${r.job.number} — ${r.job.name}` : 'No project',
+                r.receiving?.number,
+              ]
+                .filter(Boolean)
+                .join(' · '),
+            },
+            formatShortDate(r.billDate),
+            late > 0 ? { title: formatShortDate(r.dueDate), body: `${late} day${late === 1 ? '' : 's'} late` } : formatShortDate(r.dueDate),
+            bracketed(formatAmount(num(r.total)), inSum),
+            bracketed(formatAmount(num(r.netPayable)), inSum),
+            // Nothing is payable on a bill until it is approved.
+            r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL' ? '—' : bracketed(formatAmount(outstanding), inSum),
+            statusLabel(r.status),
+          ];
+        }),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: 'Billed', value: formatMoney(billed, currency) },
+          { label: 'Net payable', value: formatMoney(payable, currency) },
+          { label: 'Paid', value: formatMoney(paid, currency) },
+          { label: totalLabel('Outstanding', count, rows.length), value: formatMoney(owing, currency), bold: true },
+        ],
+      },
+    ];
+    const inStatus = (st: BillStatus) => byStatus.find((g) => g.status === st)?._count._all ?? 0;
+    const unapproved = inStatus('DRAFT') + inStatus('PENDING_APPROVAL');
+    sections.push(
+      ...listNotes([
+        bracketNote(inStatus('CANCELLED'), ['cancelled bill', 'cancelled bills']),
+        unapproved > 0 &&
+          `${counted(unapproved, ['bill not approved yet is', 'bills not approved yet are'])} counted in Billed and Net payable but not in Outstanding — nothing is payable on ${unapproved === 1 ? 'it' : 'them'} until ${unapproved === 1 ? 'it is' : 'they are'} approved.`,
+      ]),
+    );
+
+    const pdf = await renderDocument({ title: 'Supplier Bills', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      {
+        entityType: 'supplier_bill',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the supplier bill list as PDF (${rows.length} bill(s))`,
+      },
+      req,
+    );
+    sendListPdf(res, pdf, 'supplier-bills.pdf');
   }),
 );
 
@@ -1482,12 +2091,14 @@ export const claimInclude = {
   claimedBy: { select: { id: true, name: true, email: true } },
   job: { select: { id: true, number: true, name: true } },
   costCategory: { select: { id: true, name: true } },
+  // `amountRefunded`: unspent cash already handed back — the liquidation
+  // report's paper takes it off what it says is owed back.
   advance: {
-    select: { id: true, number: true, amountReleased: true, status: true, jobId: true, costCategoryId: true },
+    select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true },
   },
   // Project cash liquidated the same way — a claim names one or the other.
   budgetRequest: {
-    select: { id: true, number: true, amountReleased: true, status: true, jobId: true, costCategoryId: true },
+    select: { id: true, number: true, amountReleased: true, amountRefunded: true, status: true, jobId: true, costCategoryId: true },
   },
   lines: { orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.ExpenseClaimInclude;
@@ -1516,8 +2127,12 @@ export function presentClaim(row: ClaimRow) {
     outstanding: cents(payable - paid),
     refundDue: liquidates ? cents(Math.max(0, released - total)) : 0,
     kind: liquidates ? ('liquidation' as const) : ('reimbursement' as const),
-    advance: row.advance ? { ...row.advance, amountReleased: num(row.advance.amountReleased) } : null,
-    budgetRequest: row.budgetRequest ? { ...row.budgetRequest, amountReleased: num(row.budgetRequest.amountReleased) } : null,
+    advance: row.advance
+      ? { ...row.advance, amountReleased: num(row.advance.amountReleased), amountRefunded: num(row.advance.amountRefunded) }
+      : null,
+    budgetRequest: row.budgetRequest
+      ? { ...row.budgetRequest, amountReleased: num(row.budgetRequest.amountReleased), amountRefunded: num(row.budgetRequest.amountRefunded) }
+      : null,
     lines: row.lines.map((l) => ({ ...l, amount: num(l.amount) })),
   };
 }
@@ -1551,51 +2166,67 @@ expenseRoutes.get(
   }),
 );
 
+/**
+ * The expense claim list's where-builder — the screen's rows and the printed
+ * list read the same set. A `view_own` holder reads only their own claims
+ * whatever the URL says (`mine`), and `?ids=` is ANDed with that, so a
+ * ticked id never prints somebody else's claim.
+ */
+function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
+  const where: Prisma.ExpenseClaimWhereInput = {};
+
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all');
+  const mine = onlyOwn || q.scope === 'mine';
+  if (mine) where.claimedById = me.id;
+
+  const status = asEnum(ExpenseStatus, q.filters.status);
+  if (status) where.status = status;
+  if (q.filters.jobId) where.jobId = q.filters.jobId;
+  if (q.filters.advanceId) where.advanceId = q.filters.advanceId;
+  if (q.filters.budgetRequestId) where.budgetRequestId = q.filters.budgetRequestId;
+  // A liquidation is a claim that names an advance or a budget request; a
+  // reimbursement is one that names neither. Same table, a column apart.
+  if (q.filters.kind === 'liquidation') where.OR = [{ advanceId: { not: null } }, { budgetRequestId: { not: null } }];
+  if (q.filters.kind === 'reimbursement') {
+    where.advanceId = null;
+    where.budgetRequestId = null;
+  }
+  if (q.search) {
+    const terms: Prisma.ExpenseClaimWhereInput[] = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { purpose: { contains: q.search, mode: 'insensitive' } },
+      { claimedBy: { name: { contains: q.search, mode: 'insensitive' } } },
+      { advance: { number: { contains: q.search, mode: 'insensitive' } } },
+      { budgetRequest: { number: { contains: q.search, mode: 'insensitive' } } },
+    ];
+    // The kind filter already uses OR: the two conditions AND together.
+    if (where.OR) {
+      where.AND = [{ OR: where.OR }, { OR: terms }];
+      delete where.OR;
+    } else {
+      where.OR = terms;
+    }
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  return { where, mine };
+}
+
+const CLAIM_SORTS = ['number', 'claimDate', 'createdAt'];
+
 expenseRoutes.get(
   '/',
   requireAny('gfin.expenses.view_all', 'gfin.expenses.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.ExpenseClaimWhereInput = {};
-
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all');
-    if (onlyOwn || q.scope === 'mine') where.claimedById = me.id;
-
-    const status = asEnum(ExpenseStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.advanceId) where.advanceId = q.filters.advanceId;
-    if (q.filters.budgetRequestId) where.budgetRequestId = q.filters.budgetRequestId;
-    // A liquidation is a claim that names an advance or a budget request; a
-    // reimbursement is one that names neither. Same table, a column apart.
-    if (q.filters.kind === 'liquidation') where.OR = [{ advanceId: { not: null } }, { budgetRequestId: { not: null } }];
-    if (q.filters.kind === 'reimbursement') {
-      where.advanceId = null;
-      where.budgetRequestId = null;
-    }
-    if (q.search) {
-      const terms: Prisma.ExpenseClaimWhereInput[] = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { purpose: { contains: q.search, mode: 'insensitive' } },
-        { claimedBy: { name: { contains: q.search, mode: 'insensitive' } } },
-        { advance: { number: { contains: q.search, mode: 'insensitive' } } },
-        { budgetRequest: { number: { contains: q.search, mode: 'insensitive' } } },
-      ];
-      // The kind filter already uses OR: the two conditions AND together.
-      if (where.OR) {
-        where.AND = [{ OR: where.OR }, { OR: terms }];
-        delete where.OR;
-      } else {
-        where.OR = terms;
-      }
-    }
+    const { where } = claimListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.expenseClaim.findMany({
         where,
         include: claimInclude,
-        orderBy: orderBy(q, ['number', 'claimDate', 'createdAt'], { claimDate: 'desc' }),
+        orderBy: orderBy(q, CLAIM_SORTS, { claimDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -1603,6 +2234,115 @@ expenseRoutes.get(
     ]);
 
     res.json(listResult(rows.map(presentClaim), total, q));
+  }),
+);
+
+/** A claim that will never be paid — listed, never summed. */
+const CLAIM_CLOSED: ExpenseStatus[] = ['REJECTED', 'CANCELLED'];
+
+/**
+ * The expense claims on paper — the list as filtered (or the rows ticked),
+ * through `claimListWhere`, so a `view_own` holder prints only their own.
+ * Spent is each claim's receipts; "Owed back" is what an APPROVED claim still
+ * owes its claimant (the screen's column — the excess over an advance for a
+ * liquidation), so its total is the set's share of what the finance position
+ * calls reimbursable. A rejected or cancelled claim prints in brackets.
+ * Above `/:id`.
+ */
+expenseRoutes.get(
+  '/pdf',
+  requireAny('gfin.expenses.view_all', 'gfin.expenses.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const { where, mine } = claimListWhere(me, q);
+    const [rows, count, spent, approved, closed, currency, project, advance, budgetRequest] = await Promise.all([
+      prisma.expenseClaim.findMany({
+        where,
+        include: {
+          claimedBy: { select: { name: true } },
+          job: { select: { number: true } },
+          costCategory: { select: { name: true } },
+          ...LIQUIDATION_SOURCES,
+        },
+        orderBy: orderBy(q, CLAIM_SORTS, { claimDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.expenseClaim.count({ where }),
+      prisma.expenseClaim.aggregate({ where: { AND: [where, { status: { notIn: CLAIM_CLOSED } }] }, _sum: { total: true } }),
+      // What is still owed back over EVERY approved claim the filter matched,
+      // not only those printed — each claim's own payable (`claimPayable`).
+      prisma.expenseClaim.findMany({
+        where: { AND: [where, { status: 'APPROVED' }] },
+        select: { total: true, amountPaid: true, ...LIQUIDATION_SOURCES },
+      }),
+      prisma.expenseClaim.count({ where: { AND: [where, { status: { in: CLAIM_CLOSED } }] } }),
+      companyCurrency(),
+      recordNamed('project', q.filters.jobId),
+      recordNamed('advance', q.filters.advanceId),
+      recordNamed('budget request', q.filters.budgetRequestId),
+    ]);
+
+    const f = q.filters;
+    const status = asEnum(ExpenseStatus, f.status);
+    const reference = listReference(count, rows.length, ['expense claim', 'expense claims'], [
+      q.search && `search "${q.search}"`,
+      status && `status ${statusLabel(status)}`,
+      f.kind === 'liquidation' ? 'liquidations' : f.kind === 'reimbursement' ? 'reimbursements' : null,
+      project,
+      advance,
+      budgetRequest,
+      mine && 'claimed by me',
+      f.ids && 'the rows selected',
+    ]);
+    // The screen's "Owed back": what an APPROVED claim still owes its claimant.
+    const owedOn = (r: Parameters<typeof claimPayable>[0] & { amountPaid: Prisma.Decimal }) =>
+      Math.max(0, cents(claimPayable(r) - num(r.amountPaid)));
+    const stillOwed = cents(approved.reduce((s, r) => s + owedOn(r), 0));
+
+    // Eight columns: landscape (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Claimed by and purpose', 'Kind', 'Dated', 'Charged to', `Spent (${currency})`, `Owed back (${currency})`, 'Status'],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left'],
+        rows: rows.map((r) => {
+          const inSum = !CLAIM_CLOSED.includes(r.status);
+          const source = r.advance ?? r.budgetRequest;
+          const owed = r.status === 'APPROVED' ? owedOn(r) : 0;
+          return [
+            r.number,
+            { title: r.claimedBy.name, body: r.purpose },
+            source ? { title: 'Liquidation', body: source.number } : 'Reimbursement',
+            formatShortDate(r.claimDate),
+            r.job ? { title: r.job.number, body: r.costCategory?.name ?? undefined } : 'Overheads',
+            bracketed(formatAmount(num(r.total)), inSum),
+            owed > 0 ? formatAmount(owed) : '',
+            statusLabel(r.status),
+          ];
+        }),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: 'Still owed to claimants', value: formatMoney(stillOwed, currency) },
+          { label: totalLabel('Spent', count, rows.length), value: formatMoney(num(spent._sum.total), currency), bold: true },
+        ],
+      },
+    ];
+    sections.push(...listNotes([bracketNote(closed, ['rejected or cancelled claim', 'rejected or cancelled claims'])]));
+
+    const pdf = await renderDocument({ title: 'Expense Claims', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      {
+        entityType: 'expense_claim',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the expense claim list as PDF (${rows.length} claim(s))`,
+      },
+      req,
+    );
+    sendListPdf(res, pdf, 'expense-claims.pdf');
   }),
 );
 
@@ -1973,7 +2713,7 @@ expenseRoutes.post(
     const me = currentUser(req);
     const claim = await prisma.expenseClaim.findUnique({
       where: { id: req.params.id },
-      include: { lines: true },
+      include: { lines: true, claimedBy: { select: { name: true } } },
     });
     if (!claim) throw notFound('Expense claim not found');
     if (claim.claimedById !== me.id && !me.isSuperAdmin) throw forbidden('That is someone else’s claim');
@@ -2006,7 +2746,8 @@ expenseRoutes.post(
         documentType: 'expense',
         documentId: claim.id,
         documentNumber: claim.number,
-        subject: `${me.name} — ${claim.purpose}`,
+        // Named for the claimant, whoever pressed the button.
+        subject: `${claim.claimedBy.name} — ${claim.purpose}`,
         amount: num(claim.total),
         link: `/g-fin/expenses/${claim.id}`,
         // The claimant, even when a super admin presses the button for them:
@@ -2234,8 +2975,12 @@ expenseRoutes.post(
 
 /**
  * The printed claim. A liquidation prints as a "Liquidation Report" — same
- * document, same number series; only the title and the settlement block
- * differ, because that is all that differs on paper.
+ * document, same number series; only the title and the settlement rows
+ * differ, because that is all that differs on paper. The receipts add up in
+ * the totals block (never a TOTAL row in the table), which says what is owed
+ * either way only once the claim is approved; and the sign-offs are the
+ * claimant, then the route as `routeSignatories` reads it for the claim's
+ * status (rule 6).
  */
 expenseRoutes.get(
   '/:id/pdf',
@@ -2244,7 +2989,7 @@ expenseRoutes.get(
     const me = currentUser(req);
     const claim = await prisma.expenseClaim.findUnique({
       where: { id: req.params.id },
-      include: { ...claimInclude, claimedBy: { select: { id: true, name: true, email: true, position: true } } },
+      include: claimInclude,
     });
     if (!claim) throw notFound('Expense claim not found');
     if (claim.claimedById !== me.id && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.view_all')) {
@@ -2252,59 +2997,95 @@ expenseRoutes.get(
     }
 
     const view = presentClaim(claim);
+    const currency = await companyCurrency();
+    const money = (n: number) => formatMoney(n, currency);
+    const liquidated = claim.advance ?? claim.budgetRequest;
+    // What the receipts add up to, then — only once the claim is approved —
+    // where that leaves the claimant; the last row, in bold, is where it
+    // stands NOW. Before approval (and on a rejected or cancelled claim)
+    // nothing is owed either way, so the paper states the arithmetic and
+    // claims no position: a plain claim its total, a liquidation the
+    // difference from the cash released.
+    const approved = view.status === 'APPROVED' || view.status === 'REIMBURSED' || view.status === 'SETTLED';
+    const totals: PdfTotal[] = [];
+    if (view.kind === 'liquidation') {
+      totals.push(
+        { label: 'Total', value: money(view.total) },
+        { label: claim.advance ? 'Advance released' : 'Cash released', value: money(liquidatedReleased(claim)) },
+      );
+      if (view.payable > 0) {
+        // Spent beyond the cash: owed to the claimant on THIS document once
+        // approved, less what has been reimbursed on it.
+        totals.push({ label: 'Excess spent', value: money(view.payable) });
+        if (approved) {
+          totals.push(
+            { label: 'Less: reimbursed', value: money(view.amountPaid) },
+            { label: 'Still owed', value: money(Math.max(0, view.outstanding)) },
+          );
+        }
+      } else if (!approved) {
+        totals.push({ label: 'Unspent', value: money(view.refundDue) });
+      } else {
+        // Unspent cash comes back against the advance or the request, which
+        // carries what has been refunded so far.
+        totals.push({ label: 'Unspent — owed back', value: money(view.refundDue) });
+        if (view.refundDue > 0) {
+          const refunded = liquidated ? num(liquidated.amountRefunded) : 0;
+          totals.push(
+            { label: 'Less: refunded', value: money(refunded) },
+            { label: 'Still to refund', value: money(cents(Math.max(0, view.refundDue - refunded))) },
+          );
+        }
+      }
+    } else if (approved) {
+      totals.push(
+        { label: 'Total', value: money(view.total) },
+        { label: 'Reimbursed', value: money(view.amountPaid) },
+        { label: 'Still owed', value: money(Math.max(0, view.outstanding)) },
+      );
+    } else {
+      totals.push({ label: 'Claimed', value: money(view.total) });
+    }
+    totals[totals.length - 1].bold = true;
     const sections: PdfSection[] = [
       {
         kind: 'fields',
         columns: 3,
         fields: [
           { label: 'Claimed by', value: claim.claimedBy.name },
-          { label: 'Date', value: formatDate(claim.claimDate) },
           { label: 'Purpose', value: claim.purpose },
           { label: 'Project', value: claim.job ? `${claim.job.number} — ${claim.job.name}` : 'Overheads' },
           { label: 'Budget line', value: claim.costCategory?.name ?? '—' },
           ...(claim.advance ? [{ label: 'Liquidates', value: claim.advance.number }] : []),
           ...(claim.budgetRequest ? [{ label: 'Liquidates', value: `Budget request ${claim.budgetRequest.number}` }] : []),
-          { label: 'Status', value: claim.status.replace(/_/g, ' ') },
+          { label: 'Status', value: statusLabel(claim.status) },
         ],
       },
       {
         kind: 'table',
         title: 'Receipts',
-        head: ['#', 'Date', 'Description', 'Receipt no.', 'Amount'],
-        widths: [6, 14, 44, 18, 18],
+        head: ['No.', 'Date', 'Description', 'Receipt no.', `Amount (${currency})`],
+        widths: [7, 14, 43, 18, 18],
         align: ['right', 'left', 'left', 'left', 'right'],
-        rows: [
-          ...claim.lines.map((l, n) => [
-            String(n + 1),
-            formatDate(l.spentOn),
-            l.category ? `${l.description} (${l.category})` : l.description,
-            l.receiptNo ?? '—',
-            formatMoney(num(l.amount)),
-          ]),
-          ['', '', '', 'TOTAL', formatMoney(view.total)],
-        ],
+        rows: claim.lines.map((l, n) => [
+          String(n + 1),
+          formatShortDate(l.spentOn),
+          l.category ? `${l.description} (${l.category})` : l.description,
+          l.receiptNo ?? '—',
+          formatAmount(num(l.amount)),
+        ]),
       },
-      {
-        kind: 'fields',
-        title: 'Settlement',
-        columns: 3,
-        fields: view.kind === 'liquidation'
-          ? [
-              { label: claim.advance ? 'Advance released' : 'Cash released', value: formatMoney(liquidatedReleased(claim)) },
-              { label: 'Spent', value: formatMoney(view.total) },
-              { label: view.payable > 0 ? 'Excess owed to claimant' : 'Unspent — owed back', value: formatMoney(view.payable > 0 ? view.payable : view.refundDue) },
-            ]
-          : [
-              { label: 'Claimed', value: formatMoney(view.total) },
-              { label: 'Reimbursed', value: formatMoney(view.amountPaid) },
-              { label: 'Still owed', value: formatMoney(view.outstanding) },
-            ],
-      },
+      { kind: 'totals', rows: totals },
     ];
     if (claim.notes) sections.push({ kind: 'text', title: 'Notes', body: claim.notes });
 
-    const signoffs = await approvalSignoffs('expense', claim.id);
-    const liquidated = claim.advance ?? claim.budgetRequest;
+    const people = await printPeople([claim.claimedById]);
+    const claimant = people.get(claim.claimedById);
+    const route = await routeSignatories('expense', claim.id, {
+      status: claim.status,
+      // Submitted in the claimant's name, as the submit route does.
+      draft: { amount: view.total, requesterId: claim.claimedById },
+    });
     const pdf = await renderDocument({
       title: liquidated ? 'Liquidation Report' : 'Expense Claim',
       documentNumber: claim.number,
@@ -2312,9 +3093,8 @@ expenseRoutes.get(
       reference: liquidated ? `Liquidation of ${liquidated.number}` : claim.purpose,
       sections,
       signatories: [
-        { role: 'Prepared by', name: claim.claimedBy.name, position: claim.claimedBy.position ?? undefined, at: claim.createdAt },
-        { role: 'Checked by', ...signoffs[0] },
-        { role: 'Approved by', ...signoffs[1] },
+        { role: 'Prepared by', name: claim.claimedBy.name, phone: claimant?.phone, email: claimant?.email, at: claim.createdAt },
+        ...route,
       ],
     });
 
@@ -2386,40 +3166,53 @@ function allocationKind(a: {
   return paymentKind === 'RECEIPT' ? 'advance_refund' : 'advance';
 }
 
+/**
+ * The payment register's where-builder — the screen's rows and the printed
+ * list read the same set (`?ids=` narrows to the rows ticked).
+ */
+function paymentListWhere(q: ListQuery): Prisma.PaymentWhereInput {
+  const where: Prisma.PaymentWhereInput = {};
+
+  const kind = asEnum(PaymentKind, q.filters.kind);
+  if (kind) where.kind = kind;
+  if (q.filters.customerId) where.customerId = q.filters.customerId;
+  if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
+  if (q.filters.payeeUserId) where.payeeUserId = q.filters.payeeUserId;
+  if (q.filters.from || q.filters.to) {
+    where.paymentDate = {};
+    if (q.filters.from) where.paymentDate.gte = filterDay(q.filters.from, 'From');
+    if (q.filters.to) where.paymentDate.lte = filterDay(q.filters.to, 'To');
+  }
+  if (q.filters.uncleared === 'true') where.clearedAt = null;
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { reference: { contains: q.search, mode: 'insensitive' } },
+      { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
+      // A person is a party too: reimbursements, releases and refunds.
+      { payeeUser: { name: { contains: q.search, mode: 'insensitive' } } },
+    ];
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
+const PAYMENT_SORTS = ['number', 'paymentDate', 'amount', 'createdAt'];
+
 paymentRoutes.get(
   '/',
   requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.PaymentWhereInput = {};
-
-    const kind = asEnum(PaymentKind, q.filters.kind);
-    if (kind) where.kind = kind;
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
-    if (q.filters.payeeUserId) where.payeeUserId = q.filters.payeeUserId;
-    if (q.filters.from || q.filters.to) {
-      where.paymentDate = {};
-      if (q.filters.from) where.paymentDate.gte = new Date(q.filters.from);
-      if (q.filters.to) where.paymentDate.lte = new Date(q.filters.to);
-    }
-    if (q.filters.uncleared === 'true') where.clearedAt = null;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { reference: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-        { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
-        // A person is a party too: reimbursements, releases and refunds.
-        { payeeUser: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = paymentListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.payment.findMany({
         where,
         include: paymentInclude,
-        orderBy: orderBy(q, ['number', 'paymentDate', 'amount', 'createdAt'], { paymentDate: 'desc' }),
+        orderBy: orderBy(q, PAYMENT_SORTS, { paymentDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -2427,6 +3220,124 @@ paymentRoutes.get(
     ]);
 
     res.json(listResult(rows.map(presentPayment), total, q));
+  }),
+);
+
+/**
+ * The payment register on paper — the list as filtered (or the rows ticked),
+ * through `paymentListWhere`: every movement of money, which way it went and
+ * what it settled. The totals are money in, money out and the difference,
+ * over every payment the filter matched; an uncleared cheque is counted as
+ * recorded, and a note says how many are still uncleared — cash only once
+ * the bank says so. Above `/:id`.
+ */
+paymentRoutes.get(
+  '/pdf',
+  requireAny('gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = paymentListWhere(q);
+    const [rows, count, byKind, uncleared, currency, customer, supplier, payee] = await Promise.all([
+      prisma.payment.findMany({
+        where,
+        include: {
+          customer: { select: { name: true } },
+          supplier: { select: { name: true } },
+          payeeUser: { select: { name: true } },
+          allocations: {
+            select: {
+              invoice: { select: { number: true } },
+              bill: { select: { number: true } },
+              claim: { select: { number: true } },
+              advance: { select: { number: true } },
+              budgetRequest: { select: { number: true } },
+            },
+          },
+        },
+        orderBy: orderBy(q, PAYMENT_SORTS, { paymentDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.payment.count({ where }),
+      prisma.payment.groupBy({ by: ['kind'], where, _sum: { amount: true } }),
+      prisma.payment.count({ where: { AND: [where, { clearedAt: null }] } }),
+      companyCurrency(),
+      recordNamed('customer', q.filters.customerId),
+      recordNamed('supplier', q.filters.supplierId),
+      recordNamed('person', q.filters.payeeUserId, 'with'),
+    ]);
+
+    const f = q.filters;
+    const kind = asEnum(PaymentKind, f.kind);
+    const reference = listReference(count, rows.length, ['payment', 'payments'], [
+      q.search && `search "${q.search}"`,
+      kind && (kind === 'RECEIPT' ? 'money in' : 'money out'),
+      customer,
+      supplier,
+      payee,
+      rangeNamed('dated', f.from, f.to),
+      f.uncleared === 'true' && 'uncleared only',
+      f.ids && 'the rows selected',
+    ]);
+    const sumOf = (k: PaymentKind) => num(byKind.find((g) => g.kind === k)?._sum.amount);
+    const moneyIn = sumOf('RECEIPT');
+    const moneyOut = sumOf('DISBURSEMENT');
+    // One direction (filtered to it, or all there is): its own total. Otherwise each, then the difference.
+    const kinds = new Set(byKind.map((g) => g.kind));
+    const only: PaymentKind | null = kind ?? (kinds.size === 1 ? [...kinds][0] : null);
+    const settles = (r: (typeof rows)[number]) =>
+      r.allocations
+        .map((a) => a.invoice?.number ?? a.bill?.number ?? a.claim?.number ?? a.advance?.number ?? a.budgetRequest?.number)
+        .filter(Boolean)
+        .join('\n');
+
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Date', 'Who', 'Direction', 'Settles', `Amount (${currency})`, 'Cleared'],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'left'],
+        rows: rows.map((r) => [
+          r.number,
+          formatShortDate(r.paymentDate),
+          {
+            title: r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—',
+            body: [statusLabel(r.method), r.reference].filter(Boolean).join(' · '),
+          },
+          r.kind === 'RECEIPT' ? 'Money in' : 'Money out',
+          settles(r),
+          formatAmount(num(r.amount)),
+          r.clearedAt ? formatShortDate(r.clearedAt) : 'Uncleared',
+        ]),
+      },
+      {
+        kind: 'totals',
+        rows: only
+          ? [
+              {
+                label: totalLabel(only === 'DISBURSEMENT' ? 'Money out' : 'Money in', count, rows.length),
+                value: formatMoney(only === 'DISBURSEMENT' ? moneyOut : moneyIn, currency),
+                bold: true,
+              },
+            ]
+          : [
+              { label: 'Money in', value: formatMoney(moneyIn, currency) },
+              { label: 'Money out', value: formatMoney(moneyOut, currency) },
+              { label: totalLabel('Net, in less out', count, rows.length), value: formatMoney(cents(moneyIn - moneyOut), currency), bold: true },
+            ],
+      },
+    ];
+    sections.push(
+      ...listNotes([
+        uncleared > 0 &&
+          `${counted(uncleared, ['payment is', 'payments are'])} not cleared yet — recorded, and counted above, but not cash until the bank says so.`,
+      ]),
+    );
+
+    const pdf = await renderDocument({ title: 'Payments', date: new Date(), reference, sections });
+    await audit(
+      { entityType: 'payment', entityId: 'list', action: 'EXPORTED', summary: `Exported the payment list as PDF (${rows.length} payment(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'payments.pdf');
   }),
 );
 

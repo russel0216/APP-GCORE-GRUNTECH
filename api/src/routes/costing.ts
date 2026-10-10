@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { JobType, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -11,6 +11,7 @@ import {
   notFound,
   badRequest,
   forbidden,
+  idsFilter,
   type ListQuery,
 } from '../http/kit';
 import { manilaDayStart, manilaMonthKey } from '../shared/day';
@@ -19,9 +20,31 @@ import { can, canEditRecord, resolveUser } from '../permissions/resolve';
 import { notify } from '../shared/notifications';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
-import { approvalSlots, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
+import {
+  approvalSlots,
+  contactPhone,
+  onApprovalSettled,
+  pickWorkflow,
+  slotSignatories,
+  submitForApproval,
+  type ApprovalSlot,
+} from '../shared/approvals';
 import { costingFigures, lineAmount, lineCodes, marginOfMarkup, planTasks, vatOn } from '../shared/costingMath';
-import { renderDocument, formatMoney, formatAmount, type PdfGanttGroup, type PdfRow, type PdfSection, type Signatory } from '../shared/pdf';
+import {
+  companyCurrency,
+  formatAmount,
+  formatDate,
+  formatMoney,
+  formatShortDate,
+  renderDocument,
+  statusLabel,
+  type PdfGanttGroup,
+  type PdfRow,
+  type PdfSection,
+  type Signatory,
+} from '../shared/pdf';
+import { approvalStands, draftRouteSlots } from './sales';
+import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel } from './finance';
 
 /**
  * Costing (model §5.3).
@@ -222,10 +245,17 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
   // it is a costing whose job happens to be a contract (model §4.5) — so it
   // would be a mistake to give it a second table to drift out of step with.
   if (q.filters.jobType) {
-    where.jobs = { some: { type: q.filters.jobType as Prisma.EnumJobTypeFilter['equals'] } };
+    if (!(Object.values(JobType) as string[]).includes(q.filters.jobType)) throw badRequest(`Unknown project type: ${q.filters.jobType}`);
+    where.jobs = { some: { type: q.filters.jobType as JobType } };
   }
+  // The rows a person ticked (Print selected); the rules above still apply,
+  // so an id never prints a costing the caller could not see in the list.
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
   return where;
 }
+
+const COSTING_SORTS = ['number', 'title', 'contractValue', 'createdAt'];
 
 costingRoutes.get(
   '/',
@@ -243,7 +273,7 @@ costingRoutes.get(
           owner: { select: { id: true, name: true } },
           _count: { select: { lines: true, scopeSections: true } },
         },
-        orderBy: orderBy(q, ['number', 'title', 'contractValue', 'createdAt'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, COSTING_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -284,6 +314,114 @@ costingRoutes.get(
       count({ finalised: 'this-month' }),
     ]);
     res.json({ draft, pending, finalThisMonth });
+  }),
+);
+
+/**
+ * The costing list on paper (rule 6, A5) — the list as filtered, through
+ * `costingListWhere`, the list's own query (or, with `?ids=`, the rows
+ * ticked, still under it), so the paper never shows a different set from
+ * the screen it was printed off; a `view_own` estimator prints their own.
+ * The figures the screen shows — contract value, budgeted cost, margin —
+ * and nothing it hides. At most LIST_CAP rows, the money block over every
+ * costing the filter matched. Audited; declared above `/:id`, or that
+ * route swallows it.
+ */
+costingRoutes.get(
+  '/pdf',
+  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = costingListWhere(me, q);
+    const f = q.filters;
+    const [rows, sums, currency, customer] = await Promise.all([
+      prisma.costing.findMany({
+        where,
+        select: {
+          number: true,
+          title: true,
+          systemUnit: true,
+          status: true,
+          totalCost: true,
+          contractValue: true,
+          createdAt: true,
+          customer: { select: { name: true } },
+          owner: { select: { name: true } },
+        },
+        orderBy: orderBy(q, COSTING_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.costing.aggregate({ where, _count: { _all: true }, _sum: { totalCost: true, contractValue: true } }),
+      companyCurrency(),
+      recordNamed('customer', f.customerId),
+    ]);
+    const count = sums._count._all;
+
+    // "12 costings", or "first 1,000 of 1,234 costings printed" when the cap
+    // bit — then every filter `costingListWhere` applied, by name.
+    const reference = listReference(count, rows.length, ['costing', 'costings'], [
+      q.search ? `search "${q.search}"` : null,
+      f.finalised === 'this-month'
+        ? 'final this month'
+        : f.status && (STATUSES as readonly string[]).includes(f.status)
+          ? `status ${statusLabel(f.status)}`
+          : null,
+      customer,
+      f.jobType ? (f.jobType === 'SERVICE_CONTRACT' ? 'service contracts only' : `${statusLabel(f.jobType).toLowerCase()} projects only`) : null,
+      onlyOwn(me) || q.scope === 'mine' ? 'mine only' : null,
+      f.ids ? 'the rows selected' : null,
+    ]);
+
+    // The money block: what the costings cost, the margin they carry as a
+    // share of the price, and their contract value — the bold row last.
+    // Summed in Decimal; numbers only at the page.
+    const cost = sums._sum.totalCost ?? new Prisma.Decimal(0);
+    const value = sums._sum.contractValue ?? new Prisma.Decimal(0);
+    const margin = value.minus(cost);
+    const marginShare = value.gt(0) ? ` (${pct(margin.div(value).toNumber(), 1)} of the price)` : '';
+
+    // Eight columns: landscape, each sized from what it holds (rule 6).
+    const pdf = await renderDocument({
+      title: 'Costings',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Costing and customer', `Contract value (${currency})`, `Budgeted cost (${currency})`, 'Margin', 'Prepared by', 'Date', 'Status'],
+          align: ['left', 'left', 'right', 'right', 'right', 'left', 'left', 'left'],
+          rows: rows.map((c) => {
+            const cv = num(c.contractValue);
+            return [
+              c.number,
+              { title: c.title, body: [c.customer?.name ?? 'No customer linked', c.systemUnit].filter(Boolean).join(' · ') },
+              formatAmount(cv),
+              formatAmount(num(c.totalCost)),
+              cv > 0 ? pct((cv - num(c.totalCost)) / cv, 1) : '',
+              c.owner.name,
+              formatShortDate(c.createdAt),
+              statusLabel(c.status),
+            ];
+          }),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: totalLabel('Budgeted cost', count, rows.length), value: formatMoney(num(cost), currency) },
+            { label: `Margin${marginShare}`, value: formatMoney(num(margin), currency) },
+            { label: totalLabel('Total contract value', count, rows.length), value: formatMoney(num(value), currency), bold: true },
+          ],
+        },
+      ],
+    });
+
+    await audit(
+      { entityType: 'costing', entityId: 'list', action: 'EXPORTED', summary: `Exported the costing list as PDF (${rows.length} costing(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'costings.pdf');
   }),
 );
 
@@ -1819,6 +1957,21 @@ costingRoutes.delete(
 
 // ── PDF: the Material Cost Estimate and the Scope of Work ────────────────────
 
+/**
+ * The costing's route, one slot a step: a DRAFT prints the route submitting
+ * it now would take (`draftRouteSlots`); a pending one its open request,
+ * each step signed and dated or still open; a FINAL one the request that
+ * approved it — and none when no approval stands behind it (`approvalStands`:
+ * returned and then made final by a project built on the draft, or reopened
+ * and made final again with the route switched off), because nobody will
+ * ever sign that route.
+ */
+async function costingRouteSlots(costing: { id: string; status: string; ownerId: string; contractValue: Prisma.Decimal }): Promise<ApprovalSlot[]> {
+  if (costing.status === 'DRAFT') return draftRouteSlots('costing', num(costing.contractValue), costing.ownerId);
+  if (costing.status === 'FINAL' && !(await approvalStands('costing', costing.id, 'Reopened costing'))) return [];
+  return approvalSlots('costing', costing.id);
+}
+
 const pct = (v: number, places = 2) => `${(v * 100).toFixed(places).replace(/\.?0+$/, '')}%`;
 const qty = (v: number) => (Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3))));
 
@@ -1833,7 +1986,7 @@ costingRoutes.get(
       throw forbidden('This costing belongs to someone else');
     }
 
-    const ranks = await categoryRanks();
+    const [ranks, currency] = await Promise.all([categoryRanks(), companyCurrency()]);
     const view = present(costing as unknown as Record<string, unknown>, ranks);
     const lines = view.lines as unknown as {
       code: string | null;
@@ -1900,7 +2053,7 @@ costingRoutes.get(
     if (rows.length) {
       sections.push({
         kind: 'table',
-        head: ['No.', 'Description', 'Unit', 'Qty', 'Unit cost', 'Amount (PHP)'],
+        head: ['No.', 'Description', 'Unit', 'Qty', `Unit cost (${currency})`, `Amount (${currency})`],
         widths: [7, 47, 8, 8, 14, 16],
         align: ['left', 'left', 'left', 'right', 'right', 'right'],
         // A bucket's heading wraps inside No. + Description, the way the
@@ -1911,17 +2064,18 @@ costingRoutes.get(
     }
 
     // The owner's summary (2026-10-09): cost, the margin as a share of the
-    // price, the subtotal, VAT, the grand total — no contingency line and no
+    // price, the subtotal, VAT, the total — no contingency line and no
     // discount in the foot (a contingency is a cost line of its own bucket).
+    // The labels are the quotation's; only the last row is bold.
     const summary = [
-      { label: 'Project budgeted cost', value: formatMoney(view.totalCost) },
-      { label: `Margin (${pct(view.grossMarginPct)} of the price)`, value: formatMoney(view.marginAmount) },
-      { label: 'Subtotal', value: formatMoney(view.contractValue) },
+      { label: 'Project budgeted cost', value: formatMoney(view.totalCost, currency) },
+      { label: `Margin (${pct(view.grossMarginPct)} of the price)`, value: formatMoney(view.marginAmount, currency) },
+      { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
     ];
-    if (view.vatRate > 0) summary.push({ label: `VAT (${pct(view.vatRate, 0)})`, value: formatMoney(view.vatAmount) });
+    if (view.vatRate > 0) summary.push({ label: `VAT (${pct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) });
     sections.push({
       kind: 'totals',
-      rows: [...summary, { label: 'GRAND TOTAL', value: formatMoney(view.grandTotal), bold: true }],
+      rows: [...summary, { label: 'Total', value: formatMoney(view.grandTotal, currency), bold: true }],
     });
 
     if (costing.terms) sections.push({ kind: 'text', title: 'Terms & Conditions', body: costing.terms });
@@ -1955,15 +2109,33 @@ costingRoutes.get(
       });
     }
 
-    // Prepared by the author at creation; then one line per step of the
-    // route, the step's name as the capacity it signs in (Technical Manager,
-    // Team Leader, CTG — 2026-10-09, the owner's route), who signed and
-    // when, "Pending" until they do. A draft prints the route submitting
-    // would take; a costing with no route at all prints one open approval.
-    const slots = await approvalSlots('costing', costing.id, { amount: num(costing.contractValue), requesterId: costing.ownerId });
+    // Prepared by the author at creation, with how to reach them (read for
+    // the paper only — the costing's JSON carries no mobile); then the route
+    // as the workflow names its steps (rule 6, `slotSignatories`): Technical
+    // Manager, Team Leader, CEO (CTG) — who signed and when, else who is
+    // assigned with "Pending" under them. A DRAFT prints the route
+    // submitting it now WOULD take, whatever an earlier request said (one
+    // returned, or one approved before the costing was reopened, is no
+    // longer the costing's approval); a draft with no route at all prints
+    // one open "Approved by". A costing that went final with no approval
+    // standing behind it (`costingRouteSlots`) prints no approval slot:
+    // nobody will ever sign it.
+    const [author, slots] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: costing.ownerId },
+        select: { email: true, phone: true, employee: { select: { mobile: true } } },
+      }),
+      costingRouteSlots(costing),
+    ]);
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: costing.owner.name, position: costing.owner.position ?? undefined, at: costing.createdAt },
-      ...(slots.length ? slots.map((s) => ({ role: s.step, name: s.name, position: s.position, at: s.at })) : [{ role: 'Approved by' }]),
+      {
+        role: 'Prepared by',
+        name: costing.owner.name,
+        phone: author ? contactPhone(author) : undefined,
+        email: author?.email,
+        at: costing.createdAt,
+      },
+      ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
     ];
 
     const pdf = await renderDocument({
@@ -1986,6 +2158,3 @@ costingRoutes.get(
   }),
 );
 
-function formatDate(d: Date): string {
-  return d.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
-}

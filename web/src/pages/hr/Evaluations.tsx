@@ -456,6 +456,7 @@ export function Evaluations() {
       <DataList<EvaluationRow>
         listKey="evaluations"
         endpoint="/evaluations"
+        printPath="/api/evaluations/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

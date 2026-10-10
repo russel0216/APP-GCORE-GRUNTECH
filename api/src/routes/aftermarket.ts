@@ -20,13 +20,15 @@ import {
   forbidden,
   conflict,
   idsFilter,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { formatShortDate, renderDocument } from '../shared/pdf';
+import { formatShortDate, formatAmount, formatMoney, companyCurrency, renderDocument, statusLabel } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
 import { registerSchedule } from './workspace';
+import { LIST_CAP, listReference, totalLabel, listDay, namedInFilter, bracketed, bracketNote, listNotes } from './jobs';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
@@ -221,31 +223,48 @@ assetRoutes.get(
   handler(async (req, res) => {
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const rows = await prisma.installedAsset.findMany({
-      where: assetListWhere(q, settings.expiryWarningDays),
-      include: assetInclude,
-      orderBy: orderBy(q, ['code', 'name', 'warrantyEndsAt', 'installedAt', 'createdAt'], { createdAt: 'desc' }),
-      take: 1000,
-    });
-
-    const filters = [
+    const where = assetListWhere(q, settings.expiryWarningDays);
+    const f = q.filters;
+    const [rows, count, named] = await Promise.all([
+      prisma.installedAsset.findMany({
+        where,
+        include: assetInclude,
+        orderBy: orderBy(q, ['code', 'name', 'warrantyEndsAt', 'installedAt', 'createdAt'], { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.installedAsset.count({ where }),
+      namedInFilter({ customerId: f.customerId, siteId: f.siteId, jobId: f.jobId }),
+    ]);
+    // "12 machines", or "first 1,000 of 1,234 machines printed" when the cap
+    // bit — then every filter `assetListWhere` applied, by name, so a
+    // register narrowed to one customer never reads as the whole base.
+    const reference = listReference(count, rows.length, ['machine', 'machines'], [
       q.search ? `search "${q.search}"` : null,
-      q.filters.warranty ? `warranty ${q.filters.warranty.toLowerCase()}` : null,
-      q.filters.uncovered === 'true' ? 'no active contract' : null,
-      q.filters.status ? `status ${q.filters.status.toLowerCase()}` : null,
-    ].filter(Boolean);
+      // Only what `assetListWhere` applied: a value it does not know narrows nothing, so it is not named.
+      f.warranty && WARRANTY_FILTER[f.warranty] ? `warranty ${WARRANTY_FILTER[f.warranty]}` : null,
+      f.uncovered === 'true' ? 'no active contract' : null,
+      asEnum(AssetStatus, f.status) ? `status ${statusLabel(f.status)}` : null,
+      named.customer ? `customer ${named.customer}` : null,
+      named.site ? `site ${named.site}` : null,
+      named.project ? `project ${named.project}` : null,
+      f.ids ? 'the rows selected' : null,
+    ]);
 
+    // A list: short dates, every status through statusLabel, the issued
+    // code under "Number" as every list heads it, and landscape pages with
+    // the engine's own column widths, so no head breaks mid-word.
     const pdf = await renderDocument({
       title: 'Installed Base',
       date: new Date(),
-      reference: `${rows.length} machine(s)${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Code', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
-          widths: [1, 2.3, 2.3, 1.3, 1, 1.3, 0.9],
+          head: ['Number', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
           rows: rows.map((r) => {
             const warranty = expiryState(r.warrantyEndsAt, settings.expiryWarningDays);
+            const word = statusLabel(WARRANTY_WORD[warranty.state] ?? warranty.state);
             return [
               r.code,
               {
@@ -257,10 +276,8 @@ assetRoutes.get(
               { title: r.customer.name, body: r.address ?? r.site?.name ?? undefined },
               r.location ?? '',
               r.installedAt ? formatShortDate(r.installedAt) : '',
-              r.warrantyEndsAt
-                ? `${formatShortDate(r.warrantyEndsAt)} (${(WARRANTY_WORD[warranty.state] ?? warranty.state).toLowerCase()})`
-                : 'not recorded',
-              r.status.toLowerCase(),
+              r.warrantyEndsAt ? `${formatShortDate(r.warrantyEndsAt)}${word ? ` (${word})` : ''}` : 'Not recorded',
+              statusLabel(r.status),
             ];
           }),
         },
@@ -269,7 +286,12 @@ assetRoutes.get(
     });
 
     await audit(
-      { entityType: 'installed_asset', entityId: 'list', action: 'EXPORTED', summary: `Exported the installed base as PDF (${rows.length} machine(s))` },
+      {
+        entityType: 'installed_asset',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the installed base as PDF (${listReference(count, rows.length, ['machine', 'machines'], [])})`,
+      },
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
@@ -279,6 +301,8 @@ assetRoutes.get(
 );
 
 const WARRANTY_WORD: Record<string, string> = { ACTIVE: 'in warranty', EXPIRING: 'expiring', EXPIRED: 'expired', NONE: '' };
+/** The warranty filter in the screen's own words. */
+const WARRANTY_FILTER: Record<string, string> = { ACTIVE: 'in warranty', EXPIRING: 'expiring soon', EXPIRED: 'out of warranty' };
 
 assetRoutes.get(
   '/:id',
@@ -631,6 +655,42 @@ function presentContract(row: ContractRow, warningDays: number) {
   };
 }
 
+const CONTRACT_SORTS = ['number', 'startsAt', 'endsAt', 'createdAt'];
+
+/**
+ * Which contracts a list query means — one rule for the list and its printed
+ * twin. The contract's owner is the job's project manager (coverage terms
+ * have no separate owner, because the job is the commercial record); `?ids=`
+ * (the rows ticked) is ANDed with that.
+ */
+function contractListWhere(me: ResolvedUser, q: ListQuery, expiryWarningDays: number): Prisma.ServiceContractWhereInput {
+  const where: Prisma.ServiceContractWhereInput = {};
+  const jobWhere: Prisma.JobWhereInput = {};
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.service_contracts.view_all');
+  if (onlyOwn || q.scope === 'mine') jobWhere.projectManagerId = me.id;
+  if (q.filters.customerId) jobWhere.customerId = q.filters.customerId;
+  if (Object.keys(jobWhere).length) where.job = jobWhere;
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+
+  const status = asEnum(ContractStatus, q.filters.status);
+  if (status) where.status = status;
+  if (q.filters.expiring === 'true') {
+    const horizon = dayKey(new Date());
+    horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
+    where.status = 'ACTIVE';
+    where.endsAt = { lte: horizon };
+  }
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { job: { name: { contains: q.search, mode: 'insensitive' } } },
+      { job: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
+    ];
+  }
+  return where;
+}
+
 contractRoutes.get(
   '/',
   requireAny('gops.service_contracts.view_all', 'gops.service_contracts.view_own'),
@@ -639,37 +699,13 @@ contractRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const settings = await aftermarketSettings();
-    const where: Prisma.ServiceContractWhereInput = {};
-
-    // The contract's owner is the job's project manager — coverage terms have
-    // no separate owner, because the job is the commercial record.
-    const jobWhere: Prisma.JobWhereInput = {};
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.service_contracts.view_all');
-    if (onlyOwn || q.scope === 'mine') jobWhere.projectManagerId = me.id;
-    if (q.filters.customerId) jobWhere.customerId = q.filters.customerId;
-    if (Object.keys(jobWhere).length) where.job = jobWhere;
-
-    const status = asEnum(ContractStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.expiring === 'true') {
-      const horizon = dayKey(new Date());
-      horizon.setUTCDate(horizon.getUTCDate() + settings.expiryWarningDays);
-      where.status = 'ACTIVE';
-      where.endsAt = { lte: horizon };
-    }
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-        { job: { customer: { name: { contains: q.search, mode: 'insensitive' } } } },
-      ];
-    }
+    const where = contractListWhere(me, q, settings.expiryWarningDays);
 
     const [rows, total] = await Promise.all([
       prisma.serviceContract.findMany({
         where,
         include: contractInclude,
-        orderBy: orderBy(q, ['number', 'startsAt', 'endsAt', 'createdAt'], { endsAt: 'asc' }),
+        orderBy: orderBy(q, CONTRACT_SORTS, { endsAt: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -677,6 +713,99 @@ contractRoutes.get(
     ]);
 
     res.json(listResult(rows.map((r) => presentContract(r, settings.expiryWarningDays)), total, q));
+  }),
+);
+
+/**
+ * The service contracts list on paper (rule 6, A5): the list's own query and
+ * sort — or the rows ticked — swept first as the list is, the term as short
+ * dates with the days left on an active one, and the value with the code in
+ * the head; the whole set's value in the totals block, a cancelled
+ * contract's in brackets and not counted — the note under the totals says
+ * how many. Declared above `/:id`.
+ */
+contractRoutes.get(
+  '/pdf',
+  requireAny('gops.service_contracts.view_all', 'gops.service_contracts.view_own'),
+  handler(async (req, res) => {
+    await sweepOverdue();
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const settings = await aftermarketSettings();
+    const where = contractListWhere(me, q, settings.expiryWarningDays);
+    const [rows, count, live, cancelled, currency, named] = await Promise.all([
+      prisma.serviceContract.findMany({ where, include: contractInclude, orderBy: orderBy(q, CONTRACT_SORTS, { endsAt: 'asc' }), take: LIST_CAP }),
+      prisma.serviceContract.count({ where }),
+      prisma.job.aggregate({ where: { serviceContract: { is: { AND: [where, { status: { not: 'CANCELLED' } }] } } }, _sum: { contractValue: true } }),
+      prisma.serviceContract.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+      companyCurrency(),
+      namedInFilter({ customerId: q.filters.customerId }),
+    ]);
+    const reference = listReference(count, rows.length, ['service contract', 'service contracts'], [
+      q.search ? `search "${q.search}"` : null,
+      asEnum(ContractStatus, q.filters.status) && q.filters.expiring !== 'true' ? `status ${statusLabel(q.filters.status)}` : null,
+      q.filters.expiring === 'true' ? `active, ending within ${settings.expiryWarningDays} days` : null,
+      named.customer ? `customer ${named.customer}` : null,
+      q.scope === 'mine' ? 'managed by me' : null,
+      q.filters.ids ? 'the rows selected' : null,
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Service Contracts',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Customer and project', 'Term', 'Covers', 'Visits', `Value (${currency})`, 'Status'],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'left'],
+          rows: rows.map((r) => {
+            const c = presentContract(r, settings.expiryWarningDays);
+            const value = formatAmount(c.job.contractValue);
+            const left =
+              r.status === 'ACTIVE' && c.daysRemaining !== null
+                ? c.daysRemaining < 0
+                  ? 'Lapsed'
+                  : `${c.daysRemaining} day${c.daysRemaining === 1 ? '' : 's'} left`
+                : undefined;
+            return [
+              r.number,
+              { title: r.job.customer.name, body: [r.job.name, r.job.site?.name].filter(Boolean).join(' · ') },
+              `${formatShortDate(r.startsAt)} – ${formatShortDate(r.endsAt)}${left ? `\n${left}` : ''}`,
+              `${c.assets.length} machine${c.assets.length === 1 ? '' : 's'}`,
+              `${r.plannedVisits}\nevery ${r.frequencyMonths} month${r.frequencyMonths === 1 ? '' : 's'}`,
+              bracketed(value, r.status !== 'CANCELLED'),
+              statusLabel(r.status),
+            ];
+          }),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            {
+              label: totalLabel('Total value', count, rows.length),
+              value: formatMoney(num(live._sum.contractValue), currency),
+              bold: true,
+            },
+          ],
+        },
+        ...listNotes([bracketNote(cancelled, ['cancelled service contract', 'cancelled service contracts'])]),
+      ],
+    });
+
+    await audit(
+      {
+        entityType: 'service_contract',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the service contracts list as PDF (${listReference(count, rows.length, ['service contract', 'service contracts'], [])})`,
+      },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="service-contracts.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -1541,6 +1670,91 @@ visitRoutes.get(
   }),
 );
 
+/**
+ * The service schedule's list on paper (rule 6, A5): the list's own query
+ * and sort — or the rows ticked — swept first as the list is, on landscape
+ * pages; the due date short with how late or how soon under it, and an open
+ * visit past its date said as Overdue, as the screen's pill says it.
+ * Declared above `/:id`.
+ */
+visitRoutes.get(
+  '/pdf',
+  requireAny(...VISIT_VIEW),
+  handler(async (req, res) => {
+    await sweepOverdue();
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = visitListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, named, contract, asset] = await Promise.all([
+      prisma.serviceVisit.findMany({ where, include: visitInclude, orderBy: orderBy(q, VISIT_SORTS, { dueDate: 'asc' }), take: LIST_CAP }),
+      prisma.serviceVisit.count({ where }),
+      namedInFilter({ customerId: f.customerId, siteId: f.siteId, userId: f.assignedToId && f.assignedToId !== 'none' ? f.assignedToId : undefined }),
+      f.contractId ? prisma.serviceContract.findUnique({ where: { id: f.contractId }, select: { number: true } }) : null,
+      f.assetId ? prisma.installedAsset.findUnique({ where: { id: f.assetId }, select: { code: true } }) : null,
+    ]);
+    const today = dayKey(new Date());
+    // Only what `visitWhere` applied: a value it does not know narrows nothing, so it is not named.
+    const statuses = (f.statuses ?? '').split(',').map((v) => v.trim()).filter((v) => asEnum(VisitStatus, v));
+    const reference = listReference(count, rows.length, ['visit', 'visits'], [
+      q.search ? `search "${q.search}"` : null,
+      f.due === 'true'
+        ? 'due or overdue'
+        : statuses.length
+          ? `status ${statuses.map((v) => statusLabel(v)).join(', ')}`
+          : asEnum(VisitStatus, f.status)
+            ? `status ${statusLabel(f.status)}`
+            : null,
+      asEnum(ServiceKind, f.kind) ? `kind ${KIND_LABEL[f.kind]}` : null,
+      f.assignedToId === 'none' ? 'no engineer' : named.person ? `engineer ${named.person}` : null,
+      named.customer ? `customer ${named.customer}` : null,
+      named.site ? `site ${named.site}` : null,
+      f.contractId ? `contract ${contract?.number ?? 'not found'}` : null,
+      f.assetId ? `machine ${asset?.code ?? 'not found'}` : null,
+      f.due !== 'true' && (f.from || f.to) ? `due ${f.from === f.to ? `on ${listDay(f.from)}` : `${listDay(f.from)} to ${listDay(f.to)}`}` : null,
+      q.scope === 'mine' || visitsOnlyOwn(me) ? 'booked on me' : null,
+      f.ids ? 'the rows selected' : null,
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Service Schedule',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Due', 'Customer and machine', 'Kind', 'Booked by', 'Engineer', 'Report', 'Status'],
+          rows: rows.map((r) => {
+            const v = presentVisit(r, today);
+            const open = r.status === 'SCHEDULED' || r.status === 'MISSED';
+            const due =
+              !open ? undefined : v.daysUntilDue === 0 ? 'Today' : v.daysUntilDue < 0 ? `${-v.daysUntilDue} day${v.daysUntilDue === -1 ? '' : 's'} late` : `In ${v.daysUntilDue} day${v.daysUntilDue === 1 ? '' : 's'}`;
+            return [
+              r.sequence && r.contract ? `${r.number}\nVisit ${r.sequence} of ${r.contract.plannedVisits}` : r.number,
+              due ? `${formatShortDate(r.dueDate)}\n${due}` : formatShortDate(r.dueDate),
+              { title: r.customer.name, body: r.asset ? `${r.asset.code} ${r.asset.name}` : (r.site?.name ?? undefined) },
+              KIND_LABEL[r.kind] ?? statusLabel(r.kind),
+              r.contract?.number ?? r.jobOrder?.number ?? 'Call-out',
+              r.assignedTo?.name ?? 'Unassigned',
+              r.report?.number ?? '',
+              v.overdue ? 'Overdue' : statusLabel(r.status),
+            ];
+          }),
+        },
+      ],
+    });
+
+    await audit(
+      { entityType: 'service_visit', entityId: 'list', action: 'EXPORTED', summary: `Exported the service schedule as PDF (${listReference(count, rows.length, ['visit', 'visits'], [])})` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="service-schedule.pdf"');
+    res.send(pdf);
+  }),
+);
+
 /** One visit — what every `?visit=` link (notification, contract, asset, report) opens. */
 visitRoutes.get(
   '/:id',
@@ -1556,6 +1770,37 @@ visitRoutes.get(
   }),
 );
 
+const VISIT_SORTS = ['number', 'dueDate', 'performedAt'];
+
+/**
+ * Which visits a list query means — `visitWhere` (the filters the list, the
+ * calendar feed and the sales calendar share) plus the list's own due window,
+ * "due or overdue" and search — one rule for the list and its printed twin;
+ * `?ids=` (the rows ticked) is ANDed with the visibility rule.
+ */
+function visitListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceVisitWhereInput {
+  const where: Prisma.ServiceVisitWhereInput = visitWhere(q.filters, me, q.scope === 'mine');
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  if (q.filters.from || q.filters.to) {
+    where.dueDate = {};
+    if (q.filters.from) where.dueDate.gte = asDate(q.filters.from, 'From');
+    if (q.filters.to) where.dueDate.lte = asDate(q.filters.to, 'To');
+  }
+  if (q.filters.due === 'true') {
+    where.status = 'SCHEDULED';
+    where.dueDate = { lte: dayKey(new Date()) };
+  }
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      { asset: { name: { contains: q.search, mode: 'insensitive' } } },
+    ];
+  }
+  return where;
+}
+
 visitRoutes.get(
   '/',
   requireAny(...VISIT_VIEW),
@@ -1563,30 +1808,13 @@ visitRoutes.get(
     await sweepOverdue();
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.ServiceVisitWhereInput = visitWhere(q.filters, me, q.scope === 'mine');
-
-    if (q.filters.from || q.filters.to) {
-      where.dueDate = {};
-      if (q.filters.from) where.dueDate.gte = asDate(q.filters.from, 'From');
-      if (q.filters.to) where.dueDate.lte = asDate(q.filters.to, 'To');
-    }
-    if (q.filters.due === 'true') {
-      where.status = 'SCHEDULED';
-      where.dueDate = { lte: dayKey(new Date()) };
-    }
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-        { asset: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = visitListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.serviceVisit.findMany({
         where,
         include: visitInclude,
-        orderBy: orderBy(q, ['number', 'dueDate', 'performedAt'], { dueDate: 'asc' }),
+        orderBy: orderBy(q, VISIT_SORTS, { dueDate: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -1944,52 +2172,72 @@ const reportInclude = {
   performedBy: { select: { id: true, name: true } },
 } satisfies Prisma.ServiceReportInclude;
 
+/** Every report permission that opens the list — any one of the three kinds. */
+const REPORT_VIEW = [
+  'gops.pm_reports.view_all',
+  'gops.pm_reports.view_own',
+  'gops.commissioning_reports.view_all',
+  'gops.commissioning_reports.view_own',
+  'gops.inspection_reports.view_all',
+  'gops.inspection_reports.view_own',
+] as const;
+
+const REPORT_SORTS = ['number', 'performedAt', 'createdAt'];
+
+/** A report's status in the screen's words, through statusLabel: REJECTED reads "Returned", for correcting and sending again. */
+const reportStatusWord = (status: string) => statusLabel(status === 'REJECTED' ? 'RETURNED' : status);
+
+/**
+ * Which service reports a list query means — one rule for the list (and its
+ * three menu entries, which preset `kind`) and its printed twin. A service
+ * engineer with only view_own sees the reports they wrote; `?ids=` (the rows
+ * ticked) is ANDed with that.
+ */
+function serviceReportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceReportWhereInput {
+  const where: Prisma.ServiceReportWhereInput = {};
+
+  const kind = asEnum(ServiceKind, q.filters.kind);
+  if (kind) where.kind = kind;
+  const status = asEnum(ReportStatus, q.filters.status);
+  if (status) where.status = status;
+  if (q.filters.assetId) where.assetId = q.filters.assetId;
+  if (q.filters.contractId) where.contractId = q.filters.contractId;
+  if (q.filters.customerId) where.customerId = q.filters.customerId;
+  if (q.filters.billable) where.billable = q.filters.billable === 'true';
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+
+  const canSeeAll =
+    me.isSuperAdmin ||
+    me.permissions.has('gops.pm_reports.view_all') ||
+    me.permissions.has('gops.commissioning_reports.view_all') ||
+    me.permissions.has('gops.inspection_reports.view_all');
+  if (!canSeeAll || q.scope === 'mine') where.performedById = me.id;
+
+  if (q.search) {
+    where.OR = [
+      { number: { contains: q.search, mode: 'insensitive' } },
+      { findings: { contains: q.search, mode: 'insensitive' } },
+      { customer: { name: { contains: q.search, mode: 'insensitive' } } },
+      { asset: { serialNo: { contains: q.search, mode: 'insensitive' } } },
+    ];
+  }
+  return where;
+}
+
 serviceReportRoutes.get(
   '/',
-  requireAny(
-    'gops.pm_reports.view_all',
-    'gops.pm_reports.view_own',
-    'gops.commissioning_reports.view_all',
-    'gops.commissioning_reports.view_own',
-    'gops.inspection_reports.view_all',
-    'gops.inspection_reports.view_own',
-  ),
+  requireAny(...REPORT_VIEW),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.ServiceReportWhereInput = {};
-
-    const kind = asEnum(ServiceKind, q.filters.kind);
-    if (kind) where.kind = kind;
-    const status = asEnum(ReportStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.assetId) where.assetId = q.filters.assetId;
-    if (q.filters.contractId) where.contractId = q.filters.contractId;
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
-    if (q.filters.billable) where.billable = q.filters.billable === 'true';
-
-    // A service engineer with only view_own sees the reports they wrote.
-    const canSeeAll =
-      me.isSuperAdmin ||
-      me.permissions.has('gops.pm_reports.view_all') ||
-      me.permissions.has('gops.commissioning_reports.view_all') ||
-      me.permissions.has('gops.inspection_reports.view_all');
-    if (!canSeeAll || q.scope === 'mine') where.performedById = me.id;
-
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { findings: { contains: q.search, mode: 'insensitive' } },
-        { customer: { name: { contains: q.search, mode: 'insensitive' } } },
-        { asset: { serialNo: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = serviceReportListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.serviceReport.findMany({
         where,
         include: { ...reportInclude, template: { select: { id: true, name: true, version: true } } },
-        orderBy: orderBy(q, ['number', 'performedAt', 'createdAt'], { performedAt: 'desc' }),
+        orderBy: orderBy(q, REPORT_SORTS, { performedAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -1997,6 +2245,86 @@ serviceReportRoutes.get(
     ]);
 
     res.json(listResult(rows, total, q));
+  }),
+);
+
+/**
+ * The service reports list on paper (rule 6, A5) — and each of its three
+ * menu entries', whose `kind` the screen sends: the list's own query and
+ * sort, or the rows ticked; what covered the work (warranty, a contract, or
+ * billable) in words; the customer's signature or "Unsigned". Above `/:id`.
+ */
+serviceReportRoutes.get(
+  '/pdf',
+  requireAny(...REPORT_VIEW),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = serviceReportListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, named, contract, asset] = await Promise.all([
+      prisma.serviceReport.findMany({
+        where,
+        include: {
+          customer: { select: { name: true } },
+          site: { select: { name: true } },
+          asset: { select: { code: true, name: true } },
+          contract: { select: { number: true } },
+          performedBy: { select: { name: true } },
+        },
+        orderBy: orderBy(q, REPORT_SORTS, { performedAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.serviceReport.count({ where }),
+      namedInFilter({ customerId: f.customerId }),
+      f.contractId ? prisma.serviceContract.findUnique({ where: { id: f.contractId }, select: { number: true } }) : null,
+      f.assetId ? prisma.installedAsset.findUnique({ where: { id: f.assetId }, select: { code: true } }) : null,
+    ]);
+    const kind = asEnum(ServiceKind, f.kind);
+    const reference = listReference(count, rows.length, ['report', 'reports'], [
+      q.search ? `search "${q.search}"` : null,
+      kind ? `kind ${KIND_LABEL[kind]}` : null,
+      asEnum(ReportStatus, f.status) ? `status ${reportStatusWord(f.status)}` : null,
+      f.billable === 'true' ? 'billable' : f.billable === 'false' ? 'covered' : null,
+      named.customer ? `customer ${named.customer}` : null,
+      f.contractId ? `contract ${contract?.number ?? 'not found'}` : null,
+      f.assetId ? `machine ${asset?.code ?? 'not found'}` : null,
+      q.scope === 'mine' ? 'written by me' : null,
+      f.ids ? 'the rows selected' : null,
+    ]);
+    // The paper is named after the menu it was printed from, as the screen is.
+    const title = kind === 'COMMISSIONING' ? 'Commissioning Reports' : kind === 'PREVENTIVE_MAINTENANCE' ? 'Preventive Maintenance Reports' : kind === 'INSPECTION' ? 'Service Inspections' : 'Service Reports';
+
+    const pdf = await renderDocument({
+      title,
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Kind', 'Customer and machine', 'Performed', 'Performed by', 'Covered by', 'Signed by customer', 'Status'],
+          rows: rows.map((r) => [
+            r.number,
+            KIND_LABEL[r.kind] ?? statusLabel(r.kind),
+            { title: r.customer.name, body: r.asset ? `${r.asset.code} ${r.asset.name}` : (r.site?.name ?? undefined) },
+            formatShortDate(r.performedAt),
+            r.performedBy.name,
+            r.underWarranty ? 'Warranty' : r.contract ? `Contract ${r.contract.number}` : r.billable ? 'Billable' : '',
+            r.customerSignedBy ?? 'Unsigned',
+            reportStatusWord(r.status),
+          ]),
+        },
+      ],
+    });
+
+    await audit(
+      { entityType: 'service_report', entityId: 'list', action: 'EXPORTED', summary: `Exported the ${title.toLowerCase()} list as PDF (${listReference(count, rows.length, ['report', 'reports'], [])})` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="service-reports.pdf"');
+    res.send(pdf);
   }),
 );
 

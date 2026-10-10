@@ -833,6 +833,23 @@ async function httpCases(ctx: {
     paperText.slice(0, 200),
   );
   check('printing is refused without the key', (await fetch(`${BASE}/partners/pdf`, { headers: { Authorization: `Bearer ${outsiderT}` } })).status === 403);
+  // Rule 6: ten columns print whole on landscape paper, each sized from what
+  // it holds — a code is one word and never breaks over two lines — and a
+  // date the filter names prints as a list prints a date.
+  const wide = await fetch(`${BASE}/partners/pdf?search=${encodeURIComponent(LISTP)}&sinceFrom=2026-01-01`, { headers: { Authorization: `Bearer ${viewerT}` } });
+  const wideBytes = Buffer.from(await wide.arrayBuffer());
+  const wideText = pdfLine(wideBytes);
+  check(
+    'the partner list prints on landscape paper, every code whole',
+    wide.status === 200 && wideBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') &&
+      [`${TAG}-LP-A`, `${TAG}-LP-B`].every((code) => wideText.includes(code) || !wideText.replace(/ /g, '').includes(code)),
+    wideText.slice(0, 300),
+  );
+  check('a date the filter names prints MM/DD/YYYY', wideText.includes('partner since 01/01/2026 to'), wideText.slice(0, 400));
+  check(
+    'and each printout is audited as an export',
+    (await prisma.auditLog.count({ where: { entityType: 'supplier', entityId: 'list', action: 'EXPORTED', actorId: ctx.viewer.id, summary: { startsWith: 'Exported the partner list' } } })) >= 2,
+  );
   const recat = await http(mgrT, 'PATCH', `/partners/${pB.id}`, { category: 'Verify Compressors' });
   check('"Set what they supply" is the ordinary PATCH', recat.status === 200);
 

@@ -243,11 +243,15 @@ async function main() {
   check('the SCORO Archive is in the menu payload marked hidden', superMenu.some((s) => s.id === 'gops.quote_archive' && s.hidden));
   // The project registers are hidden too (2026-10-06): each is a tab inside
   // the project, and Project Management's strip is Costing, Job Orders,
-  // Projects — the owner's order, which the registry's order carries.
+  // Projects — the owner's order, which the registry's order carries. Three
+  // duplicate entries went the same way on 2026-10-10 (C3): Service Costing
+  // (the costing list filtered), Employee Pay Rates (the employees list) and
+  // Document Templates (the Report Templates screen) — hidden, never deleted,
+  // so their permission keys survive.
   check(
-    'the hidden screens are the SCORO Archive and the five project registers',
+    'the hidden screens are the SCORO Archive, the five project registers and the three duplicates',
     superMenu.filter((s) => s.hidden).map((s) => s.id).sort().join() ===
-      'gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.quote_archive',
+      'admin.templates,ghr.employee_rates,gops.budget_monitoring,gops.budget_requests,gops.plans,gops.progress_billing,gops.purchase_requests,gops.quote_archive,gops.service_costing',
     superMenu.filter((s) => s.hidden).map((s) => s.id).join(),
   );
   const pmStrip = menuFor(superUser)
@@ -1203,6 +1207,22 @@ async function main() {
         await restoreTagline();
       }
     }
+
+    // A wide list prints landscape (`landscape: true`): the same dress on a
+    // wider page, so ten column heads print whole instead of breaking mid-word.
+    const wideHead = ['Code', 'Customer', 'Sub-industry', 'Team', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'];
+    const wideList = await renderDocument({
+      title: 'Customers',
+      landscape: true,
+      sections: [{ kind: 'table', head: wideHead, rows: [['GT-CUST-2026-0075', 'ABOITIZ LAND, INC.', '—', 'GIB', '1', '1', '0', '0', '10/08/2026', 'Active']] }],
+    });
+    const wideListText = pdfText(wideList);
+    check('a wide list prints on landscape pages', wideList.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]'));
+    check(
+      'and its column heads and codes print whole',
+      wideListText.split('\n').some((l) => l.includes('SUB-INDUSTRY')) && wideListText.split('\n').some((l) => l.includes('GT-CUST-2026-0075')) && wideListText.split('\n').some((l) => l.includes('10/08/2026')),
+    );
+    check('and still carries the strapline', wideListText.toUpperCase().includes((co.documentTagline ?? co.website ?? '').toUpperCase().slice(0, 12)));
 
     // A document long enough for a second page carries the running header
     // — reference, document and number, the date as MM/DD/YYYY — on every

@@ -245,6 +245,7 @@ function LeaveList() {
       <DataList<LeaveRow>
         listKey="leave"
         endpoint="/leave"
+        printPath="/api/leave/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

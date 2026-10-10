@@ -22,6 +22,7 @@
  * business, and a test that depends on it breaks the moment somebody is hired.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -141,6 +142,37 @@ async function api(token: string, method: string, path: string, body?: unknown):
     parsed = { raw: text };
   }
   return { status: res.status, body: parsed };
+}
+
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation
+ * uses. PDFKit Flate-compresses its content streams and writes text as hex
+ * runs split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
 }
 
 async function apiReachable(): Promise<boolean> {
@@ -623,6 +655,63 @@ async function main() {
     workerAgain.myPendingSubmissions.some((s) => s.link === `/g-ops/leads/${myLead.id}`) &&
       !workerAgain.awaitingMyApproval.some((a) => a.link === `/g-ops/leads/${myLead.id}`),
   );
+
+  // ══ The document specimen ════════════════════════════════════════════════
+  // The page an administrator prints to see Company Settings on paper. It
+  // promises every section kind the engine draws, so it must draw every one —
+  // and in the words every document uses: money with the company's currency,
+  // a table's amounts bare under a head that names it, the money block as
+  // totals (never a TOTAL row in the lines), a status through statusLabel,
+  // and sign-offs both signed and Pending, each role in capitals.
+  console.log('\nThe document specimen');
+  const specimenRes = await fetch(`${BASE}/pdf/specimen`, { headers: { Authorization: `Bearer ${workerToken}` } });
+  const specimen = Buffer.from(await specimenRes.arrayBuffer());
+  const spec = specimenRes.ok ? pdfText(specimen) : '';
+  const words = spec.replace(/[^A-Za-z0-9:().%]+/g, ' ');
+  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true, vatRate: true, ewtRate: true } });
+  const currency = company?.currency?.trim() || 'PHP';
+  const pct = (rate: unknown) => `${+((Number(rate) || 0) * 100).toFixed(2)}%`;
+  check('it prints', specimenRes.status === 200 && specimen.subarray(0, 4).toString() === '%PDF', String(specimenRes.status));
+  check(
+    'fields, text and a table with a subheading row and title-over-description cells',
+    words.includes('HEADER FIELDS') &&
+      words.includes('SCOPE OF WORK') &&
+      words.includes('COST SUMMARY') &&
+      /^Equipment and materials$/m.test(spec) &&
+      /^Oxygen generator skid$/m.test(spec) &&
+      spec.includes('Stainless steel interconnection'),
+    spec.split('\n').slice(0, 40).join(' | ').slice(0, 300),
+  );
+  check(
+    'the money is a totals block in the quotation\'s words — Subtotal, VAT, Total, Less: EWT, Net collectible — the table\'s heads naming the currency, and no TOTAL row',
+    spec.includes('Subtotal') &&
+      spec.includes(`VAT (${pct(company?.vatRate)})`) &&
+      /^Total$/m.test(spec) &&
+      spec.includes(`Less: EWT (${pct(company?.ewtRate)})`) &&
+      spec.includes('Net collectible') &&
+      words.includes(`AMOUNT (${currency})`) &&
+      new RegExp(`^${currency} [\\d,]+\\.\\d{2}$`, 'm').test(spec) &&
+      !spec.includes('TOTAL'),
+    spec.split('\n').filter((l) => /Subtotal|VAT|Total|TOTAL|EWT|collectible|AMOUNT/.test(l)).join(' | ').slice(0, 300),
+  );
+  check(
+    'a status prints as a word ("Pending approval"), and no "≠" turns into "=" — the note says "is not"',
+    words.includes('Status: Pending approval') && spec.includes('invoiced is not collectible') && !spec.includes('PENDING_APPROVAL'),
+  );
+  check(
+    'a Gantt appendix on a landscape page of its own',
+    words.includes('SCHEDULE') && /^Site survey$/m.test(spec) && /^Day 1$/m.test(spec) && /\/MediaBox \[0 0 841\.89 595\.28\]/.test(specimen.toString('latin1')),
+  );
+  check(
+    'a footer note, and sign-offs both signed (dated) and Pending — under a name and alone — each role in capitals',
+    spec.includes('Specimen — the customer, figures and approvers on this page are samples.'.replace('—', '\x97')) &&
+      ['PREPARED BY', 'TECHNICAL REVIEW', 'FINANCE APPROVAL', 'CEO APPROVAL'].every((r) => words.includes(r)) &&
+      (spec.match(/^[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M$/gm) ?? []).length === 2 &&
+      (spec.match(/^Pending$/gm) ?? []).length === 2 &&
+      spec.includes(worker.email),
+  );
+  const specimenRows = await prisma.auditLog.count({ where: { actorId: worker.id, entityType: 'pdf_specimen', action: 'EXPORTED' } });
+  check('printing it is audited as EXPORTED, like every PDF', specimenRows === 1, String(specimenRows));
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

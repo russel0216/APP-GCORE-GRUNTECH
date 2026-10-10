@@ -127,6 +127,13 @@ export interface PdfDocumentSpec {
   signatories?: Signatory[];
   /** Small print above the footer rule. */
   footerNote?: string;
+  /**
+   * The whole document on landscape pages — a list with more columns than
+   * portrait can carry without breaking its heads mid-word (the sales
+   * order's rule: its cost and margin columns do not fit portrait). The
+   * dress is the same; only the width changes.
+   */
+  landscape?: boolean;
 }
 
 // ── The dress ─────────────────────────────────────────────────────────────────
@@ -184,6 +191,8 @@ const T = {
 
 const usableWidth = (doc: PDFKit.PDFDocument) => doc.page.width - T.left - T.right;
 const contentBottom = (doc: PDFKit.PDFDocument) => doc.page.height - T.flowBottomUp;
+/** The document's own orientation (`landscape: true`), set at the top of renderDocument; everything after is synchronous. */
+let pageLandscape = false;
 
 /** A section that stands on landscape pages of its own after the signed body: the Gantt chart. */
 const isAppendix = (s: PdfSection) => s.kind === 'gantt' && !!s.landscape;
@@ -197,8 +206,10 @@ export async function renderDocument(input: PdfDocumentSpec): Promise<Buffer> {
   const spec = safeSpec(input);
   const row = await prisma.company.findUnique({ where: { id: 'company' } });
   const company = row && safeCompany(row);
+  pageLandscape = !!spec.landscape;
   const doc = new PDFDocument({
     size: 'A4',
+    layout: pageLandscape ? 'landscape' : 'portrait',
     // PDFKit's own page limit is the content's: a paragraph it wraps breaks
     // where the table would. Only the sign-offs and the page furniture sit
     // lower, and they drop the bottom margin while they draw.
@@ -657,7 +668,7 @@ function drawSection(doc: PDFKit.PDFDocument, section: PdfSection) {
       const widths =
         section.widths && section.widths.length === section.head.length
           ? normalise(section.widths, usable)
-          : section.head.map(() => usable / section.head.length);
+          : autoWidths(doc, section.head, section.rows, usable);
       const align = section.align ?? section.head.map(() => 'left' as const);
       const head = tableHead(doc, section.head, widths);
       // The title goes over with the head and a one-line row, never alone.
@@ -709,7 +720,7 @@ function drawGantt(
   section: { title?: string; groups: PdfGanttGroup[]; landscape?: boolean; legend?: string },
 ) {
   const newPage = () => {
-    if (section.landscape) doc.addPage({ size: 'A4', layout: 'landscape', margins: doc.page.margins });
+    if (section.landscape || pageLandscape) doc.addPage({ size: 'A4', layout: 'landscape', margins: doc.page.margins });
     else doc.addPage();
   };
   if (section.landscape) newPage();
@@ -836,6 +847,53 @@ function drawGantt(
 function normalise(widths: number[], usable: number): number[] {
   const total = widths.reduce((a, b) => a + b, 0);
   return widths.map((w) => (w / total) * usable);
+}
+
+/**
+ * Column widths for a table that names none (a list with ten columns in
+ * equal shares broke "SUB-INDUSTRY" and every code mid-word). Each column's
+ * floor is its longest WORD — the head's in bold capitals, a cell's at the
+ * body size — so nothing breaks inside a word while the page can hold every
+ * floor; what the page has over the floors goes to the columns whose cells
+ * typically run longer (a name, a description), never to a date or a count.
+ * A route that knows better still passes `widths`.
+ */
+function autoWidths(doc: PDFKit.PDFDocument, head: string[], rows: PdfRow[], usable: number): number[] {
+  const pad = T.padX * 2;
+  const sample = rows.filter((r): r is PdfCell[] => !isHeading(r)).slice(0, 300);
+  const words = (text: string) => text.split(/\s+/).filter(Boolean);
+  const parts = (cell: PdfCell | undefined): { text: string; bold: boolean }[] =>
+    cell === undefined ? [] : typeof cell === 'string' ? [{ text: cell, bold: false }] : [{ text: cell.title, bold: true }, ...(cell.body ? [{ text: cell.body, bold: false }] : [])];
+  const floors: number[] = [];
+  const wants: number[] = [];
+  head.forEach((h, i) => {
+    doc.font('Helvetica-Bold').fontSize(T.size - 0.5);
+    let floor = Math.max(0, ...words(caps(h)).map((w) => doc.widthOfString(w)));
+    const fulls: number[] = [];
+    for (const row of sample) {
+      let full = 0;
+      for (const part of parts(row[i])) {
+        doc.font(part.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(T.size);
+        for (const w of words(part.text)) floor = Math.max(floor, doc.widthOfString(w));
+        full = Math.max(full, doc.widthOfString(part.text));
+      }
+      fulls.push(full);
+    }
+    fulls.sort((a, b) => a - b);
+    const typical = fulls.length ? fulls[Math.min(fulls.length - 1, Math.floor(fulls.length * 0.9))] : 0;
+    floors.push(floor + pad);
+    // A column wants its typical full line, at most half the page.
+    wants.push(Math.max(floor + pad, Math.min(typical + pad, usable / 2)));
+  });
+  const floorSum = sum(floors);
+  if (floorSum >= usable) return normalise(floors, usable);
+  const wantSum = sum(wants);
+  if (wantSum <= usable) return normalise(wants, usable);
+  // Between the two: every floor, and the room over the floors shared in
+  // proportion to how much more each column wanted.
+  const extra = usable - floorSum;
+  const need = wantSum - floorSum;
+  return floors.map((f, i) => f + ((wants[i] - floors[i]) / need) * extra);
 }
 
 // ── Lines of text, laid out the way the designed engine lays them ─────────────

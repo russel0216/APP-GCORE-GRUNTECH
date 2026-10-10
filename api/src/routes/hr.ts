@@ -9,9 +9,11 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
@@ -32,6 +34,15 @@ import { upload, saveAttachment, attachmentPath, deleteAttachment } from '../sha
 import { describeFace, faceEngineReady } from '../shared/face';
 import { toCsv } from '../shared/csv';
 import { sweepSeparations } from '../shared/clearance';
+import {
+  renderDocument,
+  formatAmount,
+  formatMoney,
+  formatShortDate,
+  statusLabel,
+  companyCurrency,
+} from '../shared/pdf';
+import { LIST_CAP, listDay, listReference, rangeNamed, sendListPdf, totalLabel } from './finance';
 import {
   hrSettings,
   saveHrSettings,
@@ -561,32 +572,47 @@ clockRoutes.post(
 export const attendanceRoutes = Router();
 attendanceRoutes.use(authenticate);
 
+/**
+ * The attendance list's where-builder — the dashboard's list and its printed
+ * twin read the same set: a day or a range of days, a status, a person, a
+ * search, and with `?ids=` the rows ticked. A date that is not one is a 400,
+ * never a 500 from the database.
+ */
+function attendanceListWhere(q: ListQuery): Prisma.AttendanceWhereInput {
+  const where: Prisma.AttendanceWhereInput = {};
+  const f = q.filters;
+  if (f.from || f.to) {
+    where.date = {};
+    if (f.from) where.date.gte = asDate(f.from)!;
+    if (f.to) where.date.lte = asDate(f.to)!;
+  } else if (f.date) {
+    where.date = asDate(f.date)!;
+  }
+  const status = asEnum(AttendanceStatus, f.status);
+  if (status) where.status = status;
+  if (f.employeeId) where.employeeId = f.employeeId;
+  if (q.search) {
+    where.employee = {
+      OR: [
+        { firstName: { contains: q.search, mode: 'insensitive' } },
+        { lastName: { contains: q.search, mode: 'insensitive' } },
+        { employeeNo: { contains: q.search, mode: 'insensitive' } },
+      ],
+    };
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
+const ATTENDANCE_SORTS = ['date', 'timeIn'];
+
 attendanceRoutes.get(
   '/',
   require_('ghr.dashboard.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.AttendanceWhereInput = {};
-
-    if (q.filters.from || q.filters.to) {
-      where.date = {};
-      if (q.filters.from) where.date.gte = new Date(q.filters.from);
-      if (q.filters.to) where.date.lte = new Date(q.filters.to);
-    } else if (q.filters.date) {
-      where.date = new Date(q.filters.date);
-    }
-    const status = asEnum(AttendanceStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.employeeId) where.employeeId = q.filters.employeeId;
-    if (q.search) {
-      where.employee = {
-        OR: [
-          { firstName: { contains: q.search, mode: 'insensitive' } },
-          { lastName: { contains: q.search, mode: 'insensitive' } },
-          { employeeNo: { contains: q.search, mode: 'insensitive' } },
-        ],
-      };
-    }
+    const where = attendanceListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.attendance.findMany({
@@ -603,7 +629,7 @@ attendanceRoutes.get(
             },
           },
         },
-        orderBy: orderBy(q, ['date', 'timeIn'], { date: 'desc' }),
+        orderBy: orderBy(q, ATTENDANCE_SORTS, { date: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -622,6 +648,88 @@ attendanceRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/** A clock time on paper, in Manila: "8:05 AM". */
+const clockTime = new Intl.DateTimeFormat('en-PH', {
+  timeZone: 'Asia/Manila',
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+});
+const clockText = (d: Date | null) => (d ? clockTime.format(d).replace(/\s+/g, ' ').toUpperCase() : '—');
+
+/**
+ * The attendance list on paper — the dashboard's list as filtered (or the
+ * rows ticked), through `attendanceListWhere`: who clocked in and out when,
+ * how late, how long, and how they were identified. The match scores and
+ * the photos stay on the screen — the photo is evidence, not a column.
+ * Declared above `/:id`, like every printed list.
+ */
+attendanceRoutes.get(
+  '/pdf',
+  require_('ghr.dashboard.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = attendanceListWhere(q);
+    const f = q.filters;
+    const [rows, count, employee] = await Promise.all([
+      prisma.attendance.findMany({
+        where,
+        include: {
+          employee: {
+            select: { employeeNo: true, firstName: true, lastName: true, department: { select: { name: true } } },
+          },
+        },
+        orderBy: orderBy(q, ATTENDANCE_SORTS, { date: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.attendance.count({ where }),
+      f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
+    ]);
+
+    const status = asEnum(AttendanceStatus, f.status);
+    const reference = listReference(count, rows.length, ['attendance row', 'attendance rows'], [
+      q.search && `search "${q.search}"`,
+      f.from || f.to ? rangeNamed('dated', f.from, f.to) : f.date && `on ${listDay(f.date)}`,
+      status && `status ${statusLabel(status)}`,
+      f.employeeId && `employee ${employee ? `${employee.firstName} ${employee.lastName}` : 'not found'}`,
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Attendance',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Date', 'Employee', 'In', 'Out', 'Late (min)', 'Hours', 'Identified by', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
+          rows: rows.map((r) => [
+            formatShortDate(r.date),
+            {
+              title: `${r.employee.lastName}, ${r.employee.firstName}`,
+              body: [r.employee.employeeNo, r.employee.department?.name].filter(Boolean).join(' · '),
+            },
+            clockText(r.timeIn),
+            clockText(r.timeOut),
+            r.lateMinutes ? String(r.lateMinutes) : '—',
+            r.workedMinutes ? (r.workedMinutes / 60).toFixed(2) : '—',
+            r.timeInMethod ? statusLabel(r.timeInMethod) : '—',
+            statusLabel(r.status),
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'attendance', entityId: 'list', action: 'EXPORTED', summary: `Exported the attendance list as PDF (${rows.length} row(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'attendance.pdf');
   }),
 );
 
@@ -868,30 +976,46 @@ leaveRoutes.get(
   }),
 );
 
+/**
+ * The leave list's where-builder — the screen's rows and the printed list
+ * read the same set. A `view_own` holder (or `?scope=mine`) sees their own
+ * filings; `?ids=` narrows to the rows ticked, ANDed with that rule.
+ */
+async function leaveListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.LeaveRequestWhereInput> {
+  const and: Prisma.LeaveRequestWhereInput[] = [];
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('ghr.leave.view_all');
+  if (onlyOwn || q.scope === 'mine') {
+    const mine = await myEmployee(me.id);
+    and.push({ employeeId: mine?.id ?? '__none__' });
+  }
+  const f = q.filters;
+  const status = asEnum(LeaveStatus, f.status);
+  if (status) and.push({ status });
+  if (f.employeeId) and.push({ employeeId: f.employeeId });
+  if (f.leaveTypeId) and.push({ leaveTypeId: f.leaveTypeId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { reason: { contains: q.search, mode: 'insensitive' } },
+        { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const LEAVE_SORTS = ['number', 'startDate', 'createdAt'];
+
 leaveRoutes.get(
   '/',
   requireAny('ghr.leave.view_all', 'ghr.leave.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.LeaveRequestWhereInput = {};
-
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('ghr.leave.view_all');
-    if (onlyOwn || q.scope === 'mine') {
-      const mine = await myEmployee(me.id);
-      where.employeeId = mine?.id ?? '__none__';
-    }
-    const status = asEnum(LeaveStatus, q.filters.status);
-    if (status) where.status = status;
-    if (q.filters.employeeId) where.employeeId = q.filters.employeeId;
-    if (q.filters.leaveTypeId) where.leaveTypeId = q.filters.leaveTypeId;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { reason: { contains: q.search, mode: 'insensitive' } },
-        { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = await leaveListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.leaveRequest.findMany({
@@ -900,7 +1024,7 @@ leaveRoutes.get(
           employee: { select: { id: true, employeeNo: true, firstName: true, lastName: true } },
           leaveType: { select: { id: true, name: true, isPaid: true } },
         },
-        orderBy: orderBy(q, ['number', 'startDate', 'createdAt'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, LEAVE_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -908,6 +1032,78 @@ leaveRoutes.get(
     ]);
 
     res.json(listResult(rows.map((r) => ({ ...r, days: num(r.days) })), total, q));
+  }),
+);
+
+/**
+ * The leave list on paper — the list as filtered (or the rows ticked),
+ * through `leaveListWhere`, so the paper is the screen it was printed off.
+ * Declared above `/:id`, or that route swallows it.
+ */
+leaveRoutes.get(
+  '/pdf',
+  requireAny('ghr.leave.view_all', 'ghr.leave.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = await leaveListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, employee, leaveType] = await Promise.all([
+      prisma.leaveRequest.findMany({
+        where,
+        include: {
+          employee: { select: { employeeNo: true, firstName: true, lastName: true } },
+          leaveType: { select: { name: true, isPaid: true } },
+        },
+        orderBy: orderBy(q, LEAVE_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.leaveRequest.count({ where }),
+      f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
+      f.leaveTypeId ? prisma.leaveType.findUnique({ where: { id: f.leaveTypeId }, select: { name: true } }) : null,
+    ]);
+
+    const status = asEnum(LeaveStatus, f.status);
+    const reference = listReference(count, rows.length, ['leave request', 'leave requests'], [
+      q.search && `search "${q.search}"`,
+      status && `status ${statusLabel(status)}`,
+      f.leaveTypeId && `type ${leaveType?.name ?? 'not found'}`,
+      f.employeeId && `employee ${employee ? `${employee.firstName} ${employee.lastName}` : 'not found'}`,
+      (q.scope === 'mine' || (!me.isSuperAdmin && !me.permissions.has('ghr.leave.view_all'))) && 'mine only',
+      f.ids && 'the rows selected',
+    ]);
+    /** A day as a list prints it, with the time a half day carries. */
+    const at = (d: Date, time: string | null) => (time ? `${formatShortDate(d)} ${time}` : formatShortDate(d));
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Leave Requests',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Employee', 'Leave type', 'From', 'To', 'Days', 'Reason', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left'],
+          rows: rows.map((r) => [
+            r.number,
+            { title: `${r.employee.lastName}, ${r.employee.firstName}`, body: r.employee.employeeNo },
+            { title: r.leaveType.name, body: r.leaveType.isPaid ? 'Paid' : 'Unpaid' },
+            at(r.startDate, r.startTime),
+            at(r.endDate, r.endTime),
+            String(num(r.days)),
+            r.reason,
+            statusLabel(r.status),
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'leave_request', entityId: 'list', action: 'EXPORTED', summary: `Exported the leave list as PDF (${rows.length} request(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'leave-requests.pdf');
   }),
 );
 
@@ -1483,30 +1679,61 @@ function presentOt<T extends OtMoney>(ot: T) {
   };
 }
 
+/**
+ * The overtime list's where-builder — the screen's rows and the printed list
+ * read the same set. A `view_own` holder (or `?scope=mine`) sees their own
+ * filings; `?ids=` narrows to the rows ticked, ANDed with that rule.
+ */
+async function overtimeListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.OvertimeRequestWhereInput> {
+  const and: Prisma.OvertimeRequestWhereInput[] = [];
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('ghr.overtime.view_all');
+  if (onlyOwn || q.scope === 'mine') {
+    const mine = await myEmployee(me.id);
+    and.push({ employeeId: mine?.id ?? '__none__' });
+  }
+  const f = q.filters;
+  const stage = asEnum(OtStage, f.stage);
+  if (stage) and.push({ stage });
+  if (f.jobId) and.push({ jobId: f.jobId });
+  if (f.employeeId) and.push({ employeeId: f.employeeId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { reason: { contains: q.search, mode: 'insensitive' } },
+        { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const OVERTIME_SORTS = ['number', 'date', 'createdAt'];
+
+/**
+ * An overtime stage in the words the screen uses — the pill and the Stage
+ * filter (`STAGES` in web/src/pages/hr/Overtime.tsx). The paper prints these,
+ * never `statusLabel`'s "Prior approved", so it says what the screen it was
+ * printed from says. Change both together.
+ */
+export const OT_STAGE_LABEL: Record<OtStage, string> = {
+  PRIOR: 'Awaiting authorisation',
+  PRIOR_APPROVED: 'Authorised — work it',
+  ACTUAL_FILED: 'Actual filed, awaiting approval',
+  APPROVED: 'Approved and charged',
+  REJECTED: 'Rejected',
+  CANCELLED: 'Cancelled',
+};
+
 overtimeRoutes.get(
   '/',
   requireAny('ghr.overtime.view_all', 'ghr.overtime.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.OvertimeRequestWhereInput = {};
-
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('ghr.overtime.view_all');
-    if (onlyOwn || q.scope === 'mine') {
-      const mine = await myEmployee(me.id);
-      where.employeeId = mine?.id ?? '__none__';
-    }
-    const stage = asEnum(OtStage, q.filters.stage);
-    if (stage) where.stage = stage;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.employeeId) where.employeeId = q.filters.employeeId;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { reason: { contains: q.search, mode: 'insensitive' } },
-        { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = await overtimeListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.overtimeRequest.findMany({
@@ -1516,7 +1743,7 @@ overtimeRoutes.get(
           job: { select: { id: true, number: true, name: true } },
           costCategory: { select: { id: true, name: true } },
         },
-        orderBy: orderBy(q, ['number', 'date', 'createdAt'], { date: 'desc' }),
+        orderBy: orderBy(q, OVERTIME_SORTS, { date: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -1524,6 +1751,100 @@ overtimeRoutes.get(
     ]);
 
     res.json(listResult(rows.map(presentOt), total, q));
+  }),
+);
+
+/**
+ * The overtime list on paper — the list as filtered (or the rows ticked),
+ * through `overtimeListWhere`, so the paper is the screen it was printed
+ * off. The cost is the screen's: the amount an approved filing was charged
+ * at, never the hourly rate or the premium behind it — a project's paper
+ * never carries a colleague's pay. The total runs over every filing the
+ * filter matched, not only those printed. Declared above `/:id`, or that
+ * route swallows it.
+ */
+overtimeRoutes.get(
+  '/pdf',
+  requireAny('ghr.overtime.view_all', 'ghr.overtime.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = await overtimeListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, sums, currency, employee, job] = await Promise.all([
+      prisma.overtimeRequest.findMany({
+        where,
+        select: {
+          number: true,
+          stage: true,
+          date: true,
+          plannedStart: true,
+          plannedEnd: true,
+          actualStart: true,
+          actualEnd: true,
+          estimatedHours: true,
+          actualHours: true,
+          reason: true,
+          amount: true,
+          employee: { select: { firstName: true, lastName: true } },
+          job: { select: { number: true } },
+          costCategory: { select: { name: true } },
+        },
+        orderBy: orderBy(q, OVERTIME_SORTS, { date: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.overtimeRequest.count({ where }),
+      prisma.overtimeRequest.aggregate({ where, _sum: { amount: true } }),
+      companyCurrency(),
+      f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
+      f.jobId ? prisma.job.findUnique({ where: { id: f.jobId }, select: { number: true } }) : null,
+    ]);
+
+    const stage = asEnum(OtStage, f.stage);
+    const reference = listReference(count, rows.length, ['overtime request', 'overtime requests'], [
+      q.search && `search "${q.search}"`,
+      stage && `stage ${OT_STAGE_LABEL[stage]}`,
+      f.jobId && `project ${job?.number ?? 'not found'}`,
+      f.employeeId && `employee ${employee ? `${employee.firstName} ${employee.lastName}` : 'not found'}`,
+      (q.scope === 'mine' || (!me.isSuperAdmin && !me.permissions.has('ghr.overtime.view_all'))) && 'mine only',
+      f.ids && 'the rows selected',
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Overtime Requests',
+      date: new Date(),
+      reference,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Employee', 'Date', 'Hours', 'Charged to', `Cost (${currency})`, 'Stage'],
+          align: ['left', 'left', 'left', 'right', 'left', 'right', 'left'],
+          rows: rows.map((r) => [
+            r.number,
+            { title: `${r.employee.lastName}, ${r.employee.firstName}`, body: r.reason },
+            {
+              title: formatShortDate(r.date),
+              body: `${r.actualStart ?? r.plannedStart}–${r.actualEnd ?? r.plannedEnd}`,
+            },
+            r.actualHours == null
+              ? { title: String(num(r.estimatedHours)), body: 'estimated' }
+              : String(num(r.actualHours)),
+            r.job ? { title: r.job.number, body: r.costCategory?.name } : 'No project',
+            r.amount == null ? '—' : formatAmount(num(r.amount)),
+            OT_STAGE_LABEL[r.stage],
+          ]),
+        },
+        {
+          kind: 'totals',
+          rows: [{ label: totalLabel('Approved cost', count, rows.length), value: formatMoney(num(sums._sum.amount), currency), bold: true }],
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'overtime_request', entityId: 'list', action: 'EXPORTED', summary: `Exported the overtime list as PDF (${rows.length} request(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'overtime-requests.pdf');
   }),
 );
 

@@ -5,7 +5,8 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, approversForStep, historyFor, pendingFor } from '../shared/approvals';
+import { act, approversForStep, contactPhone, historyFor, pendingFor } from '../shared/approvals';
+import { audit } from '../shared/audit';
 import {
   upload,
   cadUpload,
@@ -15,7 +16,7 @@ import {
   deleteAttachment,
   mayAccessAttachments,
 } from '../shared/attachments';
-import { renderDocument, formatDate } from '../shared/pdf';
+import { renderDocument, formatDate, formatMoney, formatAmount, statusLabel, companyCurrency, type PdfRow } from '../shared/pdf';
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/aftermarket';
 import { activityTypeNames } from '../shared/activityTypes';
@@ -899,20 +900,55 @@ export const pdfRoutes = Router();
 pdfRoutes.use(authenticate);
 
 /**
- * Renders a specimen of every section type the engine supports. This is not a
- * toy: it is how you check the company header, fonts, table rules, signature
- * block and page numbering after changing Company Settings — without needing a
- * real quotation to exist first.
+ * Renders a specimen of every section kind the engine supports — fields,
+ * text, a table with a subheading row and title-over-description cells, the
+ * totals block, a Gantt appendix on landscape pages of its own — with a
+ * footer note and sign-offs both signed and pending. This is not a toy: it is
+ * how you check the company header, fonts, table rules, sign-off block and
+ * page numbering after changing Company Settings — without needing a real
+ * quotation to exist first. The figures and names are samples; the words and
+ * formats are the real ones (rule 6): money through formatMoney with the
+ * company's currency, a table's amounts bare under a head that names it, a
+ * status through statusLabel, and each sign-off in the step's own name.
  */
 pdfRoutes.get(
   '/specimen',
   handler(async (req, res) => {
     const me = currentUser(req);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
+    const currency = await companyCurrency();
+    const contact = await prisma.user.findUnique({
+      where: { id: me.id },
+      select: { email: true, phone: true, employee: { select: { mobile: true } } },
+    });
+    const vatRate = Number(company?.vatRate) || 0;
+    const ewtRate = Number(company?.ewtRate) || 0;
+    const pct = (rate: number) => `${+(rate * 100).toFixed(2)}%`;
 
+    // The lines, in centavos so the sample adds up exactly.
+    const lines: { group: string; title: string; body: string; qty: number; unit: string; price: number }[] = [
+      { group: 'Equipment and materials', title: 'Oxygen generator skid', body: 'PSA unit, 30 Nm³/h at 93% ±3, with controller', qty: 1, unit: 'unit', price: 2_400_000_00 },
+      { group: 'Equipment and materials', title: 'Piping, fittings and valves', body: 'Stainless steel interconnection, flanges and supports', qty: 1, unit: 'lot', price: 850_000_00 },
+      { group: 'Services', title: 'Fabrication and installation', body: 'Crew of six, twenty working days on site', qty: 20, unit: 'day', price: 31_000_00 },
+      { group: 'Services', title: 'Testing and commissioning', body: 'Purity, pressure and alarm tests; turnover documents', qty: 1, unit: 'lot', price: 180_000_00 },
+    ];
+    const rows: PdfRow[] = [];
+    let group = '';
+    let subtotal = 0;
+    lines.forEach((l, i) => {
+      if (l.group !== group) rows.push({ heading: (group = l.group) });
+      const amount = l.qty * l.price;
+      subtotal += amount;
+      rows.push([String(i + 1), { title: l.title, body: l.body }, String(l.qty), l.unit, formatAmount(l.price / 100), formatAmount(amount / 100)]);
+    });
+    const vat = Math.round(subtotal * vatRate);
+    const ewt = Math.round(subtotal * ewtRate);
+    const peso = (centavos: number) => formatMoney(centavos / 100, currency);
+
+    const documentNumber = `${company?.numberPrefix ?? 'GT'}-SPEC-${new Date().getFullYear()}-0001`;
     const pdf = await renderDocument({
       title: 'Document Specimen',
-      documentNumber: `${company?.numberPrefix ?? 'GT'}-SPEC-${new Date().getFullYear()}-0001`,
+      documentNumber,
       revision: '0',
       date: new Date(),
       reference: 'Specimen — every G-Core document renders through this one engine',
@@ -926,8 +962,9 @@ pdfRoutes.get(
             { label: 'Project', value: 'Oxygen Plant Expansion' },
             { label: 'Site', value: 'Cagayan de Oro' },
             { label: 'Prepared by', value: me.name },
-            { label: 'Currency', value: company?.currency ?? 'PHP' },
+            { label: 'Currency', value: currency },
             { label: 'Date', value: formatDate(new Date()) },
+            { label: 'Status', value: statusLabel('PENDING_APPROVAL') },
           ],
         },
         {
@@ -937,21 +974,26 @@ pdfRoutes.get(
             'Supply, fabrication, installation, testing and commissioning of the ' +
             'oxygen generation skid including controller assembly, piping ' +
             'interconnection, and turnover documentation. This paragraph exists to ' +
-            'show how body text wraps and justifies inside the content column.',
+            'show how body text wraps inside the content column.',
         },
         {
           kind: 'table',
           title: 'Cost summary',
-          head: ['Category', 'Description', 'Qty', 'Unit cost', 'Amount'],
-          widths: [16, 40, 10, 17, 17],
-          align: ['left', 'left', 'right', 'right', 'right'],
+          head: ['No.', 'Description', 'Qty', 'Unit', `Unit price (${currency})`, `Amount (${currency})`],
+          align: ['right', 'left', 'right', 'left', 'right', 'right'],
+          // The subheading wraps across the narrow "No." and the description.
+          headingSpan: 2,
+          rows,
+        },
+        {
+          kind: 'totals',
           rows: [
-            ['Materials', 'Piping, fittings and valves', '1', '850,000.00', '850,000.00'],
-            ['Equipment', 'Oxygen generator skid', '1', '2,400,000.00', '2,400,000.00'],
-            ['Labor', 'Fabrication and installation crew', '1', '620,000.00', '620,000.00'],
-            ['Subcontractor', 'Civil works', '1', '310,000.00', '310,000.00'],
-            ['Indirect', 'Mobilisation, permits, supervision', '1', '180,000.00', '180,000.00'],
-            ['', 'TOTAL', '', '', '4,360,000.00'],
+            { label: 'Subtotal', value: peso(subtotal) },
+            { label: `VAT (${pct(vatRate)})`, value: peso(vat) },
+            { label: 'Total', value: peso(subtotal + vat) },
+            // EWT is withheld on the gross, never on the VAT.
+            { label: `Less: EWT (${pct(ewtRate)})`, value: peso(ewt) },
+            { label: 'Net collectible', value: peso(subtotal + vat - ewt), bold: true },
           ],
         },
         {
@@ -959,21 +1001,55 @@ pdfRoutes.get(
           title: 'Tax treatment',
           columns: 3,
           fields: [
-            { label: 'VAT rate', value: `${((Number(company?.vatRate) || 0) * 100).toFixed(0)}%` },
-            { label: 'EWT rate', value: `${((Number(company?.ewtRate) || 0) * 100).toFixed(0)}%` },
-            { label: 'Note', value: 'EWT is withheld at source — invoiced ≠ collectible' },
+            { label: 'VAT rate', value: pct(vatRate) },
+            { label: 'EWT rate', value: pct(ewtRate) },
+            // Words, not "≠": a standard PDF font has no such glyph, and its
+            // base character is "=", which says the opposite.
+            { label: 'Note', value: 'EWT is withheld at source — invoiced is not collectible' },
+          ],
+        },
+        {
+          kind: 'gantt',
+          title: 'Schedule',
+          landscape: true,
+          legend: 'Planned duration in working days (Mon–Fri) — 30 working days in all.',
+          groups: [
+            {
+              name: 'Mobilisation',
+              tasks: [
+                { name: 'Site survey', start: 1, days: 2 },
+                { name: 'Permits and clearances', start: 2, days: 4 },
+              ],
+            },
+            {
+              name: 'Installation',
+              tasks: [
+                { name: 'Skid placement', start: 6, days: 3 },
+                { name: 'Piping interconnection', start: 9, days: 10 },
+                { name: 'Controller wiring', start: 14, days: 6 },
+              ],
+            },
+            // A phase with no tasks of its own is a bar over its planned days.
+            { name: 'Testing and commissioning', tasks: [], start: 21, days: 7 },
+            { name: 'Turnover', tasks: [{ name: 'Documents and training', start: 28, days: 3 }] },
           ],
         },
       ],
+      footerNote: 'Specimen — the customer, figures and approvers on this page are samples.',
       signatories: [
-        // Dated, so the specimen shows the timestamp line every real document
-        // carries rather than a preview that quietly omits it.
-        { role: 'Prepared by', name: me.name, position: me.position ?? undefined, at: new Date(Date.now() - 36 * 3600_000) },
-        { role: 'Checked by', name: me.name, at: new Date(Date.now() - 20 * 3600_000) },
-        { role: 'Approved by' },
+        // The author's slot, dated, with the contact lines every real
+        // document prints under the name.
+        { role: 'Prepared by', name: me.name, phone: contact ? contactPhone(contact) : undefined, email: contact?.email, at: new Date(Date.now() - 36 * 3600_000) },
+        // A step that has signed, in the step's own name.
+        { role: 'Technical review', name: me.name, at: new Date(Date.now() - 20 * 3600_000) },
+        // A step still open: who may sign it, over "Pending".
+        { role: 'Finance approval', name: 'Maria Santos or Juan dela Cruz' },
+        // A step nobody can sign yet: the role alone, "Pending".
+        { role: 'CEO approval' },
       ],
     });
 
+    await audit({ entityType: 'pdf_specimen', entityId: 'specimen', action: 'EXPORTED', summary: `Printed the document specimen ${documentNumber}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="gcore-specimen.pdf"');
     res.send(pdf);

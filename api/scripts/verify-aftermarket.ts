@@ -29,6 +29,7 @@
  *     contract's schedule must never delete a call-out.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -58,6 +59,7 @@ import { settleJobOrder } from '../src/routes/jobOrders';
 import { scheduleFor } from '../src/routes/workspace';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
+import { statusLabel } from '../src/shared/pdf';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -93,6 +95,49 @@ const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
 const TAG = 'ZZAM';
 const BASE = `http://localhost:${env.port}/api`;
+
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation
+ * uses. PDFKit Flate-compresses its content streams and writes text as hex
+ * runs split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
+const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
+const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
+/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
+const flat = (t: string) => t.replace(/\s+/g, ' ');
+
+/** A document's bytes and its text. */
+async function printed(token: string, path: string): Promise<{ status: number; text: string }> {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  return { status: res.status, text: res.ok ? pdfText(Buffer.from(await res.arrayBuffer())) : '' };
+}
 
 async function cleanup() {
   // Approvals route to whoever really holds the role, so real people were told
@@ -1671,6 +1716,138 @@ async function main() {
       `${pdf.status} ${pdf.headers.get('content-type')}`,
     );
 
+    // On paper (rule 6): Requested by, dated; then the route in the steps'
+    // own names — printed in capitals, never "Approved by — …" — each under
+    // who may sign it with "Pending", dated once signed; the customer's
+    // acknowledgement last. Nobody signs for the requester.
+    const joSteps =
+      (
+        await prisma.approvalRequest.findFirst({
+          where: { documentType: 'job_order', documentId: raised.body.id },
+          orderBy: { createdAt: 'desc' },
+          include: { workflow: { select: { steps: { orderBy: { sequence: 'asc' } } } } },
+        })
+      )?.workflow?.steps ?? [];
+    const joPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'job_order', entityId: raised.body.id, action: 'EXPORTED' } });
+    const pendingPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
+    const roleOrder = (t: string) => ['REQUESTED BY', ...joSteps.map((st) => st.name.toUpperCase()), 'ACKNOWLEDGED BY (CUSTOMER)'].map((r) => flat(t).indexOf(r));
+    check(
+      'pending, it prints the requester dated, then each step in its own name under who may sign it — Pending — and the customer last',
+      pendingPaper.status === 200 &&
+        joSteps.length === 2 &&
+        roleOrder(pendingPaper.text).every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1])) &&
+        !flat(pendingPaper.text).includes('APPROVED BY') &&
+        pendingPaper.text.includes(director.name) &&
+        pendingPaper.text.includes(manager.name) &&
+        signedCount(pendingPaper.text) === 1 &&
+        pendingCount(pendingPaper.text) === 3,
+      `${pendingPaper.status} ${joSteps.map((st) => st.name).join(' › ')}: ${signedCount(pendingPaper.text)} signed, ${pendingCount(pendingPaper.text)} pending, order ${roleOrder(pendingPaper.text).join(',')}`,
+    );
+    const joRequest = await prisma.approvalRequest.findFirstOrThrow({
+      where: { documentType: 'job_order', documentId: raised.body.id, status: 'PENDING' },
+    });
+    await act({ requestId: joRequest.id, userId: director.id, action: 'APPROVED' });
+    const halfPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
+    check(
+      'once the project manager signs, the paper dates their step; the team leader and the customer stay Pending',
+      halfPaper.status === 200 && signedCount(halfPaper.text) === 2 && pendingCount(halfPaper.text) === 2 && halfPaper.text.includes(director.name),
+      `${halfPaper.status} ${signedCount(halfPaper.text)} signed, ${pendingCount(halfPaper.text)} pending`,
+    );
+    // Returned, the order goes back to its author: its request is closed with
+    // the project manager's signature on it, which nobody now gives — so the
+    // paper (and the page) show the route a resubmission would take, open.
+    await act({ requestId: joRequest.id, userId: manager.id, action: 'RETURNED', comment: 'Fix the scope' });
+    const returnedPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
+    const returnedPage = await api(salesToken, 'GET', `/job-orders/${raised.body.id}`);
+    check(
+      'a returned order prints the route it would take again, every step Pending under its names — no stale signature',
+      returnedPaper.status === 200 &&
+        returnedPage.body.status === 'REJECTED' &&
+        signedCount(returnedPaper.text) === 1 &&
+        pendingCount(returnedPaper.text) === 3 &&
+        returnedPaper.text.includes(director.name) &&
+        joSteps.every((st) => flat(returnedPaper.text).includes(st.name.toUpperCase())),
+      `${returnedPaper.status} ${returnedPage.body.status} ${signedCount(returnedPaper.text)} signed, ${pendingCount(returnedPaper.text)} pending`,
+    );
+    check(
+      'and the page says where a resubmission goes, by name',
+      JSON.stringify(returnedPage.body.route).includes(director.name) && JSON.stringify(returnedPage.body.route).includes(manager.name),
+      JSON.stringify(returnedPage.body.route),
+    );
+    check(
+      'its amount prints as money in the company currency',
+      /\b[A-Z]{3} 500,000\.00\b/.test(returnedPaper.text),
+      returnedPaper.text.split('\n').filter((l) => /500,000/.test(l)).join(' | '),
+    );
+    const joPrintsAfter = await prisma.auditLog.count({ where: { entityType: 'job_order', entityId: raised.body.id, action: 'EXPORTED' } });
+    check('every print of the order is on its trail as EXPORTED', joPrintsAfter === joPrintsBefore + 3, `${joPrintsBefore} → ${joPrintsAfter}`);
+
+    // Returned, then cancelled: the project manager's signature on the closed
+    // request approved a version nobody now decides on, and no step will ever
+    // be signed — so the paper prints the requester alone, no route slot, no
+    // "Approved by", no customer slot, nothing Pending, and says why.
+    const cancelReturned = await api(salesToken, 'POST', `/job-orders/${raised.body.id}/cancel`, { reason: `${TAG} customer postponed` });
+    const cancelledPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
+    const cancelledRoles = flat(cancelledPaper.text);
+    check(
+      'returned, then cancelled, it prints no stale signature and no step left Pending — the requester alone, and the reason',
+      cancelReturned.status === 200 &&
+        cancelledPaper.status === 200 &&
+        signedCount(cancelledPaper.text) === 1 &&
+        pendingCount(cancelledPaper.text) === 0 &&
+        cancelledRoles.includes('REQUESTED BY') &&
+        !joSteps.some((st) => cancelledRoles.includes(st.name.toUpperCase())) &&
+        !cancelledRoles.includes('APPROVED BY') &&
+        !cancelledRoles.includes('ACKNOWLEDGED BY') &&
+        cancelledRoles.includes(`${TAG} customer postponed`),
+      `${cancelReturned.status} ${cancelledPaper.status} ${signedCount(cancelledPaper.text)} signed, ${pendingCount(cancelledPaper.text)} pending`,
+    );
+
+    // Submitted by somebody else who may (edit_all), the request is still the
+    // AUTHOR's: filed in their name, so it goes to THEIR team leader — the
+    // route the page named — and the self-approval rule guards the author,
+    // not whoever pressed the button.
+    const forThem = await api(salesToken, 'POST', '/job-orders', {
+      customerId: customer.id,
+      projectName: `${TAG} Cooling tower`,
+      title: `${TAG} Cooling tower`,
+      scope: 'Tower fill replacement.',
+      targetStart: '2026-11-16',
+      targetFinish: '2026-11-20',
+      projectManagerId: director.id,
+    });
+    const forThemPage = await api(managerToken, 'GET', `/job-orders/${forThem.body.id}`);
+    const submittedForThem = await api(managerToken, 'POST', `/job-orders/${forThem.body.id}/submit`);
+    const forThemRequest = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'job_order', documentId: forThem.body.id },
+      orderBy: { createdAt: 'desc' },
+      include: { workflow: { include: { steps: { orderBy: { sequence: 'asc' } } } } },
+    });
+    const forThemApprovers = forThemRequest
+      ? await Promise.all(
+          (forThemRequest.workflow?.steps ?? []).map((st) => approversForStep(st, forThemRequest.requesterId, prisma, ctxOf(forThemRequest))),
+        )
+      : [];
+    check(
+      'submitted by a colleague who may, the request is filed in the author’s name and goes where the page said it would',
+      forThem.status === 201 &&
+        submittedForThem.status === 200 &&
+        forThemRequest?.requesterId === sales.id &&
+        forThemApprovers.length === 2 &&
+        forThemApprovers[0].includes(director.id) &&
+        forThemApprovers[1].includes(manager.id) &&
+        JSON.stringify(forThemPage.body.route).includes(director.name) &&
+        JSON.stringify(forThemPage.body.route).includes(manager.name),
+      `${forThem.status} ${submittedForThem.status} ${submittedForThem.body.error ?? ''} requester ${forThemRequest?.requesterId === sales.id ? 'author' : forThemRequest?.requesterId}`,
+    );
+    const submittedTwice = await api(managerToken, 'POST', `/job-orders/${forThem.body.id}/submit`);
+    check(
+      'and a second submit of the same order is refused, never a second request',
+      submittedTwice.status === 400 &&
+        (await prisma.approvalRequest.count({ where: { documentType: 'job_order', documentId: forThem.body.id } })) === 1,
+      `${submittedTwice.status} ${submittedTwice.body.error ?? ''}`,
+    );
+
     const options = await api(salesToken, 'GET', `/job-orders/options?customerId=${customer.id}`);
     const offeredQ = (options.body.quotations as { id: string; costed: boolean; amount: number }[] | undefined)?.find((q) => q.id === orderQuotation.id);
     check(
@@ -1693,6 +1870,26 @@ async function main() {
         cancelledVisit?.status === 'CANCELLED' &&
         cancelledOrder.cancelReason === 'Customer fixed it themselves',
       `${cancelApproved.status} ${cancelledOrder?.status} / ${cancelledVisit?.status}`,
+    );
+    // Cancelled AFTER its route approved it, the approval is what happened:
+    // the paper keeps every signature given, dated, and leaves nothing
+    // "Pending" (an unacknowledged customer slot is left out, not open).
+    const approvedRequest = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'job_order', documentId: contractOrder.id },
+      orderBy: { createdAt: 'desc' },
+      include: { workflow: { select: { steps: true } } },
+    });
+    const signedSteps = approvedRequest?.workflow?.steps.length ?? 0;
+    const acknowledged = cancelledOrder?.customerAcknowledgedAt ? 1 : 0;
+    const afterApprovalPaper = await printed(managerToken, `/job-orders/${contractOrder.id}/pdf`);
+    check(
+      'cancelled after approval, it still prints every signature given, each dated, and nothing Pending',
+      afterApprovalPaper.status === 200 &&
+        approvedRequest?.status === 'APPROVED' &&
+        signedSteps > 0 &&
+        signedCount(afterApprovalPaper.text) === 1 + signedSteps + acknowledged &&
+        pendingCount(afterApprovalPaper.text) === 0,
+      `${afterApprovalPaper.status} ${approvedRequest?.status} ${signedSteps} steps: ${signedCount(afterApprovalPaper.text)} signed, ${pendingCount(afterApprovalPaper.text)} pending`,
     );
     const cancelDone = await api(managerToken, 'POST', `/job-orders/${warrantyOrder.id}/cancel`, {
       reason: 'too late',
@@ -1793,6 +1990,30 @@ async function main() {
     check(
       'and the export left an audit row',
       !!(await prisma.auditLog.findFirst({ where: { entityType: 'installed_asset', entityId: 'list', action: 'EXPORTED' } })),
+    );
+    // A list's words: the issued code under "Number", every status through
+    // statusLabel ("Active", never "active" or "ACTIVE"), and the selection
+    // said when only ticked rows printed.
+    const baseText = pdfText(basePdf);
+    const basePieces = baseText.split('\n');
+    check(
+      'the printed register heads its code "Number" and prints each status as a word',
+      flat(baseText).includes('NUMBER') &&
+        !basePieces.includes('CODE') &&
+        basePieces.includes('Active') &&
+        !basePieces.includes('active') &&
+        !basePieces.includes('ACTIVE'),
+      basePieces.filter((l) => /NUMBER|CODE|ctive|ACTIVE/.test(l)).join(' | ').slice(0, 200),
+    );
+    const pickedPaper = await printed(managerToken, `/installed-assets/pdf?ids=${typed.body.id}`);
+    check(
+      'Print selected prints only the ticked machine, and says so — "1 machine", never "machine(s)"',
+      pickedPaper.status === 200 &&
+        flat(pickedPaper.text).includes(`${TAG} 12F Makati Center`) &&
+        flat(pickedPaper.text).includes('the rows selected') &&
+        /\b1 machine\b(?!s)/.test(flat(pickedPaper.text)) &&
+        !pickedPaper.text.includes('machine(s)'),
+      `${pickedPaper.status} ${flat(pickedPaper.text).match(/[\d,]+ machines?[^—]*/)?.[0] ?? ''}`,
     );
 
     const bulk = await api(engineerToken, 'POST', `/installed-assets/from-job/${project.id}`, {
@@ -2458,6 +2679,181 @@ async function main() {
       'an engineer cannot change the aftermarket rules',
       nosy.status === 403,
       String(nosy.status),
+    );
+
+    // ── Every list prints (rule 6, A5) ───────────────────────────────────────
+    //
+    // `GET <list>/pdf`, above `/:id`, reading the list's own where-builder —
+    // so the paper holds exactly the rows the list holds — on landscape
+    // pages, the count said and every filter named, `?ids=` printing only the
+    // rows ticked, and each print audited as an EXPORTED of the list.
+    console.log('\nThe lists on paper (over HTTP)');
+    const listCurrency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
+    const listPeso = (n: number) => `${listCurrency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const LANDSCAPE = '841.89x595.28';
+    type ListRow = Record<string, unknown> & { id: string; status: string };
+    const saysCount = (text: string, n: number, noun: readonly [string, string]) =>
+      new RegExp(`(^|[^\\d,])${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}\\b`).test(text);
+    const paperOf = async (token: string, path: string) => {
+      const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+      const type = res.headers.get('content-type') ?? '';
+      if (!res.ok) return { status: res.status, type, text: '', boxes: [] as string[] };
+      const bytes = Buffer.from(await res.arrayBuffer());
+      const boxes = [...bytes.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map((m) => `${m[1]}x${m[2]}`);
+      return { status: res.status, type, text: flat(pdfText(bytes)), boxes };
+    };
+    const live = (rows: ListRow[], amount: (r: ListRow) => number) => rows.filter((r) => r.status !== 'CANCELLED').reduce((t, r) => t + amount(r), 0);
+    const lists: {
+      path: string;
+      entity: string;
+      noun: readonly [string, string];
+      key: (r: ListRow) => string;
+      /** The total, and what the note under it calls a cancelled row it leaves out. */
+      total?: { label: RegExp; of: (rows: ListRow[]) => number; cancelled: readonly [string, string] };
+    }[] = [
+      {
+        path: 'job-orders',
+        entity: 'job_order',
+        noun: ['job order', 'job orders'],
+        key: (r) => String(r.number),
+        // A cancelled order's amount prints in brackets and is not counted.
+        total: { label: /Total before VAT/, of: (rows) => live(rows, (r) => Number(r.amount ?? 0)), cancelled: ['cancelled job order', 'cancelled job orders'] },
+      },
+      {
+        path: 'service-contracts',
+        entity: 'service_contract',
+        noun: ['service contract', 'service contracts'],
+        key: (r) => String(r.number),
+        total: {
+          label: /Total value/,
+          of: (rows) => live(rows, (r) => Number((r.job as { contractValue: number }).contractValue)),
+          cancelled: ['cancelled service contract', 'cancelled service contracts'],
+        },
+      },
+      { path: 'service-visits', entity: 'service_visit', noun: ['visit', 'visits'], key: (r) => String(r.number) },
+      { path: 'service-reports', entity: 'service_report', noun: ['report', 'reports'], key: (r) => String(r.number) },
+      { path: 'installed-assets', entity: 'installed_asset', noun: ['machine', 'machines'], key: (r) => String(r.code) },
+    ];
+    for (const l of lists) {
+      const listed = await api(managerToken, 'GET', `/${l.path}?search=${TAG}&pageSize=200`);
+      const rows = (listed.body.rows ?? []) as ListRow[];
+      const before = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
+      const paper = await paperOf(managerToken, `/${l.path}/pdf?search=${TAG}`);
+      const after = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
+      check(
+        `${l.path}: its paper is a PDF of exactly the rows the list holds, the count said and the search named, on landscape pages, audited as an export of the list`,
+        paper.status === 200 &&
+          paper.type.startsWith('application/pdf') &&
+          rows.length > 0 &&
+          rows.length === Number(listed.body.total) &&
+          rows.every((r) => paper.text.includes(l.key(r))) &&
+          saysCount(paper.text, rows.length, l.noun) &&
+          paper.text.includes(`search "${TAG}"`) &&
+          paper.boxes.length > 0 &&
+          paper.boxes.every((b) => b === LANDSCAPE) &&
+          after === before + 1,
+        `${paper.status} ${paper.type}, ${rows.length} of ${listed.body.total} listed, missing ${rows.filter((r) => !paper.text.includes(l.key(r))).map(l.key).join(',') || 'none'}, pages ${[...new Set(paper.boxes)].join(',')}, audited ${before} → ${after}`,
+      );
+      if (l.total) {
+        const expected = Math.round(l.total.of(rows) * 100) / 100;
+        const printedTotal = paper.text.match(new RegExp(`${l.total.label.source} ([A-Z]{3} [\\d,.]+)`))?.[1];
+        check(`${l.path}: its total is what the rows it lists add up to, a cancelled one's left out`, printedTotal === listPeso(expected), `${printedTotal} vs ${listPeso(expected)}`);
+        // Leaving them out is said one way on every document (finance's
+        // words): a plain total, then "N cancelled …, in brackets, is/are not
+        // counted." — never a count-less suffix on the total's label.
+        const cancelledRows = rows.filter((r) => r.status === 'CANCELLED').length;
+        const note = cancelledRows
+          ? `${cancelledRows} ${cancelledRows === 1 ? l.total.cancelled[0] : l.total.cancelled[1]}, in brackets, ${cancelledRows === 1 ? 'is' : 'are'} not counted.`
+          : null;
+        check(
+          `${l.path}: the note under the total says how many cancelled rows are in brackets (${cancelledRows}) — the one wording`,
+          (note ? paper.text.includes(note) : !paper.text.includes('in brackets')) && !paper.text.includes('cancelled not counted'),
+          paper.text.match(/[^.]{0,60}in brackets[^.]*\./)?.[0] ?? 'no note',
+        );
+      }
+      const [first] = rows;
+      const ticked = await paperOf(managerToken, `/${l.path}/pdf?ids=${first?.id ?? 'none'}`);
+      check(
+        `${l.path}: ?ids= prints only the row ticked, and says so`,
+        ticked.status === 200 &&
+          !!first &&
+          ticked.text.includes(l.key(first)) &&
+          rows.slice(1).every((r) => !ticked.text.includes(l.key(r))) &&
+          saysCount(ticked.text, 1, l.noun) &&
+          ticked.text.includes('the rows selected'),
+        `${ticked.status} ${ticked.text.match(/Reference: .{0,120}/)?.[0] ?? ''}`,
+      );
+      const filterQuery = `status=${first?.status}`;
+      // A returned order or report reads "Returned" on paper, as on the screen.
+      const returned = first?.status === 'REJECTED' && (l.path === 'job-orders' || l.path === 'service-reports');
+      const filterWords = `status ${statusLabel(returned ? 'RETURNED' : first?.status)}`;
+      const narrowed = await api(managerToken, 'GET', `/${l.path}?search=${TAG}&${filterQuery}&pageSize=200`);
+      const filtered = await paperOf(managerToken, `/${l.path}/pdf?search=${TAG}&${filterQuery}`);
+      check(
+        `${l.path}: a filter narrows the paper as it narrows the list, and the paper names it ("${filterWords}")`,
+        filtered.status === 200 &&
+          Number(narrowed.body.total) > 0 &&
+          Number(narrowed.body.total) <= rows.length &&
+          saysCount(filtered.text, Number(narrowed.body.total), l.noun) &&
+          filtered.text.includes(filterWords) &&
+          ((narrowed.body.rows ?? []) as ListRow[]).every((r) => filtered.text.includes(l.key(r))),
+        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}; ${filtered.text.match(/Reference: .{0,160}/)?.[0] ?? ''}`,
+      );
+    }
+
+    // A view_own holder prints what their list shows them — the orders they
+    // raised or are sent on — and ticking somebody else's id prints nothing.
+    const ownListed = await api(salesToken, 'GET', `/job-orders?search=${TAG}&pageSize=200`);
+    const ownRows = (ownListed.body.rows ?? []) as ListRow[];
+    const allOrders = (((await api(managerToken, 'GET', `/job-orders?search=${TAG}&pageSize=200`)).body.rows ?? []) as ListRow[]);
+    const otherOrder = allOrders.find((r) => !ownRows.some((o) => o.id === r.id));
+    const ownPaper = await paperOf(salesToken, `/job-orders/pdf?search=${TAG}`);
+    const otherOrderPaper = otherOrder ? await paperOf(salesToken, `/job-orders/pdf?ids=${otherOrder.id}`) : null;
+    check(
+      'a job-order view_own holder prints their own and nobody else’s — the visibility rule is ANDed with ?ids=',
+      ownPaper.status === 200 &&
+        saysCount(ownPaper.text, ownRows.length, ['job order', 'job orders']) &&
+        ownRows.every((r) => ownPaper.text.includes(String(r.number))) &&
+        (!otherOrder || (otherOrderPaper?.status === 200 && saysCount(otherOrderPaper.text, 0, ['job order', 'job orders']) && !otherOrderPaper.text.includes(String(otherOrder.number)))),
+      `${ownPaper.status} ${ownRows.length} own of ${allOrders.length}; other's ${otherOrder ? String(otherOrder.number) : 'none'}`,
+    );
+
+    // The schedule's paper is named by what narrowed it, in words and short
+    // dates: an engineer, a contract, a due window.
+    const contractForPaper = await prisma.serviceContract.findFirst({ where: { job: { name: { startsWith: TAG } } }, select: { id: true, number: true } });
+    if (contractForPaper) {
+      const window = await paperOf(managerToken, `/service-visits/pdf?contractId=${contractForPaper.id}&from=2026-01-01&to=2031-12-31`);
+      const windowList = await api(managerToken, 'GET', `/service-visits?contractId=${contractForPaper.id}&from=2026-01-01&to=2031-12-31&pageSize=200`);
+      check(
+        'the schedule’s paper names its contract and due window — "contract …", "due 01/01/2026 to 12/31/2031"',
+        window.status === 200 &&
+          window.text.includes(`contract ${contractForPaper.number}`) &&
+          window.text.includes('due 01/01/2026 to 12/31/2031') &&
+          saysCount(window.text, Number(windowList.body.total), ['visit', 'visits']),
+        window.text.match(/Reference: .{0,200}/)?.[0] ?? String(window.status),
+      );
+    }
+
+    // A list longer than the cap prints its first 1,000 and says so. Dated
+    // and cancelled out of every other figure, and gone again straight after.
+    await prisma.serviceVisit.createMany({
+      data: Array.from({ length: 1001 }, (_, n) => ({
+        number: `${TAG}-CAP-${String(n + 1).padStart(4, '0')}`,
+        kind: 'INSPECTION' as const,
+        status: 'CANCELLED' as const,
+        customerId: customer.id,
+        dueDate: day('2018-01-01'),
+      })),
+    });
+    const capped = await paperOf(managerToken, `/service-visits/pdf?search=${TAG}-CAP&sort=number&dir=asc`);
+    await prisma.serviceVisit.deleteMany({ where: { number: { startsWith: `${TAG}-CAP-` } } });
+    check(
+      'a list longer than the cap prints its first 1,000 rows and says "first 1,000 of 1,001 visits printed"',
+      capped.status === 200 &&
+        capped.text.includes('first 1,000 of 1,001 visits printed') &&
+        capped.text.includes(`${TAG}-CAP-1000`) &&
+        !capped.text.includes(`${TAG}-CAP-1001`),
+      `${capped.status} ${capped.text.match(/Reference: .{0,120}/)?.[0] ?? ''}`,
     );
 
     // ── The G-OPS overview ───────────────────────────────────────────────────

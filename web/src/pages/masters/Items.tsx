@@ -183,6 +183,7 @@ export function Items() {
       <DataList<ItemRow>
         listKey="items"
         endpoint="/items"
+        printPath="/api/items/pdf"
         columns={columns}
         rowKey={(i) => i.id}
         searchPlaceholder="Search name, code, part number…"

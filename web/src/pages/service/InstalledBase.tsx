@@ -80,7 +80,7 @@ export function InstalledBase() {
   const columns: Column<Asset>[] = [
     {
       key: 'code',
-      label: 'Code',
+      label: 'Number',
       sortKey: 'code',
       width: '140px',
       render: (r) => <span className="mono">{r.code}</span>,
@@ -168,6 +168,9 @@ export function InstalledBase() {
         endpoint="/installed-assets"
         columns={columns}
         rowKey={(r) => r.id}
+        rowLabel={(r) => `Select ${r.code}`}
+        // Tick boxes for Print selected and Export selected (`?ids=`, the rows' ids).
+        selectable
         reloadToken={reload}
         searchPlaceholder="Search code, name, serial, model, customer…"
         emptyTitle="Nothing registered yet"

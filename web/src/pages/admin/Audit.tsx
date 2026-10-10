@@ -95,6 +95,7 @@ export function Audit() {
       <DataList<AuditRow>
         listKey="admin-audit"
         endpoint="/audit"
+        printPath="/api/audit/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         onRowClick={(r) => {

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, IssueStatus, BorrowStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -10,6 +10,8 @@ import {
   orderBy,
   notFound,
   badRequest,
+  idsFilter,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, type ResolvedUser } from '../permissions/resolve';
@@ -18,7 +20,18 @@ import { registerSearch } from '../shared/search';
 import { stockOnHand } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { renderDocument, formatMoney, formatDate } from '../shared/pdf';
+import { contactPhone } from '../shared/approvals';
+import {
+  renderDocument,
+  formatMoney,
+  formatAmount,
+  formatDate,
+  formatShortDate,
+  statusLabel,
+  companyCurrency,
+  type PdfSection,
+  type Signatory,
+} from '../shared/pdf';
 import { manilaDate } from '../shared/day';
 import {
   receiveStock,
@@ -48,6 +61,71 @@ function asDate(v: string | null | undefined): Date | null {
  */
 const today = () => manilaDate(new Date());
 
+// ── The printed lists ────────────────────────────────────────────────────────
+//
+// Every register here has a printed twin, `GET <list>/pdf` above `/:id`: the
+// SAME where-builder the list reads (with `?ids=`, the rows ticked), the
+// list's own sort, at most LIST_CAP rows, a reference naming every filter
+// that narrowed it, and an EXPORTED audit row with entityId 'list' (rule 6).
+
+/** The most rows a printed list carries; the reference says when it was cut. */
+const LIST_CAP = 1000;
+
+/**
+ * A printed list's reference: "12 receivings", or, cut at the cap, "first
+ * 1,000 of 1,234 receivings printed" — then every filter that narrowed it.
+ */
+function listReference(count: number, printed: number, noun: readonly [string, string], filters: (string | null | false | undefined)[]): string {
+  const n = (v: number) => v.toLocaleString('en-PH');
+  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
+  const named = filters.filter(Boolean);
+  return named.length ? `${head} — ${named.join(' · ')}` : head;
+}
+
+/** A choice filter's value, checked against what it can be: an unknown one is a 400, never a 500. */
+function choice<T extends string>(value: string | undefined, allowed: Record<string, T>, label: string): T | undefined {
+  if (!value) return undefined;
+  const values = Object.values(allowed);
+  if (!(values as string[]).includes(value)) throw badRequest(`${label} is one of ${values.join(', ')}`);
+  return value as T;
+}
+
+/** The project a `?jobId=` names, as a filter line prints it. */
+async function projectNamed(jobId: string | undefined): Promise<string | null> {
+  if (!jobId) return null;
+  const job = await prisma.job.findUnique({ where: { id: jobId }, select: { number: true } });
+  return `project ${job?.number ?? 'not found'}`;
+}
+
+/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
+const totalLabel = (label: string, count: number, printed: number) =>
+  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
+
+/** A figure that is listed but not summed (a cancelled document's), in brackets. */
+const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
+
+// The notes under a list's total, worded as G-FIN's papers word them
+// (`counted` / `bracketNote` / `listNotes` in routes/finance.ts) so money
+// prints one way in every module. Kept here rather than imported, because
+// importing routes/finance would load its approval subscribers with this
+// module.
+
+/** "1 draft issue" / "3 draft issues" — a count in a note under a list. */
+const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+
+/** The note under a list whose closed documents (cancelled) print in brackets. */
+const bracketNote = (n: number, noun: readonly [string, string]) =>
+  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
+
+/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
+const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
+  const said = notes.filter((v): v is string => !!v);
+  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
+};
+
+/** A quantity as a list prints it: grouped, to its own three decimals at most. */
+const qty = (v: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(v);
+
 // ════════════════════════════════════════════════════════════════════
 //  RECEIVING
 // ════════════════════════════════════════════════════════════════════
@@ -55,24 +133,36 @@ const today = () => manilaDate(new Date());
 export const receivingRoutes = Router();
 receivingRoutes.use(authenticate);
 
+const RECEIVING_SORTS = ['number', 'receivedDate'];
+
+/** Which receivings a list query means — one rule for the list and its printed twin. */
+function receivingListWhere(q: ListQuery): Prisma.ReceivingWhereInput {
+  const and: Prisma.ReceivingWhereInput[] = [];
+  if (q.filters.orderId) and.push({ orderId: q.filters.orderId });
+  // A receiving has no job of its own — it inherits its order's. The job
+  // workspace's Procurement tab lists a project's deliveries through this.
+  if (q.filters.jobId) and.push({ order: { jobId: q.filters.jobId } });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { deliveryRefNo: { contains: q.search, mode: 'insensitive' } },
+        { order: { number: { contains: q.search, mode: 'insensitive' } } },
+        { order: { supplier: { name: { contains: q.search, mode: 'insensitive' } } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return and.length ? { AND: and } : {};
+}
+
 receivingRoutes.get(
   '/',
   require_('gchain.receiving.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.ReceivingWhereInput = {};
-    if (q.filters.orderId) where.orderId = q.filters.orderId;
-    // A receiving has no job of its own — it inherits its order's. The job
-    // workspace's Procurement tab lists a project's deliveries through this.
-    if (q.filters.jobId) where.order = { jobId: q.filters.jobId };
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { deliveryRefNo: { contains: q.search, mode: 'insensitive' } },
-        { order: { number: { contains: q.search, mode: 'insensitive' } } },
-        { order: { supplier: { name: { contains: q.search, mode: 'insensitive' } } } },
-      ];
-    }
+    const where = receivingListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.receiving.findMany({
@@ -91,7 +181,7 @@ receivingRoutes.get(
           receivedBy: { select: { id: true, name: true } },
           items: { select: { quantity: true, unitCost: true } },
         },
-        orderBy: orderBy(q, ['number', 'receivedDate'], { receivedDate: 'desc' }),
+        orderBy: orderBy(q, RECEIVING_SORTS, { receivedDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -115,6 +205,86 @@ receivingRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The receiving list on paper, through `receivingListWhere` (or the rows
+ * ticked, `?ids=`): what arrived, against which order, into where, and its
+ * value at the order's price — the figure the screen shows. Above `/:id`.
+ */
+receivingRoutes.get(
+  '/pdf',
+  require_('gchain.receiving.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = receivingListWhere(q);
+    const f = q.filters;
+    const [rows, count, lines, currency, project, order] = await Promise.all([
+      prisma.receiving.findMany({
+        where,
+        include: {
+          order: { select: { number: true, supplier: { select: { name: true } }, job: { select: { number: true } } } },
+          warehouse: { select: { name: true } },
+          receivedBy: { select: { name: true } },
+          items: { select: { quantity: true, unitCost: true } },
+        },
+        orderBy: orderBy(q, RECEIVING_SORTS, { receivedDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.receiving.count({ where }),
+      // Every line of every receiving listed, for the total — summed exactly
+      // and rounded once, never the sum of rounded rows.
+      prisma.receivingItem.findMany({ where: { receiving: where }, select: { quantity: true, unitCost: true } }),
+      companyCurrency(),
+      projectNamed(f.jobId),
+      f.orderId ? prisma.purchaseOrder.findUnique({ where: { id: f.orderId }, select: { number: true } }) : null,
+    ]);
+    const reference = listReference(count, rows.length, ['receiving', 'receivings'], [
+      q.search && `search "${q.search}"`,
+      f.orderId && `order ${order?.number ?? 'not found'}`,
+      project,
+      f.ids && 'the rows selected',
+    ]);
+    const valueOf = (items: { quantity: Prisma.Decimal; unitCost: Prisma.Decimal }[]) =>
+      items.reduce((s, i) => s.add(i.quantity.mul(i.unitCost)), new Prisma.Decimal(0));
+
+    // Nine columns: landscape, each sized from what it holds (rule 6).
+    const pdf = await renderDocument({
+      title: 'Receivings',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Against', 'For', 'Into', 'Received', 'Lines', `Value (${currency})`, 'Received by', 'DR no.'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
+          rows: rows.map((r) => [
+            r.number,
+            { title: r.order.supplier.name, body: r.order.number },
+            r.order.job?.number ?? 'Stock',
+            r.warehouse?.name ?? 'Site',
+            formatShortDate(r.receivedDate),
+            String(r.items.length),
+            formatAmount(valueOf(r.items).toFixed(2)),
+            r.receivedBy.name,
+            r.deliveryRefNo ?? '',
+          ]),
+        },
+        {
+          kind: 'totals',
+          rows: [{ label: totalLabel('Total received', count, rows.length), value: formatMoney(valueOf(lines).toFixed(2), currency), bold: true }],
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'receiving', entityId: 'list', action: 'EXPORTED', summary: `Exported the receiving list as PDF (${rows.length} receiving(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="receivings.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -445,21 +615,34 @@ receivingRoutes.post(
 export const stockIssueRoutes = Router();
 stockIssueRoutes.use(authenticate);
 
+const ISSUE_SORTS = ['number', 'issueDate'];
+
+/** Which stock issues a list query means — one rule for the list and its printed twin. */
+function issueListWhere(q: ListQuery): Prisma.StockIssueWhereInput {
+  const and: Prisma.StockIssueWhereInput[] = [];
+  const status = choice(q.filters.status, IssueStatus, 'Status');
+  if (status) and.push({ status });
+  if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { purpose: { contains: q.search, mode: 'insensitive' } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return and.length ? { AND: and } : {};
+}
+
 stockIssueRoutes.get(
   '/',
   require_('gchain.stock_issuance.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.StockIssueWhereInput = {};
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumIssueStatusFilter['equals'];
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { purpose: { contains: q.search, mode: 'insensitive' } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = issueListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.stockIssue.findMany({
@@ -470,7 +653,7 @@ stockIssueRoutes.get(
           issuedBy: { select: { id: true, name: true } },
           items: { select: { amount: true } },
         },
-        orderBy: orderBy(q, ['number', 'issueDate'], { issueDate: 'desc' }),
+        orderBy: orderBy(q, ISSUE_SORTS, { issueDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -496,6 +679,88 @@ stockIssueRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The stock issue list on paper, through `issueListWhere` (or the rows
+ * ticked, `?ids=`), valued at the moving average each line was issued at — the
+ * figure the screen shows. A cancelled issue moved nothing: its value prints
+ * in brackets and is not summed. A draft has moved nothing YET: it is summed,
+ * as G-FIN sums a draft invoice, and the note under the total says how many —
+ * nothing leaves the warehouse on one until it is issued. Above `/:id`.
+ */
+stockIssueRoutes.get(
+  '/pdf',
+  require_('gchain.stock_issuance.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = issueListWhere(q);
+    const f = q.filters;
+    const [rows, count, live, cancelled, drafts, currency, project] = await Promise.all([
+      prisma.stockIssue.findMany({
+        where,
+        include: {
+          job: { select: { number: true, name: true } },
+          warehouse: { select: { name: true } },
+          items: { select: { amount: true } },
+        },
+        orderBy: orderBy(q, ISSUE_SORTS, { issueDate: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.stockIssue.count({ where }),
+      prisma.stockIssueItem.aggregate({ where: { issue: { AND: [where, { status: { not: 'CANCELLED' } }] } }, _sum: { amount: true } }),
+      prisma.stockIssue.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+      prisma.stockIssue.count({ where: { AND: [where, { status: 'DRAFT' }] } }),
+      companyCurrency(),
+      projectNamed(f.jobId),
+    ]);
+    const reference = listReference(count, rows.length, ['stock issue', 'stock issues'], [
+      q.search && `search "${q.search}"`,
+      f.status && `status ${statusLabel(f.status)}`,
+      project,
+      f.ids && 'the rows selected',
+    ]);
+    const valueOf = (r: (typeof rows)[number]) => r.items.reduce((s, i) => s.add(i.amount), new Prisma.Decimal(0));
+
+    // Eight columns: landscape, each sized from what it holds (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Issue', 'From', 'To', 'Date', 'Lines', `Value (${currency})`, 'Status'],
+        align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left'],
+        rows: rows.map((i) => [
+          i.number,
+          { title: i.purpose, body: i.job ? `${i.job.number} — ${i.job.name}` : 'No project' },
+          i.warehouse.name,
+          i.issuedToName ?? '',
+          formatShortDate(i.issueDate),
+          String(i.items.length),
+          bracketed(formatAmount(valueOf(i).toFixed(2)), i.status !== 'CANCELLED'),
+          statusLabel(i.status),
+        ]),
+      },
+      {
+        kind: 'totals',
+        rows: [{ label: totalLabel('Total', count, rows.length), value: formatMoney(num(live._sum.amount), currency), bold: true }],
+      },
+    ];
+    sections.push(
+      ...listNotes([
+        drafts > 0 &&
+          `The total includes ${counted(drafts, ['draft issue', 'draft issues'])}, not issued yet — nothing leaves the warehouse on ${drafts === 1 ? 'it' : 'them'} until ${drafts === 1 ? 'it is' : 'they are'}.`,
+        bracketNote(cancelled, ['cancelled issue', 'cancelled issues']),
+      ]),
+    );
+
+    const pdf = await renderDocument({ title: 'Stock Issues', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      { entityType: 'stock_issue', entityId: 'list', action: 'EXPORTED', summary: `Exported the stock issue list as PDF (${rows.length} issue(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="stock-issues.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -966,28 +1231,57 @@ stockIssueRoutes.post(
 export const borrowRoutes = Router();
 borrowRoutes.use(authenticate);
 
+const BORROW_SORTS = ['number', 'dueAt', 'borrowedAt'];
+
+/**
+ * Which borrow slips a list query means — one rule for the list and its
+ * printed twin. `day` is the one "today" for the filter, each row's flag and
+ * both dashboard tiles, so a slip the list flags as overdue is one the Overdue
+ * filter finds. Overdue, when asked, decides the status by itself.
+ */
+function borrowListWhere(q: ListQuery, day: Date): Prisma.BorrowSlipWhereInput {
+  const and: Prisma.BorrowSlipWhereInput[] = [];
+  if (q.filters.overdue === 'true') and.push({ status: { in: ['OUT', 'PARTIALLY_RETURNED'] }, dueAt: { lt: day } });
+  else {
+    const status = choice(q.filters.status, BorrowStatus, 'Status');
+    if (status) and.push({ status });
+  }
+  if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { borrowerName: { contains: q.search, mode: 'insensitive' } },
+        { purpose: { contains: q.search, mode: 'insensitive' } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return and.length ? { AND: and } : {};
+}
+
+/**
+ * How late a slip is, against the DAY, not the instant: dueAt is a date, held
+ * as UTC midnight, so `dueAt < new Date()` flagged a slip from 08:00 on the
+ * day it was due back. 0 for a slip that is back or not yet due.
+ */
+function daysOverdue(slip: { status: string; dueAt: Date }, day: Date): number {
+  const out = slip.status === 'OUT' || slip.status === 'PARTIALLY_RETURNED';
+  return out && slip.dueAt < day ? Math.floor((day.getTime() - slip.dueAt.getTime()) / 86400000) : 0;
+}
+
+/** What is still out on a slip, across its lines. */
+const stillOut = (items: { quantity: Prisma.Decimal; returnedQty: Prisma.Decimal }[]) =>
+  cents(items.reduce((s, i) => s + num(i.quantity) - num(i.returnedQty), 0));
+
 borrowRoutes.get(
   '/',
   require_('gchain.borrow_slips.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.BorrowSlipWhereInput = {};
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumBorrowStatusFilter['equals'];
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    // One "today" for the filter, each row's flag and both dashboard tiles, so a
-    // slip the list flags as overdue is one the Overdue filter finds.
     const day = today();
-    if (q.filters.overdue === 'true') {
-      where.status = { in: ['OUT', 'PARTIALLY_RETURNED'] };
-      where.dueAt = { lt: day };
-    }
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { borrowerName: { contains: q.search, mode: 'insensitive' } },
-        { purpose: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
+    const where = borrowListWhere(q, day);
 
     const [rows, total] = await Promise.all([
       prisma.borrowSlip.findMany({
@@ -997,7 +1291,7 @@ borrowRoutes.get(
           warehouse: { select: { id: true, name: true } },
           items: { include: { item: { select: { id: true, code: true, name: true } } } },
         },
-        orderBy: orderBy(q, ['number', 'dueAt', 'borrowedAt'], { borrowedAt: 'desc' }),
+        orderBy: orderBy(q, BORROW_SORTS, { borrowedAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -1006,35 +1300,101 @@ borrowRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => ({
-          id: r.id,
-          number: r.number,
-          status: r.status,
-          borrowerName: r.borrowerName,
-          purpose: r.purpose,
-          borrowedAt: r.borrowedAt,
-          dueAt: r.dueAt,
-          returnedAt: r.returnedAt,
-          job: r.job,
-          warehouse: r.warehouse,
-          itemCount: r.items.length,
-          outstandingQty: cents(
-            r.items.reduce((s, i) => s + num(i.quantity) - num(i.returnedQty), 0),
-          ),
-          // Against the DAY, not the instant: dueAt is a date, held as UTC
-          // midnight, so `dueAt < new Date()` flagged a slip from 08:00 on the
-          // day it was due back.
-          isOverdue:
-            (r.status === 'OUT' || r.status === 'PARTIALLY_RETURNED') && r.dueAt < day,
-          daysOverdue:
-            (r.status === 'OUT' || r.status === 'PARTIALLY_RETURNED') && r.dueAt < day
-              ? Math.floor((day.getTime() - r.dueAt.getTime()) / 86400000)
-              : 0,
-        })),
+        rows.map((r) => {
+          const late = daysOverdue(r, day);
+          return {
+            id: r.id,
+            number: r.number,
+            status: r.status,
+            borrowerName: r.borrowerName,
+            purpose: r.purpose,
+            borrowedAt: r.borrowedAt,
+            dueAt: r.dueAt,
+            returnedAt: r.returnedAt,
+            job: r.job,
+            warehouse: r.warehouse,
+            itemCount: r.items.length,
+            outstandingQty: stillOut(r.items),
+            isOverdue: late > 0,
+            daysOverdue: late,
+          };
+        }),
         total,
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The borrow slip list on paper, through `borrowListWhere` (or the rows
+ * ticked, `?ids=`), with the same "today" deciding what is overdue — a slip
+ * past its date prints "Overdue, n days" where the screen shows its badge.
+ * Above `/:id`.
+ */
+borrowRoutes.get(
+  '/pdf',
+  require_('gchain.borrow_slips.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const day = today();
+    const where = borrowListWhere(q, day);
+    const f = q.filters;
+    const [rows, count, project] = await Promise.all([
+      prisma.borrowSlip.findMany({
+        where,
+        include: {
+          job: { select: { number: true } },
+          items: { select: { quantity: true, returnedQty: true } },
+        },
+        orderBy: orderBy(q, BORROW_SORTS, { borrowedAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.borrowSlip.count({ where }),
+      projectNamed(f.jobId),
+    ]);
+    const reference = listReference(count, rows.length, ['borrow slip', 'borrow slips'], [
+      q.search && `search "${q.search}"`,
+      f.overdue === 'true' ? 'overdue' : f.status && `status ${statusLabel(f.status)}`,
+      project,
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape, each sized from what it holds (rule 6).
+    const pdf = await renderDocument({
+      title: 'Borrow Slips',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Borrower', 'Project', 'Out', 'Due back', 'Items', 'Still out', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'right', 'left'],
+          rows: rows.map((b) => {
+            const late = daysOverdue(b, day);
+            const out = stillOut(b.items);
+            return [
+              b.number,
+              { title: b.borrowerName, body: b.purpose },
+              b.job?.number ?? '',
+              formatShortDate(b.borrowedAt),
+              formatShortDate(b.dueAt),
+              String(b.items.length),
+              out ? qty(out) : '',
+              late ? `Overdue, ${late} day${late === 1 ? '' : 's'}` : statusLabel(b.status),
+            ];
+          }),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'borrow_slip', entityId: 'list', action: 'EXPORTED', summary: `Exported the borrow slip list as PDF (${rows.length} slip(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="borrow-slips.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -1311,22 +1671,57 @@ borrowRoutes.post(
 export const inventoryRoutes = Router();
 inventoryRoutes.use(authenticate);
 
-inventoryRoutes.get(
-  '/',
-  require_('gchain.inventory.view_all'),
-  handler(async (req, res) => {
-    const q = listQuery(req);
-    const where: Prisma.InventoryBalanceWhereInput = {};
-    if (q.filters.warehouseId) where.warehouseId = q.filters.warehouseId;
-    if (q.search) {
-      where.item = {
+/**
+ * Available to issue: on hand less what is out on loan, to the centavo. The
+ * one rule, with `belowReorder`, for the list's flag, its Reorder filter, its
+ * paper and the reports' "Below reorder level" tile.
+ */
+const availableOf = (b: { quantity: Prisma.Decimal; borrowedQty: Prisma.Decimal }) => cents(num(b.quantity) - num(b.borrowedQty));
+
+/** At or under the item's reorder level; an item with no level never is. */
+function belowReorder(b: { quantity: Prisma.Decimal; borrowedQty: Prisma.Decimal; item: { reorderLevel: Prisma.Decimal | null } }): boolean {
+  return b.item.reorderLevel !== null && availableOf(b) <= num(b.item.reorderLevel);
+}
+
+/**
+ * Which balances a stock list query means — one rule for the list and its
+ * printed twin. "Below level" compares two columns, which a where-clause
+ * cannot, so it is decided by `belowReorder` over the candidates and named by
+ * id: the list then pages and counts the reorder set like any other, where it
+ * used to filter one page after the database had cut it.
+ */
+async function inventoryListWhere(q: ListQuery): Promise<Prisma.InventoryBalanceWhereInput> {
+  const and: Prisma.InventoryBalanceWhereInput[] = [];
+  if (q.filters.warehouseId) and.push({ warehouseId: q.filters.warehouseId });
+  if (q.search) {
+    and.push({
+      item: {
         OR: [
           { name: { contains: q.search, mode: 'insensitive' } },
           { code: { contains: q.search, mode: 'insensitive' } },
           { partNumber: { contains: q.search, mode: 'insensitive' } },
         ],
-      };
-    }
+      },
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  if (q.filters.needsReorder === 'true') {
+    const candidates = await prisma.inventoryBalance.findMany({
+      where: { AND: [...and, { item: { reorderLevel: { not: null } } }] },
+      select: { id: true, quantity: true, borrowedQty: true, item: { select: { reorderLevel: true } } },
+    });
+    and.push({ id: { in: candidates.filter(belowReorder).map((b) => b.id) } });
+  }
+  return and.length ? { AND: and } : {};
+}
+
+inventoryRoutes.get(
+  '/',
+  require_('gchain.inventory.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = await inventoryListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.inventoryBalance.findMany({
@@ -1352,28 +1747,104 @@ inventoryRoutes.get(
       prisma.inventoryBalance.count({ where }),
     ]);
 
-    const mapped = rows.map((r) => {
-      const quantity = num(r.quantity);
-      const borrowed = num(r.borrowedQty);
-      const reorderLevel = r.item.reorderLevel == null ? null : num(r.item.reorderLevel);
-      const available = cents(quantity - borrowed);
-      return {
-        id: r.id,
-        item: { ...r.item, minStock: r.item.minStock == null ? null : num(r.item.minStock), reorderLevel },
-        warehouse: r.warehouse,
-        quantity,
-        borrowedQty: borrowed,
-        available,
-        averageCost: num(r.averageCost),
-        value: cents(quantity * num(r.averageCost)),
-        needsReorder: reorderLevel !== null && available <= reorderLevel,
-      };
+    res.json(
+      listResult(
+        rows.map((r) => {
+          const quantity = num(r.quantity);
+          return {
+            id: r.id,
+            item: {
+              ...r.item,
+              minStock: r.item.minStock == null ? null : num(r.item.minStock),
+              reorderLevel: r.item.reorderLevel == null ? null : num(r.item.reorderLevel),
+            },
+            warehouse: r.warehouse,
+            quantity,
+            borrowedQty: num(r.borrowedQty),
+            available: availableOf(r),
+            averageCost: num(r.averageCost),
+            value: cents(quantity * num(r.averageCost)),
+            needsReorder: belowReorder(r),
+          };
+        }),
+        total,
+        q,
+      ),
+    );
+  }),
+);
+
+/**
+ * The stock on hand on paper, through `inventoryListWhere` (or the rows
+ * ticked, `?ids=`): what the screen shows — on hand, on loan, available, the
+ * moving average and the value — with "Below level" written where the screen
+ * marks a reorder. The total is valued as `stockOnHand()` values stock (the
+ * sum rounded once), so the unfiltered paper prints the dashboard's figure.
+ */
+inventoryRoutes.get(
+  '/pdf',
+  require_('gchain.inventory.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = await inventoryListWhere(q);
+    const f = q.filters;
+    const [rows, count, all, currency, warehouse] = await Promise.all([
+      prisma.inventoryBalance.findMany({
+        where,
+        include: {
+          item: { select: { code: true, name: true, unit: true, reorderLevel: true, category: { select: { name: true } } } },
+          warehouse: { select: { name: true } },
+        },
+        orderBy: { item: { name: 'asc' } },
+        take: LIST_CAP,
+      }),
+      prisma.inventoryBalance.count({ where }),
+      prisma.inventoryBalance.findMany({ where, select: { quantity: true, averageCost: true } }),
+      companyCurrency(),
+      f.warehouseId ? prisma.warehouse.findUnique({ where: { id: f.warehouseId }, select: { name: true } }) : null,
+    ]);
+    const reference = listReference(count, rows.length, ['stock line', 'stock lines'], [
+      q.search && `search "${q.search}"`,
+      f.warehouseId && `warehouse ${warehouse?.name ?? 'not found'}`,
+      f.needsReorder === 'true' && 'below reorder level',
+      f.ids && 'the rows selected',
+    ]);
+    const total = cents(all.reduce((s, b) => s + num(b.quantity) * num(b.averageCost), 0));
+
+    // Ten columns: landscape, each sized from what it holds (rule 6).
+    const pdf = await renderDocument({
+      title: 'Stock on Hand',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Item', 'Warehouse', 'Unit', 'On hand', 'On loan', 'Available', 'Reorder at', `Avg. cost (${currency})`, `Value (${currency})`, 'Reorder'],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right', 'right', 'left'],
+          rows: rows.map((b) => [
+            { title: b.item.name, body: [b.item.code, b.item.category?.name].filter(Boolean).join(' · ') },
+            b.warehouse.name,
+            b.item.unit,
+            qty(num(b.quantity)),
+            num(b.borrowedQty) ? qty(num(b.borrowedQty)) : '',
+            qty(availableOf(b)),
+            b.item.reorderLevel == null ? '' : qty(num(b.item.reorderLevel)),
+            formatAmount(num(b.averageCost)),
+            formatAmount(cents(num(b.quantity) * num(b.averageCost))),
+            belowReorder(b) ? 'Below level' : '',
+          ]),
+        },
+        { kind: 'totals', rows: [{ label: totalLabel('Stock value', count, rows.length), value: formatMoney(total, currency), bold: true }] },
+      ],
     });
-
-    // Filtering on a derived flag has to happen after the mapping.
-    const filtered = q.filters.needsReorder === 'true' ? mapped.filter((m) => m.needsReorder) : mapped;
-
-    res.json(listResult(filtered, q.filters.needsReorder === 'true' ? filtered.length : total, q));
+    await audit(
+      { entityType: 'inventory', entityId: 'list', action: 'EXPORTED', summary: `Exported the stock on hand as PDF (${rows.length} line(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="stock-on-hand.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -1459,17 +1930,16 @@ inventoryRoutes.get(
       entry.value = cents(entry.value + value);
       byWarehouse.set(b.warehouseId, entry);
 
-      const level = b.item.reorderLevel == null ? null : num(b.item.reorderLevel);
-      const available = cents(quantity - num(b.borrowedQty));
-      if (level !== null && available <= level) {
+      // The list's own rule, so this count is the total its Reorder filter opens.
+      if (belowReorder(b)) {
         reorder.push({
           itemId: b.item.id,
           warehouseId: b.warehouseId,
           item: b.item.name,
           code: b.item.code,
           warehouse: b.warehouse.name,
-          available,
-          reorderLevel: level,
+          available: availableOf(b),
+          reorderLevel: num(b.item.reorderLevel),
         });
       }
     }
@@ -1502,8 +1972,48 @@ stockIssueRoutes.get(
     if (!issue) throw notFound('Stock issue not found');
 
     const view = presentIssue(issue);
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
+    const currency = await companyCurrency();
+
+    // No route, so the people who acted, each dated (rule 6): whoever raised
+    // the slip, whoever pressed Issue — the trail's EXECUTED row, which is the
+    // only record of who moved the stock — and the person it was issued to,
+    // dated by the handover; "Pending" under their name while it is a draft.
+    // Never a slot nobody fills: no "Noted by", and no receiver when the slip
+    // names none. The contact lines are read here for the paper only.
+    const lines = async (userId: string | null) => {
+      if (!userId) return {};
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, phone: true, employee: { select: { mobile: true } } },
+      });
+      return user ? { phone: contactPhone(user), email: user.email } : {};
+    };
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: issue.issuedBy.name, ...(await lines(issue.issuedById)), at: issue.createdAt },
+    ];
+    if (issue.status === 'ISSUED') {
+      const executed = await prisma.auditLog.findFirst({
+        where: { entityType: 'stock_issue', entityId: issue.id, action: 'EXECUTED' },
+        orderBy: { at: 'desc' },
+        select: { actorId: true, actorName: true, at: true },
+      });
+      const issuerId = executed?.actorId ?? issue.issuedById;
+      signatories.push({
+        role: 'Issued by',
+        name: executed?.actorName ?? issue.issuedBy.name,
+        ...(await lines(issuerId)),
+        at: issue.issuedAt ?? executed?.at ?? null,
+      });
+    }
+    // A cancelled slip is handed to nobody, so it names no receiver.
+    if (issue.issuedToName && issue.status !== 'CANCELLED') {
+      signatories.push({
+        role: 'Received by',
+        name: issue.issuedToName,
+        ...(await lines(issue.issuedToId)),
+        at: issue.status === 'ISSUED' ? issue.issuedAt : null,
+      });
+    }
 
     const pdf = await renderDocument({
       title: 'Stock Issuance',
@@ -1519,36 +2029,36 @@ stockIssueRoutes.get(
             { label: 'Project', value: issue.job ? `${issue.job.number}` : '—' },
             { label: 'Issued to', value: issue.issuedToName ?? '—' },
             { label: 'Purpose', value: issue.purpose },
-            { label: 'Issued by', value: issue.issuedBy.name },
-            { label: 'Status', value: issue.status },
+            // Who raised the slip — `issuedById` is its author, set on
+            // create. Who pressed Issue is the sign-off's "Issued by".
+            { label: 'Prepared by', value: issue.issuedBy.name },
+            { label: 'Status', value: statusLabel(issue.status) },
           ],
         },
         {
           kind: 'table',
           title: 'Items issued',
-          head: ['#', 'Code', 'Description', 'Qty', 'Unit', 'Unit cost', 'Amount'],
-          widths: [5, 14, 33, 9, 8, 15, 16],
+          head: ['No.', 'Code', 'Description', 'Qty', 'Unit', `Unit cost (${currency})`, `Amount (${currency})`],
           align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
-          rows: [
-            ...view.items.map((i, n) => [
-              String(n + 1),
-              i.item.code,
-              i.item.name,
-              String(i.quantity),
-              i.item.unit,
-              formatMoney(i.unitCost, currency),
-              formatMoney(i.amount, currency),
-            ]),
-            ['', '', 'TOTAL', '', '', '', formatMoney(view.value, currency)],
-          ],
+          rows: view.items.map((i, n) => [
+            String(n + 1),
+            i.item.code,
+            i.item.name,
+            String(i.quantity),
+            i.item.unit,
+            formatAmount(i.unitCost),
+            formatAmount(i.amount),
+          ]),
         },
+        { kind: 'totals', rows: [{ label: 'Total', value: formatMoney(view.value, currency), bold: true }] },
       ],
-      signatories: [
-        { role: 'Issued by', name: issue.issuedBy.name, at: issue.createdAt },
-        { role: 'Received by', name: issue.issuedToName ?? undefined },
-        { role: 'Noted by' },
-      ],
+      signatories,
     });
+
+    await audit(
+      { entityType: 'stock_issue', entityId: issue.id, action: 'EXPORTED', summary: `Printed ${issue.number}` },
+      req,
+    );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${issue.number}.pdf"`);

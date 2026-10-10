@@ -89,6 +89,7 @@ export function Canvasses() {
       <DataList<CanvassRow>
         listKey="canvasses"
         endpoint="/canvasses"
+        printPath="/api/canvasses/pdf"
         columns={columns}
         rowKey={(c) => c.id}
         searchPlaceholder="Search number, request…"
@@ -802,6 +803,7 @@ export function PurchaseOrders() {
       <DataList<PoRow>
         listKey="purchase-orders"
         endpoint="/purchase-orders"
+        printPath="/api/purchase-orders/pdf"
         columns={columns}
         rowKey={(o) => o.id}
         searchPlaceholder="Search number, supplier, project…"

@@ -23,11 +23,13 @@ import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify, type NotificationType } from '../shared/notifications';
 import { mailConfig, sendMail } from '../shared/mail';
-import { renderDocument, formatDate, formatDateTime, type PdfSection, type Signatory } from '../shared/pdf';
+import { renderDocument, formatDate, formatShortDate, formatDateTime, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
+import { contactPhone } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
 import { registerAttachmentGuard, cadUpload, saveAttachment, attachmentPath } from '../shared/attachments';
 import { dayKey } from '../shared/aftermarket';
 import { safeHttpUrl } from '../shared/partners';
+import { LIST_CAP, listReference, listDay, namedInFilter } from './jobs';
 
 /**
  * CAD job orders — the design team's queue (2026-10-09, the owner's call:
@@ -380,34 +382,64 @@ cadJobOrderRoutes.get(
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const { base, where } = cadListWhere(me, q);
-    const [rows, summary] = await Promise.all([
-      prisma.cadJobOrder.findMany({ where, include: cadInclude, orderBy: orderBy(q, SORTABLE, { createdAt: 'desc' }), take: 1000 }),
-      cadListSummary(base),
+    const { where } = cadListWhere(me, q);
+    // The counts are of the set PRINTED — the list's own where, filters and
+    // all — never the queue's cards, which stand under the visibility rule
+    // alone: a list narrowed to one designer must not say the whole queue's
+    // open and overdue.
+    const [rows, count, open, overdue] = await Promise.all([
+      prisma.cadJobOrder.findMany({ where, include: cadInclude, orderBy: orderBy(q, SORTABLE, { createdAt: 'desc' }), take: LIST_CAP }),
+      prisma.cadJobOrder.count({ where }),
+      prisma.cadJobOrder.count({ where: { AND: [where, { status: { in: OPEN } }] } }),
+      prisma.cadJobOrder.count({ where: { AND: [where, { status: { in: OPEN }, neededBy: { lt: today() } }] } }),
     ]);
     const f = q.filters;
+    // Every filter `cadListWhere` applies is said on the paper, by name — a
+    // list narrowed to one drawing type, customer, project, quotation,
+    // designer or requestor never reads as the whole queue. The customer,
+    // project and people are read the way every delivery list reads them
+    // (`namedInFilter`); the drawing type and quotation are this list's own.
+    const [inFilter, designer, drawingType, quotation] = await Promise.all([
+      namedInFilter({ customerId: f.customerId, jobId: f.jobId, userId: f.requestedById }),
+      namedInFilter({ userId: f.assignedToId && f.assignedToId !== 'none' ? f.assignedToId : undefined }),
+      f.drawingTypeId ? prisma.cadDrawingType.findUnique({ where: { id: f.drawingTypeId }, select: { name: true } }) : null,
+      f.quotationId ? prisma.quotation.findUnique({ where: { id: f.quotationId }, select: { number: true } }) : null,
+    ]);
     const filters = [
       q.search ? `search "${q.search}"` : null,
-      f.status ? STATUS_LABEL[asEnum(CadJobOrderStatus, f.status)!] : null,
-      f.priority ? `${PRIORITY_LABEL[asEnum(CadPriority, f.priority)!]} priority` : null,
+      f.status ? `status ${statusLabel(f.status)}` : null,
+      f.priority ? `priority ${statusLabel(f.priority)}` : null,
       f.open === 'true' ? 'open' : null,
       f.overdue === 'true' ? 'overdue' : null,
       f.unassigned === 'true' ? 'not yet assigned' : null,
-      f.assignedToId ? (f.assignedToId === 'none' ? 'no designer' : 'one designer') : null,
-      f.requestedById ? 'one requestor' : null,
-      f.neededFrom || f.neededTo ? `needed ${f.neededFrom ?? '…'} to ${f.neededTo ?? '…'}` : null,
-      q.scope === 'mine' ? 'mine' : null,
+      f.assignedToId ? (f.assignedToId === 'none' ? 'no designer' : `designer ${designer.person}`) : null,
+      inFilter.person ? `requested by ${inFilter.person}` : null,
+      f.drawingTypeId ? `drawing type ${drawingType?.name ?? 'not found'}` : null,
+      inFilter.customer ? `customer ${inFilter.customer}` : null,
+      inFilter.project ? `project ${inFilter.project}` : null,
+      f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
+      f.neededFrom || f.neededTo ? `needed ${listDay(f.neededFrom)} to ${listDay(f.neededTo)}` : null,
+      q.scope === 'mine' ? 'raised by me or on my board' : null,
       f.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+    ];
+    // "12 CAD job orders, 5 open, 2 overdue" — "first 1,000 of 1,234 … printed"
+    // when cut — then every filter that narrowed it.
+    const named = filters.filter(Boolean);
+    const reference =
+      `${listReference(count, rows.length, ['CAD job order', 'CAD job orders'], [])}, ` +
+      `${open.toLocaleString('en-PH')} open, ${overdue.toLocaleString('en-PH')} overdue` +
+      (named.length ? ` — ${named.join(' · ')}` : '');
+    // Ten columns: landscape, and the engine's own widths (a head never
+    // breaks mid-word); a list's dates are short, its words statusLabel's.
     const pdf = await renderDocument({
       title: 'CAD Job Orders',
       date: new Date(),
-      reference: `${summary.open} open, ${summary.overdue} overdue${rows.length === 1000 ? ', first 1,000 printed' : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      landscape: true,
+      reference,
       sections: [
         {
           kind: 'table',
           head: ['Number', 'Drawing', 'Customer / project', 'Type', 'Requested by', 'Designer', 'Priority', 'Progress', 'Needed by', 'Status'],
-          widths: [1.4, 2.6, 2, 1.2, 1.3, 1.3, 0.8, 0.8, 1.1, 1.1],
           align: ['left', 'left', 'left', 'left', 'left', 'left', 'left', 'right', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
@@ -416,16 +448,19 @@ cadJobOrderRoutes.get(
             r.drawingType?.name ?? '—',
             r.requestedBy.name,
             r.assignedTo?.name ?? 'Open',
-            PRIORITY_LABEL[r.priority],
+            statusLabel(r.priority),
             `${r.progressPct}%`,
-            r.neededBy ? formatDate(r.neededBy) : '—',
-            STATUS_LABEL[r.status],
+            r.neededBy ? formatShortDate(r.neededBy) : '—',
+            statusLabel(r.status),
           ]),
         },
       ],
       signatories: [],
     });
-    await audit({ entityType: 'cad_job_order', entityId: 'list', action: 'EXPORTED', summary: `Printed the CAD job order list (${rows.length} rows)` }, req);
+    await audit(
+      { entityType: 'cad_job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the CAD job orders list as PDF (${listReference(count, rows.length, ['CAD job order', 'CAD job orders'], [])})` },
+      req,
+    );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="cad-job-orders.pdf"');
     res.send(pdf);
@@ -1022,10 +1057,23 @@ cadJobOrderRoutes.get(
     const row = await load(req.params.id);
     if (!mayOpen(me, row)) throw forbidden('That is someone else’s CAD job order');
     const [revisions, comments] = await Promise.all([
-      prisma.cadRevision.findMany({ where: { cadJobOrderId: row.id }, include: { submittedBy: { select: { name: true } } }, orderBy: { sequence: 'asc' } }),
+      prisma.cadRevision.findMany({ where: { cadJobOrderId: row.id }, include: { submittedBy: { select: { id: true, name: true } } }, orderBy: { sequence: 'asc' } }),
       prisma.cadComment.findMany({ where: { cadJobOrderId: row.id }, include: { author: { select: { name: true } }, revision: { select: { sequence: true } } }, orderBy: { createdAt: 'asc' } }),
     ]);
     const revisionFiles = await filesFor('cad_revision', revisions.map((r) => r.id));
+    // The contact lines under each sign-off, for the paper only (the JSON
+    // never carries a mobile); `contactPhone` is the one reading of a number.
+    const latest = revisions.length ? revisions[revisions.length - 1] : null;
+    const contactIds = [...new Set([row.requestedById, row.assignedToId, row.completedById, latest?.submittedBy.id].filter((v): v is string => !!v))];
+    const contacts = new Map(
+      (
+        await prisma.user.findMany({
+          where: { id: { in: contactIds } },
+          select: { id: true, email: true, phone: true, employee: { select: { mobile: true } } },
+        })
+      ).map((u) => [u.id, { phone: contactPhone(u), email: u.email }]),
+    );
+    const contactOf = (id: string | null) => (id ? contacts.get(id) : undefined);
 
     const sections: PdfSection[] = [
       {
@@ -1039,30 +1087,32 @@ cadJobOrderRoutes.get(
           { label: 'Project', value: row.job ? `${row.job.number} — ${row.job.name}` : '—' },
           { label: 'Quotation', value: row.quotation ? `${row.quotation.number} — ${row.quotation.subject}` : '—' },
           { label: 'Job order', value: row.jobOrder ? `${row.jobOrder.number} — ${row.jobOrder.projectName ?? row.jobOrder.title}` : '—' },
-          { label: 'Requested by', value: `${row.requestedBy.name}, ${formatDate(row.createdAt)}` },
+          // The name only: the dated "Requested by" sign-off says when, in
+          // Manila, so the paper never carries two dates for one request.
+          { label: 'Requested by', value: row.requestedBy.name },
           { label: 'Needed by', value: row.neededBy ? formatDate(row.neededBy) : '—' },
           { label: 'Designer', value: row.assignedTo?.name ?? 'Open' },
-          { label: 'Priority', value: PRIORITY_LABEL[row.priority] },
-          { label: 'Status', value: STATUS_LABEL[row.status] },
+          { label: 'Priority', value: statusLabel(row.priority) },
+          { label: 'Status', value: statusLabel(row.status) },
           { label: 'Progress', value: `${row.progressPct}%` },
         ],
       },
       { kind: 'text', title: 'Scope of the drawing', body: row.scope },
-      {
-        kind: 'table',
-        title: 'Revisions',
-        head: ['Rev', 'Submitted', 'By', 'What changed', 'Files'],
-        widths: [0.6, 1.4, 1.4, 4, 2.6],
-        rows: revisions.length
-          ? revisions.map((r) => [
+      // A table of one row of dashes says less than a sentence does.
+      revisions.length
+        ? {
+            kind: 'table',
+            title: 'Revisions',
+            head: ['Revision', 'Submitted', 'By', 'What changed', 'Files'],
+            rows: revisions.map((r) => [
               `R${r.sequence}`,
               formatDateTime(r.submittedAt),
               r.submittedBy.name,
               r.note,
               [...(revisionFiles.get(r.id) ?? []).map((f) => f.fileName), ...(r.externalUrl ? [r.externalUrl] : [])].join('\n') || '—',
-            ])
-          : [['—', '—', '—', 'No revision submitted yet', '—']],
-      },
+            ]),
+          }
+        : { kind: 'text', title: 'Revisions', body: 'No revision submitted yet.' },
     ];
     if (comments.length) {
       sections.push({
@@ -1070,17 +1120,36 @@ cadJobOrderRoutes.get(
         title: 'Thread',
         head: ['When', 'Who', 'Comment'],
         widths: [1.6, 1.6, 6.8],
-        rows: comments.map((c) => [formatDateTime(c.createdAt), c.author.name, `${c.isChangeRequest ? 'CHANGES REQUESTED' : ''}${c.revision ? ` (R${c.revision.sequence})` : ''}${c.isChangeRequest || c.revision ? ': ' : ''}${c.body}`]),
+        rows: comments.map((c) => [formatDateTime(c.createdAt), c.author.name, `${c.isChangeRequest ? 'Changes requested' : ''}${c.revision ? ` (R${c.revision.sequence})` : ''}${c.isChangeRequest || c.revision ? ': ' : ''}${c.body}`]),
       });
     }
     if (row.status === 'CANCELLED' && row.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
     if (row.status === 'ON_HOLD' && row.holdReason) sections.push({ kind: 'text', title: 'On hold', body: row.holdReason });
 
-    const signatories: Signatory[] = [
-      { role: 'Requested by', name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: row.createdAt },
-      { role: 'Drawn by', name: row.assignedTo?.name, position: row.assignedTo?.position ?? undefined, at: row.assignedAt ?? undefined },
-      { role: 'Accepted by', name: row.completedBy?.name, at: row.completedAt ?? undefined },
-    ];
+    // No route: the three sign-offs of what actually happened, each dated —
+    // and never a slot nobody is named for. Requested by the requestor, when
+    // raised. Drawn by whoever submitted the latest revision, when; before
+    // one exists, the designer on it with "Pending" under their name, and no
+    // slot at all while nobody has taken it. Accepted by the requestor, when
+    // they did — "Closed by" the designer or the lead who closed it instead —
+    // and until then the requestor's name over "Pending", for it is theirs
+    // to accept. A cancelled request fills nothing more, so its unfilled
+    // slots are left out rather than printed "Pending" for ever.
+    const cancelled = row.status === 'CANCELLED';
+    const signer = (role: string, id: string | null | undefined, name: string | undefined, at?: Date | null): Signatory => {
+      const c = contactOf(id ?? null);
+      return { role, name, phone: c?.phone, email: c?.email, at: at ?? undefined };
+    };
+    const signatories: Signatory[] = [signer('Requested by', row.requestedById, row.requestedBy.name, row.createdAt)];
+    if (latest) signatories.push(signer('Drawn by', latest.submittedBy.id, latest.submittedBy.name, latest.submittedAt));
+    else if (row.assignedTo && !cancelled) signatories.push(signer('Drawn by', row.assignedToId, row.assignedTo.name));
+    if (row.completedBy) {
+      signatories.push(
+        signer(row.completedById !== row.requestedById ? 'Closed by' : 'Accepted by', row.completedById, row.completedBy.name, row.completedAt),
+      );
+    } else if (!cancelled) {
+      signatories.push(signer('Accepted by', row.requestedById, row.requestedBy.name));
+    }
     const pdf = await renderDocument({
       title: 'CAD Job Order',
       documentNumber: row.number,

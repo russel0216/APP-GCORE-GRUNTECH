@@ -27,6 +27,7 @@
  */
 
 import bcrypt from 'bcryptjs';
+import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -58,6 +59,42 @@ function check(label: string, condition: boolean, detail?: string) {
 }
 
 const money = (a: number, b: number) => Math.abs(a - b) < 0.005;
+
+/** The text runs a PDF shows, in drawing order (verify-foundation.ts's reader). */
+function pdfRuns(pdf: Buffer): string[] {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue; // not every stream is text
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out;
+}
+
+/** The sign-off block's text — from PREPARED BY to the strapline — one line, a wrapped name read whole. */
+function signoffs(runs: string[]): string {
+  const from = runs.indexOf('PREPARED BY');
+  if (from < 0) return '';
+  const tail = runs.slice(from);
+  const end = tail.findIndex((r) => /WWW\.|^Page \d/.test(r));
+  return (end < 0 ? tail : tail.slice(0, end)).join(' ').replace(/\s+/g, ' ').trim();
+}
 const D = (v: number) => new Prisma.Decimal(v);
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
@@ -482,6 +519,71 @@ async function main() {
     "an own-scope colleague's tiles count none of the estimator's costings",
     colleagueTiles.body.finalThisMonth === 0 && colleagueTiles.body.draft === 0,
     JSON.stringify(colleagueTiles.body),
+  );
+
+  // ── The printed list (rule 6, A5): GET /costings/pdf ────────────────────
+  // The list's own query (`costingListWhere`), so the paper is the screen it
+  // was printed off: the same set, the filters named, ?ids= ANDed with the
+  // visibility rule, eight columns on landscape paper, audited.
+  console.log('The printed costing list');
+  const printList = async (token: string, query: string) => {
+    const res = await fetch(`${BASE}/costings/pdf?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+    const bytes = Buffer.from(await res.arrayBuffer());
+    const line = res.ok ? pdfRuns(bytes).join(' ').replace(/\s+/g, ' ') : '';
+    return { status: res.status, type: res.headers.get('content-type') ?? '', bytes, line, flat: line.replace(/ /g, '') };
+  };
+  const printedMine = await prisma.costing.findMany({
+    where: { ownerId: estimator.id, title: { startsWith: TAG } },
+    select: { id: true, number: true, title: true, contractValue: true, status: true },
+  });
+  const listedTotal = Number((await api(tEstimator, 'GET', `/costings?search=${encodeURIComponent(TAG)}&scope=all`)).body.total);
+  const paper = await printList(tEstimator, `search=${encodeURIComponent(TAG)}&scope=all`);
+  check(
+    'GET /costings/pdf answers a PDF, on landscape paper — eight columns, the number column headed "Number"',
+    paper.status === 200 && paper.type.startsWith('application/pdf') && paper.bytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') &&
+      paper.line.includes('NUMBER') && !paper.line.includes('NO.'),
+    `${paper.status} ${paper.type}`,
+  );
+  check(
+    'it prints the list as filtered: the count the list totals, every costing of the estimator’s, the search and the own scope named',
+    printedMine.length >= 2 && listedTotal === printedMine.length && paper.line.includes(`${listedTotal} costings`) &&
+      printedMine.every((c) => paper.flat.includes(c.number.replace(/ /g, ''))) &&
+      paper.line.includes(`search "${TAG}"`) && paper.line.includes('mine only'),
+    paper.line.slice(0, 400),
+  );
+  const listSum = printedMine.reduce((t, c) => t + Number(c.contractValue), 0);
+  check(
+    'its money names the code in the head, and its total is the contract values summed, the bold row last',
+    paper.line.includes('CONTRACT VALUE (PHP)') && paper.line.includes('BUDGETED COST (PHP)') &&
+      paper.line.includes(`Total contract value PHP ${listSum.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`),
+    paper.line.slice(-300),
+  );
+  const finalOne = printedMine.find((c) => c.id === sourceId)!;
+  const draftOne = printedMine.find((c) => c.status === 'DRAFT')!;
+  const filtered = await printList(tEstimator, `search=${encodeURIComponent(TAG)}&status=FINAL`);
+  check(
+    'a filter narrows the paper as it narrows the list, and is named: status Final',
+    filtered.status === 200 && filtered.line.includes('status Final') && filtered.flat.includes(finalOne.number) && !filtered.flat.includes(draftOne.number),
+    filtered.line.slice(0, 300),
+  );
+  const picked = await printList(tEstimator, `ids=${finalOne.id}`);
+  check(
+    '?ids= prints the ticked costing alone, and says so',
+    picked.status === 200 && picked.line.includes('1 costing') && picked.flat.includes(finalOne.number) && !picked.flat.includes(draftOne.number) &&
+      picked.line.includes('the rows selected'),
+    picked.line.slice(0, 300),
+  );
+  const pickedByColleague = await printList(tColleague, `ids=${finalOne.id}&scope=all`);
+  check(
+    '?ids= is ANDed with the visibility rule: an own-scope colleague ticking the estimator’s costing prints none of it',
+    pickedByColleague.status === 200 && pickedByColleague.line.includes('0 costings') && !pickedByColleague.flat.includes(finalOne.number),
+    pickedByColleague.line.slice(0, 300),
+  );
+  const badType = await fetch(`${BASE}/costings/pdf?jobType=NOPE`, { headers: { Authorization: `Bearer ${tEstimator}` } });
+  check('an unknown project type is a 400, never a 500 from the database', badType.status === 400, String(badType.status));
+  check(
+    'printing the list is audited as an export, under the list',
+    (await prisma.auditLog.count({ where: { entityType: 'costing', entityId: 'list', action: 'EXPORTED', actorId: estimator.id } })) >= 3,
   );
 
   const job = await prisma.job.create({
@@ -920,6 +1022,14 @@ async function main() {
   check('resubmitted and signed by all three, it is FINAL', (await prisma.costing.findUnique({ where: { id: sheetId } }))?.status === 'FINAL');
   const reopen = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
   check('the author can still reopen a final costing', reopen.status === 200 && reopen.body.status === 'DRAFT');
+  // Reopened, its last request (approved) is no longer its approval: the
+  // paper prints the route submitting it now would take, every step open.
+  const reopened = signoffs(pdfRuns(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
+  check(
+    'a reopened costing prints the route anew — all three steps Pending, none of the old signatures dated',
+    (reopened.match(/Pending/g) ?? []).length === 3 && reopened.includes(`TECHNICAL MANAGER ${reviewer.name}`),
+    reopened,
+  );
   await api(tEstimator, 'POST', `/costings/${sheetId}/submit`);
   await signCosting(sheetId, [reviewer, teamLeader, ctg]);
 
@@ -935,6 +1045,45 @@ async function main() {
   const colleaguePdf = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tColleague}` } });
   check("own scope: a colleague cannot print somebody else's estimate", colleaguePdf.status === 403, `status ${colleaguePdf.status}`);
 
+  // Rule 6: the sign-offs are the route as the workflow names its steps —
+  // in capitals, nothing added — each under who signed it; the author only
+  // ever as PREPARED BY, never as an approver.
+  const runs = pdfRuns(pdf);
+  const signed = signoffs(runs);
+  check(
+    'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER, TEAM LEADER and CEO (CTG) by their steps’ names',
+    signed.startsWith(`PREPARED BY ${estimator.name} `) &&
+      signed.includes(`TECHNICAL MANAGER ${reviewer.name} `) &&
+      signed.includes(`TEAM LEADER ${teamLeader.name} `) &&
+      signed.includes(`CEO (CTG) ${ctg.name} `) &&
+      !signed.includes('APPROVED BY') &&
+      !signed.includes('Pending'),
+    signed,
+  );
+  check(
+    'each signer with how to reach them, the author too',
+    runs.includes(estimator.email) && runs.includes(reviewer.email) && runs.includes(ctg.email),
+  );
+  check(
+    'its money block reads as the quotation’s — Subtotal, VAT (12%), Total, the bold row last — and no GRAND TOTAL',
+    runs.includes('Subtotal') && runs.some((r) => /^VAT \(\d+(\.\d+)?%\)$/.test(r)) && runs.includes('Total') && !runs.includes('GRAND TOTAL') &&
+      runs.indexOf('Total') > runs.indexOf('Subtotal'),
+    runs.filter((r) => /total|VAT|Margin|cost/i.test(r)).join(' | '),
+  );
+  check('its money columns name the code in the head', runs.includes('AMOUNT (PHP)') || runs.join(' ').includes('AMOUNT (PHP)'));
+  check('the validity prints as a record’s date (October 30, 2026)', runs.some((r) => r.includes('Valid until: October 30, 2026')), runs.filter((r) => r.includes('Valid')).join(' | '));
+  check(
+    'printing the estimate is audited as an export',
+    !!(await prisma.auditLog.findFirst({ where: { entityType: 'costing', entityId: sheetId, action: 'EXPORTED', actorId: estimator.id } })),
+  );
+  // A draft names who will sign each step, "Pending" under them.
+  const drafted = signoffs(pdfRuns(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
+  check(
+    'a draft prints the route it would take: each step by name, who is assigned, Pending under them — never the author',
+    drafted.includes(`TECHNICAL MANAGER ${reviewer.name}`) && (drafted.match(/Pending/g) ?? []).length === 3 && !drafted.includes(`TECHNICAL MANAGER ${estimator.name}`),
+    drafted,
+  );
+
   // Duplicate carries the sheet's new fields.
   const dupSheet = await api(tEstimator, 'POST', `/costings/${sheetId}/duplicate`);
   const dupStored = await prisma.costing.findUnique({ where: { id: dupSheet.body.id as string }, include: { scopeSections: { include: { tasks: true } }, lines: true } });
@@ -946,6 +1095,38 @@ async function main() {
       dupStored?.systemUnit === sheet.systemUnit &&
       dupStored?.scopeSections[0].tasks.some((t) => t.startDay === 3) === true &&
       dupStored?.validUntil === null,
+  );
+
+  // A FINAL costing prints the approval that made it final — and none when
+  // none stands behind it: reopened and made final again with no route (a
+  // project built on the draft, written here as `costingForJob` writes it),
+  // or returned by the approver and then made final that way. Nobody will
+  // ever sign that route, so neither the old signatures nor "Pending" print.
+  const finalSignoffs = async (id: string) =>
+    signoffs(pdfRuns(Buffer.from(await (await fetch(`${BASE}/costings/${id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
+  const noRoute = (s: string) => s.startsWith(`PREPARED BY ${estimator.name}`) && !/TECHNICAL MANAGER|TEAM LEADER|CEO \(CTG\)|APPROVED BY|Pending/.test(s);
+  const reopenAgain = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
+  await prisma.costing.update({ where: { id: sheetId }, data: { status: 'FINAL', finalAt: new Date() } });
+  const staleFinal = await finalSignoffs(sheetId);
+  check(
+    'reopened and made final again with no route behind it, it prints PREPARED BY alone — never the signatures it was reopened from',
+    reopenAgain.status === 200 && noRoute(staleFinal),
+    staleFinal,
+  );
+  const returned = await api(tEstimator, 'POST', '/costings', {
+    title: `${TAG} returned then built on`,
+    lines: [{ costCategoryId: mat.id, name: `${TAG} Returned line`, quantity: 1, unit: 'lot', unitCost: 1000 }],
+  });
+  await api(tEstimator, 'POST', `/costings/${returned.body.id}/submit`);
+  await signCosting(returned.body.id as string, [reviewer]);
+  const returnReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'costing', documentId: returned.body.id as string, status: 'PENDING' } });
+  await act({ requestId: returnReq!.id, userId: teamLeader.id, action: 'REJECTED', comment: 'Not this one' });
+  await prisma.costing.update({ where: { id: returned.body.id as string }, data: { status: 'FINAL', finalAt: new Date() } });
+  const returnedFinal = await finalSignoffs(returned.body.id as string);
+  check(
+    'returned by the team leader and then made final by a project, it prints no step of the returned request — signed or Pending',
+    returned.status === 201 && !!returnReq && noRoute(returnedFinal),
+    returnedFinal,
   );
 
   // ══ The margin rule, the sixth bucket and the carry-over ═══════════════════

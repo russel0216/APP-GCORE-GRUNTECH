@@ -83,6 +83,7 @@ export function Receivings() {
       <DataList<ReceivingRow>
         listKey="receivings"
         endpoint="/receivings"
+        printPath="/api/receivings/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, order, supplier…"
@@ -416,6 +417,7 @@ export function StockIssues() {
       <DataList<IssueRow>
         listKey="stock-issues"
         endpoint="/stock-issues"
+        printPath="/api/stock-issues/pdf"
         columns={columns}
         rowKey={(i) => i.id}
         searchPlaceholder="Search number, purpose, project…"
@@ -1025,6 +1027,7 @@ export function BorrowSlips() {
       <DataList<BorrowRow>
         listKey="borrow-slips"
         endpoint="/borrow-slips"
+        printPath="/api/borrow-slips/pdf"
         columns={columns}
         rowKey={(b) => b.id}
         searchPlaceholder="Search number, borrower, purpose…"
@@ -1590,6 +1593,7 @@ export function Inventory() {
       <DataList<StockRow>
         listKey="inventory"
         endpoint="/inventory"
+        printPath="/api/inventory/pdf"
         columns={columns}
         rowKey={(s) => s.id}
         searchPlaceholder="Search item name, code, part number…"

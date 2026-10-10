@@ -151,7 +151,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'commissioning_reports', group: 'Service reports', label: 'Commissioning Reports', path: '/g-ops/commissioning', actions: OWNED_APPROVABLE, phase: 8 },
       { key: 'pm_reports', group: 'Service reports', label: 'Preventive Maintenance', path: '/g-ops/pm', actions: OWNED_APPROVABLE, phase: 8 },
       { key: 'inspection_reports', group: 'Service reports', label: 'Service Inspections', path: '/g-ops/inspections', actions: OWNED_APPROVABLE, phase: 8 },
-      { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: OWNED_APPROVABLE, phase: 8 },
+      { key: 'service_costing', group: 'Aftermarket', label: 'Service Costing', path: '/g-ops/service-costing', actions: OWNED_APPROVABLE, phase: 8, hidden: true },
     ],
   },
   {
@@ -189,8 +189,7 @@ export const REGISTRY: ModuleDef[] = [
         path: '/g-hr/employees',
         actions: ['view_all', 'edit_all'],
         phase: 2,
-        note: 'Controls visibility of daily rate, burden and statutory numbers on the employee record',
-      },
+        note: 'Controls visibility of daily rate, burden and statutory numbers on the employee record', hidden: true },
       // The authorised staffing pattern: positions per department, how many of
       // each are approved, who fills them and what is vacant. Filled/vacant are
       // counted off active employees, never stored.
@@ -295,7 +294,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'numbering', group: 'Process', label: 'Numbering', path: '/admin/numbering', actions: ['view_all', 'edit_all'], phase: 1 },
       { key: 'categories', group: 'Configuration', label: 'Categories', path: '/admin/categories', actions: SHARED, phase: 2, note: 'Cost, item and industry categories' },
       { key: 'templates', group: 'Process', label: 'Document Templates', path: '/admin/templates', actions: SHARED, phase: 1,
-        note: 'Service report form templates (Phase 8). The quotation’s PDF layout is under PDF Templates.' },
+        note: 'Service report form templates (Phase 8). The quotation’s PDF layout is under PDF Templates.', hidden: true },
       { key: 'pdf_templates', group: 'Process', label: 'PDF Templates', path: '/admin/pdf-templates', actions: ['view_all', 'edit_all'], phase: 1,
         note: 'Lay out the quotation and sales order PDFs: place the boxes and choose what each one prints' },
       { key: 'pipeline_stages', group: 'Process', label: 'Pipeline Stages', path: '/admin/pipeline-stages', actions: ['view_all', 'edit_all'], phase: 3,

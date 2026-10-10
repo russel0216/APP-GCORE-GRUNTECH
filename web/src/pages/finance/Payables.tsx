@@ -312,6 +312,7 @@ export function Payables() {
       <DataList<Bill>
         listKey="supplier-bills"
         endpoint="/supplier-bills"
+        printPath="/api/supplier-bills/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}

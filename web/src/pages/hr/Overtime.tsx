@@ -34,6 +34,7 @@ import { useConfirm } from '../../components/Confirm';
  * project's budget.
  */
 
+/** The printed list says these same words (`OT_STAGE_LABEL` in api/src/routes/hr.ts) — change both. */
 const STAGES = [
   { value: 'PRIOR', label: 'Awaiting authorisation' },
   { value: 'PRIOR_APPROVED', label: 'Authorised — work it' },
@@ -177,6 +178,7 @@ export function Overtime() {
       <DataList<OtRow>
         listKey="overtime"
         endpoint="/overtime"
+        printPath="/api/overtime/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

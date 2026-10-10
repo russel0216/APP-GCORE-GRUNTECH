@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
+import { dayKey } from './day';
 import { badRequest } from '../http/kit';
 
 /**
@@ -176,10 +177,8 @@ export function fromMinutes(minutes: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
-/** The local date, as a UTC-midnight Date, so a day key is stable. */
-export function dayKey(at: Date): Date {
-  return new Date(Date.UTC(at.getFullYear(), at.getMonth(), at.getDate()));
-}
+/** The business day as a UTC-midnight Date (Manila's, never the server's clock). */
+export { dayKey };
 
 // ── Face matching ────────────────────────────────────────────────────────────
 

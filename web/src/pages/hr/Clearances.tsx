@@ -196,6 +196,7 @@ export function Clearances() {
       <DataList<ClearanceRow>
         listKey="clearances"
         endpoint="/clearances"
+        printPath="/api/clearances/pdf"
         columns={columns}
         rowKey={(c) => c.id}
         scoped={seesAll}
@@ -457,7 +458,7 @@ function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id:
             onChange={(e) => setForm({ ...form, lastWorkingDay: e.target.value })}
           />
         </Field>
-        <Field label="Hand over to" hint="Prints as “Received by” on the form" htmlFor={handOverId}>
+        <Field label="Hand over to" hint="Prints as “Handed over to” on the form" htmlFor={handOverId}>
           <PersonSelect
             id={handOverId}
             value={form.handedOverToId}

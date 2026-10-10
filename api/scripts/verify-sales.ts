@@ -16,7 +16,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken } from '../src/shared/numbering';
-import { submitForApproval, act, pendingFor } from '../src/shared/approvals';
+import { submitForApproval, act, pendingFor, pickWorkflow } from '../src/shared/approvals';
 import { renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
 import { signToken } from '../src/auth/middleware';
@@ -1891,7 +1891,15 @@ async function main() {
       'the currency is named once, in the total, and the figures carry none',
       text.includes('Total Price (PHP):') && !text.includes('PHP 3,240.00'),
     );
-    check('it keeps the dated sign-offs — prepared and approved — and no Conforme', text.includes('PREPARED BY') && text.includes('APPROVED BY') && !/CONFORME/i.test(text));
+    // Rule 6: a routed document prints its route as the workflow names its
+    // steps, in capitals, nothing added — never "APPROVED BY — <step>".
+    const rev0Route = await pickWorkflow('quotation', Number((await prisma.quotationRevision.findUniqueOrThrow({ where: { id: rev0.id } })).total));
+    const rev0Steps = (rev0Route?.steps ?? []).map((st) => st.name.toUpperCase());
+    check(
+      'it keeps the dated sign-offs — prepared, then the route by its steps’ own names — and no Conforme',
+      text.includes('PREPARED BY') && rev0Steps.length > 0 && rev0Steps.every((n) => text.includes(n)) && !text.includes('APPROVED BY —') && !/CONFORME/i.test(text),
+      rev0Steps.join(' · '),
+    );
     check(
       "the author's sign-off is the name on its own, with their email under it",
       text.split('\n').includes(sales.name) && text.includes(sales.email),
@@ -2584,7 +2592,12 @@ async function main() {
     const draftText = (await draftPdf()).replace(/\n/g, ' ');
     check('a draft’s PDF names the approver who will sign, pending', draftText.includes(manager.name) && draftText.includes('Pending') && !draftText.includes(ceo.name));
     const draftWithCeo = (await draftPdf(ceoOption.id)).replace(/\n/g, ' ');
-    check('and with the CEO ticked, the CEO too', draftWithCeo.includes(manager.name) && draftWithCeo.includes(ceo.name) && /APPROVED BY .*CEO/i.test(draftWithCeo));
+    const ceoStep = (ceoRoute?.steps[1]?.name ?? 'CEO approval').toUpperCase();
+    check(
+      'and with the CEO ticked, the CEO too, under the step’s own name',
+      draftWithCeo.includes(manager.name) && draftWithCeo.includes(ceo.name) && draftWithCeo.includes(ceoStep) && !draftWithCeo.includes('APPROVED BY'),
+      ceoStep,
+    );
     const smallRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(headed.body.id), status: 'DRAFT' } });
     const wrongBand = await http(salesToken, 'POST', `/quotations/${headed.body.id}/revisions/${smallRev.id}/submit`, { optionId: ceoOption.id });
     check('the option is refused where it does not apply (400)', wrongBand.status === 400, wrongBand.text.slice(0, 160));
@@ -2610,7 +2623,7 @@ async function main() {
         await (await fetch(`${BASE}/quotations/${big.body.id}/revisions/${bigRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
       ),
     );
-    check('halfway, the PDF dates the manager and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && /APPROVED BY .*CEO/i.test(halfway));
+    check('halfway, the PDF dates the manager and says the CEO is pending', halfway.includes(manager.name) && halfway.includes('Pending') && halfway.includes(ceoStep));
     check('naming the CEO who will sign', halfway.includes(ceo.name));
     const waiting = await http(salesToken, 'GET', `/approvals/history/quotation/${bigRev.id}`);
     const openStep = ((waiting.body as unknown as { workflow: { steps: { sequence: number; approvers?: { id: string }[] }[] } }[])[0]?.workflow.steps ?? []).find(
@@ -2626,6 +2639,34 @@ async function main() {
     );
     check('and the PDF carries both approvers, dated', signed.includes(manager.name) && signed.includes(ceo.name) && !signed.includes('Pending'));
     check('each approver with how to reach them', signed.includes(manager.email) && signed.includes(ceo.email));
+    // Rule 6: a revision whose request closed WITHOUT approving it keeps the
+    // steps signed before that, dated, and leaves the rest off — "Pending"
+    // under a step nobody will ever sign is not the truth.
+    const refused = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Over a million, refused`,
+      lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 1_500_000 }],
+    });
+    const refusedRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(refused.body.id) } });
+    const refusedSubmit = await http(salesToken, 'POST', `/quotations/${refused.body.id}/revisions/${refusedRev.id}/submit`, { optionId: ceoOption.id });
+    const refusedReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: refusedRev.id, status: 'PENDING' } });
+    await act({ requestId: refusedReq.id, userId: manager.id, action: 'APPROVED' });
+    await act({ requestId: refusedReq.id, userId: ceo.id, action: 'REJECTED', comment: `${TAG} not at this price` });
+    const refusedText = pdfText(
+      Buffer.from(
+        await (await fetch(`${BASE}/quotations/${refused.body.id}/revisions/${refusedRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+      ),
+    ).replace(/\s+/g, ' ');
+    check(
+      'rejected by the CEO, the PDF keeps the manager’s signature, dated, and leaves the CEO’s step off — nothing Pending',
+      refusedSubmit.status === 200 &&
+        (await statusOf(refusedRev.id)) === 'REJECTED' &&
+        refusedText.includes(manager.name) &&
+        !refusedText.includes(ceoStep) &&
+        !refusedText.includes(ceo.name) &&
+        !refusedText.includes('Pending'),
+      refusedText.slice(-400),
+    );
     const plain = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Over a million, standard route`,
@@ -2882,6 +2923,12 @@ async function main() {
       [manager, backSupport, costController, ceo].every((p) => soPdfOwner.includes(p.name)) && !soPdfOwner.includes('Pending'),
       soPdfOwner.slice(-400),
     );
+    const soSignLine = soPdfOwner.replace(/\s+/g, ' ');
+    check(
+      'each under its step’s own name, in capitals — nothing added, never "APPROVED BY — …"',
+      soSteps.every((st) => soSignLine.includes(st.name.toUpperCase())) && !soSignLine.includes('APPROVED BY'),
+      soSignLine.slice(-400),
+    );
     check(
       'and the paper is A4 on its side — the cost columns are why it is landscape',
       soPdfBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]'),
@@ -2894,6 +2941,75 @@ async function main() {
       ),
     );
     check('the same paper for a reader without cost rights carries no cost or margin', !soPdfOther.includes('Margin sum:') && !soPdfOther.includes('20,004.58'));
+    // Rule 6: the money block in the quotation's words — VAT, never "Tax" —
+    // and the bold total its last row: the internal cost and margin go above
+    // the money, as the costing's estimate puts them.
+    const soVatAt = soPdfOwner.search(/VAT \(\d+(\.\d+)?%\):/);
+    const soTotalAt = soPdfOwner.indexOf('Total (PHP):');
+    check(
+      'its money block names VAT as the quotation does, never "Tax", and the bold total is its last row',
+      soVatAt >= 0 && !soPdfOwner.includes('Tax (') && soTotalAt > soVatAt &&
+        soPdfOwner.indexOf('Margin sum:') < soPdfOwner.indexOf('Subtotal:') && soPdfOwner.indexOf('Subtotal:') < soVatAt &&
+        !/Total \(PHP\):[\s\S]*(Cost \(PHP\):|Margin sum:)/.test(soPdfOwner),
+      soPdfOwner.slice(soPdfOwner.indexOf('Cost (PHP):') - 20, soTotalAt + 40).replace(/\n/g, ' | '),
+    );
+    check('and the same words for a reader without cost rights', /VAT \(\d+(\.\d+)?%\):/.test(soPdfOther) && soPdfOther.includes('Total (PHP):') && !soPdfOther.includes('Tax ('));
+    // Reopened and issued again with no route standing (the issue route
+    // refuses while one is active, so the direct issue is written as that
+    // route writes it): the four signatures of the approval it was reopened
+    // from no longer stand — the paper says who issued it.
+    const soReopened = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/reopen`);
+    await prisma.salesOrder.update({ where: { id: so1Body.id }, data: { status: 'ISSUED' } });
+    await prisma.auditLog.create({
+      data: { entityType: 'sales_order', entityId: so1Body.id, action: 'COMPLETED', actorId: sales.id, actorName: sales.name, summary: `Issued sales order ${so1Body.number}` },
+    });
+    const soReissued = pdfText(
+      Buffer.from(await (await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+    ).replace(/\s+/g, ' ');
+    check(
+      'reopened and issued again with no route, it prints ISSUED BY whoever issued it — never the approval it was reopened from, nor Pending',
+      soReopened.status === 200 && soReissued.includes(`ISSUED BY ${sales.name}`) &&
+        !soSteps.some((st) => soReissued.includes(st.name.toUpperCase())) && !soReissued.includes('Pending'),
+      soReissued.slice(-400),
+    );
+    // Cancelled while it waits (rule 6): the request goes with it, and the
+    // paper keeps the step signed by then, dated — never "Pending" under the
+    // three steps nobody will now sign.
+    const soPaper = async (id: string) =>
+      pdfText(
+        Buffer.from(await (await fetch(`${BASE}/sales-orders/${id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+      ).replace(/\s+/g, ' ');
+    const so3Submit = await http(salesToken, 'POST', `/sales-orders/${so3Body.id}/submit`, {});
+    const so3Req = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so3Body.id, status: 'PENDING' } });
+    await act({ requestId: so3Req!.id, userId: manager.id, action: 'APPROVED' });
+    const so3Cancel = await http(salesToken, 'POST', `/sales-orders/${so3Body.id}/cancel`, { reason: `${TAG} customer withdrew` });
+    const so3Text = await soPaper(so3Body.id);
+    check(
+      'cancelled while it waits, its PDF keeps the team leader’s signature, dated, and leaves the other three steps off — nothing Pending',
+      so3Submit.status === 200 && so3Cancel.status === 200 &&
+        so3Text.includes(`${soSteps[0].name.toUpperCase()}`) && so3Text.includes(manager.name) &&
+        !soSteps.slice(1).some((st) => so3Text.includes(st.name.toUpperCase())) &&
+        ![backSupport, costController, ceo].some((p) => so3Text.includes(p.name)) && !so3Text.includes('Pending'),
+      so3Text.slice(-400),
+    );
+    // Pulled back to draft after a signature, then cancelled from the draft:
+    // that signature stood behind a request withdrawn before the cancel, so
+    // nothing of it is printed — the paper is the author's alone.
+    const so4 = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'all' });
+    const so4Id = String(so4.body.id);
+    await http(salesToken, 'POST', `/sales-orders/${so4Id}/submit`, {});
+    const so4Req = await prisma.approvalRequest.findFirst({ where: { documentType: 'sales_order', documentId: so4Id, status: 'PENDING' } });
+    await act({ requestId: so4Req!.id, userId: manager.id, action: 'APPROVED' });
+    const so4Pull = await http(salesToken, 'POST', `/sales-orders/${so4Id}/withdraw`);
+    const so4Cancel = await http(salesToken, 'POST', `/sales-orders/${so4Id}/cancel`, { reason: `${TAG} booked in error` });
+    const so4Text = await soPaper(so4Id);
+    check(
+      'pulled back after a signature and cancelled from its draft, the PDF names no approver and nothing Pending — that signature no longer stands',
+      so4.status === 201 && so4Pull.status === 200 && so4Cancel.status === 200 &&
+        so4Text.includes(sales.name) && !so4Text.includes(manager.name) &&
+        !soSteps.some((st) => so4Text.includes(st.name.toUpperCase())) && !so4Text.includes('Pending'),
+      so4Text.slice(-400),
+    );
 
 
     // ── Pulling a revision back from the approver to edit it ─────────────────
@@ -3005,6 +3121,23 @@ async function main() {
         where: { entityType: 'quotation', entityId: 'list', action: 'EXPORTED', actorId: sales.id },
       });
       check('and printing it is audited as an export', exported >= 1);
+      check(
+        'the list prints its money as every document does: the code in the column head, one bold "Total" in the money block',
+        printedLine.includes('VALUE (PHP)') && printedText.split('\n').includes('Total') && printedLine.includes('PHP 500.00') && !printedLine.includes('Value, total'),
+        printedLine.slice(-200),
+      );
+      check('its number column is headed "Number"', printedText.split('\n').includes('NUMBER') && !printedText.split('\n').includes('NO.'));
+      // A filter on a person or a customer is named by name on the paper —
+      // the set it is, never "one owner".
+      const ownerPrinted = await fetch(`${BASE}/quotations/pdf?search=${encodeURIComponent(LISTQ)}&scope=all&ownerId=${sales.id}`, {
+        headers: { Authorization: `Bearer ${salesToken}` },
+      });
+      const ownerLine = pdfText(Buffer.from(await ownerPrinted.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'a person the list is filtered on is named on the paper — "owner <name>", never "one owner"',
+        ownerPrinted.status === 200 && ownerLine.includes(`owner ${sales.name}`) && !ownerLine.includes('one owner'),
+        ownerLine.slice(0, 300),
+      );
 
       // Mass actions: the ticked rows travel as ?ids=, always ANDed with the
       // list's own rules; a status change is the ordinary PATCH, one by one.
@@ -3083,6 +3216,55 @@ async function main() {
         soPickPdf.status === 200 && soPickLine.replace(/ /g, '').includes(`${TAG}-LSO3`) && !soPickLine.replace(/ /g, '').includes(`${TAG}-LSO4`) && soPickLine.includes('the rows selected'),
         soPickLine.slice(0, 200),
       );
+      const soOfQuote = await prisma.salesOrder.findUniqueOrThrow({ where: { number: `${TAG}-LSO3` }, select: { quotation: { select: { id: true, number: true } } } });
+      const soQuotePdf = await fetch(`${BASE}/sales-orders/pdf?scope=all&quotationId=${soOfQuote.quotation.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
+      const soQuoteLine = pdfText(Buffer.from(await soQuotePdf.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'an order list narrowed to one quotation names it by number — never "one quotation"',
+        soQuotePdf.status === 200 && soQuoteLine.replace(/ /g, '').includes(`quotation${soOfQuote.quotation.number}`.replace(/ /g, '')) && !soQuoteLine.includes('one quotation'),
+        soQuoteLine.slice(0, 300),
+      );
+      check(
+        'the printed order list: the status through statusLabel, the code in the Total head, one "Total booked" in the money block',
+        soPrintedLine.includes('Issued') && soPrintedLine.includes('TOTAL (PHP)') && soPrintedLine.includes('Total booked') && !soPrintedLine.includes('Booked value, total'),
+        soPrintedLine.slice(-200),
+      );
+      const soAllPdf = await fetch(`${BASE}/sales-orders/pdf?search=${encodeURIComponent(`${TAG}-LSO`)}&scope=all`, { headers: { Authorization: `Bearer ${salesToken}` } });
+      const soAllLine = pdfText(Buffer.from(await soAllPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      check(
+        'a cancelled order prints in brackets and is said under the money block — never a row of it',
+        soAllPdf.status === 200 &&
+          (soSum?.cancelledCount ? /cancelled orders?, in brackets, (is|are) not counted/.test(soAllLine) : !soAllLine.includes('not counted')) &&
+          !soAllLine.includes('Cancelled, not counted:'),
+        `${soSum?.cancelledCount} ${soAllLine.slice(-200)}`,
+      );
+      check(
+        'and printing the order list is audited as an export',
+        (await prisma.auditLog.count({ where: { entityType: 'sales_order', entityId: 'list', action: 'EXPORTED', actorId: sales.id } })) >= 1,
+      );
+      // An order no route ever carried: who actually issued it, dated (the
+      // trail's row, which POST /:id/issue writes) — never "Noted by" or an
+      // "Approved by" nobody will fill.
+      const lso4 = await prisma.salesOrder.findUniqueOrThrow({ where: { number: `${TAG}-LSO4` }, select: { id: true } });
+      await prisma.auditLog.create({
+        data: { entityType: 'sales_order', entityId: lso4.id, action: 'COMPLETED', actorId: sales.id, actorName: sales.name, summary: `Issued sales order ${TAG}-LSO4` },
+      });
+      const unrouted = pdfText(
+        Buffer.from(await (await fetch(`${BASE}/sales-orders/${lso4.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+      ).replace(/\s+/g, ' ');
+      check(
+        'an order issued with no route prints ISSUED BY whoever issued it, dated — no NOTED BY, nothing Pending',
+        unrouted.includes('ISSUED BY') && unrouted.includes(`ISSUED BY ${sales.name}`) && !unrouted.includes('NOTED BY') && !unrouted.includes('Pending'),
+        unrouted.slice(-300),
+      );
+      const unroutedPending = pdfText(
+        Buffer.from(await (await fetch(`${BASE}/sales-orders/${soPick.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+      ).replace(/\s+/g, ' ');
+      check(
+        'one still waiting with no request behind it keeps one open APPROVED BY, Pending',
+        unroutedPending.includes('APPROVED BY Pending') && !unroutedPending.includes('NOTED BY'),
+        unroutedPending.slice(-300),
+      );
 
       // The leads list over HTTP and on paper; its mass actions are the PATCH.
       const lListed = await http(salesToken, 'GET', `/leads?search=${encodeURIComponent(`${TAG} LEADL`)}&scope=all&pageSize=50`);
@@ -3105,6 +3287,21 @@ async function main() {
           lPrintedLine.includes('stage On hold') && lPrintedLine.includes('Weighted by probability'),
         lPrintedLine.slice(0, 300),
       );
+      const lPrintedAgain = Buffer.from(
+        await (
+          await fetch(`${BASE}/leads/pdf?search=${encodeURIComponent(`${TAG} LEADL`)}&scope=all&stage=HOLD&createdFrom=2026-01-01`, {
+            headers: { Authorization: `Bearer ${salesToken}` },
+          })
+        ).arrayBuffer(),
+      );
+      const lAgainLine = pdfText(lPrintedAgain).replace(/\s+/g, ' ');
+      check(
+        'its eight columns print on landscape paper, the status through statusLabel, the sum the last row of the money block',
+        lPrintedAgain.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') && lAgainLine.includes('On hold') &&
+          lAgainLine.indexOf('Weighted by probability') < lAgainLine.indexOf('Total estimated value') && !lAgainLine.includes('Estimated value, total'),
+        lAgainLine.slice(-200),
+      );
+      check('a date the filter names prints as a list prints a date (MM/DD/YYYY)', lAgainLine.includes('added 01/01/2026 to'), lAgainLine.slice(0, 400));
       const toMove = lRowsHttp.find((r) => r.stage === 'OPPORTUNITY' && r.canEdit)!;
       const assigned = await http(salesToken, 'PATCH', `/leads/${toMove.id}`, { assignedToId: other.id });
       const nowOwner = await prisma.lead.findUniqueOrThrow({ where: { id: toMove.id }, select: { assignedToId: true } });
@@ -3130,6 +3327,23 @@ async function main() {
         'the printed customer list prints the ticked customer and says it is a selection',
         custPdf.status === 200 && custLine.includes(`${TAG} Hospital`) && custLine.includes('the rows selected'),
         custLine.slice(0, 200),
+      );
+      // Ten columns print whole on landscape paper; a filter on a person or a
+      // team is named by name, never "added by one person".
+      const custWide = await fetch(`${BASE}/customers/pdf?search=${encodeURIComponent(`${TAG} Hospital`)}&createdById=${sales.id}&team=none`, {
+        headers: { Authorization: `Bearer ${salesToken}` },
+      });
+      const custWideBytes = Buffer.from(await custWide.arrayBuffer());
+      const custWideLine = pdfText(custWideBytes).replace(/\s+/g, ' ');
+      check(
+        'the printed customer list is landscape, and names its filters: added by <name>, team open',
+        custWide.status === 200 && custWideBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') &&
+          custWideLine.includes(`added by ${sales.name}`) && custWideLine.includes('team open') && !custWideLine.includes('one person'),
+        custWideLine.slice(0, 300),
+      );
+      check(
+        'and every customer-list printout is audited as an export, under the list',
+        (await prisma.auditLog.count({ where: { entityType: 'customer', entityId: 'list', action: 'EXPORTED', actorId: sales.id } })) >= 2,
       );
 
       // A mass move is the PATCH per row: a legal move goes; Won without an
@@ -3169,6 +3383,17 @@ async function main() {
     );
     const pulledReqAfter = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: pulledRequest.id } });
     check('its request is withdrawn — CANCELLED, closed, kept', pulledReqAfter.status === 'CANCELLED' && !!pulledReqAfter.closedAt, pulledReqAfter.status);
+    const pulledPdf = pdfText(
+      Buffer.from(
+        await (await fetch(`${BASE}/quotations/${pulledId}/revisions/${pulledR0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+      ),
+    ).replace(/\n/g, ' ');
+    const pulledStep = ((await pickWorkflow('quotation', Number(pulledBack.total)))?.steps[0]?.name ?? '').toUpperCase();
+    check(
+      'pulled back, its PDF prints the route submitting it NOW would take — the step by name, who will sign it, Pending — never the withdrawn request',
+      !!pulledStep && pulledPdf.includes(pulledStep) && pulledPdf.includes(manager.name) && pulledPdf.includes('Pending'),
+      pulledPdf.slice(-300),
+    );
     check('and gone from the approver’s queue', !(await pendingFor(manager.id)).some((r) => r.id === pulledRequest.id));
     let lateDecisionRefused = false;
     try {
@@ -3247,6 +3472,16 @@ async function main() {
     }
     check('the approver can no longer approve it', lateApproval.includes('no longer open'), lateApproval);
     check('and R0 stays superseded', (await statusOf(changedR0.id)) === 'SUPERSEDED');
+    const supersededText = pdfText(
+      Buffer.from(
+        await (await fetch(`${BASE}/quotations/${changedId}/revisions/${changedR0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer(),
+      ),
+    ).replace(/\s+/g, ' ');
+    check(
+      'superseded before anybody signed, R0’s PDF names no approver and says nothing is Pending — nobody will sign it',
+      supersededText.includes(sales.name) && !supersededText.includes(manager.name) && !supersededText.includes('Pending'),
+      supersededText.slice(-300),
+    );
     const resubmitted = await http(salesToken, 'POST', `/quotations/${changedId}/revisions/${changedRevs[1].id}/submit`);
     check(
       'R1 goes to the approver in its place',

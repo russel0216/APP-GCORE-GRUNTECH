@@ -8,8 +8,10 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_ } from '../auth/middleware';
 import { audit } from '../shared/audit';
@@ -22,6 +24,9 @@ import {
 } from '../shared/numbering';
 import { upload, saveAttachment, attachmentPath } from '../shared/attachments';
 import { currentUser } from '../auth/middleware';
+import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
+import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
+import { LIST_CAP, listReference, rangeNamed, sendListPdf } from './finance';
 
 // ════════════════════════════════════════════════════════════════════
 //  COMPANY SETTINGS  — drives every PDF header
@@ -534,33 +539,61 @@ workflowRoutes.delete(
 export const auditRoutes = Router();
 auditRoutes.use(authenticate);
 
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The audit list's where-builder — the screen's rows and the printed trail
+ * read the same set. `from`/`to` are Manila days over a TIMESTAMP (`at`):
+ * Manila midnight to 23:59:59.999 in Manila (`manilaDayStart`/`manilaDayEnd`),
+ * never the server's clock. `?ids=` narrows to the rows ticked.
+ */
+function auditListWhere(q: ListQuery): Prisma.AuditLogWhereInput {
+  const where: Prisma.AuditLogWhereInput = {};
+  const f = q.filters;
+  if (q.search) {
+    where.OR = [
+      { summary: { contains: q.search, mode: 'insensitive' } },
+      { entityId: { contains: q.search, mode: 'insensitive' } },
+      { actorName: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  if (f.entityType) where.entityType = f.entityType;
+  if (f.action) where.action = f.action;
+  if (f.actorId) where.actorId = f.actorId;
+  // The right shape is not enough: 2026-13-45 would reach the database as an
+  // Invalid Date (a 500), and 2026-02-30 would quietly read as 2 March. A day
+  // counts only if Manila reads it back as itself.
+  for (const [key, label] of [['from', 'From'], ['to', 'To']] as const) {
+    const v = f[key];
+    if (!v) continue;
+    const start = DAY.test(v) ? manilaDayStart(v) : null;
+    if (!start || Number.isNaN(start.getTime()) || manilaDayKey(start) !== v) {
+      throw badRequest(`${label} is a day written YYYY-MM-DD`);
+    }
+  }
+  if (f.from || f.to) {
+    where.at = {};
+    if (f.from) where.at.gte = manilaDayStart(f.from);
+    if (f.to) where.at.lte = manilaDayEnd(f.to);
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
+const AUDIT_SORTS = ['at', 'entityType', 'action'];
+
 auditRoutes.get(
   '/',
   require_('admin.audit.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.AuditLogWhereInput = {};
-
-    if (q.search) {
-      where.OR = [
-        { summary: { contains: q.search, mode: 'insensitive' } },
-        { entityId: { contains: q.search, mode: 'insensitive' } },
-        { actorName: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-    if (q.filters.entityType) where.entityType = q.filters.entityType;
-    if (q.filters.action) where.action = q.filters.action;
-    if (q.filters.actorId) where.actorId = q.filters.actorId;
-    if (q.filters.from || q.filters.to) {
-      where.at = {};
-      if (q.filters.from) where.at.gte = new Date(q.filters.from);
-      if (q.filters.to) where.at.lte = new Date(`${q.filters.to}T23:59:59`);
-    }
+    const where = auditListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.auditLog.findMany({
         where,
-        orderBy: orderBy(q, ['at', 'entityType', 'action'], { at: 'desc' }),
+        orderBy: orderBy(q, AUDIT_SORTS, { at: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -568,6 +601,74 @@ auditRoutes.get(
     ]);
 
     res.json(listResult(rows, total, q));
+  }),
+);
+
+/** A moment on the printed trail, in Manila: the day, and the time under it ("9:13 AM"). */
+const auditClock = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true });
+const auditWhen = (at: Date) => ({ title: formatShortDate(at), body: auditClock.format(at).replace(/\s+/g, ' ').toUpperCase() });
+
+/**
+ * The audit trail on paper — the list as filtered (or the rows ticked),
+ * through `auditListWhere`, so the paper is the screen it was printed off:
+ * when, who, what they did, to which record, and the one-line summary. Never
+ * the before/after: those are for the screen's record view, and the paper
+ * would carry whatever a row holds. Landscape, for the summary's width.
+ * Printing it is itself audited. Declared above `/:entityType/:entityId`.
+ */
+auditRoutes.get(
+  '/pdf',
+  require_('admin.audit.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = auditListWhere(q);
+    const f = q.filters;
+    const [rows, count, actor] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        select: { at: true, actorName: true, action: true, entityType: true, entityId: true, summary: true, ip: true },
+        orderBy: orderBy(q, AUDIT_SORTS, { at: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.auditLog.count({ where }),
+      f.actorId ? prisma.user.findUnique({ where: { id: f.actorId }, select: { name: true } }) : null,
+    ]);
+
+    const reference = listReference(count, rows.length, ['entry', 'entries'], [
+      q.search && `search "${q.search}"`,
+      f.action && `action ${statusLabel(f.action)}`,
+      f.entityType && `record ${statusLabel(f.entityType)}`,
+      f.actorId && `by ${actor?.name ?? 'not found'}`,
+      rangeNamed('dated', f.from, f.to),
+      f.ids && 'the rows selected',
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Audit Trail',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['When', 'Who', 'Action', 'Record', 'Record ID', 'Detail', 'IP'],
+          rows: rows.map((r) => [
+            auditWhen(r.at),
+            r.actorName ?? 'System',
+            statusLabel(r.action),
+            statusLabel(r.entityType),
+            r.entityId,
+            r.summary ?? '—',
+            r.ip ?? '—',
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'audit_log', entityId: 'list', action: 'EXPORTED', summary: `Exported the audit trail as PDF (${rows.length} entr${rows.length === 1 ? 'y' : 'ies'})` },
+      req,
+    );
+    sendListPdf(res, pdf, 'audit-trail.pdf');
   }),
 );
 

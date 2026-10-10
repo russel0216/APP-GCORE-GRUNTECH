@@ -2,12 +2,14 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, notFound, conflict } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, idsFilter, notFound, conflict, type ListQuery } from '../http/kit';
 import { authenticate, require_, requireAny } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { filledByPosition, mirrorPositionTitle, plantillaSummary } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
+import { renderDocument } from '../shared/pdf';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 
 /**
  * The plantilla — positions per department, how many of each are authorised,
@@ -22,62 +24,83 @@ positionRoutes.use(authenticate);
 
 const HOLDER_PREVIEW = 5;
 
+type PositionRow = Prisma.PositionGetPayload<{ include: { department: { select: { id: true; name: true } } } }> & {
+  filled: number;
+  vacant: number;
+};
+
+/**
+ * The plantilla list's rows — the screen's and the printed list's, from one
+ * query. Filled and vacant are counted on read (never stored), so the
+ * derived filters (vacant, over) and sort keys run over the counted rows in
+ * memory: a plantilla is dozens of rows, not thousands. `?ids=` narrows to
+ * the rows ticked.
+ */
+async function plantillaRows(q: ListQuery): Promise<PositionRow[]> {
+  const where: Prisma.PositionWhereInput = {};
+  if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
+  if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
+  if (q.search) {
+    where.OR = [
+      { title: { contains: q.search, mode: 'insensitive' } },
+      { code: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+
+  const positions = await prisma.position.findMany({
+    where,
+    include: { department: { select: { id: true, name: true } } },
+    orderBy: [{ department: { name: 'asc' } }, { sortOrder: 'asc' }, { title: 'asc' }],
+  });
+  const filled = await filledByPosition(positions.map((p) => p.id));
+
+  let rows = positions.map((p) => {
+    const f = filled.get(p.id) ?? 0;
+    return { ...p, filled: f, vacant: p.authorisedHeadcount - f };
+  });
+  if (q.filters.vacant === 'true') rows = rows.filter((r) => r.vacant > 0);
+  if (q.filters.over === 'true') rows = rows.filter((r) => r.vacant < 0);
+
+  const dir = q.dir === 'asc' ? 1 : -1;
+  if (q.sort === 'title') rows.sort((a, b) => dir * a.title.localeCompare(b.title));
+  else if (q.sort === 'department') {
+    rows.sort((a, b) => dir * (a.department?.name ?? '').localeCompare(b.department?.name ?? ''));
+  } else if (q.sort === 'authorisedHeadcount') rows.sort((a, b) => dir * (a.authorisedHeadcount - b.authorisedHeadcount));
+  else if (q.sort === 'filled') rows.sort((a, b) => dir * (a.filled - b.filled));
+  else if (q.sort === 'vacant') rows.sort((a, b) => dir * (a.vacant - b.vacant));
+  return rows;
+}
+
+/** The active holders of these positions, by position, A–Z. */
+async function holdersOf(positionIds: string[]) {
+  const holders = positionIds.length
+    ? await prisma.employee.findMany({
+        where: { positionId: { in: positionIds }, isActive: true },
+        select: { id: true, employeeNo: true, firstName: true, lastName: true, employmentType: true, positionId: true },
+        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      })
+    : [];
+  const by = new Map<string, typeof holders>();
+  for (const h of holders) {
+    const list = by.get(h.positionId!) ?? [];
+    list.push(h);
+    by.set(h.positionId!, list);
+  }
+  return by;
+}
+
 positionRoutes.get(
   '/',
   require_('ghr.plantilla.view_all'),
   handler(async (req, res) => {
     await sweepSeparations();
     const q = listQuery(req);
-    const where: Prisma.PositionWhereInput = {};
-    if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.search) {
-      where.OR = [
-        { title: { contains: q.search, mode: 'insensitive' } },
-        { code: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-
-    // The derived filters (vacant, over) and sort keys need the counts, so the
-    // page is cut in memory. A plantilla is dozens of rows, not thousands.
-    const positions = await prisma.position.findMany({
-      where,
-      include: { department: { select: { id: true, name: true } } },
-      orderBy: [{ department: { name: 'asc' } }, { sortOrder: 'asc' }, { title: 'asc' }],
-    });
-    const filled = await filledByPosition(positions.map((p) => p.id));
-
-    let rows = positions.map((p) => {
-      const f = filled.get(p.id) ?? 0;
-      return { ...p, filled: f, vacant: p.authorisedHeadcount - f };
-    });
-    if (q.filters.vacant === 'true') rows = rows.filter((r) => r.vacant > 0);
-    if (q.filters.over === 'true') rows = rows.filter((r) => r.vacant < 0);
-
-    const dir = q.dir === 'asc' ? 1 : -1;
-    if (q.sort === 'title') rows.sort((a, b) => dir * a.title.localeCompare(b.title));
-    else if (q.sort === 'department') {
-      rows.sort((a, b) => dir * (a.department?.name ?? '').localeCompare(b.department?.name ?? ''));
-    } else if (q.sort === 'authorisedHeadcount') rows.sort((a, b) => dir * (a.authorisedHeadcount - b.authorisedHeadcount));
-    else if (q.sort === 'filled') rows.sort((a, b) => dir * (a.filled - b.filled));
-    else if (q.sort === 'vacant') rows.sort((a, b) => dir * (a.vacant - b.vacant));
-
+    const rows = await plantillaRows(q);
     const total = rows.length;
     const page = rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
-
-    const holders = page.length
-      ? await prisma.employee.findMany({
-          where: { positionId: { in: page.map((p) => p.id) }, isActive: true },
-          select: { id: true, employeeNo: true, firstName: true, lastName: true, employmentType: true, positionId: true },
-          orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-        })
-      : [];
-    const holdersBy = new Map<string, typeof holders>();
-    for (const h of holders) {
-      const list = holdersBy.get(h.positionId!) ?? [];
-      list.push(h);
-      holdersBy.set(h.positionId!, list);
-    }
+    const holdersBy = await holdersOf(page.map((p) => p.id));
 
     res.json(
       listResult(
@@ -107,6 +130,94 @@ positionRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The plantilla on paper — the list as filtered (or the rows ticked),
+ * through `plantillaRows`, so the paper is the screen it was printed off:
+ * each position, its department, authorised against filled, the gap, and
+ * every active holder by name (the screen shows five; the paper is the
+ * record, so it names them all). Names and posts only — never a rate. The
+ * headcount under the table adds up the rows the filter matched. Declared
+ * above `/:id`, or that route swallows it.
+ */
+positionRoutes.get(
+  '/pdf',
+  require_('ghr.plantilla.view_all'),
+  handler(async (req, res) => {
+    await sweepSeparations();
+    const q = listQuery(req);
+    const f = q.filters;
+    const all = await plantillaRows(q);
+    const rows = all.slice(0, LIST_CAP);
+    const [holdersBy, department] = await Promise.all([
+      holdersOf(rows.map((p) => p.id)),
+      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
+    ]);
+
+    const reference = listReference(all.length, rows.length, ['position', 'positions'], [
+      q.search && `search "${q.search}"`,
+      f.departmentId && `department ${department?.name ?? 'not found'}`,
+      f.vacant === 'true' && 'with vacancies',
+      f.over === 'true' && 'over complement',
+      f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
+      f.ids && 'the rows selected',
+    ]);
+    let authorised = 0;
+    let filled = 0;
+    let vacant = 0;
+    let over = 0;
+    for (const p of all) {
+      authorised += p.authorisedHeadcount;
+      filled += p.filled;
+      if (p.vacant > 0) vacant += p.vacant;
+      else over -= p.vacant;
+    }
+    const n = (v: number) => v.toLocaleString('en-PH');
+
+    // Eight columns: landscape (rule 6). The gap is a vacancy, or the
+    // over-complement as a negative — shown, never refused, as on screen.
+    const pdf = await renderDocument({
+      title: 'Plantilla',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Position', 'Department', 'Authorised', 'Filled', 'Vacant', 'Holders', 'Status'],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'left', 'left'],
+          rows: rows.map((p) => {
+            const holders = holdersBy.get(p.id) ?? [];
+            return [
+              p.code ?? '—',
+              p.description ? { title: p.title, body: p.description } : p.title,
+              p.department?.name ?? '—',
+              n(p.authorisedHeadcount),
+              n(p.filled),
+              p.vacant < 0 ? `${n(-p.vacant)} over` : n(p.vacant),
+              holders.length ? holders.map((h) => `${h.firstName} ${h.lastName}`).join(', ') : '—',
+              p.isActive ? 'Active' : 'Inactive',
+            ];
+          }),
+        },
+        {
+          kind: 'text',
+          title: 'Headcount',
+          body:
+            `Authorised ${n(authorised)} · filled ${n(filled)} · vacant ${n(vacant)}` +
+            (over ? ` · over complement ${n(over)}` : '') +
+            `, across the ${n(all.length)} position${all.length === 1 ? '' : 's'} listed. ` +
+            'Filled counts active employees on each position, on the day this was printed.',
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'position', entityId: 'list', action: 'EXPORTED', summary: `Exported the plantilla as PDF (${rows.length} position(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'plantilla.pdf');
   }),
 );
 

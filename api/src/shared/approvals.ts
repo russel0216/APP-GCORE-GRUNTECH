@@ -3,6 +3,7 @@ import { prisma } from '../prisma';
 import { badRequest, forbidden, notFound } from '../http/kit';
 import { notify } from './notifications';
 import { audit } from './audit';
+import type { Signatory } from './pdf';
 
 /**
  * The approval engine (model §6.1).
@@ -684,6 +685,25 @@ export async function approvalSignoffs(
     position: a.approver.position ?? undefined,
     at: a.actedAt,
   }));
+}
+
+/**
+ * The sign-off block of a routed document, one slot per step, as the PDF
+ * engine prints it (rule 6): the step's name is the role, who signed it with
+ * their contact lines and the date — or who is assigned to it, so "Pending"
+ * prints under a name (one person with their lines; several as "A or B",
+ * with none) — and a step nobody can sign as the role alone. Every routed
+ * document's PDF maps its slots through this and nothing else; a document's
+ * own first slot (Prepared by / Requested by, the author, dated) goes before
+ * them, and "Approved by" alone only where no route exists.
+ */
+export function slotSignatories(slots: ApprovalSlot[]): Signatory[] {
+  return slots.map((s) => {
+    if (s.name) return { role: s.step, name: s.name, phone: s.phone, email: s.email, at: s.at };
+    const who = s.assigned ?? [];
+    if (who.length === 1) return { role: s.step, name: who[0].name, phone: who[0].phone, email: who[0].email };
+    return { role: s.step, name: who.length ? who.map((p) => p.name).join(' or ') : undefined };
+  });
 }
 
 /** One step of a document's sign-off block. */

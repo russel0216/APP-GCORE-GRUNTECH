@@ -217,6 +217,7 @@ export function Users() {
       <DataList<UserRow>
         listKey="admin-users"
         endpoint="/users"
+        printPath="/api/users/pdf"
         columns={columns}
         rowKey={(u) => u.id}
         searchPlaceholder="Search name, email, employee no…"

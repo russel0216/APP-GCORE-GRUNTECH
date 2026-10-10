@@ -282,6 +282,7 @@ export function ServiceReports() {
         searchPlaceholder="Search number, findings, customer, serial…"
         emptyTitle="No reports yet"
         onRowClick={(r) => navigate(`/g-ops/service-reports/${r.id}`)}
+        printPath="/api/service-reports/pdf"
         filters={[
           { key: 'kind', label: 'Kind', options: KINDS },
           { key: 'status', label: 'Status', options: STATUSES },

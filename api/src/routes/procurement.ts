@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, PrStatus, PurchaseKind, PoStatus, CanvassStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -11,6 +11,8 @@ import {
   notFound,
   badRequest,
   forbidden,
+  idsFilter,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
@@ -20,14 +22,25 @@ import { nextNumber } from '../shared/numbering';
 import {
   submitForApproval,
   onApprovalSettled,
-  approvalSignoffs,
   approvalSlots,
+  slotSignatories,
   routePreview,
+  contactPhone,
   cancelOpenRequest,
   type ApprovalOutcome,
   type ApprovalSlot,
 } from '../shared/approvals';
-import { renderDocument, formatMoney, formatDate, type PdfSection, type Signatory } from '../shared/pdf';
+import {
+  renderDocument,
+  formatMoney,
+  formatAmount,
+  formatDate,
+  formatShortDate,
+  statusLabel,
+  companyCurrency,
+  type PdfSection,
+  type Signatory,
+} from '../shared/pdf';
 import { manilaDate } from '../shared/day';
 import {
   postJobCost,
@@ -47,6 +60,73 @@ function asDate(v: string | null | undefined): Date | null {
   if (Number.isNaN(date.getTime())) throw badRequest(`"${v}" is not a valid date`);
   return date;
 }
+
+// ── The printed lists ────────────────────────────────────────────────────────
+//
+// Every register here has a printed twin, `GET <list>/pdf` above `/:id`: the
+// SAME where-builder the list reads (with `?ids=`, the rows ticked, ANDed
+// with the visibility rule), the list's own sort, at most LIST_CAP rows, a
+// reference that names every filter that narrowed it, and an EXPORTED audit
+// row with entityId 'list' (rule 6, A5).
+
+/** The most rows a printed list carries; the reference says when it was cut. */
+const LIST_CAP = 1000;
+
+/**
+ * A printed list's reference: "12 purchase requests", or, cut at the cap,
+ * "first 1,000 of 1,234 purchase requests printed" — then every filter that
+ * narrowed it, so the paper says which set it is.
+ */
+function listReference(count: number, printed: number, noun: readonly [string, string], filters: (string | null | false | undefined)[]): string {
+  const n = (v: number) => v.toLocaleString('en-PH');
+  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
+  const named = filters.filter(Boolean);
+  return named.length ? `${head} — ${named.join(' · ')}` : head;
+}
+
+/**
+ * A choice filter's value, checked against what it can be — an unknown
+ * status is a 400 naming the choices, never a 500 from the database.
+ */
+function choice<T extends string>(value: string | undefined, allowed: Record<string, T>, label: string): T | undefined {
+  if (!value) return undefined;
+  const values = Object.values(allowed);
+  if (!(values as string[]).includes(value)) throw badRequest(`${label} is one of ${values.join(', ')}`);
+  return value as T;
+}
+
+/** The project a `?jobId=` names, as a filter line prints it. */
+async function projectNamed(jobId: string | undefined): Promise<string | null> {
+  if (!jobId) return null;
+  const job = await prisma.job.findUnique({ where: { id: jobId }, select: { number: true } });
+  return `project ${job?.number ?? 'not found'}`;
+}
+
+/** A figure that is listed but not summed (a cancelled or rejected document's), in brackets. */
+const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
+
+/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
+const totalLabel = (label: string, count: number, printed: number) =>
+  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
+
+// The notes under a list's total, worded as G-FIN's papers word them
+// (`counted` / `bracketNote` / `listNotes` in routes/finance.ts) so money
+// prints one way in every module. Kept here rather than imported, because
+// importing routes/finance would load its approval subscribers with this
+// module.
+
+/** "1 cancelled order" / "3 cancelled orders" — a count in a note under a list. */
+const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+
+/** The note under a list whose closed documents (cancelled, rejected) print in brackets. */
+const bracketNote = (n: number, noun: readonly [string, string]) =>
+  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
+
+/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
+const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
+  const said = notes.filter((v): v is string => !!v);
+  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
+};
 
 // ════════════════════════════════════════════════════════════════════
 //  PURCHASE REQUESTS
@@ -70,27 +150,45 @@ function presentPr(pr: Record<string, unknown>) {
   };
 }
 
+const PR_SORTS = ['number', 'neededBy', 'createdAt'];
+
+/**
+ * Which purchase requests a list query means — ONE rule for the list and its
+ * printed twin. A `view_own` holder sees their own requests whatever the
+ * scope says (`mine` is then true), exactly as `chainOverview()` counts them.
+ */
+function prListWhere(me: ResolvedUser, q: ListQuery): { where: Prisma.PurchaseRequestWhereInput; mine: boolean } {
+  const and: Prisma.PurchaseRequestWhereInput[] = [];
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gchain.purchase_requests.view_all');
+  const mine = onlyOwn || q.scope === 'mine';
+  if (mine) and.push({ requestedById: me.id });
+  const f = q.filters;
+  const status = choice(f.status, PrStatus, 'Status');
+  if (status) and.push({ status });
+  const kind = choice(f.kind, PurchaseKind, 'Type');
+  if (kind) and.push({ kind });
+  if (f.jobId) and.push({ jobId: f.jobId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { purpose: { contains: q.search, mode: 'insensitive' } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { where: and.length ? { AND: and } : {}, mine };
+}
+
 purchaseRequestRoutes.get(
   '/',
   requireAny('gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.PurchaseRequestWhereInput = {};
-
-    const onlyOwn =
-      !me.isSuperAdmin && !me.permissions.has('gchain.purchase_requests.view_all');
-    if (onlyOwn || q.scope === 'mine') where.requestedById = me.id;
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumPrStatusFilter['equals'];
-    if (q.filters.kind) where.kind = q.filters.kind as Prisma.EnumPurchaseKindFilter['equals'];
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { purpose: { contains: q.search, mode: 'insensitive' } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const { where } = prListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.purchaseRequest.findMany({
@@ -102,7 +200,7 @@ purchaseRequestRoutes.get(
           items: { select: { estimatedAmount: true } },
           _count: { select: { canvasses: true, orders: true } },
         },
-        orderBy: orderBy(q, ['number', 'neededBy', 'createdAt'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, PR_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -131,6 +229,102 @@ purchaseRequestRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/** A request that will never be bought — listed, never summed. */
+const PR_CLOSED: PrStatus[] = ['CANCELLED', 'REJECTED'];
+
+/**
+ * The purchase request list on paper — the list as filtered (or the rows
+ * ticked, `?ids=`), through `prListWhere`, so the paper is the screen and a
+ * `view_own` holder prints only their own. Estimates are what the screen
+ * shows; the total leaves out the cancelled and rejected, whose figures print
+ * in brackets. Above `/:id`.
+ */
+purchaseRequestRoutes.get(
+  '/pdf',
+  requireAny('gchain.purchase_requests.view_all', 'gchain.purchase_requests.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const { where, mine } = prListWhere(me, q);
+    const [rows, count, live, closed, currency, project] = await Promise.all([
+      prisma.purchaseRequest.findMany({
+        where,
+        include: {
+          job: { select: { number: true, name: true } },
+          requestedBy: { select: { name: true } },
+          warehouse: { select: { name: true } },
+          items: { select: { estimatedAmount: true } },
+        },
+        orderBy: orderBy(q, PR_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.purchaseRequest.count({ where }),
+      prisma.purchaseRequestItem.aggregate({
+        where: { request: { AND: [where, { status: { notIn: PR_CLOSED } }] } },
+        _sum: { estimatedAmount: true },
+      }),
+      prisma.purchaseRequest.count({ where: { AND: [where, { status: { in: PR_CLOSED } }] } }),
+      companyCurrency(),
+      projectNamed(q.filters.jobId),
+    ]);
+
+    const f = q.filters;
+    const reference = listReference(count, rows.length, ['purchase request', 'purchase requests'], [
+      q.search && `search "${q.search}"`,
+      f.status && `status ${statusLabel(f.status)}`,
+      f.kind && (f.kind === 'DIRECT_TO_JOB' ? 'direct to job' : 'stock replenishment'),
+      project,
+      mine && 'raised by me',
+      f.ids && 'the rows selected',
+    ]);
+    const estimated = (r: (typeof rows)[number]) => r.items.reduce((s, i) => s.add(i.estimatedAmount), new Prisma.Decimal(0));
+
+    // Eight columns: landscape, each sized from what it holds (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Request', 'Type', 'Lines', `Estimated (${currency})`, 'Raised by', 'Needed by', 'Status'],
+        align: ['left', 'left', 'left', 'right', 'right', 'left', 'left', 'left'],
+        rows: rows.map((r) => [
+          r.number,
+          { title: r.purpose, body: r.job ? `${r.job.number} — ${r.job.name}` : (r.warehouse?.name ?? 'Stock') },
+          r.kind === 'DIRECT_TO_JOB' ? 'Direct to job' : 'Stock',
+          String(r.items.length),
+          bracketed(formatAmount(estimated(r).toFixed(2)), !PR_CLOSED.includes(r.status)),
+          r.requestedBy.name,
+          r.neededBy ? formatShortDate(r.neededBy) : '',
+          statusLabel(r.status),
+        ]),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          {
+            label: totalLabel('Estimated total', count, rows.length),
+            value: formatMoney(num(live._sum.estimatedAmount), currency),
+            bold: true,
+          },
+        ],
+      },
+    ];
+    sections.push(...listNotes([bracketNote(closed, ['cancelled or rejected request', 'cancelled or rejected requests'])]));
+
+    const pdf = await renderDocument({ title: 'Purchase Requests', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      {
+        entityType: 'purchase_request',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the purchase request list as PDF (${rows.length} request(s))`,
+      },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="purchase-requests.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -794,20 +988,33 @@ purchaseRequestRoutes.delete(
 export const canvassRoutes = Router();
 canvassRoutes.use(authenticate);
 
+const CANVASS_SORTS = ['number', 'createdAt'];
+
+/** Which canvasses a list query means — one rule for the list and its printed twin. */
+function canvassListWhere(q: ListQuery): Prisma.CanvassWhereInput {
+  const and: Prisma.CanvassWhereInput[] = [];
+  const status = choice(q.filters.status, CanvassStatus, 'Status');
+  if (status) and.push({ status });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { request: { number: { contains: q.search, mode: 'insensitive' } } },
+        { request: { purpose: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return and.length ? { AND: and } : {};
+}
+
 canvassRoutes.get(
   '/',
   requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.CanvassWhereInput = {};
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumCanvassStatusFilter['equals'];
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { request: { number: { contains: q.search, mode: 'insensitive' } } },
-        { request: { purpose: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = canvassListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.canvass.findMany({
@@ -819,7 +1026,7 @@ canvassRoutes.get(
           createdBy: { select: { id: true, name: true } },
           suppliers: { select: { id: true, isSelected: true, supplier: { select: { name: true } } } },
         },
-        orderBy: orderBy(q, ['number', 'createdAt'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, CANVASS_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -837,6 +1044,69 @@ canvassRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The canvass list on paper, through `canvassListWhere` (or the rows ticked,
+ * `?ids=`). No prices: a canvass's figures are per supplier and belong on the
+ * canvass itself. Above `/:id`.
+ */
+canvassRoutes.get(
+  '/pdf',
+  requireAny('gchain.canvass.view_all', 'gchain.canvass.view_own'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = canvassListWhere(q);
+    const [rows, count] = await Promise.all([
+      prisma.canvass.findMany({
+        where,
+        include: {
+          request: { select: { number: true, purpose: true, job: { select: { number: true } } } },
+          createdBy: { select: { name: true } },
+          suppliers: { select: { isSelected: true, supplier: { select: { name: true } } } },
+        },
+        orderBy: orderBy(q, CANVASS_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.canvass.count({ where }),
+    ]);
+    const f = q.filters;
+    const reference = listReference(count, rows.length, ['canvass', 'canvasses'], [
+      q.search && `search "${q.search}"`,
+      f.status && `status ${statusLabel(f.status)}`,
+      f.ids && 'the rows selected',
+    ]);
+
+    // Seven columns: portrait, each sized from what it holds (rule 6).
+    const pdf = await renderDocument({
+      title: 'Canvasses',
+      date: new Date(),
+      reference,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'For', 'Suppliers', 'Awarded to', 'Opened by', 'Opened', 'Status'],
+          align: ['left', 'left', 'right', 'left', 'left', 'left', 'left'],
+          rows: rows.map((c) => [
+            c.number,
+            { title: c.request.purpose, body: [c.request.number, c.request.job?.number].filter(Boolean).join(' · ') },
+            String(c.suppliers.length),
+            c.suppliers.find((s) => s.isSelected)?.supplier.name ?? '',
+            c.createdBy.name,
+            formatShortDate(c.createdAt),
+            statusLabel(c.status),
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'canvass', entityId: 'list', action: 'EXPORTED', summary: `Exported the canvass list as PDF (${rows.length} canvass(es))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="canvasses.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -1200,25 +1470,49 @@ async function recalcPo(orderId: string, tx: Prisma.TransactionClient = prisma) 
   });
 }
 
+const PO_SORTS = ['number', 'orderDate', 'total', 'createdAt'];
+
+/**
+ * Which purchase orders a list query means — one rule for the list and its
+ * printed twin. "Awaiting delivery" is two statuses — the same pair
+ * chainOverview() counts, so the dashboard tile opens exactly the orders it
+ * counted; a status chosen as well wins, as it always has.
+ */
+function poListWhere(q: ListQuery): Prisma.PurchaseOrderWhereInput {
+  const and: Prisma.PurchaseOrderWhereInput[] = [];
+  const f = q.filters;
+  const status = choice(f.status, PoStatus, 'Status');
+  if (status) and.push({ status });
+  else if (f.awaiting === 'true') and.push({ status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } });
+  if (f.supplierId) and.push({ supplierId: f.supplierId });
+  if (f.jobId) and.push({ jobId: f.jobId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return and.length ? { AND: and } : {};
+}
+
+/** How much of an order has arrived, by quantity — the list's Received column. */
+function receivedPct(items: { quantity: Prisma.Decimal; receivedQty: Prisma.Decimal }[]): number {
+  const ordered = items.reduce((s, i) => s + num(i.quantity), 0);
+  const received = items.reduce((s, i) => s + num(i.receivedQty), 0);
+  return ordered > 0 ? cents((received / ordered) * 100) : 0;
+}
+
 purchaseOrderRoutes.get(
   '/',
   requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.PurchaseOrderWhereInput = {};
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumPoStatusFilter['equals'];
-    // "Awaiting delivery" is two statuses — the same pair chainOverview() counts,
-    // so the dashboard tile opens exactly the orders it counted.
-    else if (q.filters.awaiting === 'true') where.status = { in: ['ISSUED', 'PARTIALLY_RECEIVED'] };
-    if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = poListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.purchaseOrder.findMany({
@@ -1229,7 +1523,7 @@ purchaseOrderRoutes.get(
           request: { select: { id: true, number: true } },
           items: { select: { quantity: true, receivedQty: true } },
         },
-        orderBy: orderBy(q, ['number', 'orderDate', 'total', 'createdAt'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, PO_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -1238,27 +1532,112 @@ purchaseOrderRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => {
-          const ordered = r.items.reduce((s, i) => s + num(i.quantity), 0);
-          const received = r.items.reduce((s, i) => s + num(i.receivedQty), 0);
-          return {
-            id: r.id,
-            number: r.number,
-            kind: r.kind,
-            status: r.status,
-            supplier: r.supplier,
-            job: r.job,
-            request: r.request,
-            orderDate: r.orderDate,
-            deliveryDate: r.deliveryDate,
-            total: num(r.total),
-            receivedPct: ordered > 0 ? cents((received / ordered) * 100) : 0,
-          };
-        }),
+        rows.map((r) => ({
+          id: r.id,
+          number: r.number,
+          kind: r.kind,
+          status: r.status,
+          supplier: r.supplier,
+          job: r.job,
+          request: r.request,
+          orderDate: r.orderDate,
+          deliveryDate: r.deliveryDate,
+          total: num(r.total),
+          receivedPct: receivedPct(r.items),
+        })),
         total,
         q,
       ),
     );
+  }),
+);
+
+/** An order not issued to its supplier yet — summed, and said, as G-FIN says a draft invoice. */
+const PO_UNISSUED: PoStatus[] = ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'];
+
+/**
+ * The purchase order list on paper, through `poListWhere` (or the rows
+ * ticked, `?ids=`) — the totals the screen shows, never a line's cost
+ * category or the supplier's TIN. A cancelled order's total prints in
+ * brackets and is not summed; an order not issued yet is summed, as G-FIN
+ * sums a draft invoice, and the note under the total says how many — nothing
+ * is committed on one until it is issued. Above `/:id`.
+ */
+purchaseOrderRoutes.get(
+  '/pdf',
+  requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = poListWhere(q);
+    const f = q.filters;
+    const [rows, count, live, cancelled, unissued, currency, project, supplier] = await Promise.all([
+      prisma.purchaseOrder.findMany({
+        where,
+        include: {
+          supplier: { select: { name: true } },
+          job: { select: { number: true, name: true } },
+          request: { select: { number: true } },
+          items: { select: { quantity: true, receivedQty: true } },
+        },
+        orderBy: orderBy(q, PO_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.purchaseOrder.count({ where }),
+      prisma.purchaseOrder.aggregate({ where: { AND: [where, { status: { not: 'CANCELLED' } }] }, _sum: { total: true } }),
+      prisma.purchaseOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+      prisma.purchaseOrder.count({ where: { AND: [where, { status: { in: PO_UNISSUED } }] } }),
+      companyCurrency(),
+      projectNamed(f.jobId),
+      f.supplierId ? prisma.supplier.findUnique({ where: { id: f.supplierId }, select: { name: true } }) : null,
+    ]);
+    const reference = listReference(count, rows.length, ['purchase order', 'purchase orders'], [
+      q.search && `search "${q.search}"`,
+      f.status ? `status ${statusLabel(f.status)}` : f.awaiting === 'true' && 'awaiting delivery',
+      f.supplierId && `supplier ${supplier?.name ?? 'not found'}`,
+      project,
+      f.ids && 'the rows selected',
+    ]);
+    // A whole percentage, never rounded up to a delivery that is not complete.
+    const pct = (v: number) => (v >= 100 ? '100%' : `${Math.floor(v)}%`);
+
+    // Eight columns: landscape, each sized from what it holds (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: ['Number', 'Supplier', 'Ordered', 'Required', `Total (${currency})`, 'Received', 'Request', 'Status'],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'left', 'left'],
+        rows: rows.map((o) => [
+          o.number,
+          { title: o.supplier.name, body: o.job ? `${o.job.number} — ${o.job.name}` : 'Stock' },
+          formatShortDate(o.orderDate),
+          o.deliveryDate ? formatShortDate(o.deliveryDate) : '',
+          bracketed(formatAmount(num(o.total)), o.status !== 'CANCELLED'),
+          pct(receivedPct(o.items)),
+          o.request?.number ?? '',
+          statusLabel(o.status),
+        ]),
+      },
+      {
+        kind: 'totals',
+        rows: [{ label: totalLabel('Total', count, rows.length), value: formatMoney(num(live._sum.total), currency), bold: true }],
+      },
+    ];
+    sections.push(
+      ...listNotes([
+        unissued > 0 &&
+          `The total includes ${counted(unissued, ['order', 'orders'])} not issued yet — nothing is committed on ${unissued === 1 ? 'it' : 'them'} until ${unissued === 1 ? 'it is' : 'they are'}.`,
+        bracketNote(cancelled, ['cancelled order', 'cancelled orders']),
+      ]),
+    );
+
+    const pdf = await renderDocument({ title: 'Purchase Orders', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      { entityType: 'purchase_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the purchase order list as PDF (${rows.length} order(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="purchase-orders.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -1721,7 +2100,6 @@ purchaseOrderRoutes.post(
   '/:id/submit',
   require_('gchain.purchase_orders.create'),
   handler(async (req, res) => {
-    const me = currentUser(req);
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: req.params.id },
       include: { items: true, supplier: true, job: true },
@@ -1745,7 +2123,11 @@ purchaseOrderRoutes.post(
         subject: `${po.supplier.name}${po.job ? ` — ${po.job.number}` : ''}`,
         amount: num(po.total),
         link: `/g-chain/purchase-orders/${po.id}`,
-        requesterId: me.id,
+        // Filed in the BUYER's name whoever presses Submit, as a purchase
+        // request is in its requester's: the self-approval rule then keeps
+        // the person who raised the order off its route, and the route the
+        // paper prints for a draft is the route it takes.
+        requesterId: po.createdById,
       });
     } catch (err) {
       // Refused (no workflow, nobody to approve, already open): back to a
@@ -1901,6 +2283,61 @@ purchaseOrderRoutes.delete(
 
 // ── PDFs ─────────────────────────────────────────────────────────────────────
 
+/**
+ * The author's contact lines, read for the paper only: a reader calls the
+ * person who raised it. Never on the loaders — `GET /purchase-orders/:id`
+ * carries no mobile, as the quotation's own response does not.
+ */
+async function contactLines(userId: string): Promise<{ phone?: string; email?: string }> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, phone: true, employee: { select: { mobile: true } } },
+  });
+  return user ? { phone: contactPhone(user), email: user.email } : {};
+}
+
+/**
+ * Where a document stands, for its sign-off block: a DRAFT (nothing submitted
+ * stands), ROUTED (submitted — pending, or approved and on its way), or
+ * CLOSED without approval (a request rejected or cancelled, an order
+ * cancelled), when nobody is ever going to sign what is still unsigned.
+ */
+type SignoffStage = 'draft' | 'routed' | 'closed';
+
+/**
+ * The sign-off block of a routed document (rule 6): every step of the route,
+ * through the engine's one mapping — the step's name as the role, who signed
+ * with the date, else who is assigned over "Pending" — and one open
+ * "Approved by" where no workflow covers the document at all.
+ *
+ * A DRAFT prints the route submitting it WOULD take, every step open, with
+ * `requesterId` — the person the submit files it for — kept off it. Not
+ * `approvalSlots(…, draft)`: that previews only when NO request exists, and a
+ * draft pulled back or returned keeps its last request — CANCELLED, with the
+ * steps that had signed — and printing those would date an approval nobody
+ * now gives.
+ *
+ * A document CLOSED without approval prints only the steps that did sign,
+ * each dated — never "Pending" under a step nobody will now act on, and never
+ * the open "Approved by": "Pending" is printed only where it is the truth.
+ */
+async function routeSignatories(
+  documentType: string,
+  documentId: string,
+  stage: SignoffStage,
+  /** What a draft's preview routes on: its amount, and who the submit files it for. */
+  preview: { amount: number; requesterId: string },
+): Promise<Signatory[]> {
+  if (stage === 'draft') {
+    const route = await routePreview(documentType, preview.amount, preview.requesterId);
+    const slots: ApprovalSlot[] = (route?.steps ?? []).map((st) => ({ step: st.name, assigned: st.approvers }));
+    return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
+  }
+  const slots = await approvalSlots(documentType, documentId);
+  if (stage === 'closed') return slotSignatories(slots.filter((sl) => sl.name && sl.at));
+  return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
+}
+
 purchaseOrderRoutes.get(
   '/:id/pdf',
   requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
@@ -1909,8 +2346,8 @@ purchaseOrderRoutes.get(
     if (!po) throw notFound('Purchase order not found');
 
     const view = presentPo(po);
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
+    const currency = await companyCurrency();
+    const ratePct = `${(view.vatRate * 100).toFixed(0)}%`;
 
     const sections: PdfSection[] = [
       {
@@ -1922,47 +2359,58 @@ purchaseOrderRoutes.get(
           { label: 'Address', value: [po.supplier.address, po.supplier.city].filter(Boolean).join(', ') || '—' },
           { label: 'Required by', value: po.deliveryDate ? formatDate(po.deliveryDate) : '—' },
           { label: 'Terms', value: po.terms ?? po.supplier.paymentTerms ?? '—' },
-          { label: 'Reference', value: po.request?.number ?? '—' },
+          // The request it fills — named for what it is: the details block's
+          // "Reference" above is the supplier.
+          { label: 'Purchase request', value: po.request?.number ?? '—' },
           { label: 'For', value: po.job ? `${po.job.number} — ${po.job.name}` : 'Stock replenishment' },
           { label: 'TIN', value: po.supplier.tin ?? '—' },
+          // So a draft never leaves the building looking like an order.
+          { label: 'Status', value: statusLabel(po.status) },
         ],
       },
       {
         kind: 'table',
         title: 'Order',
-        head: ['#', 'Description', 'Qty', 'Unit', 'Unit price', 'Amount'],
-        widths: [5, 45, 10, 9, 15, 16],
+        // No widths: each column from its content, the description taking what is left (rule 6).
+        head: ['No.', 'Description', 'Qty', 'Unit', `Unit price (${currency})`, `Amount (${currency})`],
         align: ['right', 'left', 'right', 'left', 'right', 'right'],
         rows: view.items.map((i, n) => [
           String(n + 1),
           i.description,
           String(i.quantity),
           i.unit,
-          formatMoney(i.unitPrice, currency),
-          formatMoney(i.amount, currency),
+          formatAmount(i.unitPrice),
+          formatAmount(i.amount),
         ]),
       },
+      // The quotation's money block: on an inclusive order the subtotal
+      // already carries the VAT, and the line says so.
       {
-        kind: 'table',
-        head: ['', 'Amount'],
-        widths: [72, 28],
-        align: ['right', 'right'],
-        rows: po.vatInclusive
-          ? [
-              ['Total (VAT inclusive)', formatMoney(view.total, currency)],
-              [`VAT included (${(view.vatRate * 100).toFixed(0)}%)`, formatMoney(view.vatAmount, currency)],
-            ]
-          : [
-              ['Subtotal', formatMoney(view.subtotal, currency)],
-              [`VAT (${(view.vatRate * 100).toFixed(0)}%)`, formatMoney(view.vatAmount, currency)],
-              ['TOTAL', formatMoney(view.total, currency)],
-            ],
+        kind: 'totals',
+        rows: [
+          { label: 'Subtotal', value: formatMoney(view.subtotal, currency) },
+          { label: po.vatInclusive ? `VAT included (${ratePct})` : `VAT (${ratePct})`, value: formatMoney(view.vatAmount, currency) },
+          { label: 'Total', value: formatMoney(view.total, currency), bold: true },
+        ],
       },
     ];
 
     if (po.notes) sections.push({ kind: 'text', title: 'Notes', body: po.notes });
 
-    const poSignoffs = await approvalSignoffs('purchase_order', po.id);
+    // Prepared by the buyer, then every step of the route — the project
+    // manager and finance, who signed and when, "Pending" until they do; a
+    // draft prints the route submitting would take (a rejection returns the
+    // order to draft, so it reads as one). Receiving is its own document, so
+    // no slot waits for it here.
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: po.createdBy.name, ...(await contactLines(po.createdById)), at: po.createdAt },
+      ...(await routeSignatories(
+        'purchase_order',
+        po.id,
+        po.status === 'DRAFT' ? 'draft' : po.status === 'CANCELLED' ? 'closed' : 'routed',
+        { amount: view.total, requesterId: po.createdById },
+      )),
+    ];
 
     const pdf = await renderDocument({
       title: 'Purchase Order',
@@ -1970,13 +2418,7 @@ purchaseOrderRoutes.get(
       date: po.orderDate,
       reference: po.supplier.name,
       sections,
-      signatories: [
-        { role: 'Prepared by', name: po.createdBy.name, position: po.createdBy.position ?? undefined, at: po.createdAt },
-        // Name and timestamp come from the approval the engine recorded, so
-        // the signature block says who actually approved it and when.
-        { role: 'Approved by', ...poSignoffs[0] },
-        { role: 'Received by' },
-      ],
+      signatories,
     });
 
     await audit(
@@ -1999,33 +2441,24 @@ purchaseRequestRoutes.get(
 
     // Reads straight off the loaded record — the presented shape widens its
     // item type and loses the fields the table needs.
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
+    const currency = await companyCurrency();
     const estimatedTotal = cents(pr.items.reduce((s, i) => s + num(i.estimatedAmount), 0));
 
-    // Every step of the route, who signed it and when — "Pending" until they
-    // do. A draft has no sign-off standing: pulled back, its last request is
-    // CANCELLED but keeps the steps that had signed, and printing those would
-    // date an approval nobody now gives. So a draft prints the route
-    // submitting would take (a request of ₱50,000 or more takes three steps),
-    // every step Pending; anything else prints its latest request's steps.
-    const slots: ApprovalSlot[] =
-      pr.status === 'DRAFT'
-        ? ((await routePreview('purchase_request', estimatedTotal, pr.requestedById))?.steps ?? []).map((st) => ({
-            step: st.name,
-            assigned: st.approvers,
-          }))
-        : await approvalSlots('purchase_request', pr.id);
-    const stepSignatories: Signatory[] = slots.length
-      ? slots.map((sl) => {
-          const role = `Approved by — ${sl.step}`;
-          if (sl.name) return { role, name: sl.name, position: sl.position, at: sl.at };
-          // One person who may sign is named beside "Pending"; several are
-          // not, because a house-style sign-off is one line.
-          const who = sl.assigned ?? [];
-          return who.length === 1 ? { role, name: who[0].name, position: who[0].position } : { role };
-        })
-      : [{ role: 'Approved by' }];
+    // Requested by the requester, then every step of the route (a request of
+    // ₱50,000 or more takes three), who signed it and when — "Pending" until
+    // they do. A draft prints the route submitting would take, every step
+    // open: pulled back, its last request keeps the steps that had signed,
+    // and those are nobody's signature now. A rejected request prints only
+    // the steps that signed before it was refused — nobody signs the rest.
+    const signatories: Signatory[] = [
+      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactLines(pr.requestedById)), at: pr.createdAt },
+      ...(await routeSignatories(
+        'purchase_request',
+        pr.id,
+        pr.status === 'DRAFT' ? 'draft' : pr.status === 'REJECTED' || pr.status === 'CANCELLED' ? 'closed' : 'routed',
+        { amount: estimatedTotal, requesterId: pr.requestedById },
+      )),
+    ];
 
     const pdf = await renderDocument({
       title: 'Purchase Request',
@@ -2042,35 +2475,34 @@ purchaseRequestRoutes.get(
             { label: 'Warehouse', value: pr.warehouse?.name ?? '—' },
             { label: 'Requested by', value: pr.requestedBy.name },
             { label: 'Needed by', value: pr.neededBy ? formatDate(pr.neededBy) : '—' },
-            { label: 'Status', value: pr.status.replace(/_/g, ' ') },
+            { label: 'Status', value: statusLabel(pr.status) },
           ],
         },
         {
           kind: 'table',
           title: 'Items requested',
-          head: ['#', 'Description', 'Category', 'Qty', 'Unit', 'Est. cost', 'Est. amount'],
-          widths: [5, 32, 17, 9, 8, 14, 15],
+          head: ['No.', 'Description', 'Category', 'Qty', 'Unit', `Est. cost (${currency})`, `Est. amount (${currency})`],
           align: ['right', 'left', 'left', 'right', 'left', 'right', 'right'],
-          rows: [
-            ...pr.items.map((i, n) => [
-              String(n + 1),
-              i.description,
-              i.costCategory?.name ?? '—',
-              String(num(i.quantity)),
-              i.unit,
-              formatMoney(num(i.estimatedCost), currency),
-              formatMoney(num(i.estimatedAmount), currency),
-            ]),
-            ['', 'ESTIMATED TOTAL', '', '', '', '', formatMoney(estimatedTotal, currency)],
-          ],
+          rows: pr.items.map((i, n) => [
+            String(n + 1),
+            i.description,
+            i.costCategory?.name ?? '—',
+            String(num(i.quantity)),
+            i.unit,
+            formatAmount(num(i.estimatedCost)),
+            formatAmount(num(i.estimatedAmount)),
+          ]),
         },
+        { kind: 'totals', rows: [{ label: 'Estimated total', value: formatMoney(estimatedTotal, currency), bold: true }] },
         ...(pr.notes ? [{ kind: 'text' as const, title: 'Notes', body: pr.notes }] : []),
       ],
-      signatories: [
-        { role: 'Requested by', name: pr.requestedBy.name, position: pr.requestedBy.position ?? undefined, at: pr.createdAt },
-        ...stepSignatories,
-      ],
+      signatories,
     });
+
+    await audit(
+      { entityType: 'purchase_request', entityId: pr.id, action: 'EXPORTED', summary: `Printed ${pr.number}` },
+      req,
+    );
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${pr.number}.pdf"`);

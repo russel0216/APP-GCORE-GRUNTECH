@@ -193,6 +193,7 @@ export function ProgressReports() {
           onRowClick={(b) => navigate(`/g-ops/billings/${b.id}`)}
           emptyTitle="Nothing billed yet"
           emptyHint="A billing is raised from an approved progress report, and covers only the work that report added."
+          printPath="/api/billings/pdf"
           filters={[
             {
               key: 'status',
@@ -217,6 +218,7 @@ export function ProgressReports() {
         onRowClick={(r) => navigate(`/g-ops/progress/${r.id}`)}
         emptyTitle="No progress reports yet"
         emptyHint="Start one from a project's Progress tab."
+        printPath="/api/progress-reports/pdf"
         filters={[
           {
             key: 'status',
@@ -264,6 +266,8 @@ interface ReportDetail {
   issues: string | null;
   nextPeriodPlan: string | null;
   canEdit: boolean;
+  /** The approve route's own checks: still open, the right held, and not the person who prepared it. */
+  canApprove: boolean;
   job: { id: string; number: string; name: string; contractValue: number; customer: { name: string } };
   preparedBy: { id: string; name: string };
   approvedBy: { id: string; name: string } | null;
@@ -391,7 +395,7 @@ export function ProgressReportDetail() {
         }
         actions={
           <>
-            {report.status === 'DRAFT' && can('gops.progress_billing.approve') && (
+            {report.canApprove && (
               <button
                 className="btn btn-primary"
                 onClick={() =>
@@ -737,6 +741,8 @@ interface BillingDetail {
   }[];
   /** The invoice raised from this billing — at most one, by a unique key. */
   invoice: { id: string; number: string; status: string } | null;
+  /** The approve route's own checks: open, the right held, and not the person who raised it. */
+  canApprove: boolean;
 }
 
 export function BillingDetailPage() {
@@ -806,7 +812,7 @@ export function BillingDetailPage() {
         }
         actions={
           <>
-            {billing.status === 'DRAFT' && can('gops.progress_billing.approve') && (
+            {billing.canApprove && (
               <button
                 className="btn btn-primary"
                 onClick={() =>
@@ -1029,6 +1035,8 @@ export function BudgetMonitoring() {
         searchPlaceholder="Search project, customer…"
         onRowClick={(j) => navigate(`/g-ops/projects/${j.id}`)}
         emptyTitle="No projects yet"
+        // The same projects as the Projects list, printed in this screen's budget columns.
+        printPath="/api/jobs/budget-monitoring/pdf"
         filters={[
           {
             key: 'status',

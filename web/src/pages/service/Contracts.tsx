@@ -232,6 +232,7 @@ export function ServiceContracts() {
         searchPlaceholder="Search number, customer, job…"
         emptyTitle="No service contracts yet"
         onRowClick={(r) => navigate(`/g-ops/service-contracts/${r.id}`)}
+        printPath="/api/service-contracts/pdf"
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
           { key: 'expiring', label: 'Renewal', options: [{ value: 'true', label: 'Expiring soon' }] },

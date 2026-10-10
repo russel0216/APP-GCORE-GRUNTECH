@@ -31,11 +31,13 @@ import {
 import { valueRevision } from '../shared/pipeline';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
 import {
+  companyCurrency,
   formatAmount,
   formatDate,
   formatMoney,
   formatShortDate,
   renderDocument,
+  statusLabel,
   type PdfTotal,
   type Signatory,
 } from '../shared/pdf';
@@ -50,7 +52,10 @@ import {
   pickWorkflow,
   routePreview,
   submitForApproval,
+  type ApprovalSlot,
 } from '../shared/approvals';
+import { approvalStands, designedSignatories, draftRouteSlots, scopeNamed, standingSlots } from './sales';
+import { bracketNote, bracketed, LIST_CAP, listNotes, listReference, rangeNamed, recordNamed, sendListPdf, totalLabel } from './finance';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
@@ -197,12 +202,6 @@ async function nextOrderNumber(tx: Prisma.TransactionClient, quotationId: string
 
 export const SALES_ORDER_STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'ISSUED', 'CANCELLED'] as const;
 type SoStatus = (typeof SALES_ORDER_STATUSES)[number];
-const SO_STATUS_LABEL: Record<SoStatus, string> = {
-  DRAFT: 'Draft',
-  PENDING_APPROVAL: 'Pending approval',
-  ISSUED: 'Issued',
-  CANCELLED: 'Cancelled',
-};
 const SO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 function soDay(value: string | undefined, label: string): string | null {
@@ -428,68 +427,68 @@ salesOrderRoutes.get(
     const q = listQuery(req);
     const team = await teamOf(me.id);
     const { base, where } = salesOrderListWhere(me, q, team?.id ?? null);
-    const [rows, summary] = await Promise.all([
+    const f = q.filters;
+    const [rows, summary, currency, customer, owner, quotation] = await Promise.all([
       prisma.salesOrder.findMany({
         where,
         include: { customer: { select: { name: true } }, quotation: { select: { number: true, subject: true } } },
         orderBy: salesOrderOrderBy(q),
-        take: 1000,
+        take: LIST_CAP,
       }),
       salesOrderListSummary(base, where),
+      companyCurrency(),
+      recordNamed('customer', f.customerId),
+      recordNamed('person', f.ownerId, 'booked by'),
+      f.quotationId ? prisma.quotation.findUnique({ where: { id: f.quotationId }, select: { number: true } }) : null,
     ]);
-    const f = q.filters;
-    const filters = [
+    // "12 sales orders", or "first 1,000 of 1,234 sales orders printed" when
+    // the cap bit — then every filter `salesOrderListWhere` applied, by name.
+    const reference = listReference(summary.count, rows.length, ['sales order', 'sales orders'], [
       q.search ? `search "${q.search}"` : null,
-      f.status ? `status ${SO_STATUS_LABEL[f.status as SoStatus] ?? f.status}` : null,
-      f.customerId ? 'one customer' : null,
-      f.ownerId ? 'one owner' : null,
-      f.quotationId ? 'one quotation' : null,
-      f.dateFrom || f.dateTo ? `dated ${f.dateFrom ?? '…'} to ${f.dateTo ?? '…'}` : null,
+      f.status ? `status ${statusLabel(f.status)}` : null,
+      customer,
+      owner,
+      f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
+      rangeNamed('dated', f.dateFrom, f.dateTo),
       f.released === 'yes' ? 'released' : f.released === 'no' ? 'not yet released' : null,
-      q.scope === 'mine' ? 'mine only' : null,
+      scopeNamed(q.scope, team, !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all')),
       f.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+    ]);
 
+    // Seven columns: portrait holds them, each sized from what it holds
+    // (rule 6). Value, never cost. The money block is the booked value —
+    // the orders still standing, over every order the filter matched; a
+    // cancelled order's figure prints in brackets and is never summed,
+    // which the note under it says.
     const pdf = await renderDocument({
       title: 'Sales Orders',
       date: new Date(),
-      reference: `${summary.count} order(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Quotation and customer', 'Status', 'PO', 'SI / DR', 'Date', 'Total'],
-          widths: [1.7, 2.7, 1.4, 1.4, 1.3, 1.3, 1.4],
+          head: ['Number', 'Quotation and customer', 'Status', 'PO', 'SI / DR', 'Date', `Total (${currency})`],
           align: ['left', 'left', 'left', 'left', 'left', 'left', 'right'],
           rows: rows.map((r) => [
             r.number,
             { title: r.quotation.subject, body: `${r.quotation.number} · ${r.customer.name}` },
-            SO_STATUS_LABEL[r.status as SoStatus] ?? r.status,
+            statusLabel(r.status),
             r.poNumber ?? '',
             [r.siNumber, r.drNumber].filter(Boolean).join(' / '),
             formatShortDate(r.orderDate),
-            r.status === 'CANCELLED' ? `(${formatAmount(num(r.total))})` : formatAmount(num(r.total)),
+            bracketed(formatAmount(num(r.total)), r.status !== 'CANCELLED'),
           ]),
         },
-        {
-          kind: 'totals',
-          rows: [
-            { label: 'Booked value, total:', value: formatMoney(summary.value), bold: true },
-            ...(summary.cancelledCount
-              ? [{ label: `Cancelled, not counted:`, value: `${summary.cancelledCount} order(s)` }]
-              : []),
-          ],
-        },
+        { kind: 'totals', rows: [{ label: totalLabel('Total booked', summary.count, rows.length), value: formatMoney(summary.value, currency), bold: true }] },
+        ...listNotes([bracketNote(summary.cancelledCount, ['cancelled order', 'cancelled orders'])]),
       ],
-      signatories: [],
     });
 
     await audit(
       { entityType: 'sales_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the sales orders list as PDF (${rows.length} order(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="sales-orders.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'sales-orders.pdf');
   }),
 );
 
@@ -1153,7 +1152,77 @@ export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id
   return order;
 }
 
-const STATUS_LABEL: Record<string, string> = { DRAFT: 'Draft', ISSUED: 'Issued', CANCELLED: 'Cancelled' };
+/**
+ * The sign-off of an order no request ever routed (no workflow was active
+ * when it was issued): the person who actually issued it, dated — the
+ * trail's own row, which `POST /:id/issue` writes — with how to reach them;
+ * one open "Approved by" while it is still a draft; and never a slot nobody
+ * will fill ("Noted by" is nobody's step in the app). An issue the order was
+ * reopened after no longer stands behind it, so a cancelled order that was
+ * issued, reopened and cancelled from its draft names nobody.
+ */
+async function unroutedOrderSignoff(order: { id: string; status: string }): Promise<Signatory[]> {
+  if (order.status === 'DRAFT' || order.status === 'PENDING_APPROVAL') return [{ role: 'Approved by' }];
+  const issued = await prisma.auditLog.findFirst({
+    where: { entityType: 'sales_order', entityId: order.id, action: 'COMPLETED' },
+    orderBy: { at: 'desc' },
+    select: { actorId: true, actorName: true, at: true },
+  });
+  if (!issued || !(issued.actorName || issued.actorId)) return [];
+  const reopened = await prisma.auditLog.count({
+    where: { entityType: 'sales_order', entityId: order.id, at: { gt: issued.at }, summary: { startsWith: 'Reopened sales order' } },
+  });
+  if (reopened) return [];
+  const who = issued.actorId
+    ? await prisma.user.findUnique({
+        where: { id: issued.actorId },
+        select: { name: true, email: true, phone: true, employee: { select: { mobile: true } } },
+      })
+    : null;
+  return [{ role: 'Issued by', name: issued.actorName ?? who?.name, phone: who ? contactPhone(who) : undefined, email: who?.email, at: issued.at }];
+}
+
+/**
+ * The order's route, one slot a step. A DRAFT prints the route submitting it
+ * now would take; a pending one its open request, each step signed and dated
+ * or under who may yet sign it; an ISSUED one the request that approved it —
+ * none when no approval stands behind it (`approvalStands`: reopened and
+ * issued again with no route active). A CANCELLED one keeps what its latest
+ * request still stands for: the request that approved it before it was
+ * cancelled, or the one the cancel withdrew — only the steps signed by then
+ * (`standingSlots`), never "Pending" under a step nobody will sign — and
+ * none when the order went back to draft after that request closed (pulled
+ * back, returned or reopened), because those signatures then stand behind
+ * nothing. None falls to `unroutedOrderSignoff`.
+ */
+async function orderRouteSlots(order: { id: string; status: string; total: Prisma.Decimal; ownerId: string }): Promise<ApprovalSlot[]> {
+  if (order.status === 'DRAFT') return draftRouteSlots('sales_order', num(order.total), order.ownerId);
+  if (order.status === 'ISSUED' && !(await approvalStands('sales_order', order.id, 'Reopened sales order'))) return [];
+  if (order.status === 'CANCELLED') {
+    const request = await prisma.approvalRequest.findFirst({
+      where: { documentType: 'sales_order', documentId: order.id },
+      orderBy: { createdAt: 'desc' },
+      select: { closedAt: true },
+    });
+    if (!request?.closedAt) return [];
+    // The trail's own rows for a move back to draft: the pull-back, the
+    // approver's return (`settleSalesOrder`) and the reopen.
+    const backToDraft = await prisma.auditLog.count({
+      where: {
+        entityType: 'sales_order',
+        entityId: order.id,
+        at: { gt: request.closedAt },
+        OR: [
+          { summary: { startsWith: 'Pulled sales order' } },
+          { summary: { endsWith: 'returned to draft' } },
+          { summary: { startsWith: 'Reopened sales order' } },
+        ],
+      },
+    });
+    if (backToDraft) return [];
+  }
+  return standingSlots(await approvalSlots('sales_order', order.id));
+}
 
 /**
  * What a sales order prints — its fields, its lines, its totals and who
@@ -1164,8 +1233,7 @@ const STATUS_LABEL: Record<string, string> = { DRAFT: 'Draft', ISSUED: 'Issued',
  * layout that places the cost columns prints them empty.
  */
 export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: boolean): Promise<DesignData> {
-  const company = await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } });
-  const currency = company?.currency ?? 'PHP';
+  const currency = await companyCurrency();
   const site = order.quotation.siteId
     ? await prisma.customerSite.findUnique({ where: { id: order.quotation.siteId }, select: { address: true, city: true } })
     : null;
@@ -1183,7 +1251,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'order.number': order.number,
     'order.date': formatShortDate(order.orderDate),
     'order.dateLong': formatDate(order.orderDate),
-    'order.status': STATUS_LABEL[order.status] ?? order.status,
+    'order.status': statusLabel(order.status),
     'order.subject': order.quotation.subject,
     'order.poNumber': order.poNumber ?? '',
     'order.paymentTerms': `${order.termsDays} days`,
@@ -1257,7 +1325,16 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     });
   });
 
-  const totalRows: PdfTotal[] = [{ label: 'Subtotal:', value: amount(totals.subtotal) }];
+  // The money block in the quotation's words (VAT, never "Tax"), the bold
+  // total its last row (rule 6). The internal cost and margin — only where
+  // the caller may see cost — go first, as the costing's estimate puts them:
+  // what the order costs and earns, then what the customer is charged.
+  const totalRows: PdfTotal[] = [];
+  if (showCost) {
+    totalRows.push({ label: `Cost (${currency}):`, value: amount(totals.cost.totalCost) });
+    totalRows.push({ label: 'Margin sum:', value: amount(totals.cost.totalMargin) });
+  }
+  totalRows.push({ label: 'Subtotal:', value: amount(totals.subtotal) });
   if (totals.discountAmount > 0) {
     totalRows.push({
       label: `Discount (${num(order.discountPct).toFixed(num(order.discountPct) % 1 ? 2 : 0)}%):`,
@@ -1265,21 +1342,16 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     });
     if (!order.vatInclusive) totalRows.push({ label: 'Sum without tax:', value: amount(totals.net) });
   }
-  totalRows.push({ label: order.vatInclusive ? `VAT included (${ratePct}):` : `Tax (${ratePct}):`, value: amount(totals.vatAmount) });
+  totalRows.push({ label: order.vatInclusive ? `VAT included (${ratePct}):` : `VAT (${ratePct}):`, value: amount(totals.vatAmount) });
   totalRows.push({ label: `Total (${currency}):`, value: amount(totals.total), bold: true });
-  if (showCost) {
-    totalRows.push({ label: `Cost (${currency}):`, value: amount(totals.cost.totalCost) });
-    totalRows.push({ label: 'Margin sum:', value: amount(totals.cost.totalMargin) });
-  }
 
-  // Prepared by the author; then every step of the approval route, dated
-  // once it has approved and "Pending" until then — a draft shows the route
-  // submitting would take. Without a route, Noted and Approved stay open.
-  const slots = await approvalSlots(
-    'sales_order',
-    order.id,
-    order.status === 'DRAFT' ? { amount: num(order.total), requesterId: order.ownerId } : undefined,
-  );
+  // Prepared by the author; then the route as the workflow names its steps
+  // (rule 6) — Team Leader, Back Support / Admin, Cost Controller, CEO
+  // approval — who signed and when, else who is assigned with "Pending"
+  // under them (`orderRouteSlots`, which says what a draft, an issued and a
+  // cancelled order print); an order no route carried prints who actually
+  // issued it (`unroutedOrderSignoff`).
+  const slots = await orderRouteSlots(order);
   const signatories: Signatory[] = [
     {
       role: 'Prepared by',
@@ -1289,15 +1361,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
       email: order.owner.email ?? undefined,
       at: order.createdAt,
     },
-    ...(slots.length
-      ? slots.map((sl): Signatory => {
-          const role = slots.length > 1 ? `Approved by — ${sl.step}` : 'Approved by';
-          if (sl.name) return { role, name: sl.name, position: sl.position, phone: sl.phone, email: sl.email, at: sl.at };
-          const who = sl.assigned ?? [];
-          if (who.length === 1) return { role, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
-          return who.length > 1 ? { role, name: who.map((p) => p.name).join(' or ') } : { role };
-        })
-      : [{ role: 'Noted by' }, { role: 'Approved by' }]),
+    ...(slots.length ? designedSignatories(slots) : await unroutedOrderSignoff(order)),
   ];
 
   return { title: `${order.number} — Sales Order`, fields, rows, totals: totalRows, signatories };

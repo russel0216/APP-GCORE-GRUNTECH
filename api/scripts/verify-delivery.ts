@@ -8,6 +8,7 @@
  * billed. All three are easy to get subtly wrong and invisible when they are.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -15,9 +16,9 @@ import { env } from '../src/env';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act, approversForStep, routePreview } from '../src/shared/approvals';
 import { financeSettings, refreshSettlement, settleable, addDays, dayKey } from '../src/shared/finance';
-import { renderDocument } from '../src/shared/pdf';
 import { signToken } from '../src/auth/middleware';
 import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
+import { statusLabel } from '../src/shared/pdf';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
 
@@ -130,6 +131,59 @@ async function http(token: string, method: string, path: string, body?: unknown)
   }
   return { status: res.status, body: parsed };
 }
+
+/** A document's bytes — the PDF routes answer a file, not JSON. */
+async function apiBytes(token: string, path: string): Promise<{ status: number; bytes: Buffer | null }> {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  return { status: res.status, bytes: res.ok ? Buffer.from(await res.arrayBuffer()) : null };
+}
+
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation
+ * uses. PDFKit Flate-compresses its content streams and writes text as hex
+ * runs split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+/** A printed list: its status, type, words (flattened) and page sizes. */
+async function paperOf(token: string, path: string): Promise<{ status: number; type: string; text: string; boxes: string[] }> {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const type = res.headers.get('content-type') ?? '';
+  if (!res.ok) return { status: res.status, type, text: '', boxes: [] };
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const boxes = [...bytes.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map((m) => `${m[1]}x${m[2]}`);
+  return { status: res.status, type, text: pdfText(bytes).replace(/\s+/g, ' '), boxes };
+}
+
+/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
+const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
+const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
+/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
+const flat = (t: string) => t.replace(/\s+/g, ' ');
 
 async function apiReachable(): Promise<boolean> {
   try {
@@ -724,28 +778,8 @@ async function main() {
   );
 
   // ── 9. Documents ───────────────────────────────────────────────────────────
-  console.log('\nDocuments');
-
-  const pdf = await renderDocument({
-    title: 'Progress Billing',
-    documentNumber: b1.number,
-    sections: [
-      {
-        kind: 'table',
-        title: 'Summary',
-        head: ['', 'Amount'],
-        align: ['left', 'right'],
-        rows: [
-          ['Gross amount', '180,000.00'],
-          ['Add: VAT (12%)', '21,600.00'],
-          ['INVOICE TOTAL', '201,600.00'],
-          ['Less: creditable withholding tax (2%)', '-3,600.00'],
-          ['NET COLLECTIBLE', '198,000.00'],
-        ],
-      },
-    ],
-  });
-  check('a progress billing prints', pdf.subarray(0, 5).toString() === '%PDF-');
+  // The progress report and the billing are printed through their own routes
+  // in section 11 (over HTTP): the sign-offs, the money block and the trail.
 
   // ── 10. Renewal term arithmetic ─────────────────────────────────────────────
   console.log('\nRenewal term');
@@ -970,6 +1004,199 @@ async function main() {
       JSON.stringify(after.body.invoice),
     );
 
+    // (d2) The progress report and the billing on paper (rule 6). Neither has
+    //      an approval route, so each prints the people who actually acted,
+    //      each dated — never a "Checked by" nobody checks, never a Conforme,
+    //      never the project's manager guessed as a preparer — and its money
+    //      as the quotation's totals block, the figures in the table without
+    //      the code, which the column head names.
+    const currency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
+    const rate = (r: number) => `${+(r * 100).toFixed(2)}%`;
+    const peso = (n: number) => `${currency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const exports = (entityType: string, entityId: string) =>
+      prisma.auditLog.count({ where: { entityType, entityId, action: 'EXPORTED' } });
+
+    const r1Pdf = await apiBytes(leadToken, `/progress-reports/${r1.id}/pdf`);
+    const r1Text = r1Pdf.bytes ? pdfText(r1Pdf.bytes) : '';
+    check(
+      'an approved progress report prints who prepared it and who approved it, each dated — and no "Checked by"',
+      r1Pdf.status === 200 &&
+        flat(r1Text).includes('PREPARED BY') &&
+        flat(r1Text).includes('APPROVED BY') &&
+        !flat(r1Text).includes('CHECKED BY') &&
+        r1Text.includes('Verify Engineer') &&
+        r1Text.includes('Verify PM') &&
+        signedCount(r1Text) === 2 &&
+        pendingCount(r1Text) === 0,
+      `${r1Pdf.status} ${signedCount(r1Text)} signed, ${pendingCount(r1Text)} pending`,
+    );
+    check(
+      'its money is a totals block — contract value, earned this period and to date with their percentages — never a TOTAL row in the table',
+      r1Text.includes('Contract value') &&
+        r1Text.includes(peso(1_000_000)) &&
+        r1Text.includes('Earned this period (18.00%)') &&
+        r1Text.includes('Earned to date (18.00%)') &&
+        r1Text.includes(peso(180_000)) &&
+        flat(r1Text).includes(`VALUE (${currency})`) &&
+        r1Text.includes('600,000.00') &&
+        !r1Text.includes(peso(600_000)) &&
+        !r1Text.includes('TOTAL'),
+      r1Text.split('\n').filter((l) => /Contract|Earned|TOTAL|VALUE/.test(l)).join(' | ').slice(0, 240),
+    );
+    check('the print is on the report\'s trail as EXPORTED', (await exports('progress_report', r1.id)) === 1);
+
+    // A billing raised and approved through the routes: the trail names both.
+    const billerRole = await makeRole('biller', ['gops.progress_billing.view_all', 'gops.progress_billing.create']);
+    const approverRole = await makeRole('billapprover', ['gops.progress_billing.view_all', 'gops.progress_billing.approve']);
+    const biller = await makeUser(`${TAG} Biller`, 'biller@verifyd.local', [billerRole.key]);
+    const billApprover = await makeUser(`${TAG} Approver`, 'billapprover@verifyd.local', [approverRole.key]);
+    const billerToken = signToken(biller.id, biller.email);
+    const raised = await http(billerToken, 'POST', '/billings', { progressReportId: r2.id });
+    const draftBill = await apiBytes(billerToken, `/billings/${raised.body.id}/pdf`);
+    const draftBillText = draftBill.bytes ? pdfText(draftBill.bytes) : '';
+    check(
+      'a draft billing prints who raised it, dated, and "Approved by" Pending under nobody — never the creator as its approver',
+      raised.status === 201 &&
+        draftBill.status === 200 &&
+        draftBillText.includes(`${TAG} Biller`) &&
+        signedCount(draftBillText) === 1 &&
+        pendingCount(draftBillText) === 1 &&
+        (draftBillText.match(new RegExp(`${TAG} Biller`, 'g')) ?? []).length === 1 &&
+        !flat(draftBillText).includes('CHECKED BY') &&
+        !flat(draftBillText).includes('CONFORME'),
+      `${raised.status} ${draftBill.status} ${signedCount(draftBillText)} signed, ${pendingCount(draftBillText)} pending`,
+    );
+    check(
+      `its money is the quotation's block: Gross amount, VAT (${rate(vatRate)}), Invoice total, Less: EWT (${rate(ewtRate)}), Net collectible`,
+      draftBillText.includes('Gross amount') &&
+        draftBillText.includes(`VAT (${rate(vatRate)})`) &&
+        draftBillText.includes('Invoice total') &&
+        draftBillText.includes(`Less: EWT (${rate(ewtRate)})`) &&
+        draftBillText.includes('Net collectible') &&
+        draftBillText.includes(peso(gross1)) &&
+        draftBillText.includes(peso(gross1 + vat1 - ewt1)) &&
+        !draftBillText.includes('INVOICE TOTAL') &&
+        !draftBillText.includes('NET COLLECTIBLE') &&
+        !draftBillText.includes('creditable withholding') &&
+        !draftBillText.includes('TOTAL') &&
+        flat(draftBillText).includes(`THIS BILLING (${currency})`),
+      draftBillText.split('\n').filter((l) => /Gross|VAT|Total|total|TOTAL|EWT|Net|BILLING/.test(l)).join(' | ').slice(0, 260),
+    );
+    // The table speaks the billing screen's words: what was billed BEFORE
+    // this billing is "Previously billed" — never "Billed to date", which on
+    // a second billing would print the earlier figure as the running total.
+    check(
+      'its table heads what came before "Previously billed", as the screen does — never "Billed to date"',
+      flat(draftBillText).includes('PREVIOUSLY BILLED %') &&
+        flat(draftBillText).includes(`PREVIOUSLY BILLED (${currency})`) &&
+        !flat(draftBillText).includes('BILLED TO DATE'),
+      flat(draftBillText).match(/SCOPE.{0,160}/)?.[0] ?? '',
+    );
+    // The billings list on paper counts only what has been approved: a draft
+    // prints its figures in brackets, the totals leave it out, and the note
+    // says so in finance's words.
+    const fmt2 = (n: number) => n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const draftList = await paperOf(billerToken, `/billings/pdf?ids=${raised.body.id}`);
+    check(
+      'on the billings list a draft prints its figures in brackets, out of the totals, and the note says how many',
+      draftList.status === 200 &&
+        draftList.text.includes(`(${fmt2(Number(raised.body.grossAmount))})`) &&
+        draftList.text.includes(`(${fmt2(Number(raised.body.netCollectible))})`) &&
+        draftList.text.includes(`Gross amount ${peso(0)}`) &&
+        draftList.text.includes(`Net collectible ${peso(0)}`) &&
+        draftList.text.includes('1 billing not yet approved, in brackets, is not counted.'),
+      draftList.text.match(/Gross amount.{0,160}/)?.[0] ?? String(draftList.status),
+    );
+
+    // Rule 3: whoever raised a billing never approves it — given the right,
+    // and as a super admin too — and the page does not offer the button.
+    const selfRole = await makeRole('billself', ['gops.progress_billing.approve']);
+    await prisma.userRole.create({ data: { userId: biller.id, roleId: selfRole.id } });
+    const selfApprove = await http(billerToken, 'POST', `/billings/${raised.body.id}/approve`);
+    const selfPage = await http(billerToken, 'GET', `/billings/${raised.body.id}`);
+    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
+    const selfAsAdmin = await http(billerToken, 'POST', `/billings/${raised.body.id}/approve`);
+    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
+    const approverPage = await http(signToken(billApprover.id, billApprover.email), 'GET', `/billings/${raised.body.id}`);
+    check(
+      'whoever raised a billing cannot approve it, a super admin included — and only somebody else is offered the button',
+      selfApprove.status === 403 &&
+        selfAsAdmin.status === 403 &&
+        selfPage.body.canApprove === false &&
+        approverPage.body.canApprove === true &&
+        (await prisma.progressBilling.findUnique({ where: { id: raised.body.id } }))?.status === 'DRAFT',
+      `${selfApprove.status} / admin ${selfAsAdmin.status} · offered ${selfPage.body.canApprove} / ${approverPage.body.canApprove}`,
+    );
+    const approvedBill = await http(signToken(billApprover.id, billApprover.email), 'POST', `/billings/${raised.body.id}/approve`);
+    const finalBill = await apiBytes(billerToken, `/billings/${raised.body.id}/pdf`);
+    const finalBillText = finalBill.bytes ? pdfText(finalBill.bytes) : '';
+    check(
+      'approved, it prints the approver by name, dated, and nothing Pending',
+      approvedBill.status === 200 &&
+        finalBillText.includes(`${TAG} Biller`) &&
+        finalBillText.includes(`${TAG} Approver`) &&
+        signedCount(finalBillText) === 2 &&
+        pendingCount(finalBillText) === 0,
+      `${approvedBill.status} ${signedCount(finalBillText)} signed, ${pendingCount(finalBillText)} pending`,
+    );
+    check('both prints are on the billing\'s trail as EXPORTED', (await exports('progress_billing', raised.body.id)) === 2);
+
+    // Rule 3 on the progress report too: whoever prepared it never approves
+    // it — given the right, and as a super admin — the page offers the button
+    // only to somebody else, and two approvals at once land once.
+    const approverToken = signToken(billApprover.id, billApprover.email);
+    const r3 = await http(billerToken, 'POST', '/progress-reports', { jobId: job.id, periodFrom: '2026-03-01', periodTo: '2026-03-31' });
+    const r3Self = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/approve`);
+    const r3SelfPage = await http(billerToken, 'GET', `/progress-reports/${r3.body.id}`);
+    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
+    const r3AsAdmin = await http(billerToken, 'POST', `/progress-reports/${r3.body.id}/approve`);
+    const r3AdminPage = await http(billerToken, 'GET', `/progress-reports/${r3.body.id}`);
+    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
+    const r3ApproverPage = await http(approverToken, 'GET', `/progress-reports/${r3.body.id}`);
+    check(
+      'whoever prepared a progress report cannot approve it, a super admin included — and only somebody else is offered the button',
+      r3.status === 201 &&
+        r3Self.status === 403 &&
+        r3AsAdmin.status === 403 &&
+        r3SelfPage.body.canApprove === false &&
+        r3AdminPage.body.canApprove === false &&
+        r3ApproverPage.body.canApprove === true &&
+        (await prisma.progressReport.findUnique({ where: { id: r3.body.id } }))?.status === 'DRAFT',
+      `${r3.status} · ${r3Self.status} / admin ${r3AsAdmin.status} · offered ${r3SelfPage.body.canApprove} / ${r3AdminPage.body.canApprove} / ${r3ApproverPage.body.canApprove}`,
+    );
+    const r3Race = await Promise.all([
+      http(approverToken, 'POST', `/progress-reports/${r3.body.id}/approve`),
+      http(approverToken, 'POST', `/progress-reports/${r3.body.id}/approve`),
+    ]);
+    const r3Approvals = await prisma.auditLog.count({ where: { entityType: 'progress_report', entityId: r3.body.id, action: 'APPROVED' } });
+    const r3After = await http(approverToken, 'GET', `/progress-reports/${r3.body.id}`);
+    check(
+      'two approvals pressed at once approve it once — the second is refused, never written over the first',
+      r3Race.map((r) => r.status).sort().join(',') === '200,400' && r3Approvals === 1 && r3After.body.canApprove === false,
+      `${r3Race.map((r) => r.status).join(',')} · ${r3Approvals} APPROVED row(s)`,
+    );
+    const r3Pdf = await apiBytes(approverToken, `/progress-reports/${r3.body.id}/pdf`);
+    const r3Text = r3Pdf.bytes ? pdfText(r3Pdf.bytes) : '';
+    const times = (t: string, name: string) => (t.match(new RegExp(name, 'g')) ?? []).length;
+    check(
+      'its paper prints the preparer once and the approver once, each dated — never one name as both',
+      r3Pdf.status === 200 &&
+        times(r3Text, `${TAG} Biller`) === 1 &&
+        times(r3Text, `${TAG} Approver`) === 1 &&
+        signedCount(r3Text) === 2 &&
+        pendingCount(r3Text) === 0,
+      `${r3Pdf.status} biller ×${times(r3Text, `${TAG} Biller`)}, approver ×${times(r3Text, `${TAG} Approver`)}, ${signedCount(r3Text)} signed`,
+    );
+    // A billing written outside the routes has no trail to name anybody: the
+    // paper names nobody rather than the project's manager it used to guess.
+    const bareBill = await apiBytes(leadToken, `/billings/${b1.id}/pdf`);
+    const bareBillText = bareBill.bytes ? pdfText(bareBill.bytes) : '';
+    check(
+      'a billing nobody is on record as raising names no preparer — the project manager is not guessed',
+      bareBill.status === 200 && !bareBillText.includes('Verify PM') && !flat(bareBillText).includes('PREPARED BY'),
+      `${bareBill.status} PM ${bareBillText.includes('Verify PM')}`,
+    );
+
     // (e) The ledger the Budget tab lists names the document behind each row —
     //     here the liquidation, which is where a budget request's cash
     //     reaches the project. Approval itself wrote nothing.
@@ -1003,6 +1230,138 @@ async function main() {
       brPage.status === 200 && brPage.body.status === 'LIQUIDATED' && brPage.body.amountSpent === 42_000 && brPage.body.amountRefunded === 8_000,
       `${brPage.status} ${brPage.body.status}`,
     );
+
+    // The request on paper (rule 6) — the cash advance's document: the money
+    // as the quotation's totals block, its route by the step names alone
+    // (never "Approved by — …"), each signed and dated, and who received the
+    // cash. Everything here has happened, so nothing prints "Pending".
+    const brPdf = await apiBytes(financeToken, `/budget-requests/${br.id}/pdf`);
+    const brText = brPdf.bytes ? pdfText(brPdf.bytes) : '';
+    const brFlat = flat(brText);
+    const brSteps = brWorkflow.steps.map((st) => st.name.toUpperCase());
+    check(
+      'the printed request signs every step of its route by the step’s own name, then who received the cash — all dated',
+      brPdf.status === 200 &&
+        brFlat.includes('REQUESTED BY') &&
+        brSteps.every((st) => brFlat.includes(st)) &&
+        brFlat.includes('RECEIVED BY') &&
+        !brFlat.includes('APPROVED BY') &&
+        brText.includes('Verify Engineer') &&
+        brText.includes('Verify PM') &&
+        brText.includes('Verify Finance') &&
+        signedCount(brText) === 4 &&
+        pendingCount(brText) === 0,
+      `${brPdf.status} ${brSteps.join(' / ')} · ${signedCount(brText)} signed, ${pendingCount(brText)} pending`,
+    );
+    check(
+      'its money is a totals block — requested, released, spent, owed back, refunded, still to refund — with statuses in words',
+      brText.includes('Amount requested') &&
+        brText.includes(peso(50_000)) &&
+        brText.includes('Released') &&
+        brText.includes('Spent (per liquidation)') &&
+        brText.includes(peso(42_000)) &&
+        // The dash prints in WinAnsi, which the reader does not map back: the words either side of it.
+        brText.includes('Unspent') &&
+        brText.includes('owed back') &&
+        brText.includes('Less: refunded') &&
+        brText.includes(peso(8_000)) &&
+        brText.includes('Still to refund') &&
+        brText.includes(peso(0)) &&
+        brText.includes('Liquidated') &&
+        brText.includes('Settled') &&
+        !brText.includes('AMOUNT REQUESTED') &&
+        !brText.includes('LIQUIDATED') &&
+        !brText.includes('SETTLED'),
+      brText.split('\n').filter((l) => /requested|Released|Spent|refund|Liquidated|Settled/i.test(l)).join(' | ').slice(0, 300),
+    );
+    check('the print is on the request’s trail as EXPORTED', (await exports('budget_request', br.id)) === 1);
+
+    // The register on paper (rule 6, A5): `GET /budget-requests/pdf` reads
+    // `budgetRequestListWhere`, the query the project tab and G-FIN's screen
+    // share — so the project manager's print and finance's print of one
+    // project are the same requests, the project named in the reference.
+    const squash = (t: string) => t.replace(/\s+/g, '');
+    const listExports = (actorId: string) =>
+      prisma.auditLog.count({ where: { entityType: 'budget_request', entityId: 'list', action: 'EXPORTED', actorId } });
+    const exportsBefore = (await listExports(pm.id)) + (await listExports(finance.id));
+    const tabNumbers = ((tabRows.body.rows ?? []) as { number: string }[]).map((r) => r.number);
+    const tabPaper = await apiBytes(signToken(pm.id, pm.email), `/budget-requests/pdf?jobId=${job.id}`);
+    const finPaper = await apiBytes(financeToken, `/budget-requests/pdf?jobId=${job.id}`);
+    const tabPaperText = tabPaper.bytes ? pdfText(tabPaper.bytes) : '';
+    const finPaperText = finPaper.bytes ? pdfText(finPaper.bytes) : '';
+    check(
+      'the project tab’s list and G-FIN’s print the same requests, the project named in the reference',
+      tabPaper.status === 200 &&
+        finPaper.status === 200 &&
+        tabNumbers.length > 0 &&
+        tabNumbers.every((n) => squash(tabPaperText).includes(n) && squash(finPaperText).includes(n)) &&
+        flat(finPaperText).includes(`project ${job.number}`),
+      `${tabPaper.status}/${finPaper.status} · ${tabNumbers.length} request(s)`,
+    );
+    check(
+      'and prints its money as figures under a head naming the currency, the status in words',
+      // A head wraps in its column: read the words, not the line breaks.
+      flat(finPaperText).includes(`AMOUNT (${currency})`) &&
+        finPaperText.includes('50,000.00') &&
+        finPaperText.includes('Liquidated') &&
+        !finPaperText.includes('LIQUIDATED'),
+      finPaperText.split('\n').filter((l) => /AMOUNT|50,000|iquidated/i.test(l)).join(' | ').slice(0, 200),
+    );
+    const tickedPaper = await apiBytes(financeToken, `/budget-requests/pdf?ids=${br.id}`);
+    const tickedText = tickedPaper.bytes ? pdfText(tickedPaper.bytes) : '';
+    check(
+      '?ids= prints only the request ticked, and says so',
+      tickedPaper.status === 200 &&
+        squash(tickedText).includes(br.number) &&
+        tabNumbers.filter((n) => n !== br.number).every((n) => !squash(tickedText).includes(n)) &&
+        flat(tickedText).includes('the rows selected'),
+      String(tickedPaper.status),
+    );
+    const statusPaper = await apiBytes(financeToken, `/budget-requests/pdf?jobId=${job.id}&status=LIQUIDATED`);
+    check(
+      'a status filter is named on the paper',
+      statusPaper.status === 200 && !!statusPaper.bytes && flat(pdfText(statusPaper.bytes)).includes('status Liquidated'),
+      String(statusPaper.status),
+    );
+    const leadPaper = await apiBytes(leadToken, `/budget-requests/pdf?jobId=${job.id}`);
+    check('the printed list stays behind the list’s own permission', leadPaper.status === 403, String(leadPaper.status));
+    check(
+      'every print of the list is on the trail as EXPORTED, entityId "list"',
+      (await listExports(pm.id)) + (await listExports(finance.id)) === exportsBefore + 4,
+      `${(await listExports(pm.id)) + (await listExports(finance.id)) - exportsBefore} new row(s)`,
+    );
+    // The requested-by filter is ANDed with "only their own", never written
+    // over it: an engineer who sees only their own requests, naming the
+    // project manager, lists and prints none of the manager's.
+    const pmRequest = await prisma.budgetRequest.create({
+      data: {
+        number: `${TAG}-BR-PM`,
+        jobId: job.id,
+        costCategoryId: materials.id,
+        amount: d(1_000),
+        reason: `${TAG} raised by the project manager`,
+        requestedById: pm.id,
+      },
+    });
+    const engToken = signToken(engineer.id, engineer.email);
+    const askedRows = await http(engToken, 'GET', `/budget-requests?requestedById=${pm.id}&pageSize=200`);
+    const askedPaper = await apiBytes(engToken, `/budget-requests/pdf?requestedById=${pm.id}`);
+    const askedText = askedPaper.bytes ? pdfText(askedPaper.bytes) : '';
+    const ownRows = await http(engToken, 'GET', `/budget-requests?jobId=${job.id}&pageSize=200`);
+    check(
+      'a requester who sees only their own, naming somebody else as the requester, lists and prints 0 requests',
+      askedRows.status === 200 &&
+        askedRows.body.total === 0 &&
+        askedPaper.status === 200 &&
+        !squash(askedText).includes(pmRequest.number) &&
+        flat(askedText).includes('Reference: 0 ') &&
+        // Not vacuous: the engineer's own request is there without the filter, the manager's is not.
+        ownRows.status === 200 &&
+        (ownRows.body.rows ?? []).some((r: { id: string }) => r.id === br.id) &&
+        !(ownRows.body.rows ?? []).some((r: { id: string }) => r.id === pmRequest.id),
+      `${askedRows.status} total ${askedRows.body.total} · ${askedPaper.status} ${flat(askedText).match(/Reference:.{0,100}/)?.[0] ?? ''}`,
+    );
+    await prisma.budgetRequest.delete({ where: { id: pmRequest.id } });
 
     // (f) The receiving register narrows to the job (PROC's jobId filter):
     //     every row it returns must belong to the job asked about.
@@ -1177,6 +1536,163 @@ async function main() {
       detail.body.serviceContract?.id === renewal.body.serviceContractId,
       JSON.stringify(detail.body.serviceContract ?? null),
     );
+
+    // (i) Every list prints (rule 6, A5): `GET <list>/pdf`, above `/:id`,
+    //     reading the list's own where-builder — so the paper holds exactly
+    //     the rows the list holds — on landscape pages, the count said and
+    //     every filter named, `?ids=` printing only the rows ticked, and
+    //     each print audited as an EXPORTED of the list.
+    console.log('\nThe lists on paper (over HTTP)');
+    // A cancelled project is listed but never counted: its figures print in
+    // brackets, the totals leave it out, and the note under them says how
+    // many — the job orders' and service contracts' rule, and finance's.
+    const cancelledJob = await prisma.job.create({
+      data: {
+        number: await nextNumber('project'),
+        status: 'CANCELLED',
+        name: `${TAG} Cancelled plant`,
+        customerId: customer.id,
+        costingId: costing.id,
+        createdById: pm.id,
+        contractValue: d(123_456.78),
+      },
+    });
+    const listCurrency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
+    const listPeso = (n: number) => `${listCurrency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const LANDSCAPE = '841.89x595.28';
+    type ListRow = Record<string, unknown> & { id: string; number: string; status: string };
+    const saysCount = (text: string, n: number, noun: readonly [string, string]) =>
+      new RegExp(`(^|[^\\d,])${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}\\b`).test(text);
+    const liveJobs = (rows: ListRow[]) => rows.filter((r) => r.status !== 'CANCELLED');
+    const lists: {
+      path: string;
+      printPath: string;
+      entity: string;
+      noun: readonly [string, string];
+      filter: (rows: ListRow[]) => [string, string];
+      total?: { label: string; of: (rows: ListRow[]) => number };
+    }[] = [
+      {
+        path: 'jobs',
+        printPath: 'jobs/pdf',
+        entity: 'job',
+        noun: ['project', 'projects'],
+        filter: () => ['type=SERVICE_CONTRACT', 'type Service contract'],
+        total: { label: 'Contract value', of: (rows) => liveJobs(rows).reduce((t, r) => t + Number(r.contractValue), 0) },
+      },
+      {
+        path: 'jobs',
+        printPath: 'jobs/budget-monitoring/pdf',
+        entity: 'job',
+        noun: ['project', 'projects'],
+        filter: (rows) => [`status=${rows[0].status}`, `status ${statusLabel(rows[0].status)}`],
+        total: { label: 'Billed', of: (rows) => liveJobs(rows).reduce((t, r) => t + Number(r.billed), 0) },
+      },
+      { path: 'progress-reports', printPath: 'progress-reports/pdf', entity: 'progress_report', noun: ['progress report', 'progress reports'], filter: () => ['status=APPROVED', 'status Approved'] },
+      {
+        path: 'billings',
+        printPath: 'billings/pdf',
+        entity: 'progress_billing',
+        noun: ['billing', 'billings'],
+        filter: () => [`jobId=${job.id}`, `project ${job.number}`],
+        // Only what has been approved is collectible: a draft is listed, never summed.
+        total: {
+          label: 'Net collectible',
+          of: (rows) => rows.filter((r) => r.status === 'APPROVED' || r.status === 'INVOICED').reduce((t, r) => t + Number(r.netCollectible), 0),
+        },
+      },
+    ];
+    for (const l of lists) {
+      const listed = await http(leadToken, 'GET', `/${l.path}?search=${TAG}&pageSize=200`);
+      const rows = (listed.body.rows ?? []) as ListRow[];
+      const before = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
+      const paper = await paperOf(leadToken, `/${l.printPath}?search=${TAG}`);
+      const after = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
+      check(
+        `${l.printPath}: a PDF of exactly the rows the list holds, the count said and the search named, on landscape pages, audited as an export of the list`,
+        paper.status === 200 &&
+          paper.type.startsWith('application/pdf') &&
+          rows.length > 0 &&
+          rows.length === Number(listed.body.total) &&
+          rows.every((r) => paper.text.includes(r.number)) &&
+          saysCount(paper.text, rows.length, l.noun) &&
+          paper.text.includes(`search "${TAG}"`) &&
+          paper.boxes.length > 0 &&
+          paper.boxes.every((b) => b === LANDSCAPE) &&
+          after === before + 1,
+        `${paper.status} ${paper.type}, ${rows.length} of ${listed.body.total} listed, missing ${rows.filter((r) => !paper.text.includes(r.number)).map((r) => r.number).join(',') || 'none'}, pages ${paper.boxes.join(',')}, audited ${before} → ${after}`,
+      );
+      if (l.total) {
+        const expected = Math.round(l.total.of(rows) * 100) / 100;
+        check(
+          `${l.printPath}: its "${l.total.label}" is what the rows it lists add up to`,
+          new RegExp(`${l.total.label} ${listPeso(expected).replace(/[.]/g, '\\.')}`).test(paper.text),
+          `${paper.text.match(new RegExp(`${l.total.label} [A-Z]{3} [\\d,.]+`))?.[0] ?? 'no total'} vs ${listPeso(expected)}`,
+        );
+      }
+      const [first] = rows;
+      const ticked = await paperOf(leadToken, `/${l.printPath}?ids=${first?.id ?? 'none'}`);
+      check(
+        `${l.printPath}: ?ids= prints only the row ticked, and says so`,
+        ticked.status === 200 &&
+          !!first &&
+          ticked.text.includes(first.number) &&
+          rows.slice(1).every((r) => !ticked.text.includes(r.number)) &&
+          saysCount(ticked.text, 1, l.noun) &&
+          ticked.text.includes('the rows selected'),
+        `${ticked.status} ${ticked.text.match(/Reference: .{0,120}/)?.[0] ?? ''}`,
+      );
+      const [filterQuery, filterWords] = l.filter(rows);
+      const narrowed = await http(leadToken, 'GET', `/${l.path}?search=${TAG}&${filterQuery}&pageSize=200`);
+      const filtered = await paperOf(leadToken, `/${l.printPath}?search=${TAG}&${filterQuery}`);
+      check(
+        `${l.printPath}: a filter narrows the paper as it narrows the list, and the paper names it ("${filterWords}")`,
+        filtered.status === 200 &&
+          Number(narrowed.body.total) > 0 &&
+          Number(narrowed.body.total) <= rows.length &&
+          saysCount(filtered.text, Number(narrowed.body.total), l.noun) &&
+          filtered.text.includes(filterWords) &&
+          ((narrowed.body.rows ?? []) as ListRow[]).every((r) => filtered.text.includes(r.number)),
+        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}; ${filtered.text.match(/Reference: .{0,160}/)?.[0] ?? ''}`,
+      );
+    }
+    const allJobs = ((await http(leadToken, 'GET', `/jobs?search=${TAG}&pageSize=200`)).body.rows ?? []) as ListRow[];
+    const cancelledCount = allJobs.filter((r) => r.status === 'CANCELLED').length;
+    const cancelledNote = `${cancelledCount} cancelled project${cancelledCount === 1 ? '' : 's'}, in brackets, ${cancelledCount === 1 ? 'is' : 'are'} not counted.`;
+    const projectsPaper = await paperOf(leadToken, `/jobs/pdf?search=${TAG}`);
+    const budgetPaper = await paperOf(leadToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);
+    const liveContract = liveJobs(allJobs).reduce((t, r) => t + Number(r.contractValue), 0);
+    check(
+      'a cancelled project prints its contract value in brackets, out of both papers\' totals, and the note says how many',
+      cancelledCount >= 1 &&
+        allJobs.some((r) => r.id === cancelledJob.id) &&
+        [projectsPaper, budgetPaper].every(
+          (p) =>
+            p.status === 200 &&
+            p.text.includes('(123,456.78)') &&
+            p.text.includes(`Contract value ${listPeso(Math.round(liveContract * 100) / 100)}`) &&
+            p.text.includes(cancelledNote) &&
+            !p.text.includes('cancelled not counted'),
+        ),
+      `${cancelledCount} cancelled · ${projectsPaper.text.match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} / ${budgetPaper.text.match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} vs ${listPeso(liveContract)} · ${projectsPaper.text.match(/[^.]{0,40}in brackets[^.]*\./)?.[0] ?? 'no note'}`,
+    );
+
+    // Budget Monitoring's paper prints cost to date — budget monitoring's
+    // figure — so it takes that right as well as the list's.
+    const narrowBudget = await paperOf(narrowToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);
+    const narrowProjects = await paperOf(narrowToken, `/jobs/pdf?search=${TAG}`);
+    check(
+      'the budget monitoring paper needs budget monitoring; the projects paper only the list’s right',
+      narrowBudget.status === 403 && narrowProjects.status === 200,
+      `${narrowBudget.status} / ${narrowProjects.status}`,
+    );
+    // An unknown status is a 400 naming the choices — on the list and its paper — never a 500.
+    const badStatus = await Promise.all(
+      ['jobs', 'jobs/pdf', 'jobs/budget-monitoring/pdf', 'progress-reports', 'progress-reports/pdf', 'billings', 'billings/pdf'].map((path) =>
+        http(leadToken, 'GET', `/${path}?status=MAYBE`),
+      ),
+    );
+    check('a status that is not one is a 400 on every list and its paper', badStatus.every((r) => r.status === 400), badStatus.map((r) => r.status).join(' '));
   }
 
   await cleanup();

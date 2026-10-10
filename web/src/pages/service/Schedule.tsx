@@ -611,6 +611,8 @@ function VisitList({
       emptyTitle="Nothing scheduled"
       emptyHint="Activating a service contract writes its schedule; an approved job order books its visit."
       onRowClick={(r) => onOpen(r.id)}
+      // The filter bar's preset rides along in the list's own query, so the paper is what is listed.
+      printPath="/api/service-visits/pdf"
       filters={[
         { key: 'status', label: 'Status', options: STATUS_OPTIONS },
         { key: 'due', label: 'Due', options: [{ value: 'true', label: 'Due or overdue' }] },

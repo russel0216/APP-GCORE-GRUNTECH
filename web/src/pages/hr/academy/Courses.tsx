@@ -172,6 +172,7 @@ export function Courses() {
       <DataList<CourseRow>
         listKey="hr-courses"
         endpoint="/courses"
+        printPath="/api/courses/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}

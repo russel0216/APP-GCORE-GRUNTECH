@@ -8,10 +8,12 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   conflict,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
@@ -21,6 +23,8 @@ import { positionFields, setEmployeePosition } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
 import { createLogin, defaultRoleIds, deliverLink } from '../shared/accounts';
 import { celebrationsBetween } from '../shared/celebrations';
+import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 
 // ════════════════════════════════════════════════════════════════════
 //  EMPLOYEES
@@ -59,6 +63,39 @@ function decimalsToNumbers(row: Record<string, unknown>): Record<string, unknown
   return out;
 }
 
+/**
+ * The employee list's where-builder — the register's rows and its printed
+ * twin read the same set; `?ids=` narrows to the rows ticked.
+ */
+function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
+  const where: Prisma.EmployeeWhereInput = {};
+  if (q.search) {
+    where.OR = [
+      { firstName: { contains: q.search, mode: 'insensitive' } },
+      { lastName: { contains: q.search, mode: 'insensitive' } },
+      { employeeNo: { contains: q.search, mode: 'insensitive' } },
+      { position: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  const f = q.filters;
+  if (f.isActive) where.isActive = f.isActive === 'true';
+  if (f.departmentId) where.departmentId = f.departmentId;
+  // The team: an industry id, or `none` for nobody assigned yet.
+  if (f.industryId === 'none') where.industryId = null;
+  else if (f.industryId) where.industryId = f.industryId;
+  if (f.employmentType) {
+    where.employmentType = f.employmentType as Prisma.EnumEmploymentTypeFilter['equals'];
+  }
+  // `none` = unclassified: an active employee with no plantilla position.
+  if (f.positionId === 'none') where.positionId = null;
+  else if (f.positionId) where.positionId = f.positionId;
+  const ids = idsFilter(f.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
+const EMPLOYEE_SORTS = ['employeeNo', 'lastName', 'dateHired', 'createdAt'];
+
 employeeRoutes.get(
   '/',
   require_('ghr.employees.view_all'),
@@ -68,27 +105,7 @@ employeeRoutes.get(
     const me = currentUser(req);
     const seeRates = can(me, 'ghr.employee_rates.view_all');
     const q = listQuery(req);
-    const where: Prisma.EmployeeWhereInput = {};
-
-    if (q.search) {
-      where.OR = [
-        { firstName: { contains: q.search, mode: 'insensitive' } },
-        { lastName: { contains: q.search, mode: 'insensitive' } },
-        { employeeNo: { contains: q.search, mode: 'insensitive' } },
-        { position: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
-    // The team: an industry id, or `none` for nobody assigned yet.
-    if (q.filters.industryId === 'none') where.industryId = null;
-    else if (q.filters.industryId) where.industryId = q.filters.industryId;
-    if (q.filters.employmentType) {
-      where.employmentType = q.filters.employmentType as Prisma.EnumEmploymentTypeFilter['equals'];
-    }
-    // `none` = unclassified: an active employee with no plantilla position.
-    if (q.filters.positionId === 'none') where.positionId = null;
-    else if (q.filters.positionId) where.positionId = q.filters.positionId;
+    const where = employeeListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.employee.findMany({
@@ -99,7 +116,7 @@ employeeRoutes.get(
           industry: { select: { id: true, code: true, name: true } },
           user: { select: { id: true, email: true, isActive: true, invitePending: true } },
         },
-        orderBy: orderBy(q, ['employeeNo', 'lastName', 'dateHired', 'createdAt'], {
+        orderBy: orderBy(q, EMPLOYEE_SORTS, {
           lastName: 'asc',
         }),
         skip: (q.page - 1) * q.pageSize,
@@ -115,6 +132,102 @@ employeeRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The employee register on paper — the list as filtered (or the rows
+ * ticked), through `employeeListWhere`, so the paper is the screen it was
+ * printed off. NEVER the pay data, whoever prints it: the select names the
+ * columns it prints and nothing else, so a daily rate, a burden or a
+ * statutory number cannot reach the page even for a holder of
+ * `ghr.employee_rates.view_all` — a printed list travels further than a
+ * screen. Declared above `/:id`, or that route swallows it.
+ */
+employeeRoutes.get(
+  '/pdf',
+  require_('ghr.employees.view_all'),
+  handler(async (req, res) => {
+    await sweepSeparations();
+    const q = listQuery(req);
+    const where = employeeListWhere(q);
+    const f = q.filters;
+    const [rows, count, department, team, position] = await Promise.all([
+      prisma.employee.findMany({
+        where,
+        select: {
+          employeeNo: true,
+          firstName: true,
+          middleName: true,
+          lastName: true,
+          position: true,
+          positionId: true,
+          employmentType: true,
+          dateHired: true,
+          isActive: true,
+          department: { select: { name: true } },
+          positionRef: { select: { title: true } },
+          industry: { select: { code: true, name: true } },
+          user: { select: { email: true, invitePending: true } },
+        },
+        orderBy: orderBy(q, EMPLOYEE_SORTS, { lastName: 'asc' }),
+        take: LIST_CAP,
+      }),
+      prisma.employee.count({ where }),
+      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
+      f.industryId && f.industryId !== 'none'
+        ? prisma.industry.findUnique({ where: { id: f.industryId }, select: { name: true } })
+        : null,
+      f.positionId && f.positionId !== 'none'
+        ? prisma.position.findUnique({ where: { id: f.positionId }, select: { title: true } })
+        : null,
+    ]);
+
+    const reference = listReference(count, rows.length, ['employee', 'employees'], [
+      q.search && `search "${q.search}"`,
+      f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
+      f.departmentId && `department ${department?.name ?? 'not found'}`,
+      f.industryId && (f.industryId === 'none' ? 'no team yet' : `team ${team?.name ?? 'not found'}`),
+      f.employmentType && `type ${statusLabel(f.employmentType)}`,
+      f.positionId && (f.positionId === 'none' ? 'no plantilla position' : `position ${position?.title ?? 'not found'}`),
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Employees',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Name', 'Department', 'Team', 'Type', 'Hired', 'Login', 'Status'],
+          rows: rows.map((e) => {
+            const initial = e.middleName?.trim()?.[0];
+            const post = e.positionRef?.title ?? e.position;
+            return [
+              e.employeeNo,
+              {
+                title: `${e.lastName}, ${e.firstName}${initial ? ` ${initial}.` : ''}`,
+                body: post ? `${post}${!e.positionId ? ' · unclassified' : ''}` : undefined,
+              },
+              e.department?.name ?? '—',
+              e.industry?.code ?? '—',
+              statusLabel(e.employmentType),
+              e.dateHired ? formatShortDate(e.dateHired) : '—',
+              e.user ? { title: e.user.email, body: e.user.invitePending ? 'Invited' : undefined } : 'None',
+              e.isActive ? 'Active' : 'Inactive',
+            ];
+          }),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'employee', entityId: 'list', action: 'EXPORTED', summary: `Exported the employee list as PDF (${rows.length} employee(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'employees.pdf');
   }),
 );
 

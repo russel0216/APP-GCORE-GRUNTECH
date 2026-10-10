@@ -777,7 +777,10 @@ export function buildBoard(input: {
   }
   const quotationById = new Map<string, BoardQuotation>();
   for (const q of input.quotations) {
-    if ((q.outcome === 'WON' || q.outcome === 'LOST') && (!q.decidedAt || q.decidedAt < decidedFrom)) continue;
+    // A decision older than the window leaves the board; one with no date
+    // (an imported or continued quotation) stays — dropping it hid a WON
+    // quotation that the list and the quotation page both showed.
+    if ((q.outcome === 'WON' || q.outcome === 'LOST') && q.decidedAt && q.decidedAt < decidedFrom) continue;
     const c = quotationCard(q, now, me);
     if (c) {
       cards.push(c);

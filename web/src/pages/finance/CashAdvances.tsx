@@ -227,6 +227,7 @@ export function CashAdvances() {
       <DataList<Advance>
         listKey="cash-advances"
         endpoint="/cash-advances"
+        printPath="/api/cash-advances/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

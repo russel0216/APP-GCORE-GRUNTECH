@@ -8,9 +8,11 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
@@ -23,11 +25,16 @@ import {
   onApprovalSettled,
   pickWorkflow,
   approversForStep,
-  approvalSignoffs,
+  approvalSlots,
+  slotSignatories,
+  routePreview,
+  historyFor,
+  contactPhone,
   usersInRole,
   cancelOpenRequest,
+  type ApprovalSlot,
 } from '../shared/approvals';
-import { renderDocument, formatDate, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatDate, formatDateTime, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { hrSettings } from '../shared/hr';
 import { addMonths } from '../shared/aftermarket';
 import { manilaDate } from '../shared/day';
@@ -46,6 +53,7 @@ import {
   visibleTo,
   RECOMMENDATION_LABEL,
 } from '../shared/evaluations';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 
 /**
  * Employee evaluations — probation and trainee reviews (model §4.7).
@@ -205,44 +213,55 @@ evaluationRoutes.get(
 
 // ── List ─────────────────────────────────────────────────────────────────────
 
+/**
+ * The evaluation list's where-builder — the screen's rows and the printed
+ * list read the same set. "Mine" is two things: the ones I am writing, and
+ * the ones written about me — the latter only once approved, the same rule
+ * as the record (`visibleTo`). `?ids=` narrows to the rows ticked, ANDed
+ * with that rule, so naming an id never prints an evaluation the caller
+ * could not open.
+ */
+function evaluationListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Prisma.EmployeeEvaluationWhereInput {
+  const and: Prisma.EmployeeEvaluationWhereInput[] = [];
+  const onlyOwn = !can(me, 'ghr.evaluations.view_all');
+  if (onlyOwn || q.scope === 'mine') {
+    and.push({
+      OR: [{ evaluatorId: me.id }, { scheduledById: me.id }, { employee: { userId: me.id }, status: 'APPROVED' }],
+    });
+  }
+  const f = q.filters;
+  const status = asEnum(EvaluationStatus, f.status);
+  if (status) and.push({ status });
+  const kind = asEnum(EvaluationKind, f.kind);
+  if (kind) and.push({ kind });
+  if (f.employeeId) and.push({ employeeId: f.employeeId });
+  if (f.evaluatorId) and.push({ evaluatorId: f.evaluatorId });
+  if (f.milestone) and.push({ milestone: f.milestone });
+  if (f.open === '1') and.push({ status: { in: OPEN } });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
+        { employee: { firstName: { contains: q.search, mode: 'insensitive' } } },
+        { employee: { employeeNo: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const EVALUATION_SORTS = ['number', 'dueDate', 'status', 'createdAt', 'submittedAt'];
+
 evaluationRoutes.get(
   '/',
   requireAny('ghr.evaluations.view_all', 'ghr.evaluations.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.EmployeeEvaluationWhereInput = {};
-
-    // "Mine" is two things: the ones I am writing, and the ones written
-    // about me — the latter only once approved, the same rule as the record.
-    const onlyOwn = !can(me, 'ghr.evaluations.view_all');
-    if (onlyOwn || q.scope === 'mine') {
-      where.OR = [
-        { evaluatorId: me.id },
-        { scheduledById: me.id },
-        { employee: { userId: me.id }, status: 'APPROVED' },
-      ];
-    }
-    const status = asEnum(EvaluationStatus, q.filters.status);
-    if (status) where.status = status;
-    const kind = asEnum(EvaluationKind, q.filters.kind);
-    if (kind) where.kind = kind;
-    if (q.filters.employeeId) where.employeeId = q.filters.employeeId;
-    if (q.filters.evaluatorId) where.evaluatorId = q.filters.evaluatorId;
-    if (q.filters.milestone) where.milestone = q.filters.milestone;
-    if (q.filters.open === '1') where.status = { in: OPEN };
-    if (q.search) {
-      where.AND = [
-        {
-          OR: [
-            { number: { contains: q.search, mode: 'insensitive' } },
-            { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
-            { employee: { firstName: { contains: q.search, mode: 'insensitive' } } },
-            { employee: { employeeNo: { contains: q.search, mode: 'insensitive' } } },
-          ],
-        },
-      ];
-    }
+    const where = evaluationListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.employeeEvaluation.findMany({
@@ -261,7 +280,7 @@ evaluationRoutes.get(
           },
           evaluator: { select: { id: true, name: true } },
         },
-        orderBy: orderBy(q, ['number', 'dueDate', 'status', 'createdAt', 'submittedAt'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, EVALUATION_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -275,6 +294,86 @@ evaluationRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The evaluation list on paper — the list as filtered (or the rows ticked),
+ * through `evaluationListWhere`, so the paper is the screen it was printed
+ * off and carries what the screen does: who, which milestone, when due, by
+ * whom, the score and the recommendation. Nothing more — the ratings line by
+ * line are the evaluation's own paper — and the audit row says only how many
+ * were printed (ratings never reach the audit log). Declared above `/:id`,
+ * or that route swallows it.
+ */
+evaluationRoutes.get(
+  '/pdf',
+  requireAny('ghr.evaluations.view_all', 'ghr.evaluations.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = evaluationListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, employee, evaluator] = await Promise.all([
+      prisma.employeeEvaluation.findMany({
+        where,
+        include: {
+          employee: { select: { employeeNo: true, firstName: true, lastName: true, position: true, department: { select: { name: true } } } },
+          evaluator: { select: { name: true } },
+        },
+        orderBy: orderBy(q, EVALUATION_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.employeeEvaluation.count({ where }),
+      f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
+      f.evaluatorId ? prisma.user.findUnique({ where: { id: f.evaluatorId }, select: { name: true } }) : null,
+    ]);
+
+    const status = asEnum(EvaluationStatus, f.status);
+    const kind = asEnum(EvaluationKind, f.kind);
+    const reference = listReference(count, rows.length, ['evaluation', 'evaluations'], [
+      q.search && `search "${q.search}"`,
+      f.open === '1' ? 'open only' : status && `status ${statusLabel(status)}`,
+      kind && `${statusLabel(kind).toLowerCase()} evaluations`,
+      f.milestone && `milestone ${milestoneLabel(f.milestone)}`,
+      f.employeeId && `employee ${employee ? fullName(employee) : 'not found'}`,
+      f.evaluatorId && `evaluator ${evaluator?.name ?? 'not found'}`,
+      (q.scope === 'mine' || !can(me, 'ghr.evaluations.view_all')) && 'mine only',
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape (rule 6).
+    const pdf = await renderDocument({
+      title: 'Evaluations',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Employee', 'Evaluation', 'Due', 'Evaluator', 'Score', 'Recommendation', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left'],
+          rows: rows.map((r) => [
+            r.number,
+            {
+              title: `${r.employee.lastName}, ${r.employee.firstName}`,
+              body: [r.employee.employeeNo, r.employee.position, r.employee.department?.name].filter(Boolean).join(' · '),
+            },
+            { title: milestoneLabel(r.milestone), body: `${statusLabel(r.kind)} evaluation` },
+            r.dueDate ? formatShortDate(r.dueDate) : '—',
+            r.evaluator.name,
+            r.score == null ? '—' : Number(r.score).toFixed(2),
+            r.recommendation ? RECOMMENDATION_LABEL[r.recommendation] : '—',
+            statusLabel(r.status),
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'evaluation', entityId: 'list', action: 'EXPORTED', summary: `Exported the evaluation list as PDF (${rows.length} evaluation(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'evaluations.pdf');
   }),
 );
 
@@ -856,6 +955,63 @@ evaluationRoutes.post(
 
 // ── Print ────────────────────────────────────────────────────────────────────
 
+/**
+ * A person's contact lines, read for the paper only — a reader calls the
+ * person who signed. Never on the loaders: `GET /evaluations/:id` carries no
+ * mobile.
+ */
+async function contactOf(userId: string): Promise<{ phone?: string; email?: string }> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, phone: true, employee: { select: { mobile: true } } },
+  });
+  return user ? { phone: contactPhone(user), email: user.email } : {};
+}
+
+/**
+ * The approval half of the sign-offs (rule 6): every step of the route
+ * through the engine's one mapping. An evaluation not yet submitted —
+ * scheduled, or a draft (a returned one included) — prints the route
+ * submitting it would take, in the evaluator's name, every step open; not
+ * `approvalSlots(…, draft)`, which previews only while NO request exists,
+ * and a returned evaluation keeps the request that sent it back. A
+ * cancelled one prints none: no approval is coming. A rejected one is
+ * closed for good, so it prints only the steps that signed — the step that
+ * rejected it and any after it acted or never will, and "Pending" there
+ * would promise a signature nobody is going to give; the Decision line
+ * says who rejected it. One open "Approved by" only where no workflow
+ * covers evaluations at all.
+ */
+async function routeSignatories(ev: Full): Promise<Signatory[]> {
+  if (ev.status === 'CANCELLED') return [];
+  const slots: ApprovalSlot[] =
+    ev.status === 'SCHEDULED' || ev.status === 'DRAFT'
+      ? ((await routePreview('evaluation', null, ev.evaluatorId))?.steps ?? []).map((st) => ({
+          step: st.name,
+          assigned: st.approvers,
+        }))
+      : await approvalSlots('evaluation', ev.id);
+  if (ev.status === 'REJECTED') return slotSignatories(slots.filter((s) => s.name));
+  return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
+}
+
+/**
+ * Why a rejected evaluation is closed, as one line on its paper: who
+ * rejected it, at which step, when, and what they wrote — read off the
+ * engine's history of the latest request. A rejected evaluation with no
+ * rejection on that request is the one the subscriber refused to apply
+ * because the person evaluated signed it themself.
+ */
+async function rejectionNote(ev: Full): Promise<string> {
+  const [latest] = await historyFor('evaluation', ev.id);
+  const no = latest?.actions.filter((a) => a.action === 'REJECTED').pop();
+  if (latest && no) {
+    const step = latest.workflow?.steps.find((s) => s.sequence === no.sequence)?.name;
+    return `Rejected${step ? ` at ${step}` : ''} by ${no.approver.name}, ${formatDateTime(no.actedAt)}${no.comment ? `: ${no.comment}` : '.'}`;
+  }
+  return `Not applied: ${fullName(ev.employee)} signed their own evaluation, so nothing changes on their record. Raise it again once the route no longer reaches them.`;
+}
+
 evaluationRoutes.get(
   '/:id/pdf',
   requireAny('ghr.evaluations.view_all', 'ghr.evaluations.view_own'),
@@ -873,7 +1029,7 @@ evaluationRoutes.get(
         columns: 3,
         fields: [
           { label: 'Employee', value: fullName(ev.employee) },
-          { label: 'Employee No', value: ev.employee.employeeNo },
+          { label: 'Employee number', value: ev.employee.employeeNo },
           { label: 'Position', value: ev.employee.position ?? '—' },
           { label: 'Department', value: ev.employee.department?.name ?? '—' },
           { label: 'Kind', value: ev.kind === 'TRAINEE' ? 'Trainee evaluation' : 'Probationary evaluation' },
@@ -884,13 +1040,15 @@ evaluationRoutes.get(
             value: `${ev.periodFrom ? formatDate(ev.periodFrom) : '—'} to ${ev.periodTo ? formatDate(ev.periodTo) : '—'}`,
           },
           { label: 'Evaluator', value: ev.evaluator.name },
+          { label: 'Status', value: statusLabel(ev.status) },
         ],
       },
       {
         kind: 'table',
         title: `Ratings (1–${settings.ratingScale})`,
-        head: ['#', 'Criterion', 'Weight', 'Rating', 'Remarks'],
-        widths: [5, 32, 9, 22, 32],
+        // No widths: each column from what it holds, so a head never breaks
+        // mid-word ("WEIGH / T" did in fixed shares).
+        head: ['No.', 'Criterion', 'Weight', 'Rating', 'Remarks'],
         align: ['right', 'left', 'right', 'left', 'left'],
         rows: ev.lines.map((l) => [String(l.sortOrder), l.name, Number(l.weight).toFixed(2), label(l.rating), l.remarks ?? '']),
       },
@@ -920,33 +1078,33 @@ evaluationRoutes.get(
     if (ev.employeeAcknowledgementNote) {
       sections.push({ kind: 'text', title: "Employee's note", body: ev.employeeAcknowledgementNote });
     }
+    if (ev.status === 'REJECTED') sections.push({ kind: 'text', title: 'Decision', body: await rejectionNote(ev) });
 
-    // The engine records who reviewed and who approved, and when. The subject's
-    // acknowledgement is the last signature, dated by the acknowledgement
-    // itself — an unsigned slot prints "Pending", which is the truth.
-    const [reviewed, approved] = await approvalSignoffs('evaluation', ev.id);
+    // Evaluated by the evaluator, dated by the submission that signs it; then
+    // every step of the route in the engine's one mapping — the step's name
+    // as the role, who signed and when, else who may sign over "Pending".
+    // The subject's acknowledgement is the last signature, dated by the
+    // acknowledgement itself — and only where one can still come: they need
+    // a login to give it, and a rejected or cancelled evaluation asks none.
+    // Their name and the date only: nobody calls the person evaluated off
+    // their own evaluation, and an evaluator need not read their number.
+    const evaluator = await contactOf(ev.evaluatorId);
+    const acknowledges =
+      !!ev.employeeAcknowledgedAt || (!!ev.employee.userId && ev.status !== 'REJECTED' && ev.status !== 'CANCELLED');
+    const signatories: Signatory[] = [
+      { role: 'Evaluated by', name: ev.evaluator.name, ...evaluator, at: ev.submittedAt },
+      ...(await routeSignatories(ev)),
+      ...(acknowledges
+        ? [{ role: 'Acknowledged by', name: fullName(ev.employee), at: ev.employeeAcknowledgedAt }]
+        : []),
+    ];
     const pdf = await renderDocument({
       title: 'Employee Evaluation',
       documentNumber: ev.number,
       date: ev.submittedAt ?? ev.createdAt,
       reference: `${fullName(ev.employee)} · ${milestoneLabel(ev.milestone)}`,
       sections,
-      signatories: [
-        {
-          role: 'Evaluated by',
-          name: ev.evaluator.name,
-          position: ev.evaluator.position ?? undefined,
-          at: ev.submittedAt,
-        },
-        { role: 'Reviewed by (HR)', ...(reviewed ?? {}) },
-        { role: 'Approved by', ...(approved ?? {}) },
-        {
-          role: 'Acknowledged by',
-          name: fullName(ev.employee),
-          position: ev.employee.position ?? undefined,
-          at: ev.employeeAcknowledgedAt,
-        },
-      ],
+      signatories,
     });
 
     await audit({ entityType: 'evaluation', entityId: ev.id, action: 'EXPORTED', summary: `Printed ${ev.number}` }, req);

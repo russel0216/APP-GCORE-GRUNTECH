@@ -534,8 +534,9 @@ model Customer {
   name         String
   legalName    String?
   tin          String?
-  /// The sales team's list (Industry) — no longer set on a customer since
-  /// 2026-10-08; kept on the rows that carried one.
+  /// The team (Industry: KAT, HIT, UIT, GIB, SIT) that handles the customer —
+  /// open until somebody sets it (2026-10-09). Not a classification: the
+  /// sub-industry is `subIndustryId`.
   industryId   String?
   industry     Industry? @relation(fields: [industryId], references: [id], onDelete: Restrict)
   /// Where in the market the customer sits (2026-10-08, the owner's eleven:
@@ -1252,8 +1253,10 @@ model CostingTemplate {
   id          String   @id @default(cuid())
   name        String
   description String?
-  /// { systemUnit, markupPct, contingencyPct, terms, lines[], sections[] } —
-  /// lines name their category by CODE, which is permanent (isSystem rows).
+  /// { systemUnit, marginPct, terms, lines[], sections[] } — lines name their
+  /// category by CODE, which is permanent (isSystem rows). A template saved
+  /// before 2026-10-09 carries `markupPct` (and a contingency %), read as the
+  /// margin it amounts to; the contingency is a Contingency line since.
   body        Json
   /// With prices, or quantities and names only.
   withPrices  Boolean  @default(true)

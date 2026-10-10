@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
-import { manilaDate } from './day';
+import { dayKey, daysBetween, manilaDate } from './day';
 
 /**
  * The aftermarket rules more than one route needs.
@@ -20,7 +20,7 @@ type Tx = Prisma.TransactionClient | typeof prisma;
  * the UTC date is yesterday's, and a warranty that ended then still read as
  * running. A stored DATE arrives as UTC midnight and comes back unchanged.
  */
-export const dayKey = (at: Date): Date => manilaDate(at);
+export { dayKey, daysBetween };
 
 export function addMonths(date: Date, months: number): Date {
   const out = new Date(date);
@@ -33,8 +33,6 @@ export function addMonths(date: Date, months: number): Date {
   return out;
 }
 
-export const daysBetween = (from: Date, to: Date): number =>
-  Math.floor((dayKey(to).getTime() - dayKey(from).getTime()) / 86_400_000);
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 

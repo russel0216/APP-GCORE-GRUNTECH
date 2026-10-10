@@ -74,8 +74,14 @@ four databases and four copies of "customer".
    document and a running header from page two. The engine does its own
    line breaking (the designed engine's rule — PDFKit never wraps a cell),
    so a row taller than a page is split under a repeated head, and a section
-   title is never left alone at the foot of a page. A trailing landscape
-   `gantt` section is an appendix drawn after the sign-offs. Every string
+   title is never left alone at the foot of a page. A table that names no
+   `widths` is sized from its content (`autoWidths`: a column's floor is its
+   longest word, the room over the floors goes to the columns whose cells run
+   longer), and a document with more columns than portrait can hold prints
+   whole on landscape pages with `landscape: true` on the spec (the sales
+   order's rule) — verify-foundation renders a ten-column list both ways. A
+   trailing landscape `gantt` section is an appendix drawn after the
+   sign-offs. Every string
    reaches the page through `pdfSafe`; what the dress sets in capitals goes
    through `caps()` (capitals first — 'µ' would otherwise become a Greek
    capital outside WinAnsi). verify-foundation measures the margin, pins the
@@ -355,12 +361,13 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,028 assertions across twenty-three scripts** (counted 2026-10-09, after
-the Modify work; foundation 257 since its source scan and the one dress): foundation 257, masters 76, sales 425, costing 139, pipeline
-86, calendar 96, numbering 46, partners 117, delivery 103, chain 135, hr 198,
-plantilla 99, meetings 85, evaluations 130, academy 97, finance 244,
-aftermarket 224, cad 86, archive 113, insights 97, insights-brief 50,
-workspace 39, accounts 86. A check must not depend on what the database
+**3,409 assertions across twenty-three scripts** (counted 2026-10-10, after
+the one dress, the sign-off and money rules and the printed lists):
+foundation 260, masters 79, sales 447, costing 157, pipeline 92, calendar 96,
+numbering 46, partners 120, delivery 144, chain 191, hr 226, plantilla 121,
+meetings 93, evaluations 150, academy 119, finance 313, aftermarket 258,
+cad 97, archive 106, insights 97, insights-brief 50, workspace 46,
+accounts 101. A check must not depend on what the database
 already holds: count only the script's own TAG (verify-cad's lead queue), and
 build the fixture a check needs (verify-insights' uninvoiced billing). They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -714,7 +721,12 @@ launcher as the way out) — never a stale phase sentence.
   second commercial record to drift out of step.
 - **Service Costing is the costing list narrowed to service jobs**, via
   `?jobType=SERVICE_CONTRACT`. A service costing is a costing whose job happens
-  to be a contract — it is not a different table.
+  to be a contract — it is not a different table. Its menu entry is `hidden`
+  since 2026-10-10 (C3 of the review), as are "Employee Pay Rates" (the
+  Employees screen) and "Document Templates" (the Report Templates screen):
+  three labels that opened a screen another label already opened. The
+  routes, the permission keys and the links stay; verify-foundation lists
+  the hidden entries.
 - **The first PM visit falls one interval AFTER cover starts**, not on day one;
   a visit that would fall past the end date is dropped, not clamped. `addMonths`
   clamps to the month end, so three months after 31 January is 30 April.
@@ -797,8 +809,10 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   unasked three ways: `getUTC*`; a bare `new Date()` written into, or compared
   with, a `@db.Date` column (Prisma binds it as a DATE and drops the time); and
   a DATE column's `@default(now())`, which the database evaluates in UTC — so a
-  route sets that column itself. The `dayKey()`s of `shared/finance.ts`,
-  `shared/aftermarket.ts` and `shared/insights.ts` ARE `manilaDate()`; a stored
+  route sets that column itself. **`dayKey()`, `daysBetween()` and
+  `addDays()` live once, in `shared/day.ts`** (2026-10-10): `dayKey` IS
+  `manilaDate()`, and finance, aftermarket, insights and HR re-export it —
+  HR's own copy read the server clock, which is not the business's day. A stored
   DATE or a parsed `'YYYY-MM-DD'` is UTC midnight, 08:00 in Manila, and comes
   back unchanged. A DATE compared in JavaScript is compared with that day, never
   with the instant — a borrow slip once flagged itself overdue at 08:00 on the
@@ -1110,7 +1124,11 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 
 - **A lead with a quotation is never a board card**, and every quotation value
   is `quotationValue()` — Insights, the board, Customer 360 and job orders call
-  it rather than a fourth lambda.
+  it rather than a fourth lambda. A won or lost quotation leaves the board
+  once its decision is older than the window (`decidedWithinDays`); one whose
+  decision carries NO date (imported, continued) stays — `buildBoard` used
+  to drop it, so the list and the page showed a won quotation the board did
+  not (2026-10-10).
 - **The board wears SCORO's dress** (2026-10-07, the owner's pipeline
   screenshots): each column is a tinted band — stage, "N deals", "value
   (Total sum)" — mapped by POSITION onto SCORO's ladder (`COLUMN_TONE`:
@@ -2025,6 +2043,10 @@ the detail.
   continued quotation, a search hit) work as before. `menuFor()` still sends it,
   flagged, so an archive page opens under Sales. Hide a screen this way —
   never by deleting its registry entry, which would drop its permissions.
+  (The hidden G-OPS "Purchase Requests" entry keeps its keys for the same
+  reason: the API routes check `gchain.purchase_requests.*`, but the
+  project's Purchase Requisition tab and its routes in `App.tsx` are guarded
+  by `gops.purchase_requests.*`.)
 - **Import is `importBundle()` in `shared/legacyQuotes.ts`**, from the CLI
   (`scripts/import-scoro-quotes.ts <bundle> [--commit]`) or the archive's Import
   button — one function, dry run by default. Re-import upserts on
@@ -2522,6 +2544,63 @@ SCORO's "list of quotes", on the shared list pattern (rule 9).
   lead that follows, the stage's odds and the audit row are the PATCH's, and
   the server still decides each one. What did not move stays ticked, with
   the reason. There is no bulk endpoint, deliberately.
+
+## Paper: one sign-off rule, one money block, a printed twin for every list (2026-10-10)
+
+The owner approved the review's A3–A5 (2026-10-10). Rule 6 is the dress;
+these are what every document and list says in it.
+
+- **Sign-offs say who really acted.** A routed document prints its own first
+  slot (Prepared by / Requested by / Filed by — the author, dated, with their
+  contact lines) and then one slot per step of its route through
+  `slotSignatories(approvalSlots(…))` — the step's name as the role
+  (TEAM LEADER, COST CONTROLLER, CEO APPROVAL; never "Approved by — step"),
+  who signed and when, or who is assigned with "Pending" under them. A
+  draft, a pulled-back or a returned document prints the route a
+  (re)submission would take, never the closed request's old signatures; a
+  cancelled one prints only the steps that really signed. The designed
+  quotation and sales order print the same step names. A document with no
+  route (invoice, progress report, billing, stock issue, CAD J.O., training
+  sheet) prints the people who acted, read from the record or its audit
+  trail and dated — never a slot nobody fills and never the creator as the
+  approver: the billing's "Checked by" and Conforme, the progress report's
+  "Checked by" and the invoice's "Received by" are gone. The job order's
+  customer acknowledgement stays last (a real act, Pending until done).
+- **One money block.** A document's money is a `totals` section — never a
+  blank-head table, never a TOTAL row inside the line table (a costing's
+  per-bucket subtotals are the estimate's structure and stay). The
+  quotation's words: Subtotal, VAT (12%) at the stored rate, Total; "Less:
+  EWT (2%)" and "Net collectible" / "Net payable"; only the last row bold.
+  Figures in a table are `formatAmount` under a head naming the company's
+  currency ("Amount (PHP)"), a totals row `formatMoney(value,
+  await companyCurrency())` — no route spells "PHP".
+- **Words and dates.** A record's date in its fields is `formatDate`
+  ("October 9, 2026"; the DETAILS block keeps the quotation's MM/DD/YYYY), a
+  list's `formatShortDate`; every enum through `statusLabel()`. A document's
+  number column is "Number"; a master's identifier (customer, supplier,
+  item, partner, position, course, machine) stays "Code".
+- **Every PDF route writes an EXPORTED audit row** (the purchase request,
+  stock issue, clearance and specimen did not).
+- **Every list screen prints** (A5): a `GET <list>/pdf` declared above `/:id`,
+  behind the list's own right, reading the SAME where-builder as the list
+  (so the paper never shows a different set), `?ids=` through `idsFilter()`
+  for Print selected, capped at 1,000 rows with "first 1,000 of N printed",
+  a filter line naming every filter that narrowed it, landscape past seven
+  columns, audited EXPORTED with entityId `list`; the screen's DataList
+  carries `printPath`. Money on a list: a closed document (cancelled; a
+  rejected claim, advance or budget request) prints its figure in brackets
+  and is not summed; drafts and pending ones are summed with a note saying
+  how many. With `?outstanding=true` the A/R and A/P papers' outstanding
+  equals the working position's. The employee paper never prints pay data,
+  whatever the reader holds. Not lists, so no paper: dashboard tiles,
+  settings lists, a record's own sub-lists (a partner's price list, the
+  stock card). Inventory's "Below level" is part of its query
+  (`inventoryListWhere` / `belowReorder`), so the flag, the filter, the
+  paper and the reports tile agree — it was filtered after paging before.
+- **The specimen** (Company Settings › Preview, `GET /pdf/specimen`) prints
+  every section kind the engine has — fields, text, a table with a
+  subheading and title/body cells, totals, a gantt appendix, a footer note,
+  signed and pending sign-offs — so it previews the dress real paper wears.
 
 ## Quotation PDF template (2026-10-02)
 

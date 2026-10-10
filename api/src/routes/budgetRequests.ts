@@ -2,14 +2,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, RequestStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, forbidden } from '../http/kit';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import {
-  approvalSlots,
   cancelOpenRequest,
   onApprovalSettled,
   routePreview,
@@ -18,9 +17,22 @@ import {
   type ApprovalOutcome,
 } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
-import { renderDocument, formatMoney, formatDate, type PdfSection, type Signatory } from '../shared/pdf';
+import { renderDocument, formatMoney, formatAmount, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
-import { claimInclude, presentClaim } from './finance';
+import {
+  claimInclude,
+  presentClaim,
+  cashRequestSections,
+  cashRequestSignatories,
+  LIST_CAP,
+  listReference,
+  bracketed,
+  totalLabel,
+  bracketNote,
+  listNotes,
+  recordNamed,
+  sendListPdf,
+} from './finance';
 
 /**
  * BUDGET REQUESTS — project cash (model §5.2, 2026-10-07, the owner's call).
@@ -50,7 +62,7 @@ const requestInclude = {
   costCategory: { select: { id: true, name: true } },
   requestedBy: { select: { id: true, name: true, email: true, position: true } },
   liquidations: {
-    select: { id: true, number: true, status: true, total: true, claimDate: true, approvedAt: true },
+    select: { id: true, number: true, status: true, total: true, amountPaid: true, claimDate: true, approvedAt: true },
     orderBy: { createdAt: 'desc' },
   },
 } satisfies Prisma.BudgetRequestInclude;
@@ -87,8 +99,8 @@ export function presentBudgetRequest(row: RequestRow, today = dayKey(new Date())
       row.status === 'RELEASED' && !!row.liquidationDueDate && daysBetween(row.liquidationDueDate, today) > 0,
     daysToLiquidate:
       row.status === 'RELEASED' && row.liquidationDueDate ? -daysBetween(row.liquidationDueDate, today) : null,
-    liquidation: liquidation ? { ...liquidation, total: num(liquidation.total) } : null,
-    liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total) })),
+    liquidation: liquidation ? { ...liquidation, total: num(liquidation.total), amountPaid: num(liquidation.amountPaid) } : null,
+    liquidations: row.liquidations.map((l) => ({ ...l, total: num(l.total), amountPaid: num(l.amountPaid) })),
   };
 }
 
@@ -114,11 +126,18 @@ function assertCanSee(me: Me, row: { requestedById: string; job: { projectManage
 /** The list's where-builder — the project tab and the G-FIN screen read the same rows. */
 export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, today = dayKey(new Date())) {
   const where: Prisma.BudgetRequestWhereInput = {};
-  if (!seesAll(me) || q.scope === 'mine') where.requestedById = me.id;
+  const mine = !seesAll(me) || q.scope === 'mine';
+  // Who asked: the visibility rule and the `requestedById` filter are ANDed,
+  // never one written over the other — so the filter can only narrow. A
+  // requester who sees only their own, naming somebody else, gets nothing.
+  const asked = q.filters.requestedById || undefined;
+  const people: Prisma.BudgetRequestWhereInput[] = [];
+  if (mine) people.push({ requestedById: me.id });
+  if (asked) people.push({ requestedById: asked });
+  if (people.length) where.AND = people;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
   const status = q.filters.status && q.filters.status in RequestStatus ? (q.filters.status as RequestStatus) : undefined;
   if (status) where.status = status;
-  if (q.filters.requestedById) where.requestedById = q.filters.requestedById;
   // Overdue is not a status: released, past the deadline, no approved liquidation.
   if (q.filters.overdue === 'true') {
     where.status = 'RELEASED';
@@ -133,10 +152,19 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
       { requestedBy: { name: { contains: q.search, mode: 'insensitive' } } },
     ];
   }
-  return where;
+  // The rows ticked — ANDed with the visibility rule above, so a ticked id
+  // never prints somebody else's request.
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  // The person the filter names is said on paper only where it is not the
+  // caller already said as "requested by me".
+  const person = asked && !(mine && asked === me.id) ? asked : undefined;
+  return { where, mine, status, person };
 }
 
 const LIST_PERMISSIONS = ['gops.budget_requests.view_all', 'gops.budget_requests.view_own', 'gfin.budget_requests.view_all'];
+
+const REQUEST_SORTS = ['number', 'amount', 'createdAt', 'neededBy', 'liquidationDueDate'];
 
 budgetRequestRoutes.get(
   '/',
@@ -145,18 +173,131 @@ budgetRequestRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const today = dayKey(new Date());
-    const where = budgetRequestListWhere(me, q, today);
+    const { where } = budgetRequestListWhere(me, q, today);
     const [rows, total] = await Promise.all([
       prisma.budgetRequest.findMany({
         where,
         include: requestInclude,
-        orderBy: orderBy(q, ['number', 'amount', 'createdAt', 'neededBy', 'liquidationDueDate'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, REQUEST_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.budgetRequest.count({ where }),
     ]);
     res.json(listResult(rows.map((r) => presentBudgetRequest(r, today)), total, q));
+  }),
+);
+
+/** A request that will never be released — listed, never summed. */
+const REQUEST_CLOSED: RequestStatus[] = ['REJECTED', 'CANCELLED'];
+
+/**
+ * The budget requests on paper — the list as filtered (or the rows ticked),
+ * through `budgetRequestListWhere`, the query the project tab and G-FIN's
+ * register both read, so a requester who sees only their own prints only
+ * their own. Asked, released and spent as the screen shows them, the
+ * liquidation deadline with how late it is; the totals run over every request
+ * the filter matched, a rejected or cancelled one in brackets and not
+ * counted. Declared above `/:id`, or that route swallows it.
+ */
+budgetRequestRoutes.get(
+  '/pdf',
+  requireAny(...LIST_PERMISSIONS),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const today = dayKey(new Date());
+    const { where, mine, status, person: personId } = budgetRequestListWhere(me, q, today);
+    const [rows, count, sums, closed, currency, project, person] = await Promise.all([
+      prisma.budgetRequest.findMany({
+        where,
+        include: {
+          job: { select: { number: true, name: true } },
+          costCategory: { select: { name: true } },
+          requestedBy: { select: { name: true } },
+        },
+        orderBy: orderBy(q, REQUEST_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.budgetRequest.count({ where }),
+      prisma.budgetRequest.aggregate({
+        where: { AND: [where, { status: { notIn: REQUEST_CLOSED } }] },
+        _sum: { amount: true, amountReleased: true, amountSpent: true },
+      }),
+      prisma.budgetRequest.count({ where: { AND: [where, { status: { in: REQUEST_CLOSED } }] } }),
+      companyCurrency(),
+      recordNamed('project', q.filters.jobId),
+      recordNamed('person', personId, 'requested by'),
+    ]);
+
+    const f = q.filters;
+    const reference = listReference(count, rows.length, ['budget request', 'budget requests'], [
+      q.search && `search "${q.search}"`,
+      f.overdue === 'true' ? 'liquidation overdue' : status && `status ${statusLabel(status)}`,
+      project,
+      person,
+      mine && 'requested by me',
+      f.ids && 'the rows selected',
+    ]);
+
+    // Nine columns: landscape (rule 6).
+    const sections: PdfSection[] = [
+      {
+        kind: 'table',
+        head: [
+          'Number',
+          'Project and budget line',
+          'Requested by and purpose',
+          'Raised',
+          `Amount (${currency})`,
+          `Released (${currency})`,
+          `Spent (${currency})`,
+          'Liquidate by',
+          'Status',
+        ],
+        align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'left', 'left'],
+        rows: rows.map((r) => {
+          const inSum = !REQUEST_CLOSED.includes(r.status);
+          const late = r.status === 'RELEASED' && r.liquidationDueDate ? daysBetween(r.liquidationDueDate, today) : 0;
+          return [
+            r.number,
+            { title: r.job.name, body: `${r.job.number} · ${r.costCategory.name}` },
+            { title: r.requestedBy.name, body: r.reason },
+            formatShortDate(r.createdAt),
+            bracketed(formatAmount(num(r.amount)), inSum),
+            num(r.amountReleased) > 0 ? formatAmount(num(r.amountReleased)) : '',
+            r.liquidatedAt ? formatAmount(num(r.amountSpent)) : '',
+            r.liquidationDueDate
+              ? late > 0
+                ? { title: formatShortDate(r.liquidationDueDate), body: `${late} day${late === 1 ? '' : 's'} overdue` }
+                : formatShortDate(r.liquidationDueDate)
+              : '',
+            statusLabel(r.status),
+          ];
+        }),
+      },
+      {
+        kind: 'totals',
+        rows: [
+          { label: 'Released', value: formatMoney(num(sums._sum.amountReleased), currency) },
+          { label: 'Spent', value: formatMoney(num(sums._sum.amountSpent), currency) },
+          { label: totalLabel('Requested', count, rows.length), value: formatMoney(num(sums._sum.amount), currency), bold: true },
+        ],
+      },
+    ];
+    sections.push(...listNotes([bracketNote(closed, ['rejected or cancelled request', 'rejected or cancelled requests'])]));
+
+    const pdf = await renderDocument({ title: 'Budget Requests', date: new Date(), reference, landscape: true, sections });
+    await audit(
+      {
+        entityType: 'budget_request',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the budget request list as PDF (${rows.length} request(s))`,
+      },
+      req,
+    );
+    sendListPdf(res, pdf, 'budget-requests.pdf');
   }),
 );
 
@@ -453,7 +594,13 @@ budgetRequestRoutes.delete(
   }),
 );
 
-/** The request on house-style paper, with the PM and finance sign-offs and who received the cash. */
+/**
+ * The request on paper — the same document as a cash advance, through the
+ * same builders (`cashRequestSections` / `cashRequestSignatories`): the
+ * request, its money as a totals block, the liquidation, and every step of
+ * its route by the step's own name — the project's manager, then finance —
+ * with who received the cash once it is out.
+ */
 budgetRequestRoutes.get(
   '/:id/pdf',
   requireAny(...LIST_PERMISSIONS),
@@ -465,83 +612,40 @@ budgetRequestRoutes.get(
     const view = presentBudgetRequest(row);
 
     const release = row.allocations.find((a) => a.payment.kind === 'DISBURSEMENT');
-    const sections: PdfSection[] = [
-      {
-        kind: 'fields',
-        columns: 3,
-        fields: [
-          { label: 'Requested by', value: row.requestedBy.name },
-          { label: 'Date', value: formatDate(row.createdAt) },
-          { label: 'Needed by', value: row.neededBy ? formatDate(row.neededBy) : '—' },
-          { label: 'Project', value: `${row.job.number} — ${row.job.name}` },
-          { label: 'Budget line', value: row.costCategory.name },
-          { label: 'Status', value: row.status.replace(/_/g, ' ') },
-        ],
-      },
-      { kind: 'text', title: 'Purpose', body: row.reason },
-      {
-        kind: 'table',
-        head: ['', ''],
-        widths: [72, 28],
-        align: ['right', 'right'],
-        rows: [
-          ['AMOUNT REQUESTED', formatMoney(view.amount)],
-          ['Released', release ? `${formatMoney(view.amountReleased)} on ${release.payment.number}, ${formatDate(release.payment.paymentDate)}` : 'Not yet released'],
-          ['Liquidate by', row.liquidationDueDate ? formatDate(row.liquidationDueDate) : '—'],
-          ...(row.liquidatedAt
-            ? [
-                ['Spent (per liquidation)', formatMoney(view.spent)],
-                view.excessDue > 0 ? ['Excess owed to requester', formatMoney(view.excessDue)] : ['Unspent — owed back', formatMoney(view.refundDue)],
-                ['Refunded', formatMoney(view.amountRefunded)],
-              ]
-            : []),
-        ],
-      },
-    ];
-    if (view.liquidation) {
-      sections.push({
-        kind: 'fields',
-        title: 'Liquidation',
-        columns: 3,
-        fields: [
-          { label: 'Report', value: view.liquidation.number },
-          { label: 'Status', value: view.liquidation.status.replace(/_/g, ' ') },
-          { label: 'Total receipts', value: formatMoney(view.liquidation.total) },
-        ],
-      });
-    }
-    if (row.notes) sections.push({ kind: 'text', title: 'Notes', body: row.notes });
+    const sections = cashRequestSections({
+      requestedBy: row.requestedBy.name,
+      neededBy: row.neededBy,
+      project: `${row.job.number} — ${row.job.name}`,
+      budgetLine: row.costCategory.name,
+      status: row.status,
+      purpose: row.reason,
+      release: release ? release.payment : null,
+      liquidationDueDate: row.liquidationDueDate,
+      liquidated: !!row.liquidatedAt,
+      figures: view,
+      liquidation: view.liquidation,
+      notes: row.notes,
+      currency: await companyCurrency(),
+    });
     if (row.cancelReason) sections.push({ kind: 'text', title: 'Cancelled', body: row.cancelReason });
 
-    // Every step of the route: who signed and when, or who may yet — "Pending".
-    const slots = await approvalSlots(
-      'budget_request',
-      row.id,
-      row.status === 'DRAFT' ? { amount: num(row.amount), requesterId: row.requestedById, jobId: row.jobId } : undefined,
-    );
-    const stepSignatories: Signatory[] = slots.length
-      ? slots.map((sl) => {
-          const role = `Approved by — ${sl.step}`;
-          if (sl.name) return { role, name: sl.name, position: sl.position, at: sl.at };
-          const who = sl.assigned ?? [];
-          if (who.length === 1) return { role, name: who[0].name, position: who[0].position };
-          return who.length > 1 ? { role, name: who.map((p) => p.name).join(' or ') } : { role };
-        })
-      : [{ role: 'Approved by — Project Manager' }, { role: 'Approved by — Finance' }];
     const pdf = await renderDocument({
       title: 'Budget Request',
       documentNumber: row.number,
       date: row.createdAt,
       reference: `${row.job.number} — ${row.reason}`,
       sections,
-      signatories: [
-        { role: 'Requested by', name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: row.createdAt },
-        ...stepSignatories,
-        {
-          role: 'Received by',
-          ...(release ? { name: row.requestedBy.name, position: row.requestedBy.position ?? undefined, at: release.payment.paymentDate } : {}),
-        },
-      ],
+      signatories: await cashRequestSignatories({
+        documentType: 'budget_request',
+        id: row.id,
+        status: row.status,
+        amount: view.amount,
+        requester: row.requestedBy,
+        // The project the submit names, for its PROJECT_MANAGER step.
+        jobId: row.jobId,
+        raisedAt: row.createdAt,
+        releasedOn: release?.createdAt ?? null,
+      }),
     });
 
     await audit({ entityType: 'budget_request', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);

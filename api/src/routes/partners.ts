@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, idsFilter } from '../http/kit';
 import { formatShortDate, renderDocument } from '../shared/pdf';
+import { LIST_CAP, listReference, rangeNamed, sendListPdf } from './finance';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
@@ -191,32 +192,38 @@ partnerRoutes.get(
           _count: { select: { preferredItems: { where: PRICED_ITEM } } },
         },
         orderBy: orderBy(q, PARTNER_SORTS, { name: 'asc' }),
-        take: 1000,
+        take: LIST_CAP,
       }),
       partnerListSummary(base, where),
     ]);
     const f = q.filters;
-    const filters = [
+    // "12 partners", or "first 1,000 of 1,234 partners printed" when the cap
+    // bit — then every filter `partnerListWhere` applied, by name.
+    const reference = listReference(summary.count, rows.length, ['partner', 'partners'], [
       q.search ? `search "${q.search}"` : null,
       f.category ? `supplies ${f.category === 'none' ? 'not stated' : f.category}` : null,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
       f.publishes ? `publishes a ${humanKind(f.publishes as (typeof PUBLISHES)[number]).toLowerCase()}` : null,
       f.priced === 'yes' ? 'with priced items' : f.priced === 'no' ? 'no priced items' : null,
-      f.sinceFrom || f.sinceTo ? `partner since ${f.sinceFrom ?? '…'} to ${f.sinceTo ?? '…'}` : null,
+      rangeNamed('partner since', f.sinceFrom, f.sinceTo),
       q.scope === 'mine' ? 'added by me' : null,
       f.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+    ]);
     const kinds = (r: (typeof rows)[number], k: string) => String(r.resources.filter((x) => x.kind === k).length);
 
+    // Ten columns: landscape, each sized from what it holds (rule 6), so a
+    // head is never broken mid-word and a code never split over two lines.
+    // The code heads its column as the screen heads it (a partner's code is
+    // its identifier, not a document number). Counts only, never a price.
     const pdf = await renderDocument({
       title: 'Partners',
       date: new Date(),
-      reference: `${summary.count} partner(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
           head: ['Code', 'Brand and name', 'Supplies', 'Catalogues', 'Price lists', 'Software', 'Links', 'Priced items', 'Since', 'Status'],
-          widths: [1.5, 2.6, 1.6, 1, 1, 1, 0.8, 1, 1.2, 1],
           align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'right', 'left', 'left'],
           rows: rows.map((r) => [
             r.code,
@@ -232,15 +239,12 @@ partnerRoutes.get(
           ]),
         },
       ],
-      signatories: [],
     });
     await audit(
       { entityType: 'supplier', entityId: 'list', action: 'EXPORTED', summary: `Exported the partner list as PDF (${rows.length} partner(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="partners.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'partners.pdf');
   }),
 );
 

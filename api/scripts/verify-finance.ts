@@ -43,6 +43,7 @@ import {
   type AgedRow,
 } from '../src/shared/finance';
 import { manilaDayKey } from '../src/shared/day';
+import { statusLabel } from '../src/shared/pdf';
 import zlib from 'node:zlib';
 // Side-effect imports: register the bill, expense and cash-advance approval
 // subscribers, and the procurement ones the receiving path depends on. The
@@ -278,6 +279,22 @@ function pdfText(pdf: Buffer): string {
   }
   return out.join('\n');
 }
+
+/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
+const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
+/** An open sign-off: "Pending" on a line of its own — never the "Pending approval" a status prints. */
+const pendingCount = (t: string) => t.split('\n').filter((l) => l.trim() === 'Pending').length;
+/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
+const flat = (t: string) => t.replace(/\s+/g, ' ');
+/** A workflow's step names as the paper prints them, in capitals. */
+const stepNames = async (workflowId: string | null) =>
+  (await prisma.approvalStep.findMany({ where: { workflowId: workflowId ?? '' }, orderBy: { sequence: 'asc' } })).map((st) =>
+    st.name.toUpperCase(),
+  );
+/** A totals label printed as a line of its own — "Claimed", never the "Claimed by:" a field prints. */
+const hasLine = (t: string, label: string) => t.split('\n').some((l) => l.trim() === label);
+const exportsOf = (entityType: string, entityId: string) =>
+  prisma.auditLog.count({ where: { entityType, entityId, action: 'EXPORTED' } });
 
 async function main() {
   console.log('\nG-CORE finance verification\n');
@@ -1644,6 +1661,9 @@ async function main() {
     };
     const eng = as(engineer);
     const fin = as(finance);
+    // Money on paper: a total names the company's currency, a table's figures do not.
+    const currency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
+    const peso = (n: number) => `${currency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     const receipt1 = [{ spentOn: todayIso, description: 'Fuel', receiptNo: 'OR-9', amount: 2_500 }];
 
     // ── Budget requests over HTTP: raise, route, release, liquidate ──────────
@@ -1659,6 +1679,23 @@ async function main() {
         draftPage.body.approvalRoute?.steps?.[0]?.approvers?.some((p: { id: string }) => p.id === pm.id) &&
         draftPage.body.approvalRoute?.steps?.[1]?.approvers?.some((p: { id: string }) => p.id === finance.id),
       String(JSON.stringify(draftPage.body.approvalRoute ?? draftPage.body)).slice(0, 200),
+    );
+    const brDraftPdf = await eng('GET', `/budget-requests/${raisedId}/pdf`);
+    const brDraftText = brDraftPdf.bytes ? pdfText(brDraftPdf.bytes) : '';
+    const brSteps = ((draftPage.body.approvalRoute?.steps ?? []) as { name: string }[]).map((st) => st.name.toUpperCase());
+    check(
+      'and prints it: each step by its own name — never "Approved by — …" — "Pending" under the manager and finance',
+      brDraftPdf.status === 200 &&
+        brSteps.length === 2 &&
+        brSteps.every((st) => flat(brDraftText).includes(st)) &&
+        !flat(brDraftText).includes('APPROVED BY') &&
+        !flat(brDraftText).includes('RECEIVED BY') &&
+        // "A or B" wraps where the names run long: read them across the breaks.
+        flat(brDraftText).includes(pm.name) &&
+        flat(brDraftText).includes(finance.name) &&
+        signedCount(brDraftText) === 1 &&
+        pendingCount(brDraftText) === 2,
+      `${brDraftPdf.status} ${brSteps.join(' / ')} · ${signedCount(brDraftText)} signed, ${pendingCount(brDraftText)} pending`,
     );
     const bothKinds = await eng('POST', '/expense-claims', { purpose: `${TAG} both`, advanceId: a4.id, budgetRequestId: raisedId, lines: receipt1 });
     check('a claim cannot liquidate an advance and a budget request at once', bothKinds.status === 400, String(bothKinds.status));
@@ -1701,19 +1738,30 @@ async function main() {
     const liqList = await fin('GET', `/expense-claims?kind=liquidation&budgetRequestId=${raisedId}`);
     check('the Expenses register filters liquidations by budget request', liqList.status === 200 && liqList.body.rows.length === 1 && liqList.body.rows[0].id === liq.body.id, String(liqList.status));
     const brPdf = await fin('GET', `/budget-requests/${raisedId}/pdf`);
-    // Whitespace folded: a long sign-off role wraps onto a second line in the
-    // quotation dress ("APPROVED BY — PROJECT / MANAGER").
-    const brText = (brPdf.bytes ? pdfText(brPdf.bytes) : '').replace(/\s+/g, ' ');
+    const brRaw = brPdf.bytes ? pdfText(brPdf.bytes) : '';
+    // Whitespace folded: a long sign-off role wraps onto a second line.
+    const brText = flat(brRaw);
     check(
-      'the request prints with its sign-offs and who received the cash',
+      'the request prints with every step signed and dated, and who received the cash',
       brPdf.status === 200 &&
-        // Case-blind: G-OPS paper wears the quotation template's dress, which
-        // names the document in capitals.
-        brText.toUpperCase().includes('BUDGET REQUEST') &&
-        brText.toUpperCase().includes('PROJECT MANAGER') &&
-        brText.toUpperCase().includes('RECEIVED BY'),
-      `${brPdf.status} ${brText.replace(/\n/g, ' | ').slice(0, 400)}`,
+        // The document names itself in capitals, in the quotation's dress.
+        brText.includes('BUDGET REQUEST') &&
+        brSteps.every((st) => brText.includes(st)) &&
+        brText.includes('RECEIVED BY') &&
+        !brText.includes('APPROVED BY') &&
+        signedCount(brRaw) === 4 &&
+        pendingCount(brRaw) === 0,
+      `${brPdf.status} ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );
+    check(
+      'its money is the totals block: requested, then released, the last in bold',
+      brRaw.includes('Amount requested') &&
+        brRaw.includes('Released') &&
+        brRaw.includes(peso(6_000)) &&
+        !brRaw.includes('AMOUNT REQUESTED'),
+      brRaw.split('\n').filter((l) => /requested|Released/i.test(l)).join(' | '),
+    );
+    check('both prints are on the request’s trail as EXPORTED', (await exportsOf('budget_request', raisedId)) === 2);
     const reversal = await fin('DELETE', `/payments/${whole.body.id}`);
     check('the release cannot be reversed while a liquidation accounts for it', reversal.status === 400, String(reversal.status));
 
@@ -1732,6 +1780,74 @@ async function main() {
         'and allowed one when finance turns the rule off',
         allowed.status === 201 && /^GT-CA-/.test(String(allowed.body.number)),
         `${allowed.status} ${JSON.stringify(allowed.body).slice(0, 140)}`,
+      );
+      // A draft prints the route submitting it WOULD take (rule 6): every step
+      // by its own name, open, with "Pending" under who may sign it — the
+      // engineer's supervisor by name — and no receipt that has not happened.
+      const draftAdvancePdf = await eng('GET', `/cash-advances/${allowed.body.id}/pdf`);
+      const draftAdvanceText = draftAdvancePdf.bytes ? pdfText(draftAdvancePdf.bytes) : '';
+      const advanceSteps = await stepNames(a1Request.workflowId);
+      check(
+        'a draft advance prints the route it would take: each step by its name, "Pending" under who may sign it',
+        draftAdvancePdf.status === 200 &&
+          flat(draftAdvanceText).includes('REQUESTED BY') &&
+          advanceSteps.length > 0 &&
+          advanceSteps.every((st) => flat(draftAdvanceText).includes(st)) &&
+          !flat(draftAdvanceText).includes('CHECKED BY') &&
+          !flat(draftAdvanceText).includes('APPROVED BY') &&
+          !flat(draftAdvanceText).includes('RECEIVED BY') &&
+          draftAdvanceText.includes(pm.name) &&
+          signedCount(draftAdvanceText) === 1 &&
+          pendingCount(draftAdvanceText) === advanceSteps.length,
+        `${draftAdvancePdf.status} ${advanceSteps.join(' / ')} · ${signedCount(draftAdvanceText)} signed, ${pendingCount(draftAdvanceText)} pending`,
+      );
+      check(
+        'and its money is a totals block of one row, the amount requested',
+        draftAdvanceText.includes('Amount requested') &&
+          draftAdvanceText.includes(peso(500)) &&
+          !draftAdvanceText.includes('AMOUNT REQUESTED') &&
+          draftAdvanceText.includes('Not yet released') &&
+          draftAdvanceText.includes('Draft'),
+        draftAdvanceText.split('\n').filter((l) => /requested|released|Draft/i.test(l)).join(' | '),
+      );
+
+      // A super admin may submit somebody else's draft — but the request is
+      // filed in the REQUESTER's name, so it runs on their supervisor (the one
+      // the draft's paper named) and the self-approval rule still sees whose
+      // advance it is.
+      const root = await prisma.user.create({
+        data: { name: `${TAG} Root`, email: 'root@verifyf.local', passwordHash: await bcrypt.hash('x', 10), isSuperAdmin: true },
+      });
+      const rootSubmit = await as(root)('POST', `/cash-advances/${allowed.body.id}/submit`);
+      const rootRequest = await prisma.approvalRequest.findFirst({
+        where: { documentType: 'cash_advance', documentId: String(allowed.body.id), status: 'PENDING' },
+      });
+      check(
+        'a super admin submitting someone’s advance files it in the requester’s name, on their supervisor',
+        rootSubmit.status === 200 &&
+          rootRequest?.requesterId === engineer.id &&
+          String(rootRequest?.subject).startsWith(engineer.name) &&
+          (await approversForStep(
+            (await prisma.approvalStep.findFirstOrThrow({ where: { workflowId: rootRequest.workflowId ?? '', sequence: rootRequest.currentSequence } })),
+            rootRequest.requesterId,
+          )).includes(pm.id),
+        `${rootSubmit.status} requester ${rootRequest?.requesterId === engineer.id ? 'the engineer' : rootRequest?.requesterId} · ${rootRequest?.subject}`,
+      );
+      // Cancelled while pending: no approval is coming, so nothing is "Pending".
+      const advCancel = await eng('POST', `/cash-advances/${allowed.body.id}/cancel`, { reason: 'trip called off' });
+      const cancelledAdvancePdf = await eng('GET', `/cash-advances/${allowed.body.id}/pdf`);
+      const cancelledAdvanceText = cancelledAdvancePdf.bytes ? pdfText(cancelledAdvancePdf.bytes) : '';
+      check(
+        'cancelled while pending, it prints REQUESTED BY alone, dated — no step, nothing "Pending"',
+        advCancel.status === 200 &&
+          cancelledAdvancePdf.status === 200 &&
+          flat(cancelledAdvanceText).includes('REQUESTED BY') &&
+          advanceSteps.every((st) => !flat(cancelledAdvanceText).includes(st)) &&
+          !flat(cancelledAdvanceText).includes('APPROVED BY') &&
+          signedCount(cancelledAdvanceText) === 1 &&
+          pendingCount(cancelledAdvanceText) === 0 &&
+          cancelledAdvanceText.includes('Cancelled'),
+        `${advCancel.status} ${cancelledAdvancePdf.status} · ${signedCount(cancelledAdvanceText)} signed, ${pendingCount(cancelledAdvanceText)} pending`,
       );
     } finally {
       await saveFinanceSettings({ blockAdvanceWhileUnliquidated: rule });
@@ -2061,6 +2177,161 @@ async function main() {
       'and so can finance, who reads every claim',
       mFinanceFiles.status === 200 && Array.isArray(mFinanceFiles.body) && mFinanceFiles.body.length === mReceipts,
       String(mFinanceFiles.status),
+    );
+
+    // The claim on paper (rule 6). Drafted, it prints the route submitting
+    // would take — each step by its own name, "Pending" under who may sign it
+    // (the engineer's supervisor by name); never "Checked by" / "Approved by".
+    // Signed at step 1 and then pulled back, it prints that route again: the
+    // CANCELLED request's signature is not an approval anybody now gives.
+    const pClaim = await eng('POST', '/expense-claims', {
+      purpose: `${TAG} on paper`,
+      jobId: job.id,
+      costCategoryId: subcontract.id,
+      lines: [mLine('Fare', 1_200), mLine('Meals', 350.5)],
+    });
+    const pId = String(pClaim.body.id ?? '');
+    const claimPaper = async () => {
+      const res = await eng('GET', `/expense-claims/${pId}/pdf`);
+      return { status: res.status, text: res.bytes ? pdfText(res.bytes) : '' };
+    };
+    const pDraft = await claimPaper();
+    const pSubmit = await eng('POST', `/expense-claims/${pId}/submit`);
+    const pRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: pId, status: 'PENDING' } });
+    const claimSteps = await stepNames(pRequest?.workflowId ?? null);
+    check(
+      'a draft claim prints its route: PREPARED BY, then each step by its name, "Pending" under the supervisor by name',
+      pClaim.status === 201 &&
+        pDraft.status === 200 &&
+        flat(pDraft.text).includes('PREPARED BY') &&
+        claimSteps.length > 0 &&
+        claimSteps.every((st) => flat(pDraft.text).includes(st)) &&
+        !flat(pDraft.text).includes('CHECKED BY') &&
+        !flat(pDraft.text).includes('APPROVED BY') &&
+        pDraft.text.includes(pm.name) &&
+        signedCount(pDraft.text) === 1 &&
+        pendingCount(pDraft.text) === claimSteps.length,
+      `${pClaim.status} ${pDraft.status} ${claimSteps.join(' / ')} · ${signedCount(pDraft.text)} signed, ${pendingCount(pDraft.text)} pending`,
+    );
+    check(
+      'its receipts add up in the totals block — "Claimed", in bold, and no "Still owed" before anyone approved it — never a TOTAL row in the table',
+      hasLine(pDraft.text, 'Claimed') &&
+        !pDraft.text.includes('Reimbursed') &&
+        !pDraft.text.includes('Still owed') &&
+        pDraft.text.includes(peso(1_550.5)) &&
+        !pDraft.text.includes(peso(0)) &&
+        !pDraft.text.includes('TOTAL') &&
+        flat(pDraft.text).includes(`AMOUNT (${currency})`) &&
+        pDraft.text.includes('1,200.00') &&
+        !pDraft.text.includes(peso(1_200)) &&
+        pDraft.text.includes('Draft') &&
+        !pDraft.text.includes('DRAFT'),
+      pDraft.text.split('\n').filter((l) => /total|Claimed|Reimbursed|owed|AMOUNT|Draft/i.test(l)).join(' | ').slice(0, 300),
+    );
+    if (pRequest) await act({ requestId: pRequest.id, userId: pm.id, action: 'APPROVED' });
+    const pSigned = await claimPaper();
+    check(
+      'submitted and signed at step 1, it prints the supervisor dated and the next step "Pending"',
+      pSubmit.status === 200 &&
+        !!pRequest &&
+        pSigned.text.includes(pm.name) &&
+        signedCount(pSigned.text) === 2 &&
+        pendingCount(pSigned.text) === claimSteps.length - 1 &&
+        pSigned.text.includes('Pending approval'),
+      `${pSubmit.status} · ${signedCount(pSigned.text)} signed, ${pendingCount(pSigned.text)} pending`,
+    );
+    const pPulled = await eng('POST', `/expense-claims/${pId}/withdraw`);
+    const pAgain = await claimPaper();
+    check(
+      'pulled back to draft, it prints the route afresh — the withdrawn signature is not printed',
+      pPulled.status === 200 && signedCount(pAgain.text) === 1 && pendingCount(pAgain.text) === claimSteps.length,
+      `${pPulled.status} · ${signedCount(pAgain.text)} signed, ${pendingCount(pAgain.text)} pending`,
+    );
+    // Submitted again, signed at step 1, then cancelled: no approval is coming,
+    // so the paper prints the signature that WAS given, dated, and no step
+    // "Pending" — and its money states what was claimed, never a "Still owed"
+    // nobody owes.
+    const pResubmit = await eng('POST', `/expense-claims/${pId}/submit`);
+    const pRequest2 = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: pId, status: 'PENDING' } });
+    if (pRequest2) await act({ requestId: pRequest2.id, userId: pm.id, action: 'APPROVED' });
+    const pCancel = await eng('POST', `/expense-claims/${pId}/cancel`);
+    const pCancelled = await claimPaper();
+    check(
+      'cancelled after step 1 signed, it prints PREPARED BY and that signature, both dated — no step "Pending"',
+      pResubmit.status === 200 &&
+        !!pRequest2 &&
+        pCancel.status === 200 &&
+        flat(pCancelled.text).includes('PREPARED BY') &&
+        flat(pCancelled.text).includes(claimSteps[0] ?? '?') &&
+        pCancelled.text.includes(pm.name) &&
+        claimSteps.slice(1).every((st) => !flat(pCancelled.text).includes(st)) &&
+        signedCount(pCancelled.text) === 2 &&
+        pendingCount(pCancelled.text) === 0 &&
+        pCancelled.text.includes('Cancelled'),
+      `${pResubmit.status} ${pCancel.status} · ${signedCount(pCancelled.text)} signed, ${pendingCount(pCancelled.text)} pending`,
+    );
+    check(
+      'and its money states the claim — "Claimed" — with no "Still owed"',
+      hasLine(pCancelled.text, 'Claimed') &&
+        pCancelled.text.includes(peso(1_550.5)) &&
+        !pCancelled.text.includes('Still owed') &&
+        !pCancelled.text.includes('Reimbursed'),
+      pCancelled.text.split('\n').filter((l) => /Claimed|owed|Reimbursed/.test(l)).join(' | '),
+    );
+    check('every print is on the claim’s trail as EXPORTED', (await exportsOf('expense_claim', pId)) === 4);
+
+    // Rejected at its first step: nobody signed, so only the claimant's line
+    // is dated — never "Pending" under the very step that refused it.
+    const rClaim = await eng('POST', '/expense-claims', { purpose: `${TAG} refused on paper`, lines: [mLine('Parking', 180)] });
+    const rId = String(rClaim.body.id ?? '');
+    const rSubmit = await eng('POST', `/expense-claims/${rId}/submit`);
+    const rRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: rId, status: 'PENDING' } });
+    const rSteps = await stepNames(rRequest?.workflowId ?? null);
+    if (rRequest) await settle(rRequest.id, 'REJECTED');
+    const rPaper = await eng('GET', `/expense-claims/${rId}/pdf`);
+    const rText = rPaper.bytes ? pdfText(rPaper.bytes) : '';
+    check(
+      'a rejected claim prints PREPARED BY alone, dated — no step, nothing "Pending"',
+      rClaim.status === 201 &&
+        rSubmit.status === 200 &&
+        rSteps.length > 0 &&
+        (await prisma.expenseClaim.findUnique({ where: { id: rId } }))?.status === 'REJECTED' &&
+        flat(rText).includes('PREPARED BY') &&
+        rSteps.every((st) => !flat(rText).includes(st)) &&
+        signedCount(rText) === 1 &&
+        pendingCount(rText) === 0 &&
+        rText.includes('Rejected') &&
+        hasLine(rText, 'Claimed') &&
+        !rText.includes('Still owed'),
+      `${rClaim.status} ${rSubmit.status} · ${signedCount(rText)} signed, ${pendingCount(rText)} pending`,
+    );
+
+    // Approved all the way: now — and only now — the paper says where it
+    // stands: what was reimbursed, and what is still owed, in bold.
+    const okClaim = await eng('POST', '/expense-claims', { purpose: `${TAG} approved on paper`, lines: [mLine('Toll', 245)] });
+    const okId = String(okClaim.body.id ?? '');
+    const okSubmit = await eng('POST', `/expense-claims/${okId}/submit`);
+    const okRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: okId, status: 'PENDING' } });
+    const okSteps = await stepNames(okRequest?.workflowId ?? null);
+    if (okRequest) await settle(okRequest.id);
+    const okPaper = await eng('GET', `/expense-claims/${okId}/pdf`);
+    const okText = okPaper.bytes ? pdfText(okPaper.bytes) : '';
+    check(
+      'an approved claim prints every step signed and dated, then Total, Reimbursed and Still owed',
+      okClaim.status === 201 &&
+        okSubmit.status === 200 &&
+        okSteps.every((st) => flat(okText).includes(st)) &&
+        signedCount(okText) === okSteps.length + 1 &&
+        pendingCount(okText) === 0 &&
+        okText.includes('Approved') &&
+        hasLine(okText, 'Total') &&
+        hasLine(okText, 'Reimbursed') &&
+        okText.includes(peso(0)) &&
+        hasLine(okText, 'Still owed') &&
+        okText.includes(peso(245)) &&
+        !hasLine(okText, 'Claimed'),
+      `${okClaim.status} ${okSubmit.status} · ${signedCount(okText)} signed, ${pendingCount(okText)} pending · ` +
+        okText.split('\n').filter((l) => /Total|Reimbursed|owed|Claimed/.test(l)).join(' | '),
     );
 
     // A decision that landed a moment before a pull-back or a cancel: act()
@@ -2401,11 +2672,110 @@ async function main() {
       const text = res.bytes ? pdfText(res.bytes) : '';
       check(`${label} prints as a PDF`, res.status === 200 && res.type.includes('application/pdf'), `${res.status} ${res.type}`);
       check(
-        `${label} names itself, prints money as PHP and never as ±`,
-        text.replace(/\s+/g, ' ').toUpperCase().includes(title.toUpperCase()) && text.includes('PHP') && !text.includes('±'),
+        `${label} names itself, prints money as ${currency} and never as ±`,
+        flat(text).toUpperCase().includes(title.toUpperCase()) && text.includes(currency) && !text.includes('±'),
         text.slice(0, 160),
       );
     }
+    // The advance, settled all the way: its route signed step by step (the
+    // supervisor by name), who received the cash, and the money in the
+    // totals block down to what is still to refund — nothing, now.
+    const advText = advancePdf.bytes ? pdfText(advancePdf.bytes) : '';
+    const advSteps = await stepNames(a1Request.workflowId);
+    check(
+      'the advance prints REQUESTED BY, each step by its own name, RECEIVED BY — all dated, none "Checked by"',
+      flat(advText).includes('REQUESTED BY') &&
+        advSteps.every((st) => flat(advText).includes(st)) &&
+        flat(advText).includes('RECEIVED BY') &&
+        !flat(advText).includes('CHECKED BY') &&
+        !flat(advText).includes('APPROVED BY') &&
+        advText.includes(pm.name) &&
+        signedCount(advText) === advSteps.length + 2 &&
+        pendingCount(advText) === 0,
+      `${advSteps.join(' / ')} · ${signedCount(advText)} signed, ${pendingCount(advText)} pending`,
+    );
+    check(
+      'its money: requested, released, spent, owed back, refunded, still to refund — statuses in words',
+      advText.includes('Amount requested') &&
+        advText.includes(peso(10_000)) &&
+        advText.includes('Spent (per liquidation)') &&
+        advText.includes(peso(8_500)) &&
+        advText.includes('Unspent') &&
+        advText.includes('Less: refunded') &&
+        advText.includes(peso(1_500)) &&
+        advText.includes('Still to refund') &&
+        advText.includes(peso(0)) &&
+        advText.includes('Liquidated') &&
+        advText.includes('Settled') &&
+        !advText.includes('AMOUNT REQUESTED') &&
+        !advText.includes('LIQUIDATED') &&
+        !advText.includes('SETTLED'),
+      advText.split('\n').filter((l) => /requested|Released|Spent|refund|Liquidated|Settled/i.test(l)).join(' | ').slice(0, 300),
+    );
+    const liqText = liquidationPdf.bytes ? pdfText(liquidationPdf.bytes) : '';
+    const liqSteps = await stepNames(l1Request.workflowId);
+    check(
+      'the liquidation report prints PREPARED BY and each step by its name, signed and dated',
+      flat(liqText).includes('PREPARED BY') &&
+        liqSteps.every((st) => flat(liqText).includes(st)) &&
+        !flat(liqText).includes('CHECKED BY') &&
+        !flat(liqText).includes('APPROVED BY') &&
+        signedCount(liqText) === liqSteps.length + 1 &&
+        pendingCount(liqText) === 0,
+      `${liqSteps.join(' / ')} · ${signedCount(liqText)} signed, ${pendingCount(liqText)} pending`,
+    );
+    check(
+      'and its receipts add up in the totals block: Total, Advance released, the unspent owed back, less what came back — nothing still to refund',
+      liqText.includes('Total') &&
+        liqText.includes(peso(8_500)) &&
+        liqText.includes('Advance released') &&
+        liqText.includes(peso(10_000)) &&
+        liqText.includes('owed back') &&
+        liqText.includes(peso(1_500)) &&
+        hasLine(liqText, 'Less: refunded') &&
+        hasLine(liqText, 'Still to refund') &&
+        liqText.includes(peso(0)) &&
+        liqText.includes('3,500.00') &&
+        !liqText.includes(peso(3_500)) &&
+        !liqText.includes('TOTAL'),
+      liqText.split('\n').filter((l) => /total|released|owed|refund|3,500/i.test(l)).join(' | ').slice(0, 300),
+    );
+    // Over-spent (section 5): the excess is owed on the liquidation and was
+    // paid there. Both papers take the reimbursement off, so neither says
+    // anything is still owed once it is.
+    const a2Pdf = await eng('GET', `/cash-advances/${a2.id}/pdf`);
+    const a2Text = a2Pdf.bytes ? pdfText(a2Pdf.bytes) : '';
+    check(
+      'an over-spent advance prints the excess, less what its liquidation reimbursed, and nothing still owed',
+      a2Pdf.status === 200 &&
+        hasLine(a2Text, 'Excess spent') &&
+        a2Text.includes(peso(1_200)) &&
+        flat(a2Text).includes(`Less: reimbursed on ${l2.number}`) &&
+        hasLine(a2Text, 'Still owed to requester') &&
+        a2Text.includes(peso(0)) &&
+        !a2Text.includes('Excess owed'),
+      a2Text.split('\n').filter((l) => /Excess|reimbursed|owed|PHP/.test(l)).join(' | ').slice(0, 300),
+    );
+    const l2Pdf = await eng('GET', `/expense-claims/${l2.id}/pdf`);
+    const l2Text = l2Pdf.bytes ? pdfText(l2Pdf.bytes) : '';
+    check(
+      'and its liquidation report: Total, Advance released, Excess spent, Less: reimbursed — nothing Still owed',
+      l2Pdf.status === 200 &&
+        l2Text.includes(peso(6_200)) &&
+        l2Text.includes(peso(5_000)) &&
+        hasLine(l2Text, 'Excess spent') &&
+        l2Text.includes(peso(1_200)) &&
+        hasLine(l2Text, 'Less: reimbursed') &&
+        hasLine(l2Text, 'Still owed') &&
+        l2Text.includes(peso(0)) &&
+        l2Text.includes('Reimbursed') &&
+        !l2Text.includes('Excess owed'),
+      l2Text.split('\n').filter((l) => /Excess|reimbursed|owed|PHP/i.test(l)).join(' | ').slice(0, 300),
+    );
+    check(
+      'both prints are on their trails as EXPORTED',
+      (await exportsOf('cash_advance', a1.id)) === 1 && (await exportsOf('expense_claim', l1.id)) === 1,
+    );
 
     // (11) Billing a job order.
     console.log('\nInvoicing a job order (over HTTP)');
@@ -2493,6 +2863,18 @@ async function main() {
         iPut.body.jobOrderId === doneOrder.id &&
         iPut.body.customer?.id === customer.id,
       `${iPut.status} ${JSON.stringify(iPut.body).slice(0, 200)}`,
+    );
+    const iPaper = await fin('GET', `/invoices/${iId}/pdf`);
+    const iPaperText = iPaper.bytes ? pdfText(iPaper.bytes) : '';
+    check(
+      'its particulars print numbered under "No.", the figures in the table and the code in the head',
+      iPaper.status === 200 &&
+        flat(iPaperText).includes('NO.') &&
+        flat(iPaperText).includes(`AMOUNT (${currency})`) &&
+        iPaperText.includes('15,000.00') &&
+        !iPaperText.includes(peso(15_000)) &&
+        iPaperText.includes(peso(20_000)),
+      iPaperText.split('\n').filter((l) => /NO\.|AMOUNT|15,000|20,000/.test(l)).join(' | '),
     );
     const iRepoint = await fin('PUT', `/invoices/${iId}`, { jobOrderId: openOrder.id, lines: iLines });
     check(
@@ -2596,7 +2978,39 @@ async function main() {
         fbHeader.body.lines?.length === fbRaised.body.lines?.length,
       `${fbHeader.status} ${JSON.stringify(fbHeader.body).slice(0, 200)}`,
     );
+    // An invoice has no route: it prints who prepared it and who issued it,
+    // each dated — "Pending" while a draft — and never its creator as an
+    // approver, nor a "Received by" nobody in the app fills.
+    const fbDraftPdf = await fin('GET', `/invoices/${fbId}/pdf`);
+    const fbDraftText = fbDraftPdf.bytes ? pdfText(fbDraftPdf.bytes) : '';
+    const nameCount = (t: string, name: string) => t.split('\n').filter((l) => l.trim() === name).length;
+    check(
+      'a draft invoice prints PREPARED BY, dated, and ISSUED BY "Pending" under nobody — never an APPROVED BY',
+      fbDraftPdf.status === 200 &&
+        flat(fbDraftText).includes('PREPARED BY') &&
+        flat(fbDraftText).includes('ISSUED BY') &&
+        !flat(fbDraftText).includes('APPROVED BY') &&
+        !flat(fbDraftText).includes('RECEIVED BY') &&
+        nameCount(fbDraftText, finance.name) === 1 &&
+        signedCount(fbDraftText) === 1 &&
+        pendingCount(fbDraftText) === 1 &&
+        fbDraftText.includes('Draft'),
+      `${fbDraftPdf.status} · ${signedCount(fbDraftText)} signed, ${pendingCount(fbDraftText)} pending, ${nameCount(fbDraftText, finance.name)}× ${finance.name}`,
+    );
     const fbIssue = await fin('POST', `/invoices/${fbId}/issue`);
+    const fbIssuedPdf = await fin('GET', `/invoices/${fbId}/pdf`);
+    const fbIssuedText = fbIssuedPdf.bytes ? pdfText(fbIssuedPdf.bytes) : '';
+    check(
+      'issued, it prints who issued it — the trail’s issue row — dated, and nothing Pending',
+      fbIssuedPdf.status === 200 &&
+        flat(fbIssuedText).includes('ISSUED BY') &&
+        nameCount(fbIssuedText, finance.name) === 2 &&
+        signedCount(fbIssuedText) === 2 &&
+        pendingCount(fbIssuedText) === 0 &&
+        fbIssuedText.includes('Issued'),
+      `${fbIssuedPdf.status} · ${signedCount(fbIssuedText)} signed, ${pendingCount(fbIssuedText)} pending`,
+    );
+    check('both prints are on the invoice’s trail as EXPORTED', (await exportsOf('invoice', fbId)) === 2);
     const fbIssued = await fin('PUT', `/invoices/${fbId}`, { notes: 'too late' });
     check(
       'an issued invoice refuses Modify',
@@ -2620,9 +3034,30 @@ async function main() {
       `${invoicePdf.status} ${invoicePdf.type}`,
     );
     check(
-      'showing NET COLLECTIBLE and its figure, in PHP',
-      invoiceText.includes('NET COLLECTIBLE') && invoiceText.includes('PHP 440,000.00') && !invoiceText.includes('±'),
-      invoiceText.slice(0, 200),
+      'its money is the quotation’s totals block: Gross, VAT (12%), Invoice total, Less: EWT (2%), Net collectible',
+      invoiceText.includes('Gross') &&
+        invoiceText.includes(peso(400_000)) &&
+        invoiceText.includes('VAT (12%)') &&
+        invoiceText.includes(peso(48_000)) &&
+        invoiceText.includes('Invoice total') &&
+        invoiceText.includes(peso(448_000)) &&
+        invoiceText.includes('Less: EWT (2%)') &&
+        invoiceText.includes(peso(8_000)) &&
+        invoiceText.includes('Net collectible') &&
+        invoiceText.includes(peso(440_000)) &&
+        !invoiceText.includes('NET COLLECTIBLE') &&
+        !invoiceText.includes('INVOICE TOTAL') &&
+        !invoiceText.includes('±'),
+      invoiceText.split('\n').filter((l) => /Gross|VAT|total|EWT|collectible/i.test(l)).join(' | '),
+    );
+    check(
+      'an invoice issued outside the routes names no issuer rather than guessing one',
+      flat(invoiceText).includes('PREPARED BY') &&
+        !flat(invoiceText).includes('ISSUED BY') &&
+        !flat(invoiceText).includes('APPROVED BY') &&
+        signedCount(invoiceText) === 1 &&
+        pendingCount(invoiceText) === 0,
+      `${signedCount(invoiceText)} signed, ${pendingCount(invoiceText)} pending`,
     );
     const invoicePdfNosy = await eng('GET', `/invoices/${invoice.id}/pdf`);
     check('and is refused to anyone without A/R access', invoicePdfNosy.status === 403, String(invoicePdfNosy.status));
@@ -2667,6 +3102,303 @@ async function main() {
       cleared.status === 200 && !!clearedOn && [clearDay, manilaDayKey(new Date())].includes(ymd(clearedOn)),
       `${cleared.status} ${clearedOn?.toISOString()}`,
     );
+
+    // ══ Every register prints (rule 6, A5) ═════════════════════════════════
+    // `GET <list>/pdf` reads the list's own where-builder, so the paper is the
+    // screen: the same rows for the same query, the rows ticked with `?ids=`
+    // (ANDed with who may see what), every filter named in the reference, and
+    // an EXPORTED audit row with entityId 'list'.
+    console.log('\nThe registers on paper');
+    /** Numbers may wrap inside a narrow cell: compare with every space gone. */
+    const squash = (t: string) => t.replace(/\s+/g, '');
+    const listExports = (entityType: string, actorId: string) =>
+      prisma.auditLog.count({ where: { entityType, entityId: 'list', action: 'EXPORTED', actorId } });
+    type Row = { id: string; number: string; status?: string };
+    const numbersOf = (body: { rows?: Row[] }) => (body.rows ?? []).map((r) => r.number);
+    /**
+     * A status that splits the rows on file — some have it, some do not — so
+     * a filter check keeps some rows and drops others whatever the run left.
+     */
+    const splitting = (rows: Row[]) =>
+      [...new Set(rows.map((r) => r.status ?? ''))].find((st) => {
+        const n = rows.filter((r) => r.status === st).length;
+        return st && n > 0 && n < rows.length;
+      }) ?? 'NONE';
+    const searched = `search=${TAG}`;
+    const registers: {
+      path: string;
+      entity: string;
+      /** The filter query (search included where it narrows the same set) and how the reference names it. */
+      filter: (rows: Row[]) => { query: string; named: string };
+      ownScope: boolean;
+      /** Who raised a row, where the list takes `?requestedById=` — the filter must only ever narrow. */
+      requester?: (id: string) => Promise<string | undefined>;
+    }[] = [
+      {
+        path: 'invoices',
+        entity: 'invoice',
+        filter: (rows) => ({
+          query: `${searched}&customerId=${customer.id}&status=${splitting(rows)}`,
+          named: `status ${statusLabel(splitting(rows))} · customer ${customer.name}`,
+        }),
+        ownScope: false,
+      },
+      {
+        path: 'supplier-bills',
+        entity: 'supplier_bill',
+        filter: (rows) => ({
+          query: `${searched}&supplierId=${supplier.id}&status=${splitting(rows)}`,
+          named: `status ${statusLabel(splitting(rows))} · supplier ${supplier.name}`,
+        }),
+        ownScope: false,
+      },
+      // The search finds the customer's receipts; the payee filter, the money
+      // handed to the engineer — none of which the search found.
+      { path: 'payments', entity: 'payment', filter: () => ({ query: `payeeUserId=${engineer.id}`, named: `with ${engineer.name}` }), ownScope: false },
+      { path: 'expense-claims', entity: 'expense_claim', filter: () => ({ query: `${searched}&kind=reimbursement`, named: 'reimbursements' }), ownScope: true },
+      {
+        path: 'cash-advances',
+        entity: 'cash_advance',
+        filter: () => ({ query: `${searched}&requestedById=${engineer.id}`, named: `requested by ${engineer.name}` }),
+        ownScope: true,
+        requester: async (id) => (await prisma.cashAdvance.findUnique({ where: { id }, select: { requestedById: true } }))?.requestedById,
+      },
+      {
+        path: 'budget-requests',
+        entity: 'budget_request',
+        filter: (rows) => ({
+          query: `${searched}&jobId=${job.id}&status=${splitting(rows)}`,
+          named: `status ${statusLabel(splitting(rows))} · project ${job.number}`,
+        }),
+        ownScope: true,
+        requester: async (id) => (await prisma.budgetRequest.findUnique({ where: { id }, select: { requestedById: true } }))?.requestedById,
+      },
+    ];
+    for (const reg of registers) {
+      const exportsBefore = await listExports(reg.entity, finance.id);
+      const screen = await fin('GET', `/${reg.path}?search=${TAG}&pageSize=200`);
+      const shown = numbersOf(screen.body);
+      const paper = await fin('GET', `/${reg.path}/pdf?search=${TAG}`);
+      const text = paper.bytes ? pdfText(paper.bytes) : '';
+      check(
+        `/${reg.path}/pdf prints the list as the screen shows it — every row, the search named`,
+        paper.status === 200 &&
+          paper.type.includes('application/pdf') &&
+          shown.length > 0 &&
+          shown.every((n) => squash(text).includes(n)) &&
+          flat(text).includes(`search "${TAG}"`),
+        `${paper.status} ${paper.type} · ${shown.length} row(s) · missing ${shown.filter((n) => !squash(text).includes(n)).join(', ')}`,
+      );
+
+      const [first, ...rest] = (screen.body.rows ?? []) as Row[];
+      const ticked = await fin('GET', `/${reg.path}/pdf?ids=${first?.id ?? 'none'}`);
+      const tickedText = ticked.bytes ? pdfText(ticked.bytes) : '';
+      check(
+        `/${reg.path}/pdf?ids= prints only the rows ticked, and says so`,
+        ticked.status === 200 &&
+          !!first &&
+          squash(tickedText).includes(first.number) &&
+          rest.every((r) => !squash(tickedText).includes(r.number)) &&
+          flat(tickedText).includes('the rows selected'),
+        `${ticked.status} · ${rest.filter((r) => squash(tickedText).includes(r.number)).length} other row(s) printed`,
+      );
+
+      const { query, named } = reg.filter((screen.body.rows ?? []) as Row[]);
+      const narrowed = await fin('GET', `/${reg.path}?${query}&pageSize=200`);
+      const kept = numbersOf(narrowed.body);
+      const dropped = shown.filter((n) => !kept.includes(n));
+      const filtered = await fin('GET', `/${reg.path}/pdf?${query}`);
+      const filteredText = filtered.bytes ? pdfText(filtered.bytes) : '';
+      check(
+        `/${reg.path}/pdf names the filter that narrowed it (${named}) and prints exactly the rows it keeps`,
+        filtered.status === 200 &&
+          narrowed.status === 200 &&
+          flat(filteredText).includes(named) &&
+          // Not vacuous: the filter keeps some rows and drops others.
+          kept.length > 0 &&
+          dropped.length > 0 &&
+          kept.every((n) => squash(filteredText).includes(n)) &&
+          dropped.every((n) => !squash(filteredText).includes(n)),
+        `${filtered.status} · kept ${kept.length}, dropped ${dropped.length} · ${flat(filteredText).match(/Reference:.{0,160}/)?.[0] ?? ''}`,
+      );
+      check(
+        `and each print of /${reg.path}/pdf is on the trail as EXPORTED, entityId "list"`,
+        (await listExports(reg.entity, finance.id)) === exportsBefore + 3,
+        `${(await listExports(reg.entity, finance.id)) - exportsBefore} new row(s)`,
+      );
+
+      if (reg.ownScope) {
+        // A view_own holder prints their own rows, whatever they tick.
+        const own = numbersOf((await eng('GET', `/${reg.path}?search=${TAG}&pageSize=200`)).body);
+        const ownPaper = await eng('GET', `/${reg.path}/pdf?search=${TAG}`);
+        const ownText = ownPaper.bytes ? pdfText(ownPaper.bytes) : '';
+        const theirs = ((screen.body.rows ?? []) as Row[]).filter((r) => !own.includes(r.number));
+        check(
+          `/${reg.path}/pdf for someone who sees only their own prints only their own`,
+          ownPaper.status === 200 &&
+            own.length > 0 &&
+            own.every((n) => squash(ownText).includes(n)) &&
+            theirs.every((r) => !squash(ownText).includes(r.number)),
+          `${ownPaper.status} · own ${own.length}, others ${theirs.length}`,
+        );
+        if (theirs.length) {
+          const sneaky = await eng('GET', `/${reg.path}/pdf?ids=${theirs[0].id}`);
+          const sneakyText = sneaky.bytes ? pdfText(sneaky.bytes) : '';
+          check(
+            `and ticking somebody else’s row on /${reg.path}/pdf prints nothing of it`,
+            sneaky.status === 200 && !squash(sneakyText).includes(theirs[0].number) && flat(sneakyText).includes('Reference: 0 '),
+            `${sneaky.status} ${flat(sneakyText).match(/Reference:.{0,80}/)?.[0] ?? ''}`,
+          );
+          // The requested-by filter is ANDed with "only their own", never
+          // written over it: naming somebody else lists and prints nothing.
+          if (reg.requester) {
+            const other = await reg.requester(theirs[0].id);
+            const askedList = await eng('GET', `/${reg.path}?requestedById=${other ?? 'none'}&pageSize=200`);
+            const askedPaper = await eng('GET', `/${reg.path}/pdf?requestedById=${other ?? 'none'}`);
+            const askedText = askedPaper.bytes ? pdfText(askedPaper.bytes) : '';
+            check(
+              `and naming somebody else as the requester on /${reg.path} lists and prints none of theirs`,
+              !!other &&
+                other !== engineer.id &&
+                askedList.status === 200 &&
+                askedList.body.total === 0 &&
+                numbersOf(askedList.body).length === 0 &&
+                askedPaper.status === 200 &&
+                theirs.every((r) => !squash(askedText).includes(r.number)) &&
+                flat(askedText).includes('Reference: 0 '),
+              `${askedList.status} total ${askedList.body.total} · ${askedPaper.status} ${flat(askedText).match(/Reference:.{0,100}/)?.[0] ?? ''}`,
+            );
+          }
+        }
+      } else {
+        const refused = await eng('GET', `/${reg.path}/pdf`);
+        check(`/${reg.path}/pdf is refused to anyone the list itself refuses`, refused.status === 403, String(refused.status));
+      }
+    }
+
+    // The money reconciles to the screen's rows. The bold Outstanding is the
+    // RECEIVABLE (the payable on the bill paper) — `financePosition`'s rule:
+    // only an issued or part-paid invoice, an approved or part-paid bill, is
+    // owed. A draft (a bill not approved yet) is counted in the other totals
+    // and prints "—" in the column; a cancelled one is in brackets.
+    /** The figure a totals row prints — the line after its label ("Outstanding, all 1,234" past the cap). */
+    const totalAfter = (t: string, label: string) => {
+      const lines = t.split('\n').map((l) => l.trim());
+      const at = lines.findIndex((l) => l === label || l.startsWith(`${label}, all `));
+      return at >= 0 ? lines[at + 1] : undefined;
+    };
+    type MoneyRow = { id: string; number: string; status: string; outstanding: number };
+    const papers = [
+      {
+        path: 'invoices',
+        owed: ['ISSUED', 'PARTIALLY_PAID'],
+        unowed: ['DRAFT'],
+        note: 'counted in Invoiced and Net collectible but not in Outstanding',
+        // A draft and an issued invoice on the paper, whatever the run left
+        // there, so leaving one out and keeping the other is not vacuous.
+        fixtures: async () =>
+          Promise.all(
+            (['DRAFT', 'ISSUED'] as const).map((status) =>
+              prisma.invoice.create({
+                data: {
+                  number: `${TAG}-INV-${status}`,
+                  status,
+                  customerId: customer.id,
+                  invoiceDate: dayKey(new Date()),
+                  dueDate: dayKey(new Date()),
+                  grossAmount: D(5_000),
+                  vatRate: D(0.12),
+                  vatAmount: D(600),
+                  ewtRate: D(0.02),
+                  ewtAmount: D(100),
+                  invoiceTotal: D(5_600),
+                  netCollectible: D(5_500),
+                  createdById: finance.id,
+                },
+                select: { id: true },
+              }),
+            ),
+          ),
+        drop: (ids: string[]) => prisma.invoice.deleteMany({ where: { id: { in: ids } } }),
+      },
+      {
+        path: 'supplier-bills',
+        owed: ['APPROVED', 'PARTIALLY_PAID'],
+        unowed: ['DRAFT', 'PENDING_APPROVAL'],
+        note: 'counted in Billed and Net payable but not in Outstanding',
+        fixtures: async () =>
+          Promise.all(
+            (['PENDING_APPROVAL', 'APPROVED'] as const).map((status) =>
+              prisma.supplierBill.create({
+                data: {
+                  number: `${TAG}-BILL-${status}`,
+                  status,
+                  supplierId: supplier.id,
+                  supplierInvoiceNo: `${TAG}-SI-${status}`,
+                  billDate: dayKey(new Date()),
+                  dueDate: dayKey(new Date()),
+                  subtotal: D(2_000),
+                  vatRate: D(0.12),
+                  vatAmount: D(240),
+                  ewtRate: D(0),
+                  ewtAmount: D(0),
+                  total: D(2_240),
+                  netPayable: D(2_240),
+                  createdById: finance.id,
+                },
+                select: { id: true },
+              }),
+            ),
+          ),
+        drop: (ids: string[]) => prisma.supplierBill.deleteMany({ where: { id: { in: ids } } }),
+      },
+    ];
+    for (const p of papers) {
+      const made = (await p.fixtures()).map((m) => m.id);
+      const screen = await fin('GET', `/${p.path}?search=${TAG}&pageSize=200`);
+      const rows = (screen.body.rows ?? []) as MoneyRow[];
+      const owedRows = rows.filter((r) => p.owed.includes(r.status));
+      const unowed = rows.filter((r) => p.unowed.includes(r.status));
+      const expected = peso(cents(owedRows.reduce((sum, r) => sum + r.outstanding, 0)));
+      const [paper, owedPaper] = await Promise.all([
+        fin('GET', `/${p.path}/pdf?search=${TAG}`),
+        fin('GET', `/${p.path}/pdf?search=${TAG}&outstanding=true`),
+      ]);
+      const text = paper.bytes ? pdfText(paper.bytes) : '';
+      const owedText = owedPaper.bytes ? pdfText(owedPaper.bytes) : '';
+      check(
+        `the /${p.path} paper’s Outstanding is the screen’s owed rows summed — ${p.unowed.map((st) => statusLabel(st).toLowerCase()).join(' or ')} left out, the note saying so`,
+        paper.status === 200 &&
+          unowed.some((r) => r.outstanding > 0) &&
+          owedRows.length > 0 &&
+          totalAfter(text, 'Outstanding') === expected &&
+          flat(text).includes(p.note),
+        `expected ${expected}, printed ${totalAfter(text, 'Outstanding')} · ${owedRows.length} owed, ${unowed.length} not owed yet`,
+      );
+      check(
+        `and it equals the /${p.path}?outstanding=true paper’s`,
+        owedPaper.status === 200 && totalAfter(owedText, 'Outstanding') === totalAfter(text, 'Outstanding'),
+        `${totalAfter(text, 'Outstanding')} vs ${totalAfter(owedText, 'Outstanding')}`,
+      );
+      await p.drop(made);
+    }
+    // The whole register too: unfiltered, Outstanding is the receivable and the
+    // payable. Read twice at once; another suite may write between two reads,
+    // so a mismatch is read once more before it counts.
+    for (const path of ['invoices', 'supplier-bills']) {
+      let pair: [string | undefined, string | undefined] = [undefined, undefined];
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const [all, owedOnly] = await Promise.all([fin('GET', `/${path}/pdf`), fin('GET', `/${path}/pdf?outstanding=true`)]);
+        pair = [
+          totalAfter(all.bytes ? pdfText(all.bytes) : '', 'Outstanding'),
+          totalAfter(owedOnly.bytes ? pdfText(owedOnly.bytes) : '', 'Outstanding'),
+        ];
+        if (pair[0] && pair[0] === pair[1]) break;
+      }
+      check(`the unfiltered /${path} paper’s Outstanding equals the ?outstanding=true paper’s`, !!pair[0] && pair[0] === pair[1], `${pair[0]} vs ${pair[1]}`);
+    }
+    const badDay = await fin('GET', '/invoices/pdf?from=not-a-date');
+    check('a filter date that is not a date is a 400, never a 500', badDay.status === 400, String(badDay.status));
   }
 
   await cleanup();

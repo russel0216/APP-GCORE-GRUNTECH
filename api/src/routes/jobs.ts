@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, JobStatus, JobType } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -8,12 +8,16 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import type { ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
+import { renderDocument, formatAmount, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
@@ -223,124 +227,406 @@ const JOB_STATUSES = [
   'CANCELLED',
 ] as const;
 
+// ── The list, and its two printed twins ───────────────────────────────────────
+
+/** The most rows a printed list carries; the reference says when it was cut. */
+export const LIST_CAP = 1000;
+
+/**
+ * A printed list's reference: "12 projects", or, cut at the cap, "first
+ * 1,000 of 1,234 projects printed" — then every filter that narrowed it, so
+ * the paper says which set it is. The delivery group's lists (projects,
+ * budget monitoring, progress reports, billings, job orders, CAD job orders,
+ * service contracts, visits, reports, the installed base) all print it.
+ */
+export function listReference(
+  count: number,
+  printed: number,
+  noun: readonly [string, string],
+  filters: (string | null | false | undefined)[],
+): string {
+  const n = (v: number) => v.toLocaleString('en-PH');
+  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
+  const named = filters.filter(Boolean);
+  return named.length ? `${head} — ${named.join(' · ')}` : head;
+}
+
+/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
+export const totalLabel = (label: string, count: number, printed: number) =>
+  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
+
+/** A figure that is listed but not summed (a cancelled or unapproved document's), in brackets. */
+export const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
+
+/** "1 cancelled project" / "3 cancelled projects" — a count in a note under a list. */
+export const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+
+/**
+ * The note under a list whose bracketed rows are left out of its totals —
+ * "1 cancelled job order, in brackets, is not counted." — the words G-FIN,
+ * G-CHAIN and every delivery list print, so the owner reads one sentence for
+ * one rule. (A copy of finance's: this module imports nothing from finance.
+ * These list-paper helpers belong in shared/, one copy for every module.)
+ */
+export const bracketNote = (n: number, noun: readonly [string, string]) =>
+  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
+
+/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
+export const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
+  const said = notes.filter((v): v is string => !!v);
+  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
+};
+
+/**
+ * A 'YYYY-MM-DD' a filter names, as a list prints a date (MM/DD/YYYY, rule
+ * 6); a half-open range's missing end as "…".
+ */
+export const listDay = (key: string | undefined) =>
+  key && /^\d{4}-\d{2}-\d{2}$/.test(key) ? formatShortDate(new Date(`${key}T00:00:00Z`)) : '…';
+
+/**
+ * What a filter line calls the record an id names — the customer's name, the
+ * project's number, the person's name — read for the paper only; an id that
+ * names nothing says so rather than printing the id.
+ */
+export async function namedInFilter(ids: {
+  customerId?: string;
+  jobId?: string;
+  userId?: string;
+  siteId?: string;
+}): Promise<{ customer: string | null; project: string | null; person: string | null; site: string | null }> {
+  const [customer, job, user, site] = await Promise.all([
+    ids.customerId ? prisma.customer.findUnique({ where: { id: ids.customerId }, select: { name: true } }) : null,
+    ids.jobId ? prisma.job.findUnique({ where: { id: ids.jobId }, select: { number: true } }) : null,
+    ids.userId ? prisma.user.findUnique({ where: { id: ids.userId }, select: { name: true } }) : null,
+    ids.siteId ? prisma.customerSite.findUnique({ where: { id: ids.siteId }, select: { name: true } }) : null,
+  ]);
+  return {
+    customer: ids.customerId ? (customer?.name ?? 'not found') : null,
+    project: ids.jobId ? (job?.number ?? 'not found') : null,
+    person: ids.userId ? (user?.name ?? 'not found') : null,
+    site: ids.siteId ? (site?.name ?? 'not found') : null,
+  };
+}
+
+/** A choice filter's value, checked: an unknown one is a 400 naming the choices, never a 500 from the database. */
+export function choice<T extends string>(value: string | undefined, allowed: Record<string, T>, label: string): T | undefined {
+  if (!value) return undefined;
+  const values = Object.values(allowed);
+  if (!(values as string[]).includes(value)) throw badRequest(`${label} is one of ${values.join(', ')}`);
+  return value as T;
+}
+
+const JOB_SORTS = ['number', 'name', 'contractValue', 'startDate', 'createdAt'];
+
+/**
+ * Which projects a list query means — one rule for the Projects list, the
+ * Budget Monitoring list (the same endpoint) and both printed twins, so the
+ * paper never shows a different set from the screen it was printed off.
+ * `?ids=` (the rows ticked) is ANDed with the visibility rule.
+ */
+export function jobListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobWhereInput {
+  const and: Prisma.JobWhereInput[] = [];
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
+  if (onlyOwn || q.scope === 'mine') and.push({ OR: [{ projectManagerId: me.id }, { createdById: me.id }] });
+  if (q.search) {
+    const term = q.search;
+    and.push({
+      OR: [
+        { name: { contains: term, mode: 'insensitive' } },
+        { number: { contains: term, mode: 'insensitive' } },
+        { customerPoNumber: { contains: term, mode: 'insensitive' } },
+        { customer: { name: { contains: term, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  const status = choice(q.filters.status, JobStatus, 'Status');
+  if (status) and.push({ status });
+  const type = choice(q.filters.type, JobType, 'Type');
+  if (type) and.push({ type });
+  if (q.filters.customerId) and.push({ customerId: q.filters.customerId });
+  return and.length ? { AND: and } : {};
+}
+
+/** What the filter line says for the projects' own filters. */
+async function jobFilterLine(q: ListQuery): Promise<(string | null)[]> {
+  const f = q.filters;
+  const named = await namedInFilter({ customerId: f.customerId });
+  return [
+    q.search ? `search "${q.search}"` : null,
+    f.status ? `status ${statusLabel(f.status)}` : null,
+    f.type ? `type ${statusLabel(f.type)}` : null,
+    named.customer ? `customer ${named.customer}` : null,
+    q.scope === 'mine' ? 'managed or created by me' : null,
+    f.ids ? 'the rows selected' : null,
+  ];
+}
+
+const jobListInclude = {
+  customer: { select: { id: true, name: true } },
+  site: { select: { id: true, name: true } },
+  projectManager: { select: { id: true, name: true } },
+  costing: { select: { id: true, number: true, totalCost: true } },
+  progressReports: {
+    where: { status: 'APPROVED' },
+    orderBy: { reportNo: 'desc' },
+    take: 1,
+    include: { lines: true },
+  },
+  scopeItems: { select: { id: true, value: true } },
+} satisfies Prisma.JobInclude;
+
+/**
+ * A list row as the screens show it: progress from the latest approved
+ * report against the schedule of values, billed and spent from two grouped
+ * queries rather than one per row, and the EXPECTED margin from the costing —
+ * margin from spend-so-far reads 100% on a job that has barely started.
+ */
+async function presentJobRows(rows: Prisma.JobGetPayload<{ include: typeof jobListInclude }>[]) {
+  const jobIds = rows.map((r) => r.id);
+  const [billed, incurred] = await Promise.all([
+    prisma.progressBilling.groupBy({
+      by: ['jobId'],
+      where: { jobId: { in: jobIds }, status: { in: ['APPROVED', 'INVOICED'] } },
+      _sum: { grossAmount: true },
+    }),
+    prisma.jobCostEntry.groupBy({
+      by: ['jobId'],
+      where: { jobId: { in: jobIds }, state: { in: ['INCURRED', 'COMMITTED'] } },
+      _sum: { amount: true },
+    }),
+  ]);
+  const billedBy = new Map(billed.map((b) => [b.jobId, num(b._sum.grossAmount)]));
+  const spentBy = new Map(incurred.map((b) => [b.jobId, num(b._sum.amount)]));
+
+  return rows.map((r) => {
+    const contractValue = num(r.contractValue);
+    const scopeTotal = r.scopeItems.reduce((s, i) => s + num(i.value), 0);
+    const latest = r.progressReports[0];
+    let progressPct = 0;
+    if (latest && scopeTotal > 0) {
+      const byItem = new Map(latest.lines.map((l) => [l.scopeItemId, num(l.toDatePct)]));
+      const earned = r.scopeItems.reduce((sum, i) => sum + (num(i.value) * (byItem.get(i.id) ?? 0)) / 100, 0);
+      progressPct = cents((earned / scopeTotal) * 100);
+    }
+    const spent = spentBy.get(r.id) ?? 0;
+    const estimatedCost = num(r.costing?.totalCost);
+    return {
+      id: r.id,
+      number: r.number,
+      type: r.type,
+      status: r.status,
+      name: r.name,
+      customer: r.customer,
+      site: r.site,
+      projectManager: r.projectManager,
+      contractValue,
+      actualCost: cents(spent),
+      expectedMarginPct: contractValue > 0 ? cents(((contractValue - estimatedCost) / contractValue) * 100) : 0,
+      grossProfit: cents(contractValue - spent),
+      grossMarginPct: contractValue > 0 ? cents(((contractValue - spent) / contractValue) * 100) : 0,
+      billed: cents(billedBy.get(r.id) ?? 0),
+      progressPct,
+      startDate: r.startDate,
+      targetEndDate: r.targetEndDate,
+      createdAt: r.createdAt,
+    };
+  });
+}
+
 jobRoutes.get(
   '/',
   requireAny('gops.projects.view_all', 'gops.projects.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.JobWhereInput = {};
-
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.projects.view_all');
-    if (onlyOwn || q.scope === 'mine') {
-      where.OR = [{ projectManagerId: me.id }, { createdById: me.id }];
-    }
-    if (q.search) {
-      const term = q.search;
-      const search: Prisma.JobWhereInput = {
-        OR: [
-          { name: { contains: term, mode: 'insensitive' } },
-          { number: { contains: term, mode: 'insensitive' } },
-          { customerPoNumber: { contains: term, mode: 'insensitive' } },
-          { customer: { name: { contains: term, mode: 'insensitive' } } },
-        ],
-      };
-      where.AND = where.OR ? [{ OR: where.OR }, search] : [search];
-      delete where.OR;
-    }
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumJobStatusFilter['equals'];
-    if (q.filters.type) where.type = q.filters.type as Prisma.EnumJobTypeFilter['equals'];
-    if (q.filters.customerId) where.customerId = q.filters.customerId;
+    const where = jobListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.job.findMany({
         where,
-        include: {
-          customer: { select: { id: true, name: true } },
-          site: { select: { id: true, name: true } },
-          projectManager: { select: { id: true, name: true } },
-          costing: { select: { id: true, number: true, totalCost: true } },
-          progressReports: {
-            where: { status: 'APPROVED' },
-            orderBy: { reportNo: 'desc' },
-            take: 1,
-            include: { lines: true },
-          },
-          scopeItems: { select: { id: true, value: true } },
-        },
-        orderBy: orderBy(q, ['number', 'name', 'contractValue', 'startDate', 'createdAt'], {
-          createdAt: 'desc',
-        }),
+        include: jobListInclude,
+        orderBy: orderBy(q, JOB_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.job.count({ where }),
     ]);
 
-    // Progress and billed totals for the list, in two grouped queries rather
-    // than one per row.
-    const jobIds = rows.map((r) => r.id);
-    const [billed, incurred] = await Promise.all([
-      prisma.progressBilling.groupBy({
-        by: ['jobId'],
-        where: { jobId: { in: jobIds }, status: { in: ['APPROVED', 'INVOICED'] } },
-        _sum: { grossAmount: true },
-      }),
-      prisma.jobCostEntry.groupBy({
-        by: ['jobId'],
-        where: { jobId: { in: jobIds }, state: { in: ['INCURRED', 'COMMITTED'] } },
-        _sum: { amount: true },
-      }),
-    ]);
-    const billedBy = new Map(billed.map((b) => [b.jobId, num(b._sum.grossAmount)]));
-    const spentBy = new Map(incurred.map((b) => [b.jobId, num(b._sum.amount)]));
+    res.json(listResult(await presentJobRows(rows), total, q));
+  }),
+);
 
-    res.json(
-      listResult(
-        rows.map((r) => {
-          const contractValue = num(r.contractValue);
-          const scopeTotal = r.scopeItems.reduce((s, i) => s + num(i.value), 0);
-          const latest = r.progressReports[0];
-          let progressPct = 0;
-          if (latest && scopeTotal > 0) {
-            const byItem = new Map(latest.lines.map((l) => [l.scopeItemId, num(l.toDatePct)]));
-            const earned = r.scopeItems.reduce(
-              (sum, i) => sum + (num(i.value) * (byItem.get(i.id) ?? 0)) / 100,
-              0,
-            );
-            progressPct = cents((earned / scopeTotal) * 100);
-          }
-          const spent = spentBy.get(r.id) ?? 0;
-          // The list shows EXPECTED margin, from the costing's total cost —
-          // see the note in the detail endpoint on why margin-from-spend-so-far
-          // is misleading on a job that has barely started.
-          const estimatedCost = num(r.costing?.totalCost);
-          return {
-            id: r.id,
-            number: r.number,
-            type: r.type,
-            status: r.status,
-            name: r.name,
-            customer: r.customer,
-            site: r.site,
-            projectManager: r.projectManager,
-            contractValue,
-            actualCost: cents(spent),
-            expectedMarginPct:
-              contractValue > 0 ? cents(((contractValue - estimatedCost) / contractValue) * 100) : 0,
-            grossProfit: cents(contractValue - spent),
-            grossMarginPct: contractValue > 0 ? cents(((contractValue - spent) / contractValue) * 100) : 0,
-            billed: cents(billedBy.get(r.id) ?? 0),
-            progressPct,
-            startDate: r.startDate,
-            targetEndDate: r.targetEndDate,
-            createdAt: r.createdAt,
-          };
-        }),
-        total,
-        q,
-      ),
+/**
+ * The rows a printed twin covers — the list's own where and sort, at most
+ * LIST_CAP — and the money the WHOLE set adds up to, read off the records
+ * (not the printed rows), so a cut list's totals still cover every row.
+ *
+ * A cancelled project is listed but not counted — the job orders' and the
+ * service contracts' rule, and G-FIN's: its figures print in brackets, the
+ * totals leave it out, and `cancelled` is how many the note under them says
+ * were left out. Its contract value is work that will not be done.
+ */
+async function printedJobs(me: ResolvedUser, q: ListQuery) {
+  const where = jobListWhere(me, q);
+  const counted: Prisma.JobWhereInput = { AND: [where, { status: { not: 'CANCELLED' } }] };
+  const [rows, count, cancelled, contract, billed, spent] = await Promise.all([
+    prisma.job.findMany({ where, include: jobListInclude, orderBy: orderBy(q, JOB_SORTS, { createdAt: 'desc' }), take: LIST_CAP }),
+    prisma.job.count({ where }),
+    prisma.job.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
+    prisma.job.aggregate({ where: counted, _sum: { contractValue: true } }),
+    prisma.progressBilling.aggregate({ where: { job: counted, status: { in: ['APPROVED', 'INVOICED'] } }, _sum: { grossAmount: true } }),
+    prisma.jobCostEntry.aggregate({ where: { job: counted, state: { in: ['INCURRED', 'COMMITTED'] } }, _sum: { amount: true } }),
+  ]);
+  return {
+    rows: await presentJobRows(rows),
+    count,
+    cancelled,
+    sums: { contract: num(contract._sum.contractValue), billed: num(billed._sum.grossAmount), spent: num(spent._sum.amount) },
+  };
+}
+
+/** A project's figure on a printed list: in brackets, and so not in the totals, when the project is cancelled. */
+const jobAmount = (j: { status: string }, value: number) => bracketed(formatAmount(value), j.status !== 'CANCELLED');
+
+/** "18.5%" — a list's percentage, one decimal, as the screen shows it. */
+const pct1 = (v: number) => `${v.toFixed(1)}%`;
+
+/**
+ * The Projects list on paper (rule 6, A5): the screen's own columns — number,
+ * project and customer, manager, progress, contract, billed, expected margin,
+ * target end, status — on landscape pages, money as amounts with the code in
+ * the head and the sums in the totals block. Declared above `/:id`.
+ */
+jobRoutes.get(
+  '/pdf',
+  requireAny('gops.projects.view_all', 'gops.projects.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const [{ rows, count, cancelled, sums }, filters, currency] = await Promise.all([printedJobs(me, q), jobFilterLine(q), companyCurrency()]);
+
+    const pdf = await renderDocument({
+      title: 'Projects',
+      date: new Date(),
+      reference: listReference(count, rows.length, ['project', 'projects'], filters),
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Project and customer', 'Manager', 'Progress', `Contract (${currency})`, `Billed (${currency})`, 'Expected margin', 'Target end', 'Status'],
+          align: ['left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
+          rows: rows.map((j) => [
+            j.number,
+            { title: j.name, body: [j.customer.name, j.site?.name].filter(Boolean).join(' · ') },
+            j.projectManager?.name ?? 'Unassigned',
+            pct1(j.progressPct),
+            jobAmount(j, j.contractValue),
+            jobAmount(j, j.billed),
+            pct1(j.expectedMarginPct),
+            j.targetEndDate ? formatShortDate(j.targetEndDate) : '',
+            statusLabel(j.status),
+          ]),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: totalLabel('Billed', count, rows.length), value: formatMoney(sums.billed, currency) },
+            { label: totalLabel('Contract value', count, rows.length), value: formatMoney(sums.contract, currency), bold: true },
+          ],
+        },
+        ...listNotes([bracketNote(cancelled, ['cancelled project', 'cancelled projects'])]),
+      ],
+    });
+
+    await audit(
+      { entityType: 'job', entityId: 'list', action: 'EXPORTED', summary: `Exported the projects list as PDF (${listReference(count, rows.length, ['project', 'projects'], [])})` },
+      req,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="projects.pdf"');
+    res.send(pdf);
+  }),
+);
+
+/**
+ * Budget Monitoring on paper: the same projects as the Projects list (the
+ * screen reads `/jobs`), in the budget view's columns — progress, contract,
+ * cost to date, billed, unbilled (earned to date less billed) and the
+ * expected margin. Cost to date is budget monitoring's figure, so the paper
+ * takes that right as well as the list's. Declared above `/:id`.
+ */
+jobRoutes.get(
+  '/budget-monitoring/pdf',
+  requireAny('gops.projects.view_all', 'gops.projects.view_own'),
+  require_('gops.budget_monitoring.view_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const [{ rows, count, cancelled, sums }, filters, currency] = await Promise.all([printedJobs(me, q), jobFilterLine(q), companyCurrency()]);
+    const unbilled = (j: (typeof rows)[number]) => cents((j.contractValue * j.progressPct) / 100 - j.billed);
+
+    const pdf = await renderDocument({
+      title: 'Budget Monitoring',
+      date: new Date(),
+      reference: listReference(count, rows.length, ['project', 'projects'], filters),
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Project and customer', 'Progress', `Contract (${currency})`, `Cost to date (${currency})`, `Billed (${currency})`, `Unbilled (${currency})`, 'Expected margin'],
+          // Sized here: the engine sizes a column from its cells, and four
+          // short figures would stack each head a word to a line.
+          widths: [1.6, 2.8, 1.1, 1.3, 1.3, 1.3, 1.3, 1.1],
+          align: ['left', 'left', 'right', 'right', 'right', 'right', 'right', 'right'],
+          rows: rows.map((j) => [
+            j.number,
+            { title: j.name, body: j.customer.name },
+            pct1(j.progressPct),
+            jobAmount(j, j.contractValue),
+            jobAmount(j, j.actualCost),
+            jobAmount(j, j.billed),
+            jobAmount(j, unbilled(j)),
+            pct1(j.expectedMarginPct),
+          ]),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: totalLabel('Cost to date', count, rows.length), value: formatMoney(sums.spent, currency) },
+            { label: totalLabel('Billed', count, rows.length), value: formatMoney(sums.billed, currency) },
+            // Earned less billed is a per-project figure; summed only where
+            // every project is on the page, and — as every total here — over
+            // the projects not cancelled.
+            ...(count > rows.length
+              ? []
+              : [
+                  {
+                    label: 'Unbilled',
+                    value: formatMoney(cents(rows.filter((j) => j.status !== 'CANCELLED').reduce((t, j) => t + unbilled(j), 0)), currency),
+                  },
+                ]),
+            { label: totalLabel('Contract value', count, rows.length), value: formatMoney(sums.contract, currency), bold: true },
+          ],
+        },
+        ...listNotes([bracketNote(cancelled, ['cancelled project', 'cancelled projects'])]),
+      ],
+    });
+
+    await audit(
+      {
+        entityType: 'job',
+        entityId: 'list',
+        action: 'EXPORTED',
+        summary: `Exported the budget monitoring list as PDF (${listReference(count, rows.length, ['project', 'projects'], [])})`,
+      },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="budget-monitoring.pdf"');
+    res.send(pdf);
   }),
 );
 

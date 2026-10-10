@@ -90,3 +90,23 @@ export function workingDayDate(start: Date, day: number): Date {
     d.setUTCDate(d.getUTCDate() + 1);
   }
 }
+
+/**
+ * The business day of a DATE column, as UTC midnight: `manilaDate` under the
+ * name every module used for it (finance, aftermarket, insights and HR each
+ * carried a copy; HR's read the server's clock, which is not the business's
+ * day — CLAUDE.md, "Today, for a DATE column").
+ */
+export const dayKey = (at: Date): Date => manilaDate(at);
+
+/** Whole days between two dates' business days; negative means the later one has not arrived. */
+export function daysBetween(from: Date, to: Date): number {
+  return Math.floor((dayKey(to).getTime() - dayKey(from).getTime()) / 86_400_000);
+}
+
+/** `days` after a date, on the UTC calendar a DATE column lives on (negative for before). */
+export function addDays(date: Date, days: number): Date {
+  const out = new Date(date);
+  out.setUTCDate(out.getUTCDate() + days);
+  return out;
+}

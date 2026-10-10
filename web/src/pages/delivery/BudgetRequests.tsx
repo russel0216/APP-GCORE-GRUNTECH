@@ -183,6 +183,7 @@ export function BudgetRequestsList({ finance = false }: { finance?: boolean }) {
       <DataList<BudgetRequest>
         listKey={finance ? 'fin-budget-requests' : 'budget-requests'}
         endpoint="/budget-requests"
+        printPath="/api/budget-requests/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped={!finance}

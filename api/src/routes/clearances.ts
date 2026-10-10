@@ -8,10 +8,12 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   conflict,
   badRequest,
   forbidden,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
@@ -24,10 +26,13 @@ import {
   onApprovalSettled,
   pickWorkflow,
   usersInRole,
-  approvalSignoffs,
+  approvalSlots,
+  slotSignatories,
+  routePreview,
+  contactPhone,
   cancelOpenRequest,
 } from '../shared/approvals';
-import { renderDocument, formatDate, formatDateTime, type PdfSection } from '../shared/pdf';
+import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { toCsv } from '../shared/csv';
 import { dayKey, leaveBalance, myEmployee } from '../shared/hr';
 import {
@@ -43,6 +48,7 @@ import {
   trailingYear,
   turnover,
 } from '../shared/clearance';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 
 /**
  * Employee clearance — turnover of accountabilities before someone leaves.
@@ -148,6 +154,39 @@ const mayEdit = (me: ReturnType<typeof currentUser>, c: { raisedById: string }) 
 
 // ── List and summary ─────────────────────────────────────────────────────────
 
+/**
+ * The clearance list's where-builder — the screen's rows and the printed list
+ * read the same set. A `view_own` holder (or `?scope=mine`) sees what they
+ * raised or what is about them; `?ids=` narrows to the rows ticked, ANDed
+ * with that rule, so naming an id never prints someone else's clearance.
+ */
+function clearanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Prisma.EmployeeClearanceWhereInput {
+  const and: Prisma.EmployeeClearanceWhereInput[] = [];
+  const onlyOwn = !can(me, 'ghr.clearances.view_all');
+  if (onlyOwn || q.scope === 'mine') and.push({ OR: [{ raisedById: me.id }, { employee: { userId: me.id } }] });
+  const status = asEnum(ClearanceStatus, q.filters.status);
+  if (status) and.push({ status });
+  const reason = asEnum(SeparationReason, q.filters.reason);
+  if (reason) and.push({ reason });
+  if (q.filters.departmentId) and.push({ employee: { departmentId: q.filters.departmentId } });
+  if (q.filters.employeeId) and.push({ employeeId: q.filters.employeeId });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { employee: { firstName: { contains: q.search, mode: 'insensitive' } } },
+        { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
+        { employee: { employeeNo: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return { AND: and };
+}
+
+const CLEARANCE_SORTS = ['number', 'lastWorkingDay', 'createdAt', 'status'];
+
 clearanceRoutes.get(
   '/',
   requireAny('ghr.clearances.view_all', 'ghr.clearances.view_own'),
@@ -155,30 +194,7 @@ clearanceRoutes.get(
     await sweepSeparations();
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.EmployeeClearanceWhereInput = {};
-
-    const onlyOwn = !can(me, 'ghr.clearances.view_all');
-    if (onlyOwn || q.scope === 'mine') {
-      where.OR = [{ raisedById: me.id }, { employee: { userId: me.id } }];
-    }
-    const status = asEnum(ClearanceStatus, q.filters.status);
-    if (status) where.status = status;
-    const reason = asEnum(SeparationReason, q.filters.reason);
-    if (reason) where.reason = reason;
-    if (q.filters.departmentId) where.employee = { departmentId: q.filters.departmentId };
-    if (q.filters.employeeId) where.employeeId = q.filters.employeeId;
-    if (q.search) {
-      where.AND = [
-        {
-          OR: [
-            { number: { contains: q.search, mode: 'insensitive' } },
-            { employee: { firstName: { contains: q.search, mode: 'insensitive' } } },
-            { employee: { lastName: { contains: q.search, mode: 'insensitive' } } },
-            { employee: { employeeNo: { contains: q.search, mode: 'insensitive' } } },
-          ],
-        },
-      ];
-    }
+    const where = clearanceListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.employeeClearance.findMany({
@@ -197,7 +213,7 @@ clearanceRoutes.get(
           raisedBy: { select: { id: true, name: true } },
           items: { select: { status: true } },
         },
-        orderBy: orderBy(q, ['number', 'lastWorkingDay', 'createdAt', 'status'], { createdAt: 'desc' }),
+        orderBy: orderBy(q, CLEARANCE_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -219,6 +235,96 @@ clearanceRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The clearance register on paper — the list as filtered (or the rows
+ * ticked), through `clearanceListWhere`, so the paper is the screen it was
+ * printed off: who is leaving, why, their last day, how far the turnover
+ * has come and where the form stands. Declared above `/:id`, or that route
+ * swallows it.
+ */
+clearanceRoutes.get(
+  '/pdf',
+  requireAny('ghr.clearances.view_all', 'ghr.clearances.view_own'),
+  handler(async (req, res) => {
+    await sweepSeparations();
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = clearanceListWhere(me, q);
+    const f = q.filters;
+    const [rows, count, department, employee] = await Promise.all([
+      prisma.employeeClearance.findMany({
+        where,
+        include: {
+          employee: {
+            select: {
+              employeeNo: true,
+              firstName: true,
+              lastName: true,
+              position: true,
+              department: { select: { name: true } },
+            },
+          },
+          raisedBy: { select: { name: true } },
+          items: { select: { status: true } },
+        },
+        orderBy: orderBy(q, CLEARANCE_SORTS, { createdAt: 'desc' }),
+        take: LIST_CAP,
+      }),
+      prisma.employeeClearance.count({ where }),
+      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
+      f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
+    ]);
+
+    const status = asEnum(ClearanceStatus, f.status);
+    const reason = asEnum(SeparationReason, f.reason);
+    const reference = listReference(count, rows.length, ['clearance', 'clearances'], [
+      q.search && `search "${q.search}"`,
+      status && `status ${statusLabel(status)}`,
+      reason && `reason ${REASON_LABEL[reason].toLowerCase()}`,
+      f.departmentId && `department ${department?.name ?? 'not found'}`,
+      f.employeeId && `employee ${employee ? fullName(employee) : 'not found'}`,
+      (q.scope === 'mine' || !can(me, 'ghr.clearances.view_all')) && 'mine only',
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape (rule 6). "Turnover" is the items cleared or
+    // waived out of all of them — the screen's progress bar, as words.
+    const pdf = await renderDocument({
+      title: 'Clearances',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Employee', 'Department', 'Reason', 'Last day', 'Turnover', 'Raised by', 'Status'],
+          rows: rows.map((r) => {
+            const done = r.items.filter((i) => i.status !== 'PENDING').length;
+            return [
+              r.number,
+              {
+                title: `${r.employee.lastName}, ${r.employee.firstName}`,
+                body: [r.employee.employeeNo, r.employee.position].filter(Boolean).join(' · '),
+              },
+              r.employee.department?.name ?? '—',
+              REASON_LABEL[r.reason],
+              formatShortDate(r.lastWorkingDay),
+              r.items.length ? `${done} of ${r.items.length} cleared` : 'No items',
+              { title: r.raisedBy.name, body: formatShortDate(r.createdAt) },
+              statusLabel(r.status),
+            ];
+          }),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'clearance', entityId: 'list', action: 'EXPORTED', summary: `Exported the clearance list as PDF (${rows.length} clearance(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'clearances.pdf');
   }),
 );
 
@@ -732,6 +838,41 @@ clearanceRoutes.post(
 
 // ── Print ────────────────────────────────────────────────────────────────────
 
+/**
+ * A person's contact lines, read for the paper only — a reader calls the
+ * person who signed. Never on the loaders: `GET /clearances/:id` carries no
+ * mobile.
+ */
+async function contactOf(userId: string): Promise<{ phone?: string; email?: string }> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, phone: true, employee: { select: { mobile: true } } },
+  });
+  return user ? { phone: contactPhone(user), email: user.email } : {};
+}
+
+/**
+ * The approval half of the sign-offs (rule 6): every step of the route
+ * through the engine's one mapping. A clearance not yet submitted — OPEN, or
+ * REJECTED and back with HR to fix — prints the route submitting it would
+ * take, in the leaver's name as the submit files it, every step open; not
+ * `approvalSlots(…, draft)`, which previews only while NO request exists,
+ * and a rejected one keeps the request that refused it. A cancelled one
+ * prints none: no approval is coming. One open "Approved by" only where no
+ * workflow covers clearances at all.
+ */
+async function routeSignatories(head: Header): Promise<Signatory[]> {
+  if (head.status === 'CANCELLED') return [];
+  const slots =
+    head.status === 'OPEN' || head.status === 'REJECTED'
+      ? ((await routePreview('clearance', null, head.employee.userId ?? head.raisedById))?.steps ?? []).map((st) => ({
+          step: st.name,
+          assigned: st.approvers,
+        }))
+      : await approvalSlots('clearance', head.id);
+  return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
+}
+
 clearanceRoutes.get(
   '/:id/pdf',
   requireAny('ghr.clearances.view_all', 'ghr.clearances.view_own'),
@@ -744,8 +885,6 @@ clearanceRoutes.get(
       include: { clearedBy: { select: { name: true } } },
       orderBy: { sortOrder: 'asc' },
     });
-    const signoffs = await approvalSignoffs('clearance', head.id);
-
     const e = head.employee;
     const sections: PdfSection[] = [
       {
@@ -756,8 +895,9 @@ clearanceRoutes.get(
           { label: 'Last working day', value: formatDate(head.lastWorkingDay) },
           { label: 'Date hired', value: e.dateHired ? formatDate(e.dateHired) : '—' },
           { label: 'Tenure', value: tenure(e.dateHired, head.lastWorkingDay) },
-          { label: 'Employment type', value: e.employmentType.replace(/_/g, ' ').toLowerCase().replace(/^\w/, (c) => c.toUpperCase()) },
+          { label: 'Employment type', value: statusLabel(e.employmentType) },
           { label: 'Handed over to', value: head.handedOverTo?.name ?? '—' },
+          { label: 'Status', value: statusLabel(head.status) },
         ],
       },
     ];
@@ -771,34 +911,36 @@ clearanceRoutes.get(
         widths: [46, 12, 16, 12, 14],
         rows: rows.map((i) => [
           i.description,
-          i.status === 'CLEARED' ? 'Cleared' : i.status === 'WAIVED' ? 'Waived' : 'Pending',
+          statusLabel(i.status),
           i.clearedBy?.name ?? (i.status === 'CLEARED' && i.sourceType ? 'From the record' : '—'),
-          i.clearedAt ? formatDateTime(i.clearedAt) : '—',
+          i.clearedAt ? formatShortDate(i.clearedAt) : '—',
           i.remarks ?? '',
         ]),
       });
     }
     if (head.notes) sections.push({ kind: 'text', title: 'Notes', body: head.notes });
 
-    // Sign-offs in step order: supervisor, finance, HR. A slot the engine has
-    // not filled prints "Pending" — no `at`, no borrowed date.
-    const slot = (i: number) => (signoffs[i] ? { name: signoffs[i].name, position: signoffs[i].position, at: signoffs[i].at } : {});
+    // Prepared by whoever raised it, dated when they did; then every step of
+    // the route in the engine's one mapping — the step's name as the role,
+    // who signed and when, else who may sign over "Pending". The person the
+    // work is handed over to is named in the details: nobody signs for them
+    // in the system, so no slot waits on them.
+    const preparer = await contactOf(head.raisedById);
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: head.raisedBy.name, ...preparer, at: head.createdAt },
+      ...(await routeSignatories(head)),
+    ];
     const pdf = await renderDocument({
       title: 'Employee Clearance',
       documentNumber: head.number,
       date: head.createdAt,
       reference: `${e.employeeNo} · ${fullName(e)} · ${e.position ?? '—'} · ${e.department?.name ?? '—'}`,
       sections,
-      signatories: [
-        { role: 'PREPARED BY', name: head.raisedBy.name, position: head.raisedBy.position ?? undefined, at: head.createdAt },
-        { role: 'SUPERVISOR', ...slot(0) },
-        { role: 'FINANCE', ...slot(1) },
-        { role: 'HR', ...slot(2) },
-        { role: 'RECEIVED BY', name: head.handedOverTo?.name, position: head.handedOverTo?.position ?? undefined },
-      ],
+      signatories,
       footerNote: 'Turnover of accountabilities — an item marked Waived carries its written reason above.',
     });
 
+    await audit({ entityType: 'clearance', entityId: head.id, action: 'EXPORTED', summary: `Printed ${head.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${head.number}.pdf"`);
     res.send(pdf);

@@ -196,7 +196,6 @@ function Routed() {
       <Route element={<Shell />}>
         <Route path="/" element={<Home />} />
         <Route path="/my-work" element={<MyWork />} />
-        <Route path="/my-work/*" element={<MyWork />} />
         <Route path="/account" element={<Account />} />
 
         <Route

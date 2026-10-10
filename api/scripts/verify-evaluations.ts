@@ -16,17 +16,19 @@
  * it. Without it they would settle into the void — see CLAUDE.md.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
-import { act, approvalSignoffs, pendingFor } from '../src/shared/approvals';
+import { act, approvalSlots, pendingFor } from '../src/shared/approvals';
 import { globalSearch } from '../src/shared/search';
 import { hrSettings } from '../src/shared/hr';
 import { addMonths } from '../src/shared/aftermarket';
 import { manilaDate } from '../src/shared/day';
+import { statusLabel } from '../src/shared/pdf';
 import {
   allowedRecommendations,
   dueEvaluations,
@@ -219,6 +221,79 @@ async function apiReachable(): Promise<boolean> {
   }
 }
 
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation
+ * uses. PDFKit Flate-compresses its content streams and writes text as hex
+ * runs split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+/** A sign-off's "Pending" is a run of its own — never the "Pending approval" a status prints. */
+const pendingCount = (t: string) => (t.match(/^Pending$/gm) ?? []).length;
+/** A dated sign-off: "Oct 10, 2026, 6:07 AM" on a line of its own under the name. */
+const signedCount = (t: string) => (t.match(/^[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M$/gm) ?? []).length;
+/** The words of a text, line breaks and punctuation gone — a field or a role may wrap. */
+const flat = (t: string) => t.replace(/[^A-Za-z0-9:]+/g, ' ').trim();
+/** A step's name prints in CAPITALS as its sign-off role (by its first three words: a long one is cut short). */
+const roleWords = (step: string) => flat(step).toUpperCase().split(' ').slice(0, 3).join(' ');
+const printsRole = (text: string, step: string) => flat(text).includes(roleWords(step));
+
+interface Slot {
+  text: string;
+  signed: boolean;
+}
+/**
+ * The sign-off block, slot by slot. Each slot draws its role, the name, the
+ * contact lines and last its date or "Pending", so the block — from the last
+ * "EVALUATED BY" on — splits after those last lines. A slot's text is that
+ * one slot's role and person and nothing else: the details name the
+ * evaluator too, so a check on WHO signs reads here, never the whole page.
+ */
+function signoffSlots(text: string): Slot[] {
+  const slots: Slot[] = [];
+  const start = text.lastIndexOf('EVALUATED BY');
+  if (start < 0) return slots;
+  let lines: string[] = [];
+  for (const line of text.slice(start).split('\n')) {
+    lines.push(line);
+    const signed = /^[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M$/.test(line);
+    if (signed || line === 'Pending') {
+      slots.push({ text: flat(lines.join(' ')), signed });
+      lines = [];
+    }
+  }
+  return slots;
+}
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** The slot is the step's, and names this person straight after its role (the rest of a long role, cut at "…", between). */
+const signs = (slot: Slot | undefined, step: string, name: string) =>
+  !!slot && new RegExp(`^${escapeRe(roleWords(step))}(?: [A-Z0-9:]+)* ${escapeRe(flat(name))}(?: |$)`).test(slot.text);
+const slotsSaid = (slots: Slot[]) => slots.map((sl) => `${sl.text.slice(0, 48)}${sl.signed ? ' [dated]' : ' [pending]'}`).join(' | ');
+
 interface Line {
   id: string;
   criterionKey: string;
@@ -233,6 +308,145 @@ async function pendingRequest(evaluationId: string) {
     orderBy: { createdAt: 'desc' },
   });
 }
+
+// ── Printed lists (rule 6, A5) ───────────────────────────────────────────────
+//
+// `GET <list>/pdf` reads the list's own where-builder, so the paper is the
+// screen: the same set for the same query (the reference's count is the
+// screen's total, every row is on it, the search named), `?ids=` prints only
+// the row ticked and says so, a filter is named and prints the screen's count
+// for it, and each print is on the trail as EXPORTED with entityId "list".
+
+/** A reference may wrap: read the words, not the line breaks. */
+const paperWords = (t: string) => t.replace(/\s+/g, ' ');
+/** A number or a name may wrap inside a narrow cell: compare with every space gone. */
+const paperSquash = (t: string) => t.replace(/\s+/g, '');
+
+async function readPaper(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const type = res.headers.get('content-type') ?? '';
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, type, text: res.ok && type.includes('application/pdf') ? pdfText(bytes) : '' };
+}
+
+async function readScreen(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const body = (await res.json().catch(() => ({}))) as { rows?: Record<string, unknown>[]; total?: number };
+  return { status: res.status, rows: body.rows ?? [], total: body.total ?? -1 };
+}
+
+/** "Reference: 3 leave requests" — the count a printed list opens with. */
+const countedAs = (n: number, noun: readonly [string, string]) =>
+  `Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+const referenceOf = (text: string) => paperWords(text).match(/Reference:.{0,140}/)?.[0] ?? '';
+
+async function checkListPaper(o: {
+  label: string;
+  token: string;
+  actorId: string;
+  /** The list's path, '/leave'. */
+  list: string;
+  /** A query that finds this script's own rows, and how the reference names it. */
+  query: string;
+  named: string;
+  noun: readonly [string, string];
+  /** What on the paper names a row: its number, code or email. */
+  mark: (row: Record<string, unknown>) => string;
+  filter: { query: string; named: string };
+  entityType: string;
+}) {
+  const exported = () =>
+    prisma.auditLog.count({ where: { entityType: o.entityType, entityId: 'list', action: 'EXPORTED', actorId: o.actorId } });
+  const before = await exported();
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+
+  const screen = await readScreen(o.token, `${o.list}?${o.query}&pageSize=200`);
+  const paper = await readPaper(o.token, `${o.list}/pdf?${o.query}`);
+  const missing = screen.rows.map(o.mark).filter((m) => !has(paper.text, m));
+  check(
+    `${o.label}: ${o.list}/pdf prints the list as the screen shows it — the same count, every row, the search named`,
+    paper.status === 200 &&
+      paper.type.includes('application/pdf') &&
+      screen.total > 0 &&
+      paperWords(paper.text).includes(countedAs(screen.total, o.noun)) &&
+      !missing.length &&
+      paperWords(paper.text).includes(o.named),
+    `${paper.status} ${paper.type} · screen ${screen.total} · missing ${missing.join(', ')} · ${referenceOf(paper.text)}`,
+  );
+
+  const [first, ...rest] = screen.rows;
+  const others = first ? rest.map(o.mark).filter((m) => m !== o.mark(first)) : [];
+  const ticked = await readPaper(o.token, `${o.list}/pdf?ids=${String(first?.id ?? 'none')}`);
+  check(
+    `${o.label}: ?ids= prints only the row ticked, and says so`,
+    ticked.status === 200 &&
+      !!first &&
+      paperWords(ticked.text).includes(countedAs(1, o.noun)) &&
+      paperWords(ticked.text).includes('the rows selected') &&
+      has(ticked.text, o.mark(first)) &&
+      others.every((m) => !has(ticked.text, m)),
+    `${ticked.status} · ${referenceOf(ticked.text)} · ${others.filter((m) => has(ticked.text, m)).length} other row(s) printed`,
+  );
+
+  const narrowed = await readScreen(o.token, `${o.list}?${o.filter.query}&pageSize=200`);
+  const filtered = await readPaper(o.token, `${o.list}/pdf?${o.filter.query}`);
+  const lost = narrowed.rows.map(o.mark).filter((m) => !has(filtered.text, m));
+  check(
+    `${o.label}: a filter is named (${o.filter.named}) and prints the screen's rows for it`,
+    filtered.status === 200 &&
+      narrowed.status === 200 &&
+      paperWords(filtered.text).includes(o.filter.named) &&
+      paperWords(filtered.text).includes(countedAs(narrowed.total, o.noun)) &&
+      !lost.length,
+    `${filtered.status} · screen ${narrowed.total} · missing ${lost.join(', ')} · ${referenceOf(filtered.text)}`,
+  );
+  const after = await exported();
+  check(`${o.label}: each print is on the trail as EXPORTED, entityId "list"`, after === before + 3, `${after - before} new row(s)`);
+}
+
+/**
+ * A view_own holder's paper: only their own rows, whatever they search or
+ * tick — somebody else's row named in `?ids=` prints nothing of it.
+ */
+async function checkOwnPaper(o: {
+  label: string;
+  ownToken: string;
+  allToken: string;
+  list: string;
+  query: string;
+  noun: readonly [string, string];
+  mark: (row: Record<string, unknown>) => string;
+}) {
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+  const own = (await readScreen(o.ownToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const all = (await readScreen(o.allToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const ownMarks = own.map(o.mark);
+  const theirs = all.filter((r) => !ownMarks.includes(o.mark(r)));
+  const paper = await readPaper(o.ownToken, `${o.list}/pdf?${o.query}`);
+  check(
+    `${o.label}: someone who sees only their own prints only their own`,
+    paper.status === 200 &&
+      paperWords(paper.text).includes(countedAs(own.length, o.noun)) &&
+      ownMarks.every((m) => has(paper.text, m)) &&
+      theirs.every((r) => !has(paper.text, o.mark(r))),
+    `${paper.status} · own ${own.length}, others ${theirs.length} · ${referenceOf(paper.text)}`,
+  );
+  if (theirs.length) {
+    const sneaky = await readPaper(o.ownToken, `${o.list}/pdf?ids=${String(theirs[0].id)}`);
+    check(
+      `${o.label}: and ticking somebody else's row prints nothing of it`,
+      sneaky.status === 200 && !has(sneaky.text, o.mark(theirs[0])) && paperWords(sneaky.text).includes(countedAs(0, o.noun)),
+      `${sneaky.status} · ${referenceOf(sneaky.text)}`,
+    );
+  }
+}
+
+/** A status that splits the rows — some have it, some do not — so a filter keeps some and drops others. */
+const splittingValue = (rows: Record<string, unknown>[], key: string) =>
+  [...new Set(rows.map((r) => String(r[key] ?? '')))].find((v) => {
+    const n = rows.filter((r) => String(r[key] ?? '') === v).length;
+    return v && n > 0 && n < rows.length;
+  }) ?? String(rows[0]?.[key] ?? '');
 
 // ── The run ──────────────────────────────────────────────────────────────────
 
@@ -611,6 +825,46 @@ async function main() {
   );
   await prisma.setting.update({ where: { key: CRITERIA_KEY }, data: { value: originalCriteria as Prisma.InputJsonValue } });
 
+  // ══ 10b. On paper before it is submitted ══════════════════════════════════
+  // Evaluated by the evaluator — Pending until the submission signs it — then
+  // every step of the route submitting would take, in the step's own name,
+  // each Pending under who may sign it, and the subject's acknowledgement
+  // last. No "Reviewed by (HR)" / "Approved by" of the document's own.
+  console.log('\nThe draft on paper');
+  const steps = workflow?.steps ?? [];
+  const pdfOf = async (token: string, id: string) => {
+    const r = await api(token, 'GET', `/evaluations/${id}/pdf`);
+    return { status: r.status, text: r.status === 200 ? pdfText(Buffer.from(r.text, 'latin1')) : '' };
+  };
+  const draftPdf = await pdfOf(tok.supervisor, ev1.id);
+  const draftSlots = signoffSlots(draftPdf.text);
+  check(
+    'a draft prints the route it would take: Evaluated by the supervisor, then HR review and management approval in capitals, then the acknowledgement — all Pending',
+    draftPdf.status === 200 &&
+      steps.length === 2 &&
+      draftSlots.length === 2 + steps.length &&
+      signs(draftSlots[0], 'Evaluated by', supervisor.name) &&
+      steps.every((st, i) => draftSlots[i + 1].text.startsWith(roleWords(st.name))) &&
+      draftSlots[draftSlots.length - 1].text.startsWith('ACKNOWLEDGED BY') &&
+      draftSlots.every((sl) => !sl.signed) &&
+      pendingCount(draftPdf.text) === 2 + steps.length &&
+      signedCount(draftPdf.text) === 0,
+    `${draftPdf.status} ${slotsSaid(draftSlots)}`,
+  );
+  check(
+    '…the open steps name who may sign them, and no step is signed in the document\'s own words',
+    draftPdf.text.includes(hr.name) &&
+      draftPdf.text.includes(exec.name) &&
+      !flat(draftPdf.text).includes('REVIEWED BY') &&
+      !flat(draftPdf.text).includes('APPROVED BY'),
+    `hr ${draftPdf.text.includes(hr.name)}, exec ${draftPdf.text.includes(exec.name)}`,
+  );
+  check(
+    'its status is a word ("Status: Draft") and its criteria are counted under "No."',
+    flat(draftPdf.text).includes('Status: Draft') && draftPdf.text.includes('NO.') && !draftPdf.text.includes('DRAFT\n'),
+    draftPdf.text.split('\n').filter((l) => /Status|NO\./.test(l)).join(' | '),
+  );
+
   // ══ 11. Submitting ═══════════════════════════════════════════════════════
   console.log('\nSubmitting and the chain');
 
@@ -671,15 +925,33 @@ async function main() {
   const cancelApproved = await api(tok.supervisor, 'POST', `/evaluations/${ev1.id}/cancel`);
   check('an approved evaluation cannot be cancelled (400)', cancelApproved.status === 400, String(cancelApproved.status));
 
-  const signoffs = await approvalSignoffs('evaluation', ev1.id);
+  const slots = await approvalSlots('evaluation', ev1.id);
   check(
-    'the sign-offs are HR then management, each dated',
-    signoffs.length === 2 && signoffs[0].name === hr.name && signoffs[1].name === exec.name && signoffs.every((s) => s.at instanceof Date),
-    JSON.stringify(signoffs.map((s) => s.name)),
+    'the sign-offs are HR then management, each in its step\'s name and dated',
+    slots.length === 2 &&
+      slots[0].name === hr.name &&
+      slots[1].name === exec.name &&
+      slots.every((sl, i) => sl.step === steps[i]?.name && sl.at instanceof Date),
+    JSON.stringify(slots.map((sl) => [sl.step, sl.name])),
   );
   const pdf = await api(tok.subject, 'GET', `/evaluations/${ev1.id}/pdf`);
   check('it prints through renderDocument (a PDF)', pdf.status === 200 && (pdf.headers.get('content-type') ?? '').includes('application/pdf') && pdf.text.startsWith('%PDF'), `${pdf.status} ${pdf.headers.get('content-type')}`);
-  check('printing is audited', (await prisma.auditLog.count({ where: { entityType: 'evaluation', entityId: ev1.id, action: 'EXPORTED' } })) === 1);
+  const signedText = pdfText(Buffer.from(pdf.text, 'latin1'));
+  const signedSlots = signoffSlots(signedText);
+  check(
+    'approved and acknowledged, it prints all four people dated, each under their own role — evaluator, HR, management, the subject — and nothing Pending',
+    signedSlots.length === 2 + steps.length &&
+      signedSlots.every((sl) => sl.signed) &&
+      signs(signedSlots[0], 'Evaluated by', supervisor.name) &&
+      signs(signedSlots[1], steps[0]?.name ?? '', hr.name) &&
+      signs(signedSlots[2], steps[1]?.name ?? '', exec.name) &&
+      signedSlots[3].text.startsWith('ACKNOWLEDGED BY') &&
+      signedCount(signedText) === 2 + steps.length &&
+      pendingCount(signedText) === 0 &&
+      flat(signedText).includes('Status: Approved'),
+    slotsSaid(signedSlots),
+  );
+  check('both prints are audited', (await prisma.auditLog.count({ where: { entityType: 'evaluation', entityId: ev1.id, action: 'EXPORTED' } })) === 2);
 
   const hits = await globalSearch(ev1.number, hrUser);
   const hitsName = await globalSearch('Probationer', hrUser);
@@ -818,6 +1090,69 @@ async function main() {
   );
   check('and it says so loudly', errors.some((m) => m.includes('approved by its own subject')), errors.join(' | ').slice(0, 200));
   await prisma.userRole.deleteMany({ where: { userId: late.id, roleId: execRole.id } });
+  const refusedPdf = await pdfOf(tok.supervisor, ev7.id);
+  const refusedSlots = signoffSlots(refusedPdf.text);
+  check(
+    'on paper the signatures stand as given — evaluator, HR, the subject on the management step, all dated — no acknowledgement and nothing Pending',
+    refusedPdf.status === 200 &&
+      refusedSlots.length === 1 + steps.length &&
+      refusedSlots.every((sl) => sl.signed) &&
+      signs(refusedSlots[1], steps[0]?.name ?? '', hr.name) &&
+      signs(refusedSlots[2], steps[1]?.name ?? '', late.name) &&
+      pendingCount(refusedPdf.text) === 0 &&
+      !flat(refusedPdf.text).includes('ACKNOWLEDGED BY'),
+    `${refusedPdf.status} ${slotsSaid(refusedSlots)}`,
+  );
+  check(
+    '…"Status: Rejected", and its Decision line says the subject signed it, so nothing was applied',
+    flat(refusedPdf.text).includes('Status: Rejected') &&
+      flat(refusedPdf.text).includes('DECISION') &&
+      flat(refusedPdf.text).includes(flat('Not applied: Zen Lateriser signed their own evaluation')),
+    refusedPdf.text.split('\n').filter((l) => /Status|applied|DECISION/.test(l)).join(' | ').slice(0, 240),
+  );
+
+  // ══ 15b. Rejected at the management step, on paper ═══════════════════════
+  // A rejection closes the evaluation for good. The steps that signed stand,
+  // dated; the step that rejected it prints no slot — "Pending" there would
+  // promise a signature nobody is going to give — and neither does the
+  // acknowledgement. The Decision line says who rejected it, where and why.
+  console.log('\nRejected by management, on paper');
+  const sched9 = await api(tok.hr, 'POST', '/evaluations/schedule', { employeeId: e7.id, milestone: 'ADHOC', evaluatorId: supervisor.id });
+  const ev9 = sched9.body as { id: string; lines: Line[] };
+  await api(tok.supervisor, 'PATCH', `/evaluations/${ev9.id}`, { lines: (ev9.lines ?? []).map((l) => ({ id: l.id, rating: 2 })), recommendation: 'REGULARIZE' });
+  const sub9 = await api(tok.supervisor, 'POST', `/evaluations/${ev9.id}/submit`);
+  const req9 = await pendingRequest(ev9.id);
+  if (req9) {
+    await act({ requestId: req9.id, userId: hr.id, action: 'APPROVED' });
+    await act({ requestId: req9.id, userId: exec.id, action: 'REJECTED', comment: 'Not ready to regularise yet' });
+  }
+  const ev9After = await prisma.employeeEvaluation.findUniqueOrThrow({ where: { id: ev9.id } });
+  check(
+    'HR signs it, management rejects it: REJECTED, closed',
+    sched9.status === 201 && sub9.status === 200 && !!req9 && ev9After.status === 'REJECTED',
+    `schedule ${sched9.status}, submit ${sub9.status} ${sub9.body.error ?? ''}, ${ev9After.status}`,
+  );
+  const rejectedPdf = await pdfOf(tok.supervisor, ev9.id);
+  const rejectedSlots = signoffSlots(rejectedPdf.text);
+  check(
+    'it prints the evaluator and the HR step that signed, both dated — and no slot Pending under management, nor an acknowledgement',
+    rejectedPdf.status === 200 &&
+      rejectedSlots.length === 2 &&
+      rejectedSlots.every((sl) => sl.signed) &&
+      signs(rejectedSlots[0], 'Evaluated by', supervisor.name) &&
+      signs(rejectedSlots[1], steps[0]?.name ?? '', hr.name) &&
+      !rejectedSlots.some((sl) => sl.text.startsWith(roleWords(steps[1]?.name ?? ''))) &&
+      pendingCount(rejectedPdf.text) === 0 &&
+      !flat(rejectedPdf.text).includes('ACKNOWLEDGED BY'),
+    `${rejectedPdf.status} ${slotsSaid(rejectedSlots)}`,
+  );
+  check(
+    '…"Status: Rejected", and its Decision line names the step, who rejected it and why',
+    flat(rejectedPdf.text).includes('Status: Rejected') &&
+      flat(rejectedPdf.text).includes(flat(`Rejected at ${steps[1]?.name ?? ''} by ${exec.name}`)) &&
+      flat(rejectedPdf.text).includes('Not ready to regularise yet'),
+    rejectedPdf.text.split('\n').filter((l) => /Status|Rejected/.test(l)).join(' | ').slice(0, 240),
+  );
 
   // ══ 16. Cancel ═══════════════════════════════════════════════════════════
   console.log('\nCancelling');
@@ -864,6 +1199,62 @@ async function main() {
       trail8.some((a) => a.summary === `${ev8.number} cancelled`) &&
       trail8.every((a) => a.actorId === supervisor.id && a.before === null && a.after === null),
     JSON.stringify(trail8.map((a) => [a.summary, a.before, a.after])),
+  );
+
+
+  // ══ 17. The list on paper ════════════════════════════════════════════════
+  console.log('\nThe list on paper');
+  const nobody = await makeUser(`${TAG} Nobody`, `nobody${DOMAIN}`, []);
+  const searched = `search=${TAG}`;
+  const evalRows = (await readScreen(tok.hr, `/evaluations?${searched}&pageSize=200`)).rows;
+  const evalStatus = splittingValue(evalRows, 'status');
+  await checkListPaper({
+    label: 'Evaluations',
+    token: tok.hr,
+    actorId: hr.id,
+    list: '/evaluations',
+    query: searched,
+    named: `search "${TAG}"`,
+    noun: ['evaluation', 'evaluations'],
+    mark: (r) => String(r.number),
+    filter: { query: `${searched}&status=${evalStatus}`, named: `status ${statusLabel(evalStatus)}` },
+    entityType: 'evaluation',
+  });
+  // The evaluator prints what they write; the person evaluated, only what
+  // was approved about them — the record's own rule (visibleTo).
+  await checkOwnPaper({
+    label: 'Evaluations (the evaluator)',
+    ownToken: tok.supervisor,
+    allToken: tok.hr,
+    list: '/evaluations',
+    query: searched,
+    noun: ['evaluation', 'evaluations'],
+    mark: (r) => String(r.number),
+  });
+  await checkOwnPaper({
+    label: 'Evaluations (the person evaluated)',
+    ownToken: tok.subject,
+    allToken: tok.hr,
+    list: '/evaluations',
+    query: searched,
+    noun: ['evaluation', 'evaluations'],
+    mark: (r) => String(r.number),
+  });
+  const subjectRows = (await readScreen(tok.subject, `/evaluations?${searched}&pageSize=200`)).rows;
+  check(
+    'and what the person evaluated prints is approved, every row',
+    subjectRows.length > 0 && subjectRows.every((r) => r.status === 'APPROVED'),
+    subjectRows.map((r) => String(r.status)).join(', '),
+  );
+  const listRows = await prisma.auditLog.findMany({ where: { entityType: 'evaluation', entityId: 'list', actorId: hr.id } });
+  check(
+    "the list's export rows carry a count, never a rating",
+    listRows.length > 0 && listRows.every((a) => a.before === null && a.after === null && /^Exported the evaluation list as PDF \(\d+ evaluation\(s\)\)$/.test(a.summary ?? '')),
+    JSON.stringify(listRows.map((a) => a.summary)),
+  );
+  check(
+    'Evaluations: the printed list is refused to anyone the list refuses',
+    (await readPaper(signToken(nobody.id, nobody.email), '/evaluations/pdf')).status === 403,
   );
 
   await cleanup();

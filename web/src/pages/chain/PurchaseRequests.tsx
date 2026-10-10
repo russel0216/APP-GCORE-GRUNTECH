@@ -169,6 +169,7 @@ export function PurchaseRequests() {
       <DataList<PrRow>
         listKey="purchase-requests"
         endpoint="/purchase-requests"
+        printPath="/api/purchase-requests/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         scoped

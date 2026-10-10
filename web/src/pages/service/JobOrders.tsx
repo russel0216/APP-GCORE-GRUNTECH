@@ -257,6 +257,7 @@ export function JobOrders() {
         searchPlaceholder="Search number, project, customer, quotation…"
         emptyTitle="No job orders yet"
         emptyHint="Raise one for a customer, linked to its quotation — approval builds the project."
+        printPath="/api/job-orders/pdf"
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },
           { key: 'open', label: 'Open', options: [{ value: 'true', label: 'Approved' }] },

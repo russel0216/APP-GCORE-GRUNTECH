@@ -222,6 +222,8 @@ export function Projects() {
         onRowClick={(j) => navigate(`/g-ops/projects/${j.id}`)}
         emptyTitle="No projects yet"
         emptyHint="Create one from an approved quotation's costing."
+        // The paper is the screen: DataList sends the list's own query.
+        printPath="/api/jobs/pdf"
         filters={[
           { key: 'status', label: 'Status', options: JOB_STATUSES },
           {

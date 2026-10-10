@@ -19,7 +19,7 @@ import { parseCsv, runImport, templateFor, type ImportSpec } from '../src/shared
 import { customerSpec, customerWrite } from '../src/routes/imports';
 import { globalSearch } from '../src/shared/search';
 import { customerListSummary, customerListWhere } from '../src/routes/customers';
-import { supplierListSummary, supplierListWhere } from '../src/routes/masters';
+import { itemListWhere, supplierListSummary, supplierListWhere } from '../src/routes/masters';
 import { listQuery } from '../src/http/kit';
 import { SUB_INDUSTRIES } from '../src/shared/subIndustries';
 import bcrypt from 'bcryptjs';
@@ -423,7 +423,7 @@ async function main() {
       (await count({ team: kat.id })) === 1 && (await count({ team: 'none' })) === 2,
     );
     let refusedC = 0;
-    for (const bad of [{ isActive: 'maybe' }, { openQuote: 'perhaps' }, { createdFrom: '2026/03/01' }]) {
+    for (const bad of [{ isActive: 'maybe' }, { openQuote: 'perhaps' }, { createdFrom: '2026/03/01' }] as Record<string, string>[]) {
       try {
         customerListWhere(superUser, custQ(bad));
       } catch (err) {
@@ -502,6 +502,38 @@ async function main() {
       }
     }
     check('a malformed filter is a 400, never an empty list', refusedS === 4, `${refusedS} of 4`);
+  }
+
+  // The item master's one where-builder: the list and its printed twin
+  // (`GET /items/pdf`) both read it, so what the paper holds is what the
+  // screen lists — and ?ids= (Print selected) narrows it like any filter.
+  console.log('\nThe item list: filters, ?ids= and malformed choices');
+  {
+    const ITEMS = `${TAG} ITEMLIST`;
+    const itemQ = (query: Record<string, string>) =>
+      listQuery({ query: { search: ITEMS, ...query } } as unknown as Parameters<typeof listQuery>[0]);
+    const iPipe = await prisma.item.create({ data: { code: `${TAG}-IL1`, name: `${ITEMS} Pipe`, itemType: 'MATERIAL' } });
+    const iDrill = await prisma.item.create({ data: { code: `${TAG}-IL2`, name: `${ITEMS} Drill`, itemType: 'TOOL' } });
+    await prisma.item.create({ data: { code: `${TAG}-IL3`, name: `${ITEMS} Old valve`, itemType: 'MATERIAL', isActive: false } });
+    const count = (query: Record<string, string>) => prisma.item.count({ where: itemListWhere(itemQ(query)) });
+    check(
+      'the search, the type and the status select what they say',
+      (await count({})) === 3 && (await count({ itemType: 'TOOL' })) === 1 && (await count({ itemType: 'MATERIAL' })) === 2 &&
+        (await count({ isActive: 'false' })) === 1 && (await count({ isActive: 'true', itemType: 'MATERIAL' })) === 1,
+    );
+    check(
+      '?ids= selects the rows ticked, and still under the other filters',
+      (await count({ ids: `${iPipe.id},${iDrill.id}` })) === 2 && (await count({ ids: `${iPipe.id},${iDrill.id}`, itemType: 'TOOL' })) === 1,
+    );
+    let refusedI = 0;
+    for (const bad of [{ itemType: 'GADGET' }, { isActive: 'maybe' }] as Record<string, string>[]) {
+      try {
+        itemListWhere(itemQ(bad));
+      } catch (err) {
+        if ((err as { status?: number }).status === 400) refusedI++;
+      }
+    }
+    check('a malformed type or status is a 400, never an empty list or a database error', refusedI === 2, `${refusedI} of 2`);
   }
 
   await cleanup();

@@ -249,6 +249,7 @@ export function Plantilla() {
       <DataList<PositionRow>
         listKey="plantilla"
         endpoint="/positions"
+        printPath="/api/positions/pdf"
         columns={columns}
         rowKey={(p) => p.id}
         searchPlaceholder="Search title or code…"

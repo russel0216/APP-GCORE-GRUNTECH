@@ -9,15 +9,19 @@ import {
   listQuery,
   listResult,
   orderBy,
+  idsFilter,
   notFound,
   conflict,
   badRequest,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
 import { ADMIN_RESET_HOURS, createLogin, deliverLink, issueToken } from '../shared/accounts';
 import { mailConfig, sendMail } from '../shared/mail';
+import { renderDocument, formatShortDate } from '../shared/pdf';
+import { LIST_CAP, listReference, sendListPdf } from './finance';
 
 export const userRoutes = Router();
 userRoutes.use(authenticate);
@@ -44,24 +48,34 @@ const publicUser = {
 
 // ── List ─────────────────────────────────────────────────────────────────────
 
+/**
+ * The user list's where-builder — the screen's rows and the printed list
+ * read the same set; `?ids=` narrows to the rows ticked.
+ */
+function userListWhere(q: ListQuery): Prisma.UserWhereInput {
+  const where: Prisma.UserWhereInput = {};
+  if (q.search) {
+    where.OR = [
+      { name: { contains: q.search, mode: 'insensitive' } },
+      { email: { contains: q.search, mode: 'insensitive' } },
+      { employeeNo: { contains: q.search, mode: 'insensitive' } },
+      { position: { contains: q.search, mode: 'insensitive' } },
+    ];
+  }
+  if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
+  if (q.filters.role) where.roles = { some: { role: { key: q.filters.role } } };
+  if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
+  const ids = idsFilter(q.filters.ids);
+  if (ids) where.id = { in: ids };
+  return where;
+}
+
 userRoutes.get(
   '/',
   require_('admin.users.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.UserWhereInput = {};
-
-    if (q.search) {
-      where.OR = [
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { email: { contains: q.search, mode: 'insensitive' } },
-        { employeeNo: { contains: q.search, mode: 'insensitive' } },
-        { position: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.filters.role) where.roles = { some: { role: { key: q.filters.role } } };
-    if (q.filters.departmentId) where.departmentId = q.filters.departmentId;
+    const where = userListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.user.findMany({
@@ -86,6 +100,88 @@ userRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * The user list on paper — the list as filtered (or the rows ticked),
+ * through `userListWhere`, so the paper is the screen it was printed off:
+ * who signs in, as what, under whom, and whether they still can. Names,
+ * emails, roles and status only — the select names exactly what prints, so
+ * no hash, token or mobile can reach the page. Declared above `/:id`, or
+ * that route swallows it.
+ */
+userRoutes.get(
+  '/pdf',
+  require_('admin.users.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = userListWhere(q);
+    const f = q.filters;
+    const [rows, count, role, department] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        select: {
+          name: true,
+          email: true,
+          employeeNo: true,
+          position: true,
+          isActive: true,
+          isSuperAdmin: true,
+          invitePending: true,
+          lastLoginAt: true,
+          department: { select: { name: true } },
+          supervisor: { select: { name: true } },
+          roles: { select: { role: { select: { name: true } } } },
+        },
+        orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
+        take: LIST_CAP,
+      }),
+      prisma.user.count({ where }),
+      f.role ? prisma.role.findUnique({ where: { key: f.role }, select: { name: true } }) : null,
+      f.departmentId ? prisma.department.findUnique({ where: { id: f.departmentId }, select: { name: true } }) : null,
+    ]);
+
+    const reference = listReference(count, rows.length, ['user', 'users'], [
+      q.search && `search "${q.search}"`,
+      f.isActive && (f.isActive === 'true' ? 'active' : 'inactive'),
+      f.role && `role ${role?.name ?? 'not found'}`,
+      f.departmentId && `department ${department?.name ?? 'not found'}`,
+      f.ids && 'the rows selected',
+    ]);
+
+    // Eight columns: landscape (rule 6). A super admin holds every right,
+    // whatever roles they also carry, so the roles cell says it first.
+    const pdf = await renderDocument({
+      title: 'Users',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Name', 'Email', 'Number', 'Roles', 'Department', 'Reports to', 'Last sign-in', 'Status'],
+          rows: rows.map((u) => {
+            const roles = [...(u.isSuperAdmin ? ['Super admin'] : []), ...u.roles.map((r) => r.role.name)];
+            return [
+              u.position ? { title: u.name, body: u.position } : u.name,
+              u.email,
+              u.employeeNo ?? '—',
+              roles.length ? roles.join(', ') : '—',
+              u.department?.name ?? '—',
+              u.supervisor?.name ?? '—',
+              u.lastLoginAt ? formatShortDate(u.lastLoginAt) : 'Never',
+              !u.isActive ? 'Inactive' : u.invitePending ? 'Invited' : 'Active',
+            ];
+          }),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'user', entityId: 'list', action: 'EXPORTED', summary: `Exported the user list as PDF (${rows.length} user(s))` },
+      req,
+    );
+    sendListPdf(res, pdf, 'users.pdf');
   }),
 );
 

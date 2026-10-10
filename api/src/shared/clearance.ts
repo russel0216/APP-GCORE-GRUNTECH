@@ -1,4 +1,5 @@
 import { Prisma, type ApprovalStep, type ClearanceArea } from '@prisma/client';
+import { addDays } from './day';
 import { prisma } from '../prisma';
 import type { ResolvedUser } from '../permissions/resolve';
 import { can } from '../permissions/resolve';
@@ -503,7 +504,6 @@ export async function sweepSeparations(
 // ── Turnover rate ────────────────────────────────────────────────────────────
 
 const utcDay = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d));
-const addDays = (d: Date, n: number) => utcDay(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + n);
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const round1 = (n: number) => Math.round(n * 10) / 10;
 

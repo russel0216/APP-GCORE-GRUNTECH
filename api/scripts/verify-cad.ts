@@ -25,6 +25,7 @@
 
 import bcrypt from 'bcryptjs';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -134,6 +135,52 @@ async function http(token: string, method: string, path: string, body?: unknown)
   }
   return { status: res.status, type, text, body: parsed };
 }
+
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation
+ * uses. PDFKit Flate-compresses its content streams and writes text as hex
+ * runs split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+/** A document's text and its page sizes. */
+async function printed(token: string, path: string): Promise<{ status: number; text: string; pages: string[] }> {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return { status: res.status, text: '', pages: [] };
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const pages = [...bytes.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map((m) => `${m[1]}x${m[2]}`);
+  return { status: res.status, text: pdfText(bytes), pages };
+}
+
+/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
+const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
+const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
+/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
+const flat = (t: string) => t.replace(/\s+/g, ' ');
 
 async function apiReachable(): Promise<boolean> {
   try {
@@ -416,6 +463,119 @@ async function main() {
   const onePdfByOutsider = await http(outsiderT, 'GET', `/cad-job-orders/${id}/pdf`);
   check('not for somebody else', onePdfByOutsider.status === 403, String(onePdfByOutsider.status));
 
+  // The paper (rule 6). No route, so the sign-offs are the people who
+  // actually acted, each dated, and never a slot nobody is named for:
+  // Requested by; Drawn by whoever submitted the latest revision; Accepted by
+  // the requestor — whose name stands over "Pending" until they do.
+  const exportsOf = (entityId: string) => prisma.auditLog.count({ where: { entityType: 'cad_job_order', entityId, action: 'EXPORTED' } });
+  const printsBefore = await exportsOf(id);
+  const donePaper = await printed(requestorT, `/cad-job-orders/${id}/pdf`);
+  const roles = (t: string) => ['REQUESTED BY', 'DRAWN BY', 'ACCEPTED BY', 'CLOSED BY'].filter((r) => flat(t).includes(r));
+  check(
+    'an accepted request prints Requested, Drawn and Accepted by, each by name and dated, nothing Pending',
+    donePaper.status === 200 &&
+      roles(donePaper.text).join(',') === 'REQUESTED BY,DRAWN BY,ACCEPTED BY' &&
+      signedCount(donePaper.text) === 3 &&
+      pendingCount(donePaper.text) === 0 &&
+      donePaper.text.includes(`${TAG} Requestor`),
+    `${donePaper.status} ${roles(donePaper.text).join(',')} ${signedCount(donePaper.text)} signed, ${pendingCount(donePaper.text)} pending`,
+  );
+  check(
+    'its words are words: the status and priority through statusLabel, the revisions under "Revision"',
+    donePaper.text.includes('Completed') &&
+      !donePaper.text.includes('COMPLETED') &&
+      /Priority: (Low|Normal|High|Urgent)\b/.test(donePaper.text) &&
+      flat(donePaper.text).includes('REVISION') &&
+      !donePaper.text.includes('CHANGES REQUESTED'),
+    donePaper.text.split('\n').filter((l) => /omplet|ormal|REVISION|CHANGES/.test(l)).join(' | ').slice(0, 200),
+  );
+  check(
+    'it names the requestor once in its details, with no date of its own — the dated sign-off says when, in Manila',
+    donePaper.text.includes(`${TAG} Requestor`) && !donePaper.text.includes(`${TAG} Requestor, `),
+    donePaper.text.split('\n').filter((l) => l.includes('Requestor')).join(' | '),
+  );
+  const workingPaper = await printed(leadT, `/cad-job-orders/${id2}/pdf`);
+  check(
+    'in progress with no revision yet: the designer on it and the requestor each stand over "Pending"',
+    workingPaper.status === 200 &&
+      roles(workingPaper.text).join(',') === 'REQUESTED BY,DRAWN BY,ACCEPTED BY' &&
+      workingPaper.text.includes(`${TAG} Designer Support`) &&
+      signedCount(workingPaper.text) === 1 &&
+      pendingCount(workingPaper.text) === 2 &&
+      workingPaper.text.includes('No revision submitted yet.') &&
+      flat(workingPaper.text).includes('In progress'),
+    `${workingPaper.status} ${roles(workingPaper.text).join(',')} ${signedCount(workingPaper.text)} signed, ${pendingCount(workingPaper.text)} pending`,
+  );
+  const queuedPaper = await printed(requestorT, `/cad-job-orders/${id3}/pdf`);
+  check(
+    'waiting for a designer, it prints no "Drawn by" slot nobody is named for',
+    queuedPaper.status === 200 &&
+      roles(queuedPaper.text).join(',') === 'REQUESTED BY,ACCEPTED BY' &&
+      signedCount(queuedPaper.text) === 1 &&
+      pendingCount(queuedPaper.text) === 1,
+    `${queuedPaper.status} ${roles(queuedPaper.text).join(',')} ${signedCount(queuedPaper.text)} signed, ${pendingCount(queuedPaper.text)} pending`,
+  );
+  check('every print of a request is on its trail as EXPORTED', (await exportsOf(id)) === printsBefore + 1, `${printsBefore} → ${await exportsOf(id)}`);
+  const listPrintsBefore = await exportsOf('list');
+  const listPaper = await printed(leadT, `/cad-job-orders/pdf?search=${TAG}`);
+  check(
+    'the printed list is landscape, its heads whole, its dates MM/DD/YYYY, its statuses words — and audited',
+    listPaper.status === 200 &&
+      listPaper.pages.length > 0 &&
+      listPaper.pages.every((b) => b === '841.89x595.28') &&
+      flat(listPaper.text).includes('NUMBER') &&
+      listPaper.text.includes('01/02/2026') &&
+      flat(listPaper.text).includes('In progress') &&
+      !listPaper.text.includes('IN_PROGRESS') &&
+      (await exportsOf('list')) === listPrintsBefore + 1,
+    `${listPaper.status} ${listPaper.pages.join(',')} ${listPaper.text.split('\n').filter((l) => /\d\/\d|rogress|PROGRESS|NUMBER/.test(l)).join(' | ').slice(0, 300)}`,
+  );
+
+  // Every filter `cadListWhere` applied is said on the paper, by name — a
+  // list narrowed to one drawing type never reads as the whole queue.
+  const narrowed = await printed(
+    leadT,
+    `/cad-job-orders/pdf?search=${TAG}&drawingTypeId=${layout.id}&assignedToId=${support.id}&requestedById=${requestor.id}&customerId=${customer.id}&jobId=${job.id}`,
+  );
+  const narrowedLine = flat(narrowed.text);
+  check(
+    'a narrowed list names every filter it was printed under — drawing type, designer, requestor, customer, project',
+    narrowed.status === 200 &&
+      narrowedLine.includes(`drawing type ${layout.name}`) &&
+      narrowedLine.includes(`designer ${TAG} Designer Support`) &&
+      narrowedLine.includes(`requested by ${TAG} Requestor`) &&
+      narrowedLine.includes(`customer ${TAG} Customer`) &&
+      narrowedLine.includes(`project ${job.number}`) &&
+      !narrowedLine.includes('one designer') &&
+      !narrowedLine.includes('one requestor'),
+    narrowedLine.match(/search.{0,300}/)?.[0] ?? `${narrowed.status}`,
+  );
+
+  // The paper's counts are of the set it PRINTED — never the queue's cards,
+  // which stand under the visibility rule alone. The whole queue under the
+  // search is three, two open, one overdue; narrowed to what is completed and
+  // needed in November–December it is one, none open, none overdue — and the
+  // window prints as MM/DD/YYYY, as every date on a list does.
+  const queuePaper = flat((await printed(leadT, `/cad-job-orders/pdf?search=${TAG}`)).text);
+  const donePrinted = await printed(leadT, `/cad-job-orders/pdf?search=${TAG}&status=COMPLETED&neededFrom=2026-11-01&neededTo=2026-12-31`);
+  const doneLine = flat(donePrinted.text);
+  check(
+    'a filtered list counts what it printed — "1 CAD job order, 0 open, 0 overdue" — not the queue’s 3, 2 open, 1 overdue',
+    queuePaper.includes('3 CAD job orders, 2 open, 1 overdue') &&
+      donePrinted.status === 200 &&
+      doneLine.includes('1 CAD job order, 0 open, 0 overdue') &&
+      doneLine.includes('status Completed') &&
+      doneLine.includes('needed 11/01/2026 to 12/31/2026') &&
+      !doneLine.includes('December'),
+    `${queuePaper.match(/Reference: [^—]*/)?.[0] ?? ''} | ${doneLine.match(/Reference: .{0,160}/)?.[0] ?? donePrinted.status}`,
+  );
+  const tickedPrinted = flat((await printed(leadT, `/cad-job-orders/pdf?ids=${id2}`)).text);
+  check(
+    'Print selected counts the ticked rows alone, and says so',
+    tickedPrinted.includes('1 CAD job order, 1 open, 1 overdue') && tickedPrinted.includes('the rows selected') && !tickedPrinted.includes(`${TAG} As-built`),
+    tickedPrinted.match(/Reference: .{0,120}/)?.[0] ?? '',
+  );
+
   const hitsForRequestor = (await globalSearch(TAG, requestorUser)).filter((h) => h.kind === 'cad_job_order');
   const hitsForOutsider = (await globalSearch(TAG, outsiderUser)).filter((h) => h.kind === 'cad_job_order');
   check('Ctrl+K finds the requestor’s own, and nobody else’s', hitsForRequestor.length === 3 && hitsForOutsider.length === 0 && hitsForRequestor.every((h) => h.link.startsWith('/g-ops/cad-job-orders/')), `${hitsForRequestor.length} / ${hitsForOutsider.length}`);
@@ -433,6 +593,15 @@ async function main() {
 
   const cancelled = await http(requestorT, 'POST', `/cad-job-orders/${id3}/cancel`, { reason: 'Customer withdrew' });
   check('the requestor cancels the third with a reason', cancelled.status === 200 && (await prisma.cadJobOrder.findUnique({ where: { id: id3 } }))?.cancelReason === 'Customer withdrew');
+  const cancelledPaper = await printed(requestorT, `/cad-job-orders/${id3}/pdf`);
+  check(
+    'a cancelled request prints only what happened — no slot left "Pending" for ever — and says why',
+    cancelledPaper.status === 200 &&
+      roles(cancelledPaper.text).join(',') === 'REQUESTED BY' &&
+      pendingCount(cancelledPaper.text) === 0 &&
+      cancelledPaper.text.includes('Customer withdrew'),
+    `${cancelledPaper.status} ${roles(cancelledPaper.text).join(',')} ${pendingCount(cancelledPaper.text)} pending`,
+  );
 
   // ══ Drawing types ═════════════════════════════════════════════════════════
   console.log('\nDrawing types');

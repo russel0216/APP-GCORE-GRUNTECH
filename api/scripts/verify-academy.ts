@@ -12,8 +12,10 @@
  * how an external certificate reaches HR and back.
  */
 
+import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
+import { statusLabel } from '../src/shared/pdf';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { resolveUser } from '../src/permissions/resolve';
@@ -152,6 +154,44 @@ interface HttpResult {
   headers: Headers;
 }
 
+/**
+ * Readable text out of a rendered PDF — the same reader verify-foundation
+ * uses. PDFKit Flate-compresses its content streams and writes text as hex
+ * runs split at kerning pairs, so each TJ array is joined back into one piece.
+ */
+function pdfText(pdf: Buffer): string {
+  const raw = pdf.toString('latin1');
+  const out: string[] = [];
+  const stream = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = stream.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('endstream', start);
+    if (end < 0) continue;
+    let body: string;
+    try {
+      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      let piece = '';
+      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
+        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
+      }
+      if (piece) out.push(piece);
+    }
+  }
+  return out.join('\n');
+}
+
+/** A sign-off's "Pending" is a run of its own. */
+const pendingCount = (t: string) => (t.match(/^Pending$/gm) ?? []).length;
+/** A dated sign-off: "Oct 10, 2026, 6:07 AM" on a line of its own under the name (the "When" field carries its label). */
+const signedCount = (t: string) => (t.match(/^[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M$/gm) ?? []).length;
+/** The words of a text, line breaks and punctuation gone — a field may wrap. */
+const flat = (t: string) => t.replace(/[^A-Za-z0-9:]+/g, ' ').trim();
+
 async function api(token: string, method: string, path: string, body?: unknown): Promise<HttpResult> {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -195,6 +235,145 @@ type Passport = {
   lines: Line[];
   records: { id: string; number: string | null; source: string; status: string; courseId: string; approvalRequestId: string | null }[];
 };
+
+// ── Printed lists (rule 6, A5) ───────────────────────────────────────────────
+//
+// `GET <list>/pdf` reads the list's own where-builder, so the paper is the
+// screen: the same set for the same query (the reference's count is the
+// screen's total, every row is on it, the search named), `?ids=` prints only
+// the row ticked and says so, a filter is named and prints the screen's count
+// for it, and each print is on the trail as EXPORTED with entityId "list".
+
+/** A reference may wrap: read the words, not the line breaks. */
+const paperWords = (t: string) => t.replace(/\s+/g, ' ');
+/** A number or a name may wrap inside a narrow cell: compare with every space gone. */
+const paperSquash = (t: string) => t.replace(/\s+/g, '');
+
+async function readPaper(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const type = res.headers.get('content-type') ?? '';
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, type, text: res.ok && type.includes('application/pdf') ? pdfText(bytes) : '' };
+}
+
+async function readScreen(token: string, path: string) {
+  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const body = (await res.json().catch(() => ({}))) as { rows?: Record<string, unknown>[]; total?: number };
+  return { status: res.status, rows: body.rows ?? [], total: body.total ?? -1 };
+}
+
+/** "Reference: 3 leave requests" — the count a printed list opens with. */
+const countedAs = (n: number, noun: readonly [string, string]) =>
+  `Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
+const referenceOf = (text: string) => paperWords(text).match(/Reference:.{0,140}/)?.[0] ?? '';
+
+async function checkListPaper(o: {
+  label: string;
+  token: string;
+  actorId: string;
+  /** The list's path, '/leave'. */
+  list: string;
+  /** A query that finds this script's own rows, and how the reference names it. */
+  query: string;
+  named: string;
+  noun: readonly [string, string];
+  /** What on the paper names a row: its number, code or email. */
+  mark: (row: Record<string, unknown>) => string;
+  filter: { query: string; named: string };
+  entityType: string;
+}) {
+  const exported = () =>
+    prisma.auditLog.count({ where: { entityType: o.entityType, entityId: 'list', action: 'EXPORTED', actorId: o.actorId } });
+  const before = await exported();
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+
+  const screen = await readScreen(o.token, `${o.list}?${o.query}&pageSize=200`);
+  const paper = await readPaper(o.token, `${o.list}/pdf?${o.query}`);
+  const missing = screen.rows.map(o.mark).filter((m) => !has(paper.text, m));
+  check(
+    `${o.label}: ${o.list}/pdf prints the list as the screen shows it — the same count, every row, the search named`,
+    paper.status === 200 &&
+      paper.type.includes('application/pdf') &&
+      screen.total > 0 &&
+      paperWords(paper.text).includes(countedAs(screen.total, o.noun)) &&
+      !missing.length &&
+      paperWords(paper.text).includes(o.named),
+    `${paper.status} ${paper.type} · screen ${screen.total} · missing ${missing.join(', ')} · ${referenceOf(paper.text)}`,
+  );
+
+  const [first, ...rest] = screen.rows;
+  const others = first ? rest.map(o.mark).filter((m) => m !== o.mark(first)) : [];
+  const ticked = await readPaper(o.token, `${o.list}/pdf?ids=${String(first?.id ?? 'none')}`);
+  check(
+    `${o.label}: ?ids= prints only the row ticked, and says so`,
+    ticked.status === 200 &&
+      !!first &&
+      paperWords(ticked.text).includes(countedAs(1, o.noun)) &&
+      paperWords(ticked.text).includes('the rows selected') &&
+      has(ticked.text, o.mark(first)) &&
+      others.every((m) => !has(ticked.text, m)),
+    `${ticked.status} · ${referenceOf(ticked.text)} · ${others.filter((m) => has(ticked.text, m)).length} other row(s) printed`,
+  );
+
+  const narrowed = await readScreen(o.token, `${o.list}?${o.filter.query}&pageSize=200`);
+  const filtered = await readPaper(o.token, `${o.list}/pdf?${o.filter.query}`);
+  const lost = narrowed.rows.map(o.mark).filter((m) => !has(filtered.text, m));
+  check(
+    `${o.label}: a filter is named (${o.filter.named}) and prints the screen's rows for it`,
+    filtered.status === 200 &&
+      narrowed.status === 200 &&
+      paperWords(filtered.text).includes(o.filter.named) &&
+      paperWords(filtered.text).includes(countedAs(narrowed.total, o.noun)) &&
+      !lost.length,
+    `${filtered.status} · screen ${narrowed.total} · missing ${lost.join(', ')} · ${referenceOf(filtered.text)}`,
+  );
+  const after = await exported();
+  check(`${o.label}: each print is on the trail as EXPORTED, entityId "list"`, after === before + 3, `${after - before} new row(s)`);
+}
+
+/**
+ * A view_own holder's paper: only their own rows, whatever they search or
+ * tick — somebody else's row named in `?ids=` prints nothing of it.
+ */
+async function checkOwnPaper(o: {
+  label: string;
+  ownToken: string;
+  allToken: string;
+  list: string;
+  query: string;
+  noun: readonly [string, string];
+  mark: (row: Record<string, unknown>) => string;
+}) {
+  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
+  const own = (await readScreen(o.ownToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const all = (await readScreen(o.allToken, `${o.list}?${o.query}&pageSize=200`)).rows;
+  const ownMarks = own.map(o.mark);
+  const theirs = all.filter((r) => !ownMarks.includes(o.mark(r)));
+  const paper = await readPaper(o.ownToken, `${o.list}/pdf?${o.query}`);
+  check(
+    `${o.label}: someone who sees only their own prints only their own`,
+    paper.status === 200 &&
+      paperWords(paper.text).includes(countedAs(own.length, o.noun)) &&
+      ownMarks.every((m) => has(paper.text, m)) &&
+      theirs.every((r) => !has(paper.text, o.mark(r))),
+    `${paper.status} · own ${own.length}, others ${theirs.length} · ${referenceOf(paper.text)}`,
+  );
+  if (theirs.length) {
+    const sneaky = await readPaper(o.ownToken, `${o.list}/pdf?ids=${String(theirs[0].id)}`);
+    check(
+      `${o.label}: and ticking somebody else's row prints nothing of it`,
+      sneaky.status === 200 && !has(sneaky.text, o.mark(theirs[0])) && paperWords(sneaky.text).includes(countedAs(0, o.noun)),
+      `${sneaky.status} · ${referenceOf(sneaky.text)}`,
+    );
+  }
+}
+
+/** A status that splits the rows — some have it, some do not — so a filter keeps some and drops others. */
+const splittingValue = (rows: Record<string, unknown>[], key: string) =>
+  [...new Set(rows.map((r) => String(r[key] ?? '')))].find((v) => {
+    const n = rows.filter((r) => String(r[key] ?? '') === v).length;
+    return v && n > 0 && n < rows.length;
+  }) ?? String(rows[0]?.[key] ?? '');
 
 // ── The run ──────────────────────────────────────────────────────────────────
 
@@ -569,15 +748,61 @@ async function run(rules: AcademySettings) {
 
   const ics = await api(tok.worker, 'GET', `/training-sessions/${upId}/ics`);
   check('the .ics downloads with the sequence and the session number', ics.status === 200 && /BEGIN:VEVENT/.test(ics.text) && /SEQUENCE:1/.test(ics.text) && (ics.headers.get('content-type') ?? '').startsWith('text/calendar'), `${ics.status}`);
-  const pdf = await fetch(`${BASE}/training-sessions/${sessionId}/pdf`, { headers: { Authorization: `Bearer ${tok.trainer}` } });
-  const pdfBytes = Buffer.from(await pdf.arrayBuffer());
-  check('the attendance sheet renders as a PDF', pdf.status === 200 && pdfBytes.subarray(0, 4).toString() === '%PDF', `${pdf.status}`);
+  const pdfOf = async (id: string) => {
+    const r = await fetch(`${BASE}/training-sessions/${id}/pdf`, { headers: { Authorization: `Bearer ${tok.trainer}` } });
+    const bytes = Buffer.from(await r.arrayBuffer());
+    return { status: r.status, bytes, text: r.ok ? pdfText(bytes) : '' };
+  };
+  const pdf = await pdfOf(sessionId);
+  check('the attendance sheet renders as a PDF', pdf.status === 200 && pdf.bytes.subarray(0, 4).toString() === '%PDF', `${pdf.status}`);
+  // No approval routes a session: the sheet prints the people who acted,
+  // each dated — HR, who scheduled it, and the trainer, whose completion is
+  // the sign-off — never an "Approved by" nobody fills.
+  check(
+    'completed, the sheet is signed by whoever scheduled it and by the trainer, each dated, nothing Pending',
+    flat(pdf.text).includes('SCHEDULED BY') &&
+      flat(pdf.text).includes('CONDUCTED BY') &&
+      pdf.text.includes(hr.name) &&
+      pdf.text.includes(trainer.name) &&
+      signedCount(pdf.text) === 2 &&
+      pendingCount(pdf.text) === 0 &&
+      !flat(pdf.text).includes('APPROVED BY'),
+    `${signedCount(pdf.text)} signed, ${pendingCount(pdf.text)} pending`,
+  );
+  check(
+    'its words are words: "Status: Completed", results "Passed" / "Failed" (never the enum), lines under "No." and the employee\'s under "Number"',
+    flat(pdf.text).includes('Status: Completed') &&
+      /^Passed$/m.test(pdf.text) &&
+      /^Failed$/m.test(pdf.text) &&
+      !/PASSED|FAILED|NO_SHOW/.test(pdf.text) &&
+      pdf.text.includes('NO.') &&
+      pdf.text.includes('NUMBER') &&
+      !/^#$/m.test(pdf.text),
+    pdf.text.split('\n').filter((l) => /Status|Passed|Failed|PASSED|NO\.|NUMBER/.test(l)).join(' | ').slice(0, 200),
+  );
+  const upPdf = await pdfOf(upId);
+  check(
+    'scheduled, the trainer\'s slot is Pending until the session is completed; a result not yet recorded is blank, not "Pending"',
+    upPdf.status === 200 && signedCount(upPdf.text) === 1 && pendingCount(upPdf.text) === 1 && flat(upPdf.text).includes('Status: Scheduled'),
+    `${upPdf.status} ${signedCount(upPdf.text)} signed, ${pendingCount(upPdf.text)} pending`,
+  );
   const pdfStaff = await api(tok.worker, 'GET', `/training-sessions/${sessionId}/pdf`);
   check('an attendee cannot print the attendance sheet', pdfStaff.status === 403, `${pdfStaff.status}`);
 
   const cancel = await api(tok.trainer, 'POST', `/training-sessions/${upId}/cancel`, { reason: `${TAG} trainer unwell` });
   const cancelledNote = await prisma.notification.count({ where: { userId: worker.id, type: 'training.cancelled' } });
   check('cancelling tells everyone enrolled', cancel.status === 200 && cancel.body.status === 'CANCELLED' && cancelledNote === 1, `${cancel.status} ${cancelledNote}`);
+  const cancelledPdf = await pdfOf(upId);
+  check(
+    'cancelled, nobody will conduct it: the sheet drops that slot and says why it was cancelled',
+    cancelledPdf.status === 200 &&
+      !flat(cancelledPdf.text).includes('CONDUCTED BY') &&
+      pendingCount(cancelledPdf.text) === 0 &&
+      flat(cancelledPdf.text).includes(`Status: Cancelled ${TAG} trainer unwell`),
+    `${cancelledPdf.status} ${pendingCount(cancelledPdf.text)} pending`,
+  );
+  const sheetPrints = await prisma.auditLog.count({ where: { entityType: 'training_session', entityId: upId, action: 'EXPORTED', summary: { contains: 'attendance sheet' } } });
+  check('every print of a sheet is on its session\'s trail as EXPORTED', sheetPrints === 2, String(sheetPrints));
 
   // ══ 14. Search, schedule, delete guards, settings ═════════════════════════
   console.log('\n14. Search, schedule and guards');
@@ -612,6 +837,73 @@ async function run(rules: AcademySettings) {
   const audits = await prisma.auditLog.findMany({ where: { entityType: 'training_session', entityId: sessionId }, select: { action: true } });
   const actions = new Set(audits.map((a) => a.action));
   check('the session\'s audit trail runs CREATED → UPDATED → COMPLETED → EXPORTED', ['CREATED', 'UPDATED', 'COMPLETED', 'EXPORTED'].every((a) => actions.has(a)), [...actions].join(','));
+
+  // ══ 15. The lists on paper ════════════════════════════════════════════════
+  console.log('\n15. The lists on paper');
+  const searched = `search=${TAG}`;
+  const searchNamed = `search "${TAG}"`;
+  await checkListPaper({
+    label: 'Courses',
+    token: tok.hr,
+    actorId: hr.id,
+    list: '/courses',
+    query: searched,
+    named: searchNamed,
+    noun: ['course', 'courses'],
+    mark: (r) => String(r.code),
+    filter: { query: `${searched}&required=true`, named: 'required of somebody' },
+    entityType: 'course',
+  });
+  check('Courses: the printed list is refused to anyone without the course master', (await readPaper(tok.worker, '/courses/pdf')).status === 403);
+
+  const sessionRows = (await readScreen(tok.hr, `/training-sessions?${searched}&pageSize=200`)).rows;
+  const sessionStatus = splittingValue(sessionRows, 'status');
+  await checkListPaper({
+    label: 'Training sessions',
+    token: tok.hr,
+    actorId: hr.id,
+    list: '/training-sessions',
+    query: searched,
+    named: searchNamed,
+    noun: ['training session', 'training sessions'],
+    mark: (r) => String(r.number),
+    filter: { query: `${searched}&status=${sessionStatus}`, named: `status ${statusLabel(sessionStatus)}` },
+    entityType: 'training_session',
+  });
+  // A trainer holding only view_own prints the sessions they train, scheduled or attend.
+  await checkOwnPaper({
+    label: 'Training sessions',
+    ownToken: tok.trainer,
+    allToken: tok.hr,
+    list: '/training-sessions',
+    query: searched,
+    noun: ['training session', 'training sessions'],
+    mark: (r) => String(r.number),
+  });
+  check('Training sessions: the printed list is refused to anyone the list refuses', (await readPaper(tok.worker, '/training-sessions/pdf')).status === 403);
+
+  await checkListPaper({
+    label: 'Training passports',
+    token: tok.hr,
+    actorId: hr.id,
+    list: '/passports',
+    query: searched,
+    named: searchNamed,
+    noun: ['person', 'people'],
+    mark: (r) => String(r.employeeNo),
+    filter: { query: `${searched}&departmentId=${dept.id}`, named: `department ${dept.name}` },
+    entityType: 'training_passport',
+  });
+  // Each person's readiness on paper is the screen's: held of required.
+  const passportRows = (await readScreen(tok.hr, `/passports?${searched}&pageSize=200`)).rows as { required: number; held: number }[];
+  const passportPaper = await readPaper(tok.hr, `/passports/pdf?${searched}`);
+  const heldLines = passportRows.filter((r) => r.required > 0).map((r) => `${r.held} of ${r.required}`);
+  check(
+    'Training passports: every held-of-required on the screen is on the paper',
+    heldLines.length > 0 && heldLines.every((h) => paperWords(passportPaper.text).includes(h)),
+    heldLines.join(', '),
+  );
+  check('Training passports: the printed register is refused to anyone without it', (await readPaper(tok.trainer, '/passports/pdf')).status === 403);
 }
 
 main()

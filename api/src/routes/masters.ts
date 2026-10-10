@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, ItemType } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -13,6 +13,7 @@ import {
   badRequest,
   forbidden,
   idsFilter,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
@@ -21,7 +22,7 @@ import { groupKey } from '../shared/quotationGroups';
 import { activityTypeKey } from '../shared/activityTypes';
 import { nextNumber } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
-import { formatShortDate, renderDocument } from '../shared/pdf';
+import { companyCurrency, formatAmount, formatMoney, formatShortDate, renderDocument, statusLabel } from '../shared/pdf';
 import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
 
 // The employee routes live in ./employees; re-exported here so the mount in
@@ -49,6 +50,20 @@ function supplierDay(value: string | undefined, label: string): string | null {
   if (!value) return null;
   if (!SUPPLIER_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
   return value;
+}
+
+/** The most rows a printed list carries; the reference says when it was cut. */
+const LIST_CAP = 1000;
+
+/**
+ * A printed list's reference: "12 suppliers", or, cut at the cap, "first
+ * 1,000 of 1,234 suppliers printed" — then every filter that narrowed it.
+ */
+function listReference(count: number, printed: number, noun: readonly [string, string], filters: (string | null | false | undefined)[]): string {
+  const n = (v: number) => v.toLocaleString('en-PH');
+  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
+  const named = filters.filter(Boolean);
+  return named.length ? `${head} — ${named.join(' · ')}` : head;
 }
 
 /**
@@ -203,35 +218,41 @@ supplierRoutes.get(
         where,
         include: supplierCounts(mayOrders),
         orderBy: orderBy(q, SUPPLIER_SORTS, { name: 'asc' }),
-        take: 1000,
+        take: LIST_CAP,
       }),
       supplierListSummary(base, where, mayOrders),
     ]);
     const f = q.filters;
+    // A Manila day the filter names ('YYYY-MM-DD'), as a list prints a date (MM/DD/YYYY).
+    const listDay = (key: unknown) =>
+      typeof key === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(key) ? formatShortDate(new Date(`${key}T00:00:00Z`)) : '…';
     const tabName = f.category === 'none' ? 'not stated' : summary.tabs.find((t) => t.value.toLowerCase() === String(f.category ?? '').trim().toLowerCase())?.label;
-    const filters = [
-      q.search ? `search "${q.search}"` : null,
-      f.category ? `supplies ${tabName ?? f.category}` : null,
-      f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
-      f.partner === 'yes' ? 'partners' : f.partner === 'no' ? 'not partners' : null,
-      f.createdById ? 'added by one person' : null,
-      f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
-      f.orders === 'awaiting' ? 'with an order awaiting delivery' : f.orders === 'placed' ? 'ordered from' : f.orders === 'never' ? 'never ordered from' : null,
-      q.scope === 'mine' ? 'added by me' : null,
-      f.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+    const addedBy = f.createdById ? await prisma.user.findUnique({ where: { id: f.createdById }, select: { name: true } }) : null;
+    const reference = listReference(summary.count, rows.length, ['supplier', 'suppliers'], [
+      q.search && `search "${q.search}"`,
+      f.category && `supplies ${tabName ?? f.category}`,
+      f.isActive === 'true' ? 'active' : f.isActive === 'false' && 'inactive',
+      f.partner === 'yes' ? 'partners' : f.partner === 'no' && 'not partners',
+      f.createdById && `added by ${addedBy?.name ?? 'one person'}`,
+      (f.createdFrom || f.createdTo) && `added ${listDay(f.createdFrom)} to ${listDay(f.createdTo)}`,
+      f.orders === 'awaiting' ? 'with an order awaiting delivery' : f.orders === 'placed' ? 'ordered from' : f.orders === 'never' && 'never ordered from',
+      q.scope === 'mine' && 'added by me',
+      f.ids && 'the rows selected',
+    ]);
     const placed = (r: (typeof rows)[number]) => String((r._count as { purchaseOrders?: number }).purchaseOrders ?? 0);
     const awaiting = (r: (typeof rows)[number]) => String(((r as { purchaseOrders?: unknown[] }).purchaseOrders ?? []).length);
 
+    // Ten columns: landscape, each sized from what it holds (rule 6), so a
+    // head is never broken mid-word and a code never split over two lines.
     const pdf = await renderDocument({
       title: 'Suppliers',
       date: new Date(),
-      reference: `${summary.count} supplier(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
           head: ['Code', 'Supplier', 'Supplies', 'City', 'Terms', 'Contacts', ...(mayOrders ? ['Orders', 'Awaiting'] : []), 'Added', 'Status'],
-          widths: [1.4, 2.8, 1.6, 1.1, 1, 0.9, ...(mayOrders ? [0.8, 0.9] : []), 1.1, 0.9],
           align: ['left', 'left', 'left', 'left', 'left', 'right', ...(mayOrders ? (['right', 'right'] as const) : []), 'left', 'left'],
           rows: rows.map((s) => [
             s.code,
@@ -652,25 +673,44 @@ function itemNumbers(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+const ITEM_SORTS = ['code', 'name', 'createdAt'];
+
+/** Which items a list query means — one rule for the list and its printed twin. */
+export function itemListWhere(q: ListQuery): Prisma.ItemWhereInput {
+  const and: Prisma.ItemWhereInput[] = [];
+  const f = q.filters;
+  if (q.search) {
+    and.push({
+      OR: [
+        { name: { contains: q.search, mode: 'insensitive' } },
+        { code: { contains: q.search, mode: 'insensitive' } },
+        { partNumber: { contains: q.search, mode: 'insensitive' } },
+        { description: { contains: q.search, mode: 'insensitive' } },
+      ],
+    });
+  }
+  if (f.isActive) {
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    and.push({ isActive: f.isActive === 'true' });
+  }
+  if (f.itemType) {
+    const types = Object.values(ItemType) as string[];
+    if (!types.includes(f.itemType)) throw badRequest(`Type is one of ${types.join(', ')}`);
+    and.push({ itemType: f.itemType as ItemType });
+  }
+  if (f.categoryId) and.push({ categoryId: f.categoryId });
+  if (f.costCategoryId) and.push({ costCategoryId: f.costCategoryId });
+  const ids = idsFilter(f.ids);
+  if (ids) and.push({ id: { in: ids } });
+  return and.length ? { AND: and } : {};
+}
+
 itemRoutes.get(
   '/',
   require_('gchain.items.view_all'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.ItemWhereInput = {};
-
-    if (q.search) {
-      where.OR = [
-        { name: { contains: q.search, mode: 'insensitive' } },
-        { code: { contains: q.search, mode: 'insensitive' } },
-        { partNumber: { contains: q.search, mode: 'insensitive' } },
-        { description: { contains: q.search, mode: 'insensitive' } },
-      ];
-    }
-    if (q.filters.isActive) where.isActive = q.filters.isActive === 'true';
-    if (q.filters.itemType) where.itemType = q.filters.itemType as Prisma.EnumItemTypeFilter['equals'];
-    if (q.filters.categoryId) where.categoryId = q.filters.categoryId;
-    if (q.filters.costCategoryId) where.costCategoryId = q.filters.costCategoryId;
+    const where = itemListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.item.findMany({
@@ -680,7 +720,7 @@ itemRoutes.get(
           costCategory: { select: { id: true, code: true, name: true } },
           preferredSupplier: { select: { id: true, name: true } },
         },
-        orderBy: orderBy(q, ['code', 'name', 'createdAt'], { name: 'asc' }),
+        orderBy: orderBy(q, ITEM_SORTS, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -688,6 +728,91 @@ itemRoutes.get(
     ]);
 
     res.json(listResult(rows.map((r) => itemNumbers(r) as typeof r), total, q));
+  }),
+);
+
+/**
+ * The item master on paper, through `itemListWhere` (or the rows ticked,
+ * `?ids=`): the columns the screen shows to the same `gchain.items.view_all`
+ * holder — the standard cost among them, never the last cost the screen does
+ * not show. A list price is in its own currency, so it names it on each row.
+ * Above `/:id`.
+ */
+itemRoutes.get(
+  '/pdf',
+  require_('gchain.items.view_all'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = itemListWhere(q);
+    const f = q.filters;
+    const [rows, count, currency, category, costCategory] = await Promise.all([
+      prisma.item.findMany({
+        where,
+        select: {
+          code: true,
+          partNumber: true,
+          name: true,
+          itemType: true,
+          unit: true,
+          standardCost: true,
+          listPrice: true,
+          listPriceCurrency: true,
+          reorderLevel: true,
+          isActive: true,
+          category: { select: { name: true } },
+          costCategory: { select: { name: true } },
+        },
+        orderBy: orderBy(q, ITEM_SORTS, { name: 'asc' }),
+        take: LIST_CAP,
+      }),
+      prisma.item.count({ where }),
+      companyCurrency(),
+      f.categoryId ? prisma.itemCategory.findUnique({ where: { id: f.categoryId }, select: { name: true } }) : null,
+      f.costCategoryId ? prisma.costCategory.findUnique({ where: { id: f.costCategoryId }, select: { name: true } }) : null,
+    ]);
+    const reference = listReference(count, rows.length, ['item', 'items'], [
+      q.search && `search "${q.search}"`,
+      f.itemType && `type ${statusLabel(f.itemType)}`,
+      f.categoryId && `category ${category?.name ?? 'not found'}`,
+      f.costCategoryId && `cost bucket ${costCategory?.name ?? 'not found'}`,
+      f.isActive === 'true' ? 'active' : f.isActive === 'false' && 'inactive',
+      f.ids && 'the rows selected',
+    ]);
+    const quantity = (v: Prisma.Decimal) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(Number(v));
+
+    // Ten columns: landscape, each sized from what it holds (rule 6).
+    const pdf = await renderDocument({
+      title: 'Item Master',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Code', 'Item', 'Type', 'Category', 'Cost bucket', 'Unit', `Standard cost (${currency})`, 'List price', 'Reorder at', 'Status'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'right', 'right', 'left'],
+          rows: rows.map((i) => [
+            i.code,
+            { title: i.name, body: i.partNumber ?? undefined },
+            statusLabel(i.itemType),
+            i.category?.name ?? '',
+            i.costCategory?.name ?? '',
+            i.unit,
+            i.standardCost == null ? '' : formatAmount(Number(i.standardCost)),
+            i.listPrice == null ? '' : formatMoney(Number(i.listPrice), i.listPriceCurrency?.trim() || currency),
+            i.reorderLevel == null ? '' : quantity(i.reorderLevel),
+            i.isActive ? 'Active' : 'Inactive',
+          ]),
+        },
+      ],
+    });
+    await audit(
+      { entityType: 'item', entityId: 'list', action: 'EXPORTED', summary: `Exported the item master as PDF (${rows.length} item(s))` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="items.pdf"');
+    res.send(pdf);
   }),
 );
 

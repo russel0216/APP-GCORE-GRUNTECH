@@ -19,6 +19,7 @@ import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
+import { LIST_CAP, listReference, rangeNamed, recordNamed, sendListPdf } from './finance';
 
 export const customerRoutes = Router();
 customerRoutes.use(authenticate);
@@ -184,7 +185,8 @@ customerRoutes.get(
     const me = currentUser(req);
     const q = listQuery(req);
     const { base, where } = customerListWhere(me, q);
-    const [rows, summary] = await Promise.all([
+    const f = q.filters;
+    const [rows, summary, adder, team] = await Promise.all([
       prisma.customer.findMany({
         where,
         include: {
@@ -194,34 +196,41 @@ customerRoutes.get(
           _count: { select: { contacts: true, sites: true, quotations: { where: OPEN_QUOTE }, jobs: true } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
-        take: 1000,
+        take: LIST_CAP,
       }),
       customerListSummary(base, where),
+      recordNamed('person', f.createdById, 'added by'),
+      f.team && f.team !== 'none' ? prisma.industry.findUnique({ where: { id: String(f.team) }, select: { code: true } }) : null,
     ]);
-    const f = q.filters;
     const subIndustryName = f.subIndustry === 'none' ? 'not stated' : summary.tabs.find((t) => t.value === f.subIndustry)?.label;
-    const filters = [
+    // "12 customers", or "first 1,000 of 1,234 customers printed" when the
+    // cap bit — then every filter `customerListWhere` applied, by name.
+    const reference = listReference(summary.count, rows.length, ['customer', 'customers'], [
       q.search ? `search "${q.search}"` : null,
-      f.subIndustry ? `sub-industry ${subIndustryName ?? f.subIndustry}` : null,
-      f.team === 'none' ? 'team open' : f.team ? `team ${rows.find((c) => c.industryId === f.team)?.industry?.code ?? f.team}` : null,
+      f.subIndustry ? `sub-industry ${subIndustryName ?? 'not found'}` : null,
+      f.team === 'none' ? 'team open' : f.team ? `team ${team?.code ?? 'not found'}` : null,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
-      f.createdById ? 'added by one person' : null,
-      f.createdFrom || f.createdTo ? `added ${f.createdFrom ?? '…'} to ${f.createdTo ?? '…'}` : null,
+      adder,
+      rangeNamed('added', f.createdFrom, f.createdTo),
       f.openQuote === 'yes' ? 'with an open quotation' : f.openQuote === 'no' ? 'no open quotation' : null,
       f.project === 'yes' ? 'with a project' : f.project === 'no' ? 'no project' : null,
       q.scope === 'mine' ? 'added by me' : null,
       f.ids ? 'the rows selected' : null,
-    ].filter(Boolean);
+    ]);
 
+    // Ten columns: landscape, each sized from what it holds (rule 6), so a
+    // head is never broken mid-word and a code never split over two lines.
+    // The code heads its column as the screen heads it: a customer's code
+    // is its identifier, not a document number. No credit limits.
     const pdf = await renderDocument({
       title: 'Customers',
       date: new Date(),
-      reference: `${summary.count} customer(s)${summary.count > rows.length ? `, first ${rows.length} printed` : ''}${filters.length ? ` — ${filters.join(' · ')}` : ''}`,
+      reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
           head: ['Code', 'Customer', 'Sub-industry', 'Team', 'Contacts', 'Sites', 'Open quotes', 'Projects', 'Added', 'Status'],
-          widths: [1.6, 2.6, 1.3, 0.7, 0.9, 0.7, 1, 0.9, 1.2, 1],
           align: ['left', 'left', 'left', 'left', 'right', 'right', 'right', 'right', 'left', 'left'],
           rows: rows.map((c) => [
             c.code,
@@ -237,15 +246,12 @@ customerRoutes.get(
           ]),
         },
       ],
-      signatories: [],
     });
     await audit(
       { entityType: 'customer', entityId: 'list', action: 'EXPORTED', summary: `Exported the customer list as PDF (${rows.length} customer(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="customers.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'customers.pdf');
   }),
 );
 

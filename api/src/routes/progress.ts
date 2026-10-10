@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, ProgressStatus, BillingStatus } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -11,18 +11,53 @@ import {
   notFound,
   badRequest,
   forbidden,
+  idsFilter,
+  type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
-import { renderDocument, formatMoney, formatDate, type PdfSection } from '../shared/pdf';
+import {
+  renderDocument,
+  formatMoney,
+  formatAmount,
+  formatDate,
+  formatShortDate,
+  statusLabel,
+  companyCurrency,
+  type PdfSection,
+  type PdfTotal,
+  type Signatory,
+} from '../shared/pdf';
+import { contactPhone } from '../shared/approvals';
 import { manilaDate, workingDayDate } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
+import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes } from './jobs';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 const cents = (n: number) => Math.round(n * 100) / 100;
+
+/** A rate as a document prints it: 0.12 → "12%", 0.075 → "7.5%". */
+const pct = (rate: number) => `${+(rate * 100).toFixed(2)}%`;
+
+/**
+ * The contact lines a sign-off prints under a name — read for the PAPER
+ * only, never sent with the record (the quotation's rule: `GET …/:id`
+ * carries no mobile). `contactPhone` is the one reading of a person's number.
+ */
+async function printContacts(ids: (string | null | undefined)[]) {
+  const wanted = [...new Set(ids.filter((v): v is string => !!v))];
+  const rows = wanted.length
+    ? await prisma.user.findMany({
+        where: { id: { in: wanted } },
+        select: { id: true, name: true, email: true, phone: true, employee: { select: { mobile: true } } },
+      })
+    : [];
+  return new Map(rows.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
+}
 
 function asDate(v: string | null | undefined): Date | null {
   if (!v) return null;
@@ -38,80 +73,158 @@ function asDate(v: string | null | undefined): Date | null {
 export const progressRoutes = Router();
 progressRoutes.use(authenticate);
 
+const REPORT_SORTS = ['number', 'periodTo', 'createdAt'];
+
+/**
+ * Which progress reports a list query means — one rule for the list and its
+ * printed twin. A `view_own` holder sees the reports they prepared; `?ids=`
+ * (the rows ticked) is ANDed with that.
+ */
+function reportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ProgressReportWhereInput {
+  const and: Prisma.ProgressReportWhereInput[] = [];
+  const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.progress_billing.view_all');
+  if (onlyOwn || q.scope === 'mine') and.push({ preparedById: me.id });
+  if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
+  const status = choice(q.filters.status, ProgressStatus, 'Status');
+  if (status) and.push({ status });
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+        { job: { number: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  return and.length ? { AND: and } : {};
+}
+
+const reportListInclude = {
+  job: { select: { id: true, number: true, name: true, contractValue: true } },
+  preparedBy: { select: { id: true, name: true } },
+  lines: { select: { scopeItemId: true, toDatePct: true } },
+  billing: { select: { id: true, number: true, status: true } },
+} satisfies Prisma.ProgressReportInclude;
+
+/** A report's row: its overall to-date % and earned value, weighted by scope value. */
+async function presentReportRows(rows: Prisma.ProgressReportGetPayload<{ include: typeof reportListInclude }>[]) {
+  const jobIds = [...new Set(rows.map((r) => r.jobId))];
+  const scopeItems = await prisma.jobScopeItem.findMany({
+    where: { jobId: { in: jobIds } },
+    select: { id: true, jobId: true, value: true },
+  });
+  const byJob = new Map<string, { id: string; value: number }[]>();
+  for (const item of scopeItems) {
+    const list = byJob.get(item.jobId) ?? [];
+    list.push({ id: item.id, value: num(item.value) });
+    byJob.set(item.jobId, list);
+  }
+  return rows.map((r) => {
+    const items = byJob.get(r.jobId) ?? [];
+    const totalValue = items.reduce((s, i) => s + i.value, 0);
+    const pctBy = new Map(r.lines.map((l) => [l.scopeItemId, num(l.toDatePct)]));
+    const earned = items.reduce((s, i) => s + (i.value * (pctBy.get(i.id) ?? 0)) / 100, 0);
+    return {
+      id: r.id,
+      number: r.number,
+      reportNo: r.reportNo,
+      status: r.status,
+      periodFrom: r.periodFrom,
+      periodTo: r.periodTo,
+      job: { ...r.job, contractValue: num(r.job.contractValue) },
+      preparedBy: r.preparedBy,
+      billing: r.billing,
+      toDatePct: totalValue > 0 ? cents((earned / totalValue) * 100) : 0,
+      earnedValue: cents(earned),
+    };
+  });
+}
+
 progressRoutes.get(
   '/',
   requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const q = listQuery(req);
-    const where: Prisma.ProgressReportWhereInput = {};
-
-    const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.progress_billing.view_all');
-    if (onlyOwn || q.scope === 'mine') where.preparedById = me.id;
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumProgressStatusFilter['equals'];
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-        { job: { number: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = reportListWhere(me, q);
 
     const [rows, total] = await Promise.all([
       prisma.progressReport.findMany({
         where,
-        include: {
-          job: { select: { id: true, number: true, name: true, contractValue: true } },
-          preparedBy: { select: { id: true, name: true } },
-          lines: { select: { scopeItemId: true, toDatePct: true } },
-          billing: { select: { id: true, number: true, status: true } },
-        },
-        orderBy: orderBy(q, ['number', 'periodTo', 'createdAt'], { createdAt: 'desc' }),
+        include: reportListInclude,
+        orderBy: orderBy(q, REPORT_SORTS, { createdAt: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
       prisma.progressReport.count({ where }),
     ]);
 
-    // Overall % per report, weighted by scope value.
-    const jobIds = [...new Set(rows.map((r) => r.jobId))];
-    const scopeItems = await prisma.jobScopeItem.findMany({
-      where: { jobId: { in: jobIds } },
-      select: { id: true, jobId: true, value: true },
-    });
-    const byJob = new Map<string, { id: string; value: number }[]>();
-    for (const item of scopeItems) {
-      const list = byJob.get(item.jobId) ?? [];
-      list.push({ id: item.id, value: num(item.value) });
-      byJob.set(item.jobId, list);
-    }
+    res.json(listResult(await presentReportRows(rows), total, q));
+  }),
+);
 
-    res.json(
-      listResult(
-        rows.map((r) => {
-          const items = byJob.get(r.jobId) ?? [];
-          const totalValue = items.reduce((s, i) => s + i.value, 0);
-          const pctBy = new Map(r.lines.map((l) => [l.scopeItemId, num(l.toDatePct)]));
-          const earned = items.reduce((s, i) => s + (i.value * (pctBy.get(i.id) ?? 0)) / 100, 0);
-          return {
-            id: r.id,
-            number: r.number,
-            reportNo: r.reportNo,
-            status: r.status,
-            periodFrom: r.periodFrom,
-            periodTo: r.periodTo,
-            job: { ...r.job, contractValue: num(r.job.contractValue) },
-            preparedBy: r.preparedBy,
-            billing: r.billing,
-            toDatePct: totalValue > 0 ? cents((earned / totalValue) * 100) : 0,
-            earnedValue: cents(earned),
-          };
-        }),
-        total,
-        q,
-      ),
+/**
+ * The progress reports list on paper (rule 6, A5): the list's own query and
+ * sort — or, with `?ids=`, the rows ticked — on landscape pages. No totals
+ * block: each report's earned value is a running total of its own project,
+ * so summing reports would count the same work twice. Above `/:id`.
+ */
+progressRoutes.get(
+  '/pdf',
+  requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const q = listQuery(req);
+    const where = reportListWhere(me, q);
+    const [rows, count, currency, named] = await Promise.all([
+      prisma.progressReport.findMany({ where, include: reportListInclude, orderBy: orderBy(q, REPORT_SORTS, { createdAt: 'desc' }), take: LIST_CAP }),
+      prisma.progressReport.count({ where }),
+      companyCurrency(),
+      namedInFilter({ jobId: q.filters.jobId }),
+    ]);
+    const printed = await presentReportRows(rows);
+    const reference = listReference(count, printed.length, ['progress report', 'progress reports'], [
+      q.search ? `search "${q.search}"` : null,
+      q.filters.status ? `status ${statusLabel(q.filters.status)}` : null,
+      named.project ? `project ${named.project}` : null,
+      q.scope === 'mine' ? 'prepared by me' : null,
+      q.filters.ids ? 'the rows selected' : null,
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Progress Reports',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Project', 'Report no.', 'Period', 'To date', `Earned value (${currency})`, 'Prepared by', 'Billing', 'Status'],
+          align: ['left', 'left', 'right', 'left', 'right', 'right', 'left', 'left', 'left'],
+          rows: printed.map((r) => [
+            r.number,
+            { title: r.job.name, body: r.job.number },
+            String(r.reportNo),
+            `${formatShortDate(r.periodFrom)} – ${formatShortDate(r.periodTo)}`,
+            `${r.toDatePct.toFixed(2)}%`,
+            formatAmount(r.earnedValue),
+            r.preparedBy.name,
+            r.billing?.number ?? 'Not yet',
+            statusLabel(r.status),
+          ]),
+        },
+      ],
+    });
+
+    await audit(
+      { entityType: 'progress_report', entityId: 'list', action: 'EXPORTED', summary: `Exported the progress reports list as PDF (${listReference(count, printed.length, ['progress report', 'progress reports'], [])})` },
+      req,
     );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="progress-reports.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -191,6 +304,10 @@ progressRoutes.get(
         (me.isSuperAdmin ||
           me.permissions.has('gops.progress_billing.edit_all') ||
           (report.preparedById === me.id && me.permissions.has('gops.progress_billing.edit_own'))),
+      // The approve route's own checks, so the page never offers a button the
+      // route refuses: still open, the right held, and not the person who
+      // prepared it — a super admin included (rule 3).
+      canApprove: report.status !== 'APPROVED' && can(me, 'gops.progress_billing.approve') && report.preparedById !== me.id,
     });
   }),
 );
@@ -394,18 +511,23 @@ progressRoutes.post(
       include: { job: true },
     });
     if (!report) throw notFound('Progress report not found');
-    if (report.status === 'APPROVED') throw badRequest('Already approved');
+    if (report.status === 'APPROVED') throw badRequest('This report has already been approved');
 
-    // Segregation of duties, consistent with the approval engine: you do not
-    // sign off your own report.
-    if (report.preparedById === me.id && !me.isSuperAdmin) {
+    // Rule 3: whoever prepared the report never approves it — a super admin
+    // included, as the approval engine refuses one (and as the billing's
+    // route does). Otherwise the paper would print one person as both
+    // Prepared by and Approved by.
+    if (report.preparedById === me.id) {
       throw forbidden('You cannot approve a report you prepared yourself');
     }
 
-    await prisma.progressReport.update({
-      where: { id: report.id },
+    // Claimed as read: two approvers pressing at once approve it once, and
+    // the second never writes their name over the first's.
+    const claimed = await prisma.progressReport.updateMany({
+      where: { id: report.id, status: { not: 'APPROVED' } },
       data: { status: 'APPROVED', approvedById: me.id, approvedAt: new Date() },
     });
+    if (!claimed.count) throw badRequest('This report has already been approved');
 
     await audit(
       {
@@ -454,8 +576,8 @@ progressRoutes.get(
     if (!report) throw notFound('Progress report not found');
 
     const view = presentReport(report);
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
+    const currency = await companyCurrency();
+    const people = await printContacts([report.preparedById, report.approvedById]);
 
     const photos = await prisma.attachment.findMany({
       where: { entityType: 'progress_report', entityId: report.id },
@@ -481,26 +603,33 @@ progressRoutes.get(
       {
         kind: 'table',
         title: 'Accomplishment against the schedule of values',
-        head: ['Scope', 'Value', 'Prev %', 'This %', 'To date %', 'Earned to date'],
-        widths: [34, 15, 10, 10, 11, 20],
+        head: ['Scope', `Value (${currency})`, 'Prev %', 'This %', 'To date %', `Earned to date (${currency})`],
         align: ['left', 'right', 'right', 'right', 'right', 'right'],
+        rows: view.lines.map((l) => [
+          l.scopeItem.name,
+          formatAmount(l.scopeItem.value),
+          `${l.previousPct.toFixed(2)}%`,
+          `${l.thisPeriodPct.toFixed(2)}%`,
+          `${l.toDatePct.toFixed(2)}%`,
+          formatAmount(l.toDateAmount),
+        ]),
+      },
+      // The money block, as every document prints it: the figures the lines
+      // add up to, each percentage in its label as the VAT's rate is, the
+      // bold row the one that matters — never a TOTAL row inside the table.
+      {
+        kind: 'totals',
         rows: [
-          ...view.lines.map((l) => [
-            l.scopeItem.name,
-            formatMoney(l.scopeItem.value, currency),
-            `${l.previousPct.toFixed(2)}%`,
-            `${l.thisPeriodPct.toFixed(2)}%`,
-            `${l.toDatePct.toFixed(2)}%`,
-            formatMoney(l.toDateAmount, currency),
-          ]),
-          [
-            'TOTAL',
-            formatMoney(view.totals.contractValue, currency),
-            '',
-            `${view.totals.thisPeriodPct.toFixed(2)}%`,
-            `${view.totals.toDatePct.toFixed(2)}%`,
-            formatMoney(view.totals.earnedValue, currency),
-          ],
+          { label: 'Contract value', value: formatMoney(view.totals.contractValue, currency) },
+          {
+            label: `Earned this period (${view.totals.thisPeriodPct.toFixed(2)}%)`,
+            value: formatMoney(view.totals.thisPeriodValue, currency),
+          },
+          {
+            label: `Earned to date (${view.totals.toDatePct.toFixed(2)}%)`,
+            value: formatMoney(view.totals.earnedValue, currency),
+            bold: true,
+          },
         ],
       },
     ];
@@ -528,16 +657,29 @@ progressRoutes.get(
       sections.push({
         kind: 'table',
         title: `Photographs (${photos.length})`,
-        head: ['#', 'Caption', 'Taken'],
+        head: ['No.', 'Caption', 'Taken'],
         widths: [8, 62, 30],
         align: ['right', 'left', 'left'],
         rows: photos.map((p, i) => [
           String(i + 1),
           p.caption ?? p.fileName,
-          p.capturedAt ? formatDate(p.capturedAt) : formatDate(p.uploadedAt),
+          // A timestamp: Manila's day of it, as a DATE column holds one, so
+          // a photo taken before 08:00 is not dated the day before.
+          formatDate(manilaDate(p.capturedAt ?? p.uploadedAt)),
         ]),
       });
     }
+
+    // No route: the people who actually acted, each dated. Prepared by the
+    // author; approved on the record by one person (not through the engine),
+    // open — "Pending" — until somebody does. Nobody "checks" a report in
+    // the app, so no such slot is printed.
+    const preparer = people.get(report.preparedById);
+    const approver = report.approvedById ? people.get(report.approvedById) : undefined;
+    const signatories: Signatory[] = [
+      { role: 'Prepared by', name: report.preparedBy.name, phone: preparer?.phone, email: preparer?.email, at: report.createdAt },
+      { role: 'Approved by', name: report.approvedBy?.name, phone: approver?.phone, email: approver?.email, at: report.approvedAt },
+    ];
 
     const pdf = await renderDocument({
       title: 'Progress Report',
@@ -545,12 +687,7 @@ progressRoutes.get(
       date: report.periodTo,
       reference: `${report.job.number} — ${report.job.name}  ·  Report #${report.reportNo}`,
       sections,
-      signatories: [
-        { role: 'Prepared by', name: report.preparedBy.name, position: report.preparedBy.position ?? undefined, at: report.createdAt },
-        { role: 'Checked by', name: report.job.projectManager?.name },
-        // Approved on the record by one person, not through the engine.
-        { role: 'Approved by', name: report.approvedBy?.name, at: report.approvedAt },
-      ],
+      signatories,
     });
 
     await audit(
@@ -571,30 +708,48 @@ progressRoutes.get(
 export const billingRoutes = Router();
 billingRoutes.use(authenticate);
 
+const BILLING_SORTS = ['number', 'billingDate', 'grossAmount'];
+
+/**
+ * Which billings a list query means — one rule for the list and its printed
+ * twin; `?ids=` (the rows ticked) is ANDed with the rest.
+ */
+function billingListWhere(q: ListQuery): Prisma.ProgressBillingWhereInput {
+  const and: Prisma.ProgressBillingWhereInput[] = [];
+  if (q.filters.jobId) and.push({ jobId: q.filters.jobId });
+  const status = choice(q.filters.status, BillingStatus, 'Status');
+  if (status) and.push({ status });
+  const ids = idsFilter(q.filters.ids);
+  if (ids) and.push({ id: { in: ids } });
+  if (q.search) {
+    and.push({
+      OR: [
+        { number: { contains: q.search, mode: 'insensitive' } },
+        { job: { name: { contains: q.search, mode: 'insensitive' } } },
+        { job: { number: { contains: q.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  return and.length ? { AND: and } : {};
+}
+
+const billingListInclude = {
+  job: { select: { id: true, number: true, name: true, customer: { select: { name: true } } } },
+  progressReport: { select: { id: true, number: true, reportNo: true } },
+} satisfies Prisma.ProgressBillingInclude;
+
 billingRoutes.get(
   '/',
   requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
   handler(async (req, res) => {
     const q = listQuery(req);
-    const where: Prisma.ProgressBillingWhereInput = {};
-    if (q.filters.jobId) where.jobId = q.filters.jobId;
-    if (q.filters.status) where.status = q.filters.status as Prisma.EnumBillingStatusFilter['equals'];
-    if (q.search) {
-      where.OR = [
-        { number: { contains: q.search, mode: 'insensitive' } },
-        { job: { name: { contains: q.search, mode: 'insensitive' } } },
-        { job: { number: { contains: q.search, mode: 'insensitive' } } },
-      ];
-    }
+    const where = billingListWhere(q);
 
     const [rows, total] = await Promise.all([
       prisma.progressBilling.findMany({
         where,
-        include: {
-          job: { select: { id: true, number: true, name: true, customer: { select: { name: true } } } },
-          progressReport: { select: { id: true, number: true, reportNo: true } },
-        },
-        orderBy: orderBy(q, ['number', 'billingDate', 'grossAmount'], { billingDate: 'desc' }),
+        include: billingListInclude,
+        orderBy: orderBy(q, BILLING_SORTS, { billingDate: 'desc' }),
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
@@ -615,6 +770,91 @@ billingRoutes.get(
         q,
       ),
     );
+  }),
+);
+
+/**
+ * A billing counts toward what is billed and collectible once it is approved
+ * — APPROVED or INVOICED, the projects list's "Billed" rule. A draft or one
+ * awaiting approval is a figure nobody has agreed yet: listed, never summed.
+ */
+const BILLING_COUNTED: BillingStatus[] = ['APPROVED', 'INVOICED'];
+
+/**
+ * The billings list on paper (rule 6, A5): the list's own query and sort —
+ * or the rows ticked — on landscape pages, gross and net collectible as
+ * amounts with the code in the head, and what the WHOLE set adds up to in the
+ * totals block (net collectible bold: invoiced is not collectible, EWT is
+ * withheld at source). A billing not yet approved prints its figures in
+ * brackets and is left out of the totals, and the note under them says how
+ * many — finance's words for its drafts. Declared above `/:id`.
+ */
+billingRoutes.get(
+  '/pdf',
+  requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
+  handler(async (req, res) => {
+    const q = listQuery(req);
+    const where = billingListWhere(q);
+    const [rows, count, sums, unapproved, currency, named] = await Promise.all([
+      prisma.progressBilling.findMany({ where, include: billingListInclude, orderBy: orderBy(q, BILLING_SORTS, { billingDate: 'desc' }), take: LIST_CAP }),
+      prisma.progressBilling.count({ where }),
+      prisma.progressBilling.aggregate({
+        where: { AND: [where, { status: { in: BILLING_COUNTED } }] },
+        _sum: { grossAmount: true, netCollectible: true },
+      }),
+      prisma.progressBilling.count({ where: { AND: [where, { status: { notIn: BILLING_COUNTED } }] } }),
+      companyCurrency(),
+      namedInFilter({ jobId: q.filters.jobId }),
+    ]);
+    const reference = listReference(count, rows.length, ['billing', 'billings'], [
+      q.search ? `search "${q.search}"` : null,
+      q.filters.status ? `status ${statusLabel(q.filters.status)}` : null,
+      named.project ? `project ${named.project}` : null,
+      q.filters.ids ? 'the rows selected' : null,
+    ]);
+
+    const pdf = await renderDocument({
+      title: 'Progress Billings',
+      date: new Date(),
+      reference,
+      landscape: true,
+      sections: [
+        {
+          kind: 'table',
+          head: ['Number', 'Project and customer', 'Billing no.', 'Date', 'Progress report', `Gross (${currency})`, `Net collectible (${currency})`, 'Status'],
+          align: ['left', 'left', 'right', 'left', 'left', 'right', 'right', 'left'],
+          rows: rows.map((b) => {
+            const inSum = BILLING_COUNTED.includes(b.status);
+            return [
+              b.number,
+              { title: b.job.name, body: `${b.job.number} · ${b.job.customer.name}` },
+              String(b.billingNo),
+              formatShortDate(b.billingDate),
+              b.progressReport?.number ?? '',
+              bracketed(formatAmount(num(b.grossAmount)), inSum),
+              bracketed(formatAmount(num(b.netCollectible)), inSum),
+              statusLabel(b.status),
+            ];
+          }),
+        },
+        {
+          kind: 'totals',
+          rows: [
+            { label: totalLabel('Gross amount', count, rows.length), value: formatMoney(num(sums._sum.grossAmount), currency) },
+            { label: totalLabel('Net collectible', count, rows.length), value: formatMoney(num(sums._sum.netCollectible), currency), bold: true },
+          ],
+        },
+        ...listNotes([bracketNote(unapproved, ['billing not yet approved', 'billings not yet approved'])]),
+      ],
+    });
+
+    await audit(
+      { entityType: 'progress_billing', entityId: 'list', action: 'EXPORTED', summary: `Exported the billings list as PDF (${listReference(count, rows.length, ['billing', 'billings'], [])})` },
+      req,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="billings.pdf"');
+    res.send(pdf);
   }),
 );
 
@@ -790,26 +1030,67 @@ billingRoutes.get(
   '/:id',
   requireAny('gops.progress_billing.view_all', 'gops.progress_billing.view_own'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const billing = await loadBilling(req.params.id);
     if (!billing) throw notFound('Billing not found');
-    res.json(presentBilling(billing));
+    // The approve route's own checks, so the page never offers a button the
+    // route refuses — the person who raised it never approves it.
+    const { raised } = await billingTrail(billing.id);
+    res.json({
+      ...presentBilling(billing),
+      canApprove:
+        (billing.status === 'DRAFT' || billing.status === 'PENDING_APPROVAL') &&
+        can(me, 'gops.progress_billing.approve') &&
+        raised?.actorId !== me.id,
+    });
   }),
 );
+
+/**
+ * Who raised a billing and who approved it, from its trail. A billing keeps
+ * no preparer column, so the trail's CREATED row IS who raised it — the one
+ * rule the approve route refuses by and the paper prints as "Prepared by" —
+ * and the last APPROVED row is who approved it. A row with no actor (a
+ * billing written outside the routes) names nobody.
+ */
+async function billingTrail(billingId: string) {
+  const rows = await prisma.auditLog.findMany({
+    where: { entityType: 'progress_billing', entityId: billingId, action: { in: ['CREATED', 'APPROVED'] } },
+    orderBy: { at: 'asc' },
+    select: { action: true, actorId: true, actorName: true, at: true },
+  });
+  const named = rows.filter((r) => r.actorName || r.actorId);
+  return {
+    raised: named.find((r) => r.action === 'CREATED'),
+    approved: named.filter((r) => r.action === 'APPROVED').pop(),
+  };
+}
 
 billingRoutes.post(
   '/:id/approve',
   require_('gops.progress_billing.approve'),
   handler(async (req, res) => {
+    const me = currentUser(req);
     const billing = await prisma.progressBilling.findUnique({ where: { id: req.params.id } });
     if (!billing) throw notFound('Billing not found');
     if (billing.status !== 'DRAFT' && billing.status !== 'PENDING_APPROVAL') {
       throw badRequest('This billing has already been approved');
     }
 
-    await prisma.progressBilling.update({
-      where: { id: billing.id },
+    // Rule 3: whoever raised the billing never approves it — a super admin
+    // included, as the approval engine refuses one. Otherwise the paper would
+    // print one person as both Prepared by and Approved by.
+    const { raised } = await billingTrail(billing.id);
+    if (raised?.actorId === me.id) {
+      throw forbidden('You cannot approve a billing you raised yourself');
+    }
+
+    // Claimed as read: two approvers pressing at once approve it once.
+    const claimed = await prisma.progressBilling.updateMany({
+      where: { id: billing.id, status: { in: ['DRAFT', 'PENDING_APPROVAL'] } },
       data: { status: 'APPROVED', approvedAt: new Date() },
     });
+    if (!claimed.count) throw badRequest('This billing has already been approved');
     await audit(
       {
         entityType: 'progress_billing',
@@ -849,22 +1130,50 @@ billingRoutes.get(
     if (!billing) throw notFound('Billing not found');
 
     const view = presentBilling(billing);
-    const company = await prisma.company.findUnique({ where: { id: 'company' } });
-    const currency = company?.currency ?? 'PHP';
+    const currency = await companyCurrency();
 
-    const totals: string[][] = [['Gross amount this billing', formatMoney(view.grossAmount, currency)]];
+    // The money block: a "Less:" row names its own sign, so the figure
+    // prints as the amount taken off; the bold row is the one that matters.
+    const totals: PdfTotal[] = [{ label: 'Gross amount', value: formatMoney(view.grossAmount, currency) }];
     if (view.downpaymentRecouped) {
-      totals.push(['Less: downpayment recouped', formatMoney(-view.downpaymentRecouped, currency)]);
+      totals.push({ label: 'Less: downpayment recouped', value: formatMoney(view.downpaymentRecouped, currency) });
     }
     if (view.retentionWithheld) {
-      totals.push(['Less: retention withheld', formatMoney(-view.retentionWithheld, currency)]);
+      totals.push({ label: 'Less: retention withheld', value: formatMoney(view.retentionWithheld, currency) });
     }
     totals.push(
-      [`Add: VAT (${(view.vatRate * 100).toFixed(0)}%)`, formatMoney(view.vatAmount, currency)],
-      ['INVOICE TOTAL', formatMoney(view.invoiceTotal, currency)],
-      [`Less: creditable withholding tax (${(view.ewtRate * 100).toFixed(0)}%)`, formatMoney(-view.ewtAmount, currency)],
-      ['NET COLLECTIBLE', formatMoney(view.netCollectible, currency)],
+      { label: `VAT (${pct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) },
+      { label: 'Invoice total', value: formatMoney(view.invoiceTotal, currency) },
+      { label: `Less: EWT (${pct(view.ewtRate)})`, value: formatMoney(view.ewtAmount, currency) },
+      { label: 'Net collectible', value: formatMoney(view.netCollectible, currency), bold: true },
     );
+
+    // No route, and no preparer column on the billing: who raised it and
+    // who approved it are the trail's own CREATED and APPROVED rows, each
+    // dated. "Approved by" stays open — "Pending" — until somebody approves
+    // it; a person the trail cannot name (a billing made outside the routes)
+    // is left out rather than guessed, and nobody signs a Conforme in the
+    // app, so no such slot is printed.
+    const { raised, approved: approvedRow } = await billingTrail(billing.id);
+    const people = await printContacts([raised?.actorId, approvedRow?.actorId]);
+    const isApproved = billing.status === 'APPROVED' || billing.status === 'INVOICED';
+    const signatories: Signatory[] = [];
+    if (raised) {
+      const who = raised.actorId ? people.get(raised.actorId) : undefined;
+      signatories.push({ role: 'Prepared by', name: raised.actorName ?? who?.name, phone: who?.phone, email: who?.email, at: raised.at });
+    }
+    if (!isApproved) {
+      signatories.push({ role: 'Approved by' });
+    } else if (approvedRow) {
+      const who = approvedRow.actorId ? people.get(approvedRow.actorId) : undefined;
+      signatories.push({
+        role: 'Approved by',
+        name: approvedRow.actorName ?? who?.name,
+        phone: who?.phone,
+        email: who?.email,
+        at: billing.approvedAt ?? approvedRow.at,
+      });
+    }
 
     const pdf = await renderDocument({
       title: 'Progress Billing',
@@ -890,49 +1199,28 @@ billingRoutes.get(
         {
           kind: 'table',
           title: 'Billing against the schedule of values',
-          head: ['Scope', 'Contract value', 'Billed %', 'To date %', 'Billed to date', 'This billing'],
-          widths: [30, 16, 10, 10, 17, 17],
+          // The screen's words: what was billed BEFORE this billing is
+          // "Previously billed", never "billed to date", which it is not.
+          head: ['Scope', `Contract value (${currency})`, 'Previously billed %', 'To date %', `Previously billed (${currency})`, `This billing (${currency})`],
           align: ['left', 'right', 'right', 'right', 'right', 'right'],
-          rows: [
-            ...view.lines.map((l) => [
-              l.scopeItem.name,
-              formatMoney(l.scopeValue, currency),
-              `${l.previousPct.toFixed(2)}%`,
-              `${l.toDatePct.toFixed(2)}%`,
-              formatMoney(l.previousAmount, currency),
-              formatMoney(l.thisPeriodAmount, currency),
-            ]),
-            [
-              'TOTAL',
-              formatMoney(view.job.contractValue, currency),
-              '',
-              '',
-              '',
-              formatMoney(view.grossAmount, currency),
-            ],
-          ],
+          rows: view.lines.map((l) => [
+            l.scopeItem.name,
+            formatAmount(l.scopeValue),
+            `${l.previousPct.toFixed(2)}%`,
+            `${l.toDatePct.toFixed(2)}%`,
+            formatAmount(l.previousAmount),
+            formatAmount(l.thisPeriodAmount),
+          ]),
         },
-        {
-          kind: 'table',
-          title: 'Summary',
-          head: ['', 'Amount'],
-          widths: [70, 30],
-          align: ['left', 'right'],
-          rows: totals,
-        },
+        { kind: 'totals', rows: totals },
         {
           kind: 'text',
           body:
-            'The creditable withholding tax above is withheld at source by the customer and ' +
-            'remitted to the BIR on our behalf. It is supported by BIR Form 2307 and is not an ' +
-            'unpaid balance.',
+            'The EWT above is withheld at source by the customer and remitted to the BIR on our ' +
+            'behalf. It is supported by BIR Form 2307 and is not an unpaid balance.',
         },
       ],
-      signatories: [
-        { role: 'Prepared by', name: billing.job.projectManager?.name, at: billing.createdAt },
-        { role: 'Checked by', at: billing.approvedAt },
-        { role: 'Conforme' },
-      ],
+      signatories,
     });
 
     await audit(

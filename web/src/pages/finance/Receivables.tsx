@@ -299,6 +299,7 @@ export function Receivables() {
       <DataList<Invoice>
         listKey="invoices"
         endpoint="/invoices"
+        printPath="/api/invoices/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         reloadToken={reload}
@@ -1424,6 +1425,7 @@ export function Payments() {
       <DataList<PaymentRow>
         listKey="payments"
         endpoint="/payments"
+        printPath="/api/payments/pdf"
         columns={columns}
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, reference, customer, supplier, person…"
