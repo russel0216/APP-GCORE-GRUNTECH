@@ -24,6 +24,7 @@ import {
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CostPanelBlock, type Item } from './Quotations';
 import { AppendQuotePanel, linesFromItems } from './QuotationEditor';
+import { loadPeople } from '../../components/People';
 import {
   DiscountCalculator,
   ProductCells,
@@ -176,8 +177,7 @@ export function SalesOrders() {
 
   useEffect(() => {
     if (!seesAll) return;
-    api
-      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.sales_orders.create' })}`)
+    loadPeople('gops.sales_orders.create')
       .then((people) => setOwners(people.map((p) => ({ value: p.id, label: p.name }))))
       .catch(() => setOwners([]));
   }, [seesAll]);

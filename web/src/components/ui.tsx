@@ -453,6 +453,9 @@ export function Field({
   // A child that brings its own id keeps it, and the label points at THAT id —
   // otherwise the label would name an element that does not exist.
   const controlId = wired ? ((children as ReactElement<{ id?: string }>).props.id ?? id) : id;
+  // A control that is required says so on its label, whether the Field or the
+  // control itself was told.
+  const marked = required || (wired && (children as ReactElement<{ required?: boolean }>).props.required === true);
   const control = wired
     ? cloneElement(children as ReactElement<Record<string, unknown>>, {
         id: controlId,
@@ -467,7 +470,7 @@ export function Field({
     <div className={`field${error ? ' invalid' : ''}`}>
       <label htmlFor={wired ? controlId : htmlFor}>
         {label}
-        {required && (
+        {marked && (
           <span className="req" aria-hidden="true">
             *
           </span>

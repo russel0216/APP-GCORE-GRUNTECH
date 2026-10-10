@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, type ListResult } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -25,6 +25,7 @@ import { ProjectGantt } from './ProjectGantt';
 import { JOB_STATUSES, JOB_TONES, ProgressBar } from './Projects';
 import { todayLocal } from '../../lib/day';
 import { NumberInput } from '../../components/NumberInput';
+import { PersonSelect, usePeople } from '../../components/People';
 import { ProjectBudgetRequestsCard, BudgetRequestModal } from './BudgetRequests';
 
 /**
@@ -2160,7 +2161,9 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [people, setPeople] = useState<{ id: string; name: string; position: string | null }[]>([]);
+  // Naming a project manager is not the admin right to list users.
+  const { people } = usePeople();
+  const pmId = useId();
   const [form, setForm] = useState({
     name: job.name,
     status: job.status,
@@ -2172,14 +2175,6 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
     actualEndDate: job.actualEndDate?.slice(0, 10) ?? '',
     notes: job.notes ?? '',
   });
-
-  useEffect(() => {
-    // Naming a project manager is not the admin right to list users.
-    api
-      .get<{ id: string; name: string; position: string | null }[]>('/users/lookup')
-      .then(setPeople)
-      .catch(() => {});
-  }, []);
 
   async function save() {
     setBusy(true);
@@ -2238,19 +2233,15 @@ function EditJobModal({ job, onClose, onSaved }: { job: Job; onClose: () => void
             ))}
           </select>
         </Field>
-        <Field label="Project manager">
-          <select
+        <Field label="Project manager" htmlFor={pmId}>
+          <PersonSelect
+            id={pmId}
             value={form.projectManagerId}
-            onChange={(e) => setForm({ ...form, projectManagerId: e.target.value })}
-          >
-            <option value="">— unassigned —</option>
-            {people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.position ? ` — ${p.position}` : ''}
-              </option>
-            ))}
-          </select>
+            onChange={(id) => setForm((f) => ({ ...f, projectManagerId: id }))}
+            people={people}
+            placeholder="— unassigned —"
+            current={job.projectManager}
+          />
         </Field>
         <Field label="Customer P.O.">
           <input

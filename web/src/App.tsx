@@ -80,7 +80,7 @@ import { TrainingCalendar } from './pages/hr/academy/TrainingCalendar';
 import { Sessions, SessionDetail } from './pages/hr/academy/Sessions';
 import { Passport } from './pages/hr/academy/Passport';
 import { Passports } from './pages/hr/academy/Passports';
-import { Receivables, InvoiceDetail, Payments } from './pages/finance/Receivables';
+import { Receivables, InvoiceDetail, Payments, PaymentDetail } from './pages/finance/Receivables';
 import { Payables, BillDetail } from './pages/finance/Payables';
 import { Expenses, ExpenseClaimDetail } from './pages/finance/Expenses';
 import { CashAdvances, CashAdvanceDetail } from './pages/finance/CashAdvances';
@@ -1099,6 +1099,16 @@ function Routed() {
             <Guard permission="gfin.payments.view_all">
               <Payments />
             </Guard>
+          }
+        />
+        {/* One payment. Whoever may read receivables or payables opens it, as the
+            API allows — a collection is linked from the invoice it settled. */}
+        <Route
+          path="/g-fin/payments/:id"
+          element={
+            <GuardAny permissions={['gfin.payments.view_all', 'gfin.ar.view_all', 'gfin.ap.view_all']}>
+              <PaymentDetail />
+            </GuardAny>
           }
         />
         <Route

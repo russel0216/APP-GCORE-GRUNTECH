@@ -5,6 +5,7 @@ import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, isDayKey, parseDay, todayLocal } from '../../lib/day';
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
+import { PersonSelect, loadPeople, type PersonRow } from '../../components/People';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
 import { Checkbox, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, formatMoney, useToast } from '../../components/ui';
@@ -212,7 +213,7 @@ export function QuotationEditor() {
   const [dirty, setDirty] = useState(false);
 
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [authors, setAuthors] = useState<Option[]>([]);
+  const [authors, setAuthors] = useState<PersonRow[]>([]);
   const [contacts, setContacts] = useState<Option[]>([]);
   const [sites, setSites] = useState<Option[]>([]);
   const [customerTerms, setCustomerTerms] = useState<string | null>(null);
@@ -366,8 +367,7 @@ export function QuotationEditor() {
       .then((r) => setLeads(r.rows))
       .catch(() => {});
     if (canPickAuthor) {
-      api
-        .get<Option[]>(`/users/lookup${qs({ holding: 'gops.quotations.create' })}`)
+      loadPeople('gops.quotations.create')
         .then(setAuthors)
         .catch(() => setAuthors([]));
     }
@@ -895,8 +895,7 @@ export function QuotationEditor() {
   const costingOptions = merge(pinnedCostings, costings);
   const leadOptions =
     lead && !leads.some((l) => l.id === lead.id) ? [{ id: lead.id, companyName: lead.companyName }, ...leads] : leads;
-  const authorOptions = me && !authors.some((a) => a.id === myId) ? [{ id: myId, name: me.user.name }, ...authors] : authors;
-  const ownerName = editing ? quotation!.owner.name : (authorOptions.find((a) => a.id === header.ownerId)?.name ?? me?.user.name ?? '');
+  const ownerName = editing ? quotation!.owner.name : (authors.find((a) => a.id === header.ownerId)?.name ?? me?.user.name ?? '');
   const leadWithoutCustomer = !editing && !!lead && !lead.customer;
   const validityDays = isDayKey(header.dueDate) ? daysBetween(issueDate, header.dueDate) : null;
 
@@ -1049,14 +1048,20 @@ export function QuotationEditor() {
               />
             </Field>
             {canPickAuthor ? (
-              <Field label="Author" hint="Their employee digits go into the number, and only they (or a manager) can edit it">
-                <select value={header.ownerId} onChange={(e) => set('ownerId', e.target.value)}>
-                  {authorOptions.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
+              <Field
+                label="Author"
+                hint="Their employee digits go into the number, and only they (or a manager) can edit it"
+                htmlFor="qe-author"
+              >
+                {/* You are always offered, even when you do not hold the create right yourself. */}
+                <PersonSelect
+                  id="qe-author"
+                  value={header.ownerId}
+                  onChange={(v) => set('ownerId', v)}
+                  people={authors}
+                  current={me ? { id: myId, name: me.user.name } : null}
+                  required
+                />
               </Field>
             ) : (
               <Static label="Author">{ownerName}</Static>

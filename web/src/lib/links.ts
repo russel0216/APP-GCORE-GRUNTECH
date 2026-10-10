@@ -67,8 +67,6 @@ const DETAIL: Record<string, string> = {
 /** Types that open inside a list screen, through a query parameter. */
 const QUERY: Record<string, string> = {
   service_visit: '/g-ops/visits?visit=',
-  payment: '/g-fin/payments?payment=',
-  disbursement: '/g-fin/payments?payment=',
   sales_activity: '/g-ops/calendar/activities/',
   activity: '/g-ops/calendar/activities/',
   course: '/g-hr/academy/courses?course=',
@@ -86,6 +84,10 @@ const SCREEN: Record<string, string> = {
   training_record: '/g-hr/academy/passports',
   training_certification: '/g-hr/academy/passports',
   budget_request: '/g-ops/budget-requests',
+  // Finance. A payment has its own page since 2026-10-09; a disbursement is
+  // the same record seen from the money-out side.
+  payment: '/g-fin/payments',
+  disbursement: '/g-fin/payments',
   attendance: '/g-hr/attendance',
   report_template: '/g-ops/report-templates',
   number_sequence: '/admin/numbering',

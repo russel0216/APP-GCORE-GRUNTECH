@@ -34,12 +34,6 @@ button.cal-head[aria-pressed='true'] {
   width: auto;
 }
 
-/* Search box over a select, for the pickers that grow without bound. */
-.cal-picker {
-  display: grid;
-  gap: var(--s-1);
-}
-
 /* Three stacked spans inside the chip button: time, subject, who. */
 .cal-item > span {
   display: block;
@@ -66,21 +60,9 @@ button.cal-head[aria-pressed='true'] {
 
 /* ── The activity's detailed view (2026-10-08) ───────────────────────────── */
 
-/* Label beside value, SCORO's "Quote details" way. */
+/* Label beside value: the read-only grammar in styles.css (.kv). */
 .act-rows {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--s-2) var(--s-4);
-  margin: 0 0 var(--s-4);
-}
-
-.act-rows dt {
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-
-.act-rows dd {
-  margin: 0;
+  margin-bottom: var(--s-4);
 }
 
 .act-notes {

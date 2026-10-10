@@ -10,6 +10,7 @@ import { ActivityLog } from '../../components/ActivityLog';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
+import { loadPeople } from '../../components/People';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, useToast, type Tone } from '../../components/ui';
 
 export const OUTCOMES = [
@@ -181,8 +182,7 @@ export function Quotations() {
 
   useEffect(() => {
     if (!seesAll) return;
-    api
-      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.quotations.create' })}`)
+    loadPeople('gops.quotations.create')
       .then((people) => setOwners(people.map((p) => ({ value: p.id, label: p.name }))))
       .catch(() => setOwners([]));
   }, [seesAll]);

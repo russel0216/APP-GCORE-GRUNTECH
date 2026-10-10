@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, downloadBlob, qs } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
@@ -7,6 +7,7 @@ import { RecordHeader } from '../../../components/RecordHeader';
 import { useConfirm } from '../../../components/Confirm';
 import { useUnsavedChanges } from '../../../components/Navigation';
 import { PeoplePicker, type Person } from '../../../components/PeoplePicker';
+import { PersonSelect, loadPeople, type PersonRow } from '../../../components/People';
 import { MeetLink } from '../../../components/MeetLink';
 import { Attachments } from '../../../components/Attachments';
 import {
@@ -147,14 +148,6 @@ interface EmployeeLookup {
   employeeNo: string;
   firstName: string;
   lastName: string;
-  position: string | null;
-  department: { id: string; name: string } | null;
-}
-
-interface UserLookup {
-  id: string;
-  name: string;
-  email: string;
   position: string | null;
   department: { id: string; name: string } | null;
 }
@@ -406,7 +399,8 @@ export function SessionModal({
   const { me, can } = useAuth();
   const toast = useToast();
   const courses = useCourseOptions();
-  const [trainers, setTrainers] = useState<UserLookup[]>([]);
+  const [trainers, setTrainers] = useState<PersonRow[]>([]);
+  const trainerField = useId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const editing = Boolean(initial);
@@ -415,8 +409,7 @@ export function SessionModal({
   const canPickTrainer = can('ghr.training_sessions.edit_all');
   useEffect(() => {
     if (!canPickTrainer) return;
-    api
-      .get<UserLookup[]>(`/users/lookup${qs({ holding: 'ghr.training_sessions.create' })}`)
+    loadPeople('ghr.training_sessions.create')
       .then(setTrainers)
       .catch(() => setTrainers([]));
   }, [canPickTrainer]);
@@ -495,16 +488,15 @@ export function SessionModal({
     }
   }
 
-  const trainerOptions: UserLookup[] = useMemo(() => {
+  // A trainer schedules their own sessions, so they are always a choice; the
+  // trainer already on a session stays one (PersonSelect's `current`).
+  const trainerOptions: PersonRow[] = useMemo(() => {
     const list = [...trainers];
-    if (initial && !list.some((t) => t.id === initial.trainerId)) {
-      list.unshift({ id: initial.trainerId, name: initial.trainer.name, email: '', position: null, department: null });
-    }
     if (me && can('ghr.training_sessions.create') && !list.some((t) => t.id === me.user.id)) {
-      list.unshift({ id: me.user.id, name: me.user.name, email: me.user.email, position: me.user.position, department: null });
+      list.unshift({ id: me.user.id, name: me.user.name, email: me.user.email, position: me.user.position });
     }
     return list;
-  }, [trainers, initial, me, can]);
+  }, [trainers, me, can]);
 
   return (
     <Modal
@@ -534,21 +526,19 @@ export function SessionModal({
         <Field
           label="Trainer"
           required
+          htmlFor={trainerField}
           hint={canPickTrainer ? 'People holding the Trainer right.' : 'You train the sessions you schedule.'}
         >
-          <select
+          <PersonSelect
+            id={trainerField}
             value={form.trainerId}
-            onChange={(e) => setForm({ ...form, trainerId: e.target.value })}
+            onChange={(id) => setForm({ ...form, trainerId: id })}
+            people={trainerOptions}
+            placeholder="Choose a trainer…"
+            required
             disabled={!canPickTrainer}
-          >
-            <option value="">Choose a trainer…</option>
-            {trainerOptions.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-                {t.department ? ` — ${t.department.name}` : ''}
-              </option>
-            ))}
-          </select>
+            current={initial ? { id: initial.trainerId, name: initial.trainer.name } : null}
+          />
         </Field>
       </div>
 

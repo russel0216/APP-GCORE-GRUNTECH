@@ -77,7 +77,11 @@ export function toPerson(row: PersonRow): Person {
  * it), grouped by department when the people carry one, with "— none —"
  * unless the choice is required. A person already chosen who is no longer in
  * the list (left the role, deactivated) stays as an option, so opening an old
- * record never silently clears it.
+ * record never silently clears it — named through `current`, or, when the
+ * caller has no name for them, as "someone not on this list".
+ *
+ * Inside a `Field` it is wired like a native select (`fieldControl`): the
+ * label, the hint and the error reach it through `aria-describedby`.
  */
 export function PersonSelect({
   id,
@@ -88,8 +92,11 @@ export function PersonSelect({
   required,
   disabled,
   current,
+  self,
   invalid,
   describedBy,
+  'aria-describedby': fieldDescribedBy,
+  'aria-invalid': fieldInvalid,
 }: {
   id?: string;
   value: string;
@@ -100,8 +107,14 @@ export function PersonSelect({
   disabled?: boolean;
   /** The person on the record now, shown even when not in `people`. */
   current?: { id: string; name: string } | null;
+  /** The viewer's own id: their row reads "(you)". */
+  self?: string | null;
   invalid?: boolean;
   describedBy?: string;
+  /** Set by `Field`. */
+  'aria-describedby'?: string;
+  /** Set by `Field`. */
+  'aria-invalid'?: boolean;
 }) {
   const autoId = useId();
   const groups = new Map<string, PersonRow[]>();
@@ -110,25 +123,38 @@ export function PersonSelect({
     groups.set(g, [...(groups.get(g) ?? []), p]);
   }
   const grouped = groups.size > 1 || (groups.size === 1 && !groups.has(''));
-  const missing = current && !people.some((p) => p.id === current.id) ? current : null;
+  const listed = (pid: string) => people.some((p) => p.id === pid);
+  const missing = current && !listed(current.id) ? current : null;
+  // A value nobody can name (filled in from another record) still shows as
+  // chosen, never as the first name in the list.
+  const unnamed = value && !listed(value) && missing?.id !== value ? value : null;
+  const you = (pid: string) => (self && pid === self ? ' (you)' : '');
   const option = (p: PersonRow) => (
     <option key={p.id} value={p.id}>
       {p.name}
+      {you(p.id)}
       {p.position ? ` — ${p.position}` : ''}
     </option>
   );
+  const described = [describedBy, fieldDescribedBy].filter(Boolean).join(' ') || undefined;
   return (
     <select
       id={id ?? autoId}
       value={value}
       required={required}
       disabled={disabled}
-      aria-invalid={invalid || undefined}
-      aria-describedby={describedBy}
+      aria-invalid={invalid || fieldInvalid || undefined}
+      aria-describedby={described}
       onChange={(e) => onChange(e.target.value)}
     >
       {(!required || !value) && <option value="">{placeholder}</option>}
-      {missing && <option value={missing.id}>{missing.name}</option>}
+      {missing && (
+        <option value={missing.id}>
+          {missing.name}
+          {you(missing.id)}
+        </option>
+      )}
+      {unnamed && <option value={unnamed}>{people.length ? 'Someone not on this list' : '…'}</option>}
       {grouped
         ? [...groups.entries()].map(([g, rows]) => (
             <optgroup key={g || '—'} label={g || 'No department'}>
@@ -139,3 +165,5 @@ export function PersonSelect({
     </select>
   );
 }
+// Field wires its label, hint and error to it as it does to a native select.
+(PersonSelect as unknown as { fieldControl: boolean }).fieldControl = true;

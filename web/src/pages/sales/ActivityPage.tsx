@@ -8,6 +8,7 @@ import { RecordHeader, type MoreItem } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { useBackLink } from '../../components/Navigation';
 import { Avatar, ErrorBox, Loading, formatDateTime, useToast } from '../../components/ui';
+import { usePeople } from '../../components/People';
 import { ActivityModal } from './ActivityForm';
 import {
   ACTIVITY_TONES,
@@ -18,7 +19,6 @@ import {
   RSVP_MARK,
   type Activity,
   type ActivityTypeDef,
-  type Person,
   type Rsvp,
 } from './activityShared';
 
@@ -79,7 +79,8 @@ export function ActivityPage() {
   const [actionError, setActionError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [people, setPeople] = useState<Person[]>([]);
+  // The form's people: who may be booked (people who can open the calendar).
+  const { people } = usePeople('gops.calendar.view_all');
   const [types, setTypes] = useState<ActivityTypeDef[]>(BUILTIN_TYPES);
   const confirm = useConfirm();
   // Another record opened in this same page (a bell, Ctrl+K) withdraws a question about the last one.
@@ -153,12 +154,8 @@ export function ActivityPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // The form's lists: who may be booked (people who can open the calendar) and the types on offer.
+  // The form's other list: the types on offer.
   useEffect(() => {
-    api
-      .get<Person[]>(`/users/lookup${qs({ holding: 'gops.calendar.view_all' })}`)
-      .then((rows) => setPeople(rows.map((p) => ({ id: p.id, name: p.name, photoPath: p.photoPath ?? null }))))
-      .catch(() => {});
     api
       .get<ActivityTypeDef[]>('/reference/activity-types')
       .then((rows) => {

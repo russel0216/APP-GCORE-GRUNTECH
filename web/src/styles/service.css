@@ -107,11 +107,6 @@ ul.svc-legend {
   margin-bottom: var(--s-5);
 }
 
-.svc-subhead {
-  margin: var(--s-5) 0 var(--s-2);
-  font-size: var(--fs-md);
-}
-
 .svc-footnote {
   margin: var(--s-3) 0 0;
 }
@@ -168,13 +163,7 @@ ul.svc-legend {
   }
 }
 
-/* The register's inline "add as a new customer" row, and a multi-line spec. */
-.ib-add-customer {
-  gap: var(--s-2);
-  flex-wrap: wrap;
-  align-items: center;
-}
-
+/* A multi-line specification. */
 .ib-spec {
   white-space: pre-wrap;
 }

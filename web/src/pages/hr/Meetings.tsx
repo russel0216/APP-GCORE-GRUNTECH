@@ -5,7 +5,8 @@ import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
-import { PeoplePicker, type Person } from '../../components/PeoplePicker';
+import { PeoplePicker } from '../../components/PeoplePicker';
+import { toPerson, usePeople } from '../../components/People';
 import { MeetLink } from '../../components/MeetLink';
 import { Attachments } from '../../components/Attachments';
 import {
@@ -140,14 +141,6 @@ interface CalendarRow {
   mine: boolean;
 }
 
-interface LookupRow {
-  id: string;
-  name: string;
-  email: string;
-  position: string | null;
-  department: { id: string; name: string } | null;
-}
-
 /** Local wall-clock value for a datetime-local input. */
 function toLocalInput(d: Date): string {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -173,24 +166,10 @@ function durationText(startsAt: string, endsAt: string): string {
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 
-function usePeople(): Person[] {
-  const [people, setPeople] = useState<Person[]>([]);
-  useEffect(() => {
-    api
-      .get<LookupRow[]>('/users/lookup')
-      .then((rows) =>
-        setPeople(
-          rows.map((r) => ({
-            id: r.id,
-            name: r.name,
-            sub: r.position ?? r.email,
-            group: r.department?.name ?? undefined,
-          })),
-        ),
-      )
-      .catch(() => setPeople([]));
-  }, []);
-  return people;
+/** Everyone with a login, as the invitee picker takes them — the one people lookup. */
+function useInvitable() {
+  const { people } = usePeople();
+  return useMemo(() => people.map(toPerson), [people]);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -507,7 +486,7 @@ function MeetingModal({
 }) {
   const { me, can } = useAuth();
   const toast = useToast();
-  const people = usePeople();
+  const people = useInvitable();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [jobId, setJobId] = useState(initial?.job?.id ?? presetJobId ?? '');
@@ -1096,7 +1075,7 @@ function AddPeopleModal({
   onAdded: () => void;
 }) {
   const toast = useToast();
-  const people = usePeople();
+  const people = useInvitable();
   const [ids, setIds] = useState<string[]>([]);
   const [required, setRequired] = useState(true);
   const [busy, setBusy] = useState(false);

@@ -5,6 +5,7 @@ import { dayKeyOf } from '../../lib/day';
 import { Checkbox, ErrorBox, Field, Modal, ModalFoot, formatDateTime } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
 import { PeoplePicker } from '../../components/PeoplePicker';
+import { PersonSelect, toPerson } from '../../components/People';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { REMINDERS, REPEATS, type Activity, type ActivityTypeDef, type Person } from './activityShared';
 
@@ -157,7 +158,8 @@ export function ActivityModal({
   const callLinkBad = !!form.callLink.trim() && !/^https?:\/\//i.test(form.callLink.trim());
 
   // ── Who may be booked, who may be invited ──
-  // Someone who has since lost calendar access is still who it was booked for.
+  // Someone who has since lost calendar access is still who it was booked for
+  // (on "Booked for" through PersonSelect's `current`; here, for the invitees' list).
   const peopleOptions = activity && !people.some((p) => p.id === activity.assignedTo.id) ? [activity.assignedTo, ...people] : people;
   // Invited people who have since lost calendar access stay on the list.
   const inviteOptions = [
@@ -338,14 +340,15 @@ export function ActivityModal({
                 ))}
               </select>
             </Field>
-            <Field label="Booked for">
-              <select value={form.assignedToId} onChange={(e) => set('assignedToId', e.target.value)}>
-                {peopleOptions.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
+            <Field label="Booked for" htmlFor="act-booked-for">
+              <PersonSelect
+                id="act-booked-for"
+                value={form.assignedToId}
+                onChange={(v) => set('assignedToId', v)}
+                people={people}
+                current={activity?.assignedTo ?? null}
+                required
+              />
             </Field>
           </div>
 
@@ -385,7 +388,7 @@ export function ActivityModal({
             <h4>Participants</h4>
             <p className="faint act-side-note">They are told when you save, and it shows on their calendar and in My Work.</p>
             <PeoplePicker
-              people={inviteOptions.map((p) => ({ id: p.id, name: p.name, photoId: p.photoPath ?? null }))}
+              people={inviteOptions.map(toPerson)}
               value={form.inviteeIds}
               onChange={(ids) => set('inviteeIds', ids)}
               exclude={[form.assignedToId]}

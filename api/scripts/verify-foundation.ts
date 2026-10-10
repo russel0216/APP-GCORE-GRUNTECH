@@ -13,6 +13,8 @@
  * against a development database; it refuses to run against production.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
@@ -1537,6 +1539,51 @@ async function main() {
     'empty stays empty, and the edit text has no commas',
     formatNumberText('', 'money') === '' && formatNumberText(null, 'money') === '' && editNumberText('1,000.5') === '1000.5' && editNumberText(42) === '42',
   );
+
+  // ── One way to do each thing (rules 17, 19, 20) ───────────────────────────
+  // These rules have no click-path a test could take, and each was broken by
+  // hand-written copies before it was written down — 23 /users/lookup fetches,
+  // nine local confirm bars. So the source itself is read: every page and
+  // component, comments left out.
+  console.log('\nOne way to do each thing (the web source)');
+  {
+    const webSrc = path.resolve(__dirname, '../../web/src');
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(tsx?|jsx?)$/.test(entry.name)) files.push(full);
+      }
+    };
+    walk(webSrc);
+    const code = (file: string) =>
+      fs
+        .readFileSync(file, 'utf8')
+        .split('\n')
+        .map((line, i) => ({ line: i + 1, text: line }))
+        .filter(({ text }) => !/^\s*(\/\/|\*|\/\*)/.test(text));
+    const offenders = (pattern: RegExp, except: string[] = []) =>
+      files
+        .filter((f) => !except.some((e) => f.endsWith(e)))
+        .flatMap((f) => code(f).filter(({ text }) => pattern.test(text)).map(({ line }) => `${path.relative(webSrc, f)}:${line}`));
+
+    const lookups = offenders(/\.get(<[^(]*>)?\(\s*[`'"]\/users\/lookup/, ['components/People.tsx']);
+    check(
+      'people are fetched in one place: no screen calls /users/lookup itself (usePeople / loadPeople)',
+      lookups.length === 0,
+      lookups.join(', '),
+    );
+    const numberBoxes = offenders(/<input[^>]*type=["']number["']/);
+    check('no screen writes <input type="number"> (NumberInput, rule 17)', numberBoxes.length === 0, numberBoxes.join(', '));
+    const browserAsks = offenders(/(window\.(confirm|prompt|alert)\(|(^|[^.\w])(confirm|prompt|alert)\()/, ['components/Confirm.tsx']);
+    check(
+      'nothing asks through the browser: no confirm(), prompt() or alert() (useConfirm, rule 19)',
+      browserAsks.length === 0,
+      browserAsks.join(', '),
+    );
+    check('the source scan found the web app', files.length > 100, `${files.length} files`);
+  }
 
   // ── The list pattern's URL (web/src/lib/listUrl.ts, rule 16) ───────────────
   console.log('\nList URLs, filters and saved views');

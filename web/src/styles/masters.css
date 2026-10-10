@@ -16,34 +16,7 @@
   margin: 0;
 }
 
-/* A label/value list. Replaces the inline-styled Detail/Row helpers: one
-   hairline per row so a long record still reads as a form, not a paragraph. */
-.m-details {
-  margin: 0;
-}
-
-.m-details > div {
-  display: flex;
-  gap: var(--s-3);
-  padding: var(--s-1) 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.m-details > div:last-child {
-  border-bottom: 0;
-}
-
-.m-details dt {
-  flex: 0 0 9.5rem;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-
-.m-details dd {
-  margin: 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
+/* .m-details is the read-only grammar in styles.css (.kv). */
 
 /* A pill that sits after a name in a cell or a heading. */
 .m-inline {
@@ -174,14 +147,6 @@
   padding-top: var(--s-2);
 }
 
-.m-section-head {
-  margin: var(--s-5) 0 var(--s-3);
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
 /* ── Partner list and detail head ───────────────────────────────────────── */
 
 .m-subname {
@@ -192,18 +157,6 @@
 
 .m-kpis {
   margin-bottom: var(--s-2);
-}
-
-@media (max-width: 640px) {
-  .m-details > div {
-    flex-direction: column;
-    gap: 0;
-  }
-
-  .m-details dt {
-    flex-basis: auto;
-  }
-
 }
 
 .m-industries {

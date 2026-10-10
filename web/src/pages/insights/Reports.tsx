@@ -656,7 +656,7 @@ export function CashForecast() {
                     {data.uncleared.rows.map((p) => (
                       <tr key={p.id}>
                         <td>
-                          <Link to={`/g-fin/payments?payment=${encodeURIComponent(p.id)}`} className="mono">
+                          <Link to={`/g-fin/payments/${encodeURIComponent(p.id)}`} className="mono">
                             {p.number}
                           </Link>
                         </td>

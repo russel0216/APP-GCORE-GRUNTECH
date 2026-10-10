@@ -2534,21 +2534,91 @@ hr.rule {
 
 /* ──────────────────────────── G-HR: the clock ───────────────────────────── */
 
-/* Label / value pairs on a detail card. */
-.kv {
+/* ──────────── Read-only label / value: one grammar (2026-10-09) ──────────── */
+
+/* Every record page states its facts one way — the quotation page's, which is
+   SCORO's "Quote details": the label in a 10rem column beside its value, one
+   size for both, the label told apart by weight. Six patterns used to do this
+   six ways (the sales order and the quotation, siblings, did not match); they
+   now share these rules. A new screen writes `<dl className="kv">` with dt/dd
+   pairs. The row forms (.m-details > div, .qd-row, .cs-fact, .sales-row) are
+   kept only because their markup wraps each pair. */
+.kv,
+.act-rows {
   display: grid;
-  grid-template-columns: minmax(110px, auto) 1fr;
-  gap: 7px 14px;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  gap: var(--s-2) var(--s-3);
   margin: 0;
-  font-size: 13px;
+  align-items: baseline;
+  font-size: var(--fs-md);
 }
 
-.kv dt {
+.m-details {
+  margin: 0;
+}
+
+.m-details > div,
+.qd-row,
+.cs-fact,
+.sales-row {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-1) 0;
+  align-items: baseline;
+  font-size: var(--fs-md);
+}
+
+.kv dt,
+.act-rows dt,
+.m-details dt,
+.qd-row dt,
+.cs-fact dt,
+.sales-row-label {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.kv dd,
+.act-rows dd,
+.m-details dd,
+.qd-row dd,
+.cs-fact dd {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+}
+
+/* A section inside a form ("Links", "Personnel to send", "Primary contact"):
+   one heading look in every module's forms. */
+.svc-subhead,
+.m-section-head {
+  margin: var(--s-5) 0 var(--s-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
   color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-.kv dd {
-  margin: 0;
+/* On a phone the label sits over its value. */
+@media (max-width: 520px) {
+  .kv,
+  .act-rows,
+  .m-details > div,
+  .qd-row,
+  .cs-fact,
+  .sales-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .kv dd,
+  .act-rows dd {
+    margin-bottom: var(--s-2);
+  }
 }
 
 .clock-now {
@@ -4899,6 +4969,13 @@ a.icon-row:hover {
 
 .lookup-new button {
   color: var(--neon);
+  font-size: var(--fs-md);
+}
+
+/* Nothing on file matches, and this person may not file a new one. */
+.lookup-none {
+  padding: var(--s-2) var(--s-3);
+  color: var(--muted);
   font-size: var(--fs-md);
 }
 

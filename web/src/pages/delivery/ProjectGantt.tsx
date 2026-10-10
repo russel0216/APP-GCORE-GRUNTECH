@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { addDays, mondayOf, parseDay, todayLocal } from '../../lib/day';
 import { Empty, ErrorBox, Field, ModalFoot, StatusBadge, formatDate, useToast } from '../../components/ui';
 import { NumberInput } from '../../components/NumberInput';
+import { PersonSelect, usePeople } from '../../components/People';
 
 /**
  * The Scope of Work as a Gantt chart (2026-10-06) — the old gasiontech
@@ -371,7 +372,8 @@ function TaskEditor({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
+  const { people } = usePeople();
+  const assigneeId = useId();
   const [form, setForm] = useState({
     name: task?.name ?? '',
     scopeItemId: task?.scopeItemId ?? scopeItems[0]?.id ?? '',
@@ -381,13 +383,6 @@ function TaskEditor({
     status: task?.status ?? 'NOT_STARTED',
     assignedToId: task?.assignedTo?.id ?? '',
   });
-
-  useEffect(() => {
-    api
-      .get<{ id: string; name: string }[]>('/users/lookup')
-      .then(setPeople)
-      .catch(() => {});
-  }, []);
 
   const valid = form.name.trim().length >= 2 && (!form.startDate || !form.dueDate || form.dueDate >= form.startDate);
 
@@ -472,15 +467,15 @@ function TaskEditor({
             onChange={(e) => setForm({ ...form, progressPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
           />
         </Field>
-        <Field label="Assigned to">
-          <select value={form.assignedToId} onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}>
-            <option value="">— nobody —</option>
-            {people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+        <Field label="Assigned to" htmlFor={assigneeId}>
+          <PersonSelect
+            id={assigneeId}
+            value={form.assignedToId}
+            onChange={(id) => setForm((f) => ({ ...f, assignedToId: id }))}
+            people={people}
+            placeholder="— nobody —"
+            current={task?.assignedTo}
+          />
         </Field>
       </div>
       {/* The modal foot's order in a panel: [Remove] … [Cancel] [Save]. */}

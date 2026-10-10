@@ -279,14 +279,54 @@ four databases and four copies of "customer".
       removed — never the only way to perform an action, which moves into
       ⋯ instead.
 
+20. **One way to pick, one way to state a fact** (2026-10-09, rule 19's
+    content half: the editors of every module read alike, not only their
+    buttons).
+    - **A person** (a login): `components/People.tsx` — `usePeople(holding)`
+      / `loadPeople(holding)` is the ONE fetch of `/users/lookup`, cached a
+      minute per holding key, so ten forms asking for project managers make
+      one request; `PersonSelect` is the one single-person control (a native
+      select grouped by department, "— none —" unless required, `current`
+      keeping someone on the record who has since left the list, `self`
+      marking the viewer's row "(you)"); several people are `PeoplePicker`
+      fed by `toPerson()`. Never a hand-written
+      `/users/lookup` fetch or a `<select>` of users — verify-foundation reads
+      the source and fails on one. `/employees/lookup` (an employee, who may
+      have no login) is another list and keeps its own pickers.
+    - **A customer**: `CustomerPicker` wherever a form picks one, unless the
+      choice is deliberately narrower (a job's customer is its costing's; a
+      requestor without `gops.customers.view_all` picks from the job-order or
+      CAD form's own options). "Add as a new customer" is offered only to a
+      `gops.customers.create` holder and where the form allows it
+      (`allowCreate` — not on Modify of a registered machine). The lead form
+      keeps its own lookup: its text is the lead's company name, saved
+      whether or not a customer is linked.
+    - **Both are `fieldControl`s**, like `NumberInput`: inside a `Field` the
+      label, the hint and the error reach the control, and a control marked
+      `required` puts the asterisk on its label.
+    - **Read-only facts**: `<dl className="kv">` with dt/dd pairs — the
+      quotation page's look: the label in a 10rem column beside its value,
+      one size for both, the label told apart by weight, stacked on a phone.
+      `.m-details`, `.qd-row`, `.cs-fact`, `.sales-row` and `.act-rows` wrap
+      their pairs differently and share the same rules in `styles.css`; no
+      new pattern. A section inside a form is headed `.svc-subhead` (or
+      `.m-section-head`, the same look).
+    - **Forms**: a page editor puts labels BESIDE values (`.qe-rows`, SCORO's
+      way); a modal puts them above (`Field`, `.grid-2`) so it stays narrow.
+    - **Every record has a page at `/:id`**; a modal is for a form. Payments
+      were the last record opened as a modal over their list: `/g-fin/
+      payments/:id` (readable with payments, A/R or A/P view rights, as the
+      API allows; Mark cleared, and Delete in ⋯ for a delete right), and an
+      old `?payment=` link redirects there.
+
 ## Verification
 
 ```bash
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,006 assertions across twenty-three scripts** (counted 2026-10-09, after
-the Modify work): foundation 235, masters 76, sales 425, costing 139, pipeline
+**3,010 assertions across twenty-three scripts** (counted 2026-10-09, after
+the Modify work; foundation 239 since its source scan): foundation 239, masters 76, sales 425, costing 139, pipeline
 86, calendar 96, numbering 46, partners 117, delivery 103, chain 135, hr 198,
 plantilla 99, meetings 85, evaluations 130, academy 97, finance 244,
 aftermarket 224, cad 86, archive 113, insights 97, insights-brief 50,

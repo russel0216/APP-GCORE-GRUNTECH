@@ -12,8 +12,9 @@ import {
   useCalendarNav,
   type CalendarEvent,
 } from '../../components/MonthCalendar';
+import { usePeople } from '../../components/People';
 import { ActivityModal } from './ActivityForm';
-import { ACTIVITY_TONES, BUILTIN_TYPES, type Activity, type ActivityTypeDef, type Person, type Rsvp } from './activityShared';
+import { ACTIVITY_TONES, BUILTIN_TYPES, type Activity, type ActivityTypeDef, type Rsvp } from './activityShared';
 
 // ════════════════════════════════════════════════════════════════════
 //  SALES CALENDAR
@@ -131,7 +132,8 @@ export function SalesCalendar() {
   // in the URL like the view, so a shared link shows what its sender saw.
   const canVisits = can('gops.visits.view_all');
   const showVisits = canVisits && params.get('visits') !== '0';
-  const [people, setPeople] = useState<Person[]>([]);
+  // Only people who can open this calendar can be booked on it.
+  const { people } = usePeople('gops.calendar.view_all');
   const [who, setWho] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -272,14 +274,6 @@ export function SalesCalendar() {
     // An activity opens its own page (2026-10-08, SCORO's event page), never the form.
     navigate(`/g-ops/calendar/activities/${encodeURIComponent(id)}`);
   }
-
-  useEffect(() => {
-    api
-      // Only people who can open this calendar can be booked on it.
-      .get<Person[]>(`/users/lookup${qs({ holding: 'gops.calendar.view_all' })}`)
-      .then((rows) => setPeople(rows.map((p) => ({ id: p.id, name: p.name, photoPath: p.photoPath ?? null }))))
-      .catch(() => {});
-  }, []);
 
   /*
     An older link — `?activity=<id>&date=<day>`, where notifications used to

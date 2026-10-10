@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
@@ -107,7 +107,7 @@ export function CellLink({ to, children, className }: { to: string; children: Re
 }
 
 /** Where a payment's number opens: the register, with that payment's sheet up. */
-export const paymentLink = (id: string) => `/g-fin/payments?payment=${id}`;
+export const paymentLink = (id: string) => `/g-fin/payments/${id}`;
 
 export function Receivables() {
   const { can } = useAuth();
@@ -1337,21 +1337,13 @@ function AllocationLinks({ row }: { row: PaymentRow }) {
 const partyName = (r: PaymentRow) => r.customer?.name ?? r.supplier?.name ?? r.payeeUser?.name ?? '—';
 
 export function Payments() {
-  const { can } = useAuth();
-  const [params, setParams] = useSearchParams();
-  const [reload, setReload] = useState(0);
+  const navigate = useNavigate();
+  const [params] = useSearchParams();
 
-  // The API clears on either edit right; the button follows the same rule, so
-  // payables staff can clear a supplier cheque the server would accept anyway.
-  const canClear = can('gfin.ar.edit_all') || can('gfin.ap.edit_all');
-  const openId = params.get('payment');
-
-  const open = (id: string | null) => {
-    const next = new URLSearchParams(params);
-    if (id) next.set('payment', id);
-    else next.delete('payment');
-    setParams(next, { replace: !id });
-  };
+  // A payment has a page of its own; links written before it (a notification,
+  // a bookmark) said `?payment=<id>` and still land there.
+  const legacyId = params.get('payment');
+  if (legacyId) return <Navigate to={paymentLink(legacyId)} replace />;
 
   const columns: Column<PaymentRow>[] = [
     {
@@ -1405,7 +1397,7 @@ export function Payments() {
     {
       key: 'cleared',
       label: 'Cleared',
-      // Marking a payment cleared is done on its sheet (the row opens it),
+      // Marking a payment cleared is done on its page (the row opens it),
       // where it asks first: it cannot be undone.
       render: (r) =>
         r.clearedAt ? (
@@ -1434,10 +1426,9 @@ export function Payments() {
         endpoint="/payments"
         columns={columns}
         rowKey={(r) => r.id}
-        reloadToken={reload}
         searchPlaceholder="Search number, reference, customer, supplier, person…"
         emptyTitle="No payments recorded yet"
-        onRowClick={(r) => open(r.id)}
+        onRowClick={(r) => navigate(paymentLink(r.id))}
         filters={[
           {
             key: 'kind',
@@ -1450,35 +1441,24 @@ export function Payments() {
           { key: 'uncleared', label: 'Cleared', options: [{ value: 'true', label: 'Uncleared only' }] },
         ]}
       />
-
-      {openId && (
-        <PaymentDetailModal
-          id={openId}
-          canClear={canClear}
-          onClose={() => open(null)}
-          onChanged={() => setReload((r) => r + 1)}
-        />
-      )}
     </div>
   );
 }
 
 /**
- * One payment, opened by `?payment=<id>` — so a notification, a report row or
- * an invoice's collection list can point straight at it.
+ * One payment: `/g-fin/payments/:id` — where a notification, a report row or
+ * an invoice's collection list points. Every record has a page (rule 19); this
+ * one used to open as a modal over the list.
+ *
+ * A payment is not modified: what it settled is the record. It is cleared once
+ * the bank says so, or — by whoever may delete receivables or payables —
+ * deleted, which the API answers by re-deriving every document it settled.
  */
-function PaymentDetailModal({
-  id,
-  canClear,
-  onClose,
-  onChanged,
-}: {
-  id: string;
-  canClear: boolean;
-  onClose: () => void;
-  onChanged: () => void;
-}) {
+export function PaymentDetail() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const toast = useToast();
+  const { can } = useAuth();
   const confirm = useConfirm();
   const [row, setRow] = useState<PaymentRow | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -1495,25 +1475,62 @@ function PaymentDetailModal({
     load();
   }, [load]);
 
+  if (error && !row) return <ErrorBox error={error} />;
+  if (!row) return <Loading />;
+
+  // The API clears on either edit right and deletes on either delete right;
+  // the buttons follow the same rules.
+  const canClear = !row.clearedAt && (can('gfin.ar.edit_all') || can('gfin.ap.edit_all'));
+  const canDelete = can('gfin.ar.delete') || can('gfin.ap.delete');
+  const direction = row.kind === 'RECEIPT' ? 'money in' : 'money out';
+
   // Thrown, not caught: the confirm bar shows the refusal and stays open.
   async function clear() {
     await api.post(`/payments/${id}/clear`);
     toast('ok', 'Marked cleared');
     await load();
-    onChanged();
   }
 
+  async function remove() {
+    await api.del(`/payments/${id}`);
+    toast('ok', `${row!.number} deleted — what it settled is owed again`);
+    navigate('/g-fin/payments', { replace: true });
+  }
+
+  const party = row.customer ? (
+    <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
+  ) : row.supplier ? (
+    <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
+  ) : (
+    partyName(row)
+  );
+
   return (
-    <Modal
-      title={row ? `Payment ${row.number}` : 'Payment'}
-      onClose={onClose}
-      wide
-      footer={
-        <ModalFoot onCancel={onClose} cancelLabel="Close">
-          {row && !row.clearedAt && canClear && (
+    <div>
+      <RecordHeader
+        type="Payment"
+        code={row.number}
+        title={`${row.kind === 'RECEIPT' ? 'From' : 'To'} ${partyName(row)}`}
+        status={row.clearedAt ? 'CLEARED' : 'UNCLEARED'}
+        statusLabel={row.clearedAt ? 'cleared' : 'uncleared'}
+        statusExtra={{ CLEARED: 'ok', UNCLEARED: 'warn' }}
+        amount={formatMoney(row.amount)}
+        amountLabel={row.kind === 'RECEIPT' ? 'Received' : 'Paid out'}
+        meta={
+          <>
+            {direction} · {formatDate(row.paymentDate)} · {humanise(row.method)}
+            {row.reference && (
+              <>
+                {' · '}
+                <span className="mono">{row.reference}</span>
+              </>
+            )}
+          </>
+        }
+        actions={
+          canClear && (
             <button
-              className="btn"
-              disabled={confirm.open}
+              className="btn btn-primary"
               onClick={() =>
                 confirm.ask({
                   title: `Mark ${row.number} cleared?`,
@@ -1526,34 +1543,41 @@ function PaymentDetailModal({
             >
               Mark cleared
             </button>
-          )}
-        </ModalFoot>
-      }
-    >
-      {confirm.bar}
+          )
+        }
+        more={[
+          canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${row.number}?`,
+              body: `${formatMoney(row.amount)} comes off ${
+                row.allocations.length === 1 ? 'the document it settled' : `the ${row.allocations.length} documents it settled`
+              }, and each goes back to owing what it owed before. Kept in the audit trail.`,
+              confirmLabel: 'Delete payment',
+              onConfirm: remove,
+            },
+          },
+        ]}
+        confirm={confirm}
+      />
+
       <ErrorBox error={error} />
-      {!row && !error && <Loading />}
-      {row && (
-        <>
+
+      {!row.clearedAt && (
+        <div className="alert warn">Not cleared yet — it does not count as cash until the bank says it has.</div>
+      )}
+
+      <div className="grid grid-2">
+        <div className="card">
+          <h3 className="card-title">Payment</h3>
           <dl className="kv">
             <dt>Direction</dt>
             <dd>
-              <StatusBadge
-                status={row.kind}
-                extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }}
-                label={row.kind === 'RECEIPT' ? 'money in' : 'money out'}
-              />
+              <StatusBadge status={row.kind} extra={{ RECEIPT: 'ok', DISBURSEMENT: '' }} label={direction} />
             </dd>
             <dt>{row.kind === 'RECEIPT' ? 'From' : 'To'}</dt>
-            <dd>
-              {row.customer ? (
-                <Link to={`/g-ops/customers/${row.customer.id}`}>{row.customer.name}</Link>
-              ) : row.supplier ? (
-                <Link to={`/g-chain/suppliers/${row.supplier.id}`}>{row.supplier.name}</Link>
-              ) : (
-                partyName(row)
-              )}
-            </dd>
+            <dd>{party}</dd>
             <dt>Date</dt>
             <dd>{formatDate(row.paymentDate)}</dd>
             <dt>Amount</dt>
@@ -1567,13 +1591,7 @@ function PaymentDetailModal({
             <dt>Bank</dt>
             <dd>{row.bank ?? '—'}</dd>
             <dt>Cleared</dt>
-            <dd>
-              {row.clearedAt ? (
-                formatDate(row.clearedAt)
-              ) : (
-                <StatusBadge status="UNCLEARED" extra={{ UNCLEARED: 'warn' }} label="not yet — not cash until it clears" />
-              )}
-            </dd>
+            <dd>{row.clearedAt ? formatDate(row.clearedAt) : '—'}</dd>
             <dt>Recorded by</dt>
             <dd>{row.recordedBy.name}</dd>
             {row.notes && (
@@ -1583,8 +1601,10 @@ function PaymentDetailModal({
               </>
             )}
           </dl>
+        </div>
 
-          <h4 className="fin-section-title">What it settled</h4>
+        <div className="card">
+          <h3 className="card-title">What it settled</h3>
           <div className="table-wrap">
             <table className="data">
               <thead>
@@ -1616,8 +1636,8 @@ function PaymentDetailModal({
               </tbody>
             </table>
           </div>
-        </>
-      )}
-    </Modal>
+        </div>
+      </div>
+    </div>
   );
 }

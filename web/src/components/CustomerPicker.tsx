@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
 import { api, qs } from '../lib/api';
 import { useToast } from './ui';
+import { useAuth } from '../lib/auth';
 
 export interface CustomerRef {
   id: string;
@@ -22,6 +23,12 @@ export interface CustomerRef {
  *
  * Keyboard: the matches are buttons (Tab or ArrowDown reaches them), Escape
  * closes the list, and focus leaving the whole picker closes it too.
+ *
+ * "Add as a new customer" is offered only to a holder of
+ * `gops.customers.create` (the API refuses anyone else) and only where the
+ * form allows it (`allowCreate` — the equipment register's Modify does not).
+ * Inside a `Field` it is wired like an input (`fieldControl`): the label, the
+ * hint and the error reach the text box.
  */
 export function CustomerPicker({
   value,
@@ -31,6 +38,11 @@ export function CustomerPicker({
   invalid,
   describedBy,
   autoFocus,
+  allowCreate = true,
+  id,
+  required,
+  'aria-describedby': fieldDescribedBy,
+  'aria-invalid': fieldInvalid,
 }: {
   value: CustomerRef | null;
   onChange: (customer: CustomerRef | null) => void;
@@ -39,11 +51,24 @@ export function CustomerPicker({
   invalid?: boolean;
   describedBy?: string;
   autoFocus?: boolean;
+  /** False where a new customer must not be filed from this form. */
+  allowCreate?: boolean;
+  /** Set by `Field` (it wins over `inputId`, so the label points at the box). */
+  id?: string;
+  required?: boolean;
+  /** Set by `Field`. */
+  'aria-describedby'?: string;
+  /** Set by `Field`. */
+  'aria-invalid'?: boolean;
 }) {
   const toast = useToast();
+  const { can } = useAuth();
+  const mayCreate = allowCreate && can('gops.customers.create');
   const [text, setText] = useState(value?.name ?? '');
   const [picking, setPicking] = useState(false);
   const [matches, setMatches] = useState<CustomerRef[]>([]);
+  // The term the matches answer, so "nothing matches" waits for the answer.
+  const [answered, setAnswered] = useState('');
   const [busy, setBusy] = useState(false);
   const menuRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -62,7 +87,10 @@ export function CustomerPicker({
     const t = setTimeout(() => {
       api
         .get<CustomerRef[]>(`/customers/lookup${qs({ q: term })}`)
-        .then(setMatches)
+        .then((rows) => {
+          setMatches(rows);
+          setAnswered(term);
+        })
         .catch(() => setMatches([]));
     }, 180);
     return () => clearTimeout(t);
@@ -123,13 +151,14 @@ export function CustomerPicker({
     >
       <input
         ref={inputRef}
-        id={inputId}
+        id={id ?? inputId}
         value={text}
+        required={required}
         autoFocus={autoFocus}
         autoComplete="off"
         placeholder="Create or choose a customer"
-        aria-invalid={invalid || undefined}
-        aria-describedby={describedBy}
+        aria-invalid={invalid || fieldInvalid || undefined}
+        aria-describedby={[describedBy, fieldDescribedBy].filter(Boolean).join(' ') || undefined}
         aria-expanded={open}
         aria-autocomplete="list"
         onFocus={() => setPicking(true)}
@@ -155,7 +184,10 @@ export function CustomerPicker({
               </button>
             </li>
           ))}
-          {!matches.some((m) => m.name === term) && (
+          {!matches.length && !mayCreate && answered === term && (
+            <li className="lookup-none">No customer on file matches “{term}”.</li>
+          )}
+          {mayCreate && !matches.some((m) => m.name === term) && (
             <li className="lookup-new">
               <div className="lookup-new-row">
                 <button type="button" onClick={createCustomer} disabled={busy}>
@@ -169,3 +201,5 @@ export function CustomerPicker({
     </div>
   );
 }
+// Field wires its label, hint and error to the text box, as to a native input.
+(CustomerPicker as unknown as { fieldControl: boolean }).fieldControl = true;

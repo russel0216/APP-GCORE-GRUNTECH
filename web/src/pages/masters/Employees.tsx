@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -9,6 +9,7 @@ import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { EmployeeEvaluationsTab } from '../hr/EmployeeEvaluationsTab';
 import { NumberInput } from '../../components/NumberInput';
+import { PersonSelect, usePeople, type PersonRow } from '../../components/People';
 
 const EMPLOYMENT_TYPES = [
   { value: 'REGULAR', label: 'Regular' },
@@ -383,7 +384,9 @@ function EmployeeForm({
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [users, setUsers] = useState<{ id: string; name: string; email: string }[]>([]);
+  // Naming a login is not the admin right — the people lookup, not /users.
+  const { people: users } = usePeople();
+  const loginField = useId();
   const seeUsers = can('admin.users.view_all');
   const [detail, setDetail] = useState<EmployeeRow | null>(null);
 
@@ -438,14 +441,6 @@ function EmployeeForm({
     notes: employee?.notes ?? '',
   });
 
-  // Naming a login is not the admin right — the lookup, not /users.
-  useEffect(() => {
-    api
-      .get<{ id: string; name: string; email: string }[]>('/users/lookup')
-      .then(setUsers)
-      .catch(() => {});
-  }, []);
-
   // The roles a new login can start with; the self-service Employee role is ticked.
   useEffect(() => {
     if (!canMakeLogins) return;
@@ -462,10 +457,9 @@ function EmployeeForm({
   // The lookup lists ACTIVE logins and ACTIVE positions. The record's own may
   // be neither (a leaver), and a select that cannot show its value lies.
   const linked = employee?.user ?? null;
-  const userOptions =
-    linked && !users.some((u) => u.id === linked.id)
-      ? [...users, { id: linked.id, name: `${linked.email} (inactive)`, email: linked.email }]
-      : users;
+  // A login is told apart by the email it signs in with, so that is what the
+  // choice shows beside the name.
+  const loginOptions: PersonRow[] = users.map((u) => ({ ...u, position: u.email ?? u.position }));
   const held = employee?.positionRef ?? null;
   const positionOptions: PositionOption[] =
     held && !positions.some((p) => p.id === held.id)
@@ -989,16 +983,17 @@ function EmployeeForm({
           {(!makeLogin || !!employee) && (
             <Field
               label={linked ? 'Login account' : 'Or link a login that already exists'}
+              htmlFor={loginField}
               hint="Who they sign in as. Reporting line is set on the user account, since that is what approvals route by."
             >
-              <select value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })}>
-                <option value="">— no login —</option>
-                {userOptions.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.email})
-                  </option>
-                ))}
-              </select>
+              <PersonSelect
+                id={loginField}
+                value={form.userId}
+                onChange={(id) => setForm({ ...form, userId: id })}
+                people={loginOptions}
+                placeholder="— no login —"
+                current={linked ? { id: linked.id, name: `${linked.email} (inactive)` } : null}
+              />
             </Field>
           )}
         </div>
@@ -1133,10 +1128,11 @@ function LoginFields({
 }: {
   login: LoginDraft;
   roles: RoleOption[] | null;
-  people: { id: string; name: string; email: string }[];
+  people: PersonRow[];
   onChange: (next: LoginDraft) => void;
   onEmailTyped: () => void;
 }) {
+  const supervisorField = useId();
   return (
     <div className="login-fields">
       <div className="grid grid-2">
@@ -1151,15 +1147,14 @@ function LoginFields({
             }}
           />
         </Field>
-        <Field label="Reports to" hint="Their leave and overtime go to this person first">
-          <select value={login.supervisorId} onChange={(e) => onChange({ ...login, supervisorId: e.target.value })}>
-            <option value="">— none (HR decides) —</option>
-            {people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+        <Field label="Reports to" htmlFor={supervisorField} hint="Their leave and overtime go to this person first">
+          <PersonSelect
+            id={supervisorField}
+            value={login.supervisorId}
+            onChange={(id) => onChange({ ...login, supervisorId: id })}
+            people={people}
+            placeholder="— none (HR decides) —"
+          />
         </Field>
       </div>
 

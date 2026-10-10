@@ -966,7 +966,7 @@ export function CashFlow() {
                     {data.uncleared.map((p) => (
                       <tr key={p.id}>
                         <td>
-                          <Link to={`/g-fin/payments?payment=${p.id}`} className="mono">
+                          <Link to={`/g-fin/payments/${p.id}`} className="mono">
                             {p.number}
                           </Link>
                           <div className="faint">

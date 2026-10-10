@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -8,6 +8,7 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
+import { PersonSelect, usePeople } from '../../components/People';
 import {
   Empty,
   ErrorBox,
@@ -299,28 +300,13 @@ interface EmployeeLookup {
   hasUser: boolean;
 }
 
-interface UserLookup {
-  id: string;
-  name: string;
-  email: string;
-  position: string | null;
-  department: { id: string; name: string } | null;
-}
-
-function useUsers(): UserLookup[] {
-  const [users, setUsers] = useState<UserLookup[]>([]);
-  useEffect(() => {
-    api.get<UserLookup[]>('/users/lookup').then(setUsers).catch(() => {});
-  }, []);
-  return users;
-}
-
 function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id: string) => void }) {
   const { can } = useAuth();
   const toast = useToast();
   // Someone who may only raise their own — a resignation — does not choose.
   const forSelf = !can('ghr.clearances.view_all') && !can('ghr.clearances.edit_all');
-  const users = useUsers();
+  const { people } = usePeople();
+  const handOverId = useId();
 
   const [term, setTerm] = useState('');
   const [found, setFound] = useState<EmployeeLookup[]>([]);
@@ -471,16 +457,14 @@ function RaiseModal({ onClose, onRaised }: { onClose: () => void; onRaised: (id:
             onChange={(e) => setForm({ ...form, lastWorkingDay: e.target.value })}
           />
         </Field>
-        <Field label="Hand over to" hint="Prints as “Received by” on the form">
-          <select value={form.handedOverToId} onChange={(e) => setForm({ ...form, handedOverToId: e.target.value })}>
-            <option value="">— nobody named —</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name}
-                {u.position ? ` · ${u.position}` : ''}
-              </option>
-            ))}
-          </select>
+        <Field label="Hand over to" hint="Prints as “Received by” on the form" htmlFor={handOverId}>
+          <PersonSelect
+            id={handOverId}
+            value={form.handedOverToId}
+            onChange={(id) => setForm({ ...form, handedOverToId: id })}
+            people={people}
+            placeholder="— nobody named —"
+          />
         </Field>
       </div>
 
@@ -1040,7 +1024,8 @@ function EditModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
-  const users = useUsers();
+  const { people } = usePeople();
+  const handOverId = useId();
   const [form, setForm] = useState({
     reason: clearance.reason,
     lastWorkingDay: clearance.lastWorkingDay.slice(0, 10),
@@ -1097,16 +1082,15 @@ function EditModal({
             onChange={(e) => setForm({ ...form, lastWorkingDay: e.target.value })}
           />
         </Field>
-        <Field label="Hand over to">
-          <select value={form.handedOverToId} onChange={(e) => setForm({ ...form, handedOverToId: e.target.value })}>
-            <option value="">— nobody named —</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name}
-                {u.position ? ` · ${u.position}` : ''}
-              </option>
-            ))}
-          </select>
+        <Field label="Hand over to" htmlFor={handOverId}>
+          <PersonSelect
+            id={handOverId}
+            value={form.handedOverToId}
+            onChange={(id) => setForm({ ...form, handedOverToId: id })}
+            people={people}
+            placeholder="— nobody named —"
+            current={clearance.handedOverTo}
+          />
         </Field>
       </div>
       <Field label="Notes">

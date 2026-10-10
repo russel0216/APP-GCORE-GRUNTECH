@@ -22,11 +22,10 @@ import {
 } from '../../components/ui';
 import { QUOTATION_OUTCOME_TONES } from './Quotations';
 import { NumberInput } from '../../components/NumberInput';
+import { PersonSelect, loadPeople as loadPersonRows, type PersonRow } from '../../components/People';
 
 /** Somebody a lead can be handed to, and whether selling is their job. */
-export interface Person {
-  id: string;
-  name: string;
+export interface Person extends PersonRow {
   isSales: boolean;
 }
 
@@ -37,17 +36,18 @@ export interface Person {
  * "Sells" is read off the permission that lets somebody work their own lead
  * (`gops.leads.edit_own`) rather than guessed from a department or a role
  * name — the permission is what the registry already uses to decide who may
- * touch a lead at all. Both lists come from `/users/lookup`, which any
- * signed-in user may read; the old `/users?pageSize=200` is admin-gated and
- * left a salesperson with an empty picker.
+ * touch a lead at all. Both lists are the one people lookup
+ * (`components/People.tsx`, `/users/lookup`), which any signed-in user may
+ * read; the old `/users?pageSize=200` is admin-gated and left a salesperson
+ * with an empty picker.
  */
 export async function loadPeople(): Promise<Person[]> {
   const [everyone, sellers] = await Promise.all([
-    api.get<{ id: string; name: string }[]>('/users/lookup'),
-    api.get<{ id: string }[]>(`/users/lookup${qs({ holding: 'gops.leads.edit_own' })}`).catch(() => []),
+    loadPersonRows(),
+    loadPersonRows('gops.leads.edit_own').catch((): PersonRow[] => []),
   ]);
   const selling = new Set(sellers.map((u) => u.id));
-  return everyone.map((u) => ({ id: u.id, name: u.name, isSales: selling.has(u.id) }));
+  return everyone.map((u) => ({ ...u, isSales: selling.has(u.id) }));
 }
 
 export const LEAD_STATUSES = [
@@ -1022,12 +1022,6 @@ interface LeadDetailRow extends LeadRow {
   }[];
 }
 
-interface Assignable {
-  id: string;
-  name: string;
-  position: string | null;
-}
-
 /**
  * "Assign costing", in the page — no dialog. The people offered are those who
  * may make a costing (`/users/lookup?holding=gops.costing.create`); the costing
@@ -1043,15 +1037,14 @@ function AssignCostingPanel({
   onAssigned: (made: { id: string; number: string; ownerId: string }) => void | Promise<void>;
 }) {
   const { me } = useAuth();
-  const [people, setPeople] = useState<Assignable[] | null>(null);
+  const [people, setPeople] = useState<PersonRow[] | null>(null);
   const [assigneeId, setAssigneeId] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
-    api
-      .get<Assignable[]>(`/users/lookup${qs({ holding: 'gops.costing.create' })}`)
+    loadPersonRows('gops.costing.create')
       .then((rows) => {
         setPeople(rows);
         // Yourself first when you can cost; otherwise nobody is picked for you.
@@ -1093,16 +1086,15 @@ function AssignCostingPanel({
         <p className="faint">Nobody can make costings yet. An administrator gives that right in Roles.</p>
       ) : (
         <div className="grid grid-2">
-          <Field label="Who will cost it" required>
-            <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
-              <option value="">Choose…</option>
-              {people.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.id === me?.user.id ? `${p.name} (me)` : p.name}
-                  {p.position ? ` — ${p.position}` : ''}
-                </option>
-              ))}
-            </select>
+          <Field label="Who will cost it" required htmlFor="assign-costing-who">
+            <PersonSelect
+              id="assign-costing-who"
+              value={assigneeId}
+              onChange={setAssigneeId}
+              people={people.map((p) => (p.id === me?.user.id ? { ...p, name: `${p.name} (me)` } : p))}
+              placeholder="Choose…"
+              required
+            />
           </Field>
           <Field label="Note" hint="What to price, what the customer said, when you need it">
             <textarea rows={3} value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} />
@@ -1160,6 +1152,12 @@ export function LeadForm({
   */
   const sales = people.filter((p) => p.isSales);
   const others = people.filter((p) => !p.isSales);
+  // The one single-person control (components/People.tsx), grouped Sales /
+  // everyone else here rather than by department — Sales first, as above.
+  const assignable: PersonRow[] = [
+    ...sales.map((p) => ({ ...p, department: { id: 'sales', name: 'Sales' } })),
+    ...others.map((p) => ({ ...p, department: { id: 'others', name: sales.length ? 'Everyone else' : 'Everyone' } })),
+  ];
 
   const [matches, setMatches] = useState<{ id: string; name: string }[]>([]);
   const [picking, setPicking] = useState(false);
@@ -1188,6 +1186,12 @@ export function LeadForm({
     `/customers/lookup?q=` already searched on name and code and nothing used
     the q — the form pulled the whole list and made you scroll it. Debounced,
     because a keystroke is not a question worth asking the server.
+
+    Not `CustomerPicker` (2026-10-09, checked): the box IS the lead's own
+    company name, saved whether or not it names a customer on file — an
+    enquiry from a firm nobody has filed is the normal case. The picker keeps
+    its text to itself and reports only a picked customer or null, so the
+    lead would lose the name it was typed with.
   */
   useEffect(() => {
     const term = form.companyName.trim();
@@ -1384,29 +1388,16 @@ export function LeadForm({
             onChange={(e) => setForm({ ...form, contactPerson: e.target.value })}
           />
         </Field>
-        <Field label="Assigned to" hint="They are notified when you hand it over">
-          <select
+        <Field label="Assigned to" hint="They are notified when you hand it over" htmlFor="lead-assigned-to">
+          {/* Sales first — it is a sales record, and the list is everyone. */}
+          <PersonSelect
+            id="lead-assigned-to"
             value={form.assignedToId}
-            onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}
-          >
-            {/* Sales first — it is a sales record, and the list is everyone. */}
-            {sales.length > 0 && (
-              <optgroup label="Sales">
-                {sales.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            <optgroup label={sales.length ? 'Everyone else' : 'Everyone'}>
-              {others.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </optgroup>
-          </select>
+            onChange={(id) => setForm({ ...form, assignedToId: id })}
+            people={assignable}
+            current={lead?.assignedTo ?? null}
+            required
+          />
         </Field>
         <Field label="Email">
           <input

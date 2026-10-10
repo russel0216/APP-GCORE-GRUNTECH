@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ApiError, api, qs } from '../../lib/api';
+import { ApiError, api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -8,6 +8,7 @@ import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import { Checkbox, ErrorBox, Field, Modal, ModalFoot, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import type { Industry, SubIndustry } from './Reference';
 import { NumberInput } from '../../components/NumberInput';
+import { loadPeople } from '../../components/People';
 
 export interface CustomerRow {
   id: string;
@@ -248,8 +249,7 @@ export function Customers() {
   const mayEdit = can('gops.customers.edit_all');
 
   useEffect(() => {
-    api
-      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.customers.create' })}`)
+    loadPeople('gops.customers.create')
       .then((rows) => setPeople(rows.map((p) => ({ value: p.id, label: p.name }))))
       .catch(() => setPeople([]));
   }, []);

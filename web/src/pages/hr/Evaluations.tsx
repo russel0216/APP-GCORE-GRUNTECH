@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -9,6 +9,7 @@ import { useUnsavedChanges } from '../../components/Navigation';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { Panel } from '../../components/charts';
+import { PersonSelect, loadPeople, type PersonRow } from '../../components/People';
 import {
   ErrorBox,
   Field,
@@ -503,14 +504,6 @@ interface EmployeeLookup {
   hasUser: boolean;
 }
 
-interface UserLookup {
-  id: string;
-  name: string;
-  email: string;
-  position: string | null;
-  department: { id: string; name: string } | null;
-}
-
 interface MilestonePicture {
   kind: string | null;
   anchor: string | null;
@@ -550,7 +543,8 @@ export function ScheduleModal({
 
   const [search, setSearch] = useState('');
   const [people, setPeople] = useState<EmployeeLookup[]>([]);
-  const [evaluators, setEvaluators] = useState<UserLookup[]>([]);
+  const [evaluators, setEvaluators] = useState<PersonRow[]>([]);
+  const evaluatorField = useId();
   const [picture, setPicture] = useState<MilestonePicture | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -579,8 +573,7 @@ export function ScheduleModal({
 
   useEffect(() => {
     if (!viewAll) return;
-    api
-      .get<UserLookup[]>(`/users/lookup${qs({ holding: 'ghr.evaluations.create' })}`)
+    loadPeople('ghr.evaluations.create')
       .then(setEvaluators)
       .catch(() => setEvaluators([]));
   }, [viewAll]);
@@ -689,18 +682,21 @@ export function ScheduleModal({
       </Field>
 
       {viewAll && (
-        <Field label="Evaluator" required hint="Usually the person they report to. Somebody else is told it is theirs to write.">
-          <select value={form.evaluatorId} onChange={(e) => setForm({ ...form, evaluatorId: e.target.value })}>
-            {me && !evaluators.some((u) => u.id === me.user.id) && <option value={me.user.id}>{me.user.name} (you)</option>}
-            {evaluators.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name}
-                {u.id === me?.user.id ? ' (you)' : ''}
-                {u.position ? ` · ${u.position}` : ''}
-                {u.department ? ` · ${u.department.name}` : ''}
-              </option>
-            ))}
-          </select>
+        <Field
+          label="Evaluator"
+          required
+          htmlFor={evaluatorField}
+          hint="Usually the person they report to. Somebody else is told it is theirs to write."
+        >
+          <PersonSelect
+            id={evaluatorField}
+            value={form.evaluatorId}
+            onChange={(id) => setForm({ ...form, evaluatorId: id })}
+            people={evaluators}
+            required
+            current={me ? { id: me.user.id, name: me.user.name } : null}
+            self={me?.user.id}
+          />
         </Field>
       )}
 

@@ -465,19 +465,7 @@
 
 /* ── Lead and quotation pages ─────────────────────────────────────────────── */
 
-/* A label / value line on a record card. */
-.sales-row {
-  display: flex;
-  gap: var(--s-3);
-  padding: var(--s-2) 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.sales-row-label {
-  flex: 0 0 9rem;
-  font-size: var(--fs-sm);
-  color: var(--faint);
-}
+/* .sales-row is the read-only grammar in styles.css (.kv). */
 
 .sales-after-text {
   margin-left: var(--s-2);

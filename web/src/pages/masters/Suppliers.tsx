@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ApiError, api, qs } from '../../lib/api';
+import { ApiError, api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { Stat } from '../../components/charts';
@@ -22,6 +22,7 @@ import {
 } from '../../components/ui';
 import { RecordHeader } from '../../components/RecordHeader';
 import { Collection, Detail } from './Customer360';
+import { loadPeople } from '../../components/People';
 
 interface SupplierRow {
   id: string;
@@ -304,8 +305,7 @@ export function Suppliers() {
   const mayOrders = can('gchain.purchase_orders.view_all');
 
   useEffect(() => {
-    api
-      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gchain.suppliers.create' })}`)
+    loadPeople('gchain.suppliers.create')
       .then((rows) => setPeople(rows.map((p) => ({ value: p.id, label: p.name }))))
       .catch(() => setPeople([]));
   }, []);
@@ -748,7 +748,7 @@ export function SupplierDetail() {
           {(supplier.payments ?? []).map((p) => (
             <tr key={p.id}>
               <td>
-                <Link className="mono" to={`/g-fin/payments?payment=${encodeURIComponent(p.id)}`}>
+                <Link className="mono" to={`/g-fin/payments/${encodeURIComponent(p.id)}`}>
                   {p.number}
                 </Link>
               </td>

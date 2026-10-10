@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type Column } from '../../components/DataList';
 import { RecordHeader } from '../../components/RecordHeader';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import {
   ErrorBox,
   Field,
@@ -235,18 +236,21 @@ function AssetModal({
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
-  const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [customers, setCustomers] = useState<{ id: string; code: string; name: string }[]>([]);
-  const [customerQ, setCustomerQ] = useState('');
-  const [addingCustomer, setAddingCustomer] = useState(false);
+  // The one customer picker: predicted as it is typed (name or code), and
+  // "add as a new customer" files the company through the ordinary customer
+  // create, so it gets its code and its audit row (the sub-industry is typed
+  // in later, on the customer).
+  const [customer, setCustomer] = useState<CustomerRef | null>(
+    asset ? { id: asset.customer.id, name: asset.customer.name } : null,
+  );
+  const customerInputId = useId();
   const [jobs, setJobs] = useState<{ id: string; number: string; name: string }[]>([]);
   const [types, setTypes] = useState<string[]>([]);
   const [settings, setSettings] = useState<{ defaultWarrantyMonths: number } | null>(null);
 
   const [form, setForm] = useState({
-    customerId: asset?.customer.id ?? '',
     jobId: asset?.job?.id ?? '',
     name: asset?.name ?? '',
     manufacturer: asset?.manufacturer ?? '',
@@ -267,20 +271,6 @@ function AssetModal({
     api.get<{ defaultWarrantyMonths: number }>('/aftermarket/settings').then(setSettings).catch(() => {});
   }, []);
 
-  // The customer is predicted as it is typed — matched on name or code.
-  useEffect(() => {
-    const t = setTimeout(() => {
-      api
-        .get<typeof customers>(`/customers/lookup${qs({ q: customerQ })}`)
-        .then(setCustomers)
-        .catch(() => {});
-    }, 220);
-    return () => clearTimeout(t);
-  }, [customerQ]);
-  // One already picked stays pickable whatever the search box says now.
-  const customerOptions =
-    asset && !customers.some((c) => c.id === asset.customer.id) ? [asset.customer, ...customers] : customers;
-
   // Show what the warranty will be set to when nobody types one.
   const derivedWarranty = (() => {
     if (form.warrantyEndsAt || !form.installedAt || !settings) return null;
@@ -297,16 +287,8 @@ function AssetModal({
     setBusy(true);
     setError(null);
     try {
-      let customerId = form.customerId;
-      // "Add as a new customer": filed properly, by name, through the
-      // ordinary customer create, so it gets its code and its audit row (the
-      // sub-industry is typed in later, on the customer).
-      if (addingCustomer) {
-        const made = await api.post<{ id: string }>('/customers', { name: customerQ.trim() });
-        customerId = made.id;
-      }
       const payload = {
-        customerId,
+        customerId: customer?.id ?? '',
         jobId: form.jobId || null,
         name: form.name,
         manufacturer: form.manufacturer || null,
@@ -343,7 +325,7 @@ function AssetModal({
             onClick={save}
             disabled={
               busy ||
-              (addingCustomer ? customerQ.trim().length < 2 : !form.customerId) ||
+              !customer ||
               form.name.trim().length < 2
             }
           >
@@ -355,33 +337,14 @@ function AssetModal({
       <ErrorBox error={error} />
 
       <div className="grid grid-2">
-        <Field label="Customer" hint={addingCustomer ? undefined : 'Type to find one used before'}>
-          <div className="cal-picker">
-            <input
-              type="search"
-              placeholder="Search customers…"
-              aria-label="Search customers"
-              value={customerQ}
-              onChange={(e) => {
-                setCustomerQ(e.target.value);
-                setAddingCustomer(false);
-              }}
-            />
-            {!addingCustomer && (
-              <select
-                aria-label="Customer"
-                value={form.customerId}
-                onChange={(e) => setForm({ ...form, customerId: e.target.value })}
-              >
-                <option value="">— choose —</option>
-                {customerOptions.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
+        <Field label="Customer" hint="Type to find one used before" htmlFor={customerInputId}>
+          <CustomerPicker
+            inputId={customerInputId}
+            value={customer}
+            onChange={setCustomer}
+            onError={setError}
+            allowCreate={!asset}
+          />
         </Field>
         <Field label="Address" hint="Where the machine is">
           <input
@@ -391,23 +354,6 @@ function AssetModal({
           />
         </Field>
       </div>
-
-      {can('gops.customers.create') && customerQ.trim().length >= 2 && !asset && (
-        <div className={addingCustomer ? 'alert info' : undefined}>
-          {!addingCustomer ? (
-            <button type="button" className="btn btn-sm" onClick={() => setAddingCustomer(true)}>
-              + Add “{customerQ.trim()}” as a new customer
-            </button>
-          ) : (
-            <div className="row ib-add-customer">
-              <span>“{customerQ.trim()}” will be filed as a new customer when you save.</span>
-              <button type="button" className="btn btn-sm" onClick={() => setAddingCustomer(false)}>
-                Pick an existing one instead
-              </button>
-            </div>
-          )}
-        </div>
-      )}
 
       <Field label="Equipment type" hint="Pick a common one, or type a new one — it is remembered">
         <input

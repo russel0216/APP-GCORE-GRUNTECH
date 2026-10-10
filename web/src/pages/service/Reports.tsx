@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -9,6 +9,7 @@ import { Stat } from '../../components/charts';
 import { RecordHeader } from '../../components/RecordHeader';
 import { NumberInput } from '../../components/NumberInput';
 import { useBackLink, useUnsavedChanges } from '../../components/Navigation';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import {
   Checkbox,
   Empty,
@@ -357,15 +358,16 @@ export function NewReportModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [assets, setAssets] = useState<{ id: string; code: string; name: string; serialNo: string | null }[]>([]);
   const [visits, setVisits] = useState<PickerVisit[]>([]);
+  const customerInputId = useId();
 
   const [form, setForm] = useState({
     kind: preset?.kind ?? 'PREVENTIVE_MAINTENANCE',
     templateId: '',
     visitId: preset?.visitId ?? '',
-    customerId: preset?.customerId ?? '',
+    // A preset customer arrives as an id; its name is read below.
+    customer: (preset?.customerId ? { id: preset.customerId, name: '' } : null) as CustomerRef | null,
     assetId: preset?.assetId ?? '',
     contractId: preset?.contractId ?? '',
     siteId: preset?.siteId ?? '',
@@ -379,7 +381,7 @@ export function NewReportModal({
       ...f,
       visitId,
       kind: v?.kind ?? f.kind,
-      customerId: v?.customer.id ?? f.customerId,
+      customer: v ? { id: v.customer.id, name: v.customer.name } : f.customer,
       assetId: v ? (v.asset?.id ?? '') : f.assetId,
       contractId: v ? (v.contract?.id ?? '') : '',
       siteId: v ? (v.site?.id ?? '') : f.siteId,
@@ -388,7 +390,13 @@ export function NewReportModal({
 
   useEffect(() => {
     api.get<Template[]>('/report-templates').then(setTemplates).catch(() => {});
-    api.get<{ rows: { id: string; name: string }[] }>('/customers?pageSize=200').then((d) => setCustomers(d.rows)).catch(() => {});
+    // A customer handed over by id (no visit to name it) shows by name in the picker.
+    if (preset?.customerId && !preset.visitId) {
+      api
+        .get<{ id: string; name: string }>(`/customers/${preset.customerId}`)
+        .then((c) => setForm((f) => (f.customer?.id === c.id && !f.customer.name ? { ...f, customer: { id: c.id, name: c.name } } : f)))
+        .catch(() => {});
+    }
     // MISSED as well as SCHEDULED: a late visit still has to be reported, or
     // it can never complete.
     api
@@ -406,16 +414,17 @@ export function NewReportModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const customerId = form.customer?.id ?? '';
   useEffect(() => {
-    if (!form.customerId) {
+    if (!customerId) {
       setAssets([]);
       return;
     }
     api
-      .get<{ rows: typeof assets }>(`/installed-assets?pageSize=200&customerId=${form.customerId}`)
+      .get<{ rows: typeof assets }>(`/installed-assets?pageSize=200&customerId=${customerId}`)
       .then((d) => setAssets(d.rows))
       .catch(() => setAssets([]));
-  }, [form.customerId]);
+  }, [customerId]);
 
   const forKind = templates.filter((t) => t.kind === form.kind);
 
@@ -436,7 +445,7 @@ export function NewReportModal({
         kind: form.kind,
         templateId: form.templateId || undefined,
         visitId: form.visitId || null,
-        customerId: form.customerId,
+        customerId,
         siteId: form.siteId || null,
         assetId: form.assetId || null,
         contractId: form.contractId || null,
@@ -462,7 +471,7 @@ export function NewReportModal({
           <button
             className="btn btn-primary"
             onClick={create}
-            disabled={busy || !form.customerId || !form.templateId}
+            disabled={busy || !customerId || !form.templateId}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
@@ -527,23 +536,25 @@ export function NewReportModal({
       )}
 
       <div className="grid grid-2">
-        <Field label="Customer">
-          <select
-            value={form.customerId}
-            disabled={!!form.visitId}
-            onChange={(e) => setForm({ ...form, customerId: e.target.value, assetId: '' })}
-          >
-            <option value="">— choose —</option>
-            {chosen && !customers.some((c) => c.id === chosen.customer.id) && (
-              <option value={chosen.customer.id}>{chosen.customer.name}</option>
-            )}
-            {customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {form.visitId ? (
+          // The visit decides the customer; the field shows it, fixed.
+          <Field label="Customer">
+            <select value={customerId} disabled>
+              <option value={customerId}>{form.customer?.name || '…'}</option>
+            </select>
+          </Field>
+        ) : (
+          <Field label="Customer" htmlFor={customerInputId}>
+            <CustomerPicker
+              inputId={customerInputId}
+              value={form.customer}
+              onError={setError}
+              onChange={(c) =>
+                setForm((f) => ({ ...f, customer: c, assetId: c && c.id === f.customer?.id ? f.assetId : '' }))
+              }
+            />
+          </Field>
+        )}
         <Field label="Performed on">
           <input
             type="date"

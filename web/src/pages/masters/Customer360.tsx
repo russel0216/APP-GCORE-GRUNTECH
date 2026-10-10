@@ -726,7 +726,7 @@ export function Customer360Page() {
           {payments.map((p) => (
             <tr key={p.id}>
               <td>
-                <Link className="mono" to={`/g-fin/payments?payment=${encodeURIComponent(p.id)}`}>
+                <Link className="mono" to={`/g-fin/payments/${encodeURIComponent(p.id)}`}>
                   {p.number}
                 </Link>
               </td>

@@ -61,35 +61,7 @@
   }
 }
 
-/* One size for label and value alike; the label is told apart by weight only. */
-.qd-row {
-  display: grid;
-  grid-template-columns: 10rem minmax(0, 1fr);
-  gap: var(--s-3);
-  padding: var(--s-1) 0;
-  align-items: baseline;
-  font-size: var(--fs-md);
-}
-
-.qd-row dt {
-  font-size: var(--fs-md);
-  font-weight: 600;
-  color: var(--text);
-}
-
-.qd-row dd {
-  margin: 0;
-  min-width: 0;
-  font-size: var(--fs-md);
-  overflow-wrap: anywhere;
-}
-
-@media (max-width: 520px) {
-  .qd-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--s-1);
-  }
-}
+/* .qd-row is the read-only grammar in styles.css (.kv), which took its look. */
 
 .qd-strong {
   font-weight: 600;

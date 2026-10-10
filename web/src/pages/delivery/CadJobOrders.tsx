@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -9,6 +9,8 @@ import { Attachments, openAttachment, readableSize } from '../../components/Atta
 import { Meter, Stat } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
 import { Icon } from '../../components/Icon';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
+import { PersonSelect, loadPeople, usePeople, type PersonRow } from '../../components/People';
 import { ApiError } from '../../lib/api';
 import {
   Avatar,
@@ -177,15 +179,8 @@ interface CadSummary {
 const DESIGN_RIGHT = 'gops.cad_job_orders.edit_all';
 
 /** The people on the design team — everyone holding the design right. */
-function useDesigners(): Person[] {
-  const [rows, setRows] = useState<Person[]>([]);
-  useEffect(() => {
-    api
-      .get<Person[]>(`/users/lookup${qs({ holding: DESIGN_RIGHT })}`)
-      .then(setRows)
-      .catch(() => setRows([]));
-  }, []);
-  return rows;
+function useDesigners(): PersonRow[] {
+  return usePeople(DESIGN_RIGHT).people;
 }
 
 export function PriorityBadge({ priority }: { priority: string }) {
@@ -230,7 +225,7 @@ export function CadJobOrders() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const designers = useDesigners();
-  const [requestors, setRequestors] = useState<Person[]>([]);
+  const [requestors, setRequestors] = useState<PersonRow[]>([]);
   const [drawingTypes, setDrawingTypes] = useState<{ id: string; name: string }[]>([]);
   // `?new=1&customerId=&jobId=&quotationId=&jobOrderId=` — how a project, a
   // quotation or a job order starts one without retyping.
@@ -244,8 +239,7 @@ export function CadJobOrders() {
   const designer = can(DESIGN_RIGHT) || can('gops.cad_job_orders.approve');
 
   useEffect(() => {
-    api
-      .get<Person[]>(`/users/lookup${qs({ holding: 'gops.cad_job_orders.create' })}`)
+    loadPeople('gops.cad_job_orders.create')
       .then(setRequestors)
       .catch(() => setRequestors([]));
     api
@@ -417,7 +411,7 @@ export function CadJobOrders() {
  * or set their priority — each the ordinary call per row, so the audit row
  * and the notifications are the route's. What did not change stays ticked.
  */
-function CadBulkActions({ ctx, designers }: { ctx: BulkContext<CadRow>; designers: Person[] }) {
+function CadBulkActions({ ctx, designers }: { ctx: BulkContext<CadRow>; designers: PersonRow[] }) {
   const toast = useToast();
   const [action, setAction] = useState('');
   const [progress, setProgress] = useState<{ done: number; of: number } | null>(null);
@@ -544,10 +538,19 @@ export function CadRequestModal({
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
+  const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [options, setOptions] = useState<Options>(NO_OPTIONS);
+  const customerInputId = useId();
+  // The customer is fixed once raised, and when the page that opened the form
+  // named it; otherwise it is the one customer picker — for those who may read
+  // the customer register it searches. Anybody else picks from the form's own
+  // list (`/cad-job-orders/options`, behind the CAD right), as before.
+  const customerLocked = !!existing || !!prefill?.customerId;
+  const searchCustomers = can('gops.customers.view_all');
+  const [pickedCustomer, setPickedCustomer] = useState<CustomerRef | null>(null);
   const [drawingTypes, setDrawingTypes] = useState<{ id: string; name: string }[]>([]);
 
   const [form, setForm] = useState(() => ({
@@ -647,21 +650,37 @@ export function CadRequestModal({
 
       <h4 className="svc-subhead">Links</h4>
       <div className="grid grid-2">
-        <Field label="Customer">
-          <select
-            value={form.customerId}
-            disabled={!!existing || !!prefill?.customerId}
-            onChange={(e) => setForm({ ...form, customerId: e.target.value, jobId: '', quotationId: '', jobOrderId: '' })}
-          >
-            <option value="">— choose —</option>
-            {existing && !customers.some((c) => c.id === existing.customer.id) && <option value={existing.customer.id}>{existing.customer.name}</option>}
-            {customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {!customerLocked && searchCustomers ? (
+          <Field label="Customer" htmlFor={customerInputId}>
+            <CustomerPicker
+              inputId={customerInputId}
+              value={pickedCustomer}
+              onError={setError}
+              onChange={(c) => {
+                setPickedCustomer(c);
+                setForm((f) =>
+                  (c?.id ?? '') === f.customerId ? f : { ...f, customerId: c?.id ?? '', jobId: '', quotationId: '', jobOrderId: '' },
+                );
+              }}
+            />
+          </Field>
+        ) : (
+          <Field label="Customer">
+            <select
+              value={form.customerId}
+              disabled={customerLocked}
+              onChange={(e) => setForm({ ...form, customerId: e.target.value, jobId: '', quotationId: '', jobOrderId: '' })}
+            >
+              <option value="">— choose —</option>
+              {existing && !customers.some((c) => c.id === existing.customer.id) && <option value={existing.customer.id}>{existing.customer.name}</option>}
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Project" hint="When the drawing is for a project already built">
           <select value={form.jobId} onChange={(e) => set('jobId', e.target.value)}>
             <option value="">— none —</option>
@@ -969,16 +988,15 @@ export function CadJobOrderDetail() {
           <h4 className="svc-subhead" style={{ marginTop: 0 }}>
             Assign a designer
           </h4>
-          <Field label="Designer" hint="Everyone holding the design right. Choose nobody to put it back in the queue.">
-            <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
-              <option value="">— back to the queue —</option>
-              {designers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                  {p.position ? ` — ${p.position}` : ''}
-                </option>
-              ))}
-            </select>
+          <Field label="Designer" htmlFor="cad-assignee" hint="Everyone holding the design right. Choose nobody to put it back in the queue.">
+            <PersonSelect
+              id="cad-assignee"
+              value={assignee}
+              onChange={setAssignee}
+              people={designers}
+              placeholder="— back to the queue —"
+              current={r.assignedTo}
+            />
           </Field>
           <div className="cad-panel-actions">
             <button type="button" className="btn" onClick={() => setPanel(null)} disabled={busy}>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -8,6 +8,8 @@ import { useConfirm } from '../../components/Confirm';
 import { DocumentApproval } from '../../components/ApprovalStepper';
 import { Attachments } from '../../components/Attachments';
 import { PeoplePicker } from '../../components/PeoplePicker';
+import { PersonSelect, toPerson, usePeople } from '../../components/People';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import {
   ErrorBox,
   Field,
@@ -324,11 +326,20 @@ export function JobOrderModal({
   onSaved: (id: string) => void;
 }) {
   const toast = useToast();
+  const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [options, setOptions] = useState<Options>(NO_OPTIONS);
-  const [people, setPeople] = useState<Person[]>([]);
+  const { people } = usePeople();
+  const idBase = useId();
+  // The customer is fixed once raised, and when the page that opened the form
+  // named it; otherwise it is the one customer picker — for those who may read
+  // the customer register it searches. Anybody else picks from the form's own
+  // list (`/job-orders/options`, behind the job-order right), as before.
+  const customerLocked = !!existing || !!prefill?.customerId;
+  const searchCustomers = can('gops.customers.view_all');
+  const [pickedCustomer, setPickedCustomer] = useState<CustomerRef | null>(null);
 
   const [form, setForm] = useState(() => ({
     customerId: existing?.customer.id ?? prefill?.customerId ?? '',
@@ -357,10 +368,6 @@ export function JobOrderModal({
       .get<{ customers: { id: string; name: string }[] }>('/job-orders/options')
       .then((d) => setCustomers(d.customers))
       .catch(() => setCustomers([]));
-    api
-      .get<Person[]>('/users/lookup')
-      .then(setPeople)
-      .catch(() => setPeople([]));
   }, []);
 
   useEffect(() => {
@@ -427,7 +434,6 @@ export function JobOrderModal({
   const finishBeforeStart = !!form.targetStart && !!form.targetFinish && form.targetFinish < form.targetStart;
   const salesOrdersOffered = form.quotationId ? options.salesOrders.filter((o) => o.quotationId === form.quotationId) : options.salesOrders;
   const linkedQuotation = options.quotations.find((q) => q.id === form.quotationId);
-  const picked = (id: string) => people.find((p) => p.id === id);
 
   async function save() {
     setBusy(true);
@@ -467,18 +473,21 @@ export function JobOrderModal({
     }
   }
 
+  /** On the order now, so a person no longer listed still shows by name. */
+  const onRecord = {
+    projectManagerId: existing?.projectManager ?? null,
+    projectEngineerId: existing?.projectEngineer ?? null,
+    projectLeadId: existing?.projectLead ?? null,
+  };
   const personSelect = (label: string, key: 'projectManagerId' | 'projectEngineerId' | 'projectLeadId', hint?: string) => (
-    <Field label={label} hint={hint}>
-      <select value={form[key]} onChange={(e) => set(key, e.target.value)}>
-        <option value="">— none —</option>
-        {form[key] && !picked(form[key]) && <option value={form[key]}>(kept)</option>}
-        {people.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-            {p.position ? ` — ${p.position}` : ''}
-          </option>
-        ))}
-      </select>
+    <Field label={label} hint={hint} htmlFor={`${idBase}-${key}`}>
+      <PersonSelect
+        id={`${idBase}-${key}`}
+        value={form[key]}
+        onChange={(id) => set(key, id)}
+        people={people}
+        current={onRecord[key]}
+      />
     </Field>
   );
 
@@ -513,25 +522,43 @@ export function JobOrderModal({
 
       <h4 className="svc-subhead">Links</h4>
       <div className="grid grid-2">
-        <Field label="Customer">
-          <select
-            value={form.customerId}
-            disabled={!!existing || !!prefill?.customerId}
-            onChange={(e) =>
-              setForm({ ...form, customerId: e.target.value, siteId: '', contactId: '', contactNumber: '', quotationId: '', salesOrderId: '', jobId: '' })
-            }
-          >
-            <option value="">— choose —</option>
-            {existing && !customers.some((c) => c.id === existing.customer.id) && (
-              <option value={existing.customer.id}>{existing.customer.name}</option>
-            )}
-            {customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {!customerLocked && searchCustomers ? (
+          <Field label="Customer" htmlFor={`${idBase}-customer`}>
+            <CustomerPicker
+              inputId={`${idBase}-customer`}
+              value={pickedCustomer}
+              onError={setError}
+              onChange={(c) => {
+                setPickedCustomer(c);
+                setForm((f) =>
+                  (c?.id ?? '') === f.customerId
+                    ? f
+                    : { ...f, customerId: c?.id ?? '', siteId: '', contactId: '', contactNumber: '', quotationId: '', salesOrderId: '', jobId: '' },
+                );
+              }}
+            />
+          </Field>
+        ) : (
+          <Field label="Customer">
+            <select
+              value={form.customerId}
+              disabled={customerLocked}
+              onChange={(e) =>
+                setForm({ ...form, customerId: e.target.value, siteId: '', contactId: '', contactNumber: '', quotationId: '', salesOrderId: '', jobId: '' })
+              }
+            >
+              <option value="">— choose —</option>
+              {existing && !customers.some((c) => c.id === existing.customer.id) && (
+                <option value={existing.customer.id}>{existing.customer.name}</option>
+              )}
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field
           label="Quotation"
           hint={
@@ -637,7 +664,7 @@ export function JobOrderModal({
       </div>
       <Field label="Project support" hint="As many as the job needs">
         <PeoplePicker
-          people={people.map((p) => ({ id: p.id, name: p.name, sub: p.position ?? undefined }))}
+          people={people.map(toPerson)}
           value={form.supportIds}
           onChange={(ids) => set('supportIds', ids)}
           exclude={[form.projectManagerId, form.projectEngineerId, form.projectLeadId].filter(Boolean)}

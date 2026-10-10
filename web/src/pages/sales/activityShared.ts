@@ -86,12 +86,13 @@ export interface Activity {
   googleCalendarUrl?: string | null;
 }
 
-export interface Person {
-  id: string;
-  name: string;
-  /** The photo (an attachment id), for a picker that shows faces. */
-  photoPath?: string | null;
-}
+/**
+ * Somebody who can be booked on or invited to an activity: a row of the one
+ * people lookup (`components/People.tsx` — name, position, department and
+ * the photo, an attachment id, for a picker that shows faces). A type only,
+ * so this file still carries no React.
+ */
+export type { PersonRow as Person } from '../../components/People';
 
 /** The reminder offsets the API accepts (REMINDER_MINUTES in shared/activities.ts). */
 export const REMINDERS = [

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -15,6 +15,8 @@ import {
   type Tone,
 } from '../../components/ui';
 import { Meter as ProgressBar } from '../../components/charts';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
+import { PersonSelect, usePeople } from '../../components/People';
 import { todayLocal } from '../../lib/day';
 
 export const JOB_STATUSES = [
@@ -279,12 +281,6 @@ interface CostingDetail {
   jobs: { id: string; number: string; name: string; status: string }[];
 }
 
-interface PersonRow {
-  id: string;
-  name: string;
-  position: string | null;
-}
-
 function NewJobModal({
   preset,
   onClose,
@@ -298,9 +294,10 @@ function NewJobModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
-  const [people, setPeople] = useState<PersonRow[]>([]);
+  const { people } = usePeople();
+  const pmId = useId();
+  const customerInputId = useId();
   const [chosen, setChosen] = useState<CostingDetail | null>(null);
   const [renewal, setRenewal] = useState<{ id: string; number: string } | null>(null);
 
@@ -312,7 +309,7 @@ function NewJobModal({
     // A renewal is a service contract whatever the URL says; the server forces
     // it too.
     type: renewing ? 'SERVICE_CONTRACT' : preset.type === 'SERVICE_CONTRACT' ? 'SERVICE_CONTRACT' : 'PROJECT',
-    customerId: '',
+    customer: null as CustomerRef | null,
     siteId: '',
     projectManagerId: '',
     customerPoNumber: '',
@@ -325,8 +322,6 @@ function NewJobModal({
     // snapshots it. A preset costing is added below even if it is a draft, so
     // the renewal flow (duplicate → reprice → create) can still land here.
     api.get<CostingOption[]>('/costings/lookup?status=FINAL').then(setCostings).catch(() => {});
-    api.get<typeof customers>('/customers/lookup').then(setCustomers).catch(() => {});
-    api.get<PersonRow[]>('/users/lookup').then(setPeople).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -341,16 +336,17 @@ function NewJobModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const customerId = form.customer?.id ?? '';
   useEffect(() => {
-    if (!form.customerId) {
+    if (!customerId) {
       setSites([]);
       return;
     }
     api
-      .get<{ sites: { id: string; name: string }[] }>(`/customers/${form.customerId}`)
+      .get<{ sites: { id: string; name: string }[] }>(`/customers/${customerId}`)
       .then((c) => setSites(c.sites))
       .catch(() => setSites([]));
-  }, [form.customerId]);
+  }, [customerId]);
 
   /**
    * Choosing a costing fills the name, the customer and the site. The customer
@@ -377,7 +373,7 @@ function NewJobModal({
       setForm((f) => ({
         ...f,
         name: f.name || c.title,
-        customerId: c.customer?.id ?? f.customerId,
+        customer: c.customer ? { id: c.customer.id, name: c.customer.name } : f.customer,
         siteId: c.site?.id ?? (c.customer ? '' : f.siteId),
         quotationRevisionId:
           f.quotationRevisionId || (approved.length === 1 ? approved[0].id : ''),
@@ -396,7 +392,7 @@ function NewJobModal({
         quotationRevisionId: form.quotationRevisionId || null,
         name: form.name,
         type: form.type,
-        customerId: form.customerId,
+        customerId,
         siteId: form.siteId || null,
         projectManagerId: form.projectManagerId || null,
         customerPoNumber: form.customerPoNumber || null,
@@ -431,7 +427,7 @@ function NewJobModal({
           <button
             className="btn btn-primary"
             onClick={create}
-            disabled={busy || !form.costingId || !form.customerId || form.name.length < 2}
+            disabled={busy || !form.costingId || !customerId || form.name.length < 2}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
@@ -515,23 +511,24 @@ function NewJobModal({
             <option value="SERVICE_CONTRACT">Service contract</option>
           </select>
         </Field>
-        <Field label="Customer" hint={customerLocked ? 'Taken from the costing' : undefined}>
+        <Field
+          label="Customer"
+          hint={customerLocked ? 'Taken from the costing' : undefined}
+          htmlFor={customerLocked ? undefined : customerInputId}
+        >
           {customerLocked && chosen?.customer ? (
             <div className="del-locked">
               <Link to={`/g-ops/customers/${chosen.customer.id}`}>{chosen.customer.name}</Link>
             </div>
           ) : (
-            <select
-              value={form.customerId}
-              onChange={(e) => setForm({ ...form, customerId: e.target.value, siteId: '' })}
-            >
-              <option value="">— choose —</option>
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+            <CustomerPicker
+              inputId={customerInputId}
+              value={form.customer}
+              onError={setError}
+              onChange={(c) =>
+                setForm((f) => ({ ...f, customer: c, siteId: c && c.id === f.customer?.id ? f.siteId : '' }))
+              }
+            />
           )}
         </Field>
         <Field label="Site">
@@ -559,19 +556,14 @@ function NewJobModal({
             </select>
           </Field>
         )}
-        <Field label="Project manager">
-          <select
+        <Field label="Project manager" htmlFor={pmId}>
+          <PersonSelect
+            id={pmId}
             value={form.projectManagerId}
-            onChange={(e) => setForm({ ...form, projectManagerId: e.target.value })}
-          >
-            <option value="">— unassigned —</option>
-            {people.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.position ? ` — ${p.position}` : ''}
-              </option>
-            ))}
-          </select>
+            onChange={(id) => setForm((f) => ({ ...f, projectManagerId: id }))}
+            people={people}
+            placeholder="— unassigned —"
+          />
         </Field>
         <Field label="Start date" hint="Scope sections are scheduled back to back from here">
           <input

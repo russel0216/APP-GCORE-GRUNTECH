@@ -382,21 +382,7 @@ table.data.cs-tasks {
   }
 }
 
-.cs-fact {
-  display: grid;
-  grid-template-columns: 9rem minmax(0, 1fr);
-  gap: var(--s-3);
-}
-
-.cs-fact dt {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.cs-fact dd {
-  margin: 0;
-}
+/* .cs-fact is the read-only grammar in styles.css (.kv). */
 
 .cs-cat-row td {
   background: var(--surface-2);

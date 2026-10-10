@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -18,6 +18,8 @@ import {
   type Tone,
 } from '../../components/ui';
 import { monthGrid, monthOf, todayLocal } from '../../lib/day';
+import { PersonSelect, loadPeople, usePeople, type PersonRow } from '../../components/People';
+import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { KINDS, KIND_LABEL, reportPermission } from './Reports';
 
 /**
@@ -642,7 +644,8 @@ function VisitSheet({
   const [visit, setVisit] = useState<ScheduleVisit | null>(initial);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const [engineers, setEngineers] = useState<{ id: string; name: string; position: string | null }[]>([]);
+  const [engineers, setEngineers] = useState<PersonRow[]>([]);
+  const engineerId = useId();
   const [form, setForm] = useState({ dueDate: '', assignedToId: '', notes: '' });
 
   const load = useCallback(async () => {
@@ -667,10 +670,7 @@ function VisitSheet({
   const canSchedule = can('gops.pm_reports.create');
   useEffect(() => {
     if (!canSchedule) return;
-    api
-      .get<{ id: string; name: string; position: string | null }[]>(
-        `/users/lookup${qs({ holding: 'gops.pm_reports.create' })}`,
-      )
+    loadPeople('gops.pm_reports.create')
       .then(setEngineers)
       .catch(() => setEngineers([]));
   }, [canSchedule]);
@@ -894,22 +894,15 @@ function VisitSheet({
                     onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
                   />
                 </Field>
-                <Field label="Engineer">
-                  <select
+                <Field label="Engineer" htmlFor={engineerId}>
+                  <PersonSelect
+                    id={engineerId}
                     value={form.assignedToId}
-                    onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}
-                  >
-                    <option value="">— unassigned —</option>
-                    {visit.assignedTo && !engineers.some((u) => u.id === visit.assignedTo!.id) && (
-                      <option value={visit.assignedTo.id}>{visit.assignedTo.name}</option>
-                    )}
-                    {engineers.map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.name}
-                        {u.position ? ` — ${u.position}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(id) => setForm((f) => ({ ...f, assignedToId: id }))}
+                    people={engineers}
+                    placeholder="— unassigned —"
+                    current={visit.assignedTo}
+                  />
                 </Field>
               </div>
               <Field label="Notes for the engineer">
@@ -933,11 +926,12 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
+  const [customer, setCustomer] = useState<CustomerRef | null>(null);
   const [sites, setSites] = useState<{ id: string; name: string }[]>([]);
   const [assets, setAssets] = useState<{ id: string; name: string; serialNo: string | null; siteId: string | null }[]>([]);
   const [contracts, setContracts] = useState<{ id: string; number: string; job: { name: string } }[]>([]);
-  const [engineers, setEngineers] = useState<{ id: string; name: string }[]>([]);
+  const { people: engineers } = usePeople('gops.pm_reports.create');
+  const ids = useId();
   const [form, setForm] = useState({
     kind: 'CORRECTIVE',
     customerId: '',
@@ -948,17 +942,6 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
     assignedToId: '',
     notes: '',
   });
-
-  useEffect(() => {
-    api
-      .get<{ rows: { id: string; name: string }[] }>('/customers?pageSize=200')
-      .then((d) => setCustomers(d.rows))
-      .catch(() => setCustomers([]));
-    api
-      .get<{ id: string; name: string }[]>(`/users/lookup${qs({ holding: 'gops.pm_reports.create' })}`)
-      .then(setEngineers)
-      .catch(() => setEngineers([]));
-  }, []);
 
   useEffect(() => {
     if (!form.customerId) {
@@ -1038,18 +1021,18 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           <input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} />
         </Field>
       </div>
-      <Field label="Customer">
-        <select
-          value={form.customerId}
-          onChange={(e) => setForm({ ...form, customerId: e.target.value, siteId: '', assetId: '', contractId: '' })}
-        >
-          <option value="">— choose —</option>
-          {customers.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+      <Field label="Customer" htmlFor={`${ids}-customer`}>
+        <CustomerPicker
+          inputId={`${ids}-customer`}
+          value={customer}
+          onError={setError}
+          onChange={(c) => {
+            setCustomer(c);
+            setForm((f) =>
+              (c?.id ?? '') === f.customerId ? f : { ...f, customerId: c?.id ?? '', siteId: '', assetId: '', contractId: '' },
+            );
+          }}
+        />
       </Field>
       <div className="grid grid-2">
         <Field label="Site">
@@ -1092,15 +1075,14 @@ function NewVisitModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           </select>
         </Field>
       )}
-      <Field label="Engineer">
-        <select value={form.assignedToId} onChange={(e) => setForm({ ...form, assignedToId: e.target.value })}>
-          <option value="">— unassigned —</option>
-          {engineers.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.name}
-            </option>
-          ))}
-        </select>
+      <Field label="Engineer" htmlFor={`${ids}-engineer`}>
+        <PersonSelect
+          id={`${ids}-engineer`}
+          value={form.assignedToId}
+          onChange={(id) => setForm((f) => ({ ...f, assignedToId: id }))}
+          people={engineers}
+          placeholder="— unassigned —"
+        />
       </Field>
       <Field label="Notes for the engineer">
         <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
