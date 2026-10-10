@@ -265,6 +265,10 @@ employeeRoutes.get(
   '/lookup',
   requireAny(
     'ghr.employees.view_all',
+    // Admin › Users' "an employee already on the register" branch is offered
+    // on edit_all (2026-10-10), and whoever may change every employee may
+    // surely list them — without this the branch could name nobody.
+    'ghr.employees.edit_all',
     'ghr.training_sessions.create',
     'ghr.training_sessions.edit_all',
     'ghr.evaluations.create',
@@ -443,6 +447,68 @@ async function teamId(tx: Prisma.TransactionClient, id: string | null | undefine
   return id;
 }
 
+/**
+ * The roles a new login starts with, each checked to exist — a 400 naming
+ * the unknown one, where the foreign key used to answer with a 500 after the
+ * employee was already written. `field` is the path the REQUEST has: the
+ * login is nested on `POST /employees` and the whole body on `/:id/login`,
+ * and an error box that highlights by field must find the right box.
+ */
+async function checkRoleIds(
+  tx: Prisma.TransactionClient,
+  roleIds: string[] | undefined,
+  field: 'login.roleIds' | 'roleIds',
+): Promise<string[]> {
+  const ids = [...new Set(roleIds ?? [])];
+  if (!ids.length) return defaultRoleIds(tx);
+  const found = await tx.role.findMany({ where: { id: { in: ids } }, select: { id: true } });
+  const known = new Set(found.map((r) => r.id));
+  const unknown = ids.filter((id) => !known.has(id));
+  if (unknown.length) {
+    throw badRequest(`Unknown role${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}`, [
+      { field, message: 'Choose roles from the list' },
+    ]);
+  }
+  return ids;
+}
+
+/**
+ * The same rule for the two other references a creation carries (2026-10-10):
+ * an unknown "Reports to" or department is a 400 naming the field, checked
+ * before the person is written, where the foreign key answered 500. The web
+ * cannot send one (PersonSelect, the department select), but a script can.
+ */
+async function checkSupervisorId(
+  tx: Prisma.TransactionClient,
+  id: string | null | undefined,
+  field: 'login.supervisorId' | 'supervisorId',
+): Promise<string | null> {
+  if (!id) return null;
+  if (!(await tx.user.findUnique({ where: { id }, select: { id: true } }))) {
+    throw badRequest('That "Reports to" login does not exist', [{ field, message: 'Choose someone from the list' }]);
+  }
+  return id;
+}
+
+async function checkDepartmentId(tx: Prisma.TransactionClient, id: string | null | undefined): Promise<string | null> {
+  if (!id) return null;
+  if (!(await tx.department.findUnique({ where: { id }, select: { id: true } }))) {
+    throw badRequest('That department does not exist', [{ field: 'departmentId', message: 'Choose a department from the list' }]);
+  }
+  return id;
+}
+
+/**
+ * The login mirrors its employee's number (`User.employeeNo` — the `{EMP}`
+ * in their quotation numbers, and what the face clock reads). The column is
+ * unique on User too, so a number an older login still carries is left on
+ * that login and this one goes without, rather than the save failing.
+ */
+async function mirrorEmployeeNo(tx: Prisma.TransactionClient, employeeNo: string): Promise<string | null> {
+  const taken = await tx.user.findUnique({ where: { employeeNo }, select: { id: true } });
+  return taken ? null : employeeNo;
+}
+
 employeeRoutes.post(
   '/',
   require_('ghr.employees.create'),
@@ -455,6 +521,13 @@ employeeRoutes.post(
       throw forbidden('Creating a G-CORE login needs admin.users.create — save the employee, and an administrator can invite them from their record');
     }
     if (body.login && body.userId) throw badRequest('Link an existing login or create a new one — not both');
+    // The same rule as /:id/login: nobody signs in as someone who is not on the
+    // active register. Refused before the transaction, so no employee is left.
+    if (body.login && !body.isActive) {
+      throw badRequest('An inactive employee cannot be given a login — save them active, or leave the login for later', [
+        { field: 'isActive', message: 'Tick Active, or untick the login' },
+      ]);
+    }
 
     const { employee, login } = await prisma.$transaction(async (tx) => {
       const employeeNo = body.employeeNo || (await nextNumber('employee', tx));
@@ -462,9 +535,15 @@ employeeRoutes.post(
         throw conflict(`Employee number "${employeeNo}" is already in use`);
       }
       if (body.userId) {
+        if (!(await tx.user.findUnique({ where: { id: body.userId }, select: { id: true } }))) {
+          throw notFound('User not found');
+        }
         const taken = await tx.employee.findUnique({ where: { userId: body.userId } });
         if (taken) throw conflict('That user account is already linked to another employee');
       }
+      // Checked before the person is written, like the login's email.
+      const roleIds = body.login ? await checkRoleIds(tx, body.login.roleIds, 'login.roleIds') : [];
+      const supervisorId = body.login ? await checkSupervisorId(tx, body.login.supervisorId, 'login.supervisorId') : null;
 
       const created = await tx.employee.create({
         data: {
@@ -474,7 +553,7 @@ employeeRoutes.post(
           middleName: body.middleName || null,
           suffix: body.suffix || null,
           userId: body.userId || null,
-          departmentId: body.departmentId || null,
+          departmentId: await checkDepartmentId(tx, body.departmentId),
           industryId: await teamId(tx, body.industryId),
           ...(await positionFields(tx, body.positionId, body.position)),
           employmentType: body.employmentType,
@@ -502,11 +581,12 @@ employeeRoutes.post(
           email: body.login.email,
           name: fullName(created),
           password: body.login.password,
-          roleIds: body.login.roleIds?.length ? body.login.roleIds : await defaultRoleIds(tx),
-          supervisorId: body.login.supervisorId,
+          roleIds,
+          supervisorId,
           departmentId: created.departmentId,
           position: created.position,
           phone: created.mobile,
+          employeeNo: await mirrorEmployeeNo(tx, created.employeeNo),
         },
         me.id,
       );
@@ -558,6 +638,14 @@ employeeRoutes.post(
     const body = parseBody(loginSchema, req.body);
 
     const made = await prisma.$transaction(async (tx) => {
+      // The row is LOCKED first (2026-10-10, the expense claim's rule): two of
+      // these at once both read "no login" otherwise, and the loser died on
+      // User.employeeNo's unique index with a 500 — or, with the number held
+      // by an older login, both passed and the first login was orphaned. The
+      // second waits here until the first commits, reads the link it made and
+      // is refused with the 409 the sequential case gives.
+      const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Employee" WHERE id = ${req.params.id} FOR UPDATE`;
+      if (!locked.length) throw notFound('Employee not found');
       const employee = await tx.employee.findUnique({ where: { id: req.params.id } });
       if (!employee) throw notFound('Employee not found');
       if (employee.userId) throw conflict(`${employee.firstName} ${employee.lastName} already has a login`);
@@ -568,15 +656,20 @@ employeeRoutes.post(
           email: body.email,
           name: fullName(employee),
           password: body.password,
-          roleIds: body.roleIds?.length ? body.roleIds : await defaultRoleIds(tx),
-          supervisorId: body.supervisorId,
+          roleIds: await checkRoleIds(tx, body.roleIds, 'roleIds'),
+          supervisorId: await checkSupervisorId(tx, body.supervisorId, 'supervisorId'),
           departmentId: employee.departmentId,
           position: employee.position,
           phone: employee.mobile,
+          employeeNo: await mirrorEmployeeNo(tx, employee.employeeNo),
         },
         me.id,
       );
-      await tx.employee.update({ where: { id: employee.id }, data: { userId: login.user.id } });
+      // And the link is CLAIMED, never written over: the lock above decides
+      // the race, this keeps an unconditional update from ever orphaning a
+      // login should the lock be lost in a refactor.
+      const claimed = await tx.employee.updateMany({ where: { id: employee.id, userId: null }, data: { userId: login.user.id } });
+      if (claimed.count !== 1) throw conflict(`${employee.firstName} ${employee.lastName} already has a login`);
       return { employee, login };
     });
 
@@ -586,6 +679,17 @@ employeeRoutes.post(
         entityId: made.login.user.id,
         action: 'CREATED',
         summary: `Created user ${made.login.user.email} for employee ${made.employee.employeeNo}${made.login.invite ? ' — invited' : ''}`,
+      },
+      req,
+    );
+    // The register's own history says the person got their login (2026-10-10).
+    await audit(
+      {
+        entityType: 'employee',
+        entityId: made.employee.id,
+        action: 'UPDATED',
+        summary: `Linked the login ${made.login.user.email}`,
+        after: { userId: made.login.user.id },
       },
       req,
     );
@@ -634,7 +738,7 @@ employeeRoutes.patch(
       if (body[f] !== undefined) data[f] = body[f] || null;
     }
     if (body.userId !== undefined) data.userId = body.userId || null;
-    if (body.departmentId !== undefined) data.departmentId = body.departmentId || null;
+    if (body.departmentId !== undefined) data.departmentId = await checkDepartmentId(prisma, body.departmentId);
     if (body.industryId !== undefined && body.industryId !== before.industryId) {
       data.industryId = await teamId(prisma, body.industryId);
     }

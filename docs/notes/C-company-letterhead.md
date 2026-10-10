@@ -45,7 +45,7 @@ a tolerance on a service report, is Latin-1 and still prints.
 
 ## Phone
 
-- `User.phone` is exposed on `/api/users` (list, get, create, patch) and in
+- `User.phone` is exposed on `/api/users` (list, get, patch) and in
   Admin > Users as "Mobile".
 - `GET/PATCH /api/auth/profile` lets a signed-in user read and set **their own
   phone only**. Name, position and reporting line stay with Admin > Users,

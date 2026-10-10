@@ -16,6 +16,7 @@ import {
 import { PasswordInput } from '../../components/PasswordInput';
 import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { OrgChart } from './OrgChart';
+import { NewPersonModal } from '../masters/Employees';
 
 interface Role {
   id: string;
@@ -51,17 +52,6 @@ type UserDetail = Omit<UserRow, 'roles'> & {
   invite: { sentAt: string; expiresAt: string; live: boolean } | null;
   employee: { id: string; employeeNo: string; firstName: string; lastName: string } | null;
 };
-
-/** An employee a new login can belong to: one on the register who has none yet. */
-interface EmployeeOption {
-  id: string;
-  employeeNo: string;
-  firstName: string;
-  lastName: string;
-  position: string | null;
-  department: { id: string; name: string } | null;
-  hasUser: boolean;
-}
 
 /**
  * A permission chip is a button, and a button sends no `input` event — so the
@@ -112,7 +102,14 @@ export function Users() {
   // Adding someone is a local modal; an existing person has a URL, so a search
   // hit or a link from an employee record opens their editor directly.
   const [adding, setAdding] = useState(false);
-  const editing: string | null = adding ? 'new' : (id ?? null);
+  /*
+    "+ New user" is the one creation form (2026-10-10, the owner's call:
+    "unite the creation of user and HR employee record"): a new person with
+    their login, or a login for an employee HR already registered. The
+    button shows when the viewer can do either; the form hides the branch
+    they cannot.
+  */
+  const mayAdd = can('admin.users.create') && (can('ghr.employees.create') || can('ghr.employees.edit_all'));
   const [reload, setReload] = useState(0);
   const [roles, setRoles] = useState<Role[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -182,8 +179,7 @@ export function Users() {
   ];
 
   function close() {
-    if (adding) setAdding(false);
-    else navigate(`${BASE}${location.search}`);
+    navigate(`${BASE}${location.search}`);
   }
 
   return (
@@ -232,7 +228,7 @@ export function Users() {
           { key: 'role', label: 'Role', options: roles.map((r) => ({ value: r.key, label: r.name })) },
         ]}
         actions={
-          can('admin.users.create') ? (
+          mayAdd ? (
             <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}>
               + New user
             </button>
@@ -241,10 +237,21 @@ export function Users() {
       />
       )}
 
-      {editing && (
+      {adding && (
+        <NewPersonModal
+          door="admin"
+          onClose={() => setAdding(false)}
+          onSaved={() => {
+            setAdding(false);
+            setReload((r) => r + 1);
+          }}
+        />
+      )}
+
+      {id && (
         <UserEditor
-          key={editing}
-          id={editing}
+          key={id}
+          id={id}
           roles={roles}
           departments={departments}
           onClose={close}
@@ -258,6 +265,11 @@ export function Users() {
   );
 }
 
+/**
+ * Modify of an existing account — details, roles and per-person overrides.
+ * It makes nobody: a person is created with their login through
+ * `NewPersonModal` (2026-10-10), never as a login alone.
+ */
 function UserEditor({
   id,
   roles,
@@ -265,13 +277,12 @@ function UserEditor({
   onClose,
   onSaved,
 }: {
-  id: string | 'new';
+  id: string;
   roles: Role[];
   departments: Department[];
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const isNew = id === 'new';
   const toast = useToast();
   const [tab, setTab] = useState<'details' | 'access'>('details');
   const [busy, setBusy] = useState(false);
@@ -292,23 +303,9 @@ function UserEditor({
     roleIds: [] as string[],
     isActive: true,
   });
-  /** A new account: invite them to choose their password, or set one now. */
-  const [signIn, setSignIn] = useState<'invite' | 'password'>('invite');
-  const [employeeId, setEmployeeId] = useState('');
-  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [detail, setDetail] = useState<UserDetail | null>(null);
   /** The link just issued — shown until the administrator is done with it. */
   const [issued, setIssued] = useState<{ delivery: Delivery; kind: 'invite' | 'reset' } | null>(null);
-
-  // The register, for linking a new login to its person. Admins who cannot
-  // read HR's register simply do not get the choice.
-  useEffect(() => {
-    if (!isNew) return;
-    api
-      .get<EmployeeOption[]>('/employees/lookup?active=true')
-      .then((rows) => setEmployees(rows.filter((e) => !e.hasUser)))
-      .catch(() => setEmployees([]));
-  }, [isNew]);
 
   useEffect(() => {
     api
@@ -322,7 +319,6 @@ function UserEditor({
   }, []);
 
   useEffect(() => {
-    if (isNew) return;
     api
       .get<UserDetail>(`/users/${id}`)
       .then((u) => {
@@ -342,7 +338,7 @@ function UserEditor({
         setOverrides(Object.fromEntries(u.overrides.map((o) => [o.key, o.effect])));
       })
       .catch(setError);
-  }, [id, isNew]);
+  }, [id]);
 
   async function save() {
     setBusy(true);
@@ -360,32 +356,12 @@ function UserEditor({
         ...(form.password ? { password: form.password } : {}),
       };
 
-      if (isNew && signIn === 'password' && form.password.length < 8) {
-        throw new Error('Set a password of at least 8 characters, or invite them to choose their own');
-      }
-      const created = isNew
-        ? await api.post<{ id: string; invite: Delivery | null }>('/users', {
-            ...payload,
-            email: form.email,
-            employeeId: employeeId || null,
-            ...(signIn === 'password' ? { password: form.password } : { password: null }),
-          })
-        : null;
-      const userId = created ? created.id : id;
-
-      await api.put(`/users/${userId}/overrides`, {
+      await api.put(`/users/${id}/overrides`, {
         overrides: Object.entries(overrides).map(([key, effect]) => ({ key, effect })),
       });
+      await api.patch(`/users/${id}`, payload);
 
-      if (!isNew) await api.patch(`/users/${id}`, payload);
-
-      toast('ok', isNew ? `${form.name} added` : `${form.name} updated`);
-      // An invitation stays on screen so its link can be passed on.
-      if (created?.invite) {
-        setIssued({ delivery: created.invite, kind: 'invite' });
-        setBusy(false);
-        return;
-      }
+      toast('ok', `${form.name} updated`);
       onSaved();
     } catch (err) {
       setError(err);
@@ -416,45 +392,10 @@ function UserEditor({
     }
   }
 
-  // After an invitation from "New user": the link, and a way out. Its own key
-  // and no guard: it sits where the New user form sat, and React would
-  // otherwise keep that form's Modal — and its "something was typed" flag —
-  // asking "Close without saving?" about a user already saved.
-  if (isNew && issued) {
-    return (
-      <Modal
-        key="added"
-        guard={false}
-        title={`${form.name} added`}
-        onClose={onSaved}
-        footer={<ModalFoot onCancel={onSaved} cancelLabel="Close" />}
-      >
-        <LinkDelivery delivery={issued.delivery} email={form.email} kind={issued.kind} />
-        <p className="muted">
-          Until they use it, their account shows as Invited. From their account you can send a new invitation if this
-          one is lost or runs out.
-        </p>
-      </Modal>
-    );
-  }
-
-  const pickEmployee = (value: string) => {
-    setEmployeeId(value);
-    const e = employees.find((x) => x.id === value);
-    if (!e) return;
-    // The person's own record fills what is still empty; nothing typed is overwritten.
-    setForm((f) => ({
-      ...f,
-      name: f.name || `${e.firstName} ${e.lastName}`,
-      position: f.position || e.position || '',
-      departmentId: f.departmentId || e.department?.id || '',
-    }));
-  };
-
   return (
     <Modal
       wide
-      title={isNew ? 'New user' : `Modify user ${detail?.name ?? form.name}`.trim()}
+      title={`Modify user ${detail?.name ?? form.name}`.trim()}
       onClose={onClose}
       footer={
         <ModalFoot onCancel={onClose} busy={busy}>
@@ -493,13 +434,8 @@ function UserEditor({
             <Field label="Full name">
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
-            <Field label="Email">
-              <input
-                type="email"
-                value={form.email}
-                disabled={!isNew}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-              />
+            <Field label="Email" hint="The address they sign in with — it stays">
+              <input type="email" value={form.email} disabled />
             </Field>
             <Field label="Employee number">
               <input
@@ -552,55 +488,17 @@ function UserEditor({
                 ))}
               </select>
             </Field>
-            {isNew && employees.length > 0 && (
-              <Field label="Employee record" hint="The person on the G-HR register this login belongs to — linked in the same save">
-                <select value={employeeId} onChange={(e) => pickEmployee(e.target.value)}>
-                  <option value="">— none —</option>
-                  {employees.map((e) => (
-                    <option key={e.id} value={e.id}>
-                      {e.lastName}, {e.firstName} · {e.employeeNo}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            )}
-            {!isNew && (
-              <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
-                <PasswordInput
-                  id="user-password"
-                  value={form.password}
-                  autoComplete="new-password"
-                  onChange={(e) => setForm({ ...form, password: e.target.value })}
-                />
-              </Field>
-            )}
+            <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
+              <PasswordInput
+                id="user-password"
+                value={form.password}
+                autoComplete="new-password"
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+            </Field>
           </div>
 
-          {isNew && (
-            <fieldset className="signin-choice">
-              <legend>How they get in</legend>
-              <label className="checkbox">
-                <input type="radio" name="signin" checked={signIn === 'invite'} onChange={() => setSignIn('invite')} />
-                <span>Invite them — they choose their own password, and add their photo and details</span>
-              </label>
-              <label className="checkbox">
-                <input type="radio" name="signin" checked={signIn === 'password'} onChange={() => setSignIn('password')} />
-                <span>Set a password for them now</span>
-              </label>
-              {signIn === 'password' && (
-                <Field label="Password" htmlFor="user-password" hint="At least 8 characters — tell them, and ask them to change it">
-                  <PasswordInput
-                    id="user-password"
-                    value={form.password}
-                    autoComplete="new-password"
-                    onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  />
-                </Field>
-              )}
-            </fieldset>
-          )}
-
-          {!isNew && detail && (
+          {detail && (
             <SignInPanel
               detail={detail}
               issued={issued}
