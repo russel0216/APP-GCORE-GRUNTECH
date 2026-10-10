@@ -81,7 +81,7 @@ table.data tr.work-overdue td {
 }
 
 .decision-open {
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
 }
 
 .decision-note {

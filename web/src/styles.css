@@ -93,6 +93,10 @@
   /* The one space between cards, blocks, and a page's title and its first block
      (2026-10-10, the owner's call: "make the spacing between cards uniform"). */
   --block-gap: var(--s-4);
+  /* The one space INSIDE a card: between its title and its body, and between
+     the blocks it holds (2026-10-10, the owner's call: "make spacing inside
+     each card uniform"). */
+  --card-gap: var(--s-3);
 
   /* Type. Six sizes, replacing the eight that were in use ad hoc. */
   --fs-xs: 11px;
@@ -299,12 +303,12 @@ th:focus-visible {
   background: var(--surface);
   border: 2px solid var(--magenta);
   border-radius: var(--radius-lg);
-  padding: 26px;
+  padding: var(--card-pad-y) var(--card-pad-x);
   box-shadow: 0 0 10px var(--magenta-soft), inset 0 0 20px rgb(var(--magenta-rgb) / 0.06);
 }
 
 .panel h2 {
-  margin: 0 0 18px;
+  margin: 0 0 var(--card-gap);
   font-family: var(--display);
   font-size: 14px;
   letter-spacing: 3px;
@@ -877,6 +881,38 @@ textarea {
   box-shadow: var(--shadow-sm);
 }
 
+/*
+  A card's padding is its whole inset (2026-10-10, the owner's call: "make
+  spacing inside each card uniform"). Measured across fifteen screens, the
+  bottom inset ran 17, 31, 33 and 35 where the top was always 17: a trailing
+  field, hint or paragraph was adding its own margin to the padding. So the
+  first child carries no top margin and the last no bottom margin, whatever
+  it is, and a paragraph typed straight into a card (the browser gives it 1em
+  either side — 14px, not any token) spaces itself by the card gap.
+*/
+.card > p,
+.panel > p {
+  margin-block: var(--card-gap);
+}
+
+/* A message inside a card spaces itself by the card gap, not the page's. */
+.card > .alert {
+  margin-bottom: var(--card-gap);
+}
+
+/* The edges, last so they win over the two above at equal specificity. */
+.card > :first-child,
+.panel > :first-child,
+.kpi-card > :first-child {
+  margin-top: 0;
+}
+
+.card > :last-child,
+.panel > :last-child,
+.kpi-card > :last-child {
+  margin-bottom: 0;
+}
+
 /* A card that is really a button has to be reset back to looking like a card. */
 .card-button {
   display: block;
@@ -914,7 +950,7 @@ a.card:hover {
   letter-spacing: 1.6px;
   text-transform: uppercase;
   color: var(--neon-dim);
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
   display: flex;
   align-items: center;
   gap: var(--s-2);
@@ -1175,11 +1211,7 @@ a.card:hover {
   margin-bottom: var(--block-gap);
 }
 
-/* Eight across leaves each card narrow: the figure comes down a size and never breaks mid-number. */
-.list-summary .kpi-card {
-  padding: var(--s-3);
-}
-
+/* Eight across leaves each card narrow: the figure comes down a size and never breaks mid-number. (The tile keeps the one card padding.) */
 .list-summary .kpi-value {
   font-size: var(--fs-base);
   white-space: nowrap;
@@ -1921,7 +1953,7 @@ table.data .mono {
 .perm-module {
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  margin-bottom: 12px;
+  margin-bottom: var(--card-gap);
   overflow: hidden;
 }
 
@@ -2045,7 +2077,7 @@ table.data .mono {
 hr.rule {
   border: none;
   border-top: 1px solid var(--line);
-  margin: 18px 0;
+  margin: var(--card-gap) 0;
 }
 
 /* ─────────────────────────────── Progress meter ────────────────────────── */
@@ -2264,7 +2296,7 @@ hr.rule {
 }
 
 .setting-list-actions {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }
 
 /* The sales board's rules are all in styles/pipeline.css. */
@@ -2486,7 +2518,7 @@ hr.rule {
    one heading look in every module's forms. */
 .svc-subhead,
 .m-section-head {
-  margin: var(--s-5) 0 var(--s-2);
+  margin: var(--card-gap) 0;
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--muted);
@@ -2514,7 +2546,7 @@ hr.rule {
 
 .clock-now {
   text-align: center;
-  margin-bottom: 14px;
+  margin-bottom: var(--card-gap);
 }
 
 .clock-time {
@@ -2541,7 +2573,7 @@ hr.rule {
   overflow: hidden;
   background: #0b0f14;
   border: 1px solid var(--line);
-  margin-bottom: 14px;
+  margin-bottom: var(--card-gap);
 }
 
 .camera-video {
@@ -2571,8 +2603,8 @@ hr.rule {
 }
 
 .fallback-panel {
-  margin-top: 14px;
-  padding-top: 14px;
+  margin-top: var(--card-gap);
+  padding-top: var(--card-gap);
   border-top: 1px dashed var(--line);
 }
 
@@ -2913,12 +2945,15 @@ hr.rule {
 .panel-block {
   display: flex;
   flex-direction: column;
-  gap: var(--s-3);
+  gap: var(--card-gap);
 }
 
-/* A panel spaces its children too: a KPI row inside one (Face health) keeps
-   the page-level margin off, or it sat 24px over what followed it. */
-.panel-block > .kpi-grid {
+/* A panel spaces its children itself: a child's own margin (a KPI row's
+   page-level one, a paragraph's 1em, a heading's) would stack with the gap —
+   Face health's notes sat 24, 45 and 40 apart before this. */
+.panel-block > *,
+.card.panel-block > * {
+  margin-top: 0;
   margin-bottom: 0;
 }
 
@@ -2926,7 +2961,7 @@ hr.rule {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--s-3);
+  gap: var(--card-gap);
 }
 
 .panel-head .card-title {
@@ -3222,11 +3257,19 @@ a.funnel-row:hover .funnel-label {
   margin-bottom: var(--block-gap);
 }
 
+/* A KPI row INSIDE a card (Face health, a record's figures) is one of the
+   card's blocks: it spaces its tiles and what follows it by the card gap. */
+.card > .kpi-grid,
+.panel-block > .kpi-grid {
+  gap: var(--card-gap);
+  margin-bottom: 0;
+}
+
 .kpi-card {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  padding: var(--s-3) var(--s-4);
+  padding: var(--card-pad-y) var(--card-pad-x);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   position: relative;
   overflow: hidden;
@@ -3484,7 +3527,7 @@ a.funnel-row:hover .funnel-label {
   gap: var(--s-4);
   flex-wrap: wrap;
   margin-bottom: var(--block-gap);
-  padding: var(--s-4) var(--s-5);
+  padding: var(--card-pad-y) var(--card-pad-x);
   background: var(--surface);
   border: 1px solid var(--line);
   border-left: 4px solid var(--neon);
@@ -3671,7 +3714,7 @@ table.data td.right {
   align-items: center;
   justify-content: space-between;
   gap: var(--s-2);
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
   padding-top: var(--s-2);
   border-top: 1px solid var(--line-soft);
   font-size: var(--fs-xs);
@@ -4187,7 +4230,7 @@ a.icon-row:hover {
 
 /* The generated stylesheet, shown back. */
 .code-block {
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
   padding: var(--s-3);
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -4671,7 +4714,7 @@ a.icon-row:hover {
   flex-direction: column;
   gap: var(--s-1);
   list-style: none;
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
   padding: 0;
 }
 
@@ -4739,11 +4782,11 @@ a.icon-row:hover {
 
 /* ─────────────────────── Activity log on a record ──────────────────────── */
 .activity-form {
-  padding: var(--s-3);
+  padding: var(--card-pad-y) var(--card-pad-x);
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .activity-toggle {
@@ -4976,7 +5019,7 @@ a.icon-row:hover {
   align-items: center;
   justify-content: flex-end;
   gap: var(--s-2);
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }
 
 .modal-foot-question {
@@ -5043,7 +5086,7 @@ a.icon-row:hover {
 
 /* Deciding an approval on the document itself (components/ApprovalStepper.tsx). */
 .approval-decide {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
   padding-top: var(--s-3);
   border-top: 1px solid var(--line-soft);
 }

@@ -34,7 +34,7 @@
   gap: var(--s-2) var(--s-3);
   flex-wrap: wrap;
   padding: var(--s-3);
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--card-gap);
   border: 1px dashed var(--line);
   border-radius: var(--radius-sm);
 }
@@ -53,7 +53,7 @@
 .cs-cat {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .cs-cat-head {
@@ -225,7 +225,7 @@ table.data.cs-summary tbody tr:hover {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   padding: var(--s-3);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .cs-phase-head {
@@ -298,7 +298,7 @@ table.data.cs-tasks {
 }
 
 .cs-texts {
-  margin-top: var(--s-5);
+  margin-top: var(--card-gap);
   padding-top: var(--s-4);
   border-top: 1px solid var(--line-soft);
 }
@@ -307,8 +307,8 @@ table.data.cs-tasks {
    .qe-suggest-* rules, in quotation-editor.css — one menu, two prefixes. */
 
 .cs-template-save {
-  padding: var(--s-4);
-  margin-bottom: var(--s-4);
+  padding: var(--card-pad-y) var(--card-pad-x);
+  margin-bottom: var(--card-gap);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
@@ -392,7 +392,7 @@ table.data.cs-tasks {
 }
 
 .cs-links {
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .cs-after {

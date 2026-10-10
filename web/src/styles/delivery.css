@@ -18,7 +18,7 @@
   justify-content: space-between;
   gap: var(--s-3);
   flex-wrap: wrap;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .del-card-head .card-title {
@@ -328,7 +328,7 @@
 }
 
 .gantt-legend {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }
 
 .gantt-key {
@@ -355,8 +355,8 @@
 }
 
 .gantt-editor {
-  margin-top: var(--block-gap);
-  padding: var(--s-4);
+  margin-top: var(--card-gap);
+  padding: var(--card-pad-y) var(--card-pad-x);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-2);
@@ -378,7 +378,7 @@
   grid-template-columns: repeat(4, auto);
   gap: var(--s-1) var(--s-5);
   justify-content: start;
-  margin: 0 0 var(--s-4);
+  margin: 0 0 var(--card-gap);
 }
 .del-br-sum dt {
   font-size: var(--fs-xs);

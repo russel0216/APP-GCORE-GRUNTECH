@@ -8,11 +8,11 @@
 }
 
 .hraud-after {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }
 
 .hraud-below {
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 /* Last thing in a card: no trailing margin under it. */
@@ -48,7 +48,7 @@
 }
 
 .hraud-balance-figure {
-  margin-top: var(--s-2);
+  margin-top: var(--s-1);
   font-size: var(--fs-2xl);
   font-weight: 600;
 }

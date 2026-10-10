@@ -32,7 +32,7 @@
 }
 
 .meeting-card-head {
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .meeting-flush {
@@ -70,7 +70,7 @@
 }
 
 .meeting-required {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }
 
 .meeting-attachments {

@@ -72,6 +72,7 @@ export const TOKEN_GROUPS: TokenGroup[] = [
       { name: 'content-pad-y', label: 'Page padding, top and bottom', kind: 'length', min: 0, max: 64 },
       { name: 'content-pad-x', label: 'Page padding, sides', kind: 'length', min: 0, max: 80 },
       { name: 'card-pad-y', label: 'Card padding, top and bottom', kind: 'length', min: 0, max: 48 },
+      { name: 'card-gap', label: 'Space inside cards', kind: 'length', min: 0, max: 32 },
       { name: 'block-gap', label: 'Space between cards', kind: 'length', min: 0, max: 48 },
       { name: 'card-pad-x', label: 'Card padding, sides', kind: 'length', min: 0, max: 48 },
       {

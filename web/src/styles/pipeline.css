@@ -470,7 +470,7 @@
 
 .sales-card-head {
   justify-content: space-between;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .sales-card-head .card-title {
@@ -560,7 +560,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--s-4);
-  margin-top: var(--s-4);
+  margin-top: var(--card-gap);
 }
 
 .quote-summary-single {
@@ -618,7 +618,7 @@
 }
 
 .quote-cost-panel {
-  padding: var(--s-3) var(--s-4);
+  padding: var(--card-pad-y) var(--card-pad-x);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-2);
@@ -641,7 +641,7 @@
   display: flex;
   justify-content: flex-end;
   gap: var(--s-7);
-  margin-top: var(--s-4);
+  margin-top: var(--card-gap);
   flex-wrap: wrap;
 }
 
@@ -735,7 +735,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--s-4);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .so-sum dl {
@@ -875,6 +875,9 @@
   margin-bottom: var(--block-gap);
 }
 
+/* The one card that keeps a padding of its own: the board's summary strip is
+   a dense row of six tiles over the lanes, not a row of cards (2026-10-10, the
+   exception to the one card padding). */
 .pipe-kpis .kpi-card {
   min-height: 0;
   gap: var(--s-1);

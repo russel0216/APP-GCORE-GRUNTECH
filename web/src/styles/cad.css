@@ -35,8 +35,8 @@
 .cad-panel {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: var(--s-3);
-  margin-top: var(--block-gap);
+  padding: var(--card-pad-y) var(--card-pad-x);
+  margin-top: var(--card-gap);
   background: var(--surface-2);
 }
 
@@ -126,7 +126,7 @@
 
 .cad-thread {
   list-style: none;
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
   padding: 0;
   display: flex;
   flex-direction: column;

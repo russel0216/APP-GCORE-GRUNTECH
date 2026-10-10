@@ -9,7 +9,7 @@
   justify-content: space-between;
   gap: var(--s-2);
   flex-wrap: wrap;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .m-card-head .card-title {
@@ -161,5 +161,5 @@
 }
 
 .m-stock-grid {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }

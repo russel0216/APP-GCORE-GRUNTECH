@@ -20,7 +20,7 @@
 
 .academy-split {
   justify-content: space-between;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .academy-flush {
@@ -35,7 +35,7 @@
 }
 
 .academy-actions {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
 }
 
 .academy-attachments {
@@ -61,7 +61,7 @@
 
 .academy-checks {
   gap: var(--s-5);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .academy-tabs {

@@ -12,7 +12,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--s-3);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 .proc-card-head .card-title {
   margin: 0;
@@ -25,7 +25,7 @@
 
 /* An alert that closes a card — no trailing gap inside the card. */
 .proc-card-note {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
   margin-bottom: 0;
 }
 
@@ -100,7 +100,7 @@
 
 /* A figure the caller cannot see: said plainly, not printed as zero. */
 .proc-tile-note {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
   font-size: var(--fs-sm);
 }
 

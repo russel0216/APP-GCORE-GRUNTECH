@@ -40,7 +40,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--s-3);
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .pt-state {
@@ -615,7 +615,7 @@
 .pt-panel {
   max-height: calc(100vh - var(--topbar-h) - var(--s-8) * 4);
   overflow: auto;
-  padding: var(--s-3) var(--s-4);
+  padding: var(--card-pad-y) var(--card-pad-x);
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -639,7 +639,7 @@
 }
 
 .pt-intro {
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
   font-size: var(--fs-sm);
   color: var(--muted);
 }
@@ -684,7 +684,7 @@
 
 /* Under a box's text: what it has nothing for right now, and so leaves out. */
 .pt-left-out {
-  margin: 0 0 var(--s-3);
+  margin: 0 0 var(--card-gap);
   padding: var(--s-2) var(--s-3);
   font-size: var(--fs-sm);
   color: var(--text);
@@ -694,7 +694,7 @@
 }
 
 .pt-rules {
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--card-gap);
 }
 
 .pt-rules summary {
@@ -805,7 +805,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--s-2);
-  margin-top: var(--s-4);
+  margin-top: var(--card-gap);
   padding-top: var(--s-3);
   border-top: 1px solid var(--line-soft);
 }

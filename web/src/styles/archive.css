@@ -40,7 +40,7 @@ table.data.archive-lines td .archive-pre {
 
 /* Sum without tax / VAT / Total, under the lines, right-hand side. */
 .archive-totals {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
   margin-left: auto;
   max-width: 32rem;
 }
@@ -51,7 +51,7 @@ table.data.archive-lines td .archive-pre {
 }
 
 .archive-foot {
-  margin-top: var(--s-3);
+  margin-top: var(--card-gap);
   font-size: var(--fs-sm);
 }
 
