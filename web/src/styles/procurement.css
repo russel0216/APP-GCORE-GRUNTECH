@@ -87,7 +87,6 @@
 
 /* Small print under a modal or a table. */
 .proc-small {
-  font-size: var(--fs-sm);
 }
 
 /* Explanatory copy in the dashboard's "how the money flows" card. */
@@ -101,7 +100,6 @@
 /* A figure the caller cannot see: said plainly, not printed as zero. */
 .proc-tile-note {
   margin-top: var(--card-gap);
-  font-size: var(--fs-sm);
 }
 
 /* Stock card per-warehouse balance tile. */

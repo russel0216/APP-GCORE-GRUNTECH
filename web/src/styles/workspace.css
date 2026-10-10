@@ -61,7 +61,6 @@ table.data tr.work-overdue td {
 .today-time {
   flex: 0 0 auto;
   min-width: 9em;
-  font-size: var(--fs-sm);
 }
 
 .today-what {
@@ -85,7 +84,6 @@ table.data tr.work-overdue td {
 }
 
 .decision-note {
-  font-size: var(--fs-sm);
 }
 
 /* ── Home — the My Work summary ───────────────────────────────────────────── */

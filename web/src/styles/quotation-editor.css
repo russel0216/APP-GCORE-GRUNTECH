@@ -30,7 +30,6 @@
 
 .qe-lead {
   margin: var(--s-1) 0 0;
-  font-size: var(--fs-sm);
 }
 
 .qe-actions {
@@ -411,7 +410,7 @@ tr.qe-line-heading td {
 
 .qe-append-item > .faint {
   grid-column: 2;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
 }
 
 .qe-append-name {
@@ -542,7 +541,6 @@ tr.qe-line-heading td {
 
 .qe-discount-calc h4 {
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-md);
 }
 
 .qe-discount-calc table {

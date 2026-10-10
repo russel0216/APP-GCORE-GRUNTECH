@@ -23,7 +23,6 @@ table.data td.numbering-actions {
    {EMP}) says why, in the same cell the number would have been. */
 .numbering-problem {
   color: var(--danger);
-  font-size: var(--fs-sm);
 }
 
 /* "per employee" under Yearly / Monthly / Never. */
@@ -34,14 +33,12 @@ table.data td.numbering-actions {
 }
 
 .numbering-legend {
-  font-size: var(--fs-sm);
   margin-top: var(--card-gap);
   line-height: 1.6;
 }
 
 /* Which employee number the samples were rendered for. */
 .numbering-for {
-  font-size: var(--fs-sm);
   margin-top: var(--s-2);
 }
 
@@ -55,7 +52,6 @@ table.data td.numbering-actions {
 
 .numbering-preview .numbering-caption {
   display: block;
-  font-size: var(--fs-sm);
   margin-top: var(--s-1);
 }
 

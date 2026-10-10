@@ -924,9 +924,7 @@ export function Warehouses() {
               <div className="m-card-head">
                 <div className="row">
                   <strong>{w.name}</strong>
-                  <span className="mono faint" style={{ fontSize: 12 }}>
-                    {w.code}
-                  </span>
+                  <span className="mono faint">{w.code}</span>
                   <span className={`badge ${w.isActive ? 'ok' : ''}`}>
                     {w.isActive ? 'Active' : 'Inactive'}
                   </span>
@@ -949,9 +947,7 @@ export function Warehouses() {
 
               <div className="row" style={{ gap: 5 }}>
                 {w.locations.length === 0 ? (
-                  <span className="faint" style={{ fontSize: 12 }}>
-                    No locations
-                  </span>
+                  <span className="faint">No locations</span>
                 ) : (
                   w.locations.map((l) =>
                     mayEdit ? (

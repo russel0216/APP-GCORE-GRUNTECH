@@ -52,7 +52,6 @@ table.data.archive-lines td .archive-pre {
 
 .archive-foot {
   margin-top: var(--card-gap);
-  font-size: var(--fs-sm);
 }
 
 /* The warning with a button beside it. */
@@ -76,7 +75,6 @@ table.data.archive-lines td .archive-pre {
 
 .archive-report h4 {
   margin: var(--s-4) 0 var(--s-2);
-  font-size: var(--fs-md);
 }
 
 .archive-report details {

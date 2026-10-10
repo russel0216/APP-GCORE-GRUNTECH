@@ -33,7 +33,6 @@
 }
 
 .hraud-small {
-  font-size: var(--fs-sm);
 }
 
 /* ── Leave balances ───────────────────────────────────────────────────────── */
@@ -49,7 +48,7 @@
 
 .hraud-balance-figure {
   margin-top: var(--s-1);
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
   font-weight: 600;
 }
 
@@ -72,7 +71,7 @@
 
 .hraud-chain-label {
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;

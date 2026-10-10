@@ -62,9 +62,7 @@
 
 .forecast .fc-owners h4 {
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-sm);
   color: var(--muted);
-  font-weight: 600;
 }
 
 .forecast .fc-group + .fc-group {
@@ -77,11 +75,8 @@
   align-items: baseline;
   gap: var(--s-3);
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-md);
-  font-weight: 600;
 }
 
 .forecast .fc-group-head .faint {
   font-weight: 400;
-  font-size: var(--fs-sm);
 }

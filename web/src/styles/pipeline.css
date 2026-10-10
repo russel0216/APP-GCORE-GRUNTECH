@@ -524,7 +524,6 @@
 .lookup-note {
   display: block;
   padding: var(--s-2) var(--s-3);
-  font-size: var(--fs-sm);
   color: var(--muted);
 }
 
@@ -538,7 +537,6 @@
 .quote-line-desc {
   white-space: pre-wrap;
   color: var(--muted);
-  font-size: var(--fs-sm);
 }
 
 .quote-lines td {
@@ -624,9 +622,10 @@
   background: var(--surface-2);
 }
 
-.quote-panel-title {
+/* An eyebrow heading in capitals: a title's size, not a sub-heading's (h4.…, so it wins over `.card h4`). */
+h4.quote-panel-title {
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-md);
+  font-size: var(--fs-xs);
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -712,7 +711,6 @@
 }
 
 .ps-explain {
-  font-size: var(--fs-sm);
   max-width: 28rem;
 }
 
@@ -751,7 +749,7 @@
 
 .so-sum dd {
   margin: 0;
-  font-size: var(--fs-lg);
+  font-size: var(--fs-xl);
   font-weight: 600;
 }
 
@@ -884,8 +882,8 @@
   padding: var(--s-2) var(--s-3);
 }
 
+/* The figure's size is the list strip's, in styles.css (the one exception to the value size). */
 .pipe-kpis .kpi-value {
-  font-size: var(--fs-lg);
   overflow-wrap: anywhere;
 }
 

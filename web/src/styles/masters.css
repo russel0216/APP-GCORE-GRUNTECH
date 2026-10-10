@@ -34,7 +34,6 @@
 /* The small print under a reference card — "the five standard …". */
 .m-footnote {
   margin: var(--s-3) 0 0;
-  font-size: var(--fs-sm);
   color: var(--faint);
 }
 
@@ -113,8 +112,6 @@
 
 .m-resource-title {
   margin: 0;
-  font-size: var(--fs-base);
-  font-weight: 600;
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -128,7 +125,6 @@
 .m-resource-meta {
   margin: 0;
   color: var(--faint);
-  font-size: var(--fs-sm);
   overflow-wrap: anywhere;
 }
 
@@ -145,7 +141,6 @@
 .m-subname {
   display: block;
   color: var(--faint);
-  font-size: var(--fs-sm);
 }
 
 .m-kpis {

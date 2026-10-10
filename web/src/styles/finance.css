@@ -71,7 +71,6 @@
 
 /* A read-only note under a form field group. */
 .fin-note {
-  font-size: var(--fs-sm);
   color: var(--faint);
   margin: var(--s-2) 0 0;
 }

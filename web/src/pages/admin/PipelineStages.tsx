@@ -164,7 +164,7 @@ export function PipelineStages() {
 
       <div className="card">
         <div className="table-wrap">
-          <table className="table ps-table">
+          <table className="data ps-table">
             <thead>
               <tr>
                 <th>Status name</th>

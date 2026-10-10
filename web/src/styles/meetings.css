@@ -55,6 +55,7 @@
 /* Agendas are written as lines; keep them as lines. */
 .meeting-agenda {
   margin: 0;
+  font-size: var(--fs-md);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: var(--fs-base);

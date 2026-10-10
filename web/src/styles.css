@@ -341,7 +341,6 @@ th:focus-visible {
 }
 
 .field .hint {
-  font-size: var(--fs-xs);
   color: var(--muted);
   margin-top: var(--s-1);
 }
@@ -495,6 +494,7 @@ textarea {
   color: var(--text);
   cursor: pointer;
   font-weight: 500;
+  font-size: var(--fs-base);
   white-space: nowrap;
   transition: background 0.12s, border-color 0.12s, transform 0.08s;
 }
@@ -882,6 +882,28 @@ textarea {
 }
 
 /*
+  One type scale inside every card (2026-10-10, the owner's call: "make the
+  font sizes uniform in all cards"). Measured across twenty-two screens, the
+  same role read three or four sizes — a grey note was 11, 12, 13 or 14
+  depending on which card it sat in, a stat figure 14, 16, 20 or 24. The
+  roles, and the one token each reads:
+    title     .card-title, an eyebrow heading     --fs-xs  capitals
+    sub-head  h2/h3/h4 inside a card              --fs-md  600 (rule below)
+    label     .kpi-label, th, a form label        --fs-xs
+    value     .kpi-value and every stat figure    --fs-xl  700
+    caption   .kpi-subtext, .hint, a block note   --fs-xs  (rule below .faint)
+    body      everything else, cells included     --fs-md  (this rule)
+    button    .btn stays the page's 14            --fs-base
+  The card sets the body size, so a plain paragraph, a list item or an
+  unclassed span reads 13 wherever it sits (the page body is 14), and `.mono`
+  inherits (below). A stat figure's exceptions are documented at the rule.
+*/
+.card,
+.kpi-card {
+  font-size: var(--fs-md);
+}
+
+/*
   A card's padding is its whole inset (2026-10-10, the owner's call: "make
   spacing inside each card uniform"). Measured across fifteen screens, the
   bottom inset ran 17, 31, 33 and 35 where the top was always 17: a trailing
@@ -954,6 +976,25 @@ a.card:hover {
   display: flex;
   align-items: center;
   gap: var(--s-2);
+}
+
+/*
+  A sub-heading INSIDE a card — "Costing details", "Latest refusals",
+  "Participants", a form's section — is the body size in bold, whatever
+  element carries it (2026-10-10; before this, h4s read 13 and 14 and a
+  sheet's section titles 16). An eyebrow heading set in capitals (.card-title,
+  .section-label, .hraud-chain-label) is a title and keeps --fs-xs.
+*/
+.card h2:not(.card-title),
+.card h3:not(.card-title),
+.card h4,
+.kpi-card h4,
+.svc-subhead,
+.m-section-head,
+.fc-group-head,
+.m-resource-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
 }
 
 .grid {
@@ -1058,6 +1099,55 @@ a.card:hover {
 }
 
 /*
+  A caption — a note in its own block: the figure's subtext, a form hint, a
+  chart's caption, a footnote, an empty-state line, a sub-line under a cell's
+  name — is --fs-xs, the KPI subtext's size, wherever it sits (2026-10-10).
+  Only BLOCK uses of .faint/.muted take it: a grey word inside a sentence or
+  a cell (span.faint, td.muted) stays the size of the text around it.
+*/
+p.faint,
+p.muted,
+div.faint,
+div.muted,
+small,
+.hint,
+.kpi-subtext,
+.chart-caption,
+.stat-hint,
+.collection-empty,
+.m-footnote,
+.m-resource-meta,
+.m-subname,
+.turnover-footnote,
+.del-note,
+.del-small,
+.del-curve-key,
+.proc-small,
+.proc-tile-note,
+.fin-note,
+.svc-notes,
+.cs-note,
+.cs-paste-hint,
+.archive-foot,
+.decision-note,
+.eval-more,
+.eval-overdue,
+.face-samples-note,
+.camera-hint,
+.cad-comment-meta,
+.academy-month-meta,
+.numbering-legend,
+.numbering-for,
+.numbering-problem,
+.numbering-preview .numbering-caption,
+.lookup-note,
+.ps-explain,
+.qe-lead,
+.quote-line-desc {
+  font-size: var(--fs-xs);
+}
+
+/*
   Code, numbers and references — a document number, a serial, a selector.
 
   The size is RELATIVE, not 12px. A fixed size meant this class changed two
@@ -1066,20 +1156,15 @@ a.card:hover {
   than the six rows under it. It also ignored the type scale entirely — turn
   every text size up in Appearance and the mono values stayed where they were.
 
-  0.92em is the optical correction: a monospace face sets wider and reads
-  larger than Inter at the same size, so matching the number exactly makes it
-  look bigger than its neighbours. Tables land on ~12px as before; inside body
-  text it now sits level with the text around it.
+  Since 2026-10-10 it INHERITS: the 0.92em optical correction made a document
+  number in a 13px table read 11.96 beside 13px cells and a 13px mono beside
+  14px text, which the card audit counted as a fourth size. A monospace face
+  sets a little wider at the same size; that is the face, not a smaller
+  style. Make a number smaller where it is a caption, never through .mono.
 */
 .mono {
   font-family: var(--mono);
-  /*
-    `em` compounds. Nested inside something already reduced it went to 10.5px,
-    under the 11px floor the rest of the app treats as the smallest readable
-    size — so the relative size is clamped against that token rather than
-    allowed to shrink indefinitely.
-  */
-  font-size: max(0.92em, var(--fs-xs));
+  font-size: inherit;
 }
 
 .right {
@@ -1211,8 +1296,18 @@ a.card:hover {
   margin-bottom: var(--block-gap);
 }
 
-/* Eight across leaves each card narrow: the figure comes down a size and never breaks mid-number. (The tile keeps the one card padding.) */
-.list-summary .kpi-value {
+/*
+  THE one exception to the value size (--fs-xl, 20px): a strip of cards
+  across the top of a list or the pipeline board. Measured 2026-10-10 at the
+  one size: the quotation list's eight cards leave each figure 108px of room
+  at a 1600 viewport (88px at 1280) and "PHP 9,258,251.52" needs ~140px in
+  20px bold, so it was clipped; the pipeline's six broke "PHP 4,041,125.76"
+  across two lines at 1280. Both strips take --fs-base (14px, ~95px for that
+  figure) and the figure never breaks mid-number. Nothing else departs from
+  the one size.
+*/
+.list-summary .kpi-value,
+.pipe-kpis .kpi-value {
   font-size: var(--fs-base);
   white-space: nowrap;
 }
@@ -1294,7 +1389,7 @@ a.card:hover {
 
 .list-lookup-results .faint {
   padding: var(--s-2);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
 }
 
 /*
@@ -1970,7 +2065,7 @@ table.data .mono {
 .perm-module h4 {
   margin: 0;
   font-family: var(--display);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   letter-spacing: 2px;
   color: var(--neon);
 }
@@ -2519,8 +2614,6 @@ hr.rule {
 .svc-subhead,
 .m-section-head {
   margin: var(--card-gap) 0;
-  font-size: var(--fs-sm);
-  font-weight: 600;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -2931,7 +3024,6 @@ hr.rule {
 }
 
 .chart-caption {
-  font-size: var(--fs-sm);
   color: var(--muted);
 }
 
@@ -2998,7 +3090,7 @@ hr.rule {
 */
 .stat-value {
   font-family: var(--body);
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
   font-weight: 700;
   line-height: 1;
   color: var(--faint);
@@ -3007,7 +3099,6 @@ hr.rule {
 }
 
 .stat-hint {
-  font-size: var(--fs-xs);
   color: var(--faint);
 }
 
@@ -3038,6 +3129,7 @@ a.bar-row:hover .bar-label {
 }
 
 .bar-label {
+  font-size: var(--fs-xs);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3090,6 +3182,7 @@ a.funnel-row:hover .funnel-label {
 }
 
 .funnel-label {
+  font-size: var(--fs-xs);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3152,14 +3245,14 @@ a.funnel-row:hover .funnel-label {
 
 .donut-total {
   fill: var(--text);
-  font-size: 22px;
+  font-size: var(--fs-xl);
   font-weight: 700;
   text-anchor: middle;
   font-family: var(--body);
 }
 
 .donut-total.long {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-family: var(--body);
 }
 
@@ -3341,7 +3434,6 @@ a.funnel-row:hover .funnel-label {
 }
 
 .kpi-subtext {
-  font-size: var(--fs-xs);
   color: var(--faint);
   margin-top: var(--s-1);
 }
@@ -3836,7 +3928,7 @@ a.icon-row:hover {
 }
 
 .series-value {
-  font-size: var(--fs-lg);
+  font-size: var(--fs-xl);
   font-weight: 700;
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -3896,8 +3988,7 @@ a.icon-row:hover {
   gap: var(--s-2);
 }
 
-.home-work .card .faint,
-.home-work .card .mono {
+.home-work .card .faint {
   font-size: var(--fs-xs);
 }
 
@@ -5081,7 +5172,6 @@ a.icon-row:hover {
 .collection-empty {
   margin: 0;
   color: var(--faint);
-  font-size: var(--fs-sm);
 }
 
 /* Deciding an approval on the document itself (components/ApprovalStepper.tsx). */

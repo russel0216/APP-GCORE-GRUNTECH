@@ -81,7 +81,6 @@
 
 .camera-hint {
   margin: calc(-1 * var(--s-2)) 0 var(--s-3);
-  font-size: var(--fs-sm);
   text-align: center;
 }
 
@@ -106,7 +105,6 @@
 }
 
 .face-samples-note {
-  font-size: var(--fs-sm);
 }
 
 .face-sample-grid {
@@ -197,12 +195,10 @@
 
 .face-health-lists h4 {
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-md);
 }
 
 .face-health-lists p {
   margin: 0 0 var(--s-2);
-  font-size: var(--fs-sm);
 }
 
 /* People named one after another (Not protected yet). */

@@ -18,12 +18,10 @@
 /* Overdue says so in words ("3 days overdue"); the colour only adds to it. */
 .eval-overdue {
   color: var(--danger);
-  font-size: var(--fs-sm);
 }
 
 .eval-more {
   margin: var(--s-2) 0 0;
-  font-size: var(--fs-sm);
 }
 
 .eval-due-figures {
@@ -100,7 +98,7 @@
 .eval-scale legend {
   padding: 0;
   margin-bottom: var(--s-2);
-  font-size: var(--fs-base);
+  font-size: var(--fs-md);
 }
 
 .eval-line-name {

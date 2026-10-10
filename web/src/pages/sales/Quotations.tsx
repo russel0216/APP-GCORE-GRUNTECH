@@ -1146,7 +1146,7 @@ export function QuotationDetail() {
       */}
       <section className="card qd-card" aria-labelledby="qd-title">
         <div className="qd-head">
-          <h2 id="qd-title" className="qd-title">
+          <h2 id="qd-title" className="card-title qd-title">
             Quote details
           </h2>
         </div>
@@ -1518,7 +1518,7 @@ function QuotationSalesOrders({ quotationId, quotationTotal, reloadToken }: { qu
         <Empty title="No sales order yet" hint="Nothing has been booked from this quotation — Create Sales Order, above, books it." />
       ) : (
         <div className="table-wrap">
-          <table className="table so-table">
+          <table className="data so-table">
             <thead>
               <tr>
                 <th>Number</th>

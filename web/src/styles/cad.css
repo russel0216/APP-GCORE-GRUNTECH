@@ -155,7 +155,6 @@
   flex-wrap: wrap;
   gap: var(--s-2);
   align-items: baseline;
-  font-size: var(--fs-sm);
   color: var(--muted);
   margin-bottom: var(--s-1);
 }

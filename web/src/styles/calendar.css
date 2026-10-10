@@ -71,7 +71,6 @@
 
 .act-page .card > h3 {
   margin: 0 0 var(--card-gap);
-  font-size: var(--fs-md);
 }
 
 /* The date as a block beside the title: month, the day large, the weekday. */
@@ -132,7 +131,7 @@
 .act-when,
 .act-where {
   margin: 0;
-  font-size: var(--fs-base);
+  font-size: var(--fs-md);
 }
 
 .act-where::before {
@@ -151,7 +150,6 @@
 
 .act-section-head h3 {
   margin: 0;
-  font-size: var(--fs-md);
 }
 
 /* The faces: a face, the first name, and what they answered under it. */

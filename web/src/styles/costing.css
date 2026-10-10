@@ -11,7 +11,6 @@
 
 .cs-section-title {
   margin: var(--s-6) 0 var(--s-3);
-  font-size: var(--fs-lg);
 }
 
 .cs-block-head {
@@ -27,7 +26,6 @@
 
 .cs-paste-hint {
   margin: 0;
-  font-size: var(--fs-sm);
 }
 
 .cs-template {
@@ -207,7 +205,6 @@ table.data.cs-summary tbody tr:hover {
 
 .cs-note {
   margin: var(--s-1) 0 0;
-  font-size: var(--fs-sm);
   line-height: 1.45;
 }
 
