@@ -69,9 +69,8 @@ export const TOKEN_GROUPS: TokenGroup[] = [
         hint: 'Insights, whose menu is a flat list and gets a little more room',
       },
       { name: 'rail-w', label: 'Collapsed sidebar width', kind: 'length', min: 44, max: 120 },
-      { name: 'content-pad-y', label: 'Page padding, top', kind: 'length', min: 0, max: 64 },
+      { name: 'content-pad-y', label: 'Page padding, top and bottom', kind: 'length', min: 0, max: 64 },
       { name: 'content-pad-x', label: 'Page padding, sides', kind: 'length', min: 0, max: 80 },
-      { name: 'content-pad-bottom', label: 'Page padding, bottom', kind: 'length', min: 0, max: 160 },
       { name: 'card-pad-y', label: 'Card padding, top and bottom', kind: 'length', min: 0, max: 48 },
       { name: 'card-pad-x', label: 'Card padding, sides', kind: 'length', min: 0, max: 48 },
       {

@@ -129,9 +129,10 @@
      "Project Mana…". */
   --sidebar-sections-w: 236px;
   --rail-w: 60px;
+  /* The page gutter: the same above the first card as below the last one
+     (2026-10-10, the owner's call — one figure, so the two cannot drift). */
   --content-pad-y: 22px;
   --content-pad-x: 26px;
-  --content-pad-bottom: 60px;
   --card-pad-y: var(--s-4);
   --card-pad-x: var(--s-5);
   /* Below this the page title stops sharing its row with the controls beside it. */
@@ -801,7 +802,7 @@ textarea {
 .content {
   flex: 1;
   min-width: 0;
-  padding: var(--content-pad-y) var(--content-pad-x) var(--content-pad-bottom);
+  padding: var(--content-pad-y) var(--content-pad-x);
   overflow-x: auto;
 }
 
@@ -2383,7 +2384,7 @@ hr.rule {
     display: none;
   }
   .content {
-    padding: 16px 14px 50px;
+    padding: 16px 14px;
   }
   .search-trigger {
     min-width: 0;
@@ -3833,9 +3834,8 @@ a.icon-row:hover {
 }
 
 /*
-  The launcher does not need .content's 60px scroll gutter — that exists so a
-  long page does not end flush against the window. This page ends on purpose.
-  Reclaiming it is the last 44px that puts the whole screen inside the fold.
+  The launcher ends on purpose, inside the fold, so it takes a tighter bottom
+  gutter than the pages (which end with the same space they open with).
 */
 .content:has(> .home) {
   padding-bottom: var(--s-4);
