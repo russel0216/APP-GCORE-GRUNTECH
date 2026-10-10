@@ -117,6 +117,18 @@
   --btn-h: 35px;
   --btn-h-sm: 29px;
 
+  /* Table rows. One height for every ordinary row (2026-10-10, the owner's
+     call: "make the table row spacing uniform in all cards"): a row is at
+     least this tall and its cells are centred in it, so a plain line of
+     text, a status pill, a small button or a title over its caption all
+     make the same row — 8 of padding over and under the tallest ordinary
+     content, a 38px text box or a title over its caption. Before, the same
+     table read 45 with text, 48 with a pill, 54 with a button, 61 with two
+     lines and 65 with a text box, all top-aligned. A cell that really needs
+     more (a description over several lines) still grows; a line table whose
+     descriptions run long keeps top alignment. */
+  --row-h: 56px;
+
   /* Elevation. Three steps: resting, raised, floating. */
   --shadow-sm: 0 1px 2px rgb(var(--shade-rgb) / 0.4);
   --shadow-md: 0 4px 14px rgb(var(--shade-rgb) / 0.45);
@@ -412,6 +424,14 @@ textarea {
   color: var(--text);
   outline: none;
   transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+/* A select's own content runs two pixels taller than a text box's, so 9px
+   brings it to the same 38px box — in a table row, beside an input, the
+   two used to decide different row heights. */
+select {
+  padding-top: 9px;
+  padding-bottom: 9px;
 }
 
 /*
@@ -1532,6 +1552,14 @@ table.data td.list-select {
   text-align: center;
 }
 
+/* The tick box as a block: inline, it sits on the baseline and takes the
+   line's descender room with it, which made a list's head four pixels taller
+   than every other table's. */
+table.data .list-select input {
+  display: block;
+  margin: 0 auto;
+}
+
 table.data tr.selected td {
   background: rgb(var(--magenta-rgb) / 0.08);
 }
@@ -1664,11 +1692,20 @@ table.data th.sortable:focus-visible .sort-mark {
 }
 
 table.data td {
-  /* Was 10px/12px. 12px vertical gives a row enough air to be scanned down a
-     column of forty without losing your place. */
-  padding: var(--s-3);
+  /* 8 over and under: the row's air comes from --row-h, not from the padding,
+     so a button or a pill in one cell no longer makes its row taller than the
+     next (see --row-h). */
+  padding: var(--s-2) var(--s-3);
   border-bottom: 1px solid var(--line-soft);
-  vertical-align: top;
+  vertical-align: middle;
+  /* 1.4, not the page's 1.5: a cell whose text wraps to two lines (a long
+     customer name on a narrow screen) then still fits the row — two lines
+     of 13px at 1.5 run to 39, which pushed the row to 56. */
+  line-height: 1.4;
+}
+
+table.data tbody tr {
+  height: var(--row-h);
 }
 
 /* Zebra striping, faint enough to guide the eye without banding the page. */

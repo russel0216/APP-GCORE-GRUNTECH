@@ -172,10 +172,6 @@ table.data.cs-summary tbody tr:hover {
   background: none;
 }
 
-.cs-summary td {
-  vertical-align: middle;
-}
-
 .cs-rate {
   width: 9rem;
   white-space: nowrap;

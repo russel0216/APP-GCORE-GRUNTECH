@@ -321,6 +321,21 @@ four databases and four copies of "customer".
       card. The clock's `clock-btn` is the one deliberately bigger button;
       the scope-switch pills and the calendar grid's own controls are not
       buttons in this sense.
+    - **One table row** (2026-10-10, the owner's call: "make the table row
+      spacing uniform in all cards"): every `table.data` row is at least
+      `--row-h` (56 — "Table row height" in Modify layout), its cells
+      padded 8 × 12 and centred vertically, 13px at 1.4. A line of text, a
+      status pill, a `.btn-sm`, a title over its caption or a 38px text box
+      all make the same row; before, the same table read 45, 48, 54, 61 or
+      65 depending on what the first cell held. A cell whose content really
+      runs longer (a description, a stack of three) still grows — that is
+      content, not spacing — and a line table whose descriptions run long
+      (`.qe-lines`, `.quote-lines`, `.archive-lines`, `.meeting-invitees`)
+      keeps `vertical-align: top` by its own rule. The head is 41 on every
+      table (the list's tick box is a block, so it no longer takes the
+      line's descender room with it); a select pads 9 × 12 so it is the
+      text box's 38 and not 40. Never give a module's cells a padding or a
+      row height of their own.
 
 20. **One way to pick, one way to state a fact** (2026-10-09, rule 19's
     content half: the editors of every module read alike, not only their

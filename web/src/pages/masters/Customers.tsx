@@ -255,7 +255,7 @@ export function Customers() {
   }, []);
 
   const columns: Column<CustomerRow>[] = [
-    { key: 'code', label: 'Code', sortKey: 'code', width: '150px', render: (c) => <span className="mono">{c.code}</span> },
+    { key: 'code', label: 'Code', sortKey: 'code', width: '170px', render: (c) => <span className="mono">{c.code}</span> },
     {
       key: 'name',
       label: 'Customer',
