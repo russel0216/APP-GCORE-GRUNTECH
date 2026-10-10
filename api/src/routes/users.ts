@@ -18,7 +18,7 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit, redact } from '../shared/audit';
 import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry';
-import { ADMIN_RESET_HOURS, createLogin, deliverLink, issueToken } from '../shared/accounts';
+import { ADMIN_RESET_HOURS, deliverLink, issueToken } from '../shared/accounts';
 import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatShortDate } from '../shared/pdf';
 import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
@@ -338,73 +338,15 @@ userRoutes.get(
 
 // ── Create ───────────────────────────────────────────────────────────────────
 
-const createSchema = z.object({
-  email: z.string().email('Enter a valid email address'),
-  name: z.string().min(2, 'Name is required'),
-  /** Without one the person is invited, and chooses their own. */
-  password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional().nullable(),
-  /** The employee record this login belongs to — linked in the same save. */
-  employeeId: z.string().optional().nullable(),
-  employeeNo: z.string().trim().optional().nullable(),
-  position: z.string().trim().optional().nullable(),
-  /** The author's mobile under "Sincerely Yours," on a quotation. */
-  phone: z.string().trim().max(40).optional().nullable(),
-  supervisorId: z.string().optional().nullable(),
-  departmentId: z.string().optional().nullable(),
-  roleIds: z.array(z.string()).default([]),
-  isActive: z.boolean().default(true),
-});
-
-userRoutes.post(
-  '/',
-  require_('admin.users.create'),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const body = parseBody(createSchema, req.body);
-
-    // One save: the login, its link to the employee record, and the invitation.
-    const made = await prisma.$transaction(async (tx) => {
-      const employee = body.employeeId
-        ? await tx.employee.findUnique({ where: { id: body.employeeId }, select: { id: true, userId: true } })
-        : null;
-      if (body.employeeId && !employee) throw notFound('Employee not found');
-      if (employee?.userId) throw conflict('That employee already has a login');
-      const login = await createLogin(
-        tx,
-        {
-          email: body.email,
-          name: body.name,
-          password: body.password,
-          employeeNo: body.employeeNo,
-          position: body.position,
-          phone: body.phone,
-          supervisorId: body.supervisorId,
-          departmentId: body.departmentId,
-          isActive: body.isActive,
-          roleIds: body.roleIds,
-        },
-        me.id,
-      );
-      if (employee) await tx.employee.update({ where: { id: employee.id }, data: { userId: login.user.id } });
-      return login;
-    });
-
-    const created = made.user;
-    await audit(
-      {
-        entityType: 'user',
-        entityId: created.id,
-        action: 'CREATED',
-        summary: `Created user ${created.email}${made.invite ? ' — invited' : ''}${body.employeeId ? ', linked to their employee record' : ''}`,
-        after: redact(created as Record<string, unknown>),
-      },
-      req,
-    );
-
-    const invite = made.invite ? await deliverLink('INVITE', created, made.invite, me.name) : null;
-    res.status(201).json({ ...created, invite });
-  }),
-);
+/*
+  There is no POST /users (2026-10-10, the owner's call: "unite the creation
+  of user and HR employee record"). A person is made ONCE, as an employee
+  with their login — `POST /employees { login }` from Admin › Users and from
+  HR › Employees alike, or `POST /employees/:id/login` for someone already on
+  the register — through `createLogin()` in shared/accounts.ts. A standalone
+  login used to leave a User with no Employee behind it: no team, no employee
+  number, nothing for the face clock or the quotation numbering to read.
+*/
 
 // ── Invitations and reset links, issued by an administrator ──────────────────
 
@@ -466,10 +408,20 @@ userRoutes.post(
 
 // ── Update ───────────────────────────────────────────────────────────────────
 
-const updateSchema = createSchema
-  .omit({ password: true, email: true, employeeId: true })
-  .partial()
-  .extend({ password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional() });
+/** What Modify may change. The email is the account's identity and stays; a login is only ever made with its employee. */
+const updateSchema = z.object({
+  name: z.string().min(2, 'Name is required').optional(),
+  employeeNo: z.string().trim().optional().nullable(),
+  position: z.string().trim().optional().nullable(),
+  /** The author's mobile under "Sincerely Yours," on a quotation. */
+  phone: z.string().trim().max(40).optional().nullable(),
+  supervisorId: z.string().optional().nullable(),
+  departmentId: z.string().optional().nullable(),
+  roleIds: z.array(z.string()).optional(),
+  isActive: z.boolean().optional(),
+  /** A password set by hand answers the invitation. */
+  password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional(),
+});
 
 userRoutes.patch(
   '/:id',

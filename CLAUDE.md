@@ -412,19 +412,20 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,625 assertions across twenty-two scripts** (counted 2026-10-10, after
+**3,647 assertions across twenty-two scripts** (counted 2026-10-10, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
-check, and the SCORO archive's removal, which took verify-archive and two
+check, the SCORO archive's removal, which took verify-archive and two
 foundation checks with it and added nine — the removal's once-only rule —
-and the series that follows a typed quotation number with its review — the
+the series that follows a typed quotation number with its review — the
 parser's two bounds and the walk that fits a transaction — 16 on sales and
-33 on numbering):
+33 on numbering, and the one creation of an employee with their login, 22
+on accounts):
 foundation
 315, masters 79, sales 463, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
-insights 98, insights-brief 50, workspace 46, accounts 102. The
+insights 98, insights-brief 50, workspace 46, accounts 124. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -624,7 +625,8 @@ launcher as the way out) — never a stale phase sentence.
 ## Phase 2 notes worth carrying forward
 
 - **Employee vs User.** `Employee` is the person; `User` is the login, linked
-  1:1 and optional. The reporting line lives on `User`, not `Employee`, because
+  1:1 and optional — and created together since 2026-10-10 (see "Accounts and
+  sign-in"). The reporting line lives on `User`, not `Employee`, because
   the approval engine routes by user and two places to record "who approves for
   me" is one too many.
 - **Pay data** (`dailyRate`, `burdenMultiplier`, statutory numbers) is stripped
@@ -2292,14 +2294,40 @@ leave the approver deciding on stale figures).
 
 ## Accounts and sign-in
 
-- **Employee and User stay two records** (Phase 2), but a login is made in the
-  same save as its person: `POST /employees { login }`, `POST /employees/:id/login`
-  for someone already on the register, or `POST /users { employeeId }` from
-  Admin — all through `createLogin()` in `shared/accounts.ts`. Making a login
-  needs `admin.users.create`, checked BEFORE anything is written, so HR without
-  it saves the person and no half-made record is left. A login from an
-  employee record copies name, department, position and mobile and starts with
-  the seeded `employee` role.
+- **Employee and User stay two records (Phase 2), with ONE creation**
+  (2026-10-10, the owner's call: "unite the creation of user and HR employee
+  record"): a person is made as an employee with their login, `POST
+  /employees { login }`, from both doors — Admin › Users "+ New user" (the
+  login required, the form opening on it; or "an employee already on the
+  register", which is `POST /employees/:id/login` — offered on
+  `ghr.employees.edit_all`, the route's own right, which is why
+  `/employees/lookup` admits `edit_all`) and HR › Employees "+ New
+  employee" (the login tick on when the viewer may make logins, and can be
+  unticked; the admin door's is locked on). **`POST /users` is gone**;
+  `createLogin()` in `shared/accounts.ts` stays the one writer. The login
+  mirrors the employee's number WHEN IT IS MADE (`User.employeeNo`, unique —
+  a number an older login still carries stays there and the new login goes
+  without, never a failed save; a later renumbering on the employee does
+  not follow, and need not: `{EMP}` reads `Employee.employeeNo` first),
+  copies name, department, position and mobile, and starts with the seeded
+  `employee` role. Making a login needs `admin.users.create`, checked BEFORE
+  anything is written, so HR without it saves the person and no half-made
+  record is left — an administrator adds the login from the employee record
+  or from Admin › Users; no seeded role gained the right. Both routes refuse
+  a login for an inactive employee (400) and an unknown role, "Reports to"
+  or department (400 naming the field as THAT body spells it —
+  `login.roleIds` on `POST /employees`, `roleIds` on `/:id/login`) before
+  writing, and `POST /employees` an unknown `userId` (404); `/:id/login`
+  LOCKS the employee's row first (`FOR UPDATE`, the expense claim's rule —
+  two at once used to leave the loser a 500 off `User.employeeNo`'s index,
+  or both through with the first login orphaned) and claims the link
+  (`updateMany` on `userId: null`), so the loser gets the sequential 409;
+  it leaves an `employee` UPDATED row ("Linked the login …")
+  beside the `user` CREATED one. `NewPersonModal` in
+  `pages/masters/Employees.tsx` is the one form (`door: 'hr' | 'admin'`; a
+  new record's Save follows the branch — `create` for a new person,
+  `edit_all` for one on the register); `UserEditor` in
+  `pages/admin/Users.tsx` only modifies.
 - **No password is typed for a new person — they are invited.** `invitePending`
   marks the account; its password hash is of random bytes nobody sees. The
   invitation (7 days), a self-service reset (1 hour) and an admin-issued reset

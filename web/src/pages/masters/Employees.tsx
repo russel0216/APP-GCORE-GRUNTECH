@@ -347,11 +347,8 @@ export function Employees() {
       )}
 
       {creating && (
-        <EmployeeForm
-          employee={null}
-          departments={departments}
-          teams={teams}
-          positions={positions}
+        <NewPersonModal
+          door="hr"
           onClose={() => setCreating(false)}
           onSaved={() => {
             setCreating(false);
@@ -375,8 +372,59 @@ export function Employees() {
 
 type EmployeeTab = 'person' | 'employment' | 'login' | 'pay' | 'evaluations' | 'face';
 
+/**
+ * Which door a new person comes in by (2026-10-10, the owner's call: "unite
+ * the creation of user and HR employee record"). Both open the one form and
+ * the one save, `POST /employees { login }`:
+ *   - `hr`    — HR › Employees "+ New employee": the login is made with the
+ *               record when the viewer may make logins, and can be unticked.
+ *   - `admin` — Admin › Users "+ New user": the login is the point, so it is
+ *               required and the form opens on it; or the login goes to an
+ *               employee already on the register (`POST /employees/:id/login`).
+ */
+export type PersonDoor = 'hr' | 'admin';
+
+/** An employee on the register with no login yet — `GET /employees/lookup` rows with `!hasUser`. */
+interface RegisterOption {
+  id: string;
+  employeeNo: string;
+  firstName: string;
+  lastName: string;
+  position: string | null;
+  department: { id: string; name: string } | null;
+  hasUser: boolean;
+}
+
+/**
+ * The one creation form, for either door. It loads the lists the form picks
+ * from itself, so Admin › Users needs nothing of the register page.
+ */
+export function NewPersonModal({ door, onClose, onSaved }: { door: PersonDoor; onClose: () => void; onSaved: () => void }) {
+  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<TeamOption[]>([]);
+  const [positions, setPositions] = useState<PositionOption[]>([]);
+  useEffect(() => {
+    api.get<{ id: string; name: string }[]>('/departments').then(setDepartments).catch(() => {});
+    api.get<TeamOption[]>('/reference/industries').then(setTeams).catch(() => {});
+    // The plantilla is HR's list; an administrator without it types the title.
+    api.get<PositionOption[]>('/positions/lookup').then(setPositions).catch(() => {});
+  }, []);
+  return (
+    <EmployeeForm
+      employee={null}
+      door={door}
+      departments={departments}
+      teams={teams}
+      positions={positions}
+      onClose={onClose}
+      onSaved={onSaved}
+    />
+  );
+}
+
 function EmployeeForm({
   employee,
+  door = 'hr',
   initialTab,
   flaggedSampleId,
   departments,
@@ -386,6 +434,8 @@ function EmployeeForm({
   onSaved,
 }: {
   employee: EmployeeRow | null;
+  /** For a new person: which screen is asking (see `PersonDoor`). */
+  door?: PersonDoor;
   /** The tab a deep link asks for (`?tab=face`). */
   initialTab?: EmployeeTab;
   /** A face sample Face health flagged (`?sample=`), marked on the Face samples tab. */
@@ -400,16 +450,14 @@ function EmployeeForm({
   const toast = useToast();
   const seeRates = can('ghr.employee_rates.view_all');
   const setRates = can('ghr.employee_rates.edit_all');
-  // Reading the register is not the right to change it: a viewer (finance)
-  // gets the record to read and Close, never a Save the PATCH would refuse.
-  const mayEdit = employee ? can('ghr.employees.edit_all') : can('ghr.employees.create');
-
   const seeEvaluations = !!employee && can('ghr.evaluations.view_all');
   // The samples the clock matches this person against: HR's to look at and
   // remove (a blurred one, or someone else's); they are only ever ADDED by
   // the person on the Clock page.
   const seeFaces = !!employee && can('ghr.employees.edit_all');
-  const [tab, setTab] = useState<EmployeeTab>(initialTab === 'face' && seeFaces ? 'face' : 'person');
+  // Admin › Users: the login is why the form is open, so it comes first.
+  const adminDoor = !employee && door === 'admin';
+  const [tab, setTab] = useState<EmployeeTab>(adminDoor ? 'login' : initialTab === 'face' && seeFaces ? 'face' : 'person');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   // Naming a login is not the admin right — the people lookup, not /users.
@@ -424,7 +472,31 @@ function EmployeeForm({
     the tab says so and the employee saves on their own.
   */
   const canMakeLogins = can('admin.users.create');
+  // In the admin door the login is required: the tick is on and locked.
   const [makeLogin, setMakeLogin] = useState(!employee && canMakeLogins);
+  /*
+    Admin › Users may also give a login to someone HR already registered —
+    the branch that used to be the "Employee record" picker on the old New
+    user form. Each branch needs its own right; a viewer with only one of
+    them gets no choice, just that branch.
+  */
+  const mayNewPerson = can('ghr.employees.create');
+  const mayLinkExisting = adminDoor && canMakeLogins && can('ghr.employees.edit_all');
+  const [who, setWho] = useState<'new' | 'existing'>(adminDoor && !mayNewPerson && mayLinkExisting ? 'existing' : 'new');
+  const forExisting = adminDoor && who === 'existing';
+  /*
+    Reading the register is not the right to change it: a viewer (finance)
+    gets the record to read and Close, never a Save the PATCH would refuse.
+    A new record's Save follows the BRANCH (2026-10-10): the new-person branch
+    is `create`'s and the already-on-the-register branch is `edit_all`'s —
+    the right `POST /employees/:id/login` itself checks — so an administrator
+    holding only the second is not shown the branch with nothing to save it.
+  */
+  const mayEdit = employee ? can('ghr.employees.edit_all') : forExisting ? mayLinkExisting : mayNewPerson;
+  const [existingId, setExistingId] = useState('');
+  const [registerQ, setRegisterQ] = useState('');
+  /** null while loading, 'failed' when the lookup refused (the viewer cannot read the register). */
+  const [register, setRegister] = useState<RegisterOption[] | 'failed' | null>(null);
   const [login, setLogin] = useState<LoginDraft>({
     email: employee?.personalEmail ?? '',
     supervisorId: '',
@@ -435,7 +507,7 @@ function EmployeeForm({
   /** Until the login email is typed, it follows the personal email. */
   const [loginEmailTouched, setLoginEmailTouched] = useState(false);
   const [roles, setRoles] = useState<RoleOption[] | null>(null);
-  const [issued, setIssued] = useState<{ delivery: Delivery; email: string; created: boolean } | null>(null);
+  const [issued, setIssued] = useState<{ delivery: Delivery; email: string; name: string; created: boolean } | null>(null);
 
   const [form, setForm] = useState({
     employeeNo: employee?.employeeNo ?? '',
@@ -481,6 +553,23 @@ function EmployeeForm({
       })
       .catch(() => setRoles(null));
   }, [canMakeLogins]);
+
+  // The register, for a login that goes to someone already on it: active
+  // people with no login, fifty at a time, so a search box narrows it.
+  useEffect(() => {
+    if (!mayLinkExisting) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      api
+        .get<RegisterOption[]>(`/employees/lookup?active=true${registerQ.trim() ? `&q=${encodeURIComponent(registerQ.trim())}` : ''}`)
+        .then((rows) => live && setRegister(rows.filter((e) => !e.hasUser)))
+        .catch(() => live && setRegister('failed'));
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [mayLinkExisting, registerQ]);
 
   // The lookup lists ACTIVE logins and ACTIVE positions. The record's own may
   // be neither (a leaver), and a select that cannot show its value lies.
@@ -550,7 +639,7 @@ function EmployeeForm({
         `/employees/${employee.id}/login`,
         loginPayload(),
       );
-      if (r.invite) setIssued({ delivery: r.invite, email: r.user.email, created: false });
+      if (r.invite) setIssued({ delivery: r.invite, email: r.user.email, name: `${employee.firstName} ${employee.lastName}`, created: false });
       else {
         toast('ok', `Login created for ${employee.firstName} ${employee.lastName}`);
         onSaved();
@@ -568,7 +657,7 @@ function EmployeeForm({
     setError(null);
     try {
       const delivery = await api.post<Delivery>(`/users/${employee.user.id}/invite`);
-      setIssued({ delivery, email: employee.user.email, created: false });
+      setIssued({ delivery, email: employee.user.email, name: `${employee.firstName} ${employee.lastName}`, created: false });
     } catch (err) {
       setError(err);
     } finally {
@@ -580,6 +669,23 @@ function EmployeeForm({
     setBusy(true);
     setError(null);
     try {
+      // Admin › Users, for someone HR already registered: the login alone,
+      // onto their record — the same route the record's own login tab uses.
+      if (forExisting) {
+        const chosen = register !== 'failed' ? register?.find((e) => e.id === existingId) : undefined;
+        if (!chosen) throw new Error('Choose who on the register this login is for');
+        const name = `${chosen.firstName} ${chosen.lastName}`;
+        const r = await api.post<{ user: { email: string }; invite: Delivery | null }>(`/employees/${chosen.id}/login`, loginPayload());
+        if (r.invite) {
+          setIssued({ delivery: r.invite, email: r.user.email, name, created: true });
+          setBusy(false);
+          return;
+        }
+        toast('ok', `${name} added`);
+        onSaved();
+        return;
+      }
+
       const payload: Record<string, unknown> = {
         employeeNo: form.employeeNo || undefined,
         firstName: form.firstName,
@@ -627,7 +733,7 @@ function EmployeeForm({
         payload.tin = form.tin || null;
       }
 
-      if (!employee && makeLogin) {
+      if (!employee && (makeLogin || adminDoor)) {
         payload.login = loginPayload();
         delete payload.userId;
       }
@@ -641,14 +747,14 @@ function EmployeeForm({
         );
         // The invitation stays on screen so its link can be passed on.
         if (created.login?.invite) {
-          toast('ok', `${form.firstName} ${form.lastName} saved, with their login`);
-          setIssued({ delivery: created.login.invite, email: created.login.user.email, created: true });
+          toast('ok', `${form.firstName} ${form.lastName} added, with their login`);
+          setIssued({ delivery: created.login.invite, email: created.login.user.email, name: `${form.firstName} ${form.lastName}`, created: true });
           setBusy(false);
           return;
         }
       }
 
-      toast('ok', `${form.firstName} ${form.lastName} saved`);
+      toast('ok', employee ? `${form.firstName} ${form.lastName} saved` : `${form.firstName} ${form.lastName} added`);
       onSaved();
     } catch (err) {
       setError(err);
@@ -669,11 +775,16 @@ function EmployeeForm({
       ? Number(form.dailyRate) * Number(form.burdenMultiplier)
       : null;
 
-  // An invitation just issued: its link, and a way out.
+  // An invitation just issued: its link, and a way out. Its own key and no
+  // guard: it sits where the form's Modal sat, and React would otherwise keep
+  // that Modal — and its "something was typed" flag — asking "Close without
+  // saving?" about a person already saved.
   if (issued) {
     return (
       <Modal
-        title={issued.created ? `${form.firstName} ${form.lastName} saved` : `Invitation for ${form.firstName} ${form.lastName}`}
+        key="issued"
+        guard={false}
+        title={issued.created ? `${issued.name} added` : `Invitation for ${issued.name}`}
         onClose={onSaved}
         footer={<ModalFoot onCancel={onSaved} cancelLabel="Close" />}
       >
@@ -694,7 +805,9 @@ function EmployeeForm({
           ? mayEdit
             ? `Modify employee ${employee.firstName} ${employee.lastName}`
             : `${employee.firstName} ${employee.lastName}`
-          : 'New employee'
+          : adminDoor
+            ? 'New user'
+            : 'New employee'
       }
       onClose={onClose}
       footer={
@@ -716,7 +829,7 @@ function EmployeeForm({
             <button
               className="btn btn-primary"
               onClick={save}
-              disabled={busy || !form.firstName || !form.lastName}
+              disabled={busy || (forExisting ? !existingId : !form.firstName || !form.lastName)}
             >
               {busy ? 'Saving…' : 'Save'}
             </button>
@@ -728,16 +841,27 @@ function EmployeeForm({
 
       <div className="row" style={{ marginBottom: 'var(--s-4)' }}>
         <div className="scope-switch">
-          <button className={tab === 'person' ? 'active' : ''} onClick={() => setTab('person')}>
-            Person
-          </button>
-          <button className={tab === 'employment' ? 'active' : ''} onClick={() => setTab('employment')}>
-            Employment
-          </button>
-          <button className={tab === 'login' ? 'active' : ''} onClick={() => setTab('login')}>
-            G-CORE login
-          </button>
-          {seeRates && (
+          {adminDoor && (
+            <button className={tab === 'login' ? 'active' : ''} onClick={() => setTab('login')}>
+              G-CORE login
+            </button>
+          )}
+          {!forExisting && (
+            <>
+              <button className={tab === 'person' ? 'active' : ''} onClick={() => setTab('person')}>
+                Person
+              </button>
+              <button className={tab === 'employment' ? 'active' : ''} onClick={() => setTab('employment')}>
+                Employment
+              </button>
+            </>
+          )}
+          {!adminDoor && (
+            <button className={tab === 'login' ? 'active' : ''} onClick={() => setTab('login')}>
+              G-CORE login
+            </button>
+          )}
+          {seeRates && !forExisting && (
             <button className={tab === 'pay' ? 'active' : ''} onClick={() => setTab('pay')}>
               Pay &amp; statutory
             </button>
@@ -956,6 +1080,67 @@ function EmployeeForm({
 
       {tab === 'login' && (
         <div className="login-tab">
+          {adminDoor && (
+            <>
+              {mayNewPerson && mayLinkExisting && (
+                <fieldset className="signin-choice">
+                  <legend>Who the login is for</legend>
+                  <label className="checkbox">
+                    <input type="radio" name="person-who" checked={who === 'new'} onChange={() => setWho('new')} />
+                    <span>A new person — their employee record is made with the login</span>
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="radio"
+                      name="person-who"
+                      checked={who === 'existing'}
+                      onChange={() => {
+                        setWho('existing');
+                        setTab('login');
+                      }}
+                    />
+                    <span>An employee already on the register, who has no login yet</span>
+                  </label>
+                </fieldset>
+              )}
+              {forExisting ? (
+                <div className="grid grid-2">
+                  <Field label="Find on the register" hint="Name or employee number — active people with no login yet">
+                    <input value={registerQ} onChange={(e) => setRegisterQ(e.target.value)} placeholder="Search…" />
+                  </Field>
+                  <Field
+                    label="Employee"
+                    required
+                    hint={
+                      register === 'failed'
+                        ? 'The register could not be listed — try again'
+                        : register && register.length === 0
+                          ? registerQ.trim()
+                            ? 'No active employee without a login matches'
+                            : 'Everyone active on the register already has a login'
+                          : 'Their record gives the login its name, department, position and mobile'
+                    }
+                  >
+                    <select value={existingId} onChange={(e) => setExistingId(e.target.value)}>
+                      <option value="">— choose —</option>
+                      {register !== 'failed' &&
+                        register?.map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.lastName}, {e.firstName} · {e.employeeNo}
+                            {e.position ? ` · ${e.position}` : ''}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                </div>
+              ) : (
+                <p className="muted">
+                  One save makes the employee record and the login. Name them on the Person tab; the Employment tab
+                  takes their number, position, department and team.
+                </p>
+              )}
+            </>
+          )}
           {linked ? (
             <div className="login-status">
               <p>
@@ -983,14 +1168,14 @@ function EmployeeForm({
             </div>
           ) : canMakeLogins ? (
             <>
-              {!employee && (
+              {!employee && !adminDoor && (
                 <Checkbox
                   checked={makeLogin}
                   onChange={setMakeLogin}
                   label="Create their G-CORE login when I save, and send them an invitation"
                 />
               )}
-              {(employee || makeLogin) && (
+              {(employee || makeLogin || adminDoor) && (
                 <LoginFields
                   login={login}
                   roles={roles}
@@ -1013,7 +1198,7 @@ function EmployeeForm({
           )}
 
           {/* An existing login can still be linked or unlinked by hand. */}
-          {(!makeLogin || !!employee) && (
+          {(!makeLogin || !!employee) && !adminDoor && (
             <Field
               label={linked ? 'Login account' : 'Or link a login that already exists'}
               htmlFor={loginField}

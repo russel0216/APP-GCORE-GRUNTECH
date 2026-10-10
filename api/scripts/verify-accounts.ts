@@ -1,6 +1,7 @@
 /**
- * Accounts: one creation (an employee and their login together), invitations,
- * password resets and the SMTP sender behind them.
+ * Accounts: one creation (an employee and their login together — the only
+ * way a login is made, from Admin › Users and HR › Employees alike, since
+ * 2026-10-10), invitations, password resets and the SMTP sender behind them.
  *
  *   npx tsx scripts/verify-accounts.ts
  *
@@ -169,6 +170,10 @@ interface HttpResult {
   body: Record<string, unknown>;
   text: string;
 }
+
+/** The field paths a 400 names (`details: [{ field, message }]`). */
+const fieldsOf = (r: HttpResult): string[] =>
+  Array.isArray(r.body.details) ? (r.body.details as { field?: string }[]).map((d) => d.field ?? '') : [];
 
 async function http(token: string | null, method: string, path: string, body?: unknown): Promise<HttpResult> {
   const res = await fetch(`${BASE}${path}`, {
@@ -339,10 +344,28 @@ async function main() {
   const status = await http(adminT, 'GET', '/users/mail-status');
   check('Admin sees the mail set-up, and never the mailbox password', status.status === 200 && !('pass' in status.body) && !status.text.includes('SMTP_PASS'));
 
-  console.log('\nInvitations from Admin › Users');
-  const invited = await http(adminT, 'POST', '/users', { name: `${TAG} Invitee One`, email: `one${DOMAIN}`, roleIds: [employeeRole.id] });
-  const invite1 = invited.body.invite as { link: string; emailed: boolean; expiresAt: string } | null;
-  check('a user added without a password is invited', invited.status === 201 && invited.body.invitePending === true && !!invite1, invited.text.slice(0, 200));
+  console.log('\nOne creation from Admin › Users: the employee and their login');
+  // No login without its person (2026-10-10, the owner's call): the standalone
+  // route is gone, and a stray call lands on the API's own 404.
+  const standalone = await http(adminT, 'POST', '/users', { name: `${TAG} Standalone`, email: `standalone${DOMAIN}` });
+  check('POST /users is gone — a login is only ever made with its employee (404)', standalone.status === 404, String(standalone.status));
+  check('and it made nobody', (await prisma.user.count({ where: { email: `standalone${DOMAIN}` } })) === 0);
+
+  type MadeLogin = { user: { id: string; invitePending: boolean; employeeNo: string | null }; invite: { link: string; emailed: boolean; expiresAt: string } | null };
+  const invited = await http(adminT, 'POST', '/employees', {
+    employeeNo: `${TAG}-100`,
+    firstName: 'Invitee',
+    lastName: `${TAG} One`,
+    login: { email: `one${DOMAIN}`, roleIds: [employeeRole.id] },
+  });
+  const oneLogin = (invited.body.login ?? null) as MadeLogin | null;
+  const invite1 = oneLogin?.invite ?? null;
+  check(
+    'a person added without a password is invited, in the same save as their record',
+    invited.status === 201 && oneLogin?.user.invitePending === true && !!invite1 && invited.body.userId === oneLogin.user.id,
+    invited.text.slice(0, 200),
+  );
+  check('the login mirrors the employee number', oneLogin?.user.employeeNo === `${TAG}-100`, String(oneLogin?.user.employeeNo));
   check('the administrator gets the link to pass on', !!invite1 && invite1.link.includes('/welcome#token=') && invite1.emailed === mailOn);
   check(
     'an invitation lasts a week',
@@ -375,14 +398,15 @@ async function main() {
   check('someone who has chosen a password is not re-invited — a reset is offered instead', resendDone.status === 400 && /reset/i.test(resendDone.text));
 
   console.log('\nResending, and resets an administrator issues');
-  const two = await http(adminT, 'POST', '/users', { name: `${TAG} Invitee Two`, email: `two${DOMAIN}` });
-  const firstLink = tokenOf((two.body.invite as { link: string }).link);
-  const again = await http(adminT, 'POST', `/users/${two.body.id}/invite`);
+  const two = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-101`, firstName: 'Invitee', lastName: `${TAG} Two`, login: { email: `two${DOMAIN}` } });
+  const twoId = (two.body.login as MadeLogin).user.id;
+  const firstLink = tokenOf((two.body.login as MadeLogin).invite?.link);
+  const again = await http(adminT, 'POST', `/users/${twoId}/invite`);
   const secondLink = tokenOf((again.body as { link?: string }).link);
   check('a new invitation can be sent', again.status === 200 && secondLink.length > 20 && secondLink !== firstLink);
   check('and it kills the one before', (await http(null, 'POST', '/auth/link', { token: firstLink })).status === 410 && (await http(null, 'POST', '/auth/link', { token: secondLink })).status === 200);
-  const setByHand = await http(adminT, 'PATCH', `/users/${two.body.id}`, { password: 'SetByAdmin-1' });
-  const twoRow = await prisma.user.findUniqueOrThrow({ where: { id: String(two.body.id) } });
+  const setByHand = await http(adminT, 'PATCH', `/users/${twoId}`, { password: 'SetByAdmin-1' });
+  const twoRow = await prisma.user.findUniqueOrThrow({ where: { id: twoId } });
   check('a password set by an administrator completes the invitation', setByHand.status === 200 && !twoRow.invitePending);
   check('and the link still out stops working', (await http(null, 'POST', '/auth/link', { token: secondLink })).status === 410);
 
@@ -431,6 +455,7 @@ async function main() {
   const lizaUser = hireLogin ? await prisma.user.findUniqueOrThrow({ where: { id: hireLogin.user.id }, include: { roles: { include: { role: true } } } }) : null;
   check('the login carries their name, department, position and mobile from the record', lizaUser?.name === `Liza ${TAG} Soberano` && lizaUser.departmentId === department.id && lizaUser.position === 'Service Engineer' && lizaUser.phone === '0917 111 2222');
   check('it starts with the self-service Employee role', !!lizaUser && lizaUser.roles.map((r) => r.role.key).join(',') === 'employee');
+  check('and carries their employee number, for the face clock and the {EMP} in their quotation numbers', lizaUser?.employeeNo === `${TAG}-001`);
   check('and the invitation is ready to go', !!hireLogin?.invite?.link && hireLogin.user.invitePending === true);
   const lizaToken = tokenOf(hireLogin?.invite?.link);
   const lizaLink = await http(null, 'POST', '/auth/link', { token: lizaToken });
@@ -505,8 +530,11 @@ async function main() {
   check('an industry with people on its team cannot be deleted', dropTeam.status === 400 && !!(await prisma.industry.findUnique({ where: { id: team.id } })), dropTeam.text.slice(0, 120));
   const moved = await http(String(lizaIn.body.token), 'PATCH', '/auth/profile', { personal: { address: '7 Bonifacio Ave, Pasig' } });
   check('and correct it there', moved.status === 200 && (await prisma.employee.findUniqueOrThrow({ where: { id: lizaEmp.id } })).address === '7 Bonifacio Ave, Pasig');
-  const noRecord = await http(String(used.body.token), 'PATCH', '/auth/profile', { personal: { address: 'x' } });
-  check('an account with no employee record has no personal details to change', noRecord.status === 400);
+  // No route makes a login without a person any more; one made by hand
+  // (the seeded admin, an older install) still has no personal details to change.
+  const loner = await makeUser(`${TAG} Loner`, `loner${DOMAIN}`, []);
+  const noRecord = await http(signToken(loner.id, loner.email), 'PATCH', '/auth/profile', { personal: { address: 'x' } });
+  check('an account with no employee record has no personal details to change', noRecord.status === 400, String(noRecord.status));
 
   const byHr = await http(hrT, 'POST', '/employees', {
     employeeNo: `${TAG}-002`,
@@ -530,25 +558,129 @@ async function main() {
   check('a login email already in use refuses the save (409)', taken.status === 409);
   check('and the employee is not created without it', (await prisma.employee.count({ where: { employeeNo: `${TAG}-003` } })) === 0);
 
+  // Every refusal lands before the person is written: nothing half-made.
+  const inactive = await http(adminT, 'POST', '/employees', {
+    employeeNo: `${TAG}-103`,
+    firstName: 'Gone',
+    lastName: `${TAG} Already`,
+    isActive: false,
+    login: { email: `gone${DOMAIN}` },
+  });
+  check('an inactive employee cannot be saved with a login (400)', inactive.status === 400, inactive.text.slice(0, 160));
+  check(
+    'and neither the employee nor the login is left behind',
+    (await prisma.employee.count({ where: { employeeNo: `${TAG}-103` } })) === 0 && (await prisma.user.count({ where: { email: `gone${DOMAIN}` } })) === 0,
+  );
+  const badRole = await http(adminT, 'POST', '/employees', {
+    employeeNo: `${TAG}-104`,
+    firstName: 'Role',
+    lastName: `${TAG} Unknown`,
+    login: { email: `role${DOMAIN}`, roleIds: [employeeRole.id, 'no-such-role'] },
+  });
+  check('a role that does not exist is a 400 naming it, not a 500 from the foreign key', badRole.status === 400 && badRole.text.includes('no-such-role'), badRole.text.slice(0, 160));
+  check(
+    'and nothing is written',
+    (await prisma.employee.count({ where: { employeeNo: `${TAG}-104` } })) === 0 && (await prisma.user.count({ where: { email: `role${DOMAIN}` } })) === 0,
+  );
+  // The issue names the field as THIS body spells it — the login is nested
+  // here and the whole body on /:id/login — so an error box finds the box.
+  check('and the issue names the field the body has (login.roleIds)', fieldsOf(badRole).includes('login.roleIds'), fieldsOf(badRole).join(','));
+  const badBoss = await http(adminT, 'POST', '/employees', {
+    employeeNo: `${TAG}-107`,
+    firstName: 'Boss',
+    lastName: `${TAG} Unknown`,
+    login: { email: `boss${DOMAIN}`, supervisorId: 'no-such-user' },
+  });
+  check('an unknown "Reports to" is a 400 naming login.supervisorId, not a 500 from the foreign key', badBoss.status === 400 && fieldsOf(badBoss).includes('login.supervisorId'), badBoss.text.slice(0, 160));
+  check(
+    'and nothing is written',
+    (await prisma.employee.count({ where: { employeeNo: `${TAG}-107` } })) === 0 && (await prisma.user.count({ where: { email: `boss${DOMAIN}` } })) === 0,
+  );
+  const badDept = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-108`, firstName: 'Dept', lastName: `${TAG} Unknown`, departmentId: 'no-such-dept' });
+  check('an unknown department is a 400 naming departmentId', badDept.status === 400 && fieldsOf(badDept).includes('departmentId'), badDept.text.slice(0, 160));
+  check('and makes no employee', (await prisma.employee.count({ where: { employeeNo: `${TAG}-108` } })) === 0);
+  const badUser = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-105`, firstName: 'Link', lastName: `${TAG} Nobody`, userId: 'no-such-user' });
+  check('linking a login that does not exist is a 404', badUser.status === 404, badUser.text.slice(0, 160));
+  check('and makes no employee', (await prisma.employee.count({ where: { employeeNo: `${TAG}-105` } })) === 0);
+  // The number is unique on User too: one an older login still carries stays
+  // there, and the new login goes without rather than the save failing.
+  const older = await makeUser(`${TAG} Older Login`, `older${DOMAIN}`, []);
+  await prisma.user.update({ where: { id: older.id }, data: { employeeNo: `${TAG}-106` } });
+  const clash = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-106`, firstName: 'Same', lastName: `${TAG} Number`, login: { email: `same${DOMAIN}` } });
+  check(
+    'a number an older login carries is left there; the new login goes without, and the save stands',
+    clash.status === 201 &&
+      (clash.body.login as MadeLogin).user.employeeNo === null &&
+      (await prisma.user.findUniqueOrThrow({ where: { id: older.id } })).employeeNo === `${TAG}-106`,
+    clash.text.slice(0, 160),
+  );
+
   console.log('\nInviting someone already on the register');
   const later = await http(adminT, 'POST', `/employees/${hrPlain.body.id}/login`, { email: `paolo${DOMAIN}` });
   const paoloEmp = await prisma.employee.findUniqueOrThrow({ where: { id: String(hrPlain.body.id) } });
   check('an existing employee gets a login and an invitation in one step', later.status === 201 && paoloEmp.userId === (later.body.user as { id: string }).id && !!(later.body.invite as { link?: string } | null)?.link);
   check('a second login for them is refused (409)', (await http(adminT, 'POST', `/employees/${hrPlain.body.id}/login`, { email: `paolo2${DOMAIN}` })).status === 409);
 
+  // Admin › Users' other branch: "an employee already on the register" is the
+  // record's own login route, so both doors give the same account.
   const loose = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-004`, firstName: 'Kim', lastName: `${TAG} Chiu` });
-  const linked = await http(adminT, 'POST', '/users', { name: `Kim ${TAG} Chiu`, email: `kim${DOMAIN}`, employeeId: loose.body.id });
-  check('Admin › Users can link the new login to an employee in the same save', linked.status === 201 && (await prisma.employee.findUniqueOrThrow({ where: { id: String(loose.body.id) } })).userId === linked.body.id);
-  const twice = await http(adminT, 'POST', '/users', { name: 'Kim again', email: `kim2${DOMAIN}`, employeeId: loose.body.id });
-  check('but not to an employee who already has one (409)', twice.status === 409);
+  const kimBadRole = await http(adminT, 'POST', `/employees/${loose.body.id}/login`, { email: `kim${DOMAIN}`, roleIds: ['no-such-role'] });
+  check('a role that does not exist refuses the login too (400), and links nothing', kimBadRole.status === 400 && (await prisma.employee.findUniqueOrThrow({ where: { id: String(loose.body.id) } })).userId === null, kimBadRole.text.slice(0, 120));
+  check('and names the field as this body spells it (roleIds, no login wrapper)', fieldsOf(kimBadRole).includes('roleIds') && !fieldsOf(kimBadRole).includes('login.roleIds'), fieldsOf(kimBadRole).join(','));
+  const kimBadBoss = await http(adminT, 'POST', `/employees/${loose.body.id}/login`, { email: `kim${DOMAIN}`, supervisorId: 'no-such-user' });
+  check(
+    'an unknown "Reports to" refuses the login (400 naming supervisorId), and links nothing',
+    kimBadBoss.status === 400 && fieldsOf(kimBadBoss).includes('supervisorId') && (await prisma.employee.findUniqueOrThrow({ where: { id: String(loose.body.id) } })).userId === null,
+    kimBadBoss.text.slice(0, 120),
+  );
+  const linked = await http(adminT, 'POST', `/employees/${loose.body.id}/login`, { email: `kim${DOMAIN}` });
+  const kimUser = (linked.body.user ?? null) as { id: string; employeeNo: string | null } | null;
+  check(
+    'Admin › Users gives someone already on the register their login — linked, invited, the number mirrored',
+    linked.status === 201 &&
+      !!kimUser &&
+      (await prisma.employee.findUniqueOrThrow({ where: { id: String(loose.body.id) } })).userId === kimUser.id &&
+      !!(linked.body.invite as { link?: string } | null)?.link &&
+      kimUser.employeeNo === `${TAG}-004`,
+    linked.text.slice(0, 200),
+  );
+  check(
+    "and the register's own history says the login was linked",
+    (await prisma.auditLog.count({ where: { entityType: 'employee', entityId: String(loose.body.id), action: 'UPDATED', summary: `Linked the login kim${DOMAIN}` } })) === 1,
+  );
+  const twice = await http(adminT, 'POST', `/employees/${loose.body.id}/login`, { email: `kim2${DOMAIN}` });
+  check('but not twice (409)', twice.status === 409);
   check('and that refusal made no login', (await prisma.user.count({ where: { email: `kim2${DOMAIN}` } })) === 0);
+  // Two at once: the link is CLAIMED, so the loser is refused with the
+  // sequential case's 409 and its login rolled back — never a second login
+  // written over the first (which the old read-then-update allowed), and
+  // never the 500 a unique index happened to throw.
+  const raced = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-006`, firstName: 'Race', lastName: `${TAG} Two` });
+  const [raceA, raceB] = await Promise.all([
+    http(adminT, 'POST', `/employees/${raced.body.id}/login`, { email: `racea${DOMAIN}` }),
+    http(adminT, 'POST', `/employees/${raced.body.id}/login`, { email: `raceb${DOMAIN}` }),
+  ]);
+  const raceWinner = [raceA, raceB].find((r) => r.status === 201);
+  const racedEmp = await prisma.employee.findUniqueOrThrow({ where: { id: String(raced.body.id) } });
+  check(
+    'two logins asked for at once: one 201, one 409 — the link is claimed, never a 500',
+    [raceA.status, raceB.status].sort().join('|') === '201|409',
+    `${raceA.status}|${raceB.status}`,
+  );
+  check(
+    'and exactly one login exists, the one the record points at',
+    !!raceWinner &&
+      racedEmp.userId === (raceWinner.body.user as { id: string }).id &&
+      (await prisma.user.count({ where: { email: { in: [`racea${DOMAIN}`, `raceb${DOMAIN}`] } } })) === 1,
+  );
 
-  const off = await http(adminT, 'POST', '/users', { name: `${TAG} Switched Off`, email: `off${DOMAIN}` });
+  const offEmp = await http(adminT, 'POST', '/employees', { employeeNo: `${TAG}-005`, firstName: 'Switched', lastName: `${TAG} Off` });
+  const off = await http(adminT, 'POST', `/employees/${offEmp.body.id}/login`, { email: `off${DOMAIN}` });
   const offToken = tokenOf((off.body.invite as { link: string }).link);
-  await http(adminT, 'PATCH', `/users/${off.body.id}`, { isActive: false });
+  await http(adminT, 'PATCH', `/users/${(off.body.user as { id: string }).id}`, { isActive: false });
   check('the link of a switched-off account stops working', (await http(null, 'POST', '/auth/link', { token: offToken })).status === 410);
 
-  const detail = await http(adminT, 'GET', `/users/${linked.body.id}`);
+  const detail = await http(adminT, 'GET', `/users/${kimUser?.id}`);
   check('the account page says when the invitation went and until when', !!(detail.body.invite as { sentAt?: string } | null)?.sentAt && (detail.body.invite as { live?: boolean }).live === true);
   check('and which employee it belongs to', (detail.body.employee as { employeeNo?: string } | null)?.employeeNo === `${TAG}-004`);
 
