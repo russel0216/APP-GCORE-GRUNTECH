@@ -21,13 +21,13 @@
  */
 
 import bcrypt from 'bcryptjs';
-import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber, previewNext } from '../src/shared/numbering';
 import { probabilityAfterMove, stageProbability } from '../src/shared/pipeline';
+import { isBold, pdfRuns, printed } from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -645,42 +645,12 @@ async function main() {
 
   // ── Leads on paper ───────────────────────────────────────────────────────
   console.log('\nLeads as PDF');
-  const pdfText = (pdf: Buffer): string => {
-    const raw = pdf.toString('latin1');
-    const out: string[] = [];
-    const stream = /stream\r?\n/g;
-    let m: RegExpExecArray | null;
-    while ((m = stream.exec(raw))) {
-      const start = m.index + m[0].length;
-      const end = raw.indexOf('endstream', start);
-      if (end < 0) continue;
-      let body: string;
-      try {
-        body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-      } catch {
-        continue;
-      }
-      for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-        let piece = '';
-        for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-          piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-        }
-        if (piece) out.push(piece);
-      }
-    }
-    return out.join('\n');
-  };
-  const fetchPdf = async (token: string, path: string) => {
-    const r = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-    return { status: r.status, bytes: Buffer.from(await r.arrayBuffer()) };
-  };
-
-  const leadPdf = await fetchPdf(managerToken, `/leads/${bareLead.id}/pdf`);
-  const leadPdfText = pdfText(leadPdf.bytes);
+  const leadPdf = await printed(managerToken, `/leads/${bareLead.id}/pdf`);
+  const leadPdfText = leadPdf.text;
   check(
     'GET /leads/:id/pdf renders the lead: number, company, who added it',
     leadPdf.status === 200 &&
-      leadPdf.bytes.subarray(0, 5).toString() === '%PDF-' &&
+      leadPdf.bytes?.subarray(0, 5).toString() === '%PDF-' &&
       leadPdfText.includes(bareLead.number) &&
       leadPdfText.includes(`${TAG} Bare Lead`) &&
       leadPdfText.includes(manager.name),
@@ -706,17 +676,17 @@ async function main() {
     'printing the lead is audited as an export',
     !!(await prisma.auditLog.findFirst({ where: { entityType: 'lead', entityId: bareLead.id, action: 'EXPORTED', actorId: manager.id } })),
   );
-  const deniedPdf = await fetchPdf(sellerToken, `/leads/${bareLead.id}/pdf`);
+  const deniedPdf = await printed(sellerToken, `/leads/${bareLead.id}/pdf`);
   check("someone else's lead is refused on paper exactly as on screen", deniedPdf.status === 403, `${deniedPdf.status}`);
 
-  const listPdf = await fetchPdf(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}`);
-  const listPdfText = pdfText(listPdf.bytes);
+  const listPdf = await printed(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}`);
+  const listPdfText = listPdf.text;
   check(
     'GET /leads/pdf prints the filtered list — every tagged lead, and the total',
     listPdf.status === 200 && listPdfText.includes(`${TAG} Bare Lead`) && listPdfText.includes(`${TAG} Not On File`) && listPdfText.includes('Total estimated value'),
     `${listPdf.status}`,
   );
-  const narrowedPdf = pdfText((await fetchPdf(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}&status=NEW`)).bytes);
+  const narrowedPdf = (await printed(managerToken, `/leads/pdf?search=${encodeURIComponent(TAG)}&status=NEW`)).text;
   check('and obeys the list’s own filters', narrowedPdf.includes(`${TAG} Not On File`) && !narrowedPdf.includes(`${TAG} Bare Lead`));
   const exportedPdf = await prisma.auditLog.findFirst({
     where: { entityType: 'lead', entityId: 'list', action: 'EXPORTED', actorId: manager.id },
@@ -724,42 +694,10 @@ async function main() {
   check('the list export left an audit row', !!exportedPdf);
 
   // ── The Forecast on paper: one money block, one bold row ─────────────────
-  /** Each text run with whether its font is the bold one (the resource map read off the file). */
-  const pdfRuns = (pdf: Buffer): { text: string; bold: boolean }[] => {
-    const raw = pdf.toString('latin1');
-    const fonts = new Map([...raw.matchAll(/(\d+) 0 obj\s*<<\s*\/Type \/Font\s*\/BaseFont \/([\w-]+)/g)].map((m) => [m[1], m[2]]));
-    const names = new Map([...raw.matchAll(/\/(F\d+) (\d+) 0 R/g)].map((m) => [m[1], fonts.get(m[2]) ?? '']));
-    const out: { text: string; bold: boolean }[] = [];
-    const stream = /stream\r?\n/g;
-    let m: RegExpExecArray | null;
-    while ((m = stream.exec(raw))) {
-      const start = m.index + m[0].length;
-      const end = raw.indexOf('endstream', start);
-      if (end < 0) continue;
-      let body: string;
-      try {
-        body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-      } catch {
-        continue;
-      }
-      let font = '';
-      for (const op of body.matchAll(/\/(F\d+)\s+[\d.]+\s+Tf|\[([^\]]*)\]\s*TJ/g)) {
-        if (op[1]) {
-          font = names.get(op[1]) ?? '';
-          continue;
-        }
-        let piece = '';
-        for (const part of op[2].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-          piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-        }
-        if (piece) out.push({ text: piece, bold: font.endsWith('-Bold') });
-      }
-    }
-    return out;
-  };
   const fcSince = new Date();
-  const fcPaper = await fetchPdf(managerToken, `/pipeline/forecast.pdf?${fcQuery}`);
-  const fcRuns = pdfRuns(fcPaper.bytes);
+  const fcPaper = await printed(managerToken, `/pipeline/forecast.pdf?${fcQuery}`);
+  // Each text run with whether it was set bold.
+  const fcRuns = (fcPaper.bytes ? pdfRuns(fcPaper.bytes) : []).map((r) => ({ text: r.text, bold: isBold(r) }));
   const fcPaperText = fcRuns.map((r) => r.text).join('\n');
   const moneyLabels = fcRuns.filter((r) => /^(In the window|Everything open)/.test(r.text));
   check(

@@ -11,7 +11,7 @@ import { notify } from '../shared/notifications';
 import {
   cancelOpenRequest,
   onApprovalSettled,
-  routePreview,
+  routeBrief,
   submitForApproval,
   usersInRole,
   type ApprovalOutcome,
@@ -19,20 +19,8 @@ import {
 import { registerSearch } from '../shared/search';
 import { renderDocument, formatMoney, formatAmount, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
-import {
-  claimInclude,
-  presentClaim,
-  cashRequestSections,
-  cashRequestSignatories,
-  LIST_CAP,
-  listReference,
-  bracketed,
-  totalLabel,
-  bracketNote,
-  listNotes,
-  recordNamed,
-  sendListPdf,
-} from './finance';
+import { cashRequestSections, cashRequestSignatories } from './finance';
+import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 
 /**
  * BUDGET REQUESTS — project cash (model §5.2, 2026-10-07, the owner's call).
@@ -136,7 +124,7 @@ export function budgetRequestListWhere(me: Me, q: ReturnType<typeof listQuery>, 
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
-  const status = q.filters.status && q.filters.status in RequestStatus ? (q.filters.status as RequestStatus) : undefined;
+  const status = choice(q.filters.status, RequestStatus, 'Status');
   if (status) where.status = status;
   // Overdue is not a status: released, past the deadline, no approved liquidation.
   if (q.filters.overdue === 'true') {
@@ -328,17 +316,13 @@ budgetRequestRoutes.get(
     assertCanSee(me, row);
     // The route a draft WOULD take — the project's manager, then finance —
     // named before anybody presses Submit (names only).
-    const route =
-      row.status === 'DRAFT'
-        ? await routePreview('budget_request', num(row.amount), row.requestedById, null, { jobId: row.jobId })
-        : null;
+    const approvalRoute =
+      row.status === 'DRAFT' ? await routeBrief('budget_request', num(row.amount), row.requestedById, null, { jobId: row.jobId }) : null;
     res.json({
       ...presentBudgetRequest(row),
       allocations: row.allocations.map((a) => ({ ...a, amount: num(a.amount) })),
       canEdit: row.status === 'DRAFT' && canEditRecord(me, 'gops', 'budget_requests', row.requestedById),
-      approvalRoute: route
-        ? { name: route.name, steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })) }
-        : null,
+      approvalRoute,
     });
   }),
 );
@@ -652,23 +636,6 @@ budgetRequestRoutes.get(
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
     res.send(pdf);
-  }),
-);
-
-/** The liquidation claims against one request, for its page — the ordinary claim rows. */
-budgetRequestRoutes.get(
-  '/:id/liquidations',
-  requireAny(...LIST_PERMISSIONS),
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const row = await prisma.budgetRequest.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, requestedById: true, job: { select: { projectManager: { select: { id: true } } } } },
-    });
-    if (!row) throw notFound('Budget request not found');
-    assertCanSee(me, row);
-    const claims = await prisma.expenseClaim.findMany({ where: { budgetRequestId: row.id }, include: claimInclude, orderBy: { claimDate: 'desc' } });
-    res.json({ rows: claims.map(presentClaim) });
   }),
 );
 

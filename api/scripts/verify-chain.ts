@@ -10,7 +10,6 @@
  * mostly about.
  */
 
-import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -20,6 +19,7 @@ import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
 import { stockOnHand } from '../src/shared/chain';
 import { manilaDayKey } from '../src/shared/day';
+import { statusLabel } from '../src/shared/pdf';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval, act } from '../src/shared/approvals';
 import { budgetPosition } from '../src/routes/jobs';
@@ -36,6 +36,16 @@ import {
 import { settlePurchaseRequest, settlePurchaseOrder } from '../src/routes/procurement';
 import '../src/routes/warehouse';
 import '../src/routes/jobs';
+import {
+  flat,
+  LANDSCAPE,
+  pendingCount,
+  PORTRAIT,
+  printed,
+  saysCount,
+  signedCount,
+  splittingValue,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -103,43 +113,6 @@ async function apiReachable(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** A document's bytes — the PDF routes answer a file, not JSON. */
-async function apiBytes(token: string, path: string): Promise<{ status: number; type: string; bytes: Buffer | null }> {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  return { status: res.status, type: res.headers.get('content-type') ?? '', bytes: res.ok ? Buffer.from(await res.arrayBuffer()) : null };
-}
-
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation
- * uses. PDFKit Flate-compresses its content streams and writes text as hex
- * runs split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
 }
 
 /**
@@ -1370,17 +1343,12 @@ async function main() {
     const big = await raisePr('big enough for three steps', 60_000);
     const bigSteps = big.request?.workflow?.steps ?? [];
     if (big.request) await act({ requestId: big.request.id, userId: pm.id, action: 'APPROVED' });
-    const pendingPdf = await apiBytes(requesterToken, `/purchase-requests/${big.id}/pdf`);
-    const pendingText = pendingPdf.bytes ? pdfText(pendingPdf.bytes) : '';
-    // A sign-off's "Pending" is a run of its own — never the "Pending
-    // approval" a status prints.
-    const pendingCount = (t: string) => (t.match(/^Pending$/gm) ?? []).length;
-    // A dated sign-off prints "Oct 10, 2026, 6:07 AM" under its name — the
-    // requester's always, and each step's once it has signed.
-    const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
-    // A step's name prints in capitals and may wrap to a second line in its
-    // sign-off column: read the words, not the line breaks.
-    const flat = (t: string) => t.replace(/\s+/g, ' ');
+    const pendingPdf = await printed(requesterToken, `/purchase-requests/${big.id}/pdf`);
+    const pendingText = pendingPdf.text;
+    // pendingCount / signedCount (scripts/lib/paper): a sign-off's "Pending"
+    // is a run of its own — never the "Pending approval" a status prints —
+    // and a dated sign-off prints "Oct 10, 2026, 6:07 AM" under its name, the
+    // requester's always and each step's once it has signed.
     const currency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
     check(
       'pending at step 2 of three, the paper prints the project manager who signed, dated, and the two steps still to sign as Pending',
@@ -1412,8 +1380,8 @@ async function main() {
       pendingText.split('\n').filter((l) => /Pending|TOTAL|total|NO\.|EST\./.test(l)).join(' | ').slice(0, 200),
     );
     const bigPulled = await api(requesterToken, 'POST', `/purchase-requests/${big.id}/withdraw`);
-    const draftPdf = await apiBytes(requesterToken, `/purchase-requests/${big.id}/pdf`);
-    const draftText = draftPdf.bytes ? pdfText(draftPdf.bytes) : '';
+    const draftPdf = await printed(requesterToken, `/purchase-requests/${big.id}/pdf`);
+    const draftText = draftPdf.text;
     check(
       'pulled back after the project manager signed, it prints no sign-off but the requester\'s: every step of the route it would take is Pending, under who may sign it',
       bigPulled.status === 200 &&
@@ -1440,8 +1408,8 @@ async function main() {
       await act({ requestId: rejectedFirst.request.id, userId: pm.id, action: 'REJECTED', comment: `${TAG} not this quarter` });
     }
     const rejectedFirstNow = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: rejectedFirst.id } });
-    const rejectedFirstPdf = await apiBytes(requesterToken, `/purchase-requests/${rejectedFirst.id}/pdf`);
-    const rejectedFirstText = rejectedFirstPdf.bytes ? pdfText(rejectedFirstPdf.bytes) : '';
+    const rejectedFirstPdf = await printed(requesterToken, `/purchase-requests/${rejectedFirst.id}/pdf`);
+    const rejectedFirstText = rejectedFirstPdf.text;
     check(
       'rejected at its first step, the request prints no Pending and no open "Approved by" — only the requester\'s dated sign-off',
       rejectedFirst.submitted === 200 &&
@@ -1464,8 +1432,8 @@ async function main() {
       await act({ requestId: rejectedLater.request.id, userId: finance.id, action: 'REJECTED', comment: `${TAG} over budget` });
     }
     const rejectedLaterNow = await prisma.purchaseRequest.findUniqueOrThrow({ where: { id: rejectedLater.id } });
-    const rejectedLaterPdf = await apiBytes(requesterToken, `/purchase-requests/${rejectedLater.id}/pdf`);
-    const rejectedLaterText = rejectedLaterPdf.bytes ? pdfText(rejectedLaterPdf.bytes) : '';
+    const rejectedLaterPdf = await printed(requesterToken, `/purchase-requests/${rejectedLater.id}/pdf`);
+    const rejectedLaterText = rejectedLaterPdf.text;
     check(
       'rejected at finance after the project manager signed, it prints his dated sign-off and nothing for the steps nobody will sign',
       rejectedLaterSteps.length === 3 &&
@@ -1540,8 +1508,8 @@ async function main() {
     // receiving is its own document.
     console.log('\nThe printed purchase order and supplier list');
     const poPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'purchase_order', entityId: po.id, action: 'EXPORTED' } });
-    const poPdf = await apiBytes(buyerToken, `/purchase-orders/${po.id}/pdf`);
-    const poText = poPdf.bytes ? pdfText(poPdf.bytes) : '';
+    const poPdf = await printed(buyerToken, `/purchase-orders/${po.id}/pdf`);
+    const poText = poPdf.text;
     const poSteps = (await prisma.approvalRequest.findFirstOrThrow({
       where: { documentType: 'purchase_order', documentId: po.id },
       orderBy: { createdAt: 'desc' },
@@ -1580,8 +1548,8 @@ async function main() {
     // A draft — this one back in DRAFT with a cancelled stray request behind
     // it — prints the route submitting would take, every step Pending, under
     // whoever may sign it; only the buyer's own sign-off is dated.
-    const poDraftPdf = await apiBytes(buyerToken, `/purchase-orders/${poDraftId}/pdf`);
-    const poDraftText = poDraftPdf.bytes ? pdfText(poDraftPdf.bytes) : '';
+    const poDraftPdf = await printed(buyerToken, `/purchase-orders/${poDraftId}/pdf`);
+    const poDraftText = poDraftPdf.text;
     check(
       'a draft order prints the route it would take: both steps Pending under who may sign them, the buyer\'s the only dated sign-off',
       poDraftPdf.status === 200 &&
@@ -1602,12 +1570,12 @@ async function main() {
     const listPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'supplier', entityId: 'list', action: 'EXPORTED' } });
     // Filtered to today's additions, so the paper's filter line names a day.
     const listDayKey = manilaDayKey(new Date());
-    const listPdf = await apiBytes(
+    const listPdf = await printed(
       signToken(lister.id, lister.email),
       `/suppliers/pdf?search=${encodeURIComponent(TAG)}&createdFrom=${listDayKey}&createdTo=${listDayKey}`,
     );
-    const listText = listPdf.bytes ? pdfText(listPdf.bytes) : '';
-    const listBoxes = [...(listPdf.bytes?.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g) ?? [])].map((m) => `${m[1]}x${m[2]}`);
+    const listText = listPdf.text;
+    const listBoxes = listPdf.pages;
     const listPrintsAfter = await prisma.auditLog.count({ where: { entityType: 'supplier', entityId: 'list', action: 'EXPORTED' } });
     check(
       'the supplier list prints on landscape pages, its heads whole, its dates MM/DD/YYYY, and is audited as EXPORTED',
@@ -1675,8 +1643,8 @@ async function main() {
         handedOnNow.currentSequence === handedOnRequest.currentSequence,
       `${handedOnSubmit.status} requester ${handedOnRequest?.requesterId === buyerPm.id ? 'the buyer' : handedOnRequest?.requesterId === colleague.id ? 'the colleague' : 'none'}, self-approval: ${selfApproval}`,
     );
-    const handedOnPdf = await apiBytes(buyerPmToken, `/purchase-orders/${handedOnId}/pdf`);
-    const handedOnText = handedOnPdf.bytes ? pdfText(handedOnPdf.bytes) : '';
+    const handedOnPdf = await printed(buyerPmToken, `/purchase-orders/${handedOnId}/pdf`);
+    const handedOnText = handedOnPdf.text;
     check(
       'and its paper names the buyer once — as who prepared it — never among who may sign the project manager\'s step',
       handedOnPdf.status === 200 &&
@@ -1951,8 +1919,8 @@ async function main() {
     // name until it is handed over. Nobody has issued it yet, so no "Issued
     // by", and never the "Noted by" nobody fills.
     const issuePrintsBefore = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
-    const draftIssuePdf = await apiBytes(bossToken, `/stock-issues/${draftIssueId}/pdf`);
-    const draftIssueText = draftIssuePdf.bytes ? pdfText(draftIssuePdf.bytes) : '';
+    const draftIssuePdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
+    const draftIssueText = draftIssuePdf.text;
     check(
       'a draft stock issue prints who raised it, dated, and the receiver over Pending — no "Issued by", no "Noted by"',
       draftIssuePdf.status === 200 &&
@@ -1982,8 +1950,8 @@ async function main() {
     // Issue, from the trail), received on the handover. Its money is the
     // quotation's block — the figures bare under a head naming the currency,
     // the total once, with the code — and every print is on the trail.
-    const issuedPdf = await apiBytes(bossToken, `/stock-issues/${draftIssueId}/pdf`);
-    const issuedText = issuedPdf.bytes ? pdfText(issuedPdf.bytes) : '';
+    const issuedPdf = await printed(bossToken, `/stock-issues/${draftIssueId}/pdf`);
+    const issuedText = issuedPdf.text;
     const issuePrintsAfter = await prisma.auditLog.count({ where: { entityType: 'stock_issue', entityId: draftIssueId, action: 'EXPORTED' } });
     check(
       'an issued stock issue prints who raised it, who issued it and who received it, each dated, and nothing Pending',
@@ -2115,6 +2083,11 @@ async function main() {
     // deleted instead), so CANCELLED is written here — on a draft that
     // committed and moved nothing, the state a cancelled one is in.
     console.log('\nClosed and late documents for the printed lists');
+    // A canvass still out for quotes beside the two awarded above, so a status
+    // filter on the canvass list has one to keep and one to drop.
+    await prisma.canvass.create({
+      data: { number: await nextNumber('canvass'), requestId: pr.id, createdById: procurement.id, notes: `${TAG} still out for quotes` },
+    });
     const cancelledPo = await api(buyerToken, 'POST', '/purchase-orders', { supplierId: supplier.id, notes: `${TAG} cancelled order` });
     const cancelledPoId = String(cancelledPo.body.id);
     const cancelledPoLine = await api(buyerToken, 'POST', `/purchase-orders/${cancelledPoId}/items`, {
@@ -2191,13 +2164,6 @@ async function main() {
       ),
     );
 
-    const LANDSCAPE = '841.89x595.28';
-    const PORTRAIT = '595.28x841.89';
-    const boxesOf = (bytes: Buffer | null) =>
-      [...(bytes?.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g) ?? [])].map((m) => `${m[1]}x${m[2]}`);
-    /** "Reference: 3 purchase requests" — the count the paper says it holds. */
-    const saysCount = (text: string, n: number, noun: readonly [string, string]) =>
-      new RegExp(`Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}(?![a-z])`).test(text);
     /** The money a totals row prints, read off the paper: "<label> PHP 1,234.00". */
     const totalOn = (text: string, label: string) => {
       const m = text.match(new RegExp(`${label} ${currency} (-?[\\d,]+\\.\\d{2})`));
@@ -2213,8 +2179,10 @@ async function main() {
       page: string;
       /** What the paper prints for a row — its number, or what stands for it. */
       key: (row: Row) => string;
-      /** A filter, and the words the paper must name it by. */
-      filter: [string, string];
+      /** A filter, and the words the paper must name it by — one that keeps some of the rows and drops others. */
+      filter: [string, string] | ((rows: Row[]) => [string, string]);
+      /** What on the paper shows a dropped row is absent, where `key` is shared with a kept one (a stock line's item). */
+      dropKey?: (row: Row) => string;
       /** The totals row the paper must add up, from the list's own rows. */
       total?: { label: string; of: (rows: Row[]) => number };
       /** Rows listed but not summed: each figure in brackets, and the note that counts them. */
@@ -2239,7 +2207,18 @@ async function main() {
           note: (n) => `${n} cancelled or rejected request${n === 1 ? ', in brackets, is' : 's, in brackets, are'} not counted.`,
         },
       },
-      { path: 'canvasses', entity: 'canvass', noun: ['canvass', 'canvasses'], page: PORTRAIT, key: (r) => String(r.number), filter: ['status=OPEN', 'status Open'] },
+      {
+        path: 'canvasses',
+        entity: 'canvass',
+        noun: ['canvass', 'canvasses'],
+        page: PORTRAIT,
+        key: (r) => String(r.number),
+        // Neither canvass here is still open: filter on a status one has and the other has not.
+        filter: (rows) => {
+          const status = splittingValue(rows, 'status');
+          return [`status=${status}`, `status ${statusLabel(status)}`];
+        },
+      },
       {
         path: 'purchase-orders',
         entity: 'purchase_order',
@@ -2296,6 +2275,8 @@ async function main() {
         page: LANDSCAPE,
         key: (r) => String((r.item as { code: string }).code),
         filter: [`warehouseId=${warehouse.id}`, `warehouse ${warehouse.name}`],
+        // The item stocked in the site store is stocked in the main store too: its line elsewhere is told by the warehouse.
+        dropKey: (r) => String((r.warehouse as { name: string }).name),
         // Valued as stockOnHand() values stock: the sum, rounded once.
         total: { label: 'Stock value', of: (rows) => rows.reduce((t, r) => t + Number(r.quantity) * Number(r.averageCost), 0) },
       },
@@ -2306,10 +2287,10 @@ async function main() {
       const listed = await api(printerToken, 'GET', `/${l.path}?search=${TAG}&pageSize=200`);
       const rows = (listed.body.rows ?? []) as Row[];
       const before = await exported(l.entity);
-      const paper = await apiBytes(printerToken, `/${l.path}/pdf?search=${TAG}`);
-      const text = paper.bytes ? flat(pdfText(paper.bytes)) : '';
+      const paper = await printed(printerToken, `/${l.path}/pdf?search=${TAG}`);
+      const text = flat(paper.text);
       const after = await exported(l.entity);
-      const boxes = boxesOf(paper.bytes);
+      const boxes = paper.pages;
       check(
         `${l.path}: its paper is a PDF of exactly the rows the list holds, the search named, on ${l.page === LANDSCAPE ? 'landscape' : 'portrait'} pages, audited as an export of the list`,
         paper.status === 200 &&
@@ -2327,14 +2308,14 @@ async function main() {
       );
       if (l.total) {
         const expected = Math.round(l.total.of(rows) * 100) / 100;
-        const printed = totalOn(text, l.total.label);
-        check(`${l.path}: its "${l.total.label}" adds up the rows it lists — a cancelled one's figure left out`, money(printed, expected), `${printed} vs ${expected}`);
+        const printedTotal = totalOn(text, l.total.label);
+        check(`${l.path}: its "${l.total.label}" adds up the rows it lists — a cancelled one's figure left out`, money(printedTotal, expected), `${printedTotal} vs ${expected}`);
       }
       if (l.closed && l.total) {
         const closed = l.closed;
         const closedRows = rows.filter(closed.is);
         const everything = Math.round(rows.reduce((t, r) => t + closed.figure(r), 0) * 100) / 100;
-        const printed = totalOn(text, l.total.label);
+        const printedTotal = totalOn(text, l.total.label);
         const amount = (v: number) => v.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const inBrackets = text.match(/\(\d[\d,]*\.\d{2}\)/g) ?? [];
         check(
@@ -2344,42 +2325,57 @@ async function main() {
             closedRows.every((r) => text.includes(`(${amount(closed.figure(r))})`)) &&
             inBrackets.length === closedRows.length &&
             text.includes(closed.note(closedRows.length)) &&
-            !money(printed, everything),
+            !money(printedTotal, everything),
           `${closedRows.length} closed (${closedRows.map((r) => amount(closed.figure(r))).join(', ')}); on paper ${inBrackets.join(' ') || 'none'}; ` +
-            `note ${text.includes(closed.note(closedRows.length))}; total ${printed} vs all ${everything}`,
+            `note ${text.includes(closed.note(closedRows.length))}; total ${printedTotal} vs all ${everything}`,
         );
       }
       if (l.unsettled) {
         const n = rows.filter(l.unsettled.is).length;
-        // WinAnsi's em dash is byte 0x97, which is how this reader decodes it.
-        const onPaper = l.unsettled.note(n).replace(/—/g, '\u0097');
+        const onPaper = l.unsettled.note(n);
         check(
-          `${l.path}: the note says how many the total includes that nothing has moved on yet ("${l.unsettled.note(n)}")`,
+          `${l.path}: the note says how many the total includes that nothing has moved on yet ("${onPaper}")`,
           n > 0 && text.includes(onPaper),
           `${n} such row(s); ${text.match(/The total includes[^.]*\./)?.[0] ?? 'no note'}`,
         );
       }
 
       const [first] = rows;
-      const ticked = await apiBytes(printerToken, `/${l.path}/pdf?ids=${first ? String(first.id) : 'none'}`);
-      const tickedText = ticked.bytes ? flat(pdfText(ticked.bytes)) : '';
+      const ticked = await printed(printerToken, `/${l.path}/pdf?ids=${first ? String(first.id) : 'none'}`);
+      const tickedText = flat(ticked.text);
       check(
         `${l.path}: ?ids= prints only the row ticked, and says so`,
-        ticked.status === 200 && !!first && tickedText.includes(l.key(first)) && saysCount(tickedText, 1, l.noun) && tickedText.includes('the rows selected'),
-        `${ticked.status} ${tickedText.match(/Reference: [^—]*—[^·]*/)?.[0] ?? tickedText.slice(0, 120)}`,
+        ticked.status === 200 &&
+          !!first &&
+          tickedText.includes(l.key(first)) &&
+          rows.length > 1 &&
+          // A stock line shares its item's code with the item's line elsewhere: those are not "another row" on paper.
+          rows.slice(1).filter((r) => l.key(r) !== l.key(first)).every((r) => !tickedText.includes(l.key(r))) &&
+          saysCount(tickedText, 1, l.noun) &&
+          tickedText.includes('the rows selected'),
+        `${ticked.status} ${tickedText.match(/Reference: [^—]*—[^·]*/)?.[0] ?? tickedText.slice(0, 120)} · ${rows.slice(1).filter((r) => l.key(r) !== l.key(first) && tickedText.includes(l.key(r))).length} other row(s) printed`,
       );
 
-      const [filterQuery, filterWords] = l.filter;
-      const narrowed = await api(printerToken, 'GET', `/${l.path}?search=${TAG}&${filterQuery}&pageSize=1`);
-      const filtered = await apiBytes(printerToken, `/${l.path}/pdf?search=${TAG}&${filterQuery}`);
-      const filteredText = filtered.bytes ? flat(pdfText(filtered.bytes)) : '';
+      const [filterQuery, filterWords] = typeof l.filter === 'function' ? l.filter(rows) : l.filter;
+      const dropKey = l.dropKey ?? l.key;
+      const narrowed = await api(printerToken, 'GET', `/${l.path}?search=${TAG}&${filterQuery}&pageSize=200`);
+      const filtered = await printed(printerToken, `/${l.path}/pdf?search=${TAG}&${filterQuery}`);
+      const filteredText = flat(filtered.text);
+      // Narrows: it keeps some rows and drops others — on the paper as on
+      // the screen, so a filter the paper ignored prints a row it dropped.
+      const kept = (narrowed.body.rows ?? []) as Row[];
+      const dropped = rows.filter((r) => !kept.some((k) => k.id === r.id));
       check(
         `${l.path}: a filter narrows the paper as it narrows the list, and the paper names it ("${filterWords}")`,
         filtered.status === 200 &&
-          Number(narrowed.body.total) < rows.length &&
-          saysCount(filteredText, Number(narrowed.body.total), l.noun) &&
-          filteredText.includes(filterWords),
-        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}; ${filteredText.match(/Reference: [^]*?(?= NUMBER| ITEM| CODE)/)?.[0] ?? filteredText.slice(0, 160)}`,
+          kept.length > 0 &&
+          dropped.length > 0 &&
+          Number(narrowed.body.total) === kept.length &&
+          saysCount(filteredText, kept.length, l.noun) &&
+          filteredText.includes(filterWords) &&
+          kept.every((r) => filteredText.includes(l.key(r))) &&
+          dropped.every((r) => !filteredText.includes(dropKey(r))),
+        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}, ${dropped.length} dropped, ${dropped.filter((r) => filteredText.includes(dropKey(r))).length} of them printed; ${filteredText.match(/Reference: [^]*?(?= NUMBER| ITEM| CODE)/)?.[0] ?? filteredText.slice(0, 160)}`,
       );
     }
 
@@ -2388,8 +2384,8 @@ async function main() {
     // list shows its badge; a slip that is not late is not on it.
     const slipsListed = (((await api(printerToken, 'GET', `/borrow-slips?search=${TAG}&pageSize=200`)).body.rows ?? []) as Row[]);
     const overdueListed = (((await api(printerToken, 'GET', `/borrow-slips?search=${TAG}&overdue=true&pageSize=200`)).body.rows ?? []) as Row[]);
-    const overduePaper = await apiBytes(printerToken, `/borrow-slips/pdf?search=${TAG}&overdue=true`);
-    const overdueText = overduePaper.bytes ? flat(pdfText(overduePaper.bytes)) : '';
+    const overduePaper = await printed(printerToken, `/borrow-slips/pdf?search=${TAG}&overdue=true`);
+    const overdueText = flat(overduePaper.text);
     const lateWords = (r: Row) => `Overdue, ${Number(r.daysOverdue)} day${Number(r.daysOverdue) === 1 ? '' : 's'}`;
     check(
       'the Overdue paper holds exactly the overdue slips the list holds, and prints "Overdue, 2 days" for the slip two days late',
@@ -2412,8 +2408,8 @@ async function main() {
         unit: 'pcs',
       })),
     });
-    const capped = await apiBytes(printerToken, `/items/pdf?search=${encodeURIComponent(`${TAG} CAP`)}&sort=code&dir=asc`);
-    const cappedText = capped.bytes ? flat(pdfText(capped.bytes)) : '';
+    const capped = await printed(printerToken, `/items/pdf?search=${encodeURIComponent(`${TAG} CAP`)}&sort=code&dir=asc`);
+    const cappedText = flat(capped.text);
     check(
       'a list longer than the cap prints its first 1,000 rows and says "first 1,000 of 1,001 items printed"',
       capped.status === 200 &&
@@ -2445,10 +2441,10 @@ async function main() {
     });
     const ownListed = await api(requesterToken, 'GET', `/purchase-requests?search=${TAG}&pageSize=200`);
     const ownRows = (ownListed.body.rows ?? []) as Row[];
-    const ownPaper = await apiBytes(requesterToken, `/purchase-requests/pdf?search=${TAG}`);
-    const ownText = ownPaper.bytes ? flat(pdfText(ownPaper.bytes)) : '';
-    const ownTicked = await apiBytes(requesterToken, `/purchase-requests/pdf?ids=${othersRequest.id}`);
-    const ownTickedText = ownTicked.bytes ? flat(pdfText(ownTicked.bytes)) : '';
+    const ownPaper = await printed(requesterToken, `/purchase-requests/pdf?search=${TAG}`);
+    const ownText = flat(ownPaper.text);
+    const ownTicked = await printed(requesterToken, `/purchase-requests/pdf?ids=${othersRequest.id}`);
+    const ownTickedText = flat(ownTicked.text);
     check(
       'a requester who sees only their own prints only their own — "raised by me" — and ticking another\'s id prints nothing of it',
       ownPaper.status === 200 &&
@@ -2475,8 +2471,8 @@ async function main() {
       (b) => b.item.reorderLevel !== null && Math.round((num(b.quantity) - num(b.borrowedQty)) * 100) / 100 <= num(b.item.reorderLevel),
     ).length;
     const reorderPage = await api(printerToken, 'GET', `/inventory?search=${TAG}&needsReorder=true&pageSize=1`);
-    const reorderPaper = await apiBytes(printerToken, `/inventory/pdf?search=${TAG}&needsReorder=true`);
-    const reorderText = reorderPaper.bytes ? flat(pdfText(reorderPaper.bytes)) : '';
+    const reorderPaper = await printed(printerToken, `/inventory/pdf?search=${TAG}&needsReorder=true`);
+    const reorderText = flat(reorderPaper.text);
     const report = await api(printerToken, 'GET', '/inventory/reports/summary');
     const reportCount = ((report.body.reorder ?? []) as { code: string }[]).filter((r) => r.code.startsWith(TAG)).length;
     check(

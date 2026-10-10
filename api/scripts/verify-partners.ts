@@ -29,7 +29,6 @@ import { deleteAttachment } from '../src/shared/attachments';
 import { previewNext } from '../src/shared/numbering';
 import { listQuery } from '../src/http/kit';
 import { partnerListSummary, partnerListWhere } from '../src/routes/partners';
-import zlib from 'node:zlib';
 import {
   PARTNER_RESOURCE_ENTITY,
   humanKind,
@@ -42,6 +41,12 @@ import {
   checkResourceSource,
 } from '../src/shared/partners';
 import { partnerSpec, partnerWrite, itemSpec, itemWrite } from '../src/routes/imports';
+import {
+  flat,
+  LANDSCAPE,
+  printed,
+  squash,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -385,7 +390,6 @@ async function main() {
 
   const viewRole = await makeRole(`${ROLE}view`, 'Verify partner viewer', [
     'gops.partners.view_all',
-    'gops.partners.export',
   ]);
   const otherRole = await makeRole(`${ROLE}other`, 'Verify no partners', ['gops.customers.view_all']);
   const viewer = await makeUser('Verify Partner Viewer', 'viewer', [viewRole.id]);
@@ -421,10 +425,10 @@ async function main() {
     JSON.stringify(entry),
   );
   check(
-    'gops.partners has exactly the five shared actions',
+    'gops.partners has exactly the four shared actions',
     JSON.stringify(permissionsFor('gops', 'partners').sort()) ===
       JSON.stringify(
-        ['gops.partners.view_all', 'gops.partners.create', 'gops.partners.edit_all', 'gops.partners.delete', 'gops.partners.export'].sort(),
+        ['gops.partners.view_all', 'gops.partners.create', 'gops.partners.edit_all', 'gops.partners.delete'].sort(),
       ),
     permissionsFor('gops', 'partners').join(','),
   );
@@ -824,8 +828,8 @@ async function httpCases(ctx: {
     overHttp.status === 200 && !!httpSum && httpSum.count === (overHttp.body.rows as unknown[]).length && httpSum.tabCounts[''] === 3,
     overHttp.text.slice(0, 160),
   );
-  const paper = await fetch(`${BASE}/partners/pdf?ids=${pB.id}`, { headers: { Authorization: `Bearer ${viewerT}` } });
-  const paperText = pdfLine(Buffer.from(await paper.arrayBuffer()));
+  const paper = await printed(viewerT, `/partners/pdf?ids=${pB.id}`);
+  const paperText = flat(paper.text);
   check(
     'the printed partner list prints the ticked partner alone, and says so',
     paper.status === 200 && paperText.replace(/ /g, '').includes(`${TAG}-LP-B`) && !paperText.replace(/ /g, '').includes(`${TAG}-LP-A`) &&
@@ -836,14 +840,23 @@ async function httpCases(ctx: {
   // Rule 6: ten columns print whole on landscape paper, each sized from what
   // it holds — a code is one word and never breaks over two lines — and a
   // date the filter names prints as a list prints a date.
-  const wide = await fetch(`${BASE}/partners/pdf?search=${encodeURIComponent(LISTP)}&sinceFrom=2026-01-01`, { headers: { Authorization: `Bearer ${viewerT}` } });
-  const wideBytes = Buffer.from(await wide.arrayBuffer());
-  const wideText = pdfLine(wideBytes);
+  const wideQuery = `search=${encodeURIComponent(LISTP)}&sinceFrom=2026-01-01`;
+  const wide = await printed(viewerT, `/partners/pdf?${wideQuery}`);
+  const wideText = flat(wide.text);
+  // Whole: each code the list holds is ONE text run — a code broken over two
+  // lines is two — and the codes the filter left out are not on it at all.
+  const wideRows = ((await http(viewerT, 'GET', `/partners?${wideQuery}`)).body.rows ?? []) as { code: string }[];
+  const wideRuns = wide.text.split('\n');
+  const wideLeftOut = [`${TAG}-LP-B`, `${TAG}-LP-C`];
   check(
     'the partner list prints on landscape paper, every code whole',
-    wide.status === 200 && wideBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') &&
-      [`${TAG}-LP-A`, `${TAG}-LP-B`].every((code) => wideText.includes(code) || !wideText.replace(/ /g, '').includes(code)),
-    wideText.slice(0, 300),
+    wide.status === 200 &&
+      wide.pages.length > 0 &&
+      wide.pages.every((pg) => pg === LANDSCAPE) &&
+      wideRows.length > 0 &&
+      wideRows.every((r) => wideRuns.some((run) => run.includes(r.code))) &&
+      wideLeftOut.every((code) => !squash(wide.text).includes(code)),
+    `${wide.pages.join(',')} · ${wideRows.map((r) => `${r.code} ${wideRuns.some((run) => run.includes(r.code)) ? 'whole' : 'broken or missing'}`).join(', ')} · ${wideText.slice(0, 200)}`,
   );
   check('a date the filter names prints MM/DD/YYYY', wideText.includes('partner since 01/01/2026 to'), wideText.slice(0, 400));
   check(
@@ -885,16 +898,16 @@ async function httpCases(ctx: {
     'and cannot filter by them either',
     (await http(readerT, 'GET', `/suppliers?search=${encodeURIComponent(LISTS)}&orders=placed`)).status === 403,
   );
-  const supPaper = await fetch(`${BASE}/suppliers/pdf?ids=${sB.id}`, { headers: { Authorization: `Bearer ${buyerT}` } });
-  const supText = pdfLine(Buffer.from(await supPaper.arrayBuffer()));
+  const supPaper = await printed(buyerT, `/suppliers/pdf?ids=${sB.id}`);
+  const supText = flat(supPaper.text);
   check(
     'the printed supplier list prints the ticked supplier alone, with its orders for a buyer',
     supPaper.status === 200 && supText.replace(/ /g, '').includes(`${TAG}-LS-B`) && !supText.replace(/ /g, '').includes(`${TAG}-LS-A`) &&
       supText.includes('the rows selected') && supText.replace(/ /g, '').toUpperCase().includes('AWAITING'),
     supText.slice(0, 200),
   );
-  const readerPaper = await fetch(`${BASE}/suppliers/pdf?search=${encodeURIComponent(LISTS)}`, { headers: { Authorization: `Bearer ${readerT}` } });
-  const readerText = pdfLine(Buffer.from(await readerPaper.arrayBuffer()));
+  const readerPaper = await printed(readerT, `/suppliers/pdf?search=${encodeURIComponent(LISTS)}`);
+  const readerText = flat(readerPaper.text);
   check(
     'and without the order columns for a reader who may not open purchase orders',
     readerPaper.status === 200 && readerText.replace(/ /g, '').includes(`${TAG}-LS-A`) && !readerText.replace(/ /g, '').toUpperCase().includes('AWAITING'),
@@ -907,30 +920,6 @@ async function httpCases(ctx: {
   check('printing is refused without the key', (await fetch(`${BASE}/suppliers/pdf`, { headers: { Authorization: `Bearer ${outsiderT}` } })).status === 403);
   const supRecat = await http(adminT, 'PATCH', `/suppliers/${sB.id}`, { category: 'Verify Fittings' });
   check('"Set what they supply" on suppliers is the ordinary PATCH', supRecat.status === 200 && supRecat.body.category === 'Verify Fittings');
-}
-
-/** A PDF's text runs, joined and with runs of whitespace collapsed. */
-function pdfLine(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  for (const m of raw.matchAll(/stream\r?\n/g)) {
-    const start = m.index! + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join(' ').replace(/\s+/g, ' ');
 }
 
 main()

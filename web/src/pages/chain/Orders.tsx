@@ -78,11 +78,6 @@ export function Canvasses() {
       <div className="page-head">
         <div>
           <h1>Canvass / RFQ</h1>
-          <p>
-            Quote the same lines from several suppliers and compare like for like. The lowest
-            complete quote is flagged, but the award is yours — price is not the only thing that
-            matters.
-          </p>
         </div>
       </div>
 
@@ -793,10 +788,6 @@ export function PurchaseOrders() {
       <div className="page-head">
         <div>
           <h1>Purchase Orders</h1>
-          <p>
-            An issued order is a firm commitment against the project's budget, at the price
-            actually agreed — it replaces the request's estimate rather than adding to it.
-          </p>
         </div>
       </div>
 

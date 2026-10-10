@@ -31,6 +31,7 @@ import {
   resolveInline,
   resolveTemplate,
   pageSizeOf,
+  signoffColumns,
   tableBottom,
   unknownFieldsIn,
   type Align,
@@ -1299,17 +1300,13 @@ function TotalsBody({ block, sample, scale }: { block: TotalsBlock; sample: Samp
 
 function SignoffsBody({ block, sample, scale }: { block: SignoffsBlock; sample: Sample; scale: number }) {
   const people = sample.signatories;
-  const n = people.length;
-  const colW = Math.min(block.colWidth, block.w);
-  const step = n > 1 ? (block.w - colW) / (n - 1) : 0;
+  // The PDF's own columns (the designed engine sets them 10pt apart), so a
+  // crowded block — the sales order's five — reads here as it prints.
+  const cols = signoffColumns({ x: block.x, w: block.w, colWidth: block.colWidth, gutter: 10 }, people.length);
   return (
     <div className="pt-signoffs" style={{ fontSize: block.size * scale, color: block.textColor }}>
       {people.map((p, i) => (
-        <div
-          key={i}
-          className="pt-signoff"
-          style={{ marginLeft: step * i * scale, width: (n <= 1 ? block.w : i === n - 1 ? colW : Math.max(colW, step - 10)) * scale }}
-        >
+        <div key={i} className="pt-signoff" style={{ marginLeft: (cols[i].x - block.x) * scale, width: cols[i].width * scale }}>
           <b className="pt-signoff-role" style={{ color: block.headColor, fontSize: (block.size + 0.5) * scale }}>
             {p.role}
           </b>

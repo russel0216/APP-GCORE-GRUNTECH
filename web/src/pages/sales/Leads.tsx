@@ -502,7 +502,7 @@ export function Leads() {
     },
     {
       key: 'expectedClosing',
-      label: 'Expected close',
+      label: 'Expected closing',
       sortKey: 'expectedClosing',
       render: (l) => formatDate(l.expectedClosing),
     },
@@ -886,7 +886,7 @@ export function LeadDetail() {
             label="Weighted"
             value={lead.estimatedValue == null ? null : formatMoney((lead.estimatedValue * lead.probability) / 100)}
           />
-          <Row label="Expected close" value={formatDate(lead.expectedClosing)} />
+          <Row label="Expected closing" value={formatDate(lead.expectedClosing)} />
         </div>
 
         {/*

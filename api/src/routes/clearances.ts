@@ -28,8 +28,7 @@ import {
   usersInRole,
   approvalSlots,
   slotSignatories,
-  routePreview,
-  contactPhone,
+  contactOf,
   cancelOpenRequest,
 } from '../shared/approvals';
 import { renderDocument, formatDate, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
@@ -48,7 +47,7 @@ import {
   trailingYear,
   turnover,
 } from '../shared/clearance';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, listReference, choice, sendListPdf } from '../shared/listPaper';
 
 /**
  * Employee clearance — turnover of accountabilities before someone leaves.
@@ -72,10 +71,6 @@ const REASON_LABEL: Record<SeparationReason, string> = {
   AWOL: 'AWOL',
   OTHER: 'Other',
 };
-
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
-}
 
 function asDay(value: string): Date {
   const d = new Date(value);
@@ -164,9 +159,9 @@ function clearanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): P
   const and: Prisma.EmployeeClearanceWhereInput[] = [];
   const onlyOwn = !can(me, 'ghr.clearances.view_all');
   if (onlyOwn || q.scope === 'mine') and.push({ OR: [{ raisedById: me.id }, { employee: { userId: me.id } }] });
-  const status = asEnum(ClearanceStatus, q.filters.status);
+  const status = choice(q.filters.status, ClearanceStatus, 'Status');
   if (status) and.push({ status });
-  const reason = asEnum(SeparationReason, q.filters.reason);
+  const reason = choice(q.filters.reason, SeparationReason, 'Reason', (r) => REASON_LABEL[r]);
   if (reason) and.push({ reason });
   if (q.filters.departmentId) and.push({ employee: { departmentId: q.filters.departmentId } });
   if (q.filters.employeeId) and.push({ employeeId: q.filters.employeeId });
@@ -278,8 +273,8 @@ clearanceRoutes.get(
       f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
     ]);
 
-    const status = asEnum(ClearanceStatus, f.status);
-    const reason = asEnum(SeparationReason, f.reason);
+    const status = choice(f.status, ClearanceStatus, 'Status');
+    const reason = choice(f.reason, SeparationReason, 'Reason', (r) => REASON_LABEL[r]);
     const reference = listReference(count, rows.length, ['clearance', 'clearances'], [
       q.search && `search "${q.search}"`,
       status && `status ${statusLabel(status)}`,
@@ -839,38 +834,25 @@ clearanceRoutes.post(
 // ── Print ────────────────────────────────────────────────────────────────────
 
 /**
- * A person's contact lines, read for the paper only — a reader calls the
- * person who signed. Never on the loaders: `GET /clearances/:id` carries no
- * mobile.
- */
-async function contactOf(userId: string): Promise<{ phone?: string; email?: string }> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true, phone: true, employee: { select: { mobile: true } } },
-  });
-  return user ? { phone: contactPhone(user), email: user.email } : {};
-}
-
-/**
  * The approval half of the sign-offs (rule 6): every step of the route
  * through the engine's one mapping. A clearance not yet submitted — OPEN, or
  * REJECTED and back with HR to fix — prints the route submitting it would
- * take, in the leaver's name as the submit files it, every step open; not
- * `approvalSlots(…, draft)`, which previews only while NO request exists,
- * and a rejected one keeps the request that refused it. A cancelled one
- * prints none: no approval is coming. One open "Approved by" only where no
- * workflow covers clearances at all.
+ * take, in the leaver's name as the submit files it, every step open (the
+ * request that refused it signs nothing now). A cancelled one prints only
+ * the steps that really signed on its last request (`approvalSlots` of a
+ * closed request — the cancel withdraws a pending one), none when it never
+ * reached anybody, and no slot left "Pending": no approval is coming. One
+ * open "Approved by" only where no workflow covers clearances at all, and
+ * never on a cancelled one.
  */
-async function routeSignatories(head: Header): Promise<Signatory[]> {
-  if (head.status === 'CANCELLED') return [];
-  const slots =
-    head.status === 'OPEN' || head.status === 'REJECTED'
-      ? ((await routePreview('clearance', null, head.employee.userId ?? head.raisedById))?.steps ?? []).map((st) => ({
-          step: st.name,
-          assigned: st.approvers,
-        }))
-      : await approvalSlots('clearance', head.id);
-  return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
+async function routeSignoffs(head: Header): Promise<Signatory[]> {
+  const unsubmitted = head.status === 'OPEN' || head.status === 'REJECTED';
+  const slots = await approvalSlots(
+    'clearance',
+    head.id,
+    unsubmitted ? { amount: null, requesterId: head.employee.userId ?? head.raisedById } : undefined,
+  );
+  return slots.length ? slotSignatories(slots) : head.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }];
 }
 
 clearanceRoutes.get(
@@ -928,7 +910,7 @@ clearanceRoutes.get(
     const preparer = await contactOf(head.raisedById);
     const signatories: Signatory[] = [
       { role: 'Prepared by', name: head.raisedBy.name, ...preparer, at: head.createdAt },
-      ...(await routeSignatories(head)),
+      ...(await routeSignoffs(head)),
     ];
     const pdf = await renderDocument({
       title: 'Employee Clearance',

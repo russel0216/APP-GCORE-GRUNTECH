@@ -2,7 +2,7 @@ import PDFDocument from 'pdfkit';
 import fs from 'node:fs';
 import { z } from 'zod';
 import { prisma } from '../prisma';
-import { formatDateTime, pdfSafe, websiteForPrint, type PdfCell, type PdfTotal, type Signatory } from './pdf';
+import { NOTHING_TO_LIST, breakPoint, formatDateTime, signoffColumns, pdfSafe, websiteForPrint, type PdfCell, type PdfTotal, type Signatory } from './pdf';
 
 /**
  * Designed documents — a PDF laid out by an administrator.
@@ -475,7 +475,9 @@ function lineWidth(doc: PDFKit.PDFDocument, runs: Run[], s: Style): number {
 
 /**
  * Lines of runs wrapped to a width: words are kept whole unless one is wider
- * than the box on its own, and a wrapped line drops the spaces it broke at.
+ * than the box on its own (then broken by `breakPoint`, pdf.ts — after an @,
+ * a dot, a hyphen or a slash where it can), and a wrapped line drops the
+ * spaces it broke at.
  */
 function wrap(doc: PDFKit.PDFDocument, lines: Run[][], width: number, s: Style): Laid[] {
   const out: Laid[] = [];
@@ -513,11 +515,13 @@ function wrap(doc: PDFKit.PDFDocument, lines: Run[][], width: number, s: Style):
         continue;
       }
       if (cur.some((t) => !t.space)) flush();
-      // A word wider than the box on its own is broken where it has to be.
+      // A word wider than the box on its own is broken where it has to be —
+      // after an @, else a dot, a hyphen or a slash that leaves half the line filled.
       let rest = tok.text;
       while (measure(doc, rest, tok.bold, s) > width && rest.length > 1) {
         let n = rest.length - 1;
         while (n > 1 && measure(doc, rest.slice(0, n), tok.bold, s) > width) n--;
+        n = breakPoint(rest, n, (t) => measure(doc, t, tok.bold, s), width);
         cur.push({ ...tok, text: rest.slice(0, n), w: measure(doc, rest.slice(0, n), tok.bold, s) + s.spacing });
         flush();
         rest = rest.slice(n);
@@ -974,6 +978,13 @@ class Renderer {
     head();
 
     const rows = this.data.rows;
+    if (!rows.length) {
+      // No lines: one muted line under the head says so, ruled off as a row
+      // would be — never a head over nothing (the house tables' rule).
+      drawLaid(doc, laid(doc, [{ text: NOTHING_TO_LIST, bold: false }], body), b.x + padX, y + padTop, b.w - padX * 2, 'left', body, b.bodyColor);
+      rule(y + lh + padRow);
+      return { page, y: y + lh + padRow };
+    }
     const rowCells = (r: DesignRow) => ('cells' in r ? cols.map((c) => cellLines(r.cells[c.key], c.width - padX * 2)) : []);
     const fresh = flowBottom - flowTop - headH;
 
@@ -1063,15 +1074,9 @@ class Renderer {
     }
   }
 
+  /** The columns, by the one rule both engines use (`signoffColumns` in pdf.ts), 10pt apart. */
   private signoffColumns(b: SignoffsBlock): { x: number; width: number }[] {
-    const n = this.data.signatories.length;
-    if (n <= 1) return [{ x: b.x, width: b.w }];
-    const colW = Math.min(b.colWidth, b.w);
-    const step = (b.w - colW) / (n - 1);
-    return this.data.signatories.map((_, i) => ({
-      x: b.x + step * i,
-      width: i === n - 1 ? colW : Math.max(colW, step - 10),
-    }));
+    return signoffColumns({ x: b.x, w: b.w, colWidth: b.colWidth, gutter: 10 }, this.data.signatories.length);
   }
 
   /**

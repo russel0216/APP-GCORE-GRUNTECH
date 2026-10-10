@@ -42,7 +42,7 @@ import {
   statusLabel,
   companyCurrency,
 } from '../shared/pdf';
-import { LIST_CAP, listDay, listReference, rangeNamed, sendListPdf, totalLabel } from './finance';
+import { LIST_CAP, listDay, listReference, rangeNamed, sendListPdf, totalLabel, choice, filterDay, dayOf } from '../shared/listPaper';
 import {
   hrSettings,
   saveHrSettings,
@@ -71,11 +71,6 @@ function asDate(v: string | null | undefined): Date | null {
   const date = new Date(v);
   if (Number.isNaN(date.getTime())) throw badRequest(`"${v}" is not a valid date`);
   return date;
-}
-
-/** A filter value from the URL, accepted only if it names a real enum member. */
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
 }
 
 /**
@@ -395,22 +390,6 @@ clockRoutes.post(
   }),
 );
 
-clockRoutes.delete(
-  '/enroll/:id',
-  handler(async (req, res) => {
-    const me = currentUser(req);
-    const row = await prisma.faceEnrollment.findUnique({ where: { id: req.params.id } });
-    if (!row) throw notFound('Enrolment not found');
-
-    const mine = await myEmployee(me.id);
-    if (row.employeeId !== mine?.id && !me.isSuperAdmin && !me.permissions.has('ghr.employees.edit_all')) {
-      throw forbidden('That enrolment belongs to someone else');
-    }
-    await prisma.faceEnrollment.delete({ where: { id: row.id } });
-    res.json({ ok: true });
-  }),
-);
-
 /**
  * Clocking in or out.
  *
@@ -581,14 +560,12 @@ attendanceRoutes.use(authenticate);
 function attendanceListWhere(q: ListQuery): Prisma.AttendanceWhereInput {
   const where: Prisma.AttendanceWhereInput = {};
   const f = q.filters;
-  if (f.from || f.to) {
-    where.date = {};
-    if (f.from) where.date.gte = asDate(f.from)!;
-    if (f.to) where.date.lte = asDate(f.to)!;
-  } else if (f.date) {
-    where.date = asDate(f.date)!;
-  }
-  const status = asEnum(AttendanceStatus, f.status);
+  const from = filterDay(f.from, 'From');
+  const to = filterDay(f.to, 'To');
+  const on = filterDay(f.date, 'Date');
+  if (from || to) where.date = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
+  else if (on) where.date = dayOf(on);
+  const status = choice(f.status, AttendanceStatus, 'Status');
   if (status) where.status = status;
   if (f.employeeId) where.employeeId = f.employeeId;
   if (q.search) {
@@ -689,7 +666,7 @@ attendanceRoutes.get(
       f.employeeId ? prisma.employee.findUnique({ where: { id: f.employeeId }, select: { firstName: true, lastName: true } }) : null,
     ]);
 
-    const status = asEnum(AttendanceStatus, f.status);
+    const status = choice(f.status, AttendanceStatus, 'Status');
     const reference = listReference(count, rows.length, ['attendance row', 'attendance rows'], [
       q.search && `search "${q.search}"`,
       f.from || f.to ? rangeNamed('dated', f.from, f.to) : f.date && `on ${listDay(f.date)}`,
@@ -989,7 +966,7 @@ async function leaveListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma.Le
     and.push({ employeeId: mine?.id ?? '__none__' });
   }
   const f = q.filters;
-  const status = asEnum(LeaveStatus, f.status);
+  const status = choice(f.status, LeaveStatus, 'Status');
   if (status) and.push({ status });
   if (f.employeeId) and.push({ employeeId: f.employeeId });
   if (f.leaveTypeId) and.push({ leaveTypeId: f.leaveTypeId });
@@ -1063,7 +1040,7 @@ leaveRoutes.get(
       f.leaveTypeId ? prisma.leaveType.findUnique({ where: { id: f.leaveTypeId }, select: { name: true } }) : null,
     ]);
 
-    const status = asEnum(LeaveStatus, f.status);
+    const status = choice(f.status, LeaveStatus, 'Status');
     const reference = listReference(count, rows.length, ['leave request', 'leave requests'], [
       q.search && `search "${q.search}"`,
       status && `status ${statusLabel(status)}`,
@@ -1692,7 +1669,7 @@ async function overtimeListWhere(me: ResolvedUser, q: ListQuery): Promise<Prisma
     and.push({ employeeId: mine?.id ?? '__none__' });
   }
   const f = q.filters;
-  const stage = asEnum(OtStage, f.stage);
+  const stage = choice(f.stage, OtStage, 'Stage', (st) => OT_STAGE_LABEL[st]);
   if (stage) and.push({ stage });
   if (f.jobId) and.push({ jobId: f.jobId });
   if (f.employeeId) and.push({ employeeId: f.employeeId });
@@ -1800,7 +1777,7 @@ overtimeRoutes.get(
       f.jobId ? prisma.job.findUnique({ where: { id: f.jobId }, select: { number: true } }) : null,
     ]);
 
-    const stage = asEnum(OtStage, f.stage);
+    const stage = choice(f.stage, OtStage, 'Stage', (st) => OT_STAGE_LABEL[st]);
     const reference = listReference(count, rows.length, ['overtime request', 'overtime requests'], [
       q.search && `search "${q.search}"`,
       stage && `stage ${OT_STAGE_LABEL[stage]}`,

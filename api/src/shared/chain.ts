@@ -28,6 +28,25 @@ export async function stockOnHand(): Promise<{ value: number; lines: number }> {
   };
 }
 
+type Qty = { toString(): string } | number;
+
+/**
+ * Available to issue: on hand less what is out on loan, to the centavo.
+ * With `belowReorder`, the ONE rule for the stock list's flag, its "Below
+ * level" filter and paper, the inventory reports' tile and Insights'
+ * Inventory Analytics — which used to keep its own (stock above zero only,
+ * strictly under the level) and so left out an item with nothing left.
+ */
+export const availableOf = (b: { quantity: Qty; borrowedQty: Qty }) => cents(num(b.quantity) - num(b.borrowedQty));
+
+/** At or under the item's reorder level; an item with no level never is. */
+export function belowReorder(b: { quantity: Qty; borrowedQty: Qty; item: { reorderLevel: Qty | null } }): boolean {
+  return b.item.reorderLevel !== null && availableOf(b) <= num(b.item.reorderLevel);
+}
+
+/** The balances `belowReorder` can be true of: an item with a level set. Narrow with it, then filter. */
+export const REORDER_CANDIDATES = { item: { reorderLevel: { not: null } } } as const;
+
 export interface ChainOverview {
   /** PENDING_APPROVAL purchase requests — own only when the caller sees own only. */
   requestsAwaitingApproval: number | null;

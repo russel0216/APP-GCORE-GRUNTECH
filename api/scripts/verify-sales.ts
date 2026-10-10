@@ -11,7 +11,6 @@
  */
 
 import bcrypt from 'bcryptjs';
-import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -79,6 +78,11 @@ import { teamMembers, teamOf } from '../src/shared/team';
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
 import { OWNER_GROUPS, groupKey, rememberGroups, seedOwnerGroups } from '../src/shared/quotationGroups';
+import {
+  flat,
+  pdfText,
+  squash,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -261,38 +265,6 @@ async function apiReachable(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** The text a PDF shows, one string per text run (verify-foundation.ts's reader). */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue; // not every stream is text, and a font program is not a failure
-    }
-
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1]
-          ? Buffer.from(part[1], 'hex').toString('latin1')
-          : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
 }
 
 async function main() {
@@ -1781,34 +1753,35 @@ async function main() {
     const UNIT_COST = 7_777.77;
     const COST_AMOUNT = 15_555.54;
     const base = `/quotations/${qid}/revisions/${rev0.id}`;
-    const l1 = await http(salesToken, 'POST', `${base}/items`, {
-      group: `${TAG} Installation`,
-      title: 'Air compressor installation',
-      description: 'Mechanical and electrical tie-in',
-      quantity: 2,
-      unit: 'lot',
-      unitPrice: 12_500,
-      unitCost: UNIT_COST,
-      providerSupplierId: supplier.id,
-      costNote: `${TAG} supplier quote 88`,
+    // Written as the editor writes them: the revision's lines in one PUT.
+    const twoLines = await http(salesToken, 'PUT', `${base}/lines`, {
+      lines: [
+        {
+          group: `${TAG} Installation`,
+          title: 'Air compressor installation',
+          description: 'Mechanical and electrical tie-in',
+          quantity: 2,
+          unit: 'lot',
+          unitPrice: 12_500,
+          unitCost: UNIT_COST,
+          providerSupplierId: supplier.id,
+          costNote: `${TAG} supplier quote 88`,
+        },
+        {
+          group: `${TAG} Services`,
+          title: 'Commissioning',
+          description: 'Start-up and hand-over',
+          quantity: 1,
+          unit: 'lot',
+          unitPrice: 5_000,
+          unitCost: 1_000,
+          providerUserId: sales.id,
+        },
+      ],
     });
-    const l2 = await http(salesToken, 'POST', `${base}/items`, {
-      group: `${TAG} Services`,
-      title: 'Commissioning',
-      description: 'Start-up and hand-over',
-      quantity: 1,
-      unit: 'lot',
-      unitPrice: 5_000,
-      unitCost: 1_000,
-      providerUserId: sales.id,
-    });
-    check('lines with cost and a provider are accepted', l1.status === 201 && l2.status === 201, `${l1.text.slice(0, 160)} ${l2.text.slice(0, 160)}`);
-    const both = await http(salesToken, 'POST', `${base}/items`, {
-      title: 'Bad line',
-      quantity: 1,
-      unitPrice: 1,
-      providerSupplierId: supplier.id,
-      providerUserId: sales.id,
+    check('lines with cost and a provider are accepted', twoLines.status === 200, twoLines.text.slice(0, 200));
+    const both = await http(salesToken, 'PUT', `${base}/lines`, {
+      lines: [{ title: 'Bad line', quantity: 1, unit: 'lot', unitPrice: 1, providerSupplierId: supplier.id, providerUserId: sales.id }],
     });
     check('a line cannot name a supplier AND a person', both.status === 400, both.text.slice(0, 160));
 
@@ -2134,8 +2107,22 @@ async function main() {
     const partedRevs = await http(salesToken, 'GET', `/quotations/${partedId}`);
     const partedItems = ((partedRevs.body.revisions as { items: { brand: string | null; partNumber: string | null }[] }[])[0]?.items ?? []);
     check('and the page gets the three boxes back to edit', partedItems[0]?.brand === 'SCHNEIDER ELECTRIC' && partedItems[0]?.partNumber === 'EZC100H3030');
-    const typedPatch = await http(salesToken, 'PATCH', `/quotations/${partedId}/revisions/${partedRev.id}/items/${pi[2].id}`, { brand: 'KSB PUMPS', partNumber: 'ETANORM 065' });
-    const typedAfter = await prisma.quotationItem.findUniqueOrThrow({ where: { id: pi[2].id } });
+    // The editor saves every line again; the one typed as a title now has two boxes filled.
+    const asSent = (i: (typeof pi)[number]) => ({
+      group: i.group,
+      title: i.title,
+      brand: i.brand,
+      productType: i.productType,
+      partNumber: i.partNumber,
+      description: i.description,
+      quantity: Number(i.quantity),
+      unit: i.unit,
+      unitPrice: Number(i.unitPrice),
+    });
+    const typedPatch = await http(salesToken, 'PUT', `/quotations/${partedId}/revisions/${partedRev.id}/lines`, {
+      lines: [asSent(pi[0]), asSent(pi[1]), { ...asSent(pi[2]), brand: 'KSB PUMPS', partNumber: 'ETANORM 065' }],
+    });
+    const typedAfter = await prisma.quotationItem.findFirstOrThrow({ where: { revisionId: partedRev.id, sortOrder: 2 } });
     check(
       'editing one box on a line typed as a title re-titles it from the boxes',
       typedPatch.status === 200 && typedAfter.title === 'KSB PUMPS, ETANORM 065' && typedAfter.productType === null,
@@ -2918,12 +2905,14 @@ async function main() {
       soPdfOwner.includes('SALES ORDER') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('Margin sum:') && soPdfOwner.includes('SI / BS No.: SI-4622'),
       soPdfOwner.slice(0, 200),
     );
+    // A name wraps inside its column (five sign-offs share the block), so the
+    // names are looked for with the line breaks read as spaces.
+    const soSignLine = soPdfOwner.replace(/\s+/g, ' ');
     check(
       'and its sign-offs name all four signatures, dated',
-      [manager, backSupport, costController, ceo].every((p) => soPdfOwner.includes(p.name)) && !soPdfOwner.includes('Pending'),
-      soPdfOwner.slice(-400),
+      [manager, backSupport, costController, ceo].every((p) => soSignLine.includes(p.name)) && !soPdfOwner.includes('Pending'),
+      soSignLine.slice(-400),
     );
-    const soSignLine = soPdfOwner.replace(/\s+/g, ' ');
     check(
       'each under its step’s own name, in capitals — nothing added, never "APPROVED BY — …"',
       soSteps.every((st) => soSignLine.includes(st.name.toUpperCase())) && !soSignLine.includes('APPROVED BY'),
@@ -3123,7 +3112,7 @@ async function main() {
       check('and printing it is audited as an export', exported >= 1);
       check(
         'the list prints its money as every document does: the code in the column head, one bold "Total" in the money block',
-        printedLine.includes('VALUE (PHP)') && printedText.split('\n').includes('Total') && printedLine.includes('PHP 500.00') && !printedLine.includes('Value, total'),
+        printedLine.includes('TOTAL (PHP)') && printedText.split('\n').includes('Total') && printedLine.includes('PHP 500.00') && !printedLine.includes('Total, total'),
         printedLine.slice(-200),
       );
       check('its number column is headed "Number"', printedText.split('\n').includes('NUMBER') && !printedText.split('\n').includes('NO.'));
@@ -3132,7 +3121,7 @@ async function main() {
       const ownerPrinted = await fetch(`${BASE}/quotations/pdf?search=${encodeURIComponent(LISTQ)}&scope=all&ownerId=${sales.id}`, {
         headers: { Authorization: `Bearer ${salesToken}` },
       });
-      const ownerLine = pdfText(Buffer.from(await ownerPrinted.arrayBuffer())).replace(/\s+/g, ' ');
+      const ownerLine = flat(pdfText(Buffer.from(await ownerPrinted.arrayBuffer())));
       check(
         'a person the list is filtered on is named on the paper — "owner <name>", never "one owner"',
         ownerPrinted.status === 200 && ownerLine.includes(`owner ${sales.name}`) && !ownerLine.includes('one owner'),
@@ -3163,7 +3152,7 @@ async function main() {
       const printedPick = await fetch(`${BASE}/quotations/pdf?scope=all&ids=${picked.map((p) => p.id).join(',')}`, {
         headers: { Authorization: `Bearer ${salesToken}` },
       });
-      const printedPickLine = pdfText(Buffer.from(await printedPick.arrayBuffer())).replace(/\s+/g, ' ');
+      const printedPickLine = flat(pdfText(Buffer.from(await printedPick.arrayBuffer())));
       check(
         'Print selected prints the ticked quotations and no other, and says it is a selection',
         printedPick.status === 200 &&
@@ -3180,7 +3169,7 @@ async function main() {
         data: { number: `${TAG}-LB`, companyName: `${TAG} Print B`, assignedToId: sales.id, createdById: sales.id },
       });
       const leadPdf = await fetch(`${BASE}/leads/pdf?scope=all&ids=${leadA.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
-      const leadLine = pdfText(Buffer.from(await leadPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      const leadLine = flat(pdfText(Buffer.from(await leadPdf.arrayBuffer())));
       check(
         'the leads list prints a selection the same way',
         leadPdf.status === 200 && leadLine.includes(`${TAG} Print A`) && !leadLine.includes(`${TAG} Print B`),
@@ -3200,7 +3189,7 @@ async function main() {
       const soPrinted = await fetch(`${BASE}/sales-orders/pdf?search=${encodeURIComponent(`${TAG}-LSO`)}&scope=all&status=ISSUED`, {
         headers: { Authorization: `Bearer ${salesToken}` },
       });
-      const soPrintedLine = pdfText(Buffer.from(await soPrinted.arrayBuffer())).replace(/\s+/g, ' ');
+      const soPrintedLine = flat(pdfText(Buffer.from(await soPrinted.arrayBuffer())));
       check(
         'the printed sales order list is the list as filtered — the issued one, its SI, the filter named',
         // A long number wraps across text runs; read it with the spaces out.
@@ -3210,7 +3199,7 @@ async function main() {
       );
       const soPick = await prisma.salesOrder.findUniqueOrThrow({ where: { number: `${TAG}-LSO3` }, select: { id: true } });
       const soPickPdf = await fetch(`${BASE}/sales-orders/pdf?scope=all&ids=${soPick.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
-      const soPickLine = pdfText(Buffer.from(await soPickPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      const soPickLine = flat(pdfText(Buffer.from(await soPickPdf.arrayBuffer())));
       check(
         'and Print selected prints the ticked order alone',
         soPickPdf.status === 200 && soPickLine.replace(/ /g, '').includes(`${TAG}-LSO3`) && !soPickLine.replace(/ /g, '').includes(`${TAG}-LSO4`) && soPickLine.includes('the rows selected'),
@@ -3218,7 +3207,7 @@ async function main() {
       );
       const soOfQuote = await prisma.salesOrder.findUniqueOrThrow({ where: { number: `${TAG}-LSO3` }, select: { quotation: { select: { id: true, number: true } } } });
       const soQuotePdf = await fetch(`${BASE}/sales-orders/pdf?scope=all&quotationId=${soOfQuote.quotation.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
-      const soQuoteLine = pdfText(Buffer.from(await soQuotePdf.arrayBuffer())).replace(/\s+/g, ' ');
+      const soQuoteLine = flat(pdfText(Buffer.from(await soQuotePdf.arrayBuffer())));
       check(
         'an order list narrowed to one quotation names it by number — never "one quotation"',
         soQuotePdf.status === 200 && soQuoteLine.replace(/ /g, '').includes(`quotation${soOfQuote.quotation.number}`.replace(/ /g, '')) && !soQuoteLine.includes('one quotation'),
@@ -3230,13 +3219,20 @@ async function main() {
         soPrintedLine.slice(-200),
       );
       const soAllPdf = await fetch(`${BASE}/sales-orders/pdf?search=${encodeURIComponent(`${TAG}-LSO`)}&scope=all`, { headers: { Authorization: `Bearer ${salesToken}` } });
-      const soAllLine = pdfText(Buffer.from(await soAllPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      const soAllLine = flat(pdfText(Buffer.from(await soAllPdf.arrayBuffer())));
+      // LSO2 is the cancelled one, 500.00: its figure in brackets, the live
+      // orders' (1,000, 2,000 and 3,000) bare, and the booked total theirs alone.
       check(
         'a cancelled order prints in brackets and is said under the money block — never a row of it',
         soAllPdf.status === 200 &&
-          (soSum?.cancelledCount ? /cancelled orders?, in brackets, (is|are) not counted/.test(soAllLine) : !soAllLine.includes('not counted')) &&
+          soSum?.cancelledCount === 1 &&
+          squash(soAllLine).includes(`${TAG}-LSO2`) &&
+          soAllLine.includes('(500.00)') &&
+          ['1,000.00', '2,000.00', '3,000.00'].every((v) => soAllLine.includes(v) && !soAllLine.includes(`(${v})`)) &&
+          soAllLine.includes('Total booked PHP 6,000.00') &&
+          soAllLine.includes('1 cancelled order, in brackets, is not counted.') &&
           !soAllLine.includes('Cancelled, not counted:'),
-        `${soSum?.cancelledCount} ${soAllLine.slice(-200)}`,
+        `${soSum?.cancelledCount} cancelled · ${soAllLine.match(/\([\d,.]+\)/g)?.join(' ') ?? 'nothing in brackets'} · ${soAllLine.slice(-200)}`,
       );
       check(
         'and printing the order list is audited as an export',
@@ -3280,7 +3276,7 @@ async function main() {
       const lPrinted = await fetch(`${BASE}/leads/pdf?search=${encodeURIComponent(`${TAG} LEADL`)}&scope=all&stage=HOLD`, {
         headers: { Authorization: `Bearer ${salesToken}` },
       });
-      const lPrintedLine = pdfText(Buffer.from(await lPrinted.arrayBuffer())).replace(/\s+/g, ' ');
+      const lPrintedLine = flat(pdfText(Buffer.from(await lPrinted.arrayBuffer())));
       check(
         'the printed leads list is the list as filtered — the one on hold, the stage named, the weighted total',
         lPrinted.status === 200 && lPrintedLine.includes(`${TAG} LEADL hold`) && !lPrintedLine.includes(`${TAG} LEADL new`) &&
@@ -3294,7 +3290,7 @@ async function main() {
           })
         ).arrayBuffer(),
       );
-      const lAgainLine = pdfText(lPrintedAgain).replace(/\s+/g, ' ');
+      const lAgainLine = flat(pdfText(lPrintedAgain));
       check(
         'its eight columns print on landscape paper, the status through statusLabel, the sum the last row of the money block',
         lPrintedAgain.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') && lAgainLine.includes('On hold') &&
@@ -3322,7 +3318,7 @@ async function main() {
         custListed.text.slice(0, 200),
       );
       const custPdf = await fetch(`${BASE}/customers/pdf?ids=${customer.id}`, { headers: { Authorization: `Bearer ${salesToken}` } });
-      const custLine = pdfText(Buffer.from(await custPdf.arrayBuffer())).replace(/\s+/g, ' ');
+      const custLine = flat(pdfText(Buffer.from(await custPdf.arrayBuffer())));
       check(
         'the printed customer list prints the ticked customer and says it is a selection',
         custPdf.status === 200 && custLine.includes(`${TAG} Hospital`) && custLine.includes('the rows selected'),
@@ -3334,7 +3330,7 @@ async function main() {
         headers: { Authorization: `Bearer ${salesToken}` },
       });
       const custWideBytes = Buffer.from(await custWide.arrayBuffer());
-      const custWideLine = pdfText(custWideBytes).replace(/\s+/g, ' ');
+      const custWideLine = flat(pdfText(custWideBytes));
       check(
         'the printed customer list is landscape, and names its filters: added by <name>, team open',
         custWide.status === 200 && custWideBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') &&

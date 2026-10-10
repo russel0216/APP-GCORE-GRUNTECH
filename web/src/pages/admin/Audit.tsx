@@ -84,11 +84,6 @@ export function Audit() {
       <div className="page-head">
         <div>
           <h1>Audit Logs</h1>
-          <p>
-            Every create, change, approval and deletion, with who did it and when. Records are
-            written by the shared audit service, so a new module gets a trail by calling one
-            function rather than by remembering to build one.
-          </p>
         </div>
       </div>
 
@@ -127,6 +122,7 @@ export function Audit() {
               'user',
               'role',
               'company',
+              'pdf_specimen',
               'approval_workflow',
               'number_sequence',
               'setting',

@@ -207,11 +207,6 @@ export function Expenses() {
       <div className="page-head">
         <div>
           <h1>Expense Claims</h1>
-          <p>
-            What you spent on the company's behalf, and what it is owed back — including the
-            receipts that liquidate a cash advance. Every line needs a receipt number: finance
-            needs an OR against every peso, and a claim without one cannot be reimbursed.
-          </p>
         </div>
       </div>
 
@@ -225,6 +220,7 @@ export function Expenses() {
         reloadToken={reload}
         searchPlaceholder="Search number, purpose, person, advance, budget request…"
         emptyTitle="No claims yet"
+        emptyHint="Every line needs a receipt number before a claim can be submitted."
         onRowClick={(r) => navigate(`/g-fin/expenses/${r.id}`)}
         filters={[
           { key: 'status', label: 'Status', options: STATUSES },

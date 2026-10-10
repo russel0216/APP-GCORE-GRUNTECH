@@ -73,10 +73,6 @@ export function Receivings() {
       <div className="page-head">
         <div>
           <h1>Receiving</h1>
-          <p>
-            Where a direct-to-job purchase stops being a promise and becomes a cost. Stock
-            replenishment lands in the warehouse instead, and charges a project only when issued.
-          </p>
         </div>
       </div>
 
@@ -406,11 +402,6 @@ export function StockIssues() {
       <div className="page-head">
         <div>
           <h1>Stock Issuance</h1>
-          <p>
-            Material leaving the store for a project. This is where stock-sourced material first
-            charges a job, valued at the moving average cost — which is why it cannot also have been
-            charged at receiving.
-          </p>
         </div>
       </div>
 
@@ -424,6 +415,7 @@ export function StockIssues() {
         reloadToken={reload}
         onRowClick={(i) => navigate(`/g-chain/stock-issuance/${i.id}`)}
         emptyTitle="Nothing issued yet"
+        emptyHint="Stock issued to a project charges it here, at the moving average cost."
         filters={[
           {
             key: 'status',
@@ -1016,11 +1008,6 @@ export function BorrowSlips() {
       <div className="page-head">
         <div>
           <h1>Borrow Slips</h1>
-          <p>
-            Tools and equipment lent out and expected back. A borrow slip does{' '}
-            <strong>not</strong> charge job cost — the asset is on loan, not consumed. It comes out
-            of what the warehouse can issue until it is returned.
-          </p>
         </div>
       </div>
 
@@ -1034,6 +1021,7 @@ export function BorrowSlips() {
         reloadToken={reload}
         onRowClick={(b) => navigate(`/g-chain/borrow-slips/${b.id}`)}
         emptyTitle="Nothing on loan"
+        emptyHint="A borrow slip charges no job cost — the tool is on loan, not consumed."
         filters={[
           {
             key: 'status',
@@ -1583,10 +1571,6 @@ export function Inventory() {
       <div className="page-head">
         <div>
           <h1>Inventory</h1>
-          <p>
-            Stock valued at moving weighted average — a receipt changes the average, an issue takes
-            it as given. Items on loan are still owned but cannot be issued.
-          </p>
         </div>
       </div>
 

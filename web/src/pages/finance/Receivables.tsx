@@ -227,11 +227,6 @@ export function Receivables() {
       <div className="page-head">
         <div>
           <h1>Accounts Receivable</h1>
-          <p>
-            Outstanding is measured against what is <strong>collectible</strong>, not against the
-            invoice total. The withheld EWT comes back as a tax certificate, so counting it as a
-            debt would make every customer look like a late payer.
-          </p>
         </div>
       </div>
 
@@ -1414,11 +1409,6 @@ export function Payments() {
       <div className="page-head">
         <div>
           <h1>Payments</h1>
-          <p>
-            Every movement of money, in and out, and what each one settled. An uncleared cheque is
-            recorded but does not count towards cash — it is a promise until the bank says
-            otherwise.
-          </p>
         </div>
       </div>
 
@@ -1430,6 +1420,7 @@ export function Payments() {
         rowKey={(r) => r.id}
         searchPlaceholder="Search number, reference, customer, supplier, person…"
         emptyTitle="No payments recorded yet"
+        emptyHint="An uncleared cheque is recorded but counts as cash only once it clears."
         onRowClick={(r) => navigate(paymentLink(r.id))}
         filters={[
           {

@@ -30,10 +30,10 @@ import {
   type PdfTotal,
   type Signatory,
 } from '../shared/pdf';
-import { contactPhone } from '../shared/approvals';
+import { contactsOf } from '../shared/approvals';
 import { manilaDate, workingDayDate } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
-import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes } from './jobs';
+import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, ratePct } from '../shared/listPaper';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -41,23 +41,6 @@ const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v)
 const cents = (n: number) => Math.round(n * 100) / 100;
 
 /** A rate as a document prints it: 0.12 → "12%", 0.075 → "7.5%". */
-const pct = (rate: number) => `${+(rate * 100).toFixed(2)}%`;
-
-/**
- * The contact lines a sign-off prints under a name — read for the PAPER
- * only, never sent with the record (the quotation's rule: `GET …/:id`
- * carries no mobile). `contactPhone` is the one reading of a person's number.
- */
-async function printContacts(ids: (string | null | undefined)[]) {
-  const wanted = [...new Set(ids.filter((v): v is string => !!v))];
-  const rows = wanted.length
-    ? await prisma.user.findMany({
-        where: { id: { in: wanted } },
-        select: { id: true, name: true, email: true, phone: true, employee: { select: { mobile: true } } },
-      })
-    : [];
-  return new Map(rows.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
-}
 
 function asDate(v: string | null | undefined): Date | null {
   if (!v) return null;
@@ -222,9 +205,7 @@ progressRoutes.get(
       { entityType: 'progress_report', entityId: 'list', action: 'EXPORTED', summary: `Exported the progress reports list as PDF (${listReference(count, printed.length, ['progress report', 'progress reports'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="progress-reports.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'progress-reports.pdf');
   }),
 );
 
@@ -577,7 +558,7 @@ progressRoutes.get(
 
     const view = presentReport(report);
     const currency = await companyCurrency();
-    const people = await printContacts([report.preparedById, report.approvedById]);
+    const people = await contactsOf([report.preparedById, report.approvedById]);
 
     const photos = await prisma.attachment.findMany({
       where: { entityType: 'progress_report', entityId: report.id },
@@ -852,9 +833,7 @@ billingRoutes.get(
       { entityType: 'progress_billing', entityId: 'list', action: 'EXPORTED', summary: `Exported the billings list as PDF (${listReference(count, rows.length, ['billing', 'billings'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="billings.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'billings.pdf');
   }),
 );
 
@@ -1142,9 +1121,9 @@ billingRoutes.get(
       totals.push({ label: 'Less: retention withheld', value: formatMoney(view.retentionWithheld, currency) });
     }
     totals.push(
-      { label: `VAT (${pct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) },
+      { label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) },
       { label: 'Invoice total', value: formatMoney(view.invoiceTotal, currency) },
-      { label: `Less: EWT (${pct(view.ewtRate)})`, value: formatMoney(view.ewtAmount, currency) },
+      { label: `Less: EWT (${ratePct(view.ewtRate)})`, value: formatMoney(view.ewtAmount, currency) },
       { label: 'Net collectible', value: formatMoney(view.netCollectible, currency), bold: true },
     );
 
@@ -1155,7 +1134,7 @@ billingRoutes.get(
     // is left out rather than guessed, and nobody signs a Conforme in the
     // app, so no such slot is printed.
     const { raised, approved: approvedRow } = await billingTrail(billing.id);
-    const people = await printContacts([raised?.actorId, approvedRow?.actorId]);
+    const people = await contactsOf([raised?.actorId, approvedRow?.actorId]);
     const isApproved = billing.status === 'APPROVED' || billing.status === 'INVOICED';
     const signatories: Signatory[] = [];
     if (raised) {

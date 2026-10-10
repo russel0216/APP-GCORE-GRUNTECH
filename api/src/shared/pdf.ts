@@ -196,6 +196,8 @@ let pageLandscape = false;
 
 /** A section that stands on landscape pages of its own after the signed body: the Gantt chart. */
 const isAppendix = (s: PdfSection) => s.kind === 'gantt' && !!s.landscape;
+/** What a table with no rows prints under its head, muted — on both engines' tables. */
+export const NOTHING_TO_LIST = 'Nothing to list.';
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const isHeading = (row: PdfRow): row is { heading: string } => !Array.isArray(row);
 
@@ -286,7 +288,25 @@ const STAND_INS: Record<string, string> = {
   '✔': 'x',
   '✕': 'x',
   '✖': 'x',
+  // The negated relations. Each one's NFD is the plain relation plus U+0338,
+  // a combining slash, so the base-letter fallback in pdfSafe would print
+  // "≠" as "=" — the opposite of what was written ("invoiced ≠ collectible").
+  // These keep the meaning; any other character carrying the slash prints
+  // "?" (see pdfSafe), never its base.
+  '≠': '!=',
+  '≮': 'not <',
+  '≯': 'not >',
+  '≰': 'not <=',
+  '≱': 'not >=',
+  '≢': 'not identical to',
+  '∉': 'not in',
+  '∌': 'does not contain',
+  '⊄': 'not a subset of',
+  '⊅': 'not a superset of',
 };
+
+/** U+0338 COMBINING LONG SOLIDUS OVERLAY: the slash that turns a relation into its negation. */
+const NEGATING_OVERLAY = '\u0338';
 
 /**
  * Text as a standard PDF font can print it. Every string renderDocument puts
@@ -317,8 +337,11 @@ export function pdfSafe(text: string): string {
       // An accented letter outside Latin-1 keeps its base letter (s-cedilla
       // prints as "s"); anything else becomes "?", which at least reads as
       // "something was here" rather than as a different, wrong character.
-      const base = ch.normalize('NFD')[0];
-      result += base && base.codePointAt(0)! < 0x80 ? base : '?';
+      // A character negated by the overlay slash never keeps its base: "≇"
+      // without its slash is "≅", a different and opposite statement.
+      const decomposed = ch.normalize('NFD');
+      const base = decomposed[0];
+      result += base && base.codePointAt(0)! < 0x80 && !decomposed.includes(NEGATING_OVERLAY) ? base : '?';
     }
   }
   return result;
@@ -851,12 +874,24 @@ function normalise(widths: number[], usable: number): number[] {
 
 /**
  * Column widths for a table that names none (a list with ten columns in
- * equal shares broke "SUB-INDUSTRY" and every code mid-word). Each column's
- * floor is its longest WORD — the head's in bold capitals, a cell's at the
- * body size — so nothing breaks inside a word while the page can hold every
- * floor; what the page has over the floors goes to the columns whose cells
- * typically run longer (a name, a description), never to a date or a count.
- * A route that knows better still passes `widths`.
+ * equal shares broke "SUB-INDUSTRY" and every code mid-word). The page is
+ * given out in tiers, each granted whole while the page holds it:
+ *
+ *   1. every column's longest WORD — the head's in bold capitals, a cell's at
+ *      the body size — so nothing breaks inside a word;
+ *   2. its head on two lines at most, up to a fifth of the page: a head of
+ *      several words over short figures stacked one word a line ("COST / TO
+ *      / DATE / (PHP)") when the figures under it needed no more;
+ *   3. its typical cell on one line, at most half the page — the room goes
+ *      to the columns whose cells run longer (a name, a description), never
+ *      to a date or a count;
+ *   4. its head on one line, up to the same fifth.
+ *
+ * The first tier the page cannot hold is shared in proportion to what each
+ * column asked of it; with everything granted, what is left is spread in
+ * proportion. Where even tier 2 does not fit, the heads give way and the
+ * room over the words goes to the cells, as it always did. A route that
+ * knows better still passes `widths`.
  */
 function autoWidths(doc: PDFKit.PDFDocument, head: string[], rows: PdfRow[], usable: number): number[] {
   const pad = T.padX * 2;
@@ -864,11 +899,26 @@ function autoWidths(doc: PDFKit.PDFDocument, head: string[], rows: PdfRow[], usa
   const words = (text: string) => text.split(/\s+/).filter(Boolean);
   const parts = (cell: PdfCell | undefined): { text: string; bold: boolean }[] =>
     cell === undefined ? [] : typeof cell === 'string' ? [{ text: cell, bold: false }] : [{ text: cell.title, bold: true }, ...(cell.body ? [{ text: cell.body, bold: false }] : [])];
+  /** The most a column asks for its head's sake. */
+  const headCap = usable / 5;
   const floors: number[] = [];
-  const wants: number[] = [];
+  const headsTwo: number[] = [];
+  const cellWants: number[] = [];
+  const headsOne: number[] = [];
   head.forEach((h, i) => {
     doc.font('Helvetica-Bold').fontSize(T.size - 0.5);
-    let floor = Math.max(0, ...words(caps(h)).map((w) => doc.widthOfString(w)));
+    const headWords = words(caps(h));
+    // Measured as `wrapText` sets it — word by word and space by space — never
+    // as one joined string: that kerns the space before T, V, A, W or Y (up
+    // to a point at 8.5pt bold), so a column given exactly its head's width
+    // would wrap it a line more than planned ("CHARGED / TO").
+    const space = doc.widthOfString(' ');
+    const widthOf = (ws: string[]) => ws.reduce((n, x) => n + doc.widthOfString(x), 0) + Math.max(0, ws.length - 1) * space;
+    let floor = Math.max(0, ...headWords.map((w) => doc.widthOfString(w)));
+    const oneLine = widthOf(headWords);
+    // The narrowest the head sets in two lines: the best word to break at.
+    let twoLines = oneLine;
+    for (let k = 1; k < headWords.length; k++) twoLines = Math.min(twoLines, Math.max(widthOf(headWords.slice(0, k)), widthOf(headWords.slice(k))));
     const fulls: number[] = [];
     for (const row of sample) {
       let full = 0;
@@ -882,18 +932,22 @@ function autoWidths(doc: PDFKit.PDFDocument, head: string[], rows: PdfRow[], usa
     fulls.sort((a, b) => a - b);
     const typical = fulls.length ? fulls[Math.min(fulls.length - 1, Math.floor(fulls.length * 0.9))] : 0;
     floors.push(floor + pad);
-    // A column wants its typical full line, at most half the page.
-    wants.push(Math.max(floor + pad, Math.min(typical + pad, usable / 2)));
+    headsTwo.push(Math.max(floor + pad, Math.min(twoLines + pad, headCap)));
+    cellWants.push(Math.max(floor + pad, Math.min(typical + pad, usable / 2)));
+    headsOne.push(Math.max(headsTwo[i], cellWants[i], Math.min(oneLine + pad, headCap)));
   });
-  const floorSum = sum(floors);
-  if (floorSum >= usable) return normalise(floors, usable);
-  const wantSum = sum(wants);
-  if (wantSum <= usable) return normalise(wants, usable);
-  // Between the two: every floor, and the room over the floors shared in
-  // proportion to how much more each column wanted.
-  const extra = usable - floorSum;
-  const need = wantSum - floorSum;
-  return floors.map((f, i) => f + ((wants[i] - floors[i]) / need) * extra);
+  /** Every column at `lower`, and the room the page has over it shared in proportion to how much more each wanted of `upper`. */
+  const share = (lower: number[], upper: number[]) => {
+    const extra = usable - sum(lower);
+    const need = sum(upper) - sum(lower);
+    return need > 0 ? lower.map((l, i) => l + ((upper[i] - l) / need) * extra) : normalise(lower, usable);
+  };
+  if (sum(floors) >= usable) return normalise(floors, usable);
+  if (sum(headsTwo) > usable) return sum(cellWants) <= usable ? normalise(cellWants, usable) : share(floors, cellWants);
+  const wants = headsTwo.map((h, i) => Math.max(h, cellWants[i]));
+  if (sum(wants) > usable) return share(headsTwo, wants);
+  if (sum(headsOne) > usable) return share(wants, headsOne);
+  return normalise(headsOne, usable);
 }
 
 // ── Lines of text, laid out the way the designed engine lays them ─────────────
@@ -906,11 +960,34 @@ function autoWidths(doc: PDFKit.PDFDocument, head: string[], rows: PdfRow[], usa
 
 type Align = 'left' | 'right' | 'center';
 
+/** What a word wider than its box may be broken AFTER: a dot, a hyphen, a slash, an underscore (an @ first — see breakPoint). */
+const SOFT_BREAK = /[./_-]/;
+
+/**
+ * Where to break a word wider than its box, given `fits` — the most of it
+ * that fits. After an email's @ when the @ fits ("maria.santos@" over
+ * "gruntechnology.com"); else after the last dot, hyphen, slash or
+ * underscore that fits, when the piece before it fills at least half the
+ * box; else at `fits`, the last character that fits — never
+ * "maria.santos@grunte" over "chnology.com" while a better place exists.
+ * Both engines break a word this way (`wrapText` here, `wrap` in
+ * pdfDesign.ts).
+ */
+export function breakPoint(word: string, fits: number, widthOf: (text: string) => number, width: number): number {
+  const last = Math.min(fits, word.length - 1);
+  const at = word.lastIndexOf('@', last - 1);
+  if (at >= 1) return at + 1;
+  for (let k = last; k > 1; k--) {
+    if (SOFT_BREAK.test(word[k - 1])) return widthOf(word.slice(0, k)) >= width / 2 ? k : fits;
+  }
+  return fits;
+}
+
 /**
  * Text wrapped to a width — the designed engine's rule (`wrap` in
  * pdfDesign.ts): words are kept whole unless one is wider than the box on its
- * own, a wrapped line drops the spaces it broke at, and a newline in the text
- * is a line of its own.
+ * own (then broken by `breakPoint`), a wrapped line drops the spaces it broke
+ * at, and a newline in the text is a line of its own.
  */
 function wrapText(doc: PDFKit.PDFDocument, text: string, width: number, bold: boolean, size: number): string[] {
   doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size);
@@ -946,6 +1023,7 @@ function wrapText(doc: PDFKit.PDFDocument, text: string, width: number, bold: bo
       while (w(rest) > width && rest.length > 1) {
         let n = rest.length - 1;
         while (n > 1 && w(rest.slice(0, n)) > width) n--;
+        n = breakPoint(rest, n, w, width);
         cur = rest.slice(0, n);
         flush();
         rest = rest.slice(n);
@@ -1046,6 +1124,17 @@ function drawTable(
 
   if (doc.y + head.height + lh + T.padRow > contentBottom(doc)) doc.addPage();
   drawTableHead(doc, head, widths, align);
+  if (!section.rows.length) {
+    // A head over nothing reads as a table that failed to print. One muted
+    // line says it is empty, ruled off as a row would be. (A list's paper
+    // says "0 …" in its reference too; a document never sends an empty
+    // table on purpose.)
+    const top = doc.y;
+    drawLine(doc, NOTHING_TO_LIST, T.left + T.padX, top + T.padTop, total - T.padX * 2, 'left', false, T.size, GREY);
+    hairline(doc, top + lh + T.padRow, total);
+    doc.y = top + lh + T.padRow;
+    return;
+  }
   // The room a row has on a page of its own, under the head.
   const fresh = contentBottom(doc) - T.flowTop - head.height;
 
@@ -1100,6 +1189,26 @@ function drawTable(
 }
 
 /**
+ * The columns of a sign-off block — both engines' (pdfDesign.ts draws the
+ * designed documents' with a 10pt gutter, the house dress with 8): the first
+ * at the block's left edge, the last ending at its right, each `colWidth`
+ * wide at most and never wider than its equal share of the block, so a
+ * column always ends a gutter before the next begins. With room to spare
+ * (the quotation's three) every column is colWidth and the spare is between
+ * them; crowded (the sales order's Prepared by and four route steps in its
+ * 500pt box) they share the block evenly, and every line wraps inside its own.
+ */
+export function signoffColumns(
+  block: { x: number; w: number; colWidth: number; gutter: number },
+  n: number,
+): { x: number; width: number }[] {
+  if (n <= 1) return [{ x: block.x, width: block.w }];
+  const colW = Math.min(block.colWidth, block.w, (block.w - block.gutter * (n - 1)) / n);
+  const step = (block.w - colW) / (n - 1);
+  return Array.from({ length: n }, (_, i) => ({ x: block.x + step * i, width: i === n - 1 ? colW : Math.min(colW, step - block.gutter) }));
+}
+
+/**
  * Who did what, and when — the designed quotation's sign-off block: side by
  * side, one column a person, the role in purple capitals, the NAME in bold
  * 10pt, then 8pt lines of the contact number, the email and when they did
@@ -1129,40 +1238,43 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
   /** The name, bold, and the lines under it, regular: a point of lead each. */
   const nameLine = nameSize * LINE + 1;
   const textLine = textSize * LINE + 1;
-  /** A role runs to two lines at most ("APPROVED BY — PROJECT MANAGER" in a quarter of the page), never a third. */
-  const ROLE_MAX = 2;
+  /**
+   * A role runs to three lines at most — "FINANCE — NO OUTSTANDING
+   * ACCOUNTABILITIES", the seeded clearance step, in a quarter of the page —
+   * and is never cut while three lines hold it.
+   */
+  const ROLE_MAX = 3;
 
   const rows: Signatory[][] = [];
   for (let i = 0; i < people.length; i += perRow) rows.push(people.slice(i, i + perRow));
 
   // The template's columns: the first at the left margin, the last ending
-  // at the right, each at least colWidth wide.
-  const columnsOf = (row: Signatory[]) => {
-    const n = row.length;
-    if (n <= 1) return [{ x: T.left, width: usable }];
-    const colW = Math.min(colWidth, usable);
-    const step = (usable - colW) / (n - 1);
-    // Each column keeps a gutter before the next (four signatories put the
-    // step under colWidth): the last takes colWidth, the others step less 8.
-    return row.map((_, i) => ({ x: T.left + step * i, width: i === n - 1 ? colW : Math.min(colW, step - 8) }));
-  };
-  const lines = (text: string, width: number, line: number, gap: number) =>
-    Math.max(1, Math.round(doc.heightOfString(text || ' ', { width, lineGap: gap }) / line));
+  // at the right, each colWidth wide at most, an 8pt gutter between them.
+  const columnsOf = (row: Signatory[]) => signoffColumns({ x: T.left, w: usable, colWidth, gutter: 8 }, row.length);
+  // Every line is wrapped by the one rule (`wrapText`, the designed
+  // engine's), so an email too long for its column breaks after its @
+  // rather than wherever PDFKit's own wrapping ran out of room.
   const linesOf = (person: Signatory, width: number) => {
-    doc.font('Helvetica-Bold').fontSize(roleSize);
-    const role = Math.min(ROLE_MAX, lines(caps(person.role), width, roleLine, boldGap(roleSize)));
-    doc.font('Helvetica-Bold').fontSize(nameSize);
-    const name = person.name ? lines(person.name, width, nameLine, boldGap(nameSize) + 1) : 0;
-    const details = person.name
-      ? [person.phone, person.email].filter((v): v is string => !!v?.trim()).concat(person.at ? formatDateTime(person.at) : 'Pending')
-      : ['Pending'];
-    doc.font('Helvetica').fontSize(textSize);
-    const rest = details.map((t) => lines(t, width, textLine, 1));
-    return { role, name, details, rest };
+    let role = wrapText(doc, caps(person.role), width, true, roleSize);
+    if (role.length > ROLE_MAX) {
+      // Past three lines the third ends in an ellipsis, cut to fit.
+      role = role.slice(0, ROLE_MAX);
+      let last = role[ROLE_MAX - 1];
+      doc.font('Helvetica-Bold').fontSize(roleSize);
+      while (last && doc.widthOfString(`${last}…`) > width) last = last.slice(0, -1).replace(/\s+$/, '');
+      role[ROLE_MAX - 1] = `${last}…`;
+    }
+    const name = person.name ? wrapText(doc, person.name, width, true, nameSize) : [];
+    const details = (
+      person.name
+        ? [person.phone, person.email].filter((v): v is string => !!v?.trim()).concat(person.at ? formatDateTime(person.at) : 'Pending')
+        : ['Pending']
+    ).flatMap((t) => wrapText(doc, t, width, false, textSize));
+    return { role, name, details };
   };
   const heightOf = (person: Signatory, width: number) => {
-    const { role, name, rest } = linesOf(person, width);
-    return role * roleLine + 5 + name * nameLine + sum(rest) * textLine;
+    const { role, name, details } = linesOf(person, width);
+    return role.length * roleLine + 5 + name.length * nameLine + details.length * textLine;
   };
   const rowHeights = rows.map((row) => {
     const cols = columnsOf(row);
@@ -1189,23 +1301,21 @@ function drawSignoffs(doc: PDFKit.PDFDocument, spec: PdfDocumentSpec) {
     const cols = columnsOf(row);
     row.forEach((person, i) => {
       const { x, width } = cols[i];
-      const { role, name, details, rest } = linesOf(person, width);
+      const { role, name, details } = linesOf(person, width);
       let y = rowTop;
-      doc.font('Helvetica-Bold').fontSize(roleSize).fillColor(PURPLE);
-      // The box is measured in PDFKit's own bold line height: that is what
-      // its ellipsis rule reads, and a role of ROLE_MAX lines must pass it.
-      doc.text(caps(person.role), x, y, { width, lineGap: boldGap(roleSize), height: ROLE_MAX * roleSize * BOLD_LINE + 1, ellipsis: true });
-      y += role * roleLine + 5;
-      if (person.name) {
-        doc.font('Helvetica-Bold').fontSize(nameSize).fillColor(INK);
-        doc.text(person.name, x, y, { width, lineGap: boldGap(nameSize) + 1 });
-        y += name * nameLine;
+      for (const line of role) {
+        drawLine(doc, line, x, y, width, 'left', true, roleSize, PURPLE);
+        y += roleLine;
       }
-      doc.font('Helvetica').fontSize(textSize).fillColor(INK);
-      details.forEach((line, n) => {
-        doc.text(line, x, y, { width, lineGap: 1 });
-        y += rest[n] * textLine;
-      });
+      y += 5;
+      for (const line of name) {
+        drawLine(doc, line, x, y, width, 'left', true, nameSize, INK);
+        y += nameLine;
+      }
+      for (const line of details) {
+        drawLine(doc, line, x, y, width, 'left', false, textSize, INK);
+        y += textLine;
+      }
     });
     rowTop += rowHeights[r] + gap;
   });
@@ -1302,8 +1412,15 @@ export async function companyCurrency(): Promise<string> {
   return row?.currency?.trim() || 'PHP';
 }
 
+/**
+ * "October 9, 2026" — a record's date in its fields. In Manila, like every
+ * other date the paper prints: a timestamp from before 08:00 Manila is still
+ * the previous day in UTC, and the CAD paper once said "October 9" over a
+ * sign-off dated "Oct 10, 2026, 6:07 AM". A DATE column is UTC midnight,
+ * 08:00 in Manila the same day, so it prints its own day.
+ */
 export function formatDate(d: Date): string {
-  return d.toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' });
+  return d.toLocaleDateString('en-PH', { timeZone: 'Asia/Manila', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
 /** "08/17/2026", in Manila — the date as SCORO's quote printed it. */

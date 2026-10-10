@@ -28,7 +28,7 @@ import { audit } from '../shared/audit';
 import { formatShortDate, formatAmount, formatMoney, companyCurrency, renderDocument, statusLabel } from '../shared/pdf';
 import { registerSearch } from '../shared/search';
 import { registerSchedule } from './workspace';
-import { LIST_CAP, listReference, totalLabel, listDay, namedInFilter, bracketed, bracketNote, listNotes } from './jobs';
+import { LIST_CAP, listReference, totalLabel, listDay, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, filterDay, dayOf } from '../shared/listPaper';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { submitForApproval, onApprovalSettled } from '../shared/approvals';
@@ -51,10 +51,6 @@ import {
 
 const num = (v: Prisma.Decimal | null | undefined) => (v == null ? 0 : Number(v));
 
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
-}
-
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw badRequest(`${label} is not a valid date`);
@@ -75,6 +71,9 @@ export const KIND_LABEL: Record<string, string> = {
   INSPECTION: 'Inspection',
   CORRECTIVE: 'Corrective',
 };
+
+/** A service kind in the screen's words — a filter's 400 names the choices this way. */
+const kindWord = (k: string) => KIND_LABEL[k] ?? statusLabel(k);
 
 /** Which permission covers a report of each kind. */
 export function reportPermission(kind: string, action: string): string {
@@ -115,7 +114,7 @@ function presentAsset(row: AssetRow, warningDays: number) {
 function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: number): Prisma.InstalledAssetWhereInput {
   const where: Prisma.InstalledAssetWhereInput = {};
 
-  const status = asEnum(AssetStatus, q.filters.status);
+  const status = choice(q.filters.status, AssetStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.customerId) where.customerId = q.filters.customerId;
   if (q.filters.siteId) where.siteId = q.filters.siteId;
@@ -125,13 +124,14 @@ function assetListWhere(q: ReturnType<typeof listQuery>, expiryWarningDays: numb
   if (ids) where.id = { in: ids };
 
   const today = dayKey(new Date());
-  if (q.filters.warranty === 'EXPIRED') where.warrantyEndsAt = { lt: today };
-  if (q.filters.warranty === 'EXPIRING') {
+  const warranty = choice(q.filters.warranty, WARRANTY_FILTERS, 'Warranty', (w) => WARRANTY_FILTER[w].replace(/^./, (c) => c.toUpperCase()));
+  if (warranty === 'EXPIRED') where.warrantyEndsAt = { lt: today };
+  if (warranty === 'EXPIRING') {
     const horizon = new Date(today);
     horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
     where.warrantyEndsAt = { gte: today, lte: horizon };
   }
-  if (q.filters.warranty === 'ACTIVE') {
+  if (warranty === 'ACTIVE') {
     const horizon = new Date(today);
     horizon.setUTCDate(horizon.getUTCDate() + expiryWarningDays);
     where.warrantyEndsAt = { gt: horizon };
@@ -240,19 +240,21 @@ assetRoutes.get(
     // register narrowed to one customer never reads as the whole base.
     const reference = listReference(count, rows.length, ['machine', 'machines'], [
       q.search ? `search "${q.search}"` : null,
-      // Only what `assetListWhere` applied: a value it does not know narrows nothing, so it is not named.
-      f.warranty && WARRANTY_FILTER[f.warranty] ? `warranty ${WARRANTY_FILTER[f.warranty]}` : null,
+      // `assetListWhere` refused any value it does not know, so what is here narrowed the list.
+      f.warranty ? `warranty ${WARRANTY_FILTER[f.warranty as (typeof WARRANTY_FILTERS)[number]]}` : null,
       f.uncovered === 'true' ? 'no active contract' : null,
-      asEnum(AssetStatus, f.status) ? `status ${statusLabel(f.status)}` : null,
+      f.status ? `status ${statusLabel(f.status)}` : null,
       named.customer ? `customer ${named.customer}` : null,
       named.site ? `site ${named.site}` : null,
       named.project ? `project ${named.project}` : null,
       f.ids ? 'the rows selected' : null,
     ]);
 
-    // A list: short dates, every status through statusLabel, the issued
-    // code under "Number" as every list heads it, and landscape pages with
-    // the engine's own column widths, so no head breaks mid-word.
+    // A list: short dates, every status through statusLabel, the machine's
+    // code under "Code" — a master's identifier, as the screen heads it
+    // (rule 6: a document's number column is "Number", a master's "Code") —
+    // and landscape pages with the engine's own column widths, so no head
+    // breaks mid-word.
     const pdf = await renderDocument({
       title: 'Installed Base',
       date: new Date(),
@@ -261,7 +263,7 @@ assetRoutes.get(
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
+          head: ['Code', 'Equipment', 'Customer and address', 'Location', 'Installed', 'Warranty', 'Status'],
           rows: rows.map((r) => {
             const warranty = expiryState(r.warrantyEndsAt, settings.expiryWarningDays);
             const word = statusLabel(WARRANTY_WORD[warranty.state] ?? warranty.state);
@@ -294,15 +296,14 @@ assetRoutes.get(
       },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="installed-base.pdf"`);
-    res.send(pdf);
+    sendListPdf(res, pdf, 'installed-base.pdf');
   }),
 );
 
 const WARRANTY_WORD: Record<string, string> = { ACTIVE: 'in warranty', EXPIRING: 'expiring', EXPIRED: 'expired', NONE: '' };
 /** The warranty filter in the screen's own words. */
-const WARRANTY_FILTER: Record<string, string> = { ACTIVE: 'in warranty', EXPIRING: 'expiring soon', EXPIRED: 'out of warranty' };
+const WARRANTY_FILTERS = ['ACTIVE', 'EXPIRING', 'EXPIRED'] as const;
+const WARRANTY_FILTER: Record<(typeof WARRANTY_FILTERS)[number], string> = { ACTIVE: 'in warranty', EXPIRING: 'expiring soon', EXPIRED: 'out of warranty' };
 
 assetRoutes.get(
   '/:id',
@@ -673,7 +674,7 @@ function contractListWhere(me: ResolvedUser, q: ListQuery, expiryWarningDays: nu
   const ids = idsFilter(q.filters.ids);
   if (ids) where.id = { in: ids };
 
-  const status = asEnum(ContractStatus, q.filters.status);
+  const status = choice(q.filters.status, ContractStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.expiring === 'true') {
     const horizon = dayKey(new Date());
@@ -743,7 +744,7 @@ contractRoutes.get(
     ]);
     const reference = listReference(count, rows.length, ['service contract', 'service contracts'], [
       q.search ? `search "${q.search}"` : null,
-      asEnum(ContractStatus, q.filters.status) && q.filters.expiring !== 'true' ? `status ${statusLabel(q.filters.status)}` : null,
+      q.filters.status && q.filters.expiring !== 'true' ? `status ${statusLabel(q.filters.status)}` : null,
       q.filters.expiring === 'true' ? `active, ending within ${settings.expiryWarningDays} days` : null,
       named.customer ? `customer ${named.customer}` : null,
       q.scope === 'mine' ? 'managed by me' : null,
@@ -803,9 +804,7 @@ contractRoutes.get(
       },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="service-contracts.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'service-contracts.pdf');
   }),
 );
 
@@ -1516,16 +1515,16 @@ function visitWhere(
   if (filters.customerId) where.customerId = filters.customerId;
   if (filters.siteId) where.siteId = filters.siteId;
   if (filters.assetId) where.assetId = filters.assetId;
-  const kind = asEnum(ServiceKind, filters.kind);
+  const kind = choice(filters.kind, ServiceKind, 'Kind', kindWord);
   if (kind) where.kind = kind;
 
   // `statuses=SCHEDULED,MISSED` — how the report picker asks for every visit
   // that can still be reported against, late ones included.
   const many = (filters.statuses ?? '')
     .split(',')
-    .map((s) => asEnum(VisitStatus, s.trim()))
+    .map((s) => choice(s.trim(), VisitStatus, 'Status'))
     .filter((s): s is VisitStatus => !!s);
-  const one = asEnum(VisitStatus, filters.status);
+  const one = choice(filters.status, VisitStatus, 'Status');
   if (many.length) where.status = { in: many };
   else if (one) where.status = one;
   return where;
@@ -1612,7 +1611,7 @@ visitRoutes.get(
     if (q.contractId) reportWhere.contractId = q.contractId;
     if (q.siteId) reportWhere.siteId = q.siteId;
     if (q.assetId) reportWhere.assetId = q.assetId;
-    const kind = asEnum(ServiceKind, q.kind);
+    const kind = choice(q.kind, ServiceKind, 'Kind', kindWord);
     if (kind) reportWhere.kind = kind;
     if (q.assignedToId && q.assignedToId !== 'none') reportWhere.performedById = q.assignedToId;
     if (mine || !allReports) reportWhere.performedById = me.id;
@@ -1694,18 +1693,18 @@ visitRoutes.get(
       f.assetId ? prisma.installedAsset.findUnique({ where: { id: f.assetId }, select: { code: true } }) : null,
     ]);
     const today = dayKey(new Date());
-    // Only what `visitWhere` applied: a value it does not know narrows nothing, so it is not named.
-    const statuses = (f.statuses ?? '').split(',').map((v) => v.trim()).filter((v) => asEnum(VisitStatus, v));
+    // `visitWhere` refused any value it does not know, so what is named here narrowed the list.
+    const statuses = (f.statuses ?? '').split(',').map((v) => v.trim()).filter(Boolean);
     const reference = listReference(count, rows.length, ['visit', 'visits'], [
       q.search ? `search "${q.search}"` : null,
       f.due === 'true'
         ? 'due or overdue'
         : statuses.length
           ? `status ${statuses.map((v) => statusLabel(v)).join(', ')}`
-          : asEnum(VisitStatus, f.status)
+          : f.status
             ? `status ${statusLabel(f.status)}`
             : null,
-      asEnum(ServiceKind, f.kind) ? `kind ${KIND_LABEL[f.kind]}` : null,
+      f.kind ? `kind ${KIND_LABEL[f.kind]}` : null,
       f.assignedToId === 'none' ? 'no engineer' : named.person ? `engineer ${named.person}` : null,
       named.customer ? `customer ${named.customer}` : null,
       named.site ? `site ${named.site}` : null,
@@ -1749,9 +1748,7 @@ visitRoutes.get(
       { entityType: 'service_visit', entityId: 'list', action: 'EXPORTED', summary: `Exported the service schedule as PDF (${listReference(count, rows.length, ['visit', 'visits'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="service-schedule.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'service-schedule.pdf');
   }),
 );
 
@@ -1782,11 +1779,9 @@ function visitListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceVisitWher
   const where: Prisma.ServiceVisitWhereInput = visitWhere(q.filters, me, q.scope === 'mine');
   const ids = idsFilter(q.filters.ids);
   if (ids) where.id = { in: ids };
-  if (q.filters.from || q.filters.to) {
-    where.dueDate = {};
-    if (q.filters.from) where.dueDate.gte = asDate(q.filters.from, 'From');
-    if (q.filters.to) where.dueDate.lte = asDate(q.filters.to, 'To');
-  }
+  const from = filterDay(q.filters.from, 'From');
+  const to = filterDay(q.filters.to, 'To');
+  if (from || to) where.dueDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.filters.due === 'true') {
     where.status = 'SCHEDULED';
     where.dueDate = { lte: dayKey(new Date()) };
@@ -1980,7 +1975,7 @@ templateRoutes.get(
     'gops.inspection_reports.view_all',
   ),
   handler(async (req, res) => {
-    const kind = asEnum(ServiceKind, req.query.kind ? String(req.query.kind) : undefined);
+    const kind = choice(req.query.kind ? String(req.query.kind) : undefined, ServiceKind, 'Kind', kindWord);
     const all = req.query.all === 'true';
     const templates = await prisma.reportTemplate.findMany({
       where: {
@@ -2196,9 +2191,9 @@ const reportStatusWord = (status: string) => statusLabel(status === 'REJECTED' ?
 function serviceReportListWhere(me: ResolvedUser, q: ListQuery): Prisma.ServiceReportWhereInput {
   const where: Prisma.ServiceReportWhereInput = {};
 
-  const kind = asEnum(ServiceKind, q.filters.kind);
+  const kind = choice(q.filters.kind, ServiceKind, 'Kind', kindWord);
   if (kind) where.kind = kind;
-  const status = asEnum(ReportStatus, q.filters.status);
+  const status = choice(q.filters.status, ReportStatus, 'Status', reportStatusWord);
   if (status) where.status = status;
   if (q.filters.assetId) where.assetId = q.filters.assetId;
   if (q.filters.contractId) where.contractId = q.filters.contractId;
@@ -2280,11 +2275,11 @@ serviceReportRoutes.get(
       f.contractId ? prisma.serviceContract.findUnique({ where: { id: f.contractId }, select: { number: true } }) : null,
       f.assetId ? prisma.installedAsset.findUnique({ where: { id: f.assetId }, select: { code: true } }) : null,
     ]);
-    const kind = asEnum(ServiceKind, f.kind);
+    const kind = choice(f.kind, ServiceKind, 'Kind', kindWord);
     const reference = listReference(count, rows.length, ['report', 'reports'], [
       q.search ? `search "${q.search}"` : null,
       kind ? `kind ${KIND_LABEL[kind]}` : null,
-      asEnum(ReportStatus, f.status) ? `status ${reportStatusWord(f.status)}` : null,
+      f.status ? `status ${reportStatusWord(f.status)}` : null,
       f.billable === 'true' ? 'billable' : f.billable === 'false' ? 'covered' : null,
       named.customer ? `customer ${named.customer}` : null,
       f.contractId ? `contract ${contract?.number ?? 'not found'}` : null,
@@ -2322,9 +2317,7 @@ serviceReportRoutes.get(
       { entityType: 'service_report', entityId: 'list', action: 'EXPORTED', summary: `Exported the ${title.toLowerCase()} list as PDF (${listReference(count, rows.length, ['report', 'reports'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="service-reports.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'service-reports.pdf');
   }),
 );
 

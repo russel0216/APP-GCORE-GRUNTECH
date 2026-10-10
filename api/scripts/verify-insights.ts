@@ -1177,6 +1177,24 @@ async function main() {
       iv.belowReorder.some((r) => r.item.code === `${TAG}-MOV`),
       iv.belowReorder.map((r) => `${r.item.code} ${r.available}/${r.reorderLevel}`).join(', '),
     );
+    // Where a report disagrees with a module screen, the report is wrong: the
+    // Insights "below reorder" list is the G-CHAIN stock list's "Below level"
+    // set — one rule, `belowReorder` in shared/chain.ts — and the inventory
+    // reports' tile counts the same balances.
+    // Read together, so nothing written in between can tell them apart.
+    const [again, chainBelow, chainReport] = await Promise.all([
+      api('GET', '/insights/inventory?sinceDays=90'),
+      api('GET', '/inventory?needsReorder=true&pageSize=1'),
+      api('GET', '/inventory/reports/summary'),
+    ]);
+    const insightsBelow = (again.body as { belowReorder?: unknown[] }).belowReorder?.length;
+    const chainTotal = (chainBelow.body as { total?: number }).total;
+    const reportReorder = (chainReport.body as { reorder?: unknown[] }).reorder;
+    check(
+      'Inventory Analytics\' below-reorder count equals the G-CHAIN stock list\'s "Below level" total and its reports tile',
+      chainBelow.status === 200 && insightsBelow !== undefined && chainTotal === insightsBelow && Array.isArray(reportReorder) && reportReorder.length === insightsBelow,
+      `insights ${insightsBelow}, stock list ${chainTotal}, reports ${Array.isArray(reportReorder) ? reportReorder.length : chainReport.status}`,
+    );
 
     const perf = await api('GET', '/insights/performance?from=2026-01-01&to=2026-12-31');
     const pf = perf.body as unknown as {

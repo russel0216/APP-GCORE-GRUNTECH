@@ -27,10 +27,9 @@ import {
   approvalOptions,
   approvalSlots,
   cancelOpenRequest,
-  contactPhone,
-  routePreview,
+  contactOf,
+  routeBrief,
   slotSignatories,
-  type ApprovalSlot,
 } from '../shared/approvals';
 import {
   companyCurrency,
@@ -62,7 +61,7 @@ import {
   type RepeatEvery,
 } from '../shared/activities';
 import { safeHttpUrl } from '../shared/partners';
-import { LIST_CAP, listDay, listReference, rangeNamed, recordNamed, sendListPdf, totalLabel } from './finance';
+import { LIST_CAP, listDay, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, dayOf, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
 import { toCsv } from '../shared/insights';
 import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
@@ -179,9 +178,7 @@ export function leadListWhere(
     // One status, or several comma-separated — the quotation editor asks for
     // every open one at once. An unknown value is a 400, not a Prisma 500.
     const asked = f.status.split(',').map((st) => st.trim()).filter(Boolean);
-    const unknown = asked.filter((st) => !(Object.values(LeadStatus) as string[]).includes(st));
-    if (unknown.length) throw badRequest(`Unknown lead status: ${unknown.join(', ')}`);
-    and.push({ status: { in: asked as LeadStatus[] } });
+    and.push({ status: { in: asked.map((st) => choice(st, LeadStatus, 'Status')!) } });
   }
   if (f.assignedToId) and.push({ assignedToId: f.assignedToId });
   if (f.createdById) and.push({ createdById: f.createdById });
@@ -189,8 +186,8 @@ export function leadListWhere(
   // `clientId`, not `customerId`: the leads page's ?customerId= is the
   // "new lead for this customer" hand-off, and a list must never eat it.
   if (f.clientId) and.push({ customerId: f.clientId });
-  const createdFrom = dayFilter(f.createdFrom, 'Added from');
-  const createdTo = dayFilter(f.createdTo, 'Added to');
+  const createdFrom = filterDay(f.createdFrom, 'Added from');
+  const createdTo = filterDay(f.createdTo, 'Added to');
   if (createdFrom || createdTo) {
     and.push({
       createdAt: {
@@ -199,8 +196,8 @@ export function leadListWhere(
       },
     });
   }
-  const closingFrom = dayFilter(f.closingFrom, 'Closing from');
-  const closingTo = dayFilter(f.closingTo, 'Closing to');
+  const closingFrom = filterDay(f.closingFrom, 'Closing from');
+  const closingTo = filterDay(f.closingTo, 'Closing to');
   if (closingFrom || closingTo) {
     and.push({
       expectedClosing: {
@@ -216,7 +213,7 @@ export function leadListWhere(
   const base: Prisma.LeadWhereInput = and.length ? { AND: and } : {};
   if (!f.stage) return { base, where: base };
   const statuses = leadStageStatuses(f.stage, stages);
-  if (!statuses) throw badRequest(`Unknown stage: ${f.stage}`);
+  if (!statuses) throw badRequest(`Stage is one of ${leadStages(stages).map((st) => st.label).join(', ')}`);
   return { base, where: { AND: [...and, { status: { in: statuses } }] } };
 }
 
@@ -310,37 +307,6 @@ leadRoutes.get(
     });
   }),
 );
-
-/**
- * The scope a printed list stands in, as its filter line names it: "team
- * KAT" for the Team view (Mine for a viewer with no team — the where-
- * builders' own fallback), "mine only" for Mine, and also when the caller
- * may only ever see their own (`onlyOwn`), so a salesperson's paper never
- * reads as everybody's. All says nothing.
- */
-export function scopeNamed(
-  scope: string,
-  team: { code: string } | null,
-  onlyOwn: boolean,
-  mine = 'mine only',
-): string | null {
-  if (scope === 'team' && team && !onlyOwn) return `team ${team.code}`;
-  return onlyOwn || scope === 'mine' || scope === 'team' ? mine : null;
-}
-
-/**
- * The contact lines a sign-off prints under a person's name — read for the
- * PAPER only, never sent with the record (`GET …/:id` carries no mobile).
- * `contactPhone` is the one reading of a person's number.
- */
-async function signerContact(userId: string | null | undefined): Promise<{ phone?: string; email?: string }> {
-  if (!userId) return {};
-  const u = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true, phone: true, employee: { select: { mobile: true } } },
-  });
-  return u ? { phone: contactPhone(u), email: u.email } : {};
-}
 
 /**
  * The leads list on paper (2026-10-07, the owner's call: "for reporting
@@ -476,7 +442,7 @@ leadRoutes.get(
 
     const [currency, adder, typeNames, stages] = await Promise.all([
       companyCurrency(),
-      signerContact(lead.createdById),
+      contactOf(lead.createdById),
       activityTypeNames(),
       pipelineStages(),
     ]);
@@ -1042,17 +1008,13 @@ async function loadQuotation(id: string) {
 
 // ── The list (SCORO's "list of quotes", 2026-10-08) ──────────────────────────
 
-const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const REVISION_FILTERS = ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'] as const;
-
-/** A 'YYYY-MM-DD' filter value, or a 400 naming the filter. */
-function dayFilter(value: string | undefined, label: string): string | null {
-  if (!value) return null;
-  if (!DAY_KEY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
-    throw badRequest(`${label} is a date written YYYY-MM-DD`);
-  }
-  return value;
-}
+/** The Revision filter on a printed list, in the screen's words ("Has an approved revision"). */
+const REVISION_FILTER_WORDS: Record<(typeof REVISION_FILTERS)[number], string> = {
+  DRAFT: 'with a draft revision',
+  PENDING_APPROVAL: 'with a revision pending approval',
+  APPROVED: 'with an approved revision',
+};
 
 /**
  * Which quotations a list query means — ONE rule for the list, its summary
@@ -1086,10 +1048,8 @@ export function quotationListWhere(
   }
 
   const f = q.filters;
-  if (f.outcome) {
-    if (!(QUOTATION_OUTCOME_KEYS as readonly string[]).includes(f.outcome)) throw badRequest(`Unknown outcome: ${f.outcome}`);
-    and.push({ outcome: f.outcome as (typeof QUOTATION_OUTCOME_KEYS)[number] });
-  }
+  const outcome = choice(f.outcome, QUOTATION_OUTCOME_KEYS, 'Outcome');
+  if (outcome) and.push({ outcome });
   if (f.customerId) and.push({ customerId: f.customerId });
   if (f.ownerId) and.push({ ownerId: f.ownerId });
   // The rows a person ticked (mass actions); ANDed with everything else, so an
@@ -1098,8 +1058,8 @@ export function quotationListWhere(
   if (ids) and.push({ id: { in: ids } });
 
   // Raised: a timestamp, so Manila's midnight to Manila's last instant.
-  const createdFrom = dayFilter(f.createdFrom, 'Raised from');
-  const createdTo = dayFilter(f.createdTo, 'Raised to');
+  const createdFrom = filterDay(f.createdFrom, 'Raised from');
+  const createdTo = filterDay(f.createdTo, 'Raised to');
   if (createdFrom || createdTo) {
     and.push({
       createdAt: {
@@ -1109,8 +1069,8 @@ export function quotationListWhere(
     });
   }
   // Expected closing: a DATE column, so UTC midnight edges of the same days.
-  const closingFrom = dayFilter(f.closingFrom, 'Closing from');
-  const closingTo = dayFilter(f.closingTo, 'Closing to');
+  const closingFrom = filterDay(f.closingFrom, 'Closing from');
+  const closingTo = filterDay(f.closingTo, 'Closing to');
   if (closingFrom || closingTo) {
     and.push({
       expectedClosing: {
@@ -1119,19 +1079,17 @@ export function quotationListWhere(
       },
     });
   }
-  if (f.revision) {
-    if (!(REVISION_FILTERS as readonly string[]).includes(f.revision)) throw badRequest(`Unknown revision status: ${f.revision}`);
-    and.push({ revisions: { some: { status: f.revision as (typeof REVISION_FILTERS)[number] } } });
-  }
+  const revision = choice(f.revision, REVISION_FILTERS, 'Revision', (r) => ({ DRAFT: 'Has a draft', PENDING_APPROVAL: 'Pending approval', APPROVED: 'Has an approved revision' })[r]);
+  if (revision) and.push({ revisions: { some: { status: revision } } });
   // Booked in a sales order still standing — the quotation page's "Booked".
   if (f.salesOrder === 'yes') and.push({ salesOrders: { some: { status: { not: 'CANCELLED' } } } });
   else if (f.salesOrder === 'no') and.push({ salesOrders: { none: { status: { not: 'CANCELLED' } } } });
-  else if (f.salesOrder) throw badRequest('Sales order is yes or no');
+  else if (f.salesOrder) throw badRequest('Sales order is one of Booked in a sales order, No sales order yet');
 
   const base: Prisma.QuotationWhereInput = and.length ? { AND: and } : {};
   if (!f.stage) return { base, where: base };
   const stageWhere = quotationStageWhere(f.stage, stages);
-  if (!stageWhere) throw badRequest(`Unknown stage: ${f.stage}`);
+  if (!stageWhere) throw badRequest(`Stage is one of ${quotationStages(stages).map((st) => st.label).join(', ')}`);
   return { base, where: { AND: [...and, stageWhere] } };
 }
 
@@ -1415,34 +1373,38 @@ quotationRoutes.get(
       owner,
       rangeNamed('raised', f.createdFrom, f.createdTo),
       rangeNamed('closing', f.closingFrom, f.closingTo),
-      f.revision ? `with a ${statusLabel(f.revision).toLowerCase()} revision` : null,
+      f.revision ? REVISION_FILTER_WORDS[f.revision as (typeof REVISION_FILTERS)[number]] : null,
       f.salesOrder === 'yes' ? 'with a sales order' : f.salesOrder === 'no' ? 'without a sales order' : null,
       scopeNamed(q.scope, team, !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all')),
       f.ids ? 'the rows selected' : null,
     ]);
 
-    // Seven columns: portrait holds them, each sized from what it holds
-    // (rule 6). Value, never cost. The money block is the Value column's
-    // sum over every quotation the filter matched.
+    // The screen's own heads, in its order (the Sales list pattern): Number ·
+    // Quote / Project · Customer · Status (the stage) · Total · Author ·
+    // Closing · Issue date. Eight columns: landscape, each sized from what it
+    // holds (rule 6). Value, never cost. The money block is the Total
+    // column's sum over every quotation the filter matched.
     const pdf = await renderDocument({
       title: 'Quotations',
       date: new Date(),
       reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Quotation and customer', 'Stage', `Value (${currency})`, 'Owner', 'Raised', 'Closing'],
-          align: ['left', 'left', 'left', 'right', 'left', 'left', 'left'],
+          head: ['Number', 'Quote / Project', 'Customer', 'Status', `Total (${currency})`, 'Author', 'Closing', 'Issue date'],
+          align: ['left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => {
             const booked = r._count.salesOrders > 0 || r.revisions.some((v) => v.jobs.length > 0);
             return [
               r.number,
-              { title: r.subject, body: r.customer.name },
+              r.subject,
+              r.customer.name,
               stageLabel(quotationStage(r.outcome, booked, stages)),
               formatAmount(quotationValue(r.revisions)),
               r.owner.name,
-              formatShortDate(r.createdAt),
               r.expectedClosing ? formatShortDate(r.expectedClosing) : '',
+              formatShortDate(r.createdAt),
             ];
           }),
         },
@@ -1849,16 +1811,11 @@ quotationRoutes.get(
     // Where "Submit for approval" goes from here, and who decides each step —
     // the standard route and each option's — named before anybody presses it.
     // The caller is the requester the submit would record; names only.
-    const brief = (route: Awaited<ReturnType<typeof routePreview>>) =>
-      route && {
-        name: route.name,
-        steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
-      };
     const approvalRoutes = draft
       ? {
-          standard: brief(await routePreview('quotation', Number(draft.total), me.id)),
+          standard: await routeBrief('quotation', Number(draft.total), me.id),
           options: await Promise.all(
-            options.map(async (o) => ({ id: o.id, route: brief(await routePreview('quotation', Number(draft.total), me.id, o.id)) })),
+            options.map(async (o) => ({ id: o.id, route: await routeBrief('quotation', Number(draft.total), me.id, o.id) })),
           ),
         }
       : null;
@@ -1927,7 +1884,6 @@ const itemFields = {
   sortOrder: z.number().int().optional(),
 };
 const itemSchema = z.object(itemFields);
-const itemPatchSchema = z.object(itemFields).partial();
 
 /**
  * Checks the parts of a line that span fields: it says what it is, and one
@@ -2617,10 +2573,9 @@ quotationRoutes.patch(
     await recalcRevision(req.params.revisionId);
     const discountChanged = body.discountPct !== undefined && !d(body.discountPct).equals(revision.discountPct);
     const vatChanged = body.vatRate !== undefined && !d(body.vatRate).equals(revision.vatRate);
-    const pctOf = (rate: Prisma.Decimal) => `${Number(rate.mul(100).toFixed(2))}%`;
     const changes = [
       discountChanged ? `discount ${Number(revision.discountPct)}% -> ${body.discountPct}%` : '',
-      vatChanged ? `VAT ${pctOf(revision.vatRate)} -> ${pctOf(d(body.vatRate!))}` : '',
+      vatChanged ? `VAT ${ratePct(revision.vatRate)} -> ${ratePct(body.vatRate!)}` : '',
     ].filter(Boolean);
     await audit(
       {
@@ -2734,155 +2689,6 @@ quotationRoutes.put(
         canSeeQuotationCost(me, quotation.ownerId),
       ),
     );
-  }),
-);
-
-quotationRoutes.post(
-  '/:id/revisions/:revisionId/items',
-  require_('gops.quotations.edit_own'),
-  handler(async (req, res) => {
-    const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
-    const body = parseBody(itemSchema, req.body);
-    await checkLine(body);
-
-    const item = await prisma.$transaction(async (tx) => {
-      const last = body.sortOrder === undefined
-        ? await tx.quotationItem.findFirst({
-            where: { revisionId: req.params.revisionId },
-            orderBy: { sortOrder: 'desc' },
-            select: { sortOrder: true },
-          })
-        : null;
-      const created = await tx.quotationItem.create({
-        data: {
-          revisionId: req.params.revisionId,
-          // A new line goes to the bottom, as it does in SCORO.
-          ...lineData(body, body.sortOrder ?? (last ? last.sortOrder + 1 : 0)),
-        },
-      });
-      await rememberGroups(tx, [body.group]);
-      await recalcRevision(req.params.revisionId, tx);
-      return created;
-    });
-
-    await audit(
-      {
-        entityType: 'quotation',
-        entityId: quotation.id,
-        action: 'UPDATED',
-        summary: `Added a line to ${quotation.number} R${revision.revision}: ${item.title || item.description.slice(0, 60)}`,
-      },
-      req,
-    );
-    res.status(201).json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
-  }),
-);
-
-quotationRoutes.patch(
-  '/:id/revisions/:revisionId/items/:itemId',
-  require_('gops.quotations.edit_own'),
-  handler(async (req, res) => {
-    const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
-    const body = parseBody(itemPatchSchema, req.body);
-
-    const existing = await prisma.quotationItem.findFirst({
-      where: { id: req.params.itemId, revisionId: req.params.revisionId },
-    });
-    if (!existing) throw notFound('Line not found');
-
-    const heading = body.isHeading ?? existing.isHeading;
-    const quantity = heading ? 0 : (body.quantity ?? Number(existing.quantity));
-    const unitPrice = heading ? 0 : (body.unitPrice ?? Number(existing.unitPrice));
-    // undefined keeps the stored cost; null clears it.
-    const unitCost = heading
-      ? null
-      : body.unitCost === undefined
-        ? existing.unitCost == null
-          ? null
-          : Number(existing.unitCost)
-        : body.unitCost;
-    const parts = {
-      brand: body.brand !== undefined ? body.brand || null : existing.brand,
-      productType: body.productType !== undefined ? body.productType || null : existing.productType,
-      partNumber: body.partNumber !== undefined ? body.partNumber || null : existing.partNumber,
-    };
-    const merged = {
-      isHeading: heading,
-      ...parts,
-      // The sentence of the three boxes once any is set; a title typed on its own stays.
-      title: productTitle(parts) ?? (body.title !== undefined ? body.title : existing.title),
-      description: body.description !== undefined ? body.description : existing.description,
-      providerSupplierId: body.providerSupplierId !== undefined ? body.providerSupplierId || null : existing.providerSupplierId,
-      providerUserId: body.providerUserId !== undefined ? body.providerUserId || null : existing.providerUserId,
-    };
-    // Choosing one kind of provider clears the other, so switching a line
-    // from outsourced to in-house is one edit rather than two.
-    if (body.providerUserId && body.providerSupplierId === undefined) merged.providerSupplierId = null;
-    if (body.providerSupplierId && body.providerUserId === undefined) merged.providerUserId = null;
-    await checkLine(merged);
-
-    await prisma.$transaction(async (tx) => {
-      if (body.group) await rememberGroups(tx, [body.group]);
-      await tx.quotationItem.update({
-        where: { id: req.params.itemId },
-        data: {
-          ...(body.group !== undefined ? { group: body.group || null } : {}),
-          ...(heading ? { brand: null, productType: null, partNumber: null } : parts),
-          ...(heading ? (body.title !== undefined ? { title: body.title || null } : {}) : { title: merged.title || null }),
-          ...(body.description !== undefined ? { description: body.description ?? '' } : {}),
-          ...(body.unit !== undefined ? { unit: body.unit } : {}),
-          ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
-          ...(body.costNote !== undefined ? { costNote: body.costNote || null } : {}),
-          isHeading: heading,
-          providerSupplierId: heading ? null : merged.providerSupplierId,
-          providerUserId: heading ? null : merged.providerUserId,
-          quantity: d(quantity),
-          unitPrice: d(unitPrice),
-          amount: lineAmount(quantity, unitPrice),
-          unitCost: unitCost == null ? null : d(unitCost),
-          costAmount: unitCost == null ? null : lineAmount(quantity, unitCost),
-        },
-      });
-      await recalcRevision(req.params.revisionId, tx);
-    });
-
-    await audit(
-      {
-        entityType: 'quotation',
-        entityId: quotation.id,
-        action: 'UPDATED',
-        summary: `Changed a line on ${quotation.number} R${revision.revision}: ${merged.title || (merged.description ?? '').slice(0, 60)}`,
-      },
-      req,
-    );
-    res.json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
-  }),
-);
-
-quotationRoutes.delete(
-  '/:id/revisions/:revisionId/items/:itemId',
-  require_('gops.quotations.edit_own'),
-  handler(async (req, res) => {
-    const { quotation, revision } = await revisionForEdit(req, req.params.id, req.params.revisionId);
-    const existing = await prisma.quotationItem.findFirst({
-      where: { id: req.params.itemId, revisionId: req.params.revisionId },
-    });
-    if (!existing) throw notFound('Line not found');
-
-    await prisma.$transaction(async (tx) => {
-      await tx.quotationItem.delete({ where: { id: req.params.itemId } });
-      await recalcRevision(req.params.revisionId, tx);
-    });
-    await audit(
-      {
-        entityType: 'quotation',
-        entityId: quotation.id,
-        action: 'UPDATED',
-        summary: `Removed a line from ${quotation.number} R${revision.revision}: ${existing.title || existing.description.slice(0, 60)}`,
-      },
-      req,
-    );
-    res.json(presentRevision((await revisionWithItems(req.params.revisionId)) as unknown as Record<string, unknown>, true));
   }),
 );
 
@@ -3072,78 +2878,6 @@ export async function printableQuotation(me: ResolvedUser, id: string): Promise<
 }
 
 /**
- * The route a DRAFT would take if it were submitted now, one open slot a
- * step under who may sign it (an option the document no longer qualifies
- * for falls back to the standard route). Not `approvalSlots(…, draft)`,
- * which previews only while no request exists: a pulled-back quotation
- * revision, a returned sales order or a reopened costing keeps its last
- * request, and that request's signed steps would date an approval that no
- * longer stands. The quotation, the sales order and the costing print a
- * draft's route through this.
- */
-export async function draftRouteSlots(
-  documentType: string,
-  amount: number | null,
-  requesterId: string,
-  optionId?: string | null,
-): Promise<ApprovalSlot[]> {
-  const route =
-    (optionId ? await routePreview(documentType, amount, requesterId, optionId) : null) ??
-    (await routePreview(documentType, amount, requesterId, null));
-  return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
-}
-
-/**
- * Whether a FINAL costing's or an ISSUED order's latest request is still its
- * approval: that request APPROVED it, and the document was not reopened
- * after the decision (a `<reopened>…` row on its trail, which the reopen
- * routes write). A costing returned and then made final by a project built
- * on the draft, or an order reopened and issued again with no route active,
- * would otherwise print the steps of a decision that no longer stands —
- * dated signatures, or "Pending" under steps nobody will ever sign.
- */
-export async function approvalStands(documentType: string, documentId: string, reopened: string): Promise<boolean> {
-  const request = await prisma.approvalRequest.findFirst({
-    where: { documentType, documentId },
-    orderBy: { createdAt: 'desc' },
-    select: { status: true, closedAt: true },
-  });
-  if (request?.status !== 'APPROVED' || !request.closedAt) return false;
-  const since = await prisma.auditLog.count({
-    where: { entityType: documentType, entityId: documentId, at: { gt: request.closedAt }, summary: { startsWith: reopened } },
-  });
-  return since === 0;
-}
-
-/**
- * The slots of `approvalSlots` that still say something true. Every step of
- * an open request is kept — signed and dated, or under who may yet sign it
- * — and so is every step of an approved one, all signed. Of a request CLOSED
- * without approval (withdrawn when its document was cancelled or superseded,
- * returned, rejected) only the steps somebody signed are kept, each dated:
- * nobody will ever sign the rest, and "Pending" under them would not be the
- * truth (rule 6). An open request's unsigned step always carries `assigned`;
- * a closed request's carries neither, which is the whole test.
- */
-export function standingSlots(slots: ApprovalSlot[]): ApprovalSlot[] {
-  return slots.filter((s) => s.name || s.assigned);
-}
-
-/**
- * A designed document's route sign-offs: `slotSignatories` — the one mapping
- * every routed document prints (rule 6) — with each signer's position kept,
- * because a layout in Admin › PDF Templates may tick `showPosition` (the
- * house engine never prints one). The sales order prints through this too.
- */
-export function designedSignatories(slots: ApprovalSlot[]): Signatory[] {
-  return slotSignatories(slots).map((sig, i) => {
-    const slot = slots[i];
-    const position = slot.name ? slot.position : slot.assigned?.length === 1 ? slot.assigned[0].position : undefined;
-    return position ? { ...sig, position } : sig;
-  });
-}
-
-/**
  * The approval slot of a revision no request ever routed: whoever the
  * revision names as its approver, dated; else one open "Approved by" while
  * it can still be approved (a draft, no workflow active) — and nothing on
@@ -3156,7 +2890,7 @@ async function unroutedApproval(revision: {
   approvedBy: { id: string; name: string } | null;
 }): Promise<Signatory[]> {
   if (revision.approvedBy) {
-    return [{ role: 'Approved by', name: revision.approvedBy.name, ...(await signerContact(revision.approvedBy.id)), at: revision.approvedAt }];
+    return [{ role: 'Approved by', name: revision.approvedBy.name, ...(await contactOf(revision.approvedBy.id)), at: revision.approvedAt }];
   }
   return revision.status === 'DRAFT' || revision.status === 'PENDING_APPROVAL' ? [{ role: 'Approved by' }] : [];
 }
@@ -3177,7 +2911,7 @@ export async function quotationPrintData(
   // The table's figures carry no currency; it is named once, in the head and
   // in "Total Price (PHP):".
   const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
-  const ratePct = `${Number((Number(revision.vatRate) * 100).toFixed(2))}%`;
+  const rate = ratePct(revision.vatRate);
   const discountPct = Number(revision.discountPct);
   const discountAmount = Number(revision.discountAmount);
   const net = Number(revision.subtotal) - discountAmount;
@@ -3192,6 +2926,11 @@ export async function quotationPrintData(
       : [];
   const contact = quotation.contact;
   const owner = quotation.owner;
+  // How to reach the author — `contactOf`, the one reader: the login's
+  // phone, else the employee's mobile kept on My Account — for the layout's
+  // {{owner.phone}} and the Prepared-by sign-off alike, read for the paper
+  // only (the quotation's response never carries a mobile).
+  const ownerContact = await contactOf(owner.id);
   const validUntil = new Date(revision.createdAt.getTime() + revision.validityDays * 86_400_000);
   const number = revision.revision > 0 ? `${quotation.number} R${revision.revision}` : quotation.number;
 
@@ -3210,7 +2949,7 @@ export async function quotationPrintData(
     'quotation.terms': revision.terms ?? '',
     'quotation.notes': revision.notes ?? '',
     'quotation.currency': currency,
-    'quotation.vatRate': ratePct,
+    'quotation.vatRate': rate,
     'quotation.subtotal': money(amount(revision.subtotal)),
     'quotation.discount': discountAmount > 0 ? money(amount(discountAmount)) : '',
     'quotation.vat': money(amount(revision.vatAmount)),
@@ -3231,7 +2970,7 @@ export async function quotationPrintData(
     'owner.name': owner.name,
     'owner.position': owner.position ?? '',
     'owner.email': owner.email ?? '',
-    'owner.phone': owner.phone ?? '',
+    'owner.phone': ownerContact.phone ?? '',
   };
 
   // A subheading is a heading row. A group is NOT (2026-10-06, the owner's
@@ -3270,38 +3009,35 @@ export async function quotationPrintData(
     if (!revision.vatInclusive) totals.push({ label: 'Sum without tax:', value: amount(net) });
   }
   totals.push({
-    label: revision.vatInclusive ? `VAT included (${ratePct}):` : `VAT (${ratePct}):`,
+    label: revision.vatInclusive ? `VAT included (${rate}):` : `VAT (${rate}):`,
     value: amount(revision.vatAmount),
   });
   totals.push({ label: `Total Price (${currency}):`, value: amount(revision.total), bold: true });
 
   // Prepared by the author; then the route as the workflow names its steps
-  // (rule 6, `slotSignatories`) — who signed and when, else who is assigned
+  // (rule 6, `slotSignatories`, each signer's position kept for a layout
+  // that ticks `showPosition`) — who signed and when, else who is assigned
   // with "Pending" under them, the CEO's step too when the submitter added
-  // it; a draft prints the route submitting it would take. A revision whose
-  // request closed without approving it — rejected, or superseded while it
-  // was pending — keeps only the steps signed before that (`standingSlots`):
-  // its content never changed after, and nobody will sign the rest. Each with
-  // how to reach them, read here for the paper only: the quotation's own
-  // response never carries a mobile.
-  const slots =
-    revision.status === 'DRAFT'
-      ? await draftRouteSlots('quotation', Number(revision.total), owner.id, opts.optionId)
-      : standingSlots(await approvalSlots('quotation', revision.id));
-  const author = await prisma.user.findUnique({
-    where: { id: owner.id },
-    select: { phone: true, employee: { select: { mobile: true } } },
-  });
+  // it. A draft — a pulled-back one too — prints the route submitting it
+  // would take; a revision whose request closed without approving it —
+  // rejected, or superseded while it was pending — keeps only the steps
+  // signed before that (`approvalSlots`): its content never changed after,
+  // and nobody will sign the rest. Each with how to reach them, read here
+  // for the paper only: the quotation's own response never carries a mobile.
+  const slots = await approvalSlots(
+    'quotation',
+    revision.id,
+    revision.status === 'DRAFT' ? { amount: Number(revision.total), requesterId: owner.id, optionId: opts.optionId } : undefined,
+  );
   const signatories: Signatory[] = [
     {
       role: 'Prepared by',
       name: owner.name,
       position: owner.position ?? undefined,
-      phone: author ? contactPhone(author) : undefined,
-      email: owner.email ?? undefined,
+      ...ownerContact,
       at: revision.createdAt,
     },
-    ...(slots.length ? designedSignatories(slots) : await unroutedApproval(revision)),
+    ...(slots.length ? slotSignatories(slots) : await unroutedApproval(revision)),
   ];
 
   return {
@@ -4417,8 +4153,6 @@ pipelineRoutes.get(
       },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="sales-forecast.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'sales-forecast.pdf');
   }),
 );

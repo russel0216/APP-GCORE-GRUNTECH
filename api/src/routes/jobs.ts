@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma, JobStatus, JobType } from '@prisma/client';
+import { Prisma, JobStatus, JobType, CostState } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -21,6 +21,8 @@ import { renderDocument, formatAmount, formatMoney, formatShortDate, statusLabel
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
 import { addMonths, dayKey, planSchedule } from '../shared/aftermarket';
+import { addDays } from '../shared/day';
+import { LIST_CAP, listReference, totalLabel, bracketed, bracketNote, listNotes, listDay, namedInFilter, choice, sendListPdf } from '../shared/listPaper';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -228,94 +230,6 @@ const JOB_STATUSES = [
 ] as const;
 
 // ── The list, and its two printed twins ───────────────────────────────────────
-
-/** The most rows a printed list carries; the reference says when it was cut. */
-export const LIST_CAP = 1000;
-
-/**
- * A printed list's reference: "12 projects", or, cut at the cap, "first
- * 1,000 of 1,234 projects printed" — then every filter that narrowed it, so
- * the paper says which set it is. The delivery group's lists (projects,
- * budget monitoring, progress reports, billings, job orders, CAD job orders,
- * service contracts, visits, reports, the installed base) all print it.
- */
-export function listReference(
-  count: number,
-  printed: number,
-  noun: readonly [string, string],
-  filters: (string | null | false | undefined)[],
-): string {
-  const n = (v: number) => v.toLocaleString('en-PH');
-  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
-  const named = filters.filter(Boolean);
-  return named.length ? `${head} — ${named.join(' · ')}` : head;
-}
-
-/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
-export const totalLabel = (label: string, count: number, printed: number) =>
-  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
-
-/** A figure that is listed but not summed (a cancelled or unapproved document's), in brackets. */
-export const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
-
-/** "1 cancelled project" / "3 cancelled projects" — a count in a note under a list. */
-export const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
-
-/**
- * The note under a list whose bracketed rows are left out of its totals —
- * "1 cancelled job order, in brackets, is not counted." — the words G-FIN,
- * G-CHAIN and every delivery list print, so the owner reads one sentence for
- * one rule. (A copy of finance's: this module imports nothing from finance.
- * These list-paper helpers belong in shared/, one copy for every module.)
- */
-export const bracketNote = (n: number, noun: readonly [string, string]) =>
-  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
-
-/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
-export const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
-  const said = notes.filter((v): v is string => !!v);
-  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
-};
-
-/**
- * A 'YYYY-MM-DD' a filter names, as a list prints a date (MM/DD/YYYY, rule
- * 6); a half-open range's missing end as "…".
- */
-export const listDay = (key: string | undefined) =>
-  key && /^\d{4}-\d{2}-\d{2}$/.test(key) ? formatShortDate(new Date(`${key}T00:00:00Z`)) : '…';
-
-/**
- * What a filter line calls the record an id names — the customer's name, the
- * project's number, the person's name — read for the paper only; an id that
- * names nothing says so rather than printing the id.
- */
-export async function namedInFilter(ids: {
-  customerId?: string;
-  jobId?: string;
-  userId?: string;
-  siteId?: string;
-}): Promise<{ customer: string | null; project: string | null; person: string | null; site: string | null }> {
-  const [customer, job, user, site] = await Promise.all([
-    ids.customerId ? prisma.customer.findUnique({ where: { id: ids.customerId }, select: { name: true } }) : null,
-    ids.jobId ? prisma.job.findUnique({ where: { id: ids.jobId }, select: { number: true } }) : null,
-    ids.userId ? prisma.user.findUnique({ where: { id: ids.userId }, select: { name: true } }) : null,
-    ids.siteId ? prisma.customerSite.findUnique({ where: { id: ids.siteId }, select: { name: true } }) : null,
-  ]);
-  return {
-    customer: ids.customerId ? (customer?.name ?? 'not found') : null,
-    project: ids.jobId ? (job?.number ?? 'not found') : null,
-    person: ids.userId ? (user?.name ?? 'not found') : null,
-    site: ids.siteId ? (site?.name ?? 'not found') : null,
-  };
-}
-
-/** A choice filter's value, checked: an unknown one is a 400 naming the choices, never a 500 from the database. */
-export function choice<T extends string>(value: string | undefined, allowed: Record<string, T>, label: string): T | undefined {
-  if (!value) return undefined;
-  const values = Object.values(allowed);
-  if (!(values as string[]).includes(value)) throw badRequest(`${label} is one of ${values.join(', ')}`);
-  return value as T;
-}
 
 const JOB_SORTS = ['number', 'name', 'contractValue', 'startDate', 'createdAt'];
 
@@ -545,9 +459,7 @@ jobRoutes.get(
       { entityType: 'job', entityId: 'list', action: 'EXPORTED', summary: `Exported the projects list as PDF (${listReference(count, rows.length, ['project', 'projects'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="projects.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'projects.pdf');
   }),
 );
 
@@ -624,9 +536,7 @@ jobRoutes.get(
       },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="budget-monitoring.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'budget-monitoring.pdf');
   }),
 );
 
@@ -724,12 +634,6 @@ function asDate(v: string | null | undefined): Date | null {
   const date = new Date(v);
   if (Number.isNaN(date.getTime())) throw badRequest(`"${v}" is not a valid date`);
   return date;
-}
-
-function addDays(base: Date, days: number): Date {
-  const d2 = new Date(base);
-  d2.setDate(d2.getDate() + days);
-  return d2;
 }
 
 type JobCosting = Prisma.CostingGetPayload<{ include: { lines: true; scopeSections: true } }>;
@@ -1230,41 +1134,6 @@ jobRoutes.patch(
   }),
 );
 
-// ── Scope items (the job's schedule of values) ───────────────────────────────
-
-jobRoutes.patch(
-  '/:id/scope/:itemId',
-  require_('gops.projects.edit_all'),
-  handler(async (req, res) => {
-    const body = parseBody(
-      z.object({
-        plannedStart: z.string().optional().nullable(),
-        plannedEnd: z.string().optional().nullable(),
-        durationDays: z.number().int().min(0).optional(),
-      }),
-      req.body,
-    );
-
-    const item = await prisma.jobScopeItem.findFirst({
-      where: { id: req.params.itemId, jobId: req.params.id },
-    });
-    if (!item) throw notFound('Scope item not found');
-
-    // Value is deliberately not editable here. Changing what a scope line is
-    // worth after billing has started would rewrite history; that is what a
-    // budget request or a contract variation is for.
-    const updated = await prisma.jobScopeItem.update({
-      where: { id: req.params.itemId },
-      data: {
-        ...(body.plannedStart !== undefined ? { plannedStart: asDate(body.plannedStart) } : {}),
-        ...(body.plannedEnd !== undefined ? { plannedEnd: asDate(body.plannedEnd) } : {}),
-        ...(body.durationDays !== undefined ? { durationDays: body.durationDays } : {}),
-      },
-    });
-    res.json({ ...updated, value: num(updated.value) });
-  }),
-);
-
 // ── Cost ledger ──────────────────────────────────────────────────────────────
 
 jobRoutes.get(
@@ -1273,7 +1142,8 @@ jobRoutes.get(
   handler(async (req, res) => {
     const q = listQuery(req);
     const where: Prisma.JobCostEntryWhereInput = { jobId: req.params.id };
-    if (q.filters.state) where.state = q.filters.state as Prisma.EnumCostStateFilter['equals'];
+    const state = choice(q.filters.state, CostState, 'State');
+    if (state) where.state = state;
     if (q.filters.costCategoryId) where.costCategoryId = q.filters.costCategoryId;
 
     const [rows, total] = await Promise.all([
@@ -1291,14 +1161,6 @@ jobRoutes.get(
     ]);
 
     res.json(listResult(rows.map((r) => ({ ...r, amount: num(r.amount) })), total, q));
-  }),
-);
-
-jobRoutes.get(
-  '/:id/budget',
-  require_('gops.budget_monitoring.view_all'),
-  handler(async (req, res) => {
-    res.json(await budgetPosition(req.params.id));
   }),
 );
 

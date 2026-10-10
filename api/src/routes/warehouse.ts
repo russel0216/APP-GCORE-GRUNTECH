@@ -17,10 +17,10 @@ import { authenticate, require_, requireAny, currentUser } from '../auth/middlew
 import { can, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { registerSearch } from '../shared/search';
-import { stockOnHand } from '../shared/chain';
+import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../shared/chain';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { contactPhone } from '../shared/approvals';
+import { contactOf } from '../shared/approvals';
 import {
   renderDocument,
   formatMoney,
@@ -33,6 +33,7 @@ import {
   type Signatory,
 } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
+import { LIST_CAP, listReference, totalLabel, bracketed, counted, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 import {
   receiveStock,
   issueStock,
@@ -67,61 +68,7 @@ const today = () => manilaDate(new Date());
 // SAME where-builder the list reads (with `?ids=`, the rows ticked), the
 // list's own sort, at most LIST_CAP rows, a reference naming every filter
 // that narrowed it, and an EXPORTED audit row with entityId 'list' (rule 6).
-
-/** The most rows a printed list carries; the reference says when it was cut. */
-const LIST_CAP = 1000;
-
-/**
- * A printed list's reference: "12 receivings", or, cut at the cap, "first
- * 1,000 of 1,234 receivings printed" — then every filter that narrowed it.
- */
-function listReference(count: number, printed: number, noun: readonly [string, string], filters: (string | null | false | undefined)[]): string {
-  const n = (v: number) => v.toLocaleString('en-PH');
-  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
-  const named = filters.filter(Boolean);
-  return named.length ? `${head} — ${named.join(' · ')}` : head;
-}
-
-/** A choice filter's value, checked against what it can be: an unknown one is a 400, never a 500. */
-function choice<T extends string>(value: string | undefined, allowed: Record<string, T>, label: string): T | undefined {
-  if (!value) return undefined;
-  const values = Object.values(allowed);
-  if (!(values as string[]).includes(value)) throw badRequest(`${label} is one of ${values.join(', ')}`);
-  return value as T;
-}
-
-/** The project a `?jobId=` names, as a filter line prints it. */
-async function projectNamed(jobId: string | undefined): Promise<string | null> {
-  if (!jobId) return null;
-  const job = await prisma.job.findUnique({ where: { id: jobId }, select: { number: true } });
-  return `project ${job?.number ?? 'not found'}`;
-}
-
-/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
-const totalLabel = (label: string, count: number, printed: number) =>
-  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
-
-/** A figure that is listed but not summed (a cancelled document's), in brackets. */
-const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
-
-// The notes under a list's total, worded as G-FIN's papers word them
-// (`counted` / `bracketNote` / `listNotes` in routes/finance.ts) so money
-// prints one way in every module. Kept here rather than imported, because
-// importing routes/finance would load its approval subscribers with this
-// module.
-
-/** "1 draft issue" / "3 draft issues" — a count in a note under a list. */
-const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
-
-/** The note under a list whose closed documents (cancelled) print in brackets. */
-const bracketNote = (n: number, noun: readonly [string, string]) =>
-  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
-
-/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
-const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
-  const said = notes.filter((v): v is string => !!v);
-  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
-};
+// The helpers are shared/listPaper.
 
 /** A quantity as a list prints it: grouped, to its own three decimals at most. */
 const qty = (v: number) => new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(v);
@@ -237,7 +184,7 @@ receivingRoutes.get(
       // and rounded once, never the sum of rounded rows.
       prisma.receivingItem.findMany({ where: { receiving: where }, select: { quantity: true, unitCost: true } }),
       companyCurrency(),
-      projectNamed(f.jobId),
+      recordNamed('project', f.jobId),
       f.orderId ? prisma.purchaseOrder.findUnique({ where: { id: f.orderId }, select: { number: true } }) : null,
     ]);
     const reference = listReference(count, rows.length, ['receiving', 'receivings'], [
@@ -251,7 +198,7 @@ receivingRoutes.get(
 
     // Nine columns: landscape, each sized from what it holds (rule 6).
     const pdf = await renderDocument({
-      title: 'Receivings',
+      title: 'Receiving',
       date: new Date(),
       reference,
       landscape: true,
@@ -282,9 +229,7 @@ receivingRoutes.get(
       { entityType: 'receiving', entityId: 'list', action: 'EXPORTED', summary: `Exported the receiving list as PDF (${rows.length} receiving(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="receivings.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'receivings.pdf');
   }),
 );
 
@@ -713,7 +658,7 @@ stockIssueRoutes.get(
       prisma.stockIssue.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
       prisma.stockIssue.count({ where: { AND: [where, { status: 'DRAFT' }] } }),
       companyCurrency(),
-      projectNamed(f.jobId),
+      recordNamed('project', f.jobId),
     ]);
     const reference = listReference(count, rows.length, ['stock issue', 'stock issues'], [
       q.search && `search "${q.search}"`,
@@ -753,14 +698,12 @@ stockIssueRoutes.get(
       ]),
     );
 
-    const pdf = await renderDocument({ title: 'Stock Issues', date: new Date(), reference, landscape: true, sections });
+    const pdf = await renderDocument({ title: 'Stock Issuance', date: new Date(), reference, landscape: true, sections });
     await audit(
       { entityType: 'stock_issue', entityId: 'list', action: 'EXPORTED', summary: `Exported the stock issue list as PDF (${rows.length} issue(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="stock-issues.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'stock-issues.pdf');
   }),
 );
 
@@ -1351,7 +1294,7 @@ borrowRoutes.get(
         take: LIST_CAP,
       }),
       prisma.borrowSlip.count({ where }),
-      projectNamed(f.jobId),
+      recordNamed('project', f.jobId),
     ]);
     const reference = listReference(count, rows.length, ['borrow slip', 'borrow slips'], [
       q.search && `search "${q.search}"`,
@@ -1392,9 +1335,7 @@ borrowRoutes.get(
       { entityType: 'borrow_slip', entityId: 'list', action: 'EXPORTED', summary: `Exported the borrow slip list as PDF (${rows.length} slip(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="borrow-slips.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'borrow-slips.pdf');
   }),
 );
 
@@ -1672,18 +1613,6 @@ export const inventoryRoutes = Router();
 inventoryRoutes.use(authenticate);
 
 /**
- * Available to issue: on hand less what is out on loan, to the centavo. The
- * one rule, with `belowReorder`, for the list's flag, its Reorder filter, its
- * paper and the reports' "Below reorder level" tile.
- */
-const availableOf = (b: { quantity: Prisma.Decimal; borrowedQty: Prisma.Decimal }) => cents(num(b.quantity) - num(b.borrowedQty));
-
-/** At or under the item's reorder level; an item with no level never is. */
-function belowReorder(b: { quantity: Prisma.Decimal; borrowedQty: Prisma.Decimal; item: { reorderLevel: Prisma.Decimal | null } }): boolean {
-  return b.item.reorderLevel !== null && availableOf(b) <= num(b.item.reorderLevel);
-}
-
-/**
  * Which balances a stock list query means — one rule for the list and its
  * printed twin. "Below level" compares two columns, which a where-clause
  * cannot, so it is decided by `belowReorder` over the candidates and named by
@@ -1708,7 +1637,7 @@ async function inventoryListWhere(q: ListQuery): Promise<Prisma.InventoryBalance
   if (ids) and.push({ id: { in: ids } });
   if (q.filters.needsReorder === 'true') {
     const candidates = await prisma.inventoryBalance.findMany({
-      where: { AND: [...and, { item: { reorderLevel: { not: null } } }] },
+      where: { AND: [...and, REORDER_CANDIDATES] },
       select: { id: true, quantity: true, borrowedQty: true, item: { select: { reorderLevel: true } } },
     });
     and.push({ id: { in: candidates.filter(belowReorder).map((b) => b.id) } });
@@ -1813,7 +1742,7 @@ inventoryRoutes.get(
 
     // Ten columns: landscape, each sized from what it holds (rule 6).
     const pdf = await renderDocument({
-      title: 'Stock on Hand',
+      title: 'Inventory',
       date: new Date(),
       reference,
       landscape: true,
@@ -1842,9 +1771,7 @@ inventoryRoutes.get(
       { entityType: 'inventory', entityId: 'list', action: 'EXPORTED', summary: `Exported the stock on hand as PDF (${rows.length} line(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="stock-on-hand.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'stock-on-hand.pdf');
   }),
 );
 
@@ -1980,16 +1907,8 @@ stockIssueRoutes.get(
     // dated by the handover; "Pending" under their name while it is a draft.
     // Never a slot nobody fills: no "Noted by", and no receiver when the slip
     // names none. The contact lines are read here for the paper only.
-    const lines = async (userId: string | null) => {
-      if (!userId) return {};
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { email: true, phone: true, employee: { select: { mobile: true } } },
-      });
-      return user ? { phone: contactPhone(user), email: user.email } : {};
-    };
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: issue.issuedBy.name, ...(await lines(issue.issuedById)), at: issue.createdAt },
+      { role: 'Prepared by', name: issue.issuedBy.name, ...(await contactOf(issue.issuedById)), at: issue.createdAt },
     ];
     if (issue.status === 'ISSUED') {
       const executed = await prisma.auditLog.findFirst({
@@ -2001,7 +1920,7 @@ stockIssueRoutes.get(
       signatories.push({
         role: 'Issued by',
         name: executed?.actorName ?? issue.issuedBy.name,
-        ...(await lines(issuerId)),
+        ...(await contactOf(issuerId)),
         at: issue.issuedAt ?? executed?.at ?? null,
       });
     }
@@ -2010,7 +1929,7 @@ stockIssueRoutes.get(
       signatories.push({
         role: 'Received by',
         name: issue.issuedToName,
-        ...(await lines(issue.issuedToId)),
+        ...(await contactOf(issue.issuedToId)),
         at: issue.status === 'ISSUED' ? issue.issuedAt : null,
       });
     }

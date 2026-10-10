@@ -27,12 +27,10 @@ import {
   approversForStep,
   approvalSlots,
   slotSignatories,
-  routePreview,
   historyFor,
-  contactPhone,
+  contactOf,
   usersInRole,
   cancelOpenRequest,
-  type ApprovalSlot,
 } from '../shared/approvals';
 import { renderDocument, formatDate, formatDateTime, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { hrSettings } from '../shared/hr';
@@ -53,7 +51,7 @@ import {
   visibleTo,
   RECOMMENDATION_LABEL,
 } from '../shared/evaluations';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, listReference, choice, sendListPdf } from '../shared/listPaper';
 
 /**
  * Employee evaluations — probation and trainee reviews (model §4.7).
@@ -88,10 +86,6 @@ function asDate(v: string | null | undefined): Date | null {
   const date = new Date(v);
   if (Number.isNaN(date.getTime())) throw badRequest(`"${v}" is not a valid date`);
   return date;
-}
-
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
 }
 
 const OPEN: EvaluationStatus[] = ['SCHEDULED', 'DRAFT', 'PENDING_APPROVAL'];
@@ -230,9 +224,9 @@ function evaluationListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): 
     });
   }
   const f = q.filters;
-  const status = asEnum(EvaluationStatus, f.status);
+  const status = choice(f.status, EvaluationStatus, 'Status');
   if (status) and.push({ status });
-  const kind = asEnum(EvaluationKind, f.kind);
+  const kind = choice(f.kind, EvaluationKind, 'Kind');
   if (kind) and.push({ kind });
   if (f.employeeId) and.push({ employeeId: f.employeeId });
   if (f.evaluatorId) and.push({ evaluatorId: f.evaluatorId });
@@ -329,8 +323,8 @@ evaluationRoutes.get(
       f.evaluatorId ? prisma.user.findUnique({ where: { id: f.evaluatorId }, select: { name: true } }) : null,
     ]);
 
-    const status = asEnum(EvaluationStatus, f.status);
-    const kind = asEnum(EvaluationKind, f.kind);
+    const status = choice(f.status, EvaluationStatus, 'Status');
+    const kind = choice(f.kind, EvaluationKind, 'Kind');
     const reference = listReference(count, rows.length, ['evaluation', 'evaluations'], [
       q.search && `search "${q.search}"`,
       f.open === '1' ? 'open only' : status && `status ${statusLabel(status)}`,
@@ -956,43 +950,23 @@ evaluationRoutes.post(
 // ── Print ────────────────────────────────────────────────────────────────────
 
 /**
- * A person's contact lines, read for the paper only — a reader calls the
- * person who signed. Never on the loaders: `GET /evaluations/:id` carries no
- * mobile.
- */
-async function contactOf(userId: string): Promise<{ phone?: string; email?: string }> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true, phone: true, employee: { select: { mobile: true } } },
-  });
-  return user ? { phone: contactPhone(user), email: user.email } : {};
-}
-
-/**
  * The approval half of the sign-offs (rule 6): every step of the route
  * through the engine's one mapping. An evaluation not yet submitted —
  * scheduled, or a draft (a returned one included) — prints the route
- * submitting it would take, in the evaluator's name, every step open; not
- * `approvalSlots(…, draft)`, which previews only while NO request exists,
- * and a returned evaluation keeps the request that sent it back. A
- * cancelled one prints none: no approval is coming. A rejected one is
- * closed for good, so it prints only the steps that signed — the step that
- * rejected it and any after it acted or never will, and "Pending" there
- * would promise a signature nobody is going to give; the Decision line
- * says who rejected it. One open "Approved by" only where no workflow
- * covers evaluations at all.
+ * submitting it would take, in the evaluator's name, every step open (the
+ * request that sent it back signs nothing now). A rejected or a cancelled
+ * one is closed for good, so it prints only the steps that really signed
+ * (`approvalSlots` of a closed request — a cancel withdraws it): the step
+ * that rejected it and any after it acted or never will, and "Pending"
+ * there would promise a signature nobody is going to give; the Decision
+ * line says who rejected it. One open "Approved by" only where no workflow
+ * covers evaluations at all, and never on a closed one.
  */
-async function routeSignatories(ev: Full): Promise<Signatory[]> {
-  if (ev.status === 'CANCELLED') return [];
-  const slots: ApprovalSlot[] =
-    ev.status === 'SCHEDULED' || ev.status === 'DRAFT'
-      ? ((await routePreview('evaluation', null, ev.evaluatorId))?.steps ?? []).map((st) => ({
-          step: st.name,
-          assigned: st.approvers,
-        }))
-      : await approvalSlots('evaluation', ev.id);
-  if (ev.status === 'REJECTED') return slotSignatories(slots.filter((s) => s.name));
-  return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
+async function routeSignoffs(ev: Full): Promise<Signatory[]> {
+  const unsubmitted = ev.status === 'SCHEDULED' || ev.status === 'DRAFT';
+  const closed = ev.status === 'REJECTED' || ev.status === 'CANCELLED';
+  const slots = await approvalSlots('evaluation', ev.id, unsubmitted ? { amount: null, requesterId: ev.evaluatorId } : undefined);
+  return slots.length ? slotSignatories(slots) : closed ? [] : [{ role: 'Approved by' }];
 }
 
 /**
@@ -1093,7 +1067,7 @@ evaluationRoutes.get(
       !!ev.employeeAcknowledgedAt || (!!ev.employee.userId && ev.status !== 'REJECTED' && ev.status !== 'CANCELLED');
     const signatories: Signatory[] = [
       { role: 'Evaluated by', name: ev.evaluator.name, ...evaluator, at: ev.submittedAt },
-      ...(await routeSignatories(ev)),
+      ...(await routeSignoffs(ev)),
       ...(acknowledges
         ? [{ role: 'Acknowledged by', name: fullName(ev.employee), at: ev.employeeAcknowledgedAt }]
         : []),

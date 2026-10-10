@@ -25,8 +25,8 @@ import {
 import { upload, saveAttachment, attachmentPath } from '../shared/attachments';
 import { currentUser } from '../auth/middleware';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
-import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
-import { LIST_CAP, listReference, rangeNamed, sendListPdf } from './finance';
+import { manilaDayEnd, manilaDayStart } from '../shared/day';
+import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay } from '../shared/listPaper';
 
 // ════════════════════════════════════════════════════════════════════
 //  COMPANY SETTINGS  — drives every PDF header
@@ -539,8 +539,6 @@ workflowRoutes.delete(
 export const auditRoutes = Router();
 auditRoutes.use(authenticate);
 
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
-
 /**
  * The audit list's where-builder — the screen's rows and the printed trail
  * read the same set. `from`/`to` are Manila days over a TIMESTAMP (`at`):
@@ -561,21 +559,11 @@ function auditListWhere(q: ListQuery): Prisma.AuditLogWhereInput {
   if (f.action) where.action = f.action;
   if (f.actorId) where.actorId = f.actorId;
   // The right shape is not enough: 2026-13-45 would reach the database as an
-  // Invalid Date (a 500), and 2026-02-30 would quietly read as 2 March. A day
-  // counts only if Manila reads it back as itself.
-  for (const [key, label] of [['from', 'From'], ['to', 'To']] as const) {
-    const v = f[key];
-    if (!v) continue;
-    const start = DAY.test(v) ? manilaDayStart(v) : null;
-    if (!start || Number.isNaN(start.getTime()) || manilaDayKey(start) !== v) {
-      throw badRequest(`${label} is a day written YYYY-MM-DD`);
-    }
-  }
-  if (f.from || f.to) {
-    where.at = {};
-    if (f.from) where.at.gte = manilaDayStart(f.from);
-    if (f.to) where.at.lte = manilaDayEnd(f.to);
-  }
+  // Invalid Date (a 500), and 2026-02-30 would quietly read as 2 March —
+  // `filterDay` refuses both.
+  const from = filterDay(f.from, 'From');
+  const to = filterDay(f.to, 'To');
+  if (from || to) where.at = { ...(from ? { gte: manilaDayStart(from) } : {}), ...(to ? { lte: manilaDayEnd(to) } : {}) };
   const ids = idsFilter(f.ids);
   if (ids) where.id = { in: ids };
   return where;
@@ -699,33 +687,3 @@ settingRoutes.get(
   }),
 );
 
-settingRoutes.put(
-  '/:key',
-  require_('admin.settings.edit_all'),
-  handler(async (req, res) => {
-    const { value, description } = parseBody(
-      z.object({ value: z.unknown(), description: z.string().optional() }),
-      req.body,
-    );
-    const setting = await prisma.setting.upsert({
-      where: { key: req.params.key },
-      create: {
-        key: req.params.key,
-        value: value as Prisma.InputJsonValue,
-        description: description ?? null,
-      },
-      update: { value: value as Prisma.InputJsonValue, description },
-    });
-    await audit(
-      {
-        entityType: 'setting',
-        entityId: req.params.key,
-        action: 'UPDATED',
-        summary: `Changed setting ${req.params.key}`,
-        after: value,
-      },
-      req,
-    );
-    res.json(setting);
-  }),
-);

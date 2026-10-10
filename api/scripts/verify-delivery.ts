@@ -8,7 +8,6 @@
  * billed. All three are easy to get subtly wrong and invisible when they are.
  */
 
-import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -21,6 +20,15 @@ import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
 import { statusLabel } from '../src/shared/pdf';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
+import {
+  flat,
+  LANDSCAPE,
+  pendingCount,
+  printed,
+  referenceOf,
+  saysCount,
+  signedCount,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -131,59 +139,6 @@ async function http(token: string, method: string, path: string, body?: unknown)
   }
   return { status: res.status, body: parsed };
 }
-
-/** A document's bytes — the PDF routes answer a file, not JSON. */
-async function apiBytes(token: string, path: string): Promise<{ status: number; bytes: Buffer | null }> {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  return { status: res.status, bytes: res.ok ? Buffer.from(await res.arrayBuffer()) : null };
-}
-
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation
- * uses. PDFKit Flate-compresses its content streams and writes text as hex
- * runs split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-/** A printed list: its status, type, words (flattened) and page sizes. */
-async function paperOf(token: string, path: string): Promise<{ status: number; type: string; text: string; boxes: string[] }> {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const type = res.headers.get('content-type') ?? '';
-  if (!res.ok) return { status: res.status, type, text: '', boxes: [] };
-  const bytes = Buffer.from(await res.arrayBuffer());
-  const boxes = [...bytes.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map((m) => `${m[1]}x${m[2]}`);
-  return { status: res.status, type, text: pdfText(bytes).replace(/\s+/g, ' '), boxes };
-}
-
-/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
-const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
-const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
-/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
-const flat = (t: string) => t.replace(/\s+/g, ' ');
 
 async function apiReachable(): Promise<boolean> {
   try {
@@ -1016,8 +971,8 @@ async function main() {
     const exports = (entityType: string, entityId: string) =>
       prisma.auditLog.count({ where: { entityType, entityId, action: 'EXPORTED' } });
 
-    const r1Pdf = await apiBytes(leadToken, `/progress-reports/${r1.id}/pdf`);
-    const r1Text = r1Pdf.bytes ? pdfText(r1Pdf.bytes) : '';
+    const r1Pdf = await printed(leadToken, `/progress-reports/${r1.id}/pdf`);
+    const r1Text = r1Pdf.text;
     check(
       'an approved progress report prints who prepared it and who approved it, each dated — and no "Checked by"',
       r1Pdf.status === 200 &&
@@ -1052,8 +1007,8 @@ async function main() {
     const billApprover = await makeUser(`${TAG} Approver`, 'billapprover@verifyd.local', [approverRole.key]);
     const billerToken = signToken(biller.id, biller.email);
     const raised = await http(billerToken, 'POST', '/billings', { progressReportId: r2.id });
-    const draftBill = await apiBytes(billerToken, `/billings/${raised.body.id}/pdf`);
-    const draftBillText = draftBill.bytes ? pdfText(draftBill.bytes) : '';
+    const draftBill = await printed(billerToken, `/billings/${raised.body.id}/pdf`);
+    const draftBillText = draftBill.text;
     check(
       'a draft billing prints who raised it, dated, and "Approved by" Pending under nobody — never the creator as its approver',
       raised.status === 201 &&
@@ -1096,16 +1051,16 @@ async function main() {
     // prints its figures in brackets, the totals leave it out, and the note
     // says so in finance's words.
     const fmt2 = (n: number) => n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const draftList = await paperOf(billerToken, `/billings/pdf?ids=${raised.body.id}`);
+    const draftList = await printed(billerToken, `/billings/pdf?ids=${raised.body.id}`);
     check(
       'on the billings list a draft prints its figures in brackets, out of the totals, and the note says how many',
       draftList.status === 200 &&
-        draftList.text.includes(`(${fmt2(Number(raised.body.grossAmount))})`) &&
-        draftList.text.includes(`(${fmt2(Number(raised.body.netCollectible))})`) &&
-        draftList.text.includes(`Gross amount ${peso(0)}`) &&
-        draftList.text.includes(`Net collectible ${peso(0)}`) &&
-        draftList.text.includes('1 billing not yet approved, in brackets, is not counted.'),
-      draftList.text.match(/Gross amount.{0,160}/)?.[0] ?? String(draftList.status),
+        flat(draftList.text).includes(`(${fmt2(Number(raised.body.grossAmount))})`) &&
+        flat(draftList.text).includes(`(${fmt2(Number(raised.body.netCollectible))})`) &&
+        flat(draftList.text).includes(`Gross amount ${peso(0)}`) &&
+        flat(draftList.text).includes(`Net collectible ${peso(0)}`) &&
+        flat(draftList.text).includes('1 billing not yet approved, in brackets, is not counted.'),
+      flat(draftList.text).match(/Gross amount.{0,160}/)?.[0] ?? String(draftList.status),
     );
 
     // Rule 3: whoever raised a billing never approves it — given the right,
@@ -1128,8 +1083,8 @@ async function main() {
       `${selfApprove.status} / admin ${selfAsAdmin.status} · offered ${selfPage.body.canApprove} / ${approverPage.body.canApprove}`,
     );
     const approvedBill = await http(signToken(billApprover.id, billApprover.email), 'POST', `/billings/${raised.body.id}/approve`);
-    const finalBill = await apiBytes(billerToken, `/billings/${raised.body.id}/pdf`);
-    const finalBillText = finalBill.bytes ? pdfText(finalBill.bytes) : '';
+    const finalBill = await printed(billerToken, `/billings/${raised.body.id}/pdf`);
+    const finalBillText = finalBill.text;
     check(
       'approved, it prints the approver by name, dated, and nothing Pending',
       approvedBill.status === 200 &&
@@ -1175,8 +1130,8 @@ async function main() {
       r3Race.map((r) => r.status).sort().join(',') === '200,400' && r3Approvals === 1 && r3After.body.canApprove === false,
       `${r3Race.map((r) => r.status).join(',')} · ${r3Approvals} APPROVED row(s)`,
     );
-    const r3Pdf = await apiBytes(approverToken, `/progress-reports/${r3.body.id}/pdf`);
-    const r3Text = r3Pdf.bytes ? pdfText(r3Pdf.bytes) : '';
+    const r3Pdf = await printed(approverToken, `/progress-reports/${r3.body.id}/pdf`);
+    const r3Text = r3Pdf.text;
     const times = (t: string, name: string) => (t.match(new RegExp(name, 'g')) ?? []).length;
     check(
       'its paper prints the preparer once and the approver once, each dated — never one name as both',
@@ -1189,8 +1144,8 @@ async function main() {
     );
     // A billing written outside the routes has no trail to name anybody: the
     // paper names nobody rather than the project's manager it used to guess.
-    const bareBill = await apiBytes(leadToken, `/billings/${b1.id}/pdf`);
-    const bareBillText = bareBill.bytes ? pdfText(bareBill.bytes) : '';
+    const bareBill = await printed(leadToken, `/billings/${b1.id}/pdf`);
+    const bareBillText = bareBill.text;
     check(
       'a billing nobody is on record as raising names no preparer — the project manager is not guessed',
       bareBill.status === 200 && !bareBillText.includes('Verify PM') && !flat(bareBillText).includes('PREPARED BY'),
@@ -1235,8 +1190,8 @@ async function main() {
     // as the quotation's totals block, its route by the step names alone
     // (never "Approved by — …"), each signed and dated, and who received the
     // cash. Everything here has happened, so nothing prints "Pending".
-    const brPdf = await apiBytes(financeToken, `/budget-requests/${br.id}/pdf`);
-    const brText = brPdf.bytes ? pdfText(brPdf.bytes) : '';
+    const brPdf = await printed(financeToken, `/budget-requests/${br.id}/pdf`);
+    const brText = brPdf.text;
     const brFlat = flat(brText);
     const brSteps = brWorkflow.steps.map((st) => st.name.toUpperCase());
     check(
@@ -1260,9 +1215,7 @@ async function main() {
         brText.includes('Released') &&
         brText.includes('Spent (per liquidation)') &&
         brText.includes(peso(42_000)) &&
-        // The dash prints in WinAnsi, which the reader does not map back: the words either side of it.
-        brText.includes('Unspent') &&
-        brText.includes('owed back') &&
+        brText.includes('Unspent — owed back') &&
         brText.includes('Less: refunded') &&
         brText.includes(peso(8_000)) &&
         brText.includes('Still to refund') &&
@@ -1285,10 +1238,10 @@ async function main() {
       prisma.auditLog.count({ where: { entityType: 'budget_request', entityId: 'list', action: 'EXPORTED', actorId } });
     const exportsBefore = (await listExports(pm.id)) + (await listExports(finance.id));
     const tabNumbers = ((tabRows.body.rows ?? []) as { number: string }[]).map((r) => r.number);
-    const tabPaper = await apiBytes(signToken(pm.id, pm.email), `/budget-requests/pdf?jobId=${job.id}`);
-    const finPaper = await apiBytes(financeToken, `/budget-requests/pdf?jobId=${job.id}`);
-    const tabPaperText = tabPaper.bytes ? pdfText(tabPaper.bytes) : '';
-    const finPaperText = finPaper.bytes ? pdfText(finPaper.bytes) : '';
+    const tabPaper = await printed(signToken(pm.id, pm.email), `/budget-requests/pdf?jobId=${job.id}`);
+    const finPaper = await printed(financeToken, `/budget-requests/pdf?jobId=${job.id}`);
+    const tabPaperText = tabPaper.text;
+    const finPaperText = finPaper.text;
     check(
       'the project tab’s list and G-FIN’s print the same requests, the project named in the reference',
       tabPaper.status === 200 &&
@@ -1307,8 +1260,8 @@ async function main() {
         !finPaperText.includes('LIQUIDATED'),
       finPaperText.split('\n').filter((l) => /AMOUNT|50,000|iquidated/i.test(l)).join(' | ').slice(0, 200),
     );
-    const tickedPaper = await apiBytes(financeToken, `/budget-requests/pdf?ids=${br.id}`);
-    const tickedText = tickedPaper.bytes ? pdfText(tickedPaper.bytes) : '';
+    const tickedPaper = await printed(financeToken, `/budget-requests/pdf?ids=${br.id}`);
+    const tickedText = tickedPaper.text;
     check(
       '?ids= prints only the request ticked, and says so',
       tickedPaper.status === 200 &&
@@ -1317,13 +1270,13 @@ async function main() {
         flat(tickedText).includes('the rows selected'),
       String(tickedPaper.status),
     );
-    const statusPaper = await apiBytes(financeToken, `/budget-requests/pdf?jobId=${job.id}&status=LIQUIDATED`);
+    const statusPaper = await printed(financeToken, `/budget-requests/pdf?jobId=${job.id}&status=LIQUIDATED`);
     check(
       'a status filter is named on the paper',
-      statusPaper.status === 200 && !!statusPaper.bytes && flat(pdfText(statusPaper.bytes)).includes('status Liquidated'),
+      statusPaper.status === 200 && flat(statusPaper.text).includes('status Liquidated'),
       String(statusPaper.status),
     );
-    const leadPaper = await apiBytes(leadToken, `/budget-requests/pdf?jobId=${job.id}`);
+    const leadPaper = await printed(leadToken, `/budget-requests/pdf?jobId=${job.id}`);
     check('the printed list stays behind the list’s own permission', leadPaper.status === 403, String(leadPaper.status));
     check(
       'every print of the list is on the trail as EXPORTED, entityId "list"',
@@ -1345,8 +1298,8 @@ async function main() {
     });
     const engToken = signToken(engineer.id, engineer.email);
     const askedRows = await http(engToken, 'GET', `/budget-requests?requestedById=${pm.id}&pageSize=200`);
-    const askedPaper = await apiBytes(engToken, `/budget-requests/pdf?requestedById=${pm.id}`);
-    const askedText = askedPaper.bytes ? pdfText(askedPaper.bytes) : '';
+    const askedPaper = await printed(engToken, `/budget-requests/pdf?requestedById=${pm.id}`);
+    const askedText = askedPaper.text;
     const ownRows = await http(engToken, 'GET', `/budget-requests?jobId=${job.id}&pageSize=200`);
     check(
       'a requester who sees only their own, naming somebody else as the requester, lists and prints 0 requests',
@@ -1557,12 +1510,36 @@ async function main() {
         contractValue: d(123_456.78),
       },
     });
+    // A draft report and a draft billing on another project, so that a status
+    // filter on the reports and a project filter on the billings each have a
+    // row to drop — every report and billing above is the one project's, and
+    // approved.
+    const otherReport = await prisma.progressReport.create({
+      data: {
+        number: `${TAG}-PR-OTHER`,
+        reportNo: 1,
+        jobId: cancelledJob.id,
+        periodFrom: new Date('2026-09-01T00:00:00Z'),
+        periodTo: new Date('2026-09-30T00:00:00Z'),
+        preparedById: pm.id,
+      },
+    });
+    await prisma.progressBilling.create({
+      data: {
+        number: `${TAG}-PB-OTHER`,
+        billingNo: 1,
+        jobId: cancelledJob.id,
+        progressReportId: otherReport.id,
+        grossAmount: d(1_000),
+        vatAmount: d(120),
+        ewtAmount: d(20),
+        invoiceTotal: d(1_120),
+        netCollectible: d(1_100),
+      },
+    });
     const listCurrency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
     const listPeso = (n: number) => `${listCurrency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const LANDSCAPE = '841.89x595.28';
     type ListRow = Record<string, unknown> & { id: string; number: string; status: string };
-    const saysCount = (text: string, n: number, noun: readonly [string, string]) =>
-      new RegExp(`(^|[^\\d,])${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}\\b`).test(text);
     const liveJobs = (rows: ListRow[]) => rows.filter((r) => r.status !== 'CANCELLED');
     const lists: {
       path: string;
@@ -1606,7 +1583,7 @@ async function main() {
       const listed = await http(leadToken, 'GET', `/${l.path}?search=${TAG}&pageSize=200`);
       const rows = (listed.body.rows ?? []) as ListRow[];
       const before = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
-      const paper = await paperOf(leadToken, `/${l.printPath}?search=${TAG}`);
+      const paper = await printed(leadToken, `/${l.printPath}?search=${TAG}`);
       const after = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
       check(
         `${l.printPath}: a PDF of exactly the rows the list holds, the count said and the search named, on landscape pages, audited as an export of the list`,
@@ -1614,53 +1591,60 @@ async function main() {
           paper.type.startsWith('application/pdf') &&
           rows.length > 0 &&
           rows.length === Number(listed.body.total) &&
-          rows.every((r) => paper.text.includes(r.number)) &&
-          saysCount(paper.text, rows.length, l.noun) &&
-          paper.text.includes(`search "${TAG}"`) &&
-          paper.boxes.length > 0 &&
-          paper.boxes.every((b) => b === LANDSCAPE) &&
+          rows.every((r) => flat(paper.text).includes(r.number)) &&
+          saysCount(flat(paper.text), rows.length, l.noun) &&
+          flat(paper.text).includes(`search "${TAG}"`) &&
+          paper.pages.length > 0 &&
+          paper.pages.every((b) => b === LANDSCAPE) &&
           after === before + 1,
-        `${paper.status} ${paper.type}, ${rows.length} of ${listed.body.total} listed, missing ${rows.filter((r) => !paper.text.includes(r.number)).map((r) => r.number).join(',') || 'none'}, pages ${paper.boxes.join(',')}, audited ${before} → ${after}`,
+        `${paper.status} ${paper.type}, ${rows.length} of ${listed.body.total} listed, missing ${rows.filter((r) => !flat(paper.text).includes(r.number)).map((r) => r.number).join(',') || 'none'}, pages ${paper.pages.join(',')}, audited ${before} → ${after}`,
       );
       if (l.total) {
         const expected = Math.round(l.total.of(rows) * 100) / 100;
         check(
           `${l.printPath}: its "${l.total.label}" is what the rows it lists add up to`,
-          new RegExp(`${l.total.label} ${listPeso(expected).replace(/[.]/g, '\\.')}`).test(paper.text),
-          `${paper.text.match(new RegExp(`${l.total.label} [A-Z]{3} [\\d,.]+`))?.[0] ?? 'no total'} vs ${listPeso(expected)}`,
+          new RegExp(`${l.total.label} ${listPeso(expected).replace(/[.]/g, '\\.')}`).test(flat(paper.text)),
+          `${flat(paper.text).match(new RegExp(`${l.total.label} [A-Z]{3} [\\d,.]+`))?.[0] ?? 'no total'} vs ${listPeso(expected)}`,
         );
       }
       const [first] = rows;
-      const ticked = await paperOf(leadToken, `/${l.printPath}?ids=${first?.id ?? 'none'}`);
+      const ticked = await printed(leadToken, `/${l.printPath}?ids=${first?.id ?? 'none'}`);
       check(
         `${l.printPath}: ?ids= prints only the row ticked, and says so`,
         ticked.status === 200 &&
           !!first &&
-          ticked.text.includes(first.number) &&
-          rows.slice(1).every((r) => !ticked.text.includes(r.number)) &&
-          saysCount(ticked.text, 1, l.noun) &&
-          ticked.text.includes('the rows selected'),
-        `${ticked.status} ${ticked.text.match(/Reference: .{0,120}/)?.[0] ?? ''}`,
+          flat(ticked.text).includes(first.number) &&
+          rows.length > 1 &&
+          rows.slice(1).every((r) => !flat(ticked.text).includes(r.number)) &&
+          saysCount(flat(ticked.text), 1, l.noun) &&
+          flat(ticked.text).includes('the rows selected'),
+        `${ticked.status} ${flat(ticked.text).match(/Reference: .{0,120}/)?.[0] ?? ''}`,
       );
       const [filterQuery, filterWords] = l.filter(rows);
       const narrowed = await http(leadToken, 'GET', `/${l.path}?search=${TAG}&${filterQuery}&pageSize=200`);
-      const filtered = await paperOf(leadToken, `/${l.printPath}?search=${TAG}&${filterQuery}`);
+      const filtered = await printed(leadToken, `/${l.printPath}?search=${TAG}&${filterQuery}`);
+      // Narrows: it keeps some rows and drops others — on the paper as on
+      // the screen, so a filter the paper ignored prints a row it dropped.
+      const kept = (narrowed.body.rows ?? []) as ListRow[];
+      const dropped = rows.filter((r) => !kept.some((k) => k.id === r.id));
       check(
         `${l.printPath}: a filter narrows the paper as it narrows the list, and the paper names it ("${filterWords}")`,
         filtered.status === 200 &&
-          Number(narrowed.body.total) > 0 &&
-          Number(narrowed.body.total) <= rows.length &&
-          saysCount(filtered.text, Number(narrowed.body.total), l.noun) &&
-          filtered.text.includes(filterWords) &&
-          ((narrowed.body.rows ?? []) as ListRow[]).every((r) => filtered.text.includes(r.number)),
-        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}; ${filtered.text.match(/Reference: .{0,160}/)?.[0] ?? ''}`,
+          kept.length > 0 &&
+          dropped.length > 0 &&
+          Number(narrowed.body.total) === kept.length &&
+          saysCount(filtered.text, kept.length, l.noun) &&
+          flat(filtered.text).includes(filterWords) &&
+          kept.every((r) => flat(filtered.text).includes(r.number)) &&
+          dropped.every((r) => !flat(filtered.text).includes(r.number)),
+        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}, ${dropped.length} dropped, ${dropped.filter((r) => flat(filtered.text).includes(r.number)).length} of them printed; ${referenceOf(filtered.text)}`,
       );
     }
     const allJobs = ((await http(leadToken, 'GET', `/jobs?search=${TAG}&pageSize=200`)).body.rows ?? []) as ListRow[];
     const cancelledCount = allJobs.filter((r) => r.status === 'CANCELLED').length;
     const cancelledNote = `${cancelledCount} cancelled project${cancelledCount === 1 ? '' : 's'}, in brackets, ${cancelledCount === 1 ? 'is' : 'are'} not counted.`;
-    const projectsPaper = await paperOf(leadToken, `/jobs/pdf?search=${TAG}`);
-    const budgetPaper = await paperOf(leadToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);
+    const projectsPaper = await printed(leadToken, `/jobs/pdf?search=${TAG}`);
+    const budgetPaper = await printed(leadToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);
     const liveContract = liveJobs(allJobs).reduce((t, r) => t + Number(r.contractValue), 0);
     check(
       'a cancelled project prints its contract value in brackets, out of both papers\' totals, and the note says how many',
@@ -1669,18 +1653,18 @@ async function main() {
         [projectsPaper, budgetPaper].every(
           (p) =>
             p.status === 200 &&
-            p.text.includes('(123,456.78)') &&
-            p.text.includes(`Contract value ${listPeso(Math.round(liveContract * 100) / 100)}`) &&
-            p.text.includes(cancelledNote) &&
-            !p.text.includes('cancelled not counted'),
+            flat(p.text).includes('(123,456.78)') &&
+            flat(p.text).includes(`Contract value ${listPeso(Math.round(liveContract * 100) / 100)}`) &&
+            flat(p.text).includes(cancelledNote) &&
+            !flat(p.text).includes('cancelled not counted'),
         ),
-      `${cancelledCount} cancelled · ${projectsPaper.text.match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} / ${budgetPaper.text.match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} vs ${listPeso(liveContract)} · ${projectsPaper.text.match(/[^.]{0,40}in brackets[^.]*\./)?.[0] ?? 'no note'}`,
+      `${cancelledCount} cancelled · ${flat(projectsPaper.text).match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} / ${flat(budgetPaper.text).match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} vs ${listPeso(liveContract)} · ${flat(projectsPaper.text).match(/[^.]{0,40}in brackets[^.]*\./)?.[0] ?? 'no note'}`,
     );
 
     // Budget Monitoring's paper prints cost to date — budget monitoring's
     // figure — so it takes that right as well as the list's.
-    const narrowBudget = await paperOf(narrowToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);
-    const narrowProjects = await paperOf(narrowToken, `/jobs/pdf?search=${TAG}`);
+    const narrowBudget = await printed(narrowToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);
+    const narrowProjects = await printed(narrowToken, `/jobs/pdf?search=${TAG}`);
     check(
       'the budget monitoring paper needs budget monitoring; the projects paper only the list’s right',
       narrowBudget.status === 403 && narrowProjects.status === 200,

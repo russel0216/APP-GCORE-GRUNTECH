@@ -24,6 +24,7 @@ import { nextNumber } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { companyCurrency, formatAmount, formatMoney, formatShortDate, renderDocument, statusLabel } from '../shared/pdf';
 import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
+import { LIST_CAP, listReference, rangeNamed, recordNamed, filterDay, choice, sendListPdf } from '../shared/listPaper';
 
 // The employee routes live in ./employees; re-exported here so the mount in
 // index.ts keeps resolving until it imports them from their own module.
@@ -39,32 +40,11 @@ supplierRoutes.use(authenticate);
 // ── List (the quotation list's layout, 2026-10-08) ───────────────────────────
 
 const SUPPLIER_SORTS = ['code', 'name', 'createdAt'];
-const SUPPLIER_DAY = /^\d{4}-\d{2}-\d{2}$/;
 /** An order actually placed with the supplier — "Ordered from" and the Orders column. */
 const PLACED_PO: Prisma.PurchaseOrderWhereInput = { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED', 'RECEIVED'] } };
 /** Placed and not yet delivered in full — the purchase order list's `?awaiting=true`. */
 const AWAITING_PO: Prisma.PurchaseOrderWhereInput = { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } };
 const ORDER_FILTERS = ['awaiting', 'placed', 'never'] as const;
-
-function supplierDay(value: string | undefined, label: string): string | null {
-  if (!value) return null;
-  if (!SUPPLIER_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
-  return value;
-}
-
-/** The most rows a printed list carries; the reference says when it was cut. */
-const LIST_CAP = 1000;
-
-/**
- * A printed list's reference: "12 suppliers", or, cut at the cap, "first
- * 1,000 of 1,234 suppliers printed" — then every filter that narrowed it.
- */
-function listReference(count: number, printed: number, noun: readonly [string, string], filters: (string | null | false | undefined)[]): string {
-  const n = (v: number) => v.toLocaleString('en-PH');
-  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
-  const named = filters.filter(Boolean);
-  return named.length ? `${head} — ${named.join(' · ')}` : head;
-}
 
 /**
  * Which suppliers a list query means — ONE rule for the list, its summary
@@ -94,7 +74,7 @@ export function supplierListWhere(
   }
   const f = q.filters;
   if (f.isActive) {
-    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is one of Active, Inactive');
     and.push({ isActive: f.isActive === 'true' });
   }
   if (f.partner) {
@@ -103,8 +83,8 @@ export function supplierListWhere(
   }
   if (q.scope === 'mine') and.push({ createdById: me.id });
   if (f.createdById) and.push({ createdById: f.createdById });
-  const from = supplierDay(f.createdFrom, 'Added from');
-  const to = supplierDay(f.createdTo, 'Added to');
+  const from = filterDay(f.createdFrom, 'Added from');
+  const to = filterDay(f.createdTo, 'Added to');
   if (from || to) {
     and.push({ createdAt: { ...(from ? { gte: manilaDayStart(from) } : {}), ...(to ? { lte: manilaDayEnd(to) } : {}) } });
   }
@@ -223,18 +203,15 @@ supplierRoutes.get(
       supplierListSummary(base, where, mayOrders),
     ]);
     const f = q.filters;
-    // A Manila day the filter names ('YYYY-MM-DD'), as a list prints a date (MM/DD/YYYY).
-    const listDay = (key: unknown) =>
-      typeof key === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(key) ? formatShortDate(new Date(`${key}T00:00:00Z`)) : '…';
     const tabName = f.category === 'none' ? 'not stated' : summary.tabs.find((t) => t.value.toLowerCase() === String(f.category ?? '').trim().toLowerCase())?.label;
-    const addedBy = f.createdById ? await prisma.user.findUnique({ where: { id: f.createdById }, select: { name: true } }) : null;
+    const addedBy = await recordNamed('person', f.createdById, 'added by');
     const reference = listReference(summary.count, rows.length, ['supplier', 'suppliers'], [
       q.search && `search "${q.search}"`,
       f.category && `supplies ${tabName ?? f.category}`,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' && 'inactive',
       f.partner === 'yes' ? 'partners' : f.partner === 'no' && 'not partners',
-      f.createdById && `added by ${addedBy?.name ?? 'one person'}`,
-      (f.createdFrom || f.createdTo) && `added ${listDay(f.createdFrom)} to ${listDay(f.createdTo)}`,
+      addedBy,
+      rangeNamed('added', f.createdFrom, f.createdTo),
       f.orders === 'awaiting' ? 'with an order awaiting delivery' : f.orders === 'placed' ? 'ordered from' : f.orders === 'never' && 'never ordered from',
       q.scope === 'mine' && 'added by me',
       f.ids && 'the rows selected',
@@ -273,9 +250,7 @@ supplierRoutes.get(
       { entityType: 'supplier', entityId: 'list', action: 'EXPORTED', summary: `Exported the supplier list as PDF (${rows.length} supplier(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="suppliers.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'suppliers.pdf');
   }),
 );
 
@@ -690,14 +665,11 @@ export function itemListWhere(q: ListQuery): Prisma.ItemWhereInput {
     });
   }
   if (f.isActive) {
-    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is one of Active, Inactive');
     and.push({ isActive: f.isActive === 'true' });
   }
-  if (f.itemType) {
-    const types = Object.values(ItemType) as string[];
-    if (!types.includes(f.itemType)) throw badRequest(`Type is one of ${types.join(', ')}`);
-    and.push({ itemType: f.itemType as ItemType });
-  }
+  const itemType = choice(f.itemType, ItemType, 'Type');
+  if (itemType) and.push({ itemType });
   if (f.categoryId) and.push({ categoryId: f.categoryId });
   if (f.costCategoryId) and.push({ costCategoryId: f.costCategoryId });
   const ids = idsFilter(f.ids);
@@ -810,9 +782,7 @@ itemRoutes.get(
       { entityType: 'item', entityId: 'list', action: 'EXPORTED', summary: `Exported the item master as PDF (${rows.length} item(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="items.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'items.pdf');
   }),
 );
 

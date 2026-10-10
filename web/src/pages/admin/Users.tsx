@@ -191,10 +191,6 @@ export function Users() {
       <div className="page-head">
         <div>
           <h1>Users</h1>
-          <p>
-            Access is granted by role, then adjusted per person. A denial on an individual always
-            beats a grant from their role, so you can hand out a broad role and still close one door.
-          </p>
         </div>
       </div>
 
@@ -649,7 +645,7 @@ function UserEditor({
             <strong>Per-person overrides</strong>
             <span className="faint hraud-small">
               click to cycle: role default → <span className="hraud-allow">allow</span> →{' '}
-              <span className="hraud-deny">deny</span>
+              <span className="hraud-deny">deny</span> — a deny beats a grant from any role
             </span>
           </div>
 

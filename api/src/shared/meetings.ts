@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { conflict, forbidden } from '../http/kit';
-import { manilaDayKey } from './day';
+import { manilaDayEnd, manilaDayKey, manilaDayStart } from './day';
 import type { CalendarEventInput } from './calendar-links';
 
 /**
@@ -160,9 +160,11 @@ export function whenWhere(when: string | undefined, now = new Date()): Prisma.Me
     case 'past':
       return { endsAt: { lt: now } };
     case 'today': {
-      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const end = new Date(start.getTime() + 86_400_000);
-      return { startsAt: { gte: start, lt: end } };
+      // Manila's day, whatever the server's clock is set to: midnight to the
+      // last instant in Manila. The host's local midnight put a 07:00 meeting
+      // on a UTC server under yesterday.
+      const key = manilaDayKey(now);
+      return { startsAt: { gte: manilaDayStart(key), lte: manilaDayEnd(key) } };
     }
     default:
       return {};

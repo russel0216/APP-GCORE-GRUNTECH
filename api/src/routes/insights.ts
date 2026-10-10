@@ -6,7 +6,7 @@ import { handler, badRequest } from '../http/kit';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { financePosition, claimPayable } from '../shared/finance';
-import { stockOnHand } from '../shared/chain';
+import { stockOnHand, availableOf, belowReorder, REORDER_CANDIDATES } from '../shared/chain';
 import { groupShares, quotationValue, valueRevision } from '../shared/pipeline';
 import { groupKey } from '../shared/quotationGroups';
 import { manilaDayStart } from '../shared/day';
@@ -1133,8 +1133,10 @@ insightRoutes.get(
         select: { quantity: true, unitCost: true, occurredAt: true },
       }),
       slowMovers(sinceDays),
+      // The G-CHAIN stock list's own rule (shared/chain.ts), so this list is
+      // the set its "Below level" filter opens — verify-insights asserts it.
       prisma.inventoryBalance.findMany({
-        where: { quantity: { gt: 0 }, item: { reorderLevel: { gt: 0 } } },
+        where: REORDER_CANDIDATES,
         include: {
           item: { select: { id: true, code: true, name: true, unit: true, reorderLevel: true } },
           warehouse: { select: { id: true, name: true } },
@@ -1166,16 +1168,16 @@ insightRoutes.get(
     );
     const monthlyIssue = cents(issuedValue / months);
 
-    const belowReorder = reorder
+    const belowLevel = reorder
+      .filter(belowReorder)
       .map((b) => ({
         item: b.item,
         warehouse: b.warehouse,
         quantity: num(b.quantity),
         borrowed: num(b.borrowedQty),
-        available: cents(num(b.quantity) - num(b.borrowedQty)),
+        available: availableOf(b),
         reorderLevel: num(b.item.reorderLevel),
       }))
-      .filter((r) => r.available < r.reorderLevel)
       .sort((a, b) => a.available - b.available);
 
     res.json({
@@ -1189,7 +1191,7 @@ insightRoutes.get(
         totalValue,
       ),
       sinceDays,
-      belowReorder,
+      belowReorder: belowLevel,
       throughput: {
         months,
         issuedValue,

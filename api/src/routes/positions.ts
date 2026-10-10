@@ -9,7 +9,7 @@ import { nextNumber } from '../shared/numbering';
 import { filledByPosition, mirrorPositionTitle, plantillaSummary } from '../shared/plantilla';
 import { sweepSeparations } from '../shared/clearance';
 import { renderDocument } from '../shared/pdf';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 
 /**
  * The plantilla — positions per department, how many of each are authorised,

@@ -25,7 +25,6 @@
 
 import bcrypt from 'bcryptjs';
 import fs from 'node:fs';
-import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -38,6 +37,14 @@ import { nextNumber } from '../src/shared/numbering';
 import { CAD_DRAWING_TYPES } from '../src/shared/cadDrawingTypes';
 // Side-effect import: registers the search provider and the attachment guards.
 import { cadListWhere, cadListSummary } from '../src/routes/cadJobOrders';
+import {
+  flat,
+  pendingCount,
+  printed,
+  signoffSlots,
+  signs,
+  slotsSaid,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -135,52 +142,6 @@ async function http(token: string, method: string, path: string, body?: unknown)
   }
   return { status: res.status, type, text, body: parsed };
 }
-
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation
- * uses. PDFKit Flate-compresses its content streams and writes text as hex
- * runs split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-/** A document's text and its page sizes. */
-async function printed(token: string, path: string): Promise<{ status: number; text: string; pages: string[] }> {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) return { status: res.status, text: '', pages: [] };
-  const bytes = Buffer.from(await res.arrayBuffer());
-  const pages = [...bytes.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map((m) => `${m[1]}x${m[2]}`);
-  return { status: res.status, text: pdfText(bytes), pages };
-}
-
-/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
-const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
-const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
-/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
-const flat = (t: string) => t.replace(/\s+/g, ' ');
 
 async function apiReachable(): Promise<boolean> {
   try {
@@ -471,14 +432,22 @@ async function main() {
   const printsBefore = await exportsOf(id);
   const donePaper = await printed(requestorT, `/cad-job-orders/${id}/pdf`);
   const roles = (t: string) => ['REQUESTED BY', 'DRAWN BY', 'ACCEPTED BY', 'CLOSED BY'].filter((r) => flat(t).includes(r));
+  // Counted in the sign-off block, slot by slot: the revisions table and the
+  // thread print the same "Oct 10, 2026, 3:19 PM" dates, and a date there is
+  // not a signature.
+  const slotsOf = (t: string) => signoffSlots(t, 'REQUESTED BY');
+  const doneSlots = slotsOf(donePaper.text);
   check(
     'an accepted request prints Requested, Drawn and Accepted by, each by name and dated, nothing Pending',
     donePaper.status === 200 &&
       roles(donePaper.text).join(',') === 'REQUESTED BY,DRAWN BY,ACCEPTED BY' &&
-      signedCount(donePaper.text) === 3 &&
-      pendingCount(donePaper.text) === 0 &&
-      donePaper.text.includes(`${TAG} Requestor`),
-    `${donePaper.status} ${roles(donePaper.text).join(',')} ${signedCount(donePaper.text)} signed, ${pendingCount(donePaper.text)} pending`,
+      doneSlots.length === 3 &&
+      doneSlots.every((sl) => sl.signed) &&
+      signs(doneSlots[0], 'Requested by', requestor.name) &&
+      signs(doneSlots[1], 'Drawn by', support.name) &&
+      signs(doneSlots[2], 'Accepted by', requestor.name) &&
+      pendingCount(donePaper.text) === 0,
+    `${donePaper.status} ${roles(donePaper.text).join(',')} · ${slotsSaid(doneSlots)} · ${pendingCount(donePaper.text)} pending`,
   );
   check(
     'its words are words: the status and priority through statusLabel, the revisions under "Revision"',
@@ -495,25 +464,28 @@ async function main() {
     donePaper.text.split('\n').filter((l) => l.includes('Requestor')).join(' | '),
   );
   const workingPaper = await printed(leadT, `/cad-job-orders/${id2}/pdf`);
+  const workingSlots = slotsOf(workingPaper.text);
   check(
     'in progress with no revision yet: the designer on it and the requestor each stand over "Pending"',
     workingPaper.status === 200 &&
       roles(workingPaper.text).join(',') === 'REQUESTED BY,DRAWN BY,ACCEPTED BY' &&
-      workingPaper.text.includes(`${TAG} Designer Support`) &&
-      signedCount(workingPaper.text) === 1 &&
+      workingSlots.map((sl) => sl.signed).join(',') === 'true,false,false' &&
+      signs(workingSlots[1], 'Drawn by', support.name) &&
+      signs(workingSlots[2], 'Accepted by', requestor.name) &&
       pendingCount(workingPaper.text) === 2 &&
       workingPaper.text.includes('No revision submitted yet.') &&
       flat(workingPaper.text).includes('In progress'),
-    `${workingPaper.status} ${roles(workingPaper.text).join(',')} ${signedCount(workingPaper.text)} signed, ${pendingCount(workingPaper.text)} pending`,
+    `${workingPaper.status} ${roles(workingPaper.text).join(',')} · ${slotsSaid(workingSlots)} · ${pendingCount(workingPaper.text)} pending`,
   );
   const queuedPaper = await printed(requestorT, `/cad-job-orders/${id3}/pdf`);
+  const queuedSlots = slotsOf(queuedPaper.text);
   check(
     'waiting for a designer, it prints no "Drawn by" slot nobody is named for',
     queuedPaper.status === 200 &&
       roles(queuedPaper.text).join(',') === 'REQUESTED BY,ACCEPTED BY' &&
-      signedCount(queuedPaper.text) === 1 &&
+      queuedSlots.map((sl) => sl.signed).join(',') === 'true,false' &&
       pendingCount(queuedPaper.text) === 1,
-    `${queuedPaper.status} ${roles(queuedPaper.text).join(',')} ${signedCount(queuedPaper.text)} signed, ${pendingCount(queuedPaper.text)} pending`,
+    `${queuedPaper.status} ${roles(queuedPaper.text).join(',')} · ${slotsSaid(queuedSlots)} · ${pendingCount(queuedPaper.text)} pending`,
   );
   check('every print of a request is on its trail as EXPORTED', (await exportsOf(id)) === printsBefore + 1, `${printsBefore} → ${await exportsOf(id)}`);
   const listPrintsBefore = await exportsOf('list');
@@ -594,13 +566,16 @@ async function main() {
   const cancelled = await http(requestorT, 'POST', `/cad-job-orders/${id3}/cancel`, { reason: 'Customer withdrew' });
   check('the requestor cancels the third with a reason', cancelled.status === 200 && (await prisma.cadJobOrder.findUnique({ where: { id: id3 } }))?.cancelReason === 'Customer withdrew');
   const cancelledPaper = await printed(requestorT, `/cad-job-orders/${id3}/pdf`);
+  const cancelledSlots = slotsOf(cancelledPaper.text);
   check(
     'a cancelled request prints only what happened — no slot left "Pending" for ever — and says why',
     cancelledPaper.status === 200 &&
       roles(cancelledPaper.text).join(',') === 'REQUESTED BY' &&
+      cancelledSlots.length === 1 &&
+      cancelledSlots[0].signed &&
       pendingCount(cancelledPaper.text) === 0 &&
       cancelledPaper.text.includes('Customer withdrew'),
-    `${cancelledPaper.status} ${roles(cancelledPaper.text).join(',')} ${pendingCount(cancelledPaper.text)} pending`,
+    `${cancelledPaper.status} ${roles(cancelledPaper.text).join(',')} · ${slotsSaid(cancelledSlots)} · ${pendingCount(cancelledPaper.text)} pending`,
   );
 
   // ══ Drawing types ═════════════════════════════════════════════════════════

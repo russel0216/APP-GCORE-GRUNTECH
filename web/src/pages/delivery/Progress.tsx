@@ -188,7 +188,8 @@ export function ProgressReports() {
           endpoint="/billings"
           columns={billingColumns}
           rowKey={(b) => b.id}
-          scoped
+          // No Mine/All switch: a billing has no author the API narrows by
+          // (`billingListWhere` reads no scope), so the switch changed nothing.
           searchPlaceholder="Search number, project…"
           onRowClick={(b) => navigate(`/g-ops/billings/${b.id}`)}
           emptyTitle="Nothing billed yet"

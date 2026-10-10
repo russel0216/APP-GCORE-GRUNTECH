@@ -518,6 +518,8 @@
   align-self: start;
   display: flex;
   flex-direction: column;
+  /* A word wider than its column (an email) wraps inside it, as on the PDF. */
+  overflow-wrap: anywhere;
 }
 
 /*

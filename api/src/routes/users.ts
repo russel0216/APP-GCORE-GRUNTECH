@@ -21,7 +21,7 @@ import { allPermissions, REGISTRY, ACTION_LABELS } from '../permissions/registry
 import { ADMIN_RESET_HOURS, createLogin, deliverLink, issueToken } from '../shared/accounts';
 import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatShortDate } from '../shared/pdf';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, listReference, sendListPdf } from '../shared/listPaper';
 
 export const userRoutes = Router();
 userRoutes.use(authenticate);

@@ -64,18 +64,15 @@ const ROLES: RoleSeed[] = [
     only: [
       ...VIEW_OWN_SELF('gops', 'quotations'),
       'gops.quotations.view_all',
-      'gops.quotations.export',
       // Their own only: the route also requires authorship (canEditRecord),
       // and refuses a won, delivered or pending quotation.
       'gops.quotations.delete',
       // The SCORO history they are continuing from. Read-only.
       'gops.quote_archive.view_all',
       ...VIEW_OWN_SELF('gops', 'costing'),
-      'gops.costing.export',
       // Books their own quotations as sales orders, and sees everyone's.
       ...VIEW_OWN_SELF('gops', 'sales_orders'),
       'gops.sales_orders.view_all',
-      'gops.sales_orders.export',
       'gops.sales_orders.delete',
       'gops.dashboard.view_all',
       'gops.pipeline.view_all',
@@ -85,10 +82,8 @@ const ROLES: RoleSeed[] = [
       'gops.projects.view_all',
       // A partner's catalogue and price list are what a salesperson sells from.
       'gops.partners.view_all',
-      'gops.partners.export',
       // Sales takes the service call and raises the job order for it.
       ...VIEW_OWN_SELF('gops', 'job_orders'),
-      'gops.job_orders.export',
       // And asks the design team for a drawing (2026-10-09).
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       ...VIEW_OWN_SELF('gfin', 'expenses'),
@@ -114,7 +109,6 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.projects.view_all',
-      'gops.projects.export',
       // The SCORO archive, seen and exported whole. Not create: the import is
       // an administrator's job, done once.
       'gops.quote_archive.view_all',
@@ -124,7 +118,6 @@ const ROLES: RoleSeed[] = [
       'insights.pipeline.export',
       ...VIEW_OWN_SELF('gops', 'job_orders'),
       'gops.job_orders.view_all',
-      'gops.job_orders.export',
       ...VIEW_OWN_SELF('gops', 'cad_job_orders'),
       'gops.cad_job_orders.view_all',
       'gops.cad_job_orders.export',
@@ -146,7 +139,6 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.sales_orders.view_all',
-      'gops.sales_orders.export',
       'gops.quotations.view_all',
       'gops.quote_archive.view_all',
       'gops.customers.view_all',
@@ -166,11 +158,8 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.sales_orders.view_all',
-      'gops.sales_orders.export',
       'gops.quotations.view_all',
-      'gops.quotations.export',
       'gops.costing.view_all',
-      'gops.costing.export',
       'gops.quote_archive.view_all',
       'gops.customers.view_all',
       'gops.partners.view_all',
@@ -193,7 +182,6 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.dashboard.view_all',
       'gops.costing.view_all',
-      'gops.costing.export',
       'gops.quotations.view_all',
       'gops.quote_archive.view_all',
       'gops.customers.view_all',
@@ -283,7 +271,6 @@ const ROLES: RoleSeed[] = [
       'gchain.purchase_orders.view_all',
       'gchain.inventory.view_all',
       'gfin.budget_vs_actual.view_all',
-      'ghr.overtime.approve',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
       ...VIEW_OWN_SELF('gfin', 'cash_advances'),
       ...VIEW_OWN_SELF('ghr', 'evaluations'),
@@ -373,15 +360,12 @@ const ROLES: RoleSeed[] = [
     only: [
       'gops.aftermarket.view_all',
       'gops.visits.view_all',
-      'gops.visits.export',
       'gops.renewals.view_all',
-      'gops.renewals.export',
       'gops.report_templates.view_all',
       'gops.customers.view_all',
       'gops.quotations.view_all',
       'gops.costing.view_all',
       'gops.partners.view_all',
-      'gops.partners.export',
       'gchain.inventory.view_all',
       ...VIEW_OWN_SELF('gops', 'purchase_requests'),
       ...VIEW_OWN_SELF('gchain', 'purchase_requests'),
@@ -430,7 +414,6 @@ const ROLES: RoleSeed[] = [
       'gchain.dashboard.view_all',
       'gchain.purchase_orders.view_all',
       'gchain.reports.view_all',
-      'gchain.reports.export',
       // The warehouse clears a leaver's tools and borrow slips.
       'ghr.clearances.view_all',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
@@ -488,16 +471,13 @@ const ROLES: RoleSeed[] = [
       'gfin.ar.view_all',
       'gfin.ar.create',
       'gfin.ar.edit_all',
-      'gfin.ar.export',
       'gfin.ap.view_all',
       'gfin.ap.create',
       'gfin.ap.edit_all',
-      'gfin.ap.export',
       'gchain.suppliers.view_all',
       'gfin.expenses.view_all',
       'gfin.cash_advances.view_all',
       'gfin.reports.view_all',
-      'gfin.reports.export',
       'gops.projects.view_all',
       'gchain.receiving.view_all',
       ...VIEW_OWN_SELF('ghr', 'meetings'),
@@ -526,7 +506,6 @@ const ROLES: RoleSeed[] = [
     ],
     only: [
       'ghr.clock.view_own',
-      'ghr.clock.create',
       'ghr.passport.view_own',
       'ghr.passport.create',
       ...VIEW_OWN_SELF('gfin', 'expenses'),
@@ -539,18 +518,14 @@ const ROLES: RoleSeed[] = [
     description: 'Approves leave and overtime for their direct reports',
     only: [
       'ghr.clock.view_own',
-      'ghr.clock.create',
       'ghr.dashboard.view_all',
       ...VIEW_OWN_SELF('ghr', 'leave'),
       'ghr.leave.view_all',
-      'ghr.leave.approve',
       ...VIEW_OWN_SELF('ghr', 'overtime'),
       'ghr.overtime.view_all',
-      'ghr.overtime.approve',
       // First sign-off on a leaver's clearance; writes the evaluations of
       // their own probationers.
       'ghr.clearances.view_all',
-      'ghr.clearances.approve',
       ...VIEW_OWN_SELF('ghr', 'evaluations'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),
       'ghr.training_calendar.view_all',
@@ -567,7 +542,6 @@ const ROLES: RoleSeed[] = [
     description: 'Clocks in, files leave and overtime, sees their own records',
     only: [
       'ghr.clock.view_own',
-      'ghr.clock.create',
       ...VIEW_OWN_SELF('ghr', 'leave'),
       ...VIEW_OWN_SELF('ghr', 'overtime'),
       // A leaver raises their own clearance; an evaluation is read once
@@ -597,12 +571,10 @@ const ROLES: RoleSeed[] = [
       'ghr.training_sessions.view_all',
       'ghr.training_sessions.create',
       'ghr.training_sessions.edit_own',
-      'ghr.training_sessions.export',
       'ghr.passports.view_all',
       'ghr.passport.view_own',
       'ghr.passport.create',
       'ghr.clock.view_own',
-      'ghr.clock.create',
       ...VIEW_OWN_SELF('ghr', 'leave'),
       ...VIEW_OWN_SELF('ghr', 'overtime'),
       ...VIEW_OWN_SELF('ghr', 'meetings'),

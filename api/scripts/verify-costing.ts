@@ -27,7 +27,6 @@
  */
 
 import bcrypt from 'bcryptjs';
-import zlib from 'node:zlib';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -39,6 +38,13 @@ import * as webMath from '../../web/src/lib/costingMath';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
 // Registers the costing's onApprovalSettled subscriber in this process.
 import '../src/routes/costing';
+import {
+  flat,
+  LANDSCAPE,
+  pdfPieces,
+  printed,
+  squash,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -59,33 +65,6 @@ function check(label: string, condition: boolean, detail?: string) {
 }
 
 const money = (a: number, b: number) => Math.abs(a - b) < 0.005;
-
-/** The text runs a PDF shows, in drawing order (verify-foundation.ts's reader). */
-function pdfRuns(pdf: Buffer): string[] {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue; // not every stream is text
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out;
-}
 
 /** The sign-off block's text — from PREPARED BY to the strapline — one line, a wrapped name read whole. */
 function signoffs(runs: string[]): string {
@@ -417,41 +396,34 @@ async function main() {
   // A priced, FINAL costing with lines, sections and tasks — the source for
   // both the job link and the duplicate.
   const sourceId = fromNew.body.id as string;
-  for (const [i, line] of [
-    { cat: categories[0].id, description: 'Compressor', quantity: 2, unitCost: 150000 },
-    { cat: categories[1].id, description: 'Installation crew', quantity: 12, unitCost: 2500 },
-  ].entries()) {
-    const r = await api(tEstimator, 'POST', `/costings/${sourceId}/lines`, {
-      costCategoryId: line.cat,
-      description: line.description,
-      quantity: line.quantity,
-      unit: i === 0 ? 'unit' : 'day',
-      unitCost: line.unitCost,
-      sortOrder: i,
-    });
-    if (r.status !== 201) throw new Error(`line create failed: ${JSON.stringify(r.body)}`);
-  }
-  const sec1 = await api(tEstimator, 'POST', `/costings/${sourceId}/sections`, {
-    kind: 'MAIN_WORK',
-    name: 'Fabrication and installation',
-    durationDays: 30,
-    value: 300000,
-    sortOrder: 0,
+  // Written the way the sheet editor writes it — one PUT, header, lines and
+  // scope together (the per-line and per-section routes are gone). The tasks
+  // fill their phases: 3 × 10 working days is the first phase's 30, the
+  // purity test the second's 5.
+  const sourceSheet = await api(tEstimator, 'PUT', `/costings/${sourceId}/sheet`, {
+    title: fromNew.body.title,
+    lines: [
+      { costCategoryId: categories[0].id, description: 'Compressor', quantity: 2, unit: 'unit', unitCost: 150000 },
+      { costCategoryId: categories[1].id, description: 'Installation crew', quantity: 12, unit: 'day', unitCost: 2500 },
+    ],
+    sections: [
+      {
+        kind: 'MAIN_WORK',
+        name: 'Fabrication and installation',
+        durationDays: 30,
+        value: 300000,
+        tasks: ['Foundation', 'Piping', 'Controls'].map((name) => ({ name, durationDays: 10 })),
+      },
+      {
+        kind: 'TESTING_COMMISSIONING',
+        name: 'Testing and commissioning',
+        durationDays: 5,
+        value: 96000,
+        tasks: [{ name: 'Purity test', durationDays: 5 }],
+      },
+    ],
   });
-  const sec2 = await api(tEstimator, 'POST', `/costings/${sourceId}/sections`, {
-    kind: 'TESTING_COMMISSIONING',
-    name: 'Testing and commissioning',
-    durationDays: 5,
-    value: 96000,
-    sortOrder: 1,
-  });
-  for (const name of ['Foundation', 'Piping', 'Controls']) {
-    await api(tEstimator, 'POST', `/costings/${sourceId}/sections/${sec1.body.id}/tasks`, { name, durationDays: 0 });
-  }
-  await api(tEstimator, 'POST', `/costings/${sourceId}/sections/${sec2.body.id}/tasks`, {
-    name: 'Purity test',
-    durationDays: 0,
-  });
+  if (sourceSheet.status !== 200) throw new Error(`sheet save failed: ${JSON.stringify(sourceSheet.body)}`);
   // With the seeded costing workflow active, FINAL is the approver's word.
   const selfFinal = await api(tEstimator, 'PATCH', `/costings/${sourceId}`, { status: 'FINAL' });
   check('with a costing workflow active, the author cannot mark it final', selfFinal.status === 400, `status ${selfFinal.status}`);
@@ -527,10 +499,9 @@ async function main() {
   // visibility rule, eight columns on landscape paper, audited.
   console.log('The printed costing list');
   const printList = async (token: string, query: string) => {
-    const res = await fetch(`${BASE}/costings/pdf?${query}`, { headers: { Authorization: `Bearer ${token}` } });
-    const bytes = Buffer.from(await res.arrayBuffer());
-    const line = res.ok ? pdfRuns(bytes).join(' ').replace(/\s+/g, ' ') : '';
-    return { status: res.status, type: res.headers.get('content-type') ?? '', bytes, line, flat: line.replace(/ /g, '') };
+    const paper = await printed(token, `/costings/pdf?${query}`);
+    const line = flat(paper.text);
+    return { ...paper, line, flat: squash(line) };
   };
   const printedMine = await prisma.costing.findMany({
     where: { ownerId: estimator.id, title: { startsWith: TAG } },
@@ -540,7 +511,7 @@ async function main() {
   const paper = await printList(tEstimator, `search=${encodeURIComponent(TAG)}&scope=all`);
   check(
     'GET /costings/pdf answers a PDF, on landscape paper — eight columns, the number column headed "Number"',
-    paper.status === 200 && paper.type.startsWith('application/pdf') && paper.bytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]') &&
+    paper.status === 200 && paper.type.startsWith('application/pdf') && paper.pages.length > 0 && paper.pages.every((pg) => pg === LANDSCAPE) &&
       paper.line.includes('NUMBER') && !paper.line.includes('NO.'),
     `${paper.status} ${paper.type}`,
   );
@@ -1024,7 +995,7 @@ async function main() {
   check('the author can still reopen a final costing', reopen.status === 200 && reopen.body.status === 'DRAFT');
   // Reopened, its last request (approved) is no longer its approval: the
   // paper prints the route submitting it now would take, every step open.
-  const reopened = signoffs(pdfRuns(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
+  const reopened = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a reopened costing prints the route anew — all three steps Pending, none of the old signatures dated',
     (reopened.match(/Pending/g) ?? []).length === 3 && reopened.includes(`TECHNICAL MANAGER ${reviewer.name}`),
@@ -1037,18 +1008,18 @@ async function main() {
   await prisma.scopeTask.create({ data: { scopeSectionId: afterPut!.scopeSections[0].id, name: `${TAG} Long task`, startDay: 3, durationDays: 20, sortOrder: 5 } });
   const pdfRes = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } });
   const pdf = Buffer.from(await pdfRes.arrayBuffer());
-  const pdfText = pdf.toString('latin1');
-  check('GET /costings/:id/pdf renders a PDF', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf' && pdfText.startsWith('%PDF'));
-  const pages = (pdfText.match(/\/Type \/Page\b/g) ?? []).length;
+  const pdfRaw = pdf.toString('latin1');
+  check('GET /costings/:id/pdf renders a PDF', pdfRes.status === 200 && pdfRes.headers.get('content-type') === 'application/pdf' && pdfRaw.startsWith('%PDF'));
+  const pages = (pdfRaw.match(/\/Type \/Page\b/g) ?? []).length;
   check('the estimate is followed by the Scope of Work on its own page', pages >= 2, `${pages} page(s)`);
-  check('that page is landscape', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(pdfText));
+  check('that page is landscape', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(pdfRaw));
   const colleaguePdf = await fetch(`${BASE}/costings/${sheetId}/pdf`, { headers: { Authorization: `Bearer ${tColleague}` } });
   check("own scope: a colleague cannot print somebody else's estimate", colleaguePdf.status === 403, `status ${colleaguePdf.status}`);
 
   // Rule 6: the sign-offs are the route as the workflow names its steps —
   // in capitals, nothing added — each under who signed it; the author only
   // ever as PREPARED BY, never as an approver.
-  const runs = pdfRuns(pdf);
+  const runs = pdfPieces(pdf);
   const signed = signoffs(runs);
   check(
     'the estimate signs off PREPARED BY the author, then TECHNICAL MANAGER, TEAM LEADER and CEO (CTG) by their steps’ names',
@@ -1077,7 +1048,7 @@ async function main() {
     !!(await prisma.auditLog.findFirst({ where: { entityType: 'costing', entityId: sheetId, action: 'EXPORTED', actorId: estimator.id } })),
   );
   // A draft names who will sign each step, "Pending" under them.
-  const drafted = signoffs(pdfRuns(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
+  const drafted = signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${empty.body.id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   check(
     'a draft prints the route it would take: each step by name, who is assigned, Pending under them — never the author',
     drafted.includes(`TECHNICAL MANAGER ${reviewer.name}`) && (drafted.match(/Pending/g) ?? []).length === 3 && !drafted.includes(`TECHNICAL MANAGER ${estimator.name}`),
@@ -1103,7 +1074,7 @@ async function main() {
   // or returned by the approver and then made final that way. Nobody will
   // ever sign that route, so neither the old signatures nor "Pending" print.
   const finalSignoffs = async (id: string) =>
-    signoffs(pdfRuns(Buffer.from(await (await fetch(`${BASE}/costings/${id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
+    signoffs(pdfPieces(Buffer.from(await (await fetch(`${BASE}/costings/${id}/pdf`, { headers: { Authorization: `Bearer ${tEstimator}` } })).arrayBuffer())));
   const noRoute = (s: string) => s.startsWith(`PREPARED BY ${estimator.name}`) && !/TECHNICAL MANAGER|TEAM LEADER|CEO \(CTG\)|APPROVED BY|Pending/.test(s);
   const reopenAgain = await api(tEstimator, 'PATCH', `/costings/${sheetId}`, { status: 'DRAFT' });
   await prisma.costing.update({ where: { id: sheetId }, data: { status: 'FINAL', finalAt: new Date() } });

@@ -22,7 +22,6 @@
  * business, and a test that depends on it breaks the moment somebody is hired.
  */
 
-import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -30,6 +29,10 @@ import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval } from '../src/shared/approvals';
+import {
+  between,
+  pdfText,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -142,37 +145,6 @@ async function api(token: string, method: string, path: string, body?: unknown):
     parsed = { raw: text };
   }
   return { status: res.status, body: parsed };
-}
-
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation
- * uses. PDFKit Flate-compresses its content streams and writes text as hex
- * runs split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
 }
 
 async function apiReachable(): Promise<boolean> {
@@ -682,6 +654,10 @@ async function main() {
       spec.includes('Stainless steel interconnection'),
     spec.split('\n').slice(0, 40).join(' | ').slice(0, 300),
   );
+  // The line table is the runs from its last head to the money block's first
+  // row: a TOTAL row would be among them. The letterhead and the strapline
+  // are not — a company called "Total Solutions" is no TOTAL row.
+  const lineTable = between(spec, `AMOUNT (${currency})`, 'Subtotal');
   check(
     'the money is a totals block in the quotation\'s words — Subtotal, VAT, Total, Less: EWT, Net collectible — the table\'s heads naming the currency, and no TOTAL row',
     spec.includes('Subtotal') &&
@@ -691,8 +667,10 @@ async function main() {
       spec.includes('Net collectible') &&
       words.includes(`AMOUNT (${currency})`) &&
       new RegExp(`^${currency} [\\d,]+\\.\\d{2}$`, 'm').test(spec) &&
-      !spec.includes('TOTAL'),
-    spec.split('\n').filter((l) => /Subtotal|VAT|Total|TOTAL|EWT|collectible|AMOUNT/.test(l)).join(' | ').slice(0, 300),
+      lineTable.includes('Oxygen generator skid') &&
+      !lineTable.some((l) => /\btotal\b/i.test(l)),
+    `${lineTable.length} run(s) in the line table${lineTable.filter((l) => /\btotal\b/i.test(l)).map((l) => `, "${l}"`).join('')} · ` +
+      spec.split('\n').filter((l) => /Subtotal|VAT|Total|TOTAL|EWT|collectible|AMOUNT/.test(l)).join(' | ').slice(0, 300),
   );
   check(
     'a status prints as a word ("Pending approval"), and no "≠" turns into "=" — the note says "is not"',
@@ -704,7 +682,7 @@ async function main() {
   );
   check(
     'a footer note, and sign-offs both signed (dated) and Pending — under a name and alone — each role in capitals',
-    spec.includes('Specimen — the customer, figures and approvers on this page are samples.'.replace('—', '\x97')) &&
+    spec.includes('Specimen — the customer, figures and approvers on this page are samples.') &&
       ['PREPARED BY', 'TECHNICAL REVIEW', 'FINANCE APPROVAL', 'CEO APPROVAL'].every((r) => words.includes(r)) &&
       (spec.match(/^[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M$/gm) ?? []).length === 2 &&
       (spec.match(/^Pending$/gm) ?? []).length === 2 &&

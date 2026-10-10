@@ -24,12 +24,12 @@ import { nextNumber } from '../shared/numbering';
 import { notify, type NotificationType } from '../shared/notifications';
 import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatDate, formatShortDate, formatDateTime, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
-import { contactPhone } from '../shared/approvals';
+import { contactsOf } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
 import { registerAttachmentGuard, cadUpload, saveAttachment, attachmentPath } from '../shared/attachments';
 import { dayKey } from '../shared/aftermarket';
 import { safeHttpUrl } from '../shared/partners';
-import { LIST_CAP, listReference, listDay, namedInFilter } from './jobs';
+import { LIST_CAP, listReference, rangeNamed, namedInFilter, filterDay, dayOf, choice, sendListPdf } from '../shared/listPaper';
 
 /**
  * CAD job orders — the design team's queue (2026-10-09, the owner's call:
@@ -69,10 +69,6 @@ const P = {
 
 const OPEN: CadJobOrderStatus[] = ['REQUESTED', 'IN_PROGRESS', 'FOR_REVIEW', 'CHANGES_REQUESTED', 'ON_HOLD'];
 const CLOSED: CadJobOrderStatus[] = ['COMPLETED', 'CANCELLED'];
-
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
-}
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -291,28 +287,19 @@ export function cadListWhere(me: ResolvedUser, q: ReturnType<typeof listQuery>) 
 
   const f = q.filters;
   const more: Prisma.CadJobOrderWhereInput[] = [];
-  if (f.status) {
-    const status = asEnum(CadJobOrderStatus, f.status);
-    if (!status) throw badRequest(`Unknown status "${f.status}"`);
-    more.push({ status });
-  }
-  if (f.priority) {
-    const priority = asEnum(CadPriority, f.priority);
-    if (!priority) throw badRequest(`Unknown priority "${f.priority}"`);
-    more.push({ priority });
-  }
+  const status = choice(f.status, CadJobOrderStatus, 'Status');
+  if (status) more.push({ status });
+  const priority = choice(f.priority, CadPriority, 'Priority');
+  if (priority) more.push({ priority });
   if (f.open === 'true') more.push({ status: { in: OPEN } });
   if (f.overdue === 'true') more.push({ status: { in: OPEN }, neededBy: { lt: today() } });
   if (f.unassigned === 'true') more.push({ assignedToId: null, status: { in: OPEN } });
   for (const key of ['assignedToId', 'requestedById', 'drawingTypeId', 'customerId', 'jobId', 'quotationId'] as const) {
     if (f[key]) more.push({ [key]: f[key] === 'none' && key === 'assignedToId' ? null : f[key] });
   }
-  if (f.neededFrom || f.neededTo) {
-    const neededBy: Prisma.DateTimeNullableFilter = {};
-    if (f.neededFrom) neededBy.gte = asDate(f.neededFrom, 'Needed from');
-    if (f.neededTo) neededBy.lte = asDate(f.neededTo, 'Needed to');
-    more.push({ neededBy });
-  }
+  const neededFrom = filterDay(f.neededFrom, 'Needed from');
+  const neededTo = filterDay(f.neededTo, 'Needed to');
+  if (neededFrom || neededTo) more.push({ neededBy: { ...(neededFrom ? { gte: dayOf(neededFrom) } : {}), ...(neededTo ? { lte: dayOf(neededTo) } : {}) } });
   const where: Prisma.CadJobOrderWhereInput = more.length ? { AND: [base, ...more] } : base;
   return { base, where };
 }
@@ -418,7 +405,7 @@ cadJobOrderRoutes.get(
       inFilter.customer ? `customer ${inFilter.customer}` : null,
       inFilter.project ? `project ${inFilter.project}` : null,
       f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
-      f.neededFrom || f.neededTo ? `needed ${listDay(f.neededFrom)} to ${listDay(f.neededTo)}` : null,
+      rangeNamed('needed', f.neededFrom, f.neededTo),
       q.scope === 'mine' ? 'raised by me or on my board' : null,
       f.ids ? 'the rows selected' : null,
     ];
@@ -461,9 +448,7 @@ cadJobOrderRoutes.get(
       { entityType: 'cad_job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the CAD job orders list as PDF (${listReference(count, rows.length, ['CAD job order', 'CAD job orders'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="cad-job-orders.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'cad-job-orders.pdf');
   }),
 );
 
@@ -1062,18 +1047,9 @@ cadJobOrderRoutes.get(
     ]);
     const revisionFiles = await filesFor('cad_revision', revisions.map((r) => r.id));
     // The contact lines under each sign-off, for the paper only (the JSON
-    // never carries a mobile); `contactPhone` is the one reading of a number.
+    // never carries a mobile).
     const latest = revisions.length ? revisions[revisions.length - 1] : null;
-    const contactIds = [...new Set([row.requestedById, row.assignedToId, row.completedById, latest?.submittedBy.id].filter((v): v is string => !!v))];
-    const contacts = new Map(
-      (
-        await prisma.user.findMany({
-          where: { id: { in: contactIds } },
-          select: { id: true, email: true, phone: true, employee: { select: { mobile: true } } },
-        })
-      ).map((u) => [u.id, { phone: contactPhone(u), email: u.email }]),
-    );
-    const contactOf = (id: string | null) => (id ? contacts.get(id) : undefined);
+    const contacts = await contactsOf([row.requestedById, row.assignedToId, row.completedById, latest?.submittedBy.id]);
 
     const sections: PdfSection[] = [
       {
@@ -1137,7 +1113,7 @@ cadJobOrderRoutes.get(
     // slots are left out rather than printed "Pending" for ever.
     const cancelled = row.status === 'CANCELLED';
     const signer = (role: string, id: string | null | undefined, name: string | undefined, at?: Date | null): Signatory => {
-      const c = contactOf(id ?? null);
+      const c = id ? contacts.get(id) : undefined;
       return { role, name, phone: c?.phone, email: c?.email, at: at ?? undefined };
     };
     const signatories: Signatory[] = [signer('Requested by', row.requestedById, row.requestedBy.name, row.createdAt)];

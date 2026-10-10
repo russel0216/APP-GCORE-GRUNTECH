@@ -246,11 +246,6 @@ export function Payables() {
       <div className="page-head">
         <div>
           <h1>Accounts Payable</h1>
-          <p>
-            A bill raised against a receiving does <strong>not</strong> charge the project again —
-            the goods were charged when they arrived. A bill with nothing received behind it does,
-            because that is the first time the cost appears.
-          </p>
         </div>
       </div>
 
@@ -318,6 +313,7 @@ export function Payables() {
         reloadToken={reload}
         searchPlaceholder="Search number, supplier, their invoice number…"
         emptyTitle="No supplier bills yet"
+        emptyHint="A bill matched to a receiving charges the project nothing further; one with nothing received behind it is charged when approved."
         onRowClick={(r) => navigate(`/g-fin/ap/${r.id}`)}
         filters={[
           { key: 'status', label: 'Status', options: BILL_STATUSES },

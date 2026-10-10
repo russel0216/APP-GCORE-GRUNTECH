@@ -12,7 +12,6 @@
  * a sent invitation cannot be deleted.
  */
 
-import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -29,10 +28,20 @@ import {
   parseGoogleLink,
   timeWindow,
 } from '../src/shared/calendar-links';
-import { visibleWhere, meetingToCalendarEvent, isLive } from '../src/shared/meetings';
+import { visibleWhere, meetingToCalendarEvent, isLive, whenWhere } from '../src/shared/meetings';
 // Side-effect import: registers the meeting search and schedule providers.
 import '../src/routes/meetings';
 import { statusLabel } from '../src/shared/pdf';
+import {
+  checkListPaper,
+  checkOwnPaper,
+  flat,
+  printed,
+  readScreen,
+  referenceOf,
+  saysCount,
+  splittingValue,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -150,176 +159,6 @@ async function apiReachable(): Promise<boolean> {
   }
 }
 
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation uses.
- * PDFKit Flate-compresses its content streams and writes text as hex runs
- * split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-// ── Printed lists (rule 6, A5) ───────────────────────────────────────────────
-//
-// `GET <list>/pdf` reads the list's own where-builder, so the paper is the
-// screen: the same set for the same query (the reference's count is the
-// screen's total, every row is on it, the search named), `?ids=` prints only
-// the row ticked and says so, a filter is named and prints the screen's count
-// for it, and each print is on the trail as EXPORTED with entityId "list".
-
-/** A reference may wrap: read the words, not the line breaks. */
-const paperWords = (t: string) => t.replace(/\s+/g, ' ');
-/** A number or a name may wrap inside a narrow cell: compare with every space gone. */
-const paperSquash = (t: string) => t.replace(/\s+/g, '');
-
-async function readPaper(token: string, path: string) {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const type = res.headers.get('content-type') ?? '';
-  const bytes = Buffer.from(await res.arrayBuffer());
-  return { status: res.status, type, text: res.ok && type.includes('application/pdf') ? pdfText(bytes) : '' };
-}
-
-async function readScreen(token: string, path: string) {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const body = (await res.json().catch(() => ({}))) as { rows?: Record<string, unknown>[]; total?: number };
-  return { status: res.status, rows: body.rows ?? [], total: body.total ?? -1 };
-}
-
-/** "Reference: 3 leave requests" — the count a printed list opens with. */
-const countedAs = (n: number, noun: readonly [string, string]) =>
-  `Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
-const referenceOf = (text: string) => paperWords(text).match(/Reference:.{0,140}/)?.[0] ?? '';
-
-async function checkListPaper(o: {
-  label: string;
-  token: string;
-  actorId: string;
-  /** The list's path, '/leave'. */
-  list: string;
-  /** A query that finds this script's own rows, and how the reference names it. */
-  query: string;
-  named: string;
-  noun: readonly [string, string];
-  /** What on the paper names a row: its number, code or email. */
-  mark: (row: Record<string, unknown>) => string;
-  filter: { query: string; named: string };
-  entityType: string;
-}) {
-  const exported = () =>
-    prisma.auditLog.count({ where: { entityType: o.entityType, entityId: 'list', action: 'EXPORTED', actorId: o.actorId } });
-  const before = await exported();
-  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
-
-  const screen = await readScreen(o.token, `${o.list}?${o.query}&pageSize=200`);
-  const paper = await readPaper(o.token, `${o.list}/pdf?${o.query}`);
-  const missing = screen.rows.map(o.mark).filter((m) => !has(paper.text, m));
-  check(
-    `${o.label}: ${o.list}/pdf prints the list as the screen shows it — the same count, every row, the search named`,
-    paper.status === 200 &&
-      paper.type.includes('application/pdf') &&
-      screen.total > 0 &&
-      paperWords(paper.text).includes(countedAs(screen.total, o.noun)) &&
-      !missing.length &&
-      paperWords(paper.text).includes(o.named),
-    `${paper.status} ${paper.type} · screen ${screen.total} · missing ${missing.join(', ')} · ${referenceOf(paper.text)}`,
-  );
-
-  const [first, ...rest] = screen.rows;
-  const others = first ? rest.map(o.mark).filter((m) => m !== o.mark(first)) : [];
-  const ticked = await readPaper(o.token, `${o.list}/pdf?ids=${String(first?.id ?? 'none')}`);
-  check(
-    `${o.label}: ?ids= prints only the row ticked, and says so`,
-    ticked.status === 200 &&
-      !!first &&
-      paperWords(ticked.text).includes(countedAs(1, o.noun)) &&
-      paperWords(ticked.text).includes('the rows selected') &&
-      has(ticked.text, o.mark(first)) &&
-      others.every((m) => !has(ticked.text, m)),
-    `${ticked.status} · ${referenceOf(ticked.text)} · ${others.filter((m) => has(ticked.text, m)).length} other row(s) printed`,
-  );
-
-  const narrowed = await readScreen(o.token, `${o.list}?${o.filter.query}&pageSize=200`);
-  const filtered = await readPaper(o.token, `${o.list}/pdf?${o.filter.query}`);
-  const lost = narrowed.rows.map(o.mark).filter((m) => !has(filtered.text, m));
-  check(
-    `${o.label}: a filter is named (${o.filter.named}) and prints the screen's rows for it`,
-    filtered.status === 200 &&
-      narrowed.status === 200 &&
-      paperWords(filtered.text).includes(o.filter.named) &&
-      paperWords(filtered.text).includes(countedAs(narrowed.total, o.noun)) &&
-      !lost.length,
-    `${filtered.status} · screen ${narrowed.total} · missing ${lost.join(', ')} · ${referenceOf(filtered.text)}`,
-  );
-  const after = await exported();
-  check(`${o.label}: each print is on the trail as EXPORTED, entityId "list"`, after === before + 3, `${after - before} new row(s)`);
-}
-
-/**
- * A view_own holder's paper: only their own rows, whatever they search or
- * tick — somebody else's row named in `?ids=` prints nothing of it.
- */
-async function checkOwnPaper(o: {
-  label: string;
-  ownToken: string;
-  allToken: string;
-  list: string;
-  query: string;
-  noun: readonly [string, string];
-  mark: (row: Record<string, unknown>) => string;
-}) {
-  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
-  const own = (await readScreen(o.ownToken, `${o.list}?${o.query}&pageSize=200`)).rows;
-  const all = (await readScreen(o.allToken, `${o.list}?${o.query}&pageSize=200`)).rows;
-  const ownMarks = own.map(o.mark);
-  const theirs = all.filter((r) => !ownMarks.includes(o.mark(r)));
-  const paper = await readPaper(o.ownToken, `${o.list}/pdf?${o.query}`);
-  check(
-    `${o.label}: someone who sees only their own prints only their own`,
-    paper.status === 200 &&
-      paperWords(paper.text).includes(countedAs(own.length, o.noun)) &&
-      ownMarks.every((m) => has(paper.text, m)) &&
-      theirs.every((r) => !has(paper.text, o.mark(r))),
-    `${paper.status} · own ${own.length}, others ${theirs.length} · ${referenceOf(paper.text)}`,
-  );
-  if (theirs.length) {
-    const sneaky = await readPaper(o.ownToken, `${o.list}/pdf?ids=${String(theirs[0].id)}`);
-    check(
-      `${o.label}: and ticking somebody else's row prints nothing of it`,
-      sneaky.status === 200 && !has(sneaky.text, o.mark(theirs[0])) && paperWords(sneaky.text).includes(countedAs(0, o.noun)),
-      `${sneaky.status} · ${referenceOf(sneaky.text)}`,
-    );
-  }
-}
-
-/** A status that splits the rows — some have it, some do not — so a filter keeps some and drops others. */
-const splittingValue = (rows: Record<string, unknown>[], key: string) =>
-  [...new Set(rows.map((r) => String(r[key] ?? '')))].find((v) => {
-    const n = rows.filter((r) => String(r[key] ?? '') === v).length;
-    return v && n > 0 && n < rows.length;
-  }) ?? String(rows[0]?.[key] ?? '');
-
 const at = (iso: string) => new Date(iso);
 
 // ── The run ──────────────────────────────────────────────────────────────────
@@ -378,21 +217,21 @@ async function main() {
   ];
   const ics = buildIcs(ev, ana, attendees, 'https://gruntech.gcore.tech');
   const unfold = (s: string) => s.replace(/\r\n /g, '');
-  const flat = unfold(ics);
+  const unfolded = unfold(ics);
   check('the file is a VCALENDAR with one VEVENT and METHOD:REQUEST',
-    flat.startsWith('BEGIN:VCALENDAR') && flat.includes('METHOD:REQUEST') && flat.includes('BEGIN:VEVENT') && flat.endsWith('END:VCALENDAR\r\n'));
-  check('the UID is the record id at the app host', flat.includes('UID:abc123@gruntech.gcore.tech'));
-  check('SEQUENCE, DTSTART and DTEND are printed', flat.includes('SEQUENCE:0') && flat.includes('DTSTART:20260928T010000Z') && flat.includes('DTEND:20260928T020000Z'));
-  check('the summary escapes its semicolon', flat.includes(`SUMMARY:${TAG} Weekly ops\\; planning`));
+    unfolded.startsWith('BEGIN:VCALENDAR') && unfolded.includes('METHOD:REQUEST') && unfolded.includes('BEGIN:VEVENT') && unfolded.endsWith('END:VCALENDAR\r\n'));
+  check('the UID is the record id at the app host', unfolded.includes('UID:abc123@gruntech.gcore.tech'));
+  check('SEQUENCE, DTSTART and DTEND are printed', unfolded.includes('SEQUENCE:0') && unfolded.includes('DTSTART:20260928T010000Z') && unfolded.includes('DTEND:20260928T020000Z'));
+  check('the summary escapes its semicolon', unfolded.includes(`SUMMARY:${TAG} Weekly ops\\; planning`));
   check(
     'the description carries the number, the agenda and the deep link',
-    flat.includes('DESCRIPTION:GT-MTG-2026-0001\\nLine one\\nLine two\\nhttps://gruntech.gcore.tech/g-hr/meetings/abc123'),
+    unfolded.includes('DESCRIPTION:GT-MTG-2026-0001\\nLine one\\nLine two\\nhttps://gruntech.gcore.tech/g-hr/meetings/abc123'),
   );
-  check('the organiser is named', flat.includes('ORGANIZER;CN=Ana Cruz:mailto:ana@example.com'));
+  check('the organiser is named', unfolded.includes('ORGANIZER;CN=Ana Cruz:mailto:ana@example.com'));
   check(
     'a required attendee is REQ-PARTICIPANT and an optional one OPT-PARTICIPANT',
-    flat.includes('ATTENDEE;CN=Ben Reyes;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ben@example.com') &&
-      flat.includes('ATTENDEE;CN=Cat Santos;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:cat@example.com'),
+    unfolded.includes('ATTENDEE;CN=Ben Reyes;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ben@example.com') &&
+      unfolded.includes('ATTENDEE;CN=Cat Santos;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:cat@example.com'),
   );
   check('every raw line is at most 75 octets', ics.split('\r\n').every((l) => Buffer.byteLength(l, 'utf8') <= 75));
 
@@ -448,6 +287,24 @@ async function main() {
   check('Join is live from 15 minutes before the start', isLive({ startsAt: at('2026-09-28T01:00:00Z'), endsAt: at('2026-09-28T02:00:00Z'), status: 'PLANNED' }, at('2026-09-28T00:50:00Z')));
   check('and not an hour early', !isLive({ startsAt: at('2026-09-28T01:00:00Z'), endsAt: at('2026-09-28T02:00:00Z'), status: 'PLANNED' }, at('2026-09-28T00:00:00Z')));
 
+  // "Today" on the list is MANILA's day, whatever the server's clock is set
+  // to: at 00:30 in Manila (16:30Z the evening before) and at 23:30 in Manila
+  // the window is the same day, midnight to midnight in Manila. The host's
+  // local midnight put the first instant under yesterday on a UTC server.
+  const todayAt = (iso: string) => (whenWhere('today', at(iso)).startsAt ?? {}) as { gte?: Date; lte?: Date };
+  const earlyToday = todayAt('2026-10-09T16:30:00Z');
+  const lateToday = todayAt('2026-10-10T15:30:00Z');
+  check(
+    '"today" is Manila\'s day: 00:30 Manila opens the window at Manila midnight, 16:00Z the evening before',
+    earlyToday.gte?.toISOString() === '2026-10-09T16:00:00.000Z' && earlyToday.lte?.toISOString() === '2026-10-10T15:59:59.999Z',
+    `${earlyToday.gte?.toISOString()} – ${earlyToday.lte?.toISOString()}`,
+  );
+  check(
+    'and 23:30 in Manila is still the same day, never the next',
+    lateToday.gte?.toISOString() === earlyToday.gte?.toISOString() && lateToday.lte?.toISOString() === earlyToday.lte?.toISOString(),
+    `${lateToday.gte?.toISOString()} – ${lateToday.lte?.toISOString()}`,
+  );
+
   // ══ HTTP ═════════════════════════════════════════════════════════════════
   if (!(await apiReachable())) {
     console.log('\n  ✗ The API is not running — the HTTP cases were NOT checked.');
@@ -467,7 +324,7 @@ async function main() {
   const viewerRole = await makeRole('zzmt_viewer', `${TAG} viewer`, ['ghr.meetings.view_own']);
   const hrRole = await makeRole('zzmt_hr', `${TAG} hr`, [
     'ghr.meetings.view_own', 'ghr.meetings.view_all', 'ghr.meetings.create', 'ghr.meetings.edit_own',
-    'ghr.meetings.edit_all', 'ghr.meetings.delete', 'ghr.meetings.export',
+    'ghr.meetings.edit_all', 'ghr.meetings.delete',
   ]);
 
   const organizer = await makeUser(`${TAG} Organiser`, `organiser${DOMAIN}`, [staffRole.id]);
@@ -711,7 +568,7 @@ async function main() {
   const searched = `search=${TAG}`;
   const meetingRows = (await readScreen(tok.hr, `/meetings?${searched}&pageSize=200`)).rows;
   const meetingStatus = splittingValue(meetingRows, 'status');
-  await checkListPaper({
+  await checkListPaper(check, {
     label: 'Meetings',
     token: tok.hr,
     actorId: hr.id,
@@ -723,8 +580,14 @@ async function main() {
     filter: { query: `${searched}&status=${meetingStatus}`, named: `status ${statusLabel(meetingStatus)}` },
     entityType: 'meeting',
   });
-  // An invitee holding only view_own prints the meetings they are on.
-  await checkOwnPaper({
+  // An invitee holding only view_own prints the meetings they are on — and
+  // not one they were left off, which this script's other meetings (each
+  // asking them along) would never test.
+  const leftOff = await api(tok.organizer, 'POST', '/meetings', {
+    title: `${TAG} Planning without the optional`, startsAt: tomorrow.toISOString(), endsAt: tomorrowEnd.toISOString(), inviteeIds: [invitee.id],
+  });
+  check('a meeting the optional invitee is not on is booked', leftOff.status === 201, String(leftOff.status));
+  await checkOwnPaper(check, {
     label: 'Meetings',
     ownToken: tok.optional,
     allToken: tok.hr,
@@ -733,18 +596,18 @@ async function main() {
     noun: ['meeting', 'meetings'],
     mark: (r) => String(r.number),
   });
-  const upcomingPaper = await readPaper(tok.hr, `/meetings/pdf?${searched}&when=upcoming`);
+  const upcomingPaper = await printed(tok.hr, `/meetings/pdf?${searched}&when=upcoming`);
   const upcomingScreen = await readScreen(tok.hr, `/meetings?${searched}&when=upcoming&pageSize=200`);
   check(
     'Meetings: the screen\'s preset (upcoming) is named on the paper and keeps its count',
     upcomingPaper.status === 200 &&
-      paperWords(upcomingPaper.text).includes('upcoming') &&
-      paperWords(upcomingPaper.text).includes(countedAs(upcomingScreen.total, ['meeting', 'meetings'])),
+      flat(upcomingPaper.text).includes('upcoming') &&
+      saysCount(upcomingPaper.text, upcomingScreen.total, ['meeting', 'meetings']),
     referenceOf(upcomingPaper.text),
   );
   check(
     'Meetings: the printed list is refused to anyone the list refuses',
-    (await readPaper(signToken(nobody.id, nobody.email), '/meetings/pdf')).status === 403,
+    (await printed(signToken(nobody.id, nobody.email), '/meetings/pdf')).status === 403,
   );
 
   await cleanup();

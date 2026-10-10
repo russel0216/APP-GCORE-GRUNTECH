@@ -46,16 +46,18 @@ import { salesOrderDesign, withoutCostColumns } from '../shared/salesOrderTempla
 import {
   approvalOptions,
   approvalSlots,
+  approvalStands,
   cancelOpenRequest,
-  contactPhone,
+  contactOf,
+  contactsOf,
   onApprovalSettled,
   pickWorkflow,
-  routePreview,
+  routeBrief,
   submitForApproval,
+  slotSignatories,
   type ApprovalSlot,
 } from '../shared/approvals';
-import { approvalStands, designedSignatories, draftRouteSlots, scopeNamed, standingSlots } from './sales';
-import { bracketNote, bracketed, LIST_CAP, listNotes, listReference, rangeNamed, recordNamed, sendListPdf, totalLabel } from './finance';
+import { bracketNote, bracketed, LIST_CAP, listNotes, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
@@ -201,14 +203,6 @@ async function nextOrderNumber(tx: Prisma.TransactionClient, quotationId: string
 // ── List ─────────────────────────────────────────────────────────────────────
 
 export const SALES_ORDER_STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'ISSUED', 'CANCELLED'] as const;
-type SoStatus = (typeof SALES_ORDER_STATUSES)[number];
-const SO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-function soDay(value: string | undefined, label: string): string | null {
-  if (!value) return null;
-  if (!SO_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
-  return value;
-}
 
 /**
  * Which sales orders a list query means — ONE rule for the list, its summary
@@ -233,8 +227,8 @@ export function salesOrderListWhere(
   if (f.quotationId) and.push({ quotationId: f.quotationId });
   if (f.ownerId) and.push({ ownerId: f.ownerId });
   // The order date is a DATE: UTC-midnight edges of the days named.
-  const from = soDay(f.dateFrom, 'Date from');
-  const to = soDay(f.dateTo, 'Date to');
+  const from = filterDay(f.dateFrom, 'Date from');
+  const to = filterDay(f.dateTo, 'Date to');
   if (from || to) {
     and.push({
       orderDate: {
@@ -247,7 +241,7 @@ export function salesOrderListWhere(
   const RELEASED: Prisma.SalesOrderWhereInput = { OR: [{ siNumber: { not: null } }, { drNumber: { not: null } }] };
   if (f.released === 'yes') and.push(RELEASED);
   else if (f.released === 'no') and.push({ NOT: RELEASED });
-  else if (f.released) throw badRequest('Released is yes or no');
+  else if (f.released) throw badRequest('Released is one of SI or DR number filled in, Not yet released');
   // The rows a person ticked (mass actions); the rules above still apply.
   const ids = idsFilter(f.ids);
   if (ids) and.push({ id: { in: ids } });
@@ -265,9 +259,9 @@ export function salesOrderListWhere(
     });
   }
   const base: Prisma.SalesOrderWhereInput = and.length ? { AND: and } : {};
-  if (!f.status) return { base, where: base };
-  if (!(SALES_ORDER_STATUSES as readonly string[]).includes(f.status)) throw badRequest(`Unknown status: ${f.status}`);
-  return { base, where: { AND: [...and, { status: f.status as SoStatus }] } };
+  const status = choice(f.status, SALES_ORDER_STATUSES, 'Status');
+  if (!status) return { base, where: base };
+  return { base, where: { AND: [...and, { status }] } };
 }
 
 /**
@@ -431,7 +425,7 @@ salesOrderRoutes.get(
     const [rows, summary, currency, customer, owner, quotation] = await Promise.all([
       prisma.salesOrder.findMany({
         where,
-        include: { customer: { select: { name: true } }, quotation: { select: { number: true, subject: true } } },
+        include: { customer: { select: { name: true } }, quotation: { select: { number: true, subject: true } }, owner: { select: { name: true } } },
         orderBy: salesOrderOrderBy(q),
         take: LIST_CAP,
       }),
@@ -455,28 +449,33 @@ salesOrderRoutes.get(
       f.ids ? 'the rows selected' : null,
     ]);
 
-    // Seven columns: portrait holds them, each sized from what it holds
-    // (rule 6). Value, never cost. The money block is the booked value —
-    // the orders still standing, over every order the filter matched; a
-    // cancelled order's figure prints in brackets and is never summed,
-    // which the note under it says.
+    // The Sales list pattern, the screen's own heads: Number · Quotation ·
+    // Customer · Status · the references · the figure · who booked it · the
+    // date. Nine columns: landscape, each sized from what it holds (rule 6).
+    // Value, never cost. The money block is the booked value — the orders
+    // still standing, over every order the filter matched; a cancelled
+    // order's figure prints in brackets and is never summed, which the note
+    // under it says.
     const pdf = await renderDocument({
       title: 'Sales Orders',
       date: new Date(),
       reference,
+      landscape: true,
       sections: [
         {
           kind: 'table',
-          head: ['Number', 'Quotation and customer', 'Status', 'PO', 'SI / DR', 'Date', `Total (${currency})`],
-          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right'],
+          head: ['Number', 'Quotation', 'Customer', 'Status', 'PO', 'SI / DR', `Total (${currency})`, 'Booked by', 'Date'],
+          align: ['left', 'left', 'left', 'left', 'left', 'left', 'right', 'left', 'left'],
           rows: rows.map((r) => [
             r.number,
-            { title: r.quotation.subject, body: `${r.quotation.number} · ${r.customer.name}` },
+            { title: r.quotation.subject, body: r.quotation.number },
+            r.customer.name,
             statusLabel(r.status),
             r.poNumber ?? '',
             [r.siNumber, r.drNumber].filter(Boolean).join(' / '),
-            formatShortDate(r.orderDate),
             bracketed(formatAmount(num(r.total)), r.status !== 'CANCELLED'),
+            r.owner.name,
+            formatShortDate(r.orderDate),
           ]),
         },
         { kind: 'totals', rows: [{ label: totalLabel('Total booked', summary.count, rows.length), value: formatMoney(summary.value, currency), bold: true }] },
@@ -540,16 +539,11 @@ salesOrderRoutes.get(
     const total = num(order.total);
     const workflow = await pickWorkflow('sales_order', total);
     const options = order.status === 'DRAFT' && workflow ? await approvalOptions('sales_order', total) : [];
-    const brief = (route: Awaited<ReturnType<typeof routePreview>>) =>
-      route && {
-        name: route.name,
-        steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
-      };
     const approvalRoutes =
       order.status === 'DRAFT' && workflow
         ? {
-            standard: brief(await routePreview('sales_order', total, me.id)),
-            options: await Promise.all(options.map(async (o) => ({ id: o.id, route: brief(await routePreview('sales_order', total, me.id, o.id)) }))),
+            standard: await routeBrief('sales_order', total, me.id),
+            options: await Promise.all(options.map(async (o) => ({ id: o.id, route: await routeBrief('sales_order', total, me.id, o.id) }))),
           }
         : null;
     // The editor's Tax dropdown: the quotation's choices, and the rate this
@@ -1173,13 +1167,8 @@ async function unroutedOrderSignoff(order: { id: string; status: string }): Prom
     where: { entityType: 'sales_order', entityId: order.id, at: { gt: issued.at }, summary: { startsWith: 'Reopened sales order' } },
   });
   if (reopened) return [];
-  const who = issued.actorId
-    ? await prisma.user.findUnique({
-        where: { id: issued.actorId },
-        select: { name: true, email: true, phone: true, employee: { select: { mobile: true } } },
-      })
-    : null;
-  return [{ role: 'Issued by', name: issued.actorName ?? who?.name, phone: who ? contactPhone(who) : undefined, email: who?.email, at: issued.at }];
+  const who = issued.actorId ? (await contactsOf([issued.actorId])).get(issued.actorId) : undefined;
+  return [{ role: 'Issued by', name: issued.actorName ?? who?.name, phone: who?.phone, email: who?.email, at: issued.at }];
 }
 
 /**
@@ -1190,13 +1179,13 @@ async function unroutedOrderSignoff(order: { id: string; status: string }): Prom
  * issued again with no route active). A CANCELLED one keeps what its latest
  * request still stands for: the request that approved it before it was
  * cancelled, or the one the cancel withdrew — only the steps signed by then
- * (`standingSlots`), never "Pending" under a step nobody will sign — and
+ * (`approvalSlots`), never "Pending" under a step nobody will sign — and
  * none when the order went back to draft after that request closed (pulled
  * back, returned or reopened), because those signatures then stand behind
  * nothing. None falls to `unroutedOrderSignoff`.
  */
 async function orderRouteSlots(order: { id: string; status: string; total: Prisma.Decimal; ownerId: string }): Promise<ApprovalSlot[]> {
-  if (order.status === 'DRAFT') return draftRouteSlots('sales_order', num(order.total), order.ownerId);
+  if (order.status === 'DRAFT') return approvalSlots('sales_order', order.id, { amount: num(order.total), requesterId: order.ownerId });
   if (order.status === 'ISSUED' && !(await approvalStands('sales_order', order.id, 'Reopened sales order'))) return [];
   if (order.status === 'CANCELLED') {
     const request = await prisma.approvalRequest.findFirst({
@@ -1221,7 +1210,7 @@ async function orderRouteSlots(order: { id: string; status: string; total: Prism
     });
     if (backToDraft) return [];
   }
-  return standingSlots(await approvalSlots('sales_order', order.id));
+  return approvalSlots('sales_order', order.id);
 }
 
 /**
@@ -1244,7 +1233,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     vatInclusive: order.vatInclusive,
   });
   const amount = (v: number) => formatAmount(v);
-  const ratePct = `${Number(d(num(order.vatRate)).mul(100).toFixed(2))}%`;
+  const rate = ratePct(order.vatRate);
   const contact = order.contact;
 
   const fields: Record<string, string> = {
@@ -1263,7 +1252,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'order.draftNote': order.status === 'DRAFT' ? 'DRAFT — not yet issued.' : '',
     'order.cancelReason': order.status === 'CANCELLED' ? (order.cancelReason ?? '') : '',
     'order.currency': currency,
-    'order.vatRate': ratePct,
+    'order.vatRate': rate,
     'order.subtotal': amount(totals.subtotal),
     'order.discount': totals.discountAmount > 0 ? amount(totals.discountAmount) : '',
     'order.net': amount(totals.net),
@@ -1282,13 +1271,8 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'owner.name': order.owner.name,
     'owner.position': order.owner.position ?? '',
     'owner.email': order.owner.email ?? '',
-    'owner.phone': '',
+    'owner.phone': (await contactOf(order.ownerId)).phone ?? '',
   };
-  const author = await prisma.user.findUnique({
-    where: { id: order.ownerId },
-    select: { phone: true, employee: { select: { mobile: true } } },
-  });
-  if (author) fields['owner.phone'] = contactPhone(author) ?? '';
 
   const rows: DesignRow[] = [];
   let n = 0;
@@ -1342,7 +1326,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     });
     if (!order.vatInclusive) totalRows.push({ label: 'Sum without tax:', value: amount(totals.net) });
   }
-  totalRows.push({ label: order.vatInclusive ? `VAT included (${ratePct}):` : `VAT (${ratePct}):`, value: amount(totals.vatAmount) });
+  totalRows.push({ label: order.vatInclusive ? `VAT included (${rate}):` : `VAT (${rate}):`, value: amount(totals.vatAmount) });
   totalRows.push({ label: `Total (${currency}):`, value: amount(totals.total), bold: true });
 
   // Prepared by the author; then the route as the workflow names its steps
@@ -1361,7 +1345,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
       email: order.owner.email ?? undefined,
       at: order.createdAt,
     },
-    ...(slots.length ? designedSignatories(slots) : await unroutedOrderSignoff(order)),
+    ...(slots.length ? slotSignatories(slots) : await unroutedOrderSignoff(order)),
   ];
 
   return { title: `${order.number} — Sales Order`, fields, rows, totals: totalRows, signatories };

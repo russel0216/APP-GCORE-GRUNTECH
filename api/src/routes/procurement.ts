@@ -24,11 +24,9 @@ import {
   onApprovalSettled,
   approvalSlots,
   slotSignatories,
-  routePreview,
-  contactPhone,
+  contactOf,
   cancelOpenRequest,
   type ApprovalOutcome,
-  type ApprovalSlot,
 } from '../shared/approvals';
 import {
   renderDocument,
@@ -42,6 +40,7 @@ import {
   type Signatory,
 } from '../shared/pdf';
 import { manilaDate } from '../shared/day';
+import { LIST_CAP, listReference, totalLabel, bracketed, counted, bracketNote, listNotes, recordNamed, choice, sendListPdf, ratePct } from '../shared/listPaper';
 import {
   postJobCost,
   releaseCommitment,
@@ -67,66 +66,7 @@ function asDate(v: string | null | undefined): Date | null {
 // SAME where-builder the list reads (with `?ids=`, the rows ticked, ANDed
 // with the visibility rule), the list's own sort, at most LIST_CAP rows, a
 // reference that names every filter that narrowed it, and an EXPORTED audit
-// row with entityId 'list' (rule 6, A5).
-
-/** The most rows a printed list carries; the reference says when it was cut. */
-const LIST_CAP = 1000;
-
-/**
- * A printed list's reference: "12 purchase requests", or, cut at the cap,
- * "first 1,000 of 1,234 purchase requests printed" — then every filter that
- * narrowed it, so the paper says which set it is.
- */
-function listReference(count: number, printed: number, noun: readonly [string, string], filters: (string | null | false | undefined)[]): string {
-  const n = (v: number) => v.toLocaleString('en-PH');
-  const head = count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
-  const named = filters.filter(Boolean);
-  return named.length ? `${head} — ${named.join(' · ')}` : head;
-}
-
-/**
- * A choice filter's value, checked against what it can be — an unknown
- * status is a 400 naming the choices, never a 500 from the database.
- */
-function choice<T extends string>(value: string | undefined, allowed: Record<string, T>, label: string): T | undefined {
-  if (!value) return undefined;
-  const values = Object.values(allowed);
-  if (!(values as string[]).includes(value)) throw badRequest(`${label} is one of ${values.join(', ')}`);
-  return value as T;
-}
-
-/** The project a `?jobId=` names, as a filter line prints it. */
-async function projectNamed(jobId: string | undefined): Promise<string | null> {
-  if (!jobId) return null;
-  const job = await prisma.job.findUnique({ where: { id: jobId }, select: { number: true } });
-  return `project ${job?.number ?? 'not found'}`;
-}
-
-/** A figure that is listed but not summed (a cancelled or rejected document's), in brackets. */
-const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
-
-/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
-const totalLabel = (label: string, count: number, printed: number) =>
-  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
-
-// The notes under a list's total, worded as G-FIN's papers word them
-// (`counted` / `bracketNote` / `listNotes` in routes/finance.ts) so money
-// prints one way in every module. Kept here rather than imported, because
-// importing routes/finance would load its approval subscribers with this
-// module.
-
-/** "1 cancelled order" / "3 cancelled orders" — a count in a note under a list. */
-const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
-
-/** The note under a list whose closed documents (cancelled, rejected) print in brackets. */
-const bracketNote = (n: number, noun: readonly [string, string]) =>
-  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
-
-/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
-const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
-  const said = notes.filter((v): v is string => !!v);
-  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
-};
+// row with entityId 'list' (rule 6, A5). The helpers are shared/listPaper.
 
 // ════════════════════════════════════════════════════════════════════
 //  PURCHASE REQUESTS
@@ -268,7 +208,7 @@ purchaseRequestRoutes.get(
       }),
       prisma.purchaseRequest.count({ where: { AND: [where, { status: { in: PR_CLOSED } }] } }),
       companyCurrency(),
-      projectNamed(q.filters.jobId),
+      recordNamed('project', q.filters.jobId),
     ]);
 
     const f = q.filters;
@@ -322,9 +262,7 @@ purchaseRequestRoutes.get(
       },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="purchase-requests.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'purchase-requests.pdf');
   }),
 );
 
@@ -1080,7 +1018,7 @@ canvassRoutes.get(
 
     // Seven columns: portrait, each sized from what it holds (rule 6).
     const pdf = await renderDocument({
-      title: 'Canvasses',
+      title: 'Canvass / RFQ',
       date: new Date(),
       reference,
       sections: [
@@ -1104,9 +1042,7 @@ canvassRoutes.get(
       { entityType: 'canvass', entityId: 'list', action: 'EXPORTED', summary: `Exported the canvass list as PDF (${rows.length} canvass(es))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="canvasses.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'canvasses.pdf');
   }),
 );
 
@@ -1587,7 +1523,7 @@ purchaseOrderRoutes.get(
       prisma.purchaseOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
       prisma.purchaseOrder.count({ where: { AND: [where, { status: { in: PO_UNISSUED } }] } }),
       companyCurrency(),
-      projectNamed(f.jobId),
+      recordNamed('project', f.jobId),
       f.supplierId ? prisma.supplier.findUnique({ where: { id: f.supplierId }, select: { name: true } }) : null,
     ]);
     const reference = listReference(count, rows.length, ['purchase order', 'purchase orders'], [
@@ -1635,9 +1571,7 @@ purchaseOrderRoutes.get(
       { entityType: 'purchase_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the purchase order list as PDF (${rows.length} order(s))` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="purchase-orders.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'purchase-orders.pdf');
   }),
 );
 
@@ -2283,61 +2217,6 @@ purchaseOrderRoutes.delete(
 
 // ── PDFs ─────────────────────────────────────────────────────────────────────
 
-/**
- * The author's contact lines, read for the paper only: a reader calls the
- * person who raised it. Never on the loaders — `GET /purchase-orders/:id`
- * carries no mobile, as the quotation's own response does not.
- */
-async function contactLines(userId: string): Promise<{ phone?: string; email?: string }> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true, phone: true, employee: { select: { mobile: true } } },
-  });
-  return user ? { phone: contactPhone(user), email: user.email } : {};
-}
-
-/**
- * Where a document stands, for its sign-off block: a DRAFT (nothing submitted
- * stands), ROUTED (submitted — pending, or approved and on its way), or
- * CLOSED without approval (a request rejected or cancelled, an order
- * cancelled), when nobody is ever going to sign what is still unsigned.
- */
-type SignoffStage = 'draft' | 'routed' | 'closed';
-
-/**
- * The sign-off block of a routed document (rule 6): every step of the route,
- * through the engine's one mapping — the step's name as the role, who signed
- * with the date, else who is assigned over "Pending" — and one open
- * "Approved by" where no workflow covers the document at all.
- *
- * A DRAFT prints the route submitting it WOULD take, every step open, with
- * `requesterId` — the person the submit files it for — kept off it. Not
- * `approvalSlots(…, draft)`: that previews only when NO request exists, and a
- * draft pulled back or returned keeps its last request — CANCELLED, with the
- * steps that had signed — and printing those would date an approval nobody
- * now gives.
- *
- * A document CLOSED without approval prints only the steps that did sign,
- * each dated — never "Pending" under a step nobody will now act on, and never
- * the open "Approved by": "Pending" is printed only where it is the truth.
- */
-async function routeSignatories(
-  documentType: string,
-  documentId: string,
-  stage: SignoffStage,
-  /** What a draft's preview routes on: its amount, and who the submit files it for. */
-  preview: { amount: number; requesterId: string },
-): Promise<Signatory[]> {
-  if (stage === 'draft') {
-    const route = await routePreview(documentType, preview.amount, preview.requesterId);
-    const slots: ApprovalSlot[] = (route?.steps ?? []).map((st) => ({ step: st.name, assigned: st.approvers }));
-    return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
-  }
-  const slots = await approvalSlots(documentType, documentId);
-  if (stage === 'closed') return slotSignatories(slots.filter((sl) => sl.name && sl.at));
-  return slots.length ? slotSignatories(slots) : [{ role: 'Approved by' }];
-}
-
 purchaseOrderRoutes.get(
   '/:id/pdf',
   requireAny('gchain.purchase_orders.view_all', 'gchain.purchase_orders.view_own'),
@@ -2347,7 +2226,8 @@ purchaseOrderRoutes.get(
 
     const view = presentPo(po);
     const currency = await companyCurrency();
-    const ratePct = `${(view.vatRate * 100).toFixed(0)}%`;
+    // The stored rate as stored — 12.5% prints 12.5%, never a rounded 13%.
+    const rate = ratePct(po.vatRate);
 
     const sections: PdfSection[] = [
       {
@@ -2359,8 +2239,7 @@ purchaseOrderRoutes.get(
           { label: 'Address', value: [po.supplier.address, po.supplier.city].filter(Boolean).join(', ') || '—' },
           { label: 'Required by', value: po.deliveryDate ? formatDate(po.deliveryDate) : '—' },
           { label: 'Terms', value: po.terms ?? po.supplier.paymentTerms ?? '—' },
-          // The request it fills — named for what it is: the details block's
-          // "Reference" above is the supplier.
+          // The request it fills, named for what it is.
           { label: 'Purchase request', value: po.request?.number ?? '—' },
           { label: 'For', value: po.job ? `${po.job.number} — ${po.job.name}` : 'Stock replenishment' },
           { label: 'TIN', value: po.supplier.tin ?? '—' },
@@ -2389,7 +2268,7 @@ purchaseOrderRoutes.get(
         kind: 'totals',
         rows: [
           { label: 'Subtotal', value: formatMoney(view.subtotal, currency) },
-          { label: po.vatInclusive ? `VAT included (${ratePct})` : `VAT (${ratePct})`, value: formatMoney(view.vatAmount, currency) },
+          { label: po.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`, value: formatMoney(view.vatAmount, currency) },
           { label: 'Total', value: formatMoney(view.total, currency), bold: true },
         ],
       },
@@ -2397,26 +2276,33 @@ purchaseOrderRoutes.get(
 
     if (po.notes) sections.push({ kind: 'text', title: 'Notes', body: po.notes });
 
-    // Prepared by the buyer, then every step of the route — the project
-    // manager and finance, who signed and when, "Pending" until they do; a
-    // draft prints the route submitting would take (a rejection returns the
-    // order to draft, so it reads as one). Receiving is its own document, so
-    // no slot waits for it here.
+    // Prepared by the buyer, with how to reach them (read for the paper
+    // only — the order's JSON carries no mobile), then every step of the
+    // route through the engine's one mapping (rule 6) — the project manager
+    // and finance, who signed and when, "Pending" until they do. A draft
+    // prints the route submitting it would take, in the buyer's name as the
+    // submit files it (a rejection returns the order to draft, so it reads
+    // as one; a pulled-back order's old signatures sign nothing now). A
+    // cancelled order prints only the steps that did sign — no approval is
+    // coming. One open "Approved by" only while an approval may still come
+    // and no workflow covers orders at all. Receiving is its own document,
+    // so no slot waits for it here.
+    const slots = await approvalSlots(
+      'purchase_order',
+      po.id,
+      po.status === 'DRAFT' ? { amount: view.total, requesterId: po.createdById } : undefined,
+    );
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: po.createdBy.name, ...(await contactLines(po.createdById)), at: po.createdAt },
-      ...(await routeSignatories(
-        'purchase_order',
-        po.id,
-        po.status === 'DRAFT' ? 'draft' : po.status === 'CANCELLED' ? 'closed' : 'routed',
-        { amount: view.total, requesterId: po.createdById },
-      )),
+      { role: 'Prepared by', name: po.createdBy.name, ...(await contactOf(po.createdById)), at: po.createdAt },
+      ...(slots.length ? slotSignatories(slots) : po.status === 'CANCELLED' ? [] : [{ role: 'Approved by' }]),
     ];
 
     const pdf = await renderDocument({
       title: 'Purchase Order',
       documentNumber: po.number,
       date: po.orderDate,
-      reference: po.supplier.name,
+      // The supplier is named once, in the fields with its address and TIN —
+      // never again as the reference.
       sections,
       signatories,
     });
@@ -2448,16 +2334,19 @@ purchaseRequestRoutes.get(
     // ₱50,000 or more takes three), who signed it and when — "Pending" until
     // they do. A draft prints the route submitting would take, every step
     // open: pulled back, its last request keeps the steps that had signed,
-    // and those are nobody's signature now. A rejected request prints only
-    // the steps that signed before it was refused — nobody signs the rest.
+    // and those are nobody's signature now. A rejected or cancelled request
+    // prints only the steps that signed before it closed — nobody signs the
+    // rest — and no open "Approved by", which is only for a request an
+    // approval may still come to with no workflow covering it.
+    const closed = pr.status === 'REJECTED' || pr.status === 'CANCELLED';
+    const slots = await approvalSlots(
+      'purchase_request',
+      pr.id,
+      pr.status === 'DRAFT' ? { amount: estimatedTotal, requesterId: pr.requestedById } : undefined,
+    );
     const signatories: Signatory[] = [
-      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactLines(pr.requestedById)), at: pr.createdAt },
-      ...(await routeSignatories(
-        'purchase_request',
-        pr.id,
-        pr.status === 'DRAFT' ? 'draft' : pr.status === 'REJECTED' || pr.status === 'CANCELLED' ? 'closed' : 'routed',
-        { amount: estimatedTotal, requesterId: pr.requestedById },
-      )),
+      { role: 'Requested by', name: pr.requestedBy.name, ...(await contactOf(pr.requestedById)), at: pr.createdAt },
+      ...(slots.length ? slotSignatories(slots) : closed ? [] : [{ role: 'Approved by' }]),
     ];
 
     const pdf = await renderDocument({

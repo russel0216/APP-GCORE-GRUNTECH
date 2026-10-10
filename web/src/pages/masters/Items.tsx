@@ -172,11 +172,6 @@ export function Items() {
       <div className="page-head">
         <div>
           <h1>Item Master</h1>
-          <p>
-            One list of things, used by costing (estimated), procurement (ordered), inventory
-            (stocked) and jobs (consumed). The cost bucket on each item is what lets a purchase
-            land in the right line of a project budget without anyone choosing it by hand.
-          </p>
         </div>
       </div>
 

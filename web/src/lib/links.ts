@@ -72,9 +72,19 @@ const QUERY: Record<string, string> = {
   course: '/g-hr/academy/courses?course=',
 };
 
+/** Where a QUERY type's printed list (entityId 'list') or a bare row lands. */
+const QUERY_LIST: Record<string, string> = {
+  service_visit: '/g-ops/visits',
+  sales_activity: '/g-ops/calendar',
+  activity: '/g-ops/calendar',
+  course: '/g-hr/academy/courses',
+};
+
 /** Types with a screen but no per-record URL — the list or the settings page. */
 const SCREEN: Record<string, string> = {
   warehouse: '/g-chain/warehouses',
+  // The stock-on-hand list's paper audits as EXPORTED under 'inventory'.
+  inventory: '/g-chain/inventory',
   cost_category: '/admin/categories',
   industry: '/admin/categories',
   sub_industry: '/admin/categories',
@@ -83,6 +93,8 @@ const SCREEN: Record<string, string> = {
   // the record's, not the employee's, so the register is as close as it gets.
   training_record: '/g-hr/academy/passports',
   training_certification: '/g-hr/academy/passports',
+  // The passport register's paper audits as EXPORTED under 'training_passport'.
+  training_passport: '/g-hr/academy/passports',
   budget_request: '/g-ops/budget-requests',
   // Finance. A payment has its own page since 2026-10-09; a disbursement is
   // the same record seen from the money-out side.
@@ -93,7 +105,11 @@ const SCREEN: Record<string, string> = {
   number_sequence: '/admin/numbering',
   approval_workflow: '/admin/workflows',
   role: '/admin/roles',
+  // The Audit Logs paper audits itself as EXPORTED under 'audit_log'.
+  audit_log: '/admin/audit',
   company: '/admin/company',
+  // Company Settings › Preview prints the document specimen.
+  pdf_specimen: '/admin/company',
   approval: '/my-work',
   approval_request: '/my-work',
   pipeline: '/g-ops/pipeline',
@@ -118,9 +134,10 @@ export function recordLink(entityType: string, id: string): string | null {
   if (type === 'setting') return settingLink(id);
   // A printed list audits as EXPORTED with entityId 'list' (CLAUDE.md, the
   // printed lists): that row opens the list itself, never a record page that
-  // would ask the API for a record called "list".
+  // would ask the API for a record called "list". The same holds for a type
+  // opened through a query parameter (`?visit=list` is a "not found" modal).
   if (type in DETAIL) return id && id !== 'list' ? `${DETAIL[type]}/${encodeURIComponent(id)}` : DETAIL[type];
-  if (type in QUERY) return id ? `${QUERY[type]}${encodeURIComponent(id)}` : null;
+  if (type in QUERY) return id && id !== 'list' ? `${QUERY[type]}${encodeURIComponent(id)}` : QUERY_LIST[type] ?? null;
   if (type in SCREEN) return SCREEN[type];
   // partner_resource: it lives inside its partner's page and carries no
   // address of its own.

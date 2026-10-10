@@ -42,7 +42,7 @@ import {
 } from '../shared/meetings';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
 import { manilaDayKey } from '../shared/day';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, listReference, sendListPdf, choice } from '../shared/listPaper';
 
 /**
  * Meetings — G-HR › My day (item 11).
@@ -225,9 +225,8 @@ function meetingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
   const f = q.filters;
   const and: Prisma.MeetingWhereInput[] = [visibleWhere(me), whenWhere(f.when)];
   if (q.scope === 'mine') and.push({ organizerId: me.id });
-  if (f.status && ['PLANNED', 'DONE', 'CANCELLED'].includes(f.status)) {
-    and.push({ status: f.status as 'PLANNED' | 'DONE' | 'CANCELLED' });
-  }
+  const status = choice(f.status, ['PLANNED', 'DONE', 'CANCELLED'] as const, 'Status');
+  if (status) and.push({ status });
   if (f.role === 'organizer') and.push({ organizerId: me.id });
   if (f.role === 'invited') and.push({ invitees: { some: { userId: me.id } } });
   if (f.organizerId) and.push({ organizerId: f.organizerId });

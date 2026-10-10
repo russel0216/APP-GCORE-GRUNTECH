@@ -17,7 +17,16 @@ four databases and four copies of "customer".
 1. **The permission registry drives the menu.** `api/src/permissions/registry.ts`
    generates both the `Permission` rows and the navigation. Adding a screen means
    adding a registry entry — never hard-code a menu item, and never check a
-   permission string that the registry does not define.
+   permission string that the registry does not define. The converse holds
+   too (2026-10-10): **never mint an action nothing checks.** A box on Admin ›
+   Roles that does nothing is a promise the app does not keep; 109 were
+   trimmed (Export on lists anyone may print, Approve where the workflow's
+   roles decide, Delete on documents that are cancelled), the presets are
+   `OWNED`, `OWNED_KEPT`, `SHARED`, `SHARED_KEPT`, `READ`, `REPORT` and
+   `SETTINGS`, and verify-foundation reads the source and fails on a key no
+   route or screen checks (the two view keys always count — `canView()`
+   puts the screen in the menu with them). Only three approve rights remain:
+   CAD dispatch, progress reports and training certificates.
 2. **Never invent a second approval path.** Every document type routes through
    `api/src/shared/approvals.ts`. Call `submitForApproval(...)`, subscribe with
    `onApprovalSettled(...)`, and when a document moves on before anybody
@@ -361,13 +370,15 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad archive insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,409 assertions across twenty-three scripts** (counted 2026-10-10, after
-the one dress, the sign-off and money rules and the printed lists):
-foundation 260, masters 79, sales 447, costing 157, pipeline 92, calendar 96,
-numbering 46, partners 120, delivery 144, chain 191, hr 226, plantilla 121,
-meetings 93, evaluations 150, academy 119, finance 313, aftermarket 258,
-cad 97, archive 106, insights 97, insights-brief 50, workspace 46,
-accounts 101. A check must not depend on what the database
+**3,470 assertions across twenty-three scripts** (counted 2026-10-10, after
+the one dress, the sign-off and money rules, the printed lists and the
+permission trim): foundation 308, masters 79, sales 447, costing 157,
+pipeline 92, calendar 96, numbering 46, partners 120, delivery 144, chain
+191, hr 227, plantilla 123, meetings 97, evaluations 152, academy 120,
+finance 315, aftermarket 258, cad 97, archive 106, insights 98,
+insights-brief 50, workspace 46, accounts 101. The verify scripts share
+`scripts/lib/paper.ts` for reading a PDF's text and checking a list's
+paper. A check must not depend on what the database
 already holds: count only the script's own TAG (verify-cad's lead queue), and
 build the fixture a check needs (verify-insights' uninvoiced billing). They cover permission resolution, numbering
 concurrency and the per-employee counters, the approval engine, the overtime
@@ -2317,8 +2328,9 @@ the detail.
   kept, and only what is blank on it (description, brand, a sort order of
   0) is filled. An administrator's spelling or wording is never overwritten.
 - **Every save that writes a line calls `rememberGroups(tx, names)`**
-  (`shared/quotationGroups.ts`) — create with lines, replace lines, add a
-  line, edit a line — so a group typed on a quotation joins the master with
+  (`shared/quotationGroups.ts`) — create with lines and replace lines
+  (the single-line add/edit/delete routes went on 2026-10-10: nothing
+  called them) — so a group typed on a quotation joins the master with
   nobody filing it first. `createMany … skipDuplicates`: an administrator's
   spelling or a deactivated group is never overwritten. The seed's
   `seedQuotationGroups()` adds the groups lines already use, and any `group`
@@ -2601,6 +2613,31 @@ these are what every document and list says in it.
   every section kind the engine has — fields, text, a table with a
   subheading and title/body cells, totals, a gantt appendix, a footer note,
   signed and pending sign-offs — so it previews the dress real paper wears.
+- **One sign-off rule lives in `shared/approvals.ts`**: `approvalSlots(type,
+  id, draft?)` previews the route whenever `draft` is passed unless a
+  request is PENDING, and without it a closed request gives only the steps
+  that signed; `approvalStands()` is the one test of whether a decision
+  still stands behind a reopened document (a costing made FINAL again, a
+  reopened sales order); `routeBrief()` is a page's "Submit for approval
+  sends it to …"; `contactOf()` / `contactsOf()` are how a name on paper
+  gets its contact lines — read for the paper only, never sent with a
+  record. A route never builds these itself.
+- **One list-paper toolkit: `shared/listPaper.ts`** — `LIST_CAP`,
+  `listReference()` (the "first 1,000 of N printed" line), `totalLabel`,
+  `bracketed` / `bracketNote` (closed documents), `rangeNamed`,
+  `filterDay`, `listDay`, `recordNamed` / `namedInFilter` (the filter
+  line names the record, never its id), `choice()` (an unknown filter value
+  is a 400 naming the choices — a list never silently ignores one),
+  `scopeNamed`, `ratePct` and `sendListPdf`. Every `GET <list>/pdf` uses
+  them, and `api/scripts/lib/paper.ts` is the verify side (`readPaper`,
+  `checkListPaper`, `signedCount`, `pendingCount`).
+- **The engine's own rules**: `formatDate` is Manila's day whatever the
+  host clock; a table with no rows prints `NOTHING_TO_LIST`; a sign-off
+  role runs to three lines at most (`ROLE_MAX`); `signoffColumns` and
+  `breakPoint` are shared between `pdf.ts` and `pdfDesign.ts` (the editor's
+  copy in `web/src/lib/pdfTemplate.ts` is pinned equal); a character
+  outside WinAnsi (`≠`, a combining U+0338) has a stand-in rather than
+  printing as garbage.
 
 ## Quotation PDF template (2026-10-02)
 
@@ -2784,8 +2821,10 @@ Cost Estimate" PDF) in G-CORE's own style.
   `writeSheet()`; every reference is checked before `nextNumber`, so a refused
   sheet burns no number. Rows sent with their `id` are updated in place, rows
   left out are deleted — never delete-and-recreate. The old
-  `?new=1&leadId=&customerId=` list links redirect to `/new`. The per-line and
-  per-section routes stay for scripts and the renewal path.
+  `?new=1&leadId=&customerId=` list links redirect to `/new`. The per-line,
+  per-section and per-task routes are gone (2026-10-10): nothing called
+  them, and a second way to write a sheet is a second set of checks to keep
+  in step — scripts write through the sheet too.
 - **One arithmetic: `shared/costingMath.ts`**, exact in BigInt: line amount =
   qty (3 dp) × cost (2 dp) rounded half away from zero; **contract value =
   cost ÷ (1 − margin)**, rounded once to the centavo, **net of VAT** (the SOV

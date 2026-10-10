@@ -24,8 +24,7 @@ import {
   onApprovalSettled,
   approvalSlots,
   slotSignatories,
-  routePreview,
-  contactPhone,
+  contactOf,
   type ApprovalOutcome,
   type ApprovalSlot,
 } from '../shared/approvals';
@@ -44,19 +43,8 @@ import { registerSearch } from '../shared/search';
 import { dayKey } from '../shared/aftermarket';
 import { workingDaysBetween } from '../shared/day';
 import { valueRevision } from '../shared/pipeline';
-import {
-  costingForJob,
-  createJobRecord,
-  LIST_CAP,
-  listReference,
-  totalLabel,
-  listDay,
-  namedInFilter,
-  choice,
-  bracketed,
-  bracketNote,
-  listNotes,
-} from './jobs';
+import { costingForJob, createJobRecord } from './jobs';
+import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -164,34 +152,33 @@ function mayOpen(me: ResolvedUser, row: JobOrderRow): boolean {
 
 /**
  * The order's route, one slot a step. A DRAFT or a RETURNED order shows the
- * route submitting it now WOULD take, every step open under who may sign it
- * — not `approvalSlots(…, draft)`, which previews only while no request
- * exists: a returned order keeps its last request, closed, and its signed
- * steps would date an approval nobody now gives. A CANCELLED order prints
- * only signatures that stand: all of them when it was cancelled after its
- * route approved it, and none when it was cancelled as a draft or while
- * returned — a step signed before the return approved a version nobody now
- * decides on, and an open step will never be signed. Every other order
- * shows its latest request, each step signed and dated or still open.
+ * route submitting it now WOULD take (`approvalSlots` with the submit's own
+ * context — the amount, the requester, the project and the manager the
+ * order names), every step open under who may sign it: a returned order's
+ * last request signs nothing now. A CANCELLED order prints only signatures
+ * that stand — the order's own rule: all of them when it was cancelled after
+ * its route approved it, and none when it was cancelled as a draft or while
+ * returned, because a step signed before the return approved a version
+ * nobody now decides on. Every other order shows its latest request, each
+ * step signed and dated or still open.
  */
 async function routeSlots(row: JobOrderRow): Promise<ApprovalSlot[]> {
-  if (row.status === 'DRAFT' || row.status === 'REJECTED') {
-    const route = await routePreview('job_order', num(row.amount), row.requestedById, null, {
-      jobId: row.jobId,
-      projectManagerId: row.projectManagerId,
-    });
-    return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
-  }
   if (row.status === 'CANCELLED') {
     const latest = await prisma.approvalRequest.findFirst({
       where: { documentType: 'job_order', documentId: row.id },
       orderBy: { createdAt: 'desc' },
       select: { status: true },
     });
-    if (latest?.status !== 'APPROVED') return [];
-    return (await approvalSlots('job_order', row.id)).filter((s) => s.name);
+    return latest?.status === 'APPROVED' ? approvalSlots('job_order', row.id) : [];
   }
-  return approvalSlots('job_order', row.id);
+  const unsubmitted = row.status === 'DRAFT' || row.status === 'REJECTED';
+  return approvalSlots(
+    'job_order',
+    row.id,
+    unsubmitted
+      ? { amount: num(row.amount), requesterId: row.requestedById, jobId: row.jobId, projectManagerId: row.projectManagerId }
+      : undefined,
+  );
 }
 
 async function load(id: string): Promise<JobOrderRow> {
@@ -241,7 +228,7 @@ function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhere
   const ids = idsFilter(q.filters.ids);
   if (ids) and.push({ id: { in: ids } });
 
-  const status = choice(q.filters.status, JobOrderStatus, 'Status');
+  const status = choice(q.filters.status, JobOrderStatus, 'Status', statusWord);
   if (status) where.status = status;
   if (q.filters.open === 'true') where.status = 'APPROVED';
   // The unbilled queue finance works from.
@@ -254,11 +241,9 @@ function jobOrderListWhere(me: ResolvedUser, q: ListQuery): Prisma.JobOrderWhere
     if (q.filters[key]) where[key] = q.filters[key];
   }
   // requestedFor mirrors the target start, so one index serves both shapes.
-  if (q.filters.from || q.filters.to) {
-    where.requestedFor = {};
-    if (q.filters.from) where.requestedFor.gte = asDate(q.filters.from, 'From');
-    if (q.filters.to) where.requestedFor.lte = asDate(q.filters.to, 'To');
-  }
+  const from = filterDay(q.filters.from, 'From');
+  const to = filterDay(q.filters.to, 'To');
+  if (from || to) where.requestedFor = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.search) {
     and.push({
       OR: [
@@ -320,7 +305,7 @@ jobOrderRoutes.get(
       prisma.jobOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
       companyCurrency(),
       namedInFilter({ customerId: f.customerId, jobId: f.jobId, userId: f.projectManagerId }),
-      f.assignedToId ? prisma.user.findUnique({ where: { id: f.assignedToId }, select: { name: true } }) : null,
+      recordNamed('person', f.assignedToId, 'assigned to'),
       f.quotationId ? prisma.quotation.findUnique({ where: { id: f.quotationId }, select: { number: true } }) : null,
       f.salesOrderId ? prisma.salesOrder.findUnique({ where: { id: f.salesOrderId }, select: { number: true } }) : null,
     ]);
@@ -334,8 +319,8 @@ jobOrderRoutes.get(
       f.quotationId ? `quotation ${quotation?.number ?? 'not found'}` : null,
       f.salesOrderId ? `sales order ${salesOrder?.number ?? 'not found'}` : null,
       named.person ? `project manager ${named.person}` : null,
-      f.assignedToId ? `assigned to ${assignee?.name ?? 'not found'}` : null,
-      f.from || f.to ? `target start ${listDay(f.from)} to ${listDay(f.to)}` : null,
+      assignee,
+      rangeNamed('target start', f.from, f.to),
       q.scope === 'mine' ? 'raised by me or sending me' : null,
       f.ids ? 'the rows selected' : null,
     ]);
@@ -352,14 +337,15 @@ jobOrderRoutes.get(
           align: ['left', 'left', 'left', 'left', 'right', 'left', 'left', 'left'],
           rows: rows.map((r) => {
             const t = targets(r);
-            const amount = r.amount == null ? '' : formatAmount(Number(r.amount));
+            // No amount yet reads as the record reads it, never a blank.
+            const amount = r.amount == null ? 'To be billed on completion' : bracketed(formatAmount(Number(r.amount)), r.status !== 'CANCELLED');
             return [
               r.number,
               { title: r.projectName ?? r.title, body: r.projectName && r.projectName !== r.title ? r.title : undefined },
               { title: r.customer.name, body: r.site?.name ?? r.contact?.name ?? undefined },
               // Dates are never bold: the window, then the working days in it.
               `${formatShortDate(t.targetStart)} – ${formatShortDate(t.targetFinish)}\n${t.durationDays} working day${t.durationDays === 1 ? '' : 's'}`,
-              amount && bracketed(amount, r.status !== 'CANCELLED'),
+              amount,
               { title: r.projectManager?.name ?? 'None named', body: `Raised by ${r.requestedBy.name}` },
               [r.quotation?.number, r.salesOrder?.number, r.job?.number].filter(Boolean).join('\n'),
               statusWord(r.status),
@@ -384,9 +370,7 @@ jobOrderRoutes.get(
       { entityType: 'job_order', entityId: 'list', action: 'EXPORTED', summary: `Exported the job orders list as PDF (${listReference(count, rows.length, ['job order', 'job orders'], [])})` },
       req,
     );
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="job-orders.pdf"');
-    res.send(pdf);
+    sendListPdf(res, pdf, 'job-orders.pdf');
   }),
 );
 
@@ -900,10 +884,7 @@ jobOrderRoutes.get(
     const nameOf = (p: { name: string; position: string | null } | null) => (p ? [p.name, p.position].filter(Boolean).join(' · ') : '—');
     const currency = await companyCurrency();
     // The requester's contact lines, for the paper only (the JSON never carries a mobile).
-    const requester = await prisma.user.findUnique({
-      where: { id: row.requestedById },
-      select: { email: true, phone: true, employee: { select: { mobile: true } } },
-    });
+    const requester = await contactOf(row.requestedById);
 
     const sections: PdfSection[] = [
       {
@@ -963,8 +944,7 @@ jobOrderRoutes.get(
       {
         role: 'Requested by',
         name: row.requestedBy.name,
-        phone: requester ? contactPhone(requester) : undefined,
-        email: requester?.email,
+        ...requester,
         at: row.createdAt,
       },
       ...(route.length ? slotSignatories(route) : cancelled ? [] : [{ role: 'Approved by' }]),

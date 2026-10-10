@@ -217,11 +217,6 @@ export function QuoteArchive() {
       <div className="page-head">
         <div>
           <h1>SCORO Archive</h1>
-          <p>
-            Read-only history from SCORO. Every quote is kept as SCORO issued it, with its PDF as the
-            record. An open quote can be continued in G-CORE under the same number; a closed one is
-            here to look up.
-          </p>
         </div>
       </div>
 

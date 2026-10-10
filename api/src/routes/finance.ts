@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express';
+import { Router } from 'express';
 import { z } from 'zod';
 import {
   Prisma,
@@ -32,13 +32,28 @@ import {
   onApprovalSettled,
   approvalSlots,
   slotSignatories,
-  routePreview,
-  contactPhone,
+  contactOf,
+  contactsOf,
   cancelOpenRequest,
   type ApprovalOutcome,
-  type ApprovalSlot,
 } from '../shared/approvals';
 import { postJobCost } from '../shared/inventory';
+import {
+  LIST_CAP,
+  listReference,
+  bracketed,
+  totalLabel,
+  counted,
+  bracketNote,
+  listNotes,
+  recordNamed,
+  rangeNamed,
+  filterDay,
+  dayOf,
+  choice,
+  sendListPdf,
+  ratePct,
+} from '../shared/listPaper';
 import {
   renderDocument,
   formatMoney,
@@ -76,10 +91,6 @@ import {
   type SettleableKind,
 } from '../shared/finance';
 
-function asEnum<T extends Record<string, string>>(e: T, value: string | undefined): T[keyof T] | undefined {
-  return value && value in e ? (value as T[keyof T]) : undefined;
-}
-
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw badRequest(`${label} is not a valid date`);
@@ -88,170 +99,6 @@ function asDate(value: string, label: string): Date {
 
 // ── On paper (rule 6) ────────────────────────────────────────────────
 
-/** A rate as a document prints it in a label: 0.12 → "12%", 0.075 → "7.5%". */
-export const ratePct = (rate: number) => `${+(rate * 100).toFixed(2)}%`;
-
-// ── The printed lists (rule 6, A5) ───────────────────────────────────
-//
-// Every G-FIN register has a printed twin, `GET <list>/pdf` declared above
-// `/:id`: the SAME where-builder the list reads (with `?ids=`, the rows
-// ticked, ANDed with the visibility rule), the list's own sort, at most
-// LIST_CAP rows, a reference naming every filter that narrowed it, figures
-// as `formatAmount` under a head naming the currency, totals over EVERY row
-// the filter matched (not only those printed), and an EXPORTED audit row
-// with entityId 'list'. advances.ts and budgetRequests.ts import these.
-
-/** The most rows a printed list carries; the reference says when it was cut. */
-export const LIST_CAP = 1000;
-
-/**
- * A printed list's reference: "12 invoices", or, cut at the cap, "first
- * 1,000 of 1,234 invoices printed" — then every filter that narrowed it, so
- * the paper says which set it is.
- */
-export function listReference(
-  count: number,
-  printed: number,
-  noun: readonly [string, string],
-  filters: (string | null | false | undefined)[],
-): string {
-  const n = (v: number) => v.toLocaleString('en-PH');
-  const head =
-    count > printed ? `first ${n(printed)} of ${n(count)} ${noun[1]} printed` : `${n(count)} ${count === 1 ? noun[0] : noun[1]}`;
-  const named = filters.filter(Boolean);
-  return named.length ? `${head} — ${named.join(' · ')}` : head;
-}
-
-/** A figure that is listed but not summed (a draft or cancelled document's), in brackets. */
-export const bracketed = (amount: string, counted: boolean) => (counted ? amount : `(${amount})`);
-
-/** A total's label — which, on a list cut at the cap, says it covers every row, not only those printed. */
-export const totalLabel = (label: string, count: number, printed: number) =>
-  count > printed ? `${label}, all ${count.toLocaleString('en-PH')}` : label;
-
-/** "1 draft invoice" / "3 draft invoices" — a count in a note under a list. */
-export const counted = (n: number, noun: readonly [string, string]) => `${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
-
-/** The note under a list whose closed documents (cancelled, rejected) print in brackets. */
-export const bracketNote = (n: number, noun: readonly [string, string]) =>
-  n ? `${counted(n, noun)}, in brackets, ${n === 1 ? 'is' : 'are'} not counted.` : null;
-
-/** A list's notes under its totals, as one paragraph — or nothing when there is nothing to say. */
-export const listNotes = (notes: (string | null | false | undefined)[]): PdfSection[] => {
-  const said = notes.filter((v): v is string => !!v);
-  return said.length ? [{ kind: 'text', body: said.join(' ') }] : [];
-};
-
-/** A 'YYYY-MM-DD' a filter names, as a list prints a date (MM/DD/YYYY); a half-open range's missing end as "…". */
-export const listDay = (key: unknown) =>
-  typeof key === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(key) ? formatShortDate(new Date(`${key}T00:00:00Z`)) : '…';
-
-/** A date a list's filter names — a 400 when it is not one, never a 500 from the database. */
-export function filterDay(value: string, label: string): Date {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw badRequest(`${label} is not a valid date`);
-  return date;
-}
-
-/** A from–to pair as a filter line prints it, or null when neither end is set. */
-export const rangeNamed = (label: string, from: string | undefined, to: string | undefined) =>
-  from || to ? `${label} ${listDay(from)} to ${listDay(to)}` : null;
-
-/**
- * The record a `?<key>Id=` filter names, as a filter line prints it —
- * "customer ACME Hospital", "project GT-PRJ-2026-0112" — or "… not found"
- * for an id that matches nothing (the list is then empty, and says why).
- */
-export async function recordNamed(
-  kind: 'customer' | 'supplier' | 'person' | 'project' | 'advance' | 'budget request',
-  id: string | undefined,
-  /** What the line says before the name, when not the kind — "requested by", "with". */
-  label: string = kind,
-): Promise<string | null> {
-  if (!id) return null;
-  const name =
-    kind === 'customer'
-      ? (await prisma.customer.findUnique({ where: { id }, select: { name: true } }))?.name
-      : kind === 'supplier'
-        ? (await prisma.supplier.findUnique({ where: { id }, select: { name: true } }))?.name
-        : kind === 'person'
-          ? (await prisma.user.findUnique({ where: { id }, select: { name: true } }))?.name
-          : kind === 'project'
-            ? (await prisma.job.findUnique({ where: { id }, select: { number: true } }))?.number
-            : kind === 'advance'
-              ? (await prisma.cashAdvance.findUnique({ where: { id }, select: { number: true } }))?.number
-              : (await prisma.budgetRequest.findUnique({ where: { id }, select: { number: true } }))?.number;
-  return `${label} ${name ?? 'not found'}`;
-}
-
-/** A printed list goes out inline, under its own file name. */
-export function sendListPdf(res: Response, pdf: Buffer, filename: string) {
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-  res.send(pdf);
-}
-
-/**
- * The name and contact lines a sign-off prints under a person — read for
- * the PAPER only, never sent with the record (the quotation's rule: a
- * record's JSON carries no mobile). `contactPhone` is the one reading of a
- * person's number.
- */
-export async function printPeople(ids: (string | null | undefined)[]) {
-  const wanted = [...new Set(ids.filter((v): v is string => !!v))];
-  const rows = wanted.length
-    ? await prisma.user.findMany({
-        where: { id: { in: wanted } },
-        select: { id: true, name: true, email: true, phone: true, employee: { select: { mobile: true } } },
-      })
-    : [];
-  return new Map(rows.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
-}
-
-/** A document's statuses after which no approval is coming: it was refused, or withdrawn. */
-const CLOSED_STATUSES: readonly string[] = ['REJECTED', 'CANCELLED'];
-
-/**
- * The approval half of a routed finance document's sign-offs, by the
- * document's own status: every step of its route through the engine's one
- * mapping (`slotSignatories`) — the step's name as the role, who signed it
- * with the date, else who is assigned over "Pending".
- *
- * - DRAFT prints the route submitting it WOULD take, every step open, with
- *   the requester, amount and project the submit itself passes. Not
- *   `approvalSlots(…, draft)`: that previews only while NO request exists,
- *   and a draft pulled back keeps its last request — CANCELLED, with
- *   whatever step had signed — so printing it would date an approval nobody
- *   now gives.
- * - REJECTED or CANCELLED prints the steps that DID sign, dated, and nothing
- *   else: no approval is coming, so no step is "Pending" — least of all the
- *   one that refused it.
- * - Anything else prints the latest request's steps as they stand.
- *
- * One open "Approved by" only while an approval is still to come (a draft
- * or a pending document) and no workflow covers it; a document past
- * approval with no request on file prints no approval line rather than an
- * empty one.
- */
-export async function routeSignatories(
-  documentType: string,
-  documentId: string,
-  opts: { status: string; draft: { amount: number; requesterId: string; jobId?: string | null } },
-): Promise<Signatory[]> {
-  const { status, draft } = opts;
-  if (CLOSED_STATUSES.includes(status)) {
-    return slotSignatories((await approvalSlots(documentType, documentId)).filter((s) => s.name));
-  }
-  const slots: ApprovalSlot[] =
-    status === 'DRAFT'
-      ? ((await routePreview(documentType, draft.amount, draft.requesterId, null, { jobId: draft.jobId }))?.steps ?? []).map((st) => ({
-          step: st.name,
-          assigned: st.approvers,
-        }))
-      : await approvalSlots(documentType, documentId);
-  if (slots.length) return slotSignatories(slots);
-  return status === 'DRAFT' || status === 'PENDING_APPROVAL' ? [{ role: 'Approved by' }] : [];
-}
 
 /**
  * A cash advance and a budget request on paper. They are one document in
@@ -346,12 +193,23 @@ export function cashRequestSections(input: {
 }
 
 /**
+ * Whether an approval may still come to a finance document — a draft, or
+ * one pending — so that, with no workflow covering it, its paper prints one
+ * open "Approved by". Past that (approved, released, refused, withdrawn) a
+ * document with no route on file prints no approval line rather than an
+ * empty one.
+ */
+const awaitsApproval = (status: string) => status === 'DRAFT' || status === 'PENDING_APPROVAL';
+
+/**
  * The sign-offs of a cash advance or a budget request: whoever asked, dated
- * when they asked; every step of the route (`routeSignatories` — a draft
- * prints the route it would take, with the project for a PROJECT_MANAGER
- * step); and, once the cash is out, the requester again as "Received by",
- * dated when the release was recorded (a voucher's own date is a DATE, which
- * has no time to print). Nothing for a receipt that has not happened.
+ * when they asked; every step of the route through the engine's one mapping
+ * (`approvalSlots` — a draft, a pulled-back one too, prints the route it
+ * would take, with the project for a PROJECT_MANAGER step; a refused or
+ * withdrawn one only the steps that did sign); and, once the cash is out,
+ * the requester again as "Received by", dated when the release was recorded
+ * (a voucher's own date is a DATE, which has no time to print). Nothing for
+ * a receipt that has not happened.
  */
 export async function cashRequestSignatories(input: {
   documentType: 'cash_advance' | 'budget_request';
@@ -363,16 +221,15 @@ export async function cashRequestSignatories(input: {
   raisedAt: Date;
   releasedOn: Date | null;
 }): Promise<Signatory[]> {
-  const people = await printPeople([input.requester.id]);
-  const who = people.get(input.requester.id);
-  const requester = { name: input.requester.name, phone: who?.phone, email: who?.email };
-  const route = await routeSignatories(input.documentType, input.id, {
-    status: input.status,
-    draft: { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId },
-  });
+  const requester = { name: input.requester.name, ...(await contactOf(input.requester.id)) };
+  const slots = await approvalSlots(
+    input.documentType,
+    input.id,
+    input.status === 'DRAFT' ? { amount: input.amount, requesterId: input.requester.id, jobId: input.jobId } : undefined,
+  );
   return [
     { role: 'Requested by', ...requester, at: input.raisedAt },
-    ...route,
+    ...(slots.length ? slotSignatories(slots) : awaitsApproval(input.status) ? [{ role: 'Approved by' }] : []),
     ...(input.releasedOn ? [{ role: 'Received by', ...requester, at: input.releasedOn }] : []),
   ];
 }
@@ -428,15 +285,13 @@ const BILL_OWED: BillStatus[] = ['APPROVED', 'PARTIALLY_PAID'];
 function invoiceListWhere(q: ListQuery): Prisma.InvoiceWhereInput {
   const where: Prisma.InvoiceWhereInput = {};
 
-  const status = asEnum(InvoiceStatus, q.filters.status);
+  const status = choice(q.filters.status, InvoiceStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.customerId) where.customerId = q.filters.customerId;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
-  if (q.filters.from || q.filters.to) {
-    where.invoiceDate = {};
-    if (q.filters.from) where.invoiceDate.gte = filterDay(q.filters.from, 'From');
-    if (q.filters.to) where.invoiceDate.lte = filterDay(q.filters.to, 'To');
-  }
+  const from = filterDay(q.filters.from, 'From');
+  const to = filterDay(q.filters.to, 'To');
+  if (from || to) where.invoiceDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   // "Outstanding" is not a status — a partially paid invoice and an issued
   // one are both outstanding, and a paid one never is.
   if (q.filters.outstanding === 'true') {
@@ -526,7 +381,7 @@ invoiceRoutes.get(
     ]);
 
     const f = q.filters;
-    const status = asEnum(InvoiceStatus, f.status);
+    const status = choice(f.status, InvoiceStatus, 'Status');
     const reference = listReference(count, rows.length, ['invoice', 'invoices'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
@@ -716,7 +571,7 @@ invoiceRoutes.get(
           select: { actorId: true, actorName: true, at: true },
         })
       : null;
-    const people = await printPeople([inv.createdBy.id, issueRow?.actorId]);
+    const people = await contactsOf([inv.createdBy.id, issueRow?.actorId]);
     const preparer = people.get(inv.createdBy.id);
     const issuer = issueRow?.actorId ? people.get(issueRow.actorId) : undefined;
     const signatories: Signatory[] = [
@@ -1335,7 +1190,7 @@ function presentBill(row: BillRow) {
 function billListWhere(q: ListQuery): Prisma.SupplierBillWhereInput {
   const where: Prisma.SupplierBillWhereInput = {};
 
-  const status = asEnum(BillStatus, q.filters.status);
+  const status = choice(q.filters.status, BillStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
@@ -1420,7 +1275,7 @@ billRoutes.get(
     ]);
 
     const f = q.filters;
-    const status = asEnum(BillStatus, f.status);
+    const status = choice(f.status, BillStatus, 'Status');
     const reference = listReference(count, rows.length, ['supplier bill', 'supplier bills'], [
       q.search && `search "${q.search}"`,
       f.overdue === 'true' ? 'overdue' : f.outstanding === 'true' ? 'outstanding' : status && `status ${statusLabel(status)}`,
@@ -2179,7 +2034,7 @@ function claimListWhere(me: ReturnType<typeof currentUser>, q: ListQuery) {
   const mine = onlyOwn || q.scope === 'mine';
   if (mine) where.claimedById = me.id;
 
-  const status = asEnum(ExpenseStatus, q.filters.status);
+  const status = choice(q.filters.status, ExpenseStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
   if (q.filters.advanceId) where.advanceId = q.filters.advanceId;
@@ -2284,7 +2139,7 @@ expenseRoutes.get(
     ]);
 
     const f = q.filters;
-    const status = asEnum(ExpenseStatus, f.status);
+    const status = choice(f.status, ExpenseStatus, 'Status');
     const reference = listReference(count, rows.length, ['expense claim', 'expense claims'], [
       q.search && `search "${q.search}"`,
       status && `status ${statusLabel(status)}`,
@@ -2979,7 +2834,7 @@ expenseRoutes.post(
  * differ, because that is all that differs on paper. The receipts add up in
  * the totals block (never a TOTAL row in the table), which says what is owed
  * either way only once the claim is approved; and the sign-offs are the
- * claimant, then the route as `routeSignatories` reads it for the claim's
+ * claimant, then the route as `approvalSlots` reads it for the claim's
  * status (rule 6).
  */
 expenseRoutes.get(
@@ -3079,13 +2934,13 @@ expenseRoutes.get(
     ];
     if (claim.notes) sections.push({ kind: 'text', title: 'Notes', body: claim.notes });
 
-    const people = await printPeople([claim.claimedById]);
-    const claimant = people.get(claim.claimedById);
-    const route = await routeSignatories('expense', claim.id, {
-      status: claim.status,
+    const claimant = await contactOf(claim.claimedById);
+    const slots = await approvalSlots(
+      'expense',
+      claim.id,
       // Submitted in the claimant's name, as the submit route does.
-      draft: { amount: view.total, requesterId: claim.claimedById },
-    });
+      claim.status === 'DRAFT' ? { amount: view.total, requesterId: claim.claimedById } : undefined,
+    );
     const pdf = await renderDocument({
       title: liquidated ? 'Liquidation Report' : 'Expense Claim',
       documentNumber: claim.number,
@@ -3093,8 +2948,8 @@ expenseRoutes.get(
       reference: liquidated ? `Liquidation of ${liquidated.number}` : claim.purpose,
       sections,
       signatories: [
-        { role: 'Prepared by', name: claim.claimedBy.name, phone: claimant?.phone, email: claimant?.email, at: claim.createdAt },
-        ...route,
+        { role: 'Prepared by', name: claim.claimedBy.name, ...claimant, at: claim.createdAt },
+        ...(slots.length ? slotSignatories(slots) : awaitsApproval(claim.status) ? [{ role: 'Approved by' }] : []),
       ],
     });
 
@@ -3173,16 +3028,14 @@ function allocationKind(a: {
 function paymentListWhere(q: ListQuery): Prisma.PaymentWhereInput {
   const where: Prisma.PaymentWhereInput = {};
 
-  const kind = asEnum(PaymentKind, q.filters.kind);
+  const kind = choice(q.filters.kind, PaymentKind, 'Direction', (k) => (k === 'RECEIPT' ? 'Money in' : 'Money out'));
   if (kind) where.kind = kind;
   if (q.filters.customerId) where.customerId = q.filters.customerId;
   if (q.filters.supplierId) where.supplierId = q.filters.supplierId;
   if (q.filters.payeeUserId) where.payeeUserId = q.filters.payeeUserId;
-  if (q.filters.from || q.filters.to) {
-    where.paymentDate = {};
-    if (q.filters.from) where.paymentDate.gte = filterDay(q.filters.from, 'From');
-    if (q.filters.to) where.paymentDate.lte = filterDay(q.filters.to, 'To');
-  }
+  const from = filterDay(q.filters.from, 'From');
+  const to = filterDay(q.filters.to, 'To');
+  if (from || to) where.paymentDate = { ...(from ? { gte: dayOf(from) } : {}), ...(to ? { lte: dayOf(to) } : {}) };
   if (q.filters.uncleared === 'true') where.clearedAt = null;
   if (q.search) {
     where.OR = [
@@ -3267,7 +3120,7 @@ paymentRoutes.get(
     ]);
 
     const f = q.filters;
-    const kind = asEnum(PaymentKind, f.kind);
+    const kind = choice(f.kind, PaymentKind, 'Direction', (k) => (k === 'RECEIPT' ? 'Money in' : 'Money out'));
     const reference = listReference(count, rows.length, ['payment', 'payments'], [
       q.search && `search "${q.search}"`,
       kind && (kind === 'RECEIPT' ? 'money in' : 'money out'),

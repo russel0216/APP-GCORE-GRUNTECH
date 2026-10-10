@@ -19,7 +19,7 @@ import { audit } from '../shared/audit';
 import { nextNumber, previewNext } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
 import { formatShortDate, renderDocument } from '../shared/pdf';
-import { LIST_CAP, listReference, rangeNamed, recordNamed, sendListPdf } from './finance';
+import { LIST_CAP, listReference, rangeNamed, recordNamed, sendListPdf, filterDay } from '../shared/listPaper';
 
 export const customerRoutes = Router();
 customerRoutes.use(authenticate);
@@ -28,13 +28,6 @@ const SORTABLE = ['code', 'name', 'createdAt', 'updatedAt'];
 
 /** A quotation still in play — the "Open quotation" filter and column. */
 const OPEN_QUOTE: Prisma.QuotationWhereInput = { outcome: { in: ['OPEN', 'SUBMITTED', 'NEGOTIATION'] } };
-const CUST_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-function custDay(value: string | undefined, label: string): string | null {
-  if (!value) return null;
-  if (!CUST_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
-  return value;
-}
 
 /** A yes/no filter, or a 400 naming it. */
 function yesNo(value: string | undefined, label: string): boolean | null {
@@ -69,13 +62,13 @@ export function customerListWhere(
   }
   const f = q.filters;
   if (f.isActive) {
-    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is one of Active, Inactive');
     and.push({ isActive: f.isActive === 'true' });
   }
   if (q.scope === 'mine') and.push({ createdById: me.id });
   if (f.createdById) and.push({ createdById: f.createdById });
-  const from = custDay(f.createdFrom, 'Added from');
-  const to = custDay(f.createdTo, 'Added to');
+  const from = filterDay(f.createdFrom, 'Added from');
+  const to = filterDay(f.createdTo, 'Added to');
   if (from || to) {
     and.push({ createdAt: { ...(from ? { gte: manilaDayStart(from) } : {}), ...(to ? { lte: manilaDayEnd(to) } : {}) } });
   }

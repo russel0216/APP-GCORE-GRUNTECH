@@ -15,7 +15,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import type { ApprovalStep, Prisma } from '@prisma/client';
@@ -45,12 +44,27 @@ import {
   historyFor,
   cancelOpenRequest,
   approversForStep,
+  slotSignatories,
+  contactOf,
+  contactsOf,
 } from '../src/shared/approvals';
-import { renderDocument, companyCurrency, formatAmount, formatDateTime, formatMoney, formatShortDate, pdfSafe, websiteForPrint } from '../src/shared/pdf';
+import {
+  renderDocument,
+  companyCurrency,
+  formatAmount,
+  formatDate,
+  formatDateTime,
+  formatMoney,
+  formatShortDate,
+  pdfSafe,
+  signoffColumns,
+  websiteForPrint,
+} from '../src/shared/pdf';
 import { designSchema, readDesign, renderDesigned, resolveTemplate, unknownFields, type DesignData, type PdfDesign } from '../src/shared/pdfDesign';
 import { QUOTATION_FIELDS, QUOTATION_FIELD_KEYS, STANDARD_QUOTATION_DESIGN } from '../src/shared/quotationTemplate';
-// The PDF Templates editor's copy of the text rule: DOM-free, held equal below.
-import { resolveTemplate as editorResolve, emptyFieldsIn } from '../../web/src/lib/pdfTemplate';
+import { STANDARD_SALES_ORDER_DESIGN, salesOrderSample } from '../src/shared/salesOrderTemplate';
+// The PDF Templates editor's copies of the text rule and the sign-off columns: DOM-free, held equal below.
+import { resolveTemplate as editorResolve, emptyFieldsIn, signoffColumns as editorSignoffColumns } from '../../web/src/lib/pdfTemplate';
 import { cleanNumberText, editNumberText, formatNumberText, isPartialNumber } from '../../web/src/lib/number';
 import {
   countActiveFilters,
@@ -79,6 +93,7 @@ import { workingDayDate } from '../src/shared/day';
 import { recordLink } from '../../web/src/lib/links';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
+import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -228,12 +243,39 @@ async function main() {
     check(`hr sees ${screen} in their menu`, hrScreens.includes(screen));
   }
 
-  // A clearance is signed off through the engine; a plantilla position is
-  // master data. The registry must only mint the approve right where a
-  // document actually routes.
+  // Every box on Admin › Roles must do something (2026-10-10, C2): 109 keys
+  // nobody checked were trimmed — Export on lists anyone may print, Approve
+  // where the workflow's roles decide, Delete where a document is cancelled.
+  // So the source is read: a key counts as checked when it appears whole in
+  // the API or the web app, or when its action is built into a template
+  // (`${base}.edit_all`) beside its module.screen; the two view keys always
+  // count, because canView() puts the screen in the menu with them.
   const permissionKeys = new Set(allPermissions().map((p) => p.key));
-  check('the registry defines ghr.clearances.approve', permissionKeys.has('ghr.clearances.approve'));
-  check('and does not define ghr.plantilla.approve', !permissionKeys.has('ghr.plantilla.approve'));
+  {
+    const roots = [path.resolve(__dirname, '../src'), path.resolve(__dirname, '../../web/src')];
+    const registryFile = path.resolve(__dirname, '../src/permissions/registry.ts');
+    let corpus = '';
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name) && full !== registryFile) corpus += fs.readFileSync(full, 'utf8') + '\n';
+      }
+    };
+    roots.forEach(walk);
+    const templated = new Set([...corpus.matchAll(/\$\{[^}]+\}\.(\w+)[`'"]/g)].map((m) => m[1]));
+    const unchecked = allPermissions()
+      .filter((p) => !['view_all', 'view_own'].includes(p.action))
+      .filter((p) => !corpus.includes(p.key) && !(templated.has(p.action) && corpus.includes(`${p.module}.${p.submodule}`)))
+      .map((p) => p.key);
+    check('every permission the registry mints is checked by a route or a screen', unchecked.length === 0, unchecked.join(', '));
+  }
+  check('approval goes to the workflow, not to a key: no ghr.clearances.approve, no gops.quotations.approve', !permissionKeys.has('ghr.clearances.approve') && !permissionKeys.has('gops.quotations.approve'));
+  check(
+    'the three approve rights left are the ones something checks (CAD dispatch, progress reports, certificates)',
+    [...permissionKeys].filter((k) => k.endsWith('.approve')).sort().join() === 'ghr.passports.approve,gops.cad_job_orders.approve,gops.progress_billing.approve',
+    [...permissionKeys].filter((k) => k.endsWith('.approve')).join(),
+  );
 
   // The SCORO Archive is off the menu but still a screen: its permissions
   // stay (the guards and the links depend on them) and the menu carries it
@@ -801,6 +843,63 @@ async function main() {
   );
   check('and how to reach them: the approver’s email; nothing for a step not yet taken', slotsAfter[0].email === pm.email && !slotsAfter[1].email);
   check('a document never submitted has no slots', (await approvalSlots(`${TAG}_opt_doc`, `${TAG}-never`)).length === 0);
+  const asSigned = slotSignatories(slotsAfter);
+  check(
+    'a slot maps to a sign-off with the step as the role and the signer’s name, contact lines and date',
+    asSigned[0].role === 'Manager' && asSigned[0].name === pm.name && asSigned[0].email === pm.email && !!asSigned[0].at,
+    JSON.stringify(asSigned[0]),
+  );
+  const mapped = slotSignatories([
+    { step: 'Signed', name: 'A Signer', position: 'Head of Signing', at: new Date() },
+    { step: 'One open', assigned: [{ id: 'b', name: 'B Assigned', position: 'Assignee', email: 'b@verify.local' }] },
+    {
+      step: 'Two open',
+      assigned: [
+        { id: 'c', name: 'C One', position: 'P', email: 'c@verify.local' },
+        { id: 'd', name: 'D Two', position: 'Q', email: 'd@verify.local' },
+      ],
+    },
+  ]);
+  check(
+    'the position travels with a signer and a lone assignee (a designed layout may print it); several assignees read "A or B" with none',
+    mapped[0].position === 'Head of Signing' &&
+      mapped[1].position === 'Assignee' &&
+      mapped[1].email === 'b@verify.local' &&
+      mapped[2].name === 'C One or D Two' &&
+      mapped[2].position === undefined &&
+      mapped[2].email === undefined,
+    JSON.stringify(mapped),
+  );
+  const draftWhileOpen = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`, { amount: 5_000, requesterId: employee.id });
+  check(
+    'asked as a draft while its request is still open, a document prints that open request — a preview never hides a signature in progress',
+    draftWhileOpen.length === 2 && draftWhileOpen[0].name === pm.name && !draftWhileOpen[1].name,
+  );
+  // Refused at the Boss: the request closes, and nobody will sign that step.
+  await act({ requestId: optioned.id, userId: pm.id, action: 'REJECTED', comment: 'Verify — refused at the boss' });
+  const slotsClosed = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`);
+  check(
+    'a request closed without approval keeps only the steps that signed, each dated — never "Pending" under one nobody will sign',
+    slotsClosed.length === 1 && slotsClosed[0].step === 'Manager' && slotsClosed[0].name === pm.name && !!slotsClosed[0].at,
+    JSON.stringify(slotsClosed.map((x) => [x.step, x.name])),
+  );
+  const redraft = await approvalSlots(`${TAG}_opt_doc`, `${TAG}-opt-big`, { amount: 5_000, requesterId: employee.id, optionId: optionRoute.id });
+  check(
+    'back in draft behind that closed request, it prints the route a resubmission would take — every step open, the old signature gone',
+    redraft.length === 2 && redraft.every((x) => !x.name && !x.at && !!x.assigned?.some((p) => p.id === pm.id)),
+    JSON.stringify(redraft.map((x) => [x.step, x.name, x.assigned?.length])),
+  );
+  const reach = await contactOf(pm.id);
+  const reachMany = await contactsOf([pm.id, null, pm.id, employee.id]);
+  check(
+    'contactOf reads how to reach a person for the paper; contactsOf the same for several, each with the name on file',
+    reach.email === pm.email &&
+      Object.keys(await contactOf(null)).length === 0 &&
+      reachMany.size === 2 &&
+      reachMany.get(pm.id)?.name === pm.name &&
+      reachMany.get(pm.id)?.email === reach.email &&
+      reachMany.get(employee.id)?.email === employee.email,
+  );
 
   // ── 5c. Withdrawing a request the document moved on from ───────────────────
   // A quotation revision superseded while it waits on the approver: its
@@ -1096,6 +1195,35 @@ async function main() {
     ).includes('PHP 1,562.20'),
   );
 
+  // A record's date is Manila's day (2026-10-10). Until 08:00 in Manila the
+  // UTC date is still yesterday's: formatDate had no timezone, and the CAD
+  // paper printed "October 9" over a sign-off dated "Oct 10, 2026, 6:07 AM".
+  // A DATE column is UTC midnight — 08:00 in Manila, the same day.
+  const earlyMorning = new Date('2026-10-09T22:07:00Z');
+  check('a timestamp before 08:00 Manila prints its Manila day', formatDate(earlyMorning) === 'October 10, 2026', formatDate(earlyMorning));
+  check('the same day its sign-off is stamped with', formatDateTime(earlyMorning).startsWith('Oct 10, 2026,'), formatDateTime(earlyMorning));
+  check('and a DATE column still prints its own day', formatDate(new Date('2026-10-09T00:00:00Z')) === 'October 9, 2026', formatDate(new Date('2026-10-09T00:00:00Z')));
+
+  // A negated relation never prints as its opposite. "≠" decomposes to "="
+  // plus a combining slash, and the base-letter fallback for characters a
+  // standard font lacks printed "invoiced ≠ collectible" as "invoiced =
+  // collectible". Each negated relation people type has a stand-in that
+  // keeps the meaning; any other carrying the slash prints "?".
+  check('"≠" prints as "!=", never as "="', pdfSafe('invoiced ≠ collectible') === 'invoiced != collectible', pdfSafe('invoiced ≠ collectible'));
+  const negated = ['≮', '≯', '≰', '≱', '≢', '∉', '∌', '⊄', '⊅'];
+  const negatedOut = negated.map((c) => pdfSafe(`a ${c} b`));
+  check(
+    'every negated relation keeps its negation, in characters a standard font has',
+    negatedOut.every((t) => /\bnot\b|!=/.test(t) && [...t].every((c) => c.codePointAt(0)! < 0x80)),
+    negatedOut.join(' | '),
+  );
+  check(
+    'one with no stand-in prints "?" — never its base, which says the opposite',
+    pdfSafe('≇') === '?' && pdfSafe('≁') === '?' && pdfSafe('⊈') === '?' && pdfSafe('x\u0338') === 'x?',
+    [pdfSafe('≇'), pdfSafe('≁'), pdfSafe('⊈'), pdfSafe('x\u0338')].join(' '),
+  );
+  check('an accented letter outside Latin-1 still prints its base letter', pdfSafe('Kayseri ş') === 'Kayseri s', pdfSafe('Kayseri ş'));
+
   // The margin is the quotation template's, 36pt — one dress for every
   // document (2026-10-10). Measured off the page rather than read back off
   // the constant.
@@ -1374,6 +1502,181 @@ async function main() {
     }
     check('a section title never ends a page with its table head on the next', orphans.length === 0, orphans.join('; ') || 'none orphaned');
 
+    // ── Paper fixes handed back by the module passes (2026-10-10) ────────
+    // A table with no rows prints one muted line under its head, ruled off
+    // as a row would be — a head over nothing read as a failed print.
+    const emptyTable = await renderDocument({
+      title: 'Customers',
+      documentNumber: `${TAG}-EMPTY`,
+      reference: '0 customers',
+      sections: [
+        { kind: 'table', head: ['Code', 'Customer', 'Status'], rows: [] },
+        { kind: 'text', title: 'Note', body: 'EWT is withheld at source: invoiced ≠ collectible.' },
+      ],
+    });
+    const emptyLines = pdfText(emptyTable).split('\n');
+    const emptyHeadAt = textAt(emptyTable, 'CODE');
+    const nothingAt = textAt(emptyTable, 'Nothing to list.');
+    check(
+      'a table with no rows says "Nothing to list." under its head',
+      emptyLines.includes('Nothing to list.') && !!emptyHeadAt && !!nothingAt && nothingAt.y > emptyHeadAt.y && nothingAt.x === emptyHeadAt.x,
+      `${emptyHeadAt?.y} → ${nothingAt?.y}`,
+    );
+    check('a table with rows never says it', !pdfText(pdf).includes('Nothing to list.') && !wideListText.includes('Nothing to list.'));
+    check('"≠" reaches the page as "!="', emptyLines.some((l) => l.includes('invoiced != collectible')));
+
+    // A head of several words over short figures takes two lines at most
+    // where the page has room — never one word a line ("COST / TO / DATE /
+    // (PHP)") — and on one line where it has more; no word is broken.
+    const budgetHead = ['Category', 'Description', 'Budget (PHP)', 'Committed (PHP)', 'Cost to date (PHP)', 'Available (PHP)'];
+    const budgetRows = [
+      ['Materials', 'Pipes, fittings, valves and the consumables for the oxygen header tie-in', '1,000,000.00', '200,000.00', '300,000.00', '500,000.00'],
+      ['Labor', 'Installation crew', '50,000.00', '0.00', '10,000.00', '40,000.00'],
+    ];
+    const headLines = (doc: Buffer, starts: string) => {
+      const runs = pdfRuns(doc);
+      const at = runs.find((r) => r.text.startsWith(starts));
+      return at ? runs.filter((r) => r.page === at.page && r.x === at.x && r.size === at.size && r.y >= at.y && r.y < at.y + 30).map((r) => r.text) : [];
+    };
+    for (const landscape of [false, true]) {
+      const budgetDoc = await renderDocument({
+        // Titled so that no head's first word starts the title too.
+        title: 'Project Ledger',
+        documentNumber: `${TAG}-HEADS`,
+        landscape,
+        // Left-aligned, so a head's lines share their x and can be read back as one head.
+        sections: [{ kind: 'table', head: budgetHead, rows: budgetRows }],
+      });
+      const costHead = headLines(budgetDoc, 'COST');
+      const budgetLines = pdfText(budgetDoc).split('\n');
+      check(
+        landscape
+          ? 'with a landscape page to spare, "COST TO DATE (PHP)" prints on one line'
+          : 'on a portrait page "COST TO DATE (PHP)" takes two lines, never one word a line',
+        costHead.join(' ') === 'COST TO DATE (PHP)' && costHead.length === (landscape ? 1 : 2),
+        costHead.join(' / '),
+      );
+      check(
+        `and every figure and word under the heads prints whole (${landscape ? 'landscape' : 'portrait'})`,
+        ['1,000,000.00', '200,000.00', '300,000.00', '500,000.00', '50,000.00', '10,000.00', '40,000.00'].every((f) => budgetLines.includes(f)) &&
+          budgetHead.every((h) => headLines(budgetDoc, h.toUpperCase().split(' ')[0]).join(' ') === h.toUpperCase()),
+        budgetHead.map((h) => headLines(budgetDoc, h.toUpperCase().split(' ')[0]).join(' / ')).join(' | '),
+      );
+    }
+    // Crowded: two long text columns take every point over the heads, so a
+    // column of small figures is given exactly its head's two-line width.
+    // That width must be measured as the head is set — word by word, space by
+    // space — or the kerning of the space before T, V, A, W or Y leaves it a
+    // point short and the head stacks one word a line ("EST. / VALUE / (PHP)").
+    const crowdedHead = ['Code', 'Description', 'Customer', 'Est. value (PHP)', 'Net total (PHP)', 'Left to book', 'Status'];
+    const crowded = await renderDocument({
+      title: 'Booking Register',
+      documentNumber: `${TAG}-CROWDED`,
+      sections: [
+        {
+          kind: 'table',
+          head: crowdedHead,
+          rows: [
+            ['GT-SO-0001', 'Supply and installation of a 200 m3/h oxygen generator with its dryer, filters, receiver tank and the header tie-in', 'Metro Manila General Hospital and Medical Center, Inc.', '1.00', '1.00', '1.00', 'Open'],
+            ['GT-SO-0002', 'Preventive maintenance of the medical air compressors and the vacuum plant, quarterly for twelve months', 'Southern Luzon Regional Medical Center Foundation', '1.00', '1.00', '0.00', 'Issued'],
+          ],
+        },
+      ],
+    });
+    const crowdedHeads = crowdedHead.map((h) => headLines(crowded, h.toUpperCase().split(' ')[0]));
+    check(
+      'a crowded portrait table: every head takes two lines at most, read whole',
+      crowdedHeads.every((lines, i) => lines.length >= 1 && lines.length <= 2 && lines.join(' ') === crowdedHead[i].toUpperCase()),
+      crowdedHeads.map((lines) => lines.join(' / ')).join(' | '),
+    );
+
+    // Four sign-offs in a row, as a clearance prints them. A role runs to
+    // three lines and is never cut while three hold it — the seeded step
+    // "Finance — no outstanding accountabilities" was cut at two with an
+    // ellipsis; only a role past three lines ends in one. Every line wraps
+    // inside its own column, an email after its @.
+    const clearance = await renderDocument({
+      title: 'Clearance',
+      documentNumber: `${TAG}-CLR`,
+      sections: [{ kind: 'fields', fields: [{ label: 'Employee', value: 'Erwin Dela Pena' }] }],
+      signatories: [
+        { role: 'Requested by', name: 'Erwin Dela Pena', phone: '0917 555 0177', email: `${TAG}.erwin@verify.local`, at: new Date('2026-10-09T22:07:00Z') },
+        { role: 'Supervisor', name: 'Juan dela Cruz', at: new Date('2026-10-10T01:00:00Z') },
+        { role: 'Finance — no outstanding accountabilities', name: 'Camille Reyes', email: 'camille.reyes@gruntechnology.com' },
+        { role: 'HR — final clearance, the release of the last pay and the certificate of employment', name: 'Ana Lim' },
+      ],
+    });
+    const clearanceRuns = pdfRuns(clearance);
+    const roleLines = (first: string) => {
+      const at = clearanceRuns.find((r) => r.text === first);
+      return at ? clearanceRuns.filter((r) => r.page === at.page && r.x === at.x && r.size === at.size && r.y >= at.y - 0.5).map((r) => r.text) : [];
+    };
+    const financeRole = roleLines('FINANCE — NO');
+    check(
+      'a long role takes a third line rather than being cut',
+      financeRole.join(' ') === 'FINANCE — NO OUTSTANDING ACCOUNTABILITIES' && financeRole.length === 3,
+      financeRole.join(' / '),
+    );
+    const hrRole = roleLines(clearanceRuns.find((r) => r.text.startsWith('HR — '))?.text ?? '\u0000');
+    check(
+      'and only one longer than three lines ends in an ellipsis, on its third',
+      hrRole.length === 3 && hrRole[2].endsWith('…') && !financeRole.some((l) => l.includes('…')),
+      hrRole.join(' / '),
+    );
+    const clearanceLines = pdfText(clearance).split('\n');
+    check(
+      'an email too long for its column breaks after its @',
+      clearanceLines.includes('camille.reyes@') && clearanceLines.includes('gruntechnology.com'),
+      clearanceLines.filter((l) => l.includes('camille') || l.includes('gruntech')).join(' / '),
+    );
+    const houseOverruns = signoffOverruns(clearanceRuns, 'REQUESTED BY', 595.28 - 36, 841.89 - 57.38);
+    check("no sign-off line runs past its column into the next", houseOverruns.length === 0, houseOverruns.join('; ') || 'none');
+    check('the requester\'s date is Manila\'s', clearanceLines.includes(formatDateTime(new Date('2026-10-09T22:07:00Z'))) && formatDateTime(new Date('2026-10-09T22:07:00Z')).startsWith('Oct 10'));
+
+    // The column rule both engines share: each column ends a gutter before
+    // the next begins, however many sign-offs the block holds, and the last
+    // ends at the block's right edge.
+    const columnFaults: string[] = [];
+    for (const block of [
+      { name: 'house portrait', x: 36, w: 523.28, colWidth: 133, gutter: 8 },
+      { name: 'house landscape', x: 36, w: 769.89, colWidth: 133, gutter: 8 },
+      { name: 'designed quotation', x: 36, w: 523.28, colWidth: 133, gutter: 10 },
+      { name: 'designed sales order', x: 36, w: 500, colWidth: 150, gutter: 10 },
+    ]) {
+      for (let n = 1; n <= 8; n++) {
+        const cols = signoffColumns(block, n);
+        cols.forEach((c, i) => {
+          if (i + 1 < cols.length && c.x + c.width > cols[i + 1].x - block.gutter + 0.01) columnFaults.push(`${block.name} n=${n} column ${i + 1}`);
+          // One sign-off alone has the whole block, as it always had.
+          if (n > 1 && c.width > block.colWidth + 0.01) columnFaults.push(`${block.name} n=${n} column ${i + 1} wider than ${block.colWidth}`);
+        });
+        const last = cols[cols.length - 1];
+        if (Math.abs(last.x + last.width - (block.x + block.w)) > 0.01) columnFaults.push(`${block.name} n=${n} last column ends at ${last.x + last.width}`);
+      }
+    }
+    check("each sign-off column's x + width stops a gutter short of the next column's x", columnFaults.length === 0, columnFaults.join('; ') || 'none');
+    // Admin › PDF Templates draws the sign-offs with its own copy of the rule
+    // (web/src/lib/pdfTemplate.ts), so the canvas shows the columns the PDF
+    // prints — the sales order's five at their shared width, not overlapping.
+    const editorColumnFaults: string[] = [];
+    for (const block of [
+      { x: 36, w: 523.28, colWidth: 133, gutter: 10 },
+      { x: 36, w: 500, colWidth: 150, gutter: 10 },
+      { x: 36, w: 769.89, colWidth: 340, gutter: 10 },
+      { x: 40, w: 120, colWidth: 200, gutter: 10 },
+    ]) {
+      for (let n = 0; n <= 8; n++) {
+        if (JSON.stringify(signoffColumns(block, n)) !== JSON.stringify(editorSignoffColumns(block, n))) editorColumnFaults.push(`${block.w}/${block.colWidth} n=${n}`);
+      }
+    }
+    check("the PDF Templates editor's copy of the sign-off columns reads every block the same", editorColumnFaults.length === 0, editorColumnFaults.join('; ') || 'none');
+    const roomy = signoffColumns({ x: 36, w: 523.28, colWidth: 133, gutter: 10 }, 3);
+    check(
+      'with room to spare a column keeps the layout\'s width — the quotation\'s three are 133pt, first and last at the edges',
+      roomy.every((c) => Math.abs(c.width - 133) < 0.01) && roomy[0].x === 36,
+      roomy.map((c) => `${c.x.toFixed(1)}+${c.width.toFixed(1)}`).join(', '),
+    );
+
     // The currency a route prints is read every time: a changed setting
     // prints at once, with nothing cached in the process to go stale.
     await prisma.company.update({ where: { id: 'company' }, data: { currency: 'USD' } });
@@ -1443,8 +1746,7 @@ async function main() {
     check('the standard layout names itself QUOTATION, with "# number" and the revision', letterText.includes('QUOTATION') && letterText.includes(`# ${TAG}-LT R2`));
     check('CUSTOMER and DETAILS head the two blocks', letterText.includes('CUSTOMER') && letterText.includes('DETAILS'));
     check('the details print as labelled lines — the date the 08/17/2026 way', letterText.includes('Date: 08/17/2026') && letterText.includes('PR Number: PR-77'));
-    // WinAnsi's em dash is byte 0x97, which is how this reader decodes it.
-    check('{{field|—}} prints the dash when the field is empty', letterText.includes('Payment Terms: \u0097'));
+    check('{{field|—}} prints the dash when the field is empty', letterText.includes('Payment Terms: —'));
     check(
       'its company block is on the letterhead: TIN and REG NO',
       (!co.tin || letterText.includes(`TIN: ${co.tin}`)) && (!co.regNo || letterText.includes(`REG NO: ${co.regNo}`)),
@@ -1562,6 +1864,42 @@ async function main() {
     check('a line taller than a page is carried over, not cut off', pages(split) >= 2 && pdfText(split).includes('Spec line 90'));
     check('and nothing is drawn off the bottom of a page', pdfEdges(split).bottom > 12 && pdfEdges(runOn).bottom > 12);
 
+    // The designed table with no lines says so too, under its head.
+    const noLines = pdfText(await renderDesigned(STANDARD_QUOTATION_DESIGN, quoteData({ rows: [] }))).split('\n');
+    check('a designed document with no lines prints "Nothing to list." under the head', noLines.includes('Nothing to list.') && noLines.includes('PRODUCT DESCRIPTION'));
+    check('and one with lines never does', !letterText.includes('Nothing to list.'));
+
+    // The standard sales order: Prepared by and the four steps of its route
+    // in a 500pt box beside the totals. Each column used to be given at
+    // least colWidth (150pt) whatever the step, so the names and emails ran
+    // into the next column; now the columns share the box and every line
+    // wraps inside its own.
+    const orderData = salesOrderSample(false);
+    orderData.fields = { ...orderData.fields, 'order.draftNote': '' };
+    orderData.signatories = [
+      { role: 'Prepared by', name: 'Maria Clara Santos-Villanueva', phone: '0917 555 0100', email: 'maria.santos@gruntechnology.com', at: new Date('2026-10-07T01:30:00Z') },
+      { role: 'Team Leader', name: 'Juan dela Cruz', phone: '0917 555 0101', email: 'juan.delacruz@gruntechnology.com', at: new Date('2026-10-07T03:10:00Z') },
+      { role: 'Back Support / Admin', name: 'Erica Mae Bautista', phone: '0917 555 0102', email: 'erica.bautista@gruntechnology.com', at: earlyMorning },
+      { role: 'Cost Controller', name: 'Camille Reyes', phone: '0917 555 0103', email: 'camille.reyes@gruntechnology.com' },
+      { role: 'CEO Approval', name: 'Carter T. Gasiong', email: 'ctg@gruntechnology.com' },
+    ];
+    const order = await renderDesigned(STANDARD_SALES_ORDER_DESIGN, orderData);
+    const orderBox = STANDARD_SALES_ORDER_DESIGN.blocks.find((b) => b.type === 'signoffs')!;
+    const footerRule = STANDARD_SALES_ORDER_DESIGN.blocks.find((b) => b.id === 'footer-rule')!;
+    const orderOverruns = signoffOverruns(pdfRuns(order), 'PREPARED BY', orderBox.x + orderBox.w, footerRule.y);
+    const orderLines = pdfText(order).split('\n');
+    check(
+      "five sign-offs on the standard sales order: no line runs past its column into the next",
+      orderOverruns.length === 0 && ['PREPARED BY', 'TEAM LEADER', 'COST CONTROLLER', 'CEO APPROVAL'].every((r) => orderLines.includes(r)),
+      orderOverruns.join('; ') || 'none',
+    );
+    check(
+      'and an email wider than its column breaks after its @, never mid-word',
+      orderLines.includes('maria.santos@') && orderLines.includes('gruntechnology.com') && !orderLines.some((l) => /^chnology|grunte$/.test(l)),
+      orderLines.filter((l) => l.includes('@') || l.includes('gruntech')).join(' / '),
+    );
+    check('the names print whole in the narrower columns', orderLines.includes('Santos-Villanueva') && orderLines.includes('Erica Mae Bautista'));
+
     // The rule for filling text, and the browser's copy of it.
     const cases: [string, Record<string, string>, boolean][] = [
       ['Tel No.: {{a}} | Fax: {{b}} | Email: {{c}}', { a: '', b: '', c: 'x@y.ph' }, false],
@@ -1573,13 +1911,13 @@ async function main() {
       ['A {{x}} | B', { x: '' }, true],
       ['**open | {{gone}} | still** bold', { gone: '' }, false],
     ];
-    const flat = (lines: { text: string; bold: boolean }[][]) => lines.map((l) => l.map((r) => (r.bold ? `<b>${r.text}</b>` : r.text)).join('')).join('/');
-    check('a part whose fields are empty drops out, alone', flat(resolveTemplate(cases[0][0], cases[0][1])) === 'Email: x@y.ph');
+    const marked = (lines: { text: string; bold: boolean }[][]) => lines.map((l) => l.map((r) => (r.bold ? `<b>${r.text}</b>` : r.text)).join('')).join('/');
+    check('a part whose fields are empty drops out, alone', marked(resolveTemplate(cases[0][0], cases[0][1])) === 'Email: x@y.ph');
     check('a line whose parts all dropped is left out', resolveTemplate(cases[1][0], cases[1][1]).length === 0);
-    check('{{field|—}} keeps the line, and ** marks bold', flat(resolveTemplate(cases[2][0], cases[2][1])) === '<b>Delivery:</b> —');
-    check('blank lines and fixed text stay', flat(resolveTemplate(cases[3][0], cases[3][1])) === 'Static//After');
-    check('a value is printed as typed — its ** is not markup', flat(resolveTemplate(cases[4][0], cases[4][1])) === 'a**b**');
-    check('a value with newlines runs over as many lines', flat(resolveTemplate(cases[5][0], cases[5][1])) === '<b>Terms:</b>/one/two');
+    check('{{field|—}} keeps the line, and ** marks bold', marked(resolveTemplate(cases[2][0], cases[2][1])) === '<b>Delivery:</b> —');
+    check('blank lines and fixed text stay', marked(resolveTemplate(cases[3][0], cases[3][1])) === 'Static//After');
+    check('a value is printed as typed — its ** is not markup', marked(resolveTemplate(cases[4][0], cases[4][1])) === 'a**b**');
+    check('a value with newlines runs over as many lines', marked(resolveTemplate(cases[5][0], cases[5][1])) === '<b>Terms:</b>/one/two');
     // The editor says which fields a box leaves out, so an empty Company
     // Settings field reads as empty rather than as a broken template.
     const leftOut = emptyFieldsIn(
@@ -2066,87 +2404,20 @@ main()
   .finally(() => prisma.$disconnect());
 
 /**
- * Readable text out of a rendered PDF.
- *
- * PDFKit Flate-compresses its content streams, so the words are not in the raw
- * bytes — which is why the older assertions here could only count page objects
- * and never what those pages said.
- *
- * Two things to know about what comes out of the inflate. PDFKit writes text as
- * `[<hex> kern <hex>] TJ` rather than `(literal) Tj`, and it splits a run at
- * every kerning pair — so "Marikina" arrives as `<4d6172> -15 <696b696e61>`.
- * Both halves of one TJ array belong to the same word, so they are joined with
- * nothing between them and only whole operators are separated.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue; // not every stream is text, and a font program is not a failure
-    }
-
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1]
-          ? Buffer.from(part[1], 'hex').toString('latin1')
-          : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-/**
- * Where the ink actually starts and stops on page 1, in points.
- *
- * The margin is a stated requirement rather than an implementation detail, so
- * it is measured off the rendered page. Reading it back off the constant would
- * pass even if the drawing code ignored it.
- */
-/**
  * Where the first text run containing `needle` was drawn: x from the left
  * edge and y from the top of its page, at the baseline — PDFKit sets each run
  * with its own "1 0 0 1 x y Tm" just before the TJ that shows it.
  */
 function textAt(pdf: Buffer, needle: string, nth = 0): { x: number; y: number } | null {
-  const raw = pdf.toString('latin1');
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
   let seen = 0;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
+  for (const body of contentStreams(pdf)) {
     let at: { x: number; y: number } | null = null;
     for (const t of body.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm|\[([^\]]*)\]\s*TJ/g)) {
       if (t[1] !== undefined) {
         at = { x: Number(t[1]), y: Math.round((841.89 - Number(t[2])) * 100) / 100 };
         continue;
       }
-      let piece = '';
-      for (const part of t[3].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (at && piece.includes(needle) && seen++ === nth) return at;
+      if (at && shown(t[3]).includes(needle) && seen++ === nth) return at;
     }
   }
   return null;
@@ -2158,49 +2429,51 @@ function textAt(pdf: Buffer, needle: string, nth = 0): { x: number; y: number } 
  * inflates to text operators is a page's.
  */
 function pageOf(pdf: Buffer, needle: string): number | null {
-  const raw = pdf.toString('latin1');
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
   let page = 0;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
+  for (const body of contentStreams(pdf)) {
     if (!/\]\s*TJ/.test(body)) continue;
     page++;
-    for (const t of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of t[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece.includes(needle)) return page;
-    }
+    for (const t of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) if (shown(t[1]).includes(needle)) return page;
   }
   return null;
 }
 
+/**
+ * The runs of a sign-off block that end past the next column's start. The
+ * columns begin where the roles' first lines do — the runs set beside
+ * `firstRole`, on its page and baseline, at its size — and the last ends at
+ * `right`. Only runs from the roles' baseline down to `bottom` are the
+ * block's.
+ */
+function signoffOverruns(runs: PdfRun[], firstRole: string, right: number, bottom: number): string[] {
+  const first = runs.find((run) => run.text === firstRole);
+  if (!first) return [`no "${firstRole}" on the page`];
+  const { page, y: top } = first;
+  const starts = runs
+    .filter((r) => r.page === page && Math.abs(r.y - top) < 0.5 && r.size === first.size)
+    .map((r) => r.x)
+    .sort((a, b) => a - b);
+  const bad: string[] = [];
+  for (const run of runs) {
+    if (run.page !== page || run.y < top - 0.5 || run.y >= bottom || run.x < starts[0] - 0.5 || run.x > right) continue;
+    const col = starts.reduce((c, x, i) => (run.x >= x - 0.5 ? i : c), 0);
+    const limit = col + 1 < starts.length ? starts[col + 1] : right;
+    const ends = run.x + runWidth(run);
+    if (ends > limit + 0.01) bad.push(`"${run.text}" ends at ${ends.toFixed(1)}, past ${limit.toFixed(1)}`);
+  }
+  return bad;
+}
+
+/**
+ * Where the ink actually starts and stops on page 1, in points. The margin is
+ * a stated requirement rather than an implementation detail, so it is
+ * measured off the rendered page — reading it back off the constant would
+ * pass even if the drawing code ignored it.
+ */
 function pdfEdges(pdf: Buffer): { left: number; bottom: number } {
-  const raw = pdf.toString('latin1');
   let left = Infinity;
   let lowest = 0;
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
+  for (const body of contentStreams(pdf)) {
     // "1 0 0 1 <x> <y> Tm" — PDFKit's text-positioning matrix.
     for (const t of body.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm/g)) {
       left = Math.min(left, Number(t[1]));

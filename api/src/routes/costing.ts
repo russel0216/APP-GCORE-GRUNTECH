@@ -22,7 +22,8 @@ import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import {
   approvalSlots,
-  contactPhone,
+  approvalStands,
+  contactOf,
   onApprovalSettled,
   pickWorkflow,
   slotSignatories,
@@ -43,8 +44,7 @@ import {
   type PdfSection,
   type Signatory,
 } from '../shared/pdf';
-import { approvalStands, draftRouteSlots } from './sales';
-import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel } from './finance';
+import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel, choice, ratePct } from '../shared/listPaper';
 
 /**
  * Costing (model §5.3).
@@ -232,9 +232,8 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
       { systemUnit: { contains: q.search, mode: 'insensitive' } },
     ];
   }
-  if (q.filters.status && (STATUSES as readonly string[]).includes(q.filters.status)) {
-    where.status = q.filters.status as Status;
-  }
+  const status = choice(q.filters.status, STATUSES, 'Status', (st) => (st === 'PENDING_APPROVAL' ? 'Awaiting approval' : statusLabel(st)));
+  if (status) where.status = status;
   if (q.filters.finalised === 'this-month') {
     where.status = 'FINAL';
     where.finalAt = { gte: manilaDayStart(`${manilaMonthKey(new Date())}-01`) };
@@ -244,10 +243,8 @@ function costingListWhere(me: ReturnType<typeof currentUser>, q: ListQuery): Pri
   // service contract. A service costing is not a different kind of record —
   // it is a costing whose job happens to be a contract (model §4.5) — so it
   // would be a mistake to give it a second table to drift out of step with.
-  if (q.filters.jobType) {
-    if (!(Object.values(JobType) as string[]).includes(q.filters.jobType)) throw badRequest(`Unknown project type: ${q.filters.jobType}`);
-    where.jobs = { some: { type: q.filters.jobType as JobType } };
-  }
+  const jobType = choice(q.filters.jobType, JobType, 'Project type');
+  if (jobType) where.jobs = { some: { type: jobType } };
   // The rows a person ticked (Print selected); the rules above still apply,
   // so an id never prints a costing the caller could not see in the list.
   const ids = idsFilter(q.filters.ids);
@@ -364,11 +361,11 @@ costingRoutes.get(
       q.search ? `search "${q.search}"` : null,
       f.finalised === 'this-month'
         ? 'final this month'
-        : f.status && (STATUSES as readonly string[]).includes(f.status)
-          ? `status ${statusLabel(f.status)}`
+        : f.status
+          ? `status ${f.status === 'PENDING_APPROVAL' ? 'Awaiting approval' : statusLabel(f.status)}`
           : null,
       customer,
-      f.jobType ? (f.jobType === 'SERVICE_CONTRACT' ? 'service contracts only' : `${statusLabel(f.jobType).toLowerCase()} projects only`) : null,
+      f.jobType ? (f.jobType === 'SERVICE_CONTRACT' ? 'service contracts only' : 'projects only') : null,
       onlyOwn(me) || q.scope === 'mine' ? 'mine only' : null,
       f.ids ? 'the rows selected' : null,
     ]);
@@ -1703,177 +1700,11 @@ costingRoutes.post(
   }),
 );
 
-// ── Cost lines, one at a time ────────────────────────────────────────────────
-
-const lineSchema = z.object({
-  costCategoryId: z.string().min(1, 'Choose a cost category'),
-  itemId: z.string().optional().nullable(),
-  name: z.string().trim().max(300).optional().nullable(),
-  description: z.string().trim().min(1, 'Describe the line'),
-  isHeading: z.boolean().optional(),
-  quantity: z.number().min(0),
-  unit: z.string().trim().min(1).default('pcs'),
-  unitCost: z.number().min(0),
-  sortOrder: z.number().int().optional(),
-});
-
-costingRoutes.post(
-  '/:id/lines',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const body = parseBody(lineSchema, req.body);
-    const heading = !!body.isHeading;
-
-    const line = await prisma.costingLine.create({
-      data: {
-        costingId: req.params.id,
-        costCategoryId: body.costCategoryId,
-        itemId: body.itemId || null,
-        name: body.name || null,
-        description: body.description,
-        isHeading: heading,
-        quantity: d(heading ? 0 : body.quantity),
-        unit: body.unit,
-        unitCost: d(heading ? 0 : body.unitCost),
-        amount: d(heading ? 0 : lineAmount(body.quantity, body.unitCost)),
-        sortOrder: body.sortOrder ?? 0,
-      },
-    });
-    await recalc(req.params.id);
-
-    res.status(201).json(line);
-  }),
-);
-
-costingRoutes.patch(
-  '/:id/lines/:lineId',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const body = parseBody(lineSchema.partial(), req.body);
-
-    const existing = await prisma.costingLine.findFirst({
-      where: { id: req.params.lineId, costingId: req.params.id },
-    });
-    if (!existing) throw notFound('Cost line not found');
-
-    const heading = body.isHeading ?? existing.isHeading;
-    const quantity = heading ? 0 : body.quantity ?? Number(existing.quantity);
-    const unitCost = heading ? 0 : body.unitCost ?? Number(existing.unitCost);
-
-    const line = await prisma.costingLine.update({
-      where: { id: req.params.lineId },
-      data: {
-        ...(body.costCategoryId !== undefined ? { costCategoryId: body.costCategoryId } : {}),
-        ...(body.itemId !== undefined ? { itemId: body.itemId || null } : {}),
-        ...(body.name !== undefined ? { name: body.name || null } : {}),
-        ...(body.description !== undefined ? { description: body.description } : {}),
-        ...(body.unit !== undefined ? { unit: body.unit } : {}),
-        ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
-        isHeading: heading,
-        quantity: d(quantity),
-        unitCost: d(unitCost),
-        amount: d(lineAmount(quantity, unitCost)),
-      },
-    });
-    await recalc(req.params.id);
-
-    res.json(line);
-  }),
-);
-
-costingRoutes.delete(
-  '/:id/lines/:lineId',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const existing = await prisma.costingLine.findFirst({
-      where: { id: req.params.lineId, costingId: req.params.id },
-    });
-    if (!existing) throw notFound('Cost line not found');
-
-    await prisma.costingLine.delete({ where: { id: req.params.lineId } });
-    await recalc(req.params.id);
-    res.json({ ok: true });
-  }),
-);
-
-// ── Scope of work / Schedule of Values, one at a time ────────────────────────
-
-const sectionSchema = z.object({
-  kind: z.enum(['MAIN_WORK', 'TESTING_COMMISSIONING', 'TURNOVER', 'OTHER']).default('MAIN_WORK'),
-  name: z.string().trim().min(2, 'Name the scope section'),
-  description: z.string().optional().nullable(),
-  durationDays: z.number().int().min(0).default(0),
-  value: z.number().min(0).default(0),
-  sortOrder: z.number().int().optional(),
-});
-
-costingRoutes.post(
-  '/:id/sections',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const body = parseBody(sectionSchema, req.body);
-
-    const section = await prisma.scopeSection.create({
-      data: {
-        costingId: req.params.id,
-        kind: body.kind,
-        name: body.name,
-        description: body.description || null,
-        durationDays: body.durationDays,
-        value: d(body.value),
-        sortOrder: body.sortOrder ?? 0,
-      },
-      include: { tasks: true },
-    });
-    res.status(201).json({ ...section, value: num(section.value) });
-  }),
-);
-
-costingRoutes.patch(
-  '/:id/sections/:sectionId',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const body = parseBody(sectionSchema.partial(), req.body);
-
-    const existing = await prisma.scopeSection.findFirst({
-      where: { id: req.params.sectionId, costingId: req.params.id },
-    });
-    if (!existing) throw notFound('Scope section not found');
-
-    const section = await prisma.scopeSection.update({
-      where: { id: req.params.sectionId },
-      data: {
-        ...(body.kind !== undefined ? { kind: body.kind } : {}),
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.description !== undefined ? { description: body.description || null } : {}),
-        ...(body.durationDays !== undefined ? { durationDays: body.durationDays } : {}),
-        ...(body.value !== undefined ? { value: d(body.value) } : {}),
-        ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
-      },
-      include: { tasks: { orderBy: { sortOrder: 'asc' } } },
-    });
-    res.json({ ...section, value: num(section.value) });
-  }),
-);
-
-costingRoutes.delete(
-  '/:id/sections/:sectionId',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const existing = await prisma.scopeSection.findFirst({
-      where: { id: req.params.sectionId, costingId: req.params.id },
-    });
-    if (!existing) throw notFound('Scope section not found');
-    await prisma.scopeSection.delete({ where: { id: req.params.sectionId } });
-    res.json({ ok: true });
-  }),
-);
+// ── The schedule of values ───────────────────────────────────────────────────
+//
+// Lines, phases and tasks are written by the sheet's one save (PUT /:id/sheet);
+// the one-at-a-time routes went on 2026-10-10 — nothing called them but the
+// verify scripts, which now save the sheet as the editor does.
 
 /**
  * Spreads the contract value across the scope sections in proportion to what
@@ -1906,68 +1737,20 @@ costingRoutes.post(
   }),
 );
 
-// ── Scope tasks ──────────────────────────────────────────────────────────────
-
-costingRoutes.post(
-  '/:id/sections/:sectionId/tasks',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const body = parseBody(
-      z.object({
-        name: z.string().trim().min(1),
-        startDay: z.number().int().min(1).optional().nullable(),
-        durationDays: z.number().int().min(0).default(0),
-        sortOrder: z.number().int().optional(),
-      }),
-      req.body,
-    );
-    const section = await prisma.scopeSection.findFirst({
-      where: { id: req.params.sectionId, costingId: req.params.id },
-    });
-    if (!section) throw notFound('Scope section not found');
-
-    res.status(201).json(
-      await prisma.scopeTask.create({
-        data: {
-          scopeSectionId: req.params.sectionId,
-          name: body.name,
-          startDay: body.startDay ?? null,
-          durationDays: body.durationDays,
-          sortOrder: body.sortOrder ?? 0,
-        },
-      }),
-    );
-  }),
-);
-
-costingRoutes.delete(
-  '/:id/sections/:sectionId/tasks/:taskId',
-  require_('gops.costing.edit_own'),
-  handler(async (req, res) => {
-    await forEdit(req, req.params.id);
-    const task = await prisma.scopeTask.findFirst({
-      where: { id: req.params.taskId, scopeSectionId: req.params.sectionId },
-    });
-    if (!task) throw notFound('Task not found');
-    await prisma.scopeTask.delete({ where: { id: req.params.taskId } });
-    res.json({ ok: true });
-  }),
-);
-
 // ── PDF: the Material Cost Estimate and the Scope of Work ────────────────────
 
 /**
- * The costing's route, one slot a step: a DRAFT prints the route submitting
- * it now would take (`draftRouteSlots`); a pending one its open request,
- * each step signed and dated or still open; a FINAL one the request that
- * approved it — and none when no approval stands behind it (`approvalStands`:
- * returned and then made final by a project built on the draft, or reopened
- * and made final again with the route switched off), because nobody will
- * ever sign that route.
+ * The costing's route, one slot a step: a DRAFT — returned, or reopened
+ * after its approval, too — prints the route submitting it now would take
+ * (`approvalSlots` with the submit's own amount and author); a pending one
+ * its open request, each step signed and dated or still open; a FINAL one
+ * the request that approved it — and none when no approval stands behind it
+ * (`approvalStands`: returned and then made final by a project built on the
+ * draft, or reopened and made final again with the route switched off),
+ * because nobody will ever sign that route.
  */
 async function costingRouteSlots(costing: { id: string; status: string; ownerId: string; contractValue: Prisma.Decimal }): Promise<ApprovalSlot[]> {
-  if (costing.status === 'DRAFT') return draftRouteSlots('costing', num(costing.contractValue), costing.ownerId);
+  if (costing.status === 'DRAFT') return approvalSlots('costing', costing.id, { amount: num(costing.contractValue), requesterId: costing.ownerId });
   if (costing.status === 'FINAL' && !(await approvalStands('costing', costing.id, 'Reopened costing'))) return [];
   return approvalSlots('costing', costing.id);
 }
@@ -2072,7 +1855,7 @@ costingRoutes.get(
       { label: `Margin (${pct(view.grossMarginPct)} of the price)`, value: formatMoney(view.marginAmount, currency) },
       { label: 'Subtotal', value: formatMoney(view.contractValue, currency) },
     ];
-    if (view.vatRate > 0) summary.push({ label: `VAT (${pct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) });
+    if (view.vatRate > 0) summary.push({ label: `VAT (${ratePct(view.vatRate)})`, value: formatMoney(view.vatAmount, currency) });
     sections.push({
       kind: 'totals',
       rows: [...summary, { label: 'Total', value: formatMoney(view.grandTotal, currency), bold: true }],
@@ -2120,21 +1903,9 @@ costingRoutes.get(
     // one open "Approved by". A costing that went final with no approval
     // standing behind it (`costingRouteSlots`) prints no approval slot:
     // nobody will ever sign it.
-    const [author, slots] = await Promise.all([
-      prisma.user.findUnique({
-        where: { id: costing.ownerId },
-        select: { email: true, phone: true, employee: { select: { mobile: true } } },
-      }),
-      costingRouteSlots(costing),
-    ]);
+    const [author, slots] = await Promise.all([contactOf(costing.ownerId), costingRouteSlots(costing)]);
     const signatories: Signatory[] = [
-      {
-        role: 'Prepared by',
-        name: costing.owner.name,
-        phone: author ? contactPhone(author) : undefined,
-        email: author?.email,
-        at: costing.createdAt,
-      },
+      { role: 'Prepared by', name: costing.owner.name, ...author, at: costing.createdAt },
       ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
     ];
 

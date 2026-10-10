@@ -23,7 +23,7 @@ import { nextNumber } from '../shared/numbering';
 import { registerAttachmentGuard } from '../shared/attachments';
 import { notify, type NotifyInput } from '../shared/notifications';
 import { registerSearch } from '../shared/search';
-import { contactPhone, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
+import { contactsOf, onApprovalSettled, pickWorkflow, submitForApproval } from '../shared/approvals';
 import { renderDocument, formatDate, formatDateTime, formatShortDate, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { buildIcs, googleCalendarUrl, parseGoogleLink, timeWindow } from '../shared/calendar-links';
 import { myEmployee } from '../shared/hr';
@@ -31,7 +31,7 @@ import { manilaDate, manilaDayKey } from '../shared/day';
 import { required, optional, decimal, bool, type ImportSpec } from '../shared/csv';
 import { registerSchedule } from './workspace';
 import type { Registered } from './imports';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, listReference, sendListPdf, choice } from '../shared/listPaper';
 import {
   ATTENDEE_RESULTS,
   MY_PASSPORT_LINK,
@@ -879,9 +879,8 @@ function sessionListWhere(me: ResolvedUser, q: ListQuery): Prisma.TrainingSessio
   const and: Prisma.TrainingSessionWhereInput[] = [];
   if (!can(me, 'ghr.training_sessions.view_all')) and.push(participantWhere(me.id));
   if (q.scope === 'mine') and.push({ trainerId: me.id });
-  if (f.status && ['SCHEDULED', 'COMPLETED', 'CANCELLED'].includes(f.status)) {
-    and.push({ status: f.status as 'SCHEDULED' | 'COMPLETED' | 'CANCELLED' });
-  }
+  const status = choice(f.status, ['SCHEDULED', 'COMPLETED', 'CANCELLED'] as const, 'Status');
+  if (status) and.push({ status });
   const now = new Date();
   if (f.when === 'upcoming') and.push({ endsAt: { gte: now } });
   if (f.when === 'past') and.push({ endsAt: { lt: now } });
@@ -1149,19 +1148,16 @@ sessionRoutes.get(
     // until then). A cancelled session will never be conducted, so no slot
     // waits on it; a session from before the scheduler was recorded names
     // nobody rather than a guess.
-    const contacts = await prisma.user.findMany({
-      where: { id: { in: [s.trainerId, ...(s.createdById ? [s.createdById] : [])] } },
-      select: { id: true, email: true, phone: true, employee: { select: { mobile: true } } },
-    });
-    const contactOf = (id: string | null) => {
-      const u = contacts.find((c) => c.id === id);
-      return u ? { phone: contactPhone(u), email: u.email } : {};
+    const contacts = await contactsOf([s.trainerId, s.createdById]);
+    const reach = (id: string | null) => {
+      const c = id ? contacts.get(id) : undefined;
+      return { phone: c?.phone, email: c?.email };
     };
     const signatories: Signatory[] = [
-      ...(s.createdBy ? [{ role: 'Scheduled by', name: s.createdBy.name, ...contactOf(s.createdById), at: s.createdAt }] : []),
+      ...(s.createdBy ? [{ role: 'Scheduled by', name: s.createdBy.name, ...reach(s.createdById), at: s.createdAt }] : []),
       ...(s.status === 'CANCELLED'
         ? []
-        : [{ role: 'Conducted by', name: s.trainer.name, ...contactOf(s.trainerId), at: s.status === 'COMPLETED' ? s.completedAt : undefined }]),
+        : [{ role: 'Conducted by', name: s.trainer.name, ...reach(s.trainerId), at: s.status === 'COMPLETED' ? s.completedAt : undefined }]),
     ];
     const pdf = await renderDocument({
       title: 'Training Attendance Sheet',

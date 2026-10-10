@@ -44,7 +44,6 @@ import {
 } from '../src/shared/finance';
 import { manilaDayKey } from '../src/shared/day';
 import { statusLabel } from '../src/shared/pdf';
-import zlib from 'node:zlib';
 // Side-effect imports: register the bill, expense and cash-advance approval
 // subscribers, and the procurement ones the receiving path depends on. The
 // two settle handlers are imported by name as well, so a test can call each
@@ -54,6 +53,15 @@ import { settleAdvance } from '../src/routes/advances';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
 import '../src/routes/procurement';
+import {
+  flat,
+  hasLine,
+  labelRuns,
+  labelsSaid,
+  pdfText,
+  pendingCount,
+  signedCount,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -247,52 +255,11 @@ async function makeUser(name: string, email: string, roleKeys: string[], supervi
   });
 }
 
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation uses.
- * PDFKit Flate-compresses its content streams and writes text as hex runs
- * split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1]
-          ? Buffer.from(part[1], 'hex').toString('latin1')
-          : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
-const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
-/** An open sign-off: "Pending" on a line of its own — never the "Pending approval" a status prints. */
-const pendingCount = (t: string) => t.split('\n').filter((l) => l.trim() === 'Pending').length;
-/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
-const flat = (t: string) => t.replace(/\s+/g, ' ');
 /** A workflow's step names as the paper prints them, in capitals. */
 const stepNames = async (workflowId: string | null) =>
   (await prisma.approvalStep.findMany({ where: { workflowId: workflowId ?? '' }, orderBy: { sequence: 'asc' } })).map((st) =>
     st.name.toUpperCase(),
   );
-/** A totals label printed as a line of its own — "Claimed", never the "Claimed by:" a field prints. */
-const hasLine = (t: string, label: string) => t.split('\n').some((l) => l.trim() === label);
 const exportsOf = (entityType: string, entityId: string) =>
   prisma.auditLog.count({ where: { entityType, entityId, action: 'EXPORTED' } });
 
@@ -1507,6 +1474,23 @@ async function main() {
       return { status: res.status, body: text ? JSON.parse(text) : {} };
     };
 
+    // A list filter's value is checked against its choices' VALUES (shared/
+    // listPaper's `choice`): a prototype key such as "toString" once passed an
+    // `in Enum` test and reached the database as a 500; a malformed day read
+    // as Invalid Date. Both are a 400 naming the choices in words.
+    const [protoStatus, protoKind, impossibleDay] = await Promise.all([
+      api('GET', '/invoices?status=toString'),
+      api('GET', '/payments?kind=constructor'),
+      api('GET', '/invoices?from=2026-13-01'),
+    ]);
+    check(
+      'a filter value that is a prototype key is a 400 naming the choices in words, never a 500',
+      protoStatus.status === 400 && String(protoStatus.body.error).includes('Partially paid') &&
+        protoKind.status === 400 && String(protoKind.body.error).includes('Money in'),
+      `${protoStatus.status} ${JSON.stringify(protoStatus.body).slice(0, 120)} · ${protoKind.status} ${JSON.stringify(protoKind.body).slice(0, 120)}`,
+    );
+    check('and an impossible day is a 400, never a 500', impossibleDay.status === 400, `${impossibleDay.status} ${JSON.stringify(impossibleDay.body).slice(0, 120)}`);
+
     const doubleInvoice = await api('POST', `/invoices/from-billing/${billing.id}`);
     check(
       'a billing that has been invoiced cannot be invoiced again',
@@ -1753,13 +1737,14 @@ async function main() {
         pendingCount(brRaw) === 0,
       `${brPdf.status} ${signedCount(brRaw)} signed, ${pendingCount(brRaw)} pending · ${brText.slice(0, 300)}`,
     );
+    const brMoney = labelRuns(brPdf.bytes, ['Amount requested', 'Released']);
     check(
       'its money is the totals block: requested, then released, the last in bold',
-      brRaw.includes('Amount requested') &&
-        brRaw.includes('Released') &&
+      brMoney.map((r) => r.text).join(',') === 'Amount requested,Released' &&
+        brMoney.map((r) => r.bold).join(',') === 'false,true' &&
         brRaw.includes(peso(6_000)) &&
         !brRaw.includes('AMOUNT REQUESTED'),
-      brRaw.split('\n').filter((l) => /requested|Released/i.test(l)).join(' | '),
+      `${labelsSaid(brMoney)} · ${brRaw.split('\n').filter((l) => /requested|Released/i.test(l)).join(' | ')}`,
     );
     check('both prints are on the request’s trail as EXPORTED', (await exportsOf('budget_request', raisedId)) === 2);
     const reversal = await fin('DELETE', `/payments/${whole.body.id}`);
@@ -2193,8 +2178,9 @@ async function main() {
     const pId = String(pClaim.body.id ?? '');
     const claimPaper = async () => {
       const res = await eng('GET', `/expense-claims/${pId}/pdf`);
-      return { status: res.status, text: res.bytes ? pdfText(res.bytes) : '' };
+      return { status: res.status, bytes: res.bytes, text: res.bytes ? pdfText(res.bytes) : '' };
     };
+    const CLAIM_MONEY = ['Total', 'Claimed', 'Reimbursed', 'Still owed'];
     const pDraft = await claimPaper();
     const pSubmit = await eng('POST', `/expense-claims/${pId}/submit`);
     const pRequest = await prisma.approvalRequest.findFirst({ where: { documentType: 'expense', documentId: pId, status: 'PENDING' } });
@@ -2216,6 +2202,7 @@ async function main() {
     check(
       'its receipts add up in the totals block — "Claimed", in bold, and no "Still owed" before anyone approved it — never a TOTAL row in the table',
       hasLine(pDraft.text, 'Claimed') &&
+        labelsSaid(labelRuns(pDraft.bytes, CLAIM_MONEY)) === 'Claimed*' &&
         !pDraft.text.includes('Reimbursed') &&
         !pDraft.text.includes('Still owed') &&
         pDraft.text.includes(peso(1_550.5)) &&
@@ -2226,7 +2213,7 @@ async function main() {
         !pDraft.text.includes(peso(1_200)) &&
         pDraft.text.includes('Draft') &&
         !pDraft.text.includes('DRAFT'),
-      pDraft.text.split('\n').filter((l) => /total|Claimed|Reimbursed|owed|AMOUNT|Draft/i.test(l)).join(' | ').slice(0, 300),
+      `${labelsSaid(labelRuns(pDraft.bytes, CLAIM_MONEY))} · ${pDraft.text.split('\n').filter((l) => /total|Claimed|Reimbursed|owed|AMOUNT|Draft/i.test(l)).join(' | ').slice(0, 300)}`,
     );
     if (pRequest) await act({ requestId: pRequest.id, userId: pm.id, action: 'APPROVED' });
     const pSigned = await claimPaper();
@@ -2329,8 +2316,10 @@ async function main() {
         okText.includes(peso(0)) &&
         hasLine(okText, 'Still owed') &&
         okText.includes(peso(245)) &&
-        !hasLine(okText, 'Claimed'),
-      `${okClaim.status} ${okSubmit.status} · ${signedCount(okText)} signed, ${pendingCount(okText)} pending · ` +
+        !hasLine(okText, 'Claimed') &&
+        // In the money block's order, only the last — what is still owed — bold.
+        labelsSaid(labelRuns(okPaper.bytes, CLAIM_MONEY)) === 'Total, Reimbursed, Still owed*',
+      `${okClaim.status} ${okSubmit.status} · ${signedCount(okText)} signed, ${pendingCount(okText)} pending · ${labelsSaid(labelRuns(okPaper.bytes, CLAIM_MONEY))} · ` +
         okText.split('\n').filter((l) => /Total|Reimbursed|owed|Claimed/.test(l)).join(' | '),
     );
 

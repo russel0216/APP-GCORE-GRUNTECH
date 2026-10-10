@@ -216,11 +216,6 @@ export function CashAdvances() {
       <div className="page-head">
         <div>
           <h1>Cash Advances</h1>
-          <p>
-            Cash handed over before it is spent — site trips, emergency purchases, anything paid in
-            cash on the day. It is accounted for with receipts afterwards, and only what was
-            actually spent reaches a project's budget.
-          </p>
         </div>
       </div>
 

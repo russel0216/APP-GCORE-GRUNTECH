@@ -27,20 +27,8 @@ import {
 import { registerSearch } from '../shared/search';
 import { renderDocument, companyCurrency, formatAmount, formatMoney, formatShortDate, statusLabel, type PdfSection } from '../shared/pdf';
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
-import {
-  claimInclude,
-  presentClaim,
-  cashRequestSections,
-  cashRequestSignatories,
-  LIST_CAP,
-  listReference,
-  bracketed,
-  totalLabel,
-  bracketNote,
-  listNotes,
-  recordNamed,
-  sendListPdf,
-} from './finance';
+import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories } from './finance';
+import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
 
 /**
  * Cash advances — money issued to a person BEFORE it is spent.
@@ -127,7 +115,7 @@ function advanceListWhere(me: ReturnType<typeof currentUser>, q: ListQuery, toda
   if (mine) people.push({ requestedById: me.id });
   if (asked) people.push({ requestedById: asked });
   if (people.length) where.AND = people;
-  const status = q.filters.status && q.filters.status in CashAdvanceStatus ? (q.filters.status as CashAdvanceStatus) : undefined;
+  const status = choice(q.filters.status, CashAdvanceStatus, 'Status');
   if (status) where.status = status;
   if (q.filters.jobId) where.jobId = q.filters.jobId;
   // Overdue is not a status: released, past the deadline, no approved liquidation.

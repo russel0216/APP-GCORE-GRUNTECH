@@ -279,6 +279,34 @@ export async function routePreview(
   };
 }
 
+/** A route as a page names it before anybody presses Submit: names only, never contact lines. */
+export interface RouteBrief {
+  name: string;
+  steps: { name: string; approvers: { id: string; name: string }[] }[];
+}
+
+/**
+ * `routePreview` for a page — "Submit for approval sends it to …" — the
+ * workflow's name and, step by step, who would decide it, by name only (a
+ * page's JSON never carries a mobile). Null when no active workflow covers
+ * the document; an option it is out of band for is null too.
+ */
+export async function routeBrief(
+  documentType: string,
+  amount: number | null,
+  requesterId: string,
+  optionId?: string | null,
+  ctx: ApprovalContext = {},
+): Promise<RouteBrief | null> {
+  const route = await routePreview(documentType, amount, requesterId, optionId, ctx);
+  return (
+    route && {
+      name: route.name,
+      steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
+    }
+  );
+}
+
 /** Active users holding a role, by key. HR fallbacks and the clearance sweep read it. */
 export async function usersInRole(
   roleKey: string,
@@ -698,10 +726,13 @@ export async function approvalSignoffs(
  * them, and "Approved by" alone only where no route exists.
  */
 export function slotSignatories(slots: ApprovalSlot[]): Signatory[] {
+  // The position travels too: the house dress never prints one, but a
+  // designed layout (the quotation's, the sales order's) may tick
+  // `showPosition`, and a slot is the same slot on either.
   return slots.map((s) => {
-    if (s.name) return { role: s.step, name: s.name, phone: s.phone, email: s.email, at: s.at };
+    if (s.name) return { role: s.step, name: s.name, position: s.position, phone: s.phone, email: s.email, at: s.at };
     const who = s.assigned ?? [];
-    if (who.length === 1) return { role: s.step, name: who[0].name, phone: who[0].phone, email: who[0].email };
+    if (who.length === 1) return { role: s.step, name: who[0].name, position: who[0].position, phone: who[0].phone, email: who[0].email };
     return { role: s.step, name: who.length ? who.map((p) => p.name).join(' or ') : undefined };
   });
 }
@@ -720,21 +751,46 @@ export interface ApprovalSlot {
 }
 
 /**
- * Every sign-off slot of a document's latest approval request, in step order:
- * each step's name, and — once that step has approved — who and when. A step
- * still to act has no `name` and no time, so a printed document says
- * "Pending" there rather than borrowing anybody's signature; while the
- * request is open it carries `assigned`, who may yet sign it.
- *
- * Before submission there is no request. Given `draft`, the slots are the
- * route the document WOULD take (`routePreview`), each step `assigned`; without
- * it, none.
+ * What a draft's route is previewed on: exactly what the document's own
+ * submit passes to `submitForApproval` — the amount that picks the band, the
+ * person the submit files it for, the option ticked ("Add the CEO as
+ * approver"), and the project and manager a PROJECT_MANAGER step reads.
  */
-export async function approvalSlots(
-  documentType: string,
-  documentId: string,
-  draft?: { amount: number | null; requesterId: string; optionId?: string | null; jobId?: string | null; projectManagerId?: string | null },
-): Promise<ApprovalSlot[]> {
+export interface DraftRoute {
+  amount: number | null;
+  requesterId: string;
+  optionId?: string | null;
+  jobId?: string | null;
+  projectManagerId?: string | null;
+}
+
+/**
+ * Every sign-off slot of a document, in step order — the ONE reading every
+ * routed document's paper (and a page that says where Submit goes) takes.
+ *
+ * - **`draft` given** — the caller says the document is a draft now: never
+ *   submitted, pulled back, returned, or reopened after its approval. Unless
+ *   a request is still PENDING, the slots are the route a (re)submission
+ *   WOULD take (`routePreview`, with the submit's own context), every step
+ *   open under who may sign it; an option the document no longer qualifies
+ *   for falls back to the standard route. Whatever its last request closed
+ *   as — withdrawn, returned, or approved before a reopen — it is not this
+ *   draft's approval, and its dated steps would sign for a version nobody
+ *   now decides on.
+ * - **An open request** (PENDING): each step signed and dated, or — still to
+ *   act — no `name` and no time, so the paper says "Pending" rather than
+ *   borrowing anybody's signature, with `assigned`: who may yet sign it.
+ * - **A closed request** (APPROVED — every step signed — REJECTED, or
+ *   CANCELLED): only the steps somebody signed, each dated. Nobody will ever
+ *   sign the rest, the step that refused it included, and "Pending" there
+ *   would not be the truth (rule 6).
+ * - **No request** and no `draft`: none.
+ *
+ * A document's own rule about which request still stands behind it (a FINAL
+ * costing reopened since — `approvalStands`; a cancelled job order) is the
+ * caller's, applied before it asks.
+ */
+export async function approvalSlots(documentType: string, documentId: string, draft?: DraftRoute): Promise<ApprovalSlot[]> {
   const request = await prisma.approvalRequest.findFirst({
     where: { documentType, documentId },
     orderBy: { createdAt: 'desc' },
@@ -748,20 +804,19 @@ export async function approvalSlots(
       },
     },
   });
-  if (!request) {
-    if (!draft) return [];
+  const open = request?.status === 'PENDING';
+  if (draft && !open) {
     // An option the document no longer qualifies for falls back to the standard route.
-    const ctx = { jobId: draft.jobId, projectManagerId: draft.projectManagerId };
+    const ctx: ApprovalContext = { jobId: draft.jobId, projectManagerId: draft.projectManagerId };
     const route =
       (draft.optionId ? await routePreview(documentType, draft.amount, draft.requesterId, draft.optionId, ctx) : null) ??
       (await routePreview(documentType, draft.amount, draft.requesterId, null, ctx));
     return route ? route.steps.map((st) => ({ step: st.name, assigned: st.approvers })) : [];
   }
+  if (!request) return [];
   const bySeq = new Map(request.actions.map((a) => [a.sequence, a]));
-  const steps = request.workflow?.steps ?? [];
-  const open = request.status === 'PENDING';
-  return Promise.all(
-    steps.map(async (st): Promise<ApprovalSlot> => {
+  const slots = await Promise.all(
+    (request.workflow?.steps ?? []).map(async (st): Promise<ApprovalSlot | null> => {
       const a = bySeq.get(st.sequence);
       if (a) {
         return {
@@ -773,9 +828,33 @@ export async function approvalSlots(
           at: a.actedAt,
         };
       }
-      return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : { step: st.name };
+      return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;
     }),
   );
+  return slots.filter((s): s is ApprovalSlot => s !== null);
+}
+
+/**
+ * Whether a document's latest request is still its approval: that request
+ * APPROVED it, and the document was not reopened after the decision — a row
+ * on its own trail whose summary starts `reopened` ("Reopened costing",
+ * "Reopened sales order"), which the reopen routes write. A costing returned
+ * and then made final by a project built on the draft, or an order reopened
+ * and issued again with no route active, would otherwise print the steps of
+ * a decision that no longer stands — dated signatures, or a route nobody
+ * will ever sign.
+ */
+export async function approvalStands(documentType: string, documentId: string, reopened: string): Promise<boolean> {
+  const request = await prisma.approvalRequest.findFirst({
+    where: { documentType, documentId },
+    orderBy: { createdAt: 'desc' },
+    select: { status: true, closedAt: true },
+  });
+  if (request?.status !== 'APPROVED' || !request.closedAt) return false;
+  const since = await prisma.auditLog.count({
+    where: { entityType: documentType, entityId: documentId, at: { gt: request.closedAt }, summary: { startsWith: reopened } },
+  });
+  return since === 0;
 }
 
 /**
@@ -785,4 +864,35 @@ export async function approvalSlots(
  */
 export function contactPhone(user: { phone?: string | null; employee?: { mobile?: string | null } | null }): string | undefined {
   return user.phone?.trim() || user.employee?.mobile?.trim() || undefined;
+}
+
+/** The contact lines a sign-off prints under a person's name. */
+export interface Contact {
+  phone?: string;
+  email?: string;
+}
+
+const CONTACT_SELECT = { id: true, name: true, email: true, phone: true, employee: { select: { mobile: true } } } as const;
+
+/**
+ * How to reach a person, as a sign-off prints it under their name — read for
+ * the PAPER only, never sent with a record (the quotation's rule: a record's
+ * JSON carries no mobile). Nothing for nobody, or a login no longer on file.
+ * Spread it into a `Signatory` beside the name the document already holds.
+ */
+export async function contactOf(userId: string | null | undefined): Promise<Contact> {
+  if (!userId) return {};
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: CONTACT_SELECT });
+  return user ? { phone: contactPhone(user), email: user.email } : {};
+}
+
+/**
+ * `contactOf` for several people in one read, by login id, each with the name
+ * on file — for a document that names people off its trail (whoever raised
+ * it, whoever issued it), where the trail may hold only the id.
+ */
+export async function contactsOf(ids: (string | null | undefined)[]): Promise<Map<string, Contact & { name: string }>> {
+  const wanted = [...new Set(ids.filter((v): v is string => !!v))];
+  const users = wanted.length ? await prisma.user.findMany({ where: { id: { in: wanted } }, select: CONTACT_SELECT }) : [];
+  return new Map(users.map((u) => [u.id, { name: u.name, phone: contactPhone(u), email: u.email }]));
 }

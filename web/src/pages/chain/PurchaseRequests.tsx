@@ -157,12 +157,6 @@ export function PurchaseRequests() {
       <div className="page-head">
         <div>
           <h1>Purchase Requests</h1>
-          <p>
-            Two kinds, and the difference matters. <strong>Direct to job</strong> commits the
-            project's budget now and charges it when the goods arrive.{' '}
-            <strong>Stock replenishment</strong> buys for the warehouse and charges a project only
-            when it is issued — so material is never counted against a job twice.
-          </p>
         </div>
       </div>
 
@@ -177,6 +171,7 @@ export function PurchaseRequests() {
         reloadToken={reload}
         onRowClick={(r) => navigate(`${base}/${r.id}`)}
         emptyTitle="No purchase requests yet"
+        emptyHint="Direct to job charges the project when the goods arrive; stock replenishment charges one only when it is issued."
         filters={[
           { key: 'status', label: 'Status', options: PR_STATUSES },
           {

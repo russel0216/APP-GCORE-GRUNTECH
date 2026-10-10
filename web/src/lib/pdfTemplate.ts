@@ -3,9 +3,10 @@
  * of `api/src/shared/pdfDesign.ts`, and its rule for filling text with field
  * values, so a box on the editor's page reads the way it will print.
  *
- * DOM-free: `verify-foundation.ts` imports `resolveTemplate` from here and
- * holds it equal to the server's on the same cases. It is a copy of that rule
- * for the page's preview, never a second rule — change both together.
+ * DOM-free: `verify-foundation.ts` imports `resolveTemplate` and
+ * `signoffColumns` from here and holds each equal to the server's on the same
+ * cases. They are copies of those rules for the page's preview, never second
+ * rules — change both together.
  */
 
 /** A4, in points. */
@@ -284,6 +285,24 @@ export function clampToPage<B extends Block>(b: B, page: { w: number; h: number 
     x: pt(Math.min(Math.max(b.x, 0), page.w - w)),
     y: pt(Math.min(Math.max(b.y, 0), page.h - h)),
   };
+}
+
+/**
+ * The columns of a sign-off block — a COPY of `signoffColumns` in
+ * api/src/shared/pdf.ts, pinned equal by verify-foundation, so the canvas
+ * draws the columns the PDF prints: the first at the block's left edge, the
+ * last ending at its right, each `colWidth` wide at most and never wider than
+ * its equal share of the block, so a column always ends a gutter before the
+ * next begins. The designed documents set them 10pt apart.
+ */
+export function signoffColumns(
+  block: { x: number; w: number; colWidth: number; gutter: number },
+  n: number,
+): { x: number; width: number }[] {
+  if (n <= 1) return [{ x: block.x, width: block.w }];
+  const colW = Math.min(block.colWidth, block.w, (block.w - block.gutter * (n - 1)) / n);
+  const step = (block.w - colW) / (n - 1);
+  return Array.from({ length: n }, (_, i) => ({ x: block.x + step * i, width: i === n - 1 ? colW : Math.min(colW, step - block.gutter) }));
 }
 
 /** Where the boxes that follow the lines may start: under the table as drawn. */

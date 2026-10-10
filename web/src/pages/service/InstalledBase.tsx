@@ -80,7 +80,7 @@ export function InstalledBase() {
   const columns: Column<Asset>[] = [
     {
       key: 'code',
-      label: 'Number',
+      label: 'Code',
       sortKey: 'code',
       width: '140px',
       render: (r) => <span className="mono">{r.code}</span>,

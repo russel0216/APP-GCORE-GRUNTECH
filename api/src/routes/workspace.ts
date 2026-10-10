@@ -1,11 +1,12 @@
 import { Router } from 'express';
+import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
 import { z } from 'zod';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, approversForStep, contactPhone, historyFor, pendingFor } from '../shared/approvals';
+import { act, approversForStep, contactOf, historyFor, pendingFor } from '../shared/approvals';
 import { audit } from '../shared/audit';
 import {
   upload,
@@ -917,13 +918,9 @@ pdfRoutes.get(
     const me = currentUser(req);
     const company = await prisma.company.findUnique({ where: { id: 'company' } });
     const currency = await companyCurrency();
-    const contact = await prisma.user.findUnique({
-      where: { id: me.id },
-      select: { email: true, phone: true, employee: { select: { mobile: true } } },
-    });
+    const contact = await contactOf(me.id);
     const vatRate = Number(company?.vatRate) || 0;
     const ewtRate = Number(company?.ewtRate) || 0;
-    const pct = (rate: number) => `${+(rate * 100).toFixed(2)}%`;
 
     // The lines, in centavos so the sample adds up exactly.
     const lines: { group: string; title: string; body: string; qty: number; unit: string; price: number }[] = [
@@ -989,10 +986,10 @@ pdfRoutes.get(
           kind: 'totals',
           rows: [
             { label: 'Subtotal', value: peso(subtotal) },
-            { label: `VAT (${pct(vatRate)})`, value: peso(vat) },
+            { label: `VAT (${ratePct(vatRate)})`, value: peso(vat) },
             { label: 'Total', value: peso(subtotal + vat) },
             // EWT is withheld on the gross, never on the VAT.
-            { label: `Less: EWT (${pct(ewtRate)})`, value: peso(ewt) },
+            { label: `Less: EWT (${ratePct(ewtRate)})`, value: peso(ewt) },
             { label: 'Net collectible', value: peso(subtotal + vat - ewt), bold: true },
           ],
         },
@@ -1001,8 +998,8 @@ pdfRoutes.get(
           title: 'Tax treatment',
           columns: 3,
           fields: [
-            { label: 'VAT rate', value: pct(vatRate) },
-            { label: 'EWT rate', value: pct(ewtRate) },
+            { label: 'VAT rate', value: ratePct(vatRate) },
+            { label: 'EWT rate', value: ratePct(ewtRate) },
             // Words, not "≠": a standard PDF font has no such glyph, and its
             // base character is "=", which says the opposite.
             { label: 'Note', value: 'EWT is withheld at source — invoiced is not collectible' },
@@ -1039,7 +1036,7 @@ pdfRoutes.get(
       signatories: [
         // The author's slot, dated, with the contact lines every real
         // document prints under the name.
-        { role: 'Prepared by', name: me.name, phone: contact ? contactPhone(contact) : undefined, email: contact?.email, at: new Date(Date.now() - 36 * 3600_000) },
+        { role: 'Prepared by', name: me.name, ...contact, at: new Date(Date.now() - 36 * 3600_000) },
         // A step that has signed, in the step's own name.
         { role: 'Technical review', name: me.name, at: new Date(Date.now() - 20 * 3600_000) },
         // A step still open: who may sign it, over "Pending".

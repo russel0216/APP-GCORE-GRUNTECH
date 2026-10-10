@@ -21,7 +21,6 @@
  */
 
 import fs from 'node:fs';
-import zlib from 'node:zlib';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import sharp from 'sharp';
@@ -51,6 +50,17 @@ import { formatAmount, formatMoney, statusLabel } from '../src/shared/pdf';
 // Registers the leave and overtime approval subscribers (a side effect), and
 // lends the overtime paper's stage words.
 import { OT_STAGE_LABEL } from '../src/routes/hr';
+import {
+  checkListPaper,
+  checkOwnPaper,
+  flat,
+  printed,
+  readScreen,
+  referenceOf,
+  saysCount,
+  splittingValue,
+  squash,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -239,176 +249,6 @@ async function apiReachable(): Promise<boolean> {
   }
 }
 
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation uses.
- * PDFKit Flate-compresses its content streams and writes text as hex runs
- * split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-// ── Printed lists (rule 6, A5) ───────────────────────────────────────────────
-//
-// `GET <list>/pdf` reads the list's own where-builder, so the paper is the
-// screen: the same set for the same query (the reference's count is the
-// screen's total, every row is on it, the search named), `?ids=` prints only
-// the row ticked and says so, a filter is named and prints the screen's count
-// for it, and each print is on the trail as EXPORTED with entityId "list".
-
-/** A reference may wrap: read the words, not the line breaks. */
-const paperWords = (t: string) => t.replace(/\s+/g, ' ');
-/** A number or a name may wrap inside a narrow cell: compare with every space gone. */
-const paperSquash = (t: string) => t.replace(/\s+/g, '');
-
-async function readPaper(token: string, path: string) {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const type = res.headers.get('content-type') ?? '';
-  const bytes = Buffer.from(await res.arrayBuffer());
-  return { status: res.status, type, text: res.ok && type.includes('application/pdf') ? pdfText(bytes) : '' };
-}
-
-async function readScreen(token: string, path: string) {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const body = (await res.json().catch(() => ({}))) as { rows?: Record<string, unknown>[]; total?: number };
-  return { status: res.status, rows: body.rows ?? [], total: body.total ?? -1 };
-}
-
-/** "Reference: 3 leave requests" — the count a printed list opens with. */
-const countedAs = (n: number, noun: readonly [string, string]) =>
-  `Reference: ${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}`;
-const referenceOf = (text: string) => paperWords(text).match(/Reference:.{0,140}/)?.[0] ?? '';
-
-async function checkListPaper(o: {
-  label: string;
-  token: string;
-  actorId: string;
-  /** The list's path, '/leave'. */
-  list: string;
-  /** A query that finds this script's own rows, and how the reference names it. */
-  query: string;
-  named: string;
-  noun: readonly [string, string];
-  /** What on the paper names a row: its number, code or email. */
-  mark: (row: Record<string, unknown>) => string;
-  filter: { query: string; named: string };
-  entityType: string;
-}) {
-  const exported = () =>
-    prisma.auditLog.count({ where: { entityType: o.entityType, entityId: 'list', action: 'EXPORTED', actorId: o.actorId } });
-  const before = await exported();
-  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
-
-  const screen = await readScreen(o.token, `${o.list}?${o.query}&pageSize=200`);
-  const paper = await readPaper(o.token, `${o.list}/pdf?${o.query}`);
-  const missing = screen.rows.map(o.mark).filter((m) => !has(paper.text, m));
-  check(
-    `${o.label}: ${o.list}/pdf prints the list as the screen shows it — the same count, every row, the search named`,
-    paper.status === 200 &&
-      paper.type.includes('application/pdf') &&
-      screen.total > 0 &&
-      paperWords(paper.text).includes(countedAs(screen.total, o.noun)) &&
-      !missing.length &&
-      paperWords(paper.text).includes(o.named),
-    `${paper.status} ${paper.type} · screen ${screen.total} · missing ${missing.join(', ')} · ${referenceOf(paper.text)}`,
-  );
-
-  const [first, ...rest] = screen.rows;
-  const others = first ? rest.map(o.mark).filter((m) => m !== o.mark(first)) : [];
-  const ticked = await readPaper(o.token, `${o.list}/pdf?ids=${String(first?.id ?? 'none')}`);
-  check(
-    `${o.label}: ?ids= prints only the row ticked, and says so`,
-    ticked.status === 200 &&
-      !!first &&
-      paperWords(ticked.text).includes(countedAs(1, o.noun)) &&
-      paperWords(ticked.text).includes('the rows selected') &&
-      has(ticked.text, o.mark(first)) &&
-      others.every((m) => !has(ticked.text, m)),
-    `${ticked.status} · ${referenceOf(ticked.text)} · ${others.filter((m) => has(ticked.text, m)).length} other row(s) printed`,
-  );
-
-  const narrowed = await readScreen(o.token, `${o.list}?${o.filter.query}&pageSize=200`);
-  const filtered = await readPaper(o.token, `${o.list}/pdf?${o.filter.query}`);
-  const lost = narrowed.rows.map(o.mark).filter((m) => !has(filtered.text, m));
-  check(
-    `${o.label}: a filter is named (${o.filter.named}) and prints the screen's rows for it`,
-    filtered.status === 200 &&
-      narrowed.status === 200 &&
-      paperWords(filtered.text).includes(o.filter.named) &&
-      paperWords(filtered.text).includes(countedAs(narrowed.total, o.noun)) &&
-      !lost.length,
-    `${filtered.status} · screen ${narrowed.total} · missing ${lost.join(', ')} · ${referenceOf(filtered.text)}`,
-  );
-  const after = await exported();
-  check(`${o.label}: each print is on the trail as EXPORTED, entityId "list"`, after === before + 3, `${after - before} new row(s)`);
-}
-
-/**
- * A view_own holder's paper: only their own rows, whatever they search or
- * tick — somebody else's row named in `?ids=` prints nothing of it.
- */
-async function checkOwnPaper(o: {
-  label: string;
-  ownToken: string;
-  allToken: string;
-  list: string;
-  query: string;
-  noun: readonly [string, string];
-  mark: (row: Record<string, unknown>) => string;
-}) {
-  const has = (text: string, mark: string) => paperSquash(text).includes(paperSquash(mark));
-  const own = (await readScreen(o.ownToken, `${o.list}?${o.query}&pageSize=200`)).rows;
-  const all = (await readScreen(o.allToken, `${o.list}?${o.query}&pageSize=200`)).rows;
-  const ownMarks = own.map(o.mark);
-  const theirs = all.filter((r) => !ownMarks.includes(o.mark(r)));
-  const paper = await readPaper(o.ownToken, `${o.list}/pdf?${o.query}`);
-  check(
-    `${o.label}: someone who sees only their own prints only their own`,
-    paper.status === 200 &&
-      paperWords(paper.text).includes(countedAs(own.length, o.noun)) &&
-      ownMarks.every((m) => has(paper.text, m)) &&
-      theirs.every((r) => !has(paper.text, o.mark(r))),
-    `${paper.status} · own ${own.length}, others ${theirs.length} · ${referenceOf(paper.text)}`,
-  );
-  if (theirs.length) {
-    const sneaky = await readPaper(o.ownToken, `${o.list}/pdf?ids=${String(theirs[0].id)}`);
-    check(
-      `${o.label}: and ticking somebody else's row prints nothing of it`,
-      sneaky.status === 200 && !has(sneaky.text, o.mark(theirs[0])) && paperWords(sneaky.text).includes(countedAs(0, o.noun)),
-      `${sneaky.status} · ${referenceOf(sneaky.text)}`,
-    );
-  }
-}
-
-/** A status that splits the rows — some have it, some do not — so a filter keeps some and drops others. */
-const splittingValue = (rows: Record<string, unknown>[], key: string) =>
-  [...new Set(rows.map((r) => String(r[key] ?? '')))].find((v) => {
-    const n = rows.filter((r) => String(r[key] ?? '') === v).length;
-    return v && n > 0 && n < rows.length;
-  }) ?? String(rows[0]?.[key] ?? '');
-
 // ── The run ──────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -507,7 +347,6 @@ async function main() {
 
   const workerRole = await makeRole('zzhr_worker', `${TAG} Worker`, [
     'ghr.clock.view_own',
-    'ghr.clock.create',
     'ghr.leave.create',
     'ghr.leave.view_own',
     'ghr.overtime.create',
@@ -2426,7 +2265,7 @@ async function main() {
 
     const leaveRows = (await readScreen(hrToken, `/leave?${searched}&pageSize=200`)).rows;
     const leaveStatus = splittingValue(leaveRows, 'status');
-    await checkListPaper({
+    await checkListPaper(check, {
       label: 'Leave',
       token: hrToken,
       actorId: hrOfficer.id,
@@ -2438,7 +2277,7 @@ async function main() {
       filter: { query: `${searched}&status=${leaveStatus}`, named: `status ${statusLabel(leaveStatus)}` },
       entityType: 'leave_request',
     });
-    await checkOwnPaper({
+    await checkOwnPaper(check, {
       label: 'Leave',
       ownToken: workerToken,
       allToken: hrToken,
@@ -2447,11 +2286,11 @@ async function main() {
       noun: ['leave request', 'leave requests'],
       mark: numberOf,
     });
-    check('Leave: the printed list is refused to anyone the list refuses', (await readPaper(nobodyToken, '/leave/pdf')).status === 403);
+    check('Leave: the printed list is refused to anyone the list refuses', (await printed(nobodyToken, '/leave/pdf')).status === 403);
 
     const otScreen = await readScreen(hrToken, `/overtime?${searched}&pageSize=200`);
     const otStage = splittingValue(otScreen.rows, 'stage');
-    await checkListPaper({
+    await checkListPaper(check, {
       label: 'Overtime',
       token: hrToken,
       actorId: hrOfficer.id,
@@ -2463,7 +2302,7 @@ async function main() {
       filter: { query: `${searched}&stage=${otStage}`, named: `stage ${OT_STAGE_LABEL[otStage as keyof typeof OT_STAGE_LABEL]}` },
       entityType: 'overtime_request',
     });
-    await checkOwnPaper({
+    await checkOwnPaper(check, {
       label: 'Overtime',
       ownToken: workerToken,
       allToken: hrToken,
@@ -2474,29 +2313,29 @@ async function main() {
     });
     // The cost is the screen's — the amount charged — and the total adds the
     // listed filings up; the hourly rate behind it never reaches the paper.
-    const otPaper = await readPaper(hrToken, `/overtime/pdf?${searched}`);
+    const otPaper = await printed(hrToken, `/overtime/pdf?${searched}`);
     const otRates = otScreen.rows.filter((r) => r.hourlyRate != null).map((r) => formatAmount(Number(r.hourlyRate)));
     const otSum = otScreen.rows.reduce((t, r) => t + Math.round(Number(r.amount ?? 0) * 100), 0) / 100;
     check(
       'Overtime: the paper totals the approved cost the screen lists, and never prints an hourly rate',
       otRates.length > 0 &&
-        paperWords(otPaper.text).includes(formatMoney(otSum)) &&
-        otRates.every((rate) => !paperSquash(otPaper.text).includes(paperSquash(rate))),
-      `${formatMoney(otSum)} · rates ${otRates.join(', ')} · ${paperWords(otPaper.text).match(/Approved cost.{0,30}/)?.[0] ?? ''}`,
+        flat(otPaper.text).includes(formatMoney(otSum)) &&
+        otRates.every((rate) => !squash(otPaper.text).includes(squash(rate))),
+      `${formatMoney(otSum)} · rates ${otRates.join(', ')} · ${flat(otPaper.text).match(/Approved cost.{0,30}/)?.[0] ?? ''}`,
     );
     // The stage in the screen's words — the pill's and the filter's — never
     // the enum's "Prior": a filing awaiting authorisation says so.
     const otPrior = otScreen.rows.find((r) => r.stage === 'PRIOR');
-    const otPriorPaper = otPrior ? await readPaper(hrToken, `/overtime/pdf?ids=${String(otPrior.id)}`) : null;
+    const otPriorPaper = otPrior ? await printed(hrToken, `/overtime/pdf?ids=${String(otPrior.id)}`) : null;
     check(
       'Overtime: a filing awaiting authorisation prints "Awaiting authorisation", the screen\'s word for its stage',
       !!otPriorPaper &&
         otPriorPaper.status === 200 &&
-        paperSquash(otPriorPaper.text).includes(paperSquash(OT_STAGE_LABEL.PRIOR)) &&
-        !/\bPrior\b/.test(paperWords(otPriorPaper.text)),
+        squash(otPriorPaper.text).includes(squash(OT_STAGE_LABEL.PRIOR)) &&
+        !/\bPrior\b/.test(flat(otPriorPaper.text)),
       otPrior ? referenceOf(otPriorPaper?.text ?? '') : 'no PRIOR row on the screen',
     );
-    check('Overtime: the printed list is refused to anyone the list refuses', (await readPaper(nobodyToken, '/overtime/pdf')).status === 403);
+    check('Overtime: the printed list is refused to anyone the list refuses', (await printed(nobodyToken, '/overtime/pdf')).status === 403);
 
     // Attendance: two days of the other employee's, one late, so the status
     // filter keeps one and drops the other. A row is named by its day and
@@ -2529,7 +2368,7 @@ async function main() {
       const e = r.employee as { firstName: string; lastName: string };
       return `${mdy(String(r.date))}${e.lastName}, ${e.firstName}`;
     };
-    await checkListPaper({
+    await checkListPaper(check, {
       label: 'Attendance',
       token: registrarToken,
       actorId: registrar.id,
@@ -2541,17 +2380,21 @@ async function main() {
       filter: { query: `${searched}&status=LATE`, named: 'status Late' },
       entityType: 'attendance',
     });
-    const ranged = await readPaper(registrarToken, `/attendance/pdf?${searched}&from=2026-09-21&to=2026-09-21`);
+    const ranged = await printed(registrarToken, `/attendance/pdf?${searched}&from=2026-09-21&to=2026-09-21`);
     check(
       'Attendance: a range of days is named and narrows the paper to it',
       ranged.status === 200 &&
-        paperWords(ranged.text).includes('dated 09/21/2026 to 09/21/2026') &&
-        paperWords(ranged.text).includes(countedAs(1, ['attendance row', 'attendance rows'])),
+        flat(ranged.text).includes('dated 09/21/2026 to 09/21/2026') &&
+        saysCount(ranged.text, 1, ['attendance row', 'attendance rows']),
       referenceOf(ranged.text),
     );
-    check('Attendance: the printed list is refused to anyone the dashboard refuses', (await readPaper(workerToken, '/attendance/pdf')).status === 403);
+    check('Attendance: the printed list is refused to anyone the dashboard refuses', (await printed(workerToken, '/attendance/pdf')).status === 403);
 
-    await checkListPaper({
+    // Every employee this script made is active, so "active" would keep them
+    // all and prove nothing: the loner, whose part is done, is switched off,
+    // and the inactive filter keeps them alone.
+    await prisma.employee.update({ where: { employeeNo: `${TAG}-005` }, data: { isActive: false } });
+    await checkListPaper(check, {
       label: 'Employees',
       token: registrarToken,
       actorId: registrar.id,
@@ -2560,20 +2403,36 @@ async function main() {
       named: searchNamed,
       noun: ['employee', 'employees'],
       mark: (r) => String(r.employeeNo),
-      filter: { query: `${searched}&isActive=true`, named: 'active' },
+      filter: { query: `${searched}&isActive=false`, named: 'inactive' },
       entityType: 'employee',
     });
     // Zeno Worker's day rate is 1,000.00 at a 1.4 burden: neither prints,
     // although this reader may see both on the screen.
-    const registerPaper = await readPaper(registrarToken, `/employees/pdf?${searched}`);
+    const registerPaper = await printed(registrarToken, `/employees/pdf?${searched}`);
     check(
       'Employees: the printed register never carries the pay data, even for a reader who may see it',
       registerPaper.status === 200 &&
-        paperSquash(registerPaper.text).includes(`${TAG}-001`) &&
-        !/1,000\.00|1,400\.00|daily rate|burden/i.test(paperWords(registerPaper.text)),
-      paperWords(registerPaper.text).slice(0, 200),
+        squash(registerPaper.text).includes(`${TAG}-001`) &&
+        !/1,000\.00|1,400\.00|daily rate|burden/i.test(flat(registerPaper.text)),
+      flat(registerPaper.text).slice(0, 200),
     );
-    check('Employees: the printed register is refused to anyone the register refuses', (await readPaper(workerToken, '/employees/pdf')).status === 403);
+    check('Employees: the printed register is refused to anyone the register refuses', (await printed(workerToken, '/employees/pdf')).status === 403);
+
+    // The employment-type filter is checked against the enum's VALUES
+    // (listPaper's `choice`): a prototype key once reached the database and
+    // answered 500, on the register and on its paper alike.
+    const unknownType = await Promise.all(
+      ['/employees?employmentType=toString', '/employees/pdf?employmentType=toString'].map(async (path) => {
+        const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${registrarToken}` } });
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        return { status: res.status, error: String(body.error ?? '') };
+      }),
+    );
+    check(
+      'Employees: an unknown employment type is a 400 naming the choices in words, on the register and its paper, never a 500',
+      unknownType.every((r) => r.status === 400 && r.error.includes('Employment type') && r.error.includes('Project based')),
+      unknownType.map((r) => `${r.status} ${r.error}`).join(' · '),
+    );
   }
 
   await cleanup();

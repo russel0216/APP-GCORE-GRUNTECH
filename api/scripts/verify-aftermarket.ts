@@ -29,7 +29,6 @@
  *     contract's schedule must never delete a call-out.
  */
 
-import zlib from 'node:zlib';
 import bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
@@ -60,6 +59,23 @@ import { scheduleFor } from '../src/routes/workspace';
 import { resolveUser } from '../src/permissions/resolve';
 import { globalSearch } from '../src/shared/search';
 import { statusLabel } from '../src/shared/pdf';
+import {
+  flat,
+  LANDSCAPE,
+  names,
+  pdfText,
+  pendingCount,
+  printed,
+  printsRole,
+  referenceOf,
+  saysCount,
+  signedCount,
+  signoffSlots,
+  signs,
+  slotsSaid,
+  splittingValue,
+  squash,
+} from './lib/paper';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -95,49 +111,6 @@ const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
 const TAG = 'ZZAM';
 const BASE = `http://localhost:${env.port}/api`;
-
-/**
- * Readable text out of a rendered PDF — the same reader verify-foundation
- * uses. PDFKit Flate-compresses its content streams and writes text as hex
- * runs split at kerning pairs, so each TJ array is joined back into one piece.
- */
-function pdfText(pdf: Buffer): string {
-  const raw = pdf.toString('latin1');
-  const out: string[] = [];
-  const stream = /stream\r?\n/g;
-  let m: RegExpExecArray | null;
-  while ((m = stream.exec(raw))) {
-    const start = m.index + m[0].length;
-    const end = raw.indexOf('endstream', start);
-    if (end < 0) continue;
-    let body: string;
-    try {
-      body = zlib.inflateSync(Buffer.from(raw.slice(start, end), 'latin1')).toString('latin1');
-    } catch {
-      continue;
-    }
-    for (const show of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
-      let piece = '';
-      for (const part of show[1].matchAll(/<([0-9A-Fa-f]*)>|\(((?:\\.|[^\\()])*)\)/g)) {
-        piece += part[1] ? Buffer.from(part[1], 'hex').toString('latin1') : part[2].replace(/\\([()\\])/g, '$1');
-      }
-      if (piece) out.push(piece);
-    }
-  }
-  return out.join('\n');
-}
-
-/** A sign-off dated under its name: "Oct 10, 2026, 6:07 AM". */
-const signedCount = (t: string) => (t.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M/g) ?? []).length;
-const pendingCount = (t: string) => (t.match(/Pending/g) ?? []).length;
-/** A head or a role prints in capitals and may wrap: read the words, not the line breaks. */
-const flat = (t: string) => t.replace(/\s+/g, ' ');
-
-/** A document's bytes and its text. */
-async function printed(token: string, path: string): Promise<{ status: number; text: string }> {
-  const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  return { status: res.status, text: res.ok ? pdfText(Buffer.from(await res.arrayBuffer())) : '' };
-}
 
 async function cleanup() {
   // Approvals route to whoever really holds the role, so real people were told
@@ -1731,17 +1704,37 @@ async function main() {
     const joPrintsBefore = await prisma.auditLog.count({ where: { entityType: 'job_order', entityId: raised.body.id, action: 'EXPORTED' } });
     const pendingPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
     const roleOrder = (t: string) => ['REQUESTED BY', ...joSteps.map((st) => st.name.toUpperCase()), 'ACKNOWLEDGED BY (CUSTOMER)'].map((r) => flat(t).indexOf(r));
+    // The order's PERSONNEL TO SEND names the project manager and the
+    // support too, so who signs is read off the slots, never the whole page:
+    // [requester, project manager's step, team leader's step, customer].
+    const joSlots = (t: string) => signoffSlots(t, 'REQUESTED BY');
+    const routeSigned = (t: string, pmSigned: boolean) => {
+      const sl = joSlots(t);
+      return (
+        sl.length === 4 &&
+        signs(sl[0], 'Requested by', sales.name) &&
+        sl[0].signed &&
+        signs(sl[1], joSteps[0].name, director.name) &&
+        sl[1].signed === pmSigned &&
+        !names(sl[1], manager.name) &&
+        printsRole(sl[2].text, joSteps[1].name) &&
+        names(sl[2], manager.name) &&
+        !names(sl[2], director.name) &&
+        !sl[2].signed &&
+        sl[3].text.startsWith('ACKNOWLEDGED BY CUSTOMER') &&
+        !sl[3].signed
+      );
+    };
     check(
       'pending, it prints the requester dated, then each step in its own name under who may sign it — Pending — and the customer last',
       pendingPaper.status === 200 &&
         joSteps.length === 2 &&
         roleOrder(pendingPaper.text).every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1])) &&
         !flat(pendingPaper.text).includes('APPROVED BY') &&
-        pendingPaper.text.includes(director.name) &&
-        pendingPaper.text.includes(manager.name) &&
+        routeSigned(pendingPaper.text, false) &&
         signedCount(pendingPaper.text) === 1 &&
         pendingCount(pendingPaper.text) === 3,
-      `${pendingPaper.status} ${joSteps.map((st) => st.name).join(' › ')}: ${signedCount(pendingPaper.text)} signed, ${pendingCount(pendingPaper.text)} pending, order ${roleOrder(pendingPaper.text).join(',')}`,
+      `${pendingPaper.status} ${joSteps.map((st) => st.name).join(' › ')}: ${slotsSaid(joSlots(pendingPaper.text))}, order ${roleOrder(pendingPaper.text).join(',')}`,
     );
     const joRequest = await prisma.approvalRequest.findFirstOrThrow({
       where: { documentType: 'job_order', documentId: raised.body.id, status: 'PENDING' },
@@ -1750,8 +1743,8 @@ async function main() {
     const halfPaper = await printed(salesToken, `/job-orders/${raised.body.id}/pdf`);
     check(
       'once the project manager signs, the paper dates their step; the team leader and the customer stay Pending',
-      halfPaper.status === 200 && signedCount(halfPaper.text) === 2 && pendingCount(halfPaper.text) === 2 && halfPaper.text.includes(director.name),
-      `${halfPaper.status} ${signedCount(halfPaper.text)} signed, ${pendingCount(halfPaper.text)} pending`,
+      halfPaper.status === 200 && routeSigned(halfPaper.text, true) && signedCount(halfPaper.text) === 2 && pendingCount(halfPaper.text) === 2,
+      `${halfPaper.status} ${slotsSaid(joSlots(halfPaper.text))}`,
     );
     // Returned, the order goes back to its author: its request is closed with
     // the project manager's signature on it, which nobody now gives — so the
@@ -1763,11 +1756,11 @@ async function main() {
       'a returned order prints the route it would take again, every step Pending under its names — no stale signature',
       returnedPaper.status === 200 &&
         returnedPage.body.status === 'REJECTED' &&
+        routeSigned(returnedPaper.text, false) &&
         signedCount(returnedPaper.text) === 1 &&
         pendingCount(returnedPaper.text) === 3 &&
-        returnedPaper.text.includes(director.name) &&
         joSteps.every((st) => flat(returnedPaper.text).includes(st.name.toUpperCase())),
-      `${returnedPaper.status} ${returnedPage.body.status} ${signedCount(returnedPaper.text)} signed, ${pendingCount(returnedPaper.text)} pending`,
+      `${returnedPaper.status} ${returnedPage.body.status} ${slotsSaid(joSlots(returnedPaper.text))}`,
     );
     check(
       'and the page says where a resubmission goes, by name',
@@ -1991,29 +1984,40 @@ async function main() {
       'and the export left an audit row',
       !!(await prisma.auditLog.findFirst({ where: { entityType: 'installed_asset', entityId: 'list', action: 'EXPORTED' } })),
     );
-    // A list's words: the issued code under "Number", every status through
-    // statusLabel ("Active", never "active" or "ACTIVE"), and the selection
-    // said when only ticked rows printed.
+    // A list's words: a machine's identifier under "Code" (a master's code,
+    // never a document's "Number"), every status through statusLabel
+    // ("Active", never "active" or "ACTIVE"), and the selection said when
+    // only ticked rows printed.
     const baseText = pdfText(basePdf);
     const basePieces = baseText.split('\n');
     check(
-      'the printed register heads its code "Number" and prints each status as a word',
-      flat(baseText).includes('NUMBER') &&
-        !basePieces.includes('CODE') &&
+      'the printed register heads its code "Code" and prints each status as a word',
+      basePieces.includes('CODE') &&
+        !basePieces.includes('NUMBER') &&
         basePieces.includes('Active') &&
         !basePieces.includes('active') &&
         !basePieces.includes('ACTIVE'),
       basePieces.filter((l) => /NUMBER|CODE|ctive|ACTIVE/.test(l)).join(' | ').slice(0, 200),
     );
     const pickedPaper = await printed(managerToken, `/installed-assets/pdf?ids=${typed.body.id}`);
+    // Every other machine this script registered is on the register — and
+    // none of them may be on the ticked paper.
+    const registered = ((await api(managerToken, 'GET', `/installed-assets?search=${encodeURIComponent(TAG)}&pageSize=200`)).body.rows ?? []) as {
+      id: string;
+      code: string;
+    }[];
+    const othersOnPaper = registered.filter((r) => r.id !== typed.body.id && squash(pickedPaper.text).includes(r.code));
     check(
       'Print selected prints only the ticked machine, and says so — "1 machine", never "machine(s)"',
       pickedPaper.status === 200 &&
+        squash(pickedPaper.text).includes(String(typed.body.code)) &&
         flat(pickedPaper.text).includes(`${TAG} 12F Makati Center`) &&
+        registered.length > 1 &&
+        !othersOnPaper.length &&
         flat(pickedPaper.text).includes('the rows selected') &&
-        /\b1 machine\b(?!s)/.test(flat(pickedPaper.text)) &&
+        saysCount(pickedPaper.text, 1, ['machine', 'machines']) &&
         !pickedPaper.text.includes('machine(s)'),
-      `${pickedPaper.status} ${flat(pickedPaper.text).match(/[\d,]+ machines?[^—]*/)?.[0] ?? ''}`,
+      `${pickedPaper.status} ${referenceOf(pickedPaper.text)} · ${registered.length} registered, ${othersOnPaper.map((r) => r.code).join(', ') || 'no other'} printed`,
     );
 
     const bulk = await api(engineerToken, 'POST', `/installed-assets/from-job/${project.id}`, {
@@ -2690,18 +2694,7 @@ async function main() {
     console.log('\nThe lists on paper (over HTTP)');
     const listCurrency = (await prisma.company.findUnique({ where: { id: 'company' }, select: { currency: true } }))?.currency?.trim() || 'PHP';
     const listPeso = (n: number) => `${listCurrency} ${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const LANDSCAPE = '841.89x595.28';
     type ListRow = Record<string, unknown> & { id: string; status: string };
-    const saysCount = (text: string, n: number, noun: readonly [string, string]) =>
-      new RegExp(`(^|[^\\d,])${n.toLocaleString('en-PH')} ${n === 1 ? noun[0] : noun[1]}\\b`).test(text);
-    const paperOf = async (token: string, path: string) => {
-      const res = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-      const type = res.headers.get('content-type') ?? '';
-      if (!res.ok) return { status: res.status, type, text: '', boxes: [] as string[] };
-      const bytes = Buffer.from(await res.arrayBuffer());
-      const boxes = [...bytes.toString('latin1').matchAll(/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map((m) => `${m[1]}x${m[2]}`);
-      return { status: res.status, type, text: flat(pdfText(bytes)), boxes };
-    };
     const live = (rows: ListRow[], amount: (r: ListRow) => number) => rows.filter((r) => r.status !== 'CANCELLED').reduce((t, r) => t + amount(r), 0);
     const lists: {
       path: string;
@@ -2734,11 +2727,16 @@ async function main() {
       { path: 'service-reports', entity: 'service_report', noun: ['report', 'reports'], key: (r) => String(r.number) },
       { path: 'installed-assets', entity: 'installed_asset', noun: ['machine', 'machines'], key: (r) => String(r.code) },
     ];
+    // Every machine registered above is in service, so a status filter on the
+    // register would drop nothing: one is mothballed for these checks, and
+    // back in service straight after.
+    const mothballed = await prisma.installedAsset.findFirstOrThrow({ where: { name: `${TAG} Derived warranty` } });
+    await prisma.installedAsset.update({ where: { id: mothballed.id }, data: { status: 'INACTIVE' } });
     for (const l of lists) {
       const listed = await api(managerToken, 'GET', `/${l.path}?search=${TAG}&pageSize=200`);
       const rows = (listed.body.rows ?? []) as ListRow[];
       const before = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
-      const paper = await paperOf(managerToken, `/${l.path}/pdf?search=${TAG}`);
+      const paper = await printed(managerToken, `/${l.path}/pdf?search=${TAG}`);
       const after = await prisma.auditLog.count({ where: { entityType: l.entity, entityId: 'list', action: 'EXPORTED' } });
       check(
         `${l.path}: its paper is a PDF of exactly the rows the list holds, the count said and the search named, on landscape pages, audited as an export of the list`,
@@ -2746,17 +2744,17 @@ async function main() {
           paper.type.startsWith('application/pdf') &&
           rows.length > 0 &&
           rows.length === Number(listed.body.total) &&
-          rows.every((r) => paper.text.includes(l.key(r))) &&
-          saysCount(paper.text, rows.length, l.noun) &&
-          paper.text.includes(`search "${TAG}"`) &&
-          paper.boxes.length > 0 &&
-          paper.boxes.every((b) => b === LANDSCAPE) &&
+          rows.every((r) => flat(paper.text).includes(l.key(r))) &&
+          saysCount(flat(paper.text), rows.length, l.noun) &&
+          flat(paper.text).includes(`search "${TAG}"`) &&
+          paper.pages.length > 0 &&
+          paper.pages.every((b) => b === LANDSCAPE) &&
           after === before + 1,
-        `${paper.status} ${paper.type}, ${rows.length} of ${listed.body.total} listed, missing ${rows.filter((r) => !paper.text.includes(l.key(r))).map(l.key).join(',') || 'none'}, pages ${[...new Set(paper.boxes)].join(',')}, audited ${before} → ${after}`,
+        `${paper.status} ${paper.type}, ${rows.length} of ${listed.body.total} listed, missing ${rows.filter((r) => !flat(paper.text).includes(l.key(r))).map(l.key).join(',') || 'none'}, pages ${[...new Set(paper.pages)].join(',')}, audited ${before} → ${after}`,
       );
       if (l.total) {
         const expected = Math.round(l.total.of(rows) * 100) / 100;
-        const printedTotal = paper.text.match(new RegExp(`${l.total.label.source} ([A-Z]{3} [\\d,.]+)`))?.[1];
+        const printedTotal = flat(paper.text).match(new RegExp(`${l.total.label.source} ([A-Z]{3} [\\d,.]+)`))?.[1];
         check(`${l.path}: its total is what the rows it lists add up to, a cancelled one's left out`, printedTotal === listPeso(expected), `${printedTotal} vs ${listPeso(expected)}`);
         // Leaving them out is said one way on every document (finance's
         // words): a plain total, then "N cancelled …, in brackets, is/are not
@@ -2767,70 +2765,98 @@ async function main() {
           : null;
         check(
           `${l.path}: the note under the total says how many cancelled rows are in brackets (${cancelledRows}) — the one wording`,
-          (note ? paper.text.includes(note) : !paper.text.includes('in brackets')) && !paper.text.includes('cancelled not counted'),
-          paper.text.match(/[^.]{0,60}in brackets[^.]*\./)?.[0] ?? 'no note',
+          (note ? flat(paper.text).includes(note) : !flat(paper.text).includes('in brackets')) && !flat(paper.text).includes('cancelled not counted'),
+          flat(paper.text).match(/[^.]{0,60}in brackets[^.]*\./)?.[0] ?? 'no note',
         );
       }
       const [first] = rows;
-      const ticked = await paperOf(managerToken, `/${l.path}/pdf?ids=${first?.id ?? 'none'}`);
+      const ticked = await printed(managerToken, `/${l.path}/pdf?ids=${first?.id ?? 'none'}`);
       check(
         `${l.path}: ?ids= prints only the row ticked, and says so`,
         ticked.status === 200 &&
           !!first &&
-          ticked.text.includes(l.key(first)) &&
-          rows.slice(1).every((r) => !ticked.text.includes(l.key(r))) &&
-          saysCount(ticked.text, 1, l.noun) &&
-          ticked.text.includes('the rows selected'),
-        `${ticked.status} ${ticked.text.match(/Reference: .{0,120}/)?.[0] ?? ''}`,
+          flat(ticked.text).includes(l.key(first)) &&
+          rows.length > 1 &&
+          rows.slice(1).every((r) => !flat(ticked.text).includes(l.key(r))) &&
+          saysCount(flat(ticked.text), 1, l.noun) &&
+          flat(ticked.text).includes('the rows selected'),
+        `${ticked.status} ${flat(ticked.text).match(/Reference: .{0,120}/)?.[0] ?? ''}`,
       );
-      const filterQuery = `status=${first?.status}`;
+      // A status some rows have and others do not: the filter must keep the
+      // first and drop the second, on the paper as on the screen.
+      const status = splittingValue(rows, 'status');
+      const filterQuery = `status=${status}`;
       // A returned order or report reads "Returned" on paper, as on the screen.
-      const returned = first?.status === 'REJECTED' && (l.path === 'job-orders' || l.path === 'service-reports');
-      const filterWords = `status ${statusLabel(returned ? 'RETURNED' : first?.status)}`;
+      const returned = status === 'REJECTED' && (l.path === 'job-orders' || l.path === 'service-reports');
+      const filterWords = `status ${statusLabel(returned ? 'RETURNED' : status)}`;
       const narrowed = await api(managerToken, 'GET', `/${l.path}?search=${TAG}&${filterQuery}&pageSize=200`);
-      const filtered = await paperOf(managerToken, `/${l.path}/pdf?search=${TAG}&${filterQuery}`);
+      const filtered = await printed(managerToken, `/${l.path}/pdf?search=${TAG}&${filterQuery}`);
+      const kept = (narrowed.body.rows ?? []) as ListRow[];
+      const dropped = rows.filter((r) => !kept.some((k) => k.id === r.id));
       check(
         `${l.path}: a filter narrows the paper as it narrows the list, and the paper names it ("${filterWords}")`,
         filtered.status === 200 &&
-          Number(narrowed.body.total) > 0 &&
-          Number(narrowed.body.total) <= rows.length &&
-          saysCount(filtered.text, Number(narrowed.body.total), l.noun) &&
-          filtered.text.includes(filterWords) &&
-          ((narrowed.body.rows ?? []) as ListRow[]).every((r) => filtered.text.includes(l.key(r))),
-        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}; ${filtered.text.match(/Reference: .{0,160}/)?.[0] ?? ''}`,
+          kept.length > 0 &&
+          dropped.length > 0 &&
+          Number(narrowed.body.total) === kept.length &&
+          saysCount(filtered.text, kept.length, l.noun) &&
+          flat(filtered.text).includes(filterWords) &&
+          kept.every((r) => flat(filtered.text).includes(l.key(r))) &&
+          dropped.every((r) => !flat(filtered.text).includes(l.key(r))),
+        `${filtered.status}: list ${narrowed.body.total} of ${rows.length}, ${dropped.length} dropped, ${dropped.filter((r) => flat(filtered.text).includes(l.key(r))).length} of them printed; ${referenceOf(filtered.text)}`,
       );
     }
 
+    await prisma.installedAsset.update({ where: { id: mothballed.id }, data: { status: mothballed.status } });
+
     // A view_own holder prints what their list shows them — the orders they
     // raised or are sent on — and ticking somebody else's id prints nothing.
+    // The salesperson raised every order above, so one the manager raised,
+    // sending nobody, is what the rule has to keep out.
+    const foreignOrder = await prisma.jobOrder.create({
+      data: {
+        number: `${TAG}-JO-MGR`,
+        customerId: customer.id,
+        title: `${TAG} Raised by the service manager`,
+        description: 'Nobody from sales is on it',
+        requestedFor: day('2026-11-02'),
+        requestedById: manager.id,
+      },
+    });
     const ownListed = await api(salesToken, 'GET', `/job-orders?search=${TAG}&pageSize=200`);
     const ownRows = (ownListed.body.rows ?? []) as ListRow[];
     const allOrders = (((await api(managerToken, 'GET', `/job-orders?search=${TAG}&pageSize=200`)).body.rows ?? []) as ListRow[]);
     const otherOrder = allOrders.find((r) => !ownRows.some((o) => o.id === r.id));
-    const ownPaper = await paperOf(salesToken, `/job-orders/pdf?search=${TAG}`);
-    const otherOrderPaper = otherOrder ? await paperOf(salesToken, `/job-orders/pdf?ids=${otherOrder.id}`) : null;
+    const ownPaper = await printed(salesToken, `/job-orders/pdf?search=${TAG}`);
+    const otherOrderPaper = await printed(salesToken, `/job-orders/pdf?ids=${otherOrder?.id ?? 'none'}`);
     check(
       'a job-order view_own holder prints their own and nobody else’s — the visibility rule is ANDed with ?ids=',
       ownPaper.status === 200 &&
+        ownRows.length > 0 &&
+        !ownRows.some((r) => r.id === foreignOrder.id) &&
+        otherOrder?.id === foreignOrder.id &&
         saysCount(ownPaper.text, ownRows.length, ['job order', 'job orders']) &&
-        ownRows.every((r) => ownPaper.text.includes(String(r.number))) &&
-        (!otherOrder || (otherOrderPaper?.status === 200 && saysCount(otherOrderPaper.text, 0, ['job order', 'job orders']) && !otherOrderPaper.text.includes(String(otherOrder.number)))),
-      `${ownPaper.status} ${ownRows.length} own of ${allOrders.length}; other's ${otherOrder ? String(otherOrder.number) : 'none'}`,
+        ownRows.every((r) => flat(ownPaper.text).includes(String(r.number))) &&
+        !flat(ownPaper.text).includes(foreignOrder.number) &&
+        otherOrderPaper.status === 200 &&
+        saysCount(otherOrderPaper.text, 0, ['job order', 'job orders']) &&
+        !flat(otherOrderPaper.text).includes(foreignOrder.number),
+      `${ownPaper.status} ${ownRows.length} own of ${allOrders.length}; other's ${otherOrder ? String(otherOrder.number) : 'none'} · ${referenceOf(otherOrderPaper.text)}`,
     );
 
     // The schedule's paper is named by what narrowed it, in words and short
     // dates: an engineer, a contract, a due window.
     const contractForPaper = await prisma.serviceContract.findFirst({ where: { job: { name: { startsWith: TAG } } }, select: { id: true, number: true } });
     if (contractForPaper) {
-      const window = await paperOf(managerToken, `/service-visits/pdf?contractId=${contractForPaper.id}&from=2026-01-01&to=2031-12-31`);
+      const window = await printed(managerToken, `/service-visits/pdf?contractId=${contractForPaper.id}&from=2026-01-01&to=2031-12-31`);
       const windowList = await api(managerToken, 'GET', `/service-visits?contractId=${contractForPaper.id}&from=2026-01-01&to=2031-12-31&pageSize=200`);
       check(
         'the schedule’s paper names its contract and due window — "contract …", "due 01/01/2026 to 12/31/2031"',
         window.status === 200 &&
-          window.text.includes(`contract ${contractForPaper.number}`) &&
-          window.text.includes('due 01/01/2026 to 12/31/2031') &&
-          saysCount(window.text, Number(windowList.body.total), ['visit', 'visits']),
-        window.text.match(/Reference: .{0,200}/)?.[0] ?? String(window.status),
+          flat(window.text).includes(`contract ${contractForPaper.number}`) &&
+          flat(window.text).includes('due 01/01/2026 to 12/31/2031') &&
+          saysCount(flat(window.text), Number(windowList.body.total), ['visit', 'visits']),
+        flat(window.text).match(/Reference: .{0,200}/)?.[0] ?? String(window.status),
       );
     }
 
@@ -2845,15 +2871,15 @@ async function main() {
         dueDate: day('2018-01-01'),
       })),
     });
-    const capped = await paperOf(managerToken, `/service-visits/pdf?search=${TAG}-CAP&sort=number&dir=asc`);
+    const capped = await printed(managerToken, `/service-visits/pdf?search=${TAG}-CAP&sort=number&dir=asc`);
     await prisma.serviceVisit.deleteMany({ where: { number: { startsWith: `${TAG}-CAP-` } } });
     check(
       'a list longer than the cap prints its first 1,000 rows and says "first 1,000 of 1,001 visits printed"',
       capped.status === 200 &&
-        capped.text.includes('first 1,000 of 1,001 visits printed') &&
-        capped.text.includes(`${TAG}-CAP-1000`) &&
-        !capped.text.includes(`${TAG}-CAP-1001`),
-      `${capped.status} ${capped.text.match(/Reference: .{0,120}/)?.[0] ?? ''}`,
+        flat(capped.text).includes('first 1,000 of 1,001 visits printed') &&
+        flat(capped.text).includes(`${TAG}-CAP-1000`) &&
+        !flat(capped.text).includes(`${TAG}-CAP-1001`),
+      `${capped.status} ${flat(capped.text).match(/Reference: .{0,120}/)?.[0] ?? ''}`,
     );
 
     // ── The G-OPS overview ───────────────────────────────────────────────────

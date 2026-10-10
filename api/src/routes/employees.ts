@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, EmploymentType } from '@prisma/client';
 import { prisma } from '../prisma';
 import {
   handler,
@@ -24,7 +24,7 @@ import { sweepSeparations } from '../shared/clearance';
 import { createLogin, defaultRoleIds, deliverLink } from '../shared/accounts';
 import { celebrationsBetween } from '../shared/celebrations';
 import { renderDocument, formatShortDate, statusLabel } from '../shared/pdf';
-import { LIST_CAP, listReference, sendListPdf } from './finance';
+import { LIST_CAP, choice, listReference, sendListPdf } from '../shared/listPaper';
 
 // ════════════════════════════════════════════════════════════════════
 //  EMPLOYEES
@@ -83,9 +83,10 @@ function employeeListWhere(q: ListQuery): Prisma.EmployeeWhereInput {
   // The team: an industry id, or `none` for nobody assigned yet.
   if (f.industryId === 'none') where.industryId = null;
   else if (f.industryId) where.industryId = f.industryId;
-  if (f.employmentType) {
-    where.employmentType = f.employmentType as Prisma.EnumEmploymentTypeFilter['equals'];
-  }
+  // Checked against the enum's values: an unknown type ('toString' included)
+  // is a 400 naming the choices, never a 500 from the database.
+  const employmentType = choice(f.employmentType, EmploymentType, 'Employment type');
+  if (employmentType) where.employmentType = employmentType;
   // `none` = unclassified: an active employee with no plantilla position.
   if (f.positionId === 'none') where.positionId = null;
   else if (f.positionId) where.positionId = f.positionId;

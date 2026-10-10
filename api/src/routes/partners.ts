@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, orderBy, notFound, badRequest, idsFilter } from '../http/kit';
 import { formatShortDate, renderDocument } from '../shared/pdf';
-import { LIST_CAP, listReference, rangeNamed, sendListPdf } from './finance';
+import { LIST_CAP, listReference, rangeNamed, sendListPdf, filterDay, choice } from '../shared/listPaper';
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { audit } from '../shared/audit';
 import { categoryTabWhere, categoryTabs } from '../shared/supplierCategories';
@@ -38,15 +38,15 @@ partnerRoutes.use(authenticate);
 // ── List (the quotation list's layout, 2026-10-08) ───────────────────────────
 
 const PUBLISHES = ['CATALOGUE', 'PRICE_LIST', 'SIZING_APP', 'LINK'] as const;
-const PARTNER_DAY = /^\d{4}-\d{2}-\d{2}$/;
+/** What the "Publishes" filter says in the screen's words (Partners.tsx) — "publishes software", never "a software". */
+const PUBLISHES_WORDS: Record<(typeof PUBLISHES)[number], string> = {
+  CATALOGUE: 'a catalogue',
+  PRICE_LIST: 'a price list',
+  SIZING_APP: 'software',
+  LINK: 'links to other sites',
+};
 /** An item with a list price on it, still sold — what "priced items" counts. */
 const PRICED_ITEM: Prisma.ItemWhereInput = { isActive: true, listPrice: { not: null } };
-
-function partnerDay(value: string | undefined, label: string): string | null {
-  if (!value) return null;
-  if (!PARTNER_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) throw badRequest(`${label} is a date written YYYY-MM-DD`);
-  return value;
-}
 
 /**
  * Which partners a list query means — ONE rule for the list, its summary
@@ -71,19 +71,17 @@ export function partnerListWhere(
   }
   const f = q.filters;
   if (f.isActive) {
-    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is true or false');
+    if (f.isActive !== 'true' && f.isActive !== 'false') throw badRequest('Status is one of Active, Inactive');
     and.push({ isActive: f.isActive === 'true' });
   }
   if (q.scope === 'mine') and.push({ createdById: me.id });
-  if (f.publishes) {
-    if (!(PUBLISHES as readonly string[]).includes(f.publishes)) throw badRequest(`Unknown resource kind: ${f.publishes}`);
-    and.push({ resources: { some: { kind: f.publishes as (typeof PUBLISHES)[number], isActive: true } } });
-  }
+  const publishes = choice(f.publishes, PUBLISHES, 'Publishes', (k) => PUBLISHES_WORDS[k].replace(/^./, (c) => c.toUpperCase()));
+  if (publishes) and.push({ resources: { some: { kind: publishes, isActive: true } } });
   if (f.priced === 'yes') and.push({ preferredItems: { some: PRICED_ITEM } });
   else if (f.priced === 'no') and.push({ preferredItems: { none: PRICED_ITEM } });
   else if (f.priced) throw badRequest('Priced items is yes or no');
-  const from = partnerDay(f.sinceFrom, 'Partner since, from');
-  const to = partnerDay(f.sinceTo, 'Partner since, to');
+  const from = filterDay(f.sinceFrom, 'Partner since, from');
+  const to = filterDay(f.sinceTo, 'Partner since, to');
   if (from || to) {
     and.push({
       partnerSince: {
@@ -203,7 +201,7 @@ partnerRoutes.get(
       q.search ? `search "${q.search}"` : null,
       f.category ? `supplies ${f.category === 'none' ? 'not stated' : f.category}` : null,
       f.isActive === 'true' ? 'active' : f.isActive === 'false' ? 'inactive' : null,
-      f.publishes ? `publishes a ${humanKind(f.publishes as (typeof PUBLISHES)[number]).toLowerCase()}` : null,
+      f.publishes ? `publishes ${PUBLISHES_WORDS[f.publishes as (typeof PUBLISHES)[number]]}` : null,
       f.priced === 'yes' ? 'with priced items' : f.priced === 'no' ? 'no priced items' : null,
       rangeNamed('partner since', f.sinceFrom, f.sinceTo),
       q.scope === 'mine' ? 'added by me' : null,
