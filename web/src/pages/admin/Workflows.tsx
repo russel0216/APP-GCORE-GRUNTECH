@@ -26,6 +26,8 @@ interface Workflow {
   maxAmount: number | null;
   /** Set: an optional route the submitter may tick, under this label. */
   optionLabel: string | null;
+  /** Set: the route for documents prepared by a holder of this role. */
+  requesterRoleId: string | null;
   steps: Step[];
   requestCount: number;
 }
@@ -131,6 +133,12 @@ export function Workflows() {
                   </span>
                 </div>
                 {w.optionLabel && <div className="faint">Offered as “{w.optionLabel}”</div>}
+                {w.requesterRoleId && (
+                  <div className="faint">
+                    Prepared by {roles.find((r) => r.id === w.requesterRoleId)?.name ?? 'a role'}
+                    {w.steps.length === 0 ? ' — no approval, approved on submit' : ''}
+                  </div>
+                )}
                 <div className="muted" style={{ fontSize: 12, margin: '6px 0 10px' }}>
                   {w.minAmount === null && w.maxAmount === null
                     ? 'Any amount'
@@ -218,6 +226,7 @@ function WorkflowEditor({
   const [minAmount, setMinAmount] = useState(workflow?.minAmount?.toString() ?? '');
   const [maxAmount, setMaxAmount] = useState(workflow?.maxAmount?.toString() ?? '');
   const [optionLabel, setOptionLabel] = useState(workflow?.optionLabel ?? '');
+  const [requesterRoleId, setRequesterRoleId] = useState(workflow?.requesterRoleId ?? '');
   const [steps, setSteps] = useState<Step[]>(
     workflow?.steps.map((s) => ({ ...s })) ?? [
       { sequence: 1, name: 'Approval', approverType: 'SUPERVISOR', roleId: null, userId: null },
@@ -258,6 +267,7 @@ function WorkflowEditor({
         minAmount: minAmount === '' ? null : Number(minAmount),
         maxAmount: maxAmount === '' ? null : Number(maxAmount),
         optionLabel: optionLabel.trim() || null,
+        requesterRoleId: requesterRoleId || null,
         steps: steps.map((s) => ({
           sequence: s.sequence,
           name: s.name,
@@ -338,6 +348,19 @@ function WorkflowEditor({
           hint="Blank = a standard route, taken by amount. A label (e.g. Add the CEO as approver) makes it a choice the submitter ticks."
         >
           <input value={optionLabel} maxLength={120} onChange={(e) => setOptionLabel(e.target.value)} />
+        </Field>
+        <Field
+          label="Prepared by"
+          hint="Blank = everyone not covered by a role's own route. A role makes this the route for documents its holders prepare; with no steps, they are approved on submit."
+        >
+          <select value={requesterRoleId} onChange={(e) => setRequesterRoleId(e.target.value)}>
+            <option value="">— anyone —</option>
+            {roles.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
+              </option>
+            ))}
+          </select>
         </Field>
       </div>
 

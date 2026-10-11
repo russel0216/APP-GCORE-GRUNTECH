@@ -575,6 +575,45 @@ const ROLES: RoleSeed[] = [
   },
 ];
 
+// The owner's routing sheet (2026-10-11, "APPROVAL ROUTER — SALES ORDER AND
+// QUOTATION"): who PREPARED a quotation or a sales order decides its route.
+// Three preparer roles; each starts from the nearest existing role's
+// permissions and is edited in Admin › Roles from there. The CEO / President
+// is its own role (the owner's call), apart from Executive, which stays the
+// read-everything management role and the CEO step of every other route.
+{
+  const like = (key: string) => ROLES.find((r) => r.key === key)!;
+  const exec = like('executive');
+  ROLES.push(
+    {
+      key: 'ceo',
+      name: 'CEO / President',
+      description: 'The Chief Executive Officer / President — prepares quotations needing no approval, and is the CEO step on the quotation and sales order routes',
+      only: [
+        ...(exec.only ?? []),
+        ...VIEW_OWN_SELF('gops', 'quotations'),
+        'gops.quotations.edit_all',
+        ...VIEW_OWN_SELF('gops', 'sales_orders'),
+        'gops.sales_orders.edit_all',
+      ],
+    },
+    {
+      key: 'team_leader',
+      name: 'Team Leader',
+      description: 'Leads a sales team — approves the industry specialists\' quotations and sales orders; their own go to the CEO / President',
+      grants: like('sales_manager').grants,
+      only: like('sales_manager').only,
+    },
+    {
+      key: 'industry_specialist',
+      name: 'Industry Specialist',
+      description: 'Prepares quotations and sales orders — the team leader approves, and the CEO / President too above ₱1,000,000',
+      grants: like('sales').grants,
+      only: like('sales').only,
+    },
+  );
+}
+
 /**
  * Default approval workflows.
  *
@@ -590,6 +629,8 @@ interface WorkflowSeed {
   maxAmount?: number;
   /** An optional route the submitter may tick (ApprovalWorkflow.optionLabel). */
   optionLabel?: string;
+  /** The route for documents prepared by a holder of this role (ApprovalWorkflow.requesterRoleId). */
+  requesterRoleKey?: string;
   steps: SeedStep[];
   /**
    * The steps this workflow was seeded with before a correction. A workflow
@@ -699,31 +740,61 @@ const WORKFLOWS: WorkflowSeed[] = [
       { sequence: 3, name: 'CTG', approverType: 'ROLE', roleKey: 'ctg' },
     ],
   },
+  // ── The owner's routing sheet (2026-10-11) ─────────────────────────────
+  // QUOTATION, by who prepared it: the CEO / President — no approval (a route
+  // with no steps, approved on submit); a Team Leader — the CEO / President;
+  // an Industry Specialist, and anyone else — their Team Leader ("Reports
+  // to", else a Team Leader role holder), and the CEO / President too above
+  // ₱1,000,000 (no longer an option to tick). The routes before it
+  // ("Quotation — sales manager", "… with the CEO") are RETIRED below.
   {
-    // The salesperson's own supervisor ("Reports to" on their login) decides
-    // first (2026-10-06, the owner's call); somebody with none set goes to the
-    // sales managers rather than to HR, who have no business pricing work.
     documentType: 'quotation',
-    name: 'Quotation — sales manager',
-    steps: [{ sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' }],
-    previously: [{ sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' }],
+    name: 'Quotation — prepared by the CEO / President: no approval',
+    requesterRoleKey: 'ceo',
+    steps: [],
   },
   {
-    // An OPTION, not a rule: a quotation over ₱1,000,000 may also go to the
-    // CEO when whoever submits it ticks "Add the CEO as approver". The sales
-    // manager still decides first. Routed to the executive role; point the CEO
-    // step at one person in Admin › Approval Workflows if several hold it.
     documentType: 'quotation',
-    name: 'Quotation — over ₱1,000,000, with the CEO',
+    name: 'Quotation — prepared by a Team Leader: CEO / President',
+    requesterRoleKey: 'team_leader',
+    steps: [{ sequence: 1, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' }],
+  },
+  {
+    documentType: 'quotation',
+    name: 'Quotation — Team Leader',
+    maxAmount: 1_000_000,
+    steps: [{ sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' }],
+  },
+  {
+    documentType: 'quotation',
+    name: 'Quotation — Team Leader, then CEO / President over ₱1,000,000',
     minAmount: 1_000_000.01,
-    optionLabel: 'Add the CEO as approver',
     steps: [
-      { sequence: 1, name: 'Sales Manager', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
-      { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
-    previously: [
-      { sequence: 1, name: 'Sales Manager', approverType: 'ROLE', roleKey: 'sales_manager' },
-      { sequence: 2, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+  },
+  // SALES ORDER, by who prepared it: the CEO / President — Admin Back
+  // Support, Cost Controller; a Team Leader — the same, then the CEO /
+  // President; an Industry Specialist, and anyone else — their Team Leader
+  // first (the general route below).
+  {
+    documentType: 'sales_order',
+    name: 'Sales Order — prepared by the CEO / President: back support, cost controller',
+    requesterRoleKey: 'ceo',
+    steps: [
+      { sequence: 1, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+    ],
+  },
+  {
+    documentType: 'sales_order',
+    name: 'Sales Order — prepared by a Team Leader: back support, cost controller, CEO / President',
+    requesterRoleKey: 'team_leader',
+    steps: [
+      { sequence: 1, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
@@ -738,7 +809,16 @@ const WORKFLOWS: WorkflowSeed[] = [
     // `previously` cannot update in place.
     documentType: 'sales_order',
     name: 'Sales Order — team leader, back support, cost controller, CEO',
+    // Since the routing sheet (2026-10-11) the general route — an Industry
+    // Specialist's, or anyone's not keyed above: the Team Leader falls back
+    // to the Team Leader role, the last step is the CEO / President role.
     steps: [
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 3, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
+      { sequence: 4, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
+    ],
+    previously: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
       { sequence: 2, name: 'Back Support / Admin', approverType: 'ROLE', roleKey: 'back_support' },
       { sequence: 3, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
@@ -1064,6 +1144,10 @@ async function main() {
     // The job order became a project work order routed to its own project
     // manager, then the team leader (2026-10-09).
     'Job order — service manager',
+    // The owner's routing sheet (2026-10-11): the quotation routes by who
+    // prepared it, the CEO a fixed step over ₱1,000,000 rather than an option.
+    'Quotation — sales manager',
+    'Quotation — over ₱1,000,000, with the CEO',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });
@@ -1121,6 +1205,10 @@ async function main() {
       // alone: it is in use, and the customer may have edited it deliberately.
       if (already._count.requests === 0) {
         await prisma.$transaction(async (tx) => {
+          await tx.approvalWorkflow.update({
+            where: { id: already.id },
+            data: { requesterRoleId: seed.requesterRoleKey ? (roleByKey.get(seed.requesterRoleKey) ?? null) : null },
+          });
           await tx.approvalStep.deleteMany({ where: { workflowId: already.id } });
           await tx.approvalStep.createMany({
             data: seed.steps.map((s) => ({
@@ -1143,6 +1231,7 @@ async function main() {
         minAmount: seed.minAmount ?? null,
         maxAmount: seed.maxAmount ?? null,
         optionLabel: seed.optionLabel ?? null,
+        requesterRoleId: seed.requesterRoleKey ? (roleByKey.get(seed.requesterRoleKey) ?? null) : null,
         steps: {
           create: seed.steps.map((s) => ({
             sequence: s.sequence,

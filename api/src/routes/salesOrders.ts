@@ -540,7 +540,7 @@ salesOrderRoutes.get(
     // optional one, both data in Admin › Approval Workflows. With a route
     // active the order is submitted, not issued; the page names who decides.
     const total = num(order.total);
-    const workflow = await pickWorkflow('sales_order', total);
+    const workflow = await pickWorkflow('sales_order', total, { requesterId: me.id });
     const options = order.status === 'DRAFT' && workflow ? await approvalOptions('sales_order', total) : [];
     const approvalRoutes =
       order.status === 'DRAFT' && workflow
@@ -940,7 +940,7 @@ salesOrderRoutes.post(
     const { order } = await orderForEdit(req, req.params.id);
     const hasLine = await prisma.salesOrderLine.count({ where: { orderId: order.id, isHeading: false } });
     if (!hasLine) throw badRequest('Add at least one line before issuing it');
-    if (await pickWorkflow('sales_order', num(order.total))) {
+    if (await pickWorkflow('sales_order', num(order.total), { requesterId: currentUser(req).id })) {
       throw badRequest('This sales order goes through approval — submit it for approval instead');
     }
     // Claimed, never simply written: two Issue clicks book once.

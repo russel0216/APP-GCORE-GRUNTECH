@@ -1156,6 +1156,15 @@ export function QuotationDetail() {
           const chosen = chosenOption ? quotation.approvalRoutes?.options.find((o) => o.id === chosenOption)?.route : null;
           const route = chosen ?? quotation.approvalRoutes?.standard;
           const options = quotation.approvalOptions ?? [];
+          // A route with no steps: the preparer's role needs nobody (the
+          // CEO / President's own quotation) — Submit approves it at once.
+          if (route && !route.steps.length && !options.length) {
+            return (
+              <div className="card qd-route sales-card-gap" role="note">
+                <span className="qd-route-label">No approval needed — Submit for approval approves it at once</span>
+              </div>
+            );
+          }
           if (!route?.steps.length && !options.length) return null;
           return (
             <div className="card qd-route sales-card-gap" role="group" aria-label="Submit for approval">

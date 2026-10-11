@@ -198,6 +198,7 @@ model Role {
   permissions            RolePermission[]
   users                  UserRole[]
   workflowStepsTargeting ApprovalStep[]   @relation("StepRole")
+  workflowsForRequester  ApprovalWorkflow[] @relation("WorkflowRequesterRole")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -380,6 +381,14 @@ model ApprovalWorkflow {
   /// the amount is in its band ("Add the CEO as approver") and used only when
   /// they tick it. Null: a standard route, picked by amount alone.
   optionLabel String?
+
+  /// Set: the route for documents PREPARED by a holder of this role (the
+  /// owner's routing sheet, 2026-10-11 — a CEO's quotation needs nobody, a
+  /// team leader's goes to the CEO). A role-specific route beats the general
+  /// one (null); a preparer holding several gets the shortest — the senior
+  /// role's. A route with NO steps approves on submit.
+  requesterRoleId String?
+  requesterRole   Role?   @relation("WorkflowRequesterRole", fields: [requesterRoleId], references: [id], onDelete: Restrict)
 
   steps    ApprovalStep[]
   requests ApprovalRequest[]

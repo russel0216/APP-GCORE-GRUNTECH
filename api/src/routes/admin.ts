@@ -401,8 +401,23 @@ const workflowSchema = z.object({
   maxAmount: z.number().nonnegative().optional().nullable(),
   /** Set: an optional route the submitter may tick, under this label. */
   optionLabel: z.string().trim().max(120).optional().nullable(),
-  steps: z.array(stepSchema).min(1, 'A workflow needs at least one step'),
+  /** Set: the route for documents prepared by a holder of this role. */
+  requesterRoleId: z.string().optional().nullable(),
+  steps: z.array(stepSchema),
 });
+
+/**
+ * A route needs a step — except one keyed to a preparer's role, where no
+ * step means "approved on submit" (the CEO's quotation, 2026-10-11).
+ */
+async function checkPreparer(body: z.infer<typeof workflowSchema>) {
+  if (body.requesterRoleId && !(await prisma.role.findUnique({ where: { id: body.requesterRoleId }, select: { id: true } }))) {
+    throw badRequest('That "Prepared by" role does not exist');
+  }
+  if (!body.steps.length && !body.requesterRoleId) {
+    throw badRequest('A workflow needs at least one step — only a route for a "Prepared by" role may have none (approved on submit)');
+  }
+}
 
 function validateSteps(steps: z.infer<typeof stepSchema>[]) {
   const seen = new Set<number>();
@@ -424,6 +439,7 @@ workflowRoutes.post(
   handler(async (req, res) => {
     const body = parseBody(workflowSchema, req.body);
     validateSteps(body.steps);
+    await checkPreparer(body);
 
     const workflow = await prisma.approvalWorkflow.create({
       data: {
@@ -433,6 +449,7 @@ workflowRoutes.post(
         minAmount: body.minAmount != null ? new Prisma.Decimal(body.minAmount) : null,
         maxAmount: body.maxAmount != null ? new Prisma.Decimal(body.maxAmount) : null,
         optionLabel: body.optionLabel || null,
+        requesterRoleId: body.requesterRoleId || null,
         steps: {
           create: body.steps.map((s) => ({
             sequence: s.sequence,
@@ -466,6 +483,7 @@ workflowRoutes.put(
   handler(async (req, res) => {
     const body = parseBody(workflowSchema, req.body);
     validateSteps(body.steps);
+    await checkPreparer(body);
 
     const existing = await prisma.approvalWorkflow.findUnique({ where: { id: req.params.id } });
     if (!existing) throw notFound('Workflow not found');
@@ -487,6 +505,8 @@ workflowRoutes.put(
           // Absent: left as it is. Clearing an option by omission would turn
           // "Add the CEO" into a route every quotation over a million takes.
           ...(body.optionLabel !== undefined ? { optionLabel: body.optionLabel || null } : {}),
+          // Absent: left as it is, the option's rule.
+          ...(body.requesterRoleId !== undefined ? { requesterRoleId: body.requesterRoleId || null } : {}),
           steps: {
             create: body.steps.map((s) => ({
               sequence: s.sequence,

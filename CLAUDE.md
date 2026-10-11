@@ -432,7 +432,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,720 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,724 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -448,9 +448,10 @@ quotation that needs no approval until it is changed, and 11 on sales
 and 3 on masters for the capitals, the group the SCORO import asks
 about, a deleted group, the group refused at save and the customer's
 address, and 7 across cad, finance, delivery and aftermarket for deleting
-a cancelled document, and 2 on chain for cancelling a purchase request):
+a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on sales for
+the routes by who prepared the document):
 foundation
-316, masters 92, sales 513, costing 157, pipeline 92, calendar 96, numbering
+316, masters 92, sales 517, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 193, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -2882,6 +2883,44 @@ SCORO.
   verify-insights asserts both. Every active group is listed, even at zero;
   "No group" is last. The pipeline CSV appends a Groups column. Verify
   scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
+
+## Approval by who prepared it (2026-10-11)
+
+The owner's routing sheet ("APPROVAL ROUTER — SALES ORDER AND QUOTATION"):
+the quotation's and the sales order's route depends on the PREPARER's role.
+
+- **`ApprovalWorkflow.requesterRoleId`** ("Prepared by" in Admin › Approval
+  Workflows; `onDelete: Restrict`). `pickWorkflow(type, amount, { option,
+  requesterId })` reads the requester's roles: a route keyed to one of them
+  beats the general route (null); among several keyed routes the SHORTEST
+  wins — the senior role's (the owner's call: a CEO who is also a Team
+  Leader takes the CEO's); then the narrowest amount band. Every caller
+  that previews or submits passes the requester (`routePreview`,
+  `submitForApproval`, the sales order's GET and Issue guard). A
+  general route still needs a step; **a role's route with NO steps
+  approves on submit**: `submitForApproval` writes the request APPROVED,
+  audits "Approved on submit", and runs the same `onApprovalSettled`
+  subscribers a last signature reaches — the quotation's page says "No
+  approval needed — Submit for approval approves it at once" and its paper
+  prints Prepared by alone.
+- **Three new roles** (seeded, then edited in Admin › Roles): `ceo` **CEO /
+  President** (the owner's call: its own role, apart from Executive, which
+  stays the read-everything role and the CEO step of every OTHER route;
+  starts from Executive's rights plus raising quotations and sales orders),
+  `team_leader` **Team Leader** (the sales manager's rights) and
+  `industry_specialist` **Industry Specialist** (the sales role's).
+  Admin Back Support (`back_support`) and Cost Controller are reused.
+- **Quotation**: CEO / President — no approval; Team Leader — CEO /
+  President; anyone else — Team Leader (SUPERVISOR, falling back to the
+  `team_leader` role), and over ₱1,000,000 the CEO / President too, a fixed
+  step: "Quotation — sales manager" and the "Add the CEO as approver"
+  option are RETIRED. **Sales order**: CEO / President — Admin Back
+  Support, Cost Controller; Team Leader — the same, then CEO / President;
+  anyone else — Team Leader, Admin Back Support, Cost Controller, CEO /
+  President (the general route, corrected in place through `previously`).
+- **Assign the roles in Admin › Users**: until somebody holds Team Leader
+  (for anyone with no "Reports to") and CEO / President, those steps route
+  to nobody and `audit-workflows.ts` says so.
 
 ## Sales orders (2026-10-07)
 

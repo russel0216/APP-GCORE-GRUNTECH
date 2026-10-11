@@ -73,12 +73,24 @@ async function emitSettled(req: ApprovalRequest, outcome: ApprovalOutcome): Prom
  * "approval thresholds should be configurable in Settings" is expressed —
  * a PR under ₱50k takes one route, over it takes another.
  */
-export async function pickWorkflow(documentType: string, amount?: number | null, opts: { option?: string | null } = {}) {
+export async function pickWorkflow(
+  documentType: string,
+  amount?: number | null,
+  opts: { option?: string | null; requesterId?: string | null } = {},
+) {
   const candidates = await prisma.approvalWorkflow.findMany({
     where: { documentType, isActive: true },
     include: { steps: { orderBy: { sequence: 'asc' } } },
     orderBy: { createdAt: 'asc' },
   });
+  // The preparer's roles: a route keyed to one of them is theirs. Without a
+  // requester only the general routes apply.
+  const roleIds = new Set(
+    opts.requesterId && candidates.some((w) => w.requesterRoleId)
+      ? (await prisma.userRole.findMany({ where: { userId: opts.requesterId }, select: { roleId: true } })).map((r) => r.roleId)
+      : [],
+  );
+  const forPreparer = (w: (typeof candidates)[number]) => !w.requesterRoleId || roleIds.has(w.requesterRoleId);
   const value = amount ?? 0;
   const inBand = (w: (typeof candidates)[number]) => {
     const min = w.minAmount ? Number(w.minAmount) : null;
@@ -90,11 +102,16 @@ export async function pickWorkflow(documentType: string, amount?: number | null,
   // An optional route is only ever the one the submitter asked for, and only
   // where it applies; a standard pick never lands on one.
   if (opts.option) {
-    return candidates.find((w) => w.id === opts.option && w.optionLabel && inBand(w)) ?? null;
+    return candidates.find((w) => w.id === opts.option && w.optionLabel && inBand(w) && forPreparer(w)) ?? null;
   }
-  const matching = candidates.filter((w) => !w.optionLabel && inBand(w));
-  // Prefer the most specific band (the narrowest one that still matches).
+  const matching = candidates.filter((w) => !w.optionLabel && inBand(w) && forPreparer(w));
+  // A route keyed to the preparer's role beats the general one; among those,
+  // the shortest (the senior role's: a CEO's beats a team leader's); then the
+  // most specific band (the narrowest one that still matches).
   matching.sort((a, b) => {
+    const keyed = (w: typeof a) => (w.requesterRoleId ? 0 : 1);
+    if (keyed(a) !== keyed(b)) return keyed(a) - keyed(b);
+    if (a.requesterRoleId && b.requesterRoleId && a.steps.length !== b.steps.length) return a.steps.length - b.steps.length;
     const span = (w: typeof a) =>
       (w.maxAmount ? Number(w.maxAmount) : Number.MAX_SAFE_INTEGER) -
       (w.minAmount ? Number(w.minAmount) : 0);
@@ -268,7 +285,7 @@ export async function routePreview(
   optionId?: string | null,
   ctx: ApprovalContext = {},
 ): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; approvers: StepPerson[] }[] } | null> {
-  const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null });
+  const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null, requesterId });
   if (!workflow) return null;
   return {
     workflowId: workflow.id,
@@ -347,9 +364,40 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
   });
   if (existing) throw badRequest('This document is already awaiting approval');
 
-  const workflow = await pickWorkflow(input.documentType, input.amount, { option: input.optionId });
+  const workflow = await pickWorkflow(input.documentType, input.amount, { option: input.optionId, requesterId: input.requesterId });
   if (input.optionId && !workflow) {
     throw badRequest('That approval option does not apply to this document — the amount is outside its band, or it was switched off');
+  }
+  // A route with no steps is the preparer's role needing nobody's approval
+  // (a CEO's quotation): the request is written APPROVED, audited and
+  // settled at once, through the same subscribers a last signature reaches.
+  if (workflow && workflow.steps.length === 0 && workflow.requesterRoleId) {
+    const approved = await prisma.approvalRequest.create({
+      data: {
+        documentType: input.documentType,
+        documentId: input.documentId,
+        documentNumber: input.documentNumber ?? null,
+        subject: input.subject,
+        amount: input.amount != null ? new Prisma.Decimal(input.amount) : null,
+        link: input.link ?? null,
+        requesterId: input.requesterId,
+        jobId: input.jobId ?? null,
+        projectManagerId: input.projectManagerId ?? null,
+        workflowId: workflow.id,
+        currentSequence: 1,
+        status: 'APPROVED',
+        closedAt: new Date(),
+      },
+    });
+    await audit({
+      entityType: input.documentType,
+      entityId: input.documentId,
+      action: 'APPROVED',
+      summary: `Approved on submit — ${workflow.name} needs no approval`,
+      actorId: input.requesterId,
+    });
+    await emitSettled(approved, 'APPROVED');
+    return approved;
   }
   if (!workflow || workflow.steps.length === 0) {
     throw badRequest(
