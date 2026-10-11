@@ -201,6 +201,25 @@ export const QUOTATION_EXTRA_TAX_RATES: { rate: number; label: string }[] = [
   { rate: 0.06, label: '6% (Government)' },
 ];
 
+/**
+ * The currencies a quotation may be written in (2026-10-11, the owner's
+ * call): PHP unless somebody picks another. A quotation's figures are in its
+ * own currency — nothing is converted.
+ */
+export const DEFAULT_QUOTATION_CURRENCY = 'PHP';
+export const QUOTATION_CURRENCIES: { code: string; label: string }[] = [
+  { code: 'PHP', label: 'PHP — Philippine peso' },
+  { code: 'USD', label: 'USD — US dollar' },
+  { code: 'EUR', label: 'EUR — Euro' },
+  { code: 'JPY', label: 'JPY — Japanese yen' },
+  { code: 'SGD', label: 'SGD — Singapore dollar' },
+  { code: 'CNY', label: 'CNY — Chinese yuan' },
+  { code: 'GBP', label: 'GBP — Pound sterling' },
+  { code: 'AUD', label: 'AUD — Australian dollar' },
+  { code: 'HKD', label: 'HKD — Hong Kong dollar' },
+];
+export const QUOTATION_CURRENCY_CODES = QUOTATION_CURRENCIES.map((c) => c.code) as [string, ...string[]];
+
 export function quotationTaxOptions(companyRate: number): { rate: number; label: string }[] {
   const pct = (r: number) => `${Number((r * 100).toFixed(2))}%`;
   const options = [{ rate: companyRate, label: pct(companyRate) }, ...QUOTATION_EXTRA_TAX_RATES, { rate: 0, label: '0% (zero-rated)' }];

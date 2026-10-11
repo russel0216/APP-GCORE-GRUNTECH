@@ -2,7 +2,7 @@ import { Prisma, type QuotationOutcome, type RevisionStatus } from '@prisma/clie
 import { prisma } from '../../prisma';
 import { required, optional, type ImportSpec, type ImportActor } from '../../shared/csv';
 import { nextNumber, setCounter, type CounterMove } from '../../shared/numbering';
-import { recalcQuotationRevision, upperText } from '../../shared/quotation';
+import { recalcQuotationRevision, upperText, QUOTATION_CURRENCY_CODES, DEFAULT_QUOTATION_CURRENCY } from '../../shared/quotation';
 import { FALLBACK_GROUP, groupKey, rememberGroups } from '../../shared/quotationGroups';
 import { badRequest } from '../../http/kit';
 import { pipelineStages, stageProbability } from '../../shared/pipelineStages';
@@ -150,6 +150,8 @@ interface ScoroQuoteRecord {
   /** SCORO's doc_date: the issue date, `createdAt` of the quotation and its revision. */
   issuedAt: Date;
   expectedClosing: Date | null;
+  /** The quote's own currency — PHP when the file says none (2026-10-11). */
+  currency: string;
   validityDays: number;
   subject: string;
   notes: string | null;
@@ -261,7 +263,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
     { header: 'contact_person', example: 'Leo Solis', hint: 'The customer’s contact — matched by name, else added to the customer' },
     { header: 'payer_id', example: '4798', hint: 'SCORO’s customer id, kept as "(SCORO id N)" in a created customer’s notes so the next file matches it' },
     { header: 'doc_description', example: 'Quotation Validity : 120 days', hint: 'The revision’s notes' },
-    { header: 'currency', example: 'PHP', hint: 'Must be the company currency; G-CORE prints only that' },
+    { header: 'currency', example: 'PHP', hint: `One of ${QUOTATION_CURRENCY_CODES.join(', ')}; blank is PHP` },
     {
       header: 'status_name',
       example: 'Opportunity',
@@ -333,9 +335,9 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
     if (!owner) throw new Error(`No login named "${ownerName}" — add them in Admin › Users first`);
 
     const company = await prisma.company.findUniqueOrThrow({ where: { id: 'company' }, select: { currency: true, vatRate: true } });
-    const currency = optional(row, 'currency');
-    if (currency && currency.toUpperCase() !== company.currency.toUpperCase()) {
-      throw new Error(`currency "${currency}" is not the company currency (${company.currency}) — G-CORE prints only that`);
+    const currency = (optional(row, 'currency') ?? '').toUpperCase() || DEFAULT_QUOTATION_CURRENCY;
+    if (!QUOTATION_CURRENCY_CODES.includes(currency)) {
+      throw new Error(`currency "${currency}" is not one a quotation may be in (${QUOTATION_CURRENCY_CODES.join(', ')})`);
     }
 
     const payer = required(row, 'payer');
@@ -389,6 +391,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
       lostReason: outcome === 'LOST' ? `SCORO status: ${collapse(statusName)}` : null,
       issuedAt,
       expectedClosing: scoroDate(row, 'estimated_closing_date'),
+      currency,
       validityDays,
       subject: upperText(optional(row, 'quote_name') ?? `SCORO quote ${number}`),
       notes: optional(row, 'doc_description'),
@@ -614,6 +617,7 @@ async function writeScoroQuotes(
           decidedAt: record.decidedAt,
           lostReason: record.lostReason,
           expectedClosing: record.expectedClosing,
+          currency: record.currency,
           createdAt: record.issuedAt,
           revisions: {
             create: [

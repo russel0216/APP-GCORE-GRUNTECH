@@ -96,7 +96,7 @@ export function canSeeOrderCost(me: ReturnType<typeof currentUser>, ownerId: str
 const ORDER_INCLUDE = {
   customer: { select: { id: true, code: true, name: true, tin: true, phone: true, address: true } },
   contact: { select: { id: true, name: true, position: true } },
-  quotation: { select: { id: true, number: true, subject: true, siteId: true } },
+  quotation: { select: { id: true, number: true, subject: true, siteId: true, currency: true } },
   owner: { select: { id: true, name: true, email: true, position: true } },
 } as const;
 
@@ -428,7 +428,7 @@ salesOrderRoutes.get(
     const [rows, summary, currency, customer, owner, quotation] = await Promise.all([
       prisma.salesOrder.findMany({
         where,
-        include: { customer: { select: { name: true } }, quotation: { select: { number: true, subject: true } }, owner: { select: { name: true } } },
+        include: { customer: { select: { name: true } }, quotation: { select: { number: true, subject: true, currency: true } }, owner: { select: { name: true } } },
         orderBy: salesOrderOrderBy(q),
         take: LIST_CAP,
       }),
@@ -476,7 +476,7 @@ salesOrderRoutes.get(
             statusLabel(r.status),
             r.poNumber ?? '',
             [r.siNumber, r.drNumber].filter(Boolean).join(' / '),
-            bracketed(formatAmount(num(r.total)), r.status !== 'CANCELLED'),
+            bracketed(`${r.quotation.currency !== currency ? `${r.quotation.currency} ` : ''}${formatAmount(num(r.total))}`, r.status !== 'CANCELLED'),
             r.owner.name,
             formatShortDate(r.orderDate),
           ]),
@@ -1223,8 +1223,14 @@ async function orderRouteSlots(order: { id: string; status: string; total: Prism
  * without it no cost cell, cost total or margin is in the data at all — a
  * layout that places the cost columns prints them empty.
  */
+/** A margin's share as the paper prints it: "23.45%", two decimals at most. */
+function marginPctText(pct: number): string {
+  return `${Number(pct.toFixed(2))}%`;
+}
+
 export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: boolean): Promise<DesignData> {
-  const currency = await companyCurrency();
+  // An order is in the currency of the quotation it books (2026-10-11).
+  const currency = order.quotation.currency;
   const site = order.quotation.siteId
     ? await prisma.customerSite.findUnique({ where: { id: order.quotation.siteId }, select: { address: true, city: true } })
     : null;
@@ -1260,6 +1266,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'order.net': amount(totals.net),
     'order.vat': amount(totals.vatAmount),
     'order.total': amount(totals.total),
+    'order.marginPct': showCost && totals.cost.totalMarginPct != null ? marginPctText(totals.cost.totalMarginPct) : '',
     'quotation.number': order.quotation.number,
     'quotation.subject': order.quotation.subject,
     'customer.name': order.customer.name,
@@ -1303,7 +1310,13 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
                 title: l.costAmount == null ? '' : amount(num(l.costAmount)),
                 body: l.providerSupplier?.name ?? l.providerUser?.name ?? undefined,
               },
-              margin: m.margin == null ? '' : amount(m.margin),
+              // The margin and, under it, its share of the line's amount.
+              margin:
+                m.margin == null
+                  ? ''
+                  : m.marginPct == null
+                    ? amount(m.margin)
+                    : { title: amount(m.margin), body: marginPctText(m.marginPct) },
             }
           : {}),
       },
@@ -1318,6 +1331,9 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
   if (showCost) {
     totalRows.push({ label: `Cost (${currency}):`, value: amount(totals.cost.totalCost) });
     totalRows.push({ label: 'Margin sum:', value: amount(totals.cost.totalMargin) });
+    if (totals.cost.totalMarginPct != null) {
+      totalRows.push({ label: 'Margin %:', value: marginPctText(totals.cost.totalMarginPct) });
+    }
   }
   totalRows.push({ label: 'Subtotal:', value: amount(totals.subtotal) });
   if (totals.discountAmount > 0) {

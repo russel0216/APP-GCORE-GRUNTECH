@@ -58,6 +58,8 @@ interface QuotationRow {
   stageLabel: string | null;
   probability: number;
   expectedClosing: string | null;
+  /** The quotation's own currency (PHP unless another was picked). */
+  currency: string;
   customer: { id: string; name: string };
   contact: { id: string; name: string } | null;
   owner: { id: string; name: string };
@@ -247,7 +249,7 @@ export function Quotations() {
       key: 'total',
       label: 'Total',
       align: 'right',
-      render: (q) => (q.valueRevision ? <span className="mono">{formatMoney(q.value)}</span> : '—'),
+      render: (q) => (q.valueRevision ? <span className="mono">{formatMoney(q.value, q.currency)}</span> : '—'),
     },
     ...(seesCost
       ? [
@@ -258,7 +260,7 @@ export function Quotations() {
             render: (q: QuotationRow) =>
               q.margin ? (
                 <span title={`${q.margin.costedLines} of ${q.margin.lineCount} lines costed`}>
-                  <span className="mono">{formatMoney(q.margin.amount)}</span>
+                  <span className="mono">{formatMoney(q.margin.amount, q.currency)}</span>
                   {q.margin.pct !== null && <div className="faint">{q.margin.pct}%</div>}
                 </span>
               ) : (
@@ -704,6 +706,9 @@ export interface QuotationDetail {
   decidedAt?: string | null;
   expectedClosing: string | null;
   createdAt?: string;
+  /** Every figure's currency — PHP unless another was picked (2026-10-11). */
+  currency: string;
+  currencies?: { code: string; label: string }[];
   canEdit: boolean;
   /** Whether the server sent the cost half of each line. */
   canSeeCost: boolean;
@@ -955,7 +960,7 @@ export function QuotationDetail() {
         status={quotation.stage || stageKeyFor(quotation.outcome, quotation.quotationStages)}
         statusLabel={quotation.stageLabel ?? stageLabelOf(quotation.outcome)}
         statusExtra={STAGE_TONES}
-        amount={valueRevision ? formatMoney(valueRevision.total) : undefined}
+        amount={valueRevision ? formatMoney(valueRevision.total, quotation.currency) : undefined}
         amountLabel={valueRevision ? `Total · R${valueRevision.revision}${valueRevision.status === 'APPROVED' ? ' approved' : ''}` : undefined}
         meta={
           <>
@@ -1464,11 +1469,11 @@ export function QuotationDetail() {
                         <td className="right mono">
                           {row.item.quantity} <span className="faint">{row.item.unit}</span>
                         </td>
-                        <td className="right mono">{formatMoney(row.item.unitPrice)}</td>
-                        <td className="right mono">{formatMoney(row.item.amount)}</td>
+                        <td className="right mono">{formatMoney(row.item.unitPrice, quotation.currency)}</td>
+                        <td className="right mono">{formatMoney(row.item.amount, quotation.currency)}</td>
                         {showCost && (
                           <td>
-                            <LineCost item={row.item} />
+                            <LineCost item={row.item} currency={quotation.currency} />
                           </td>
                         )}
                         {showCost && (
@@ -1477,7 +1482,7 @@ export function QuotationDetail() {
                               <span className="faint">—</span>
                             ) : (
                               <>
-                                <div className={row.item.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(row.item.margin)}</div>
+                                <div className={row.item.margin < 0 ? 'quote-negative' : undefined}>{formatMoney(row.item.margin, quotation.currency)}</div>
                                 <div className="faint">{pct(row.item.marginPct)}</div>
                               </>
                             )}
@@ -1492,8 +1497,8 @@ export function QuotationDetail() {
             )}
 
             <div className={`quote-summary${showPanel ? '' : ' quote-summary-single'}`}>
-              <TotalsBlock revision={revision} />
-              {showPanel && revision.costPanel && <CostPanelBlock panel={revision.costPanel} />}
+              <TotalsBlock revision={revision} currency={quotation.currency} />
+              {showPanel && revision.costPanel && <CostPanelBlock panel={revision.costPanel} currency={quotation.currency} />}
             </div>
           </div>
 
@@ -1501,6 +1506,7 @@ export function QuotationDetail() {
             <QuotationSalesOrders
               quotationId={quotation.id}
               quotationTotal={Number(valueRevision?.total ?? 0)}
+              currency={quotation.currency}
               reloadToken={reload}
             />
           )}
@@ -1521,7 +1527,17 @@ export function QuotationDetail() {
  * ordinary `/sales-orders?quotationId=` query, so it shows exactly what the
  * reader may open there — a `view_own` holder sees only their own.
  */
-function QuotationSalesOrders({ quotationId, quotationTotal, reloadToken }: { quotationId: string; quotationTotal: number; reloadToken: number }) {
+function QuotationSalesOrders({
+  quotationId,
+  quotationTotal,
+  currency,
+  reloadToken,
+}: {
+  quotationId: string;
+  quotationTotal: number;
+  currency: string;
+  reloadToken: number;
+}) {
   const [rows, setRows] = useState<SalesOrderRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
 
@@ -1549,15 +1565,15 @@ function QuotationSalesOrders({ quotationId, quotationTotal, reloadToken }: { qu
         <div className="so-sum" aria-label="Booking against the quotation">
           <dl>
             <dt>Quotation total</dt>
-            <dd className="mono">{formatMoney(quotationTotal)}</dd>
+            <dd className="mono">{formatMoney(quotationTotal, currency)}</dd>
           </dl>
           <dl>
             <dt>Booked ({rows.filter((r) => r.status !== 'CANCELLED').length} order{rows.filter((r) => r.status !== 'CANCELLED').length === 1 ? '' : 's'})</dt>
-            <dd className="mono">{formatMoney(booked)}</dd>
+            <dd className="mono">{formatMoney(booked, currency)}</dd>
           </dl>
           <dl>
             <dt>Outstanding</dt>
-            <dd className="mono">{formatMoney(outstanding)}</dd>
+            <dd className="mono">{formatMoney(outstanding, currency)}</dd>
           </dl>
         </div>
       )}
@@ -1596,7 +1612,7 @@ function QuotationSalesOrders({ quotationId, quotationTotal, reloadToken }: { qu
                   <td>{r.poNumber ?? <span className="faint">—</span>}</td>
                   <td>{r.siNumber ?? <span className="faint">—</span>}</td>
                   <td>{r.drNumber ?? <span className="faint">—</span>}</td>
-                  <td className="num mono">{formatMoney(r.total)}</td>
+                  <td className="num mono">{formatMoney(r.total, currency)}</td>
                   <td>{r.owner.name}</td>
                 </tr>
               ))}
@@ -1609,7 +1625,7 @@ function QuotationSalesOrders({ quotationId, quotationTotal, reloadToken }: { qu
 }
 
 /** Who carries a line's cost, and what it is — the cost column's cell. */
-function LineCost({ item }: { item: Item }) {
+function LineCost({ item, currency }: { item: Item; currency: string }) {
   const who = item.providerUser
     ? { kind: 'In-house', name: item.providerUser.name }
     : item.providerSupplier
@@ -1618,7 +1634,7 @@ function LineCost({ item }: { item: Item }) {
   if (item.costAmount == null && !who) return <span className="faint">not costed</span>;
   return (
     <div className="quote-line-cost">
-      <div className="mono">{item.costAmount == null ? '—' : formatMoney(item.costAmount)}</div>
+      <div className="mono">{item.costAmount == null ? '—' : formatMoney(item.costAmount, currency)}</div>
       {who && (
         <div className="faint">
           {who.kind} · {who.name}
@@ -1635,41 +1651,41 @@ function LineCost({ item }: { item: Item }) {
  * Modify, where the discount calculator is. The figures are the server's — it
  * recomputes them on every save with the one `quotationTotals`.
  */
-function TotalsBlock({ revision }: { revision: Revision }) {
+function TotalsBlock({ revision, currency }: { revision: Revision; currency: string }) {
   const rate = `${(revision.vatRate * 100).toFixed(0)}%`;
   return (
     <dl className="quote-totals" aria-label="Totals">
       <div>
         <dt>Subtotal</dt>
-        <dd className="mono">{formatMoney(revision.subtotal)}</dd>
+        <dd className="mono">{formatMoney(revision.subtotal, currency)}</dd>
       </div>
       <div>
         <dt>{`Discount ${revision.discountPct ? `${revision.discountPct}%` : ''}`}</dt>
-        <dd className="mono">{revision.discountAmount > 0 ? `−${formatMoney(revision.discountAmount)}` : formatMoney(0)}</dd>
+        <dd className="mono">{revision.discountAmount > 0 ? `−${formatMoney(revision.discountAmount, currency)}` : formatMoney(0, currency)}</dd>
       </div>
       <div>
         <dt>Sum without tax</dt>
-        <dd className="mono">{formatMoney(revision.netOfTax ?? revision.net)}</dd>
+        <dd className="mono">{formatMoney(revision.netOfTax ?? revision.net, currency)}</dd>
       </div>
       <div>
         <dt>{revision.vatInclusive ? `Tax included (${rate})` : `Tax (${rate})`}</dt>
-        <dd className="mono">{formatMoney(revision.vatAmount)}</dd>
+        <dd className="mono">{formatMoney(revision.vatAmount, currency)}</dd>
       </div>
       <div className="quote-totals-grand">
         <dt>Total</dt>
-        <dd className="mono">{formatMoney(revision.total)}</dd>
+        <dd className="mono">{formatMoney(revision.total, currency)}</dd>
       </div>
     </dl>
   );
 }
 
 /** SCORO's right-hand panel: cost and margin, in-house against outsourced. */
-export function CostPanelBlock({ panel }: { panel: CostPanel }) {
+export function CostPanelBlock({ panel, currency = 'PHP' }: { panel: CostPanel; currency?: string }) {
   const row = (label: string, value: number, share: number | null, strong = false) => (
     <div className={strong ? 'quote-totals-grand' : undefined}>
       <dt>{label}</dt>
       <dd className="mono">
-        <span className={value < 0 ? 'quote-negative' : undefined}>{formatMoney(value)}</span>{' '}
+        <span className={value < 0 ? 'quote-negative' : undefined}>{formatMoney(value, currency)}</span>{' '}
         <span className="faint">{pct(share)}</span>
       </dd>
     </div>
@@ -1882,16 +1898,16 @@ function CreateSalesOrderPanel({ quotation, onClose }: { quotation: QuotationDet
               </div>
               <div>
                 <dt>Sum without tax</dt>
-                <dd className="mono">{formatMoney(net)}</dd>
+                <dd className="mono">{formatMoney(net, quotation.currency)}</dd>
               </div>
               <div>
                 <dt>Total ({booking.vatInclusive ? 'VAT included' : 'with VAT'})</dt>
-                <dd className="mono">{formatMoney(total)}</dd>
+                <dd className="mono">{formatMoney(total, quotation.currency)}</dd>
               </div>
               {booking.bookedNet > 0 && (
                 <div>
                   <dt>Already booked</dt>
-                  <dd className="mono">{formatMoney(booking.bookedNet)}</dd>
+                  <dd className="mono">{formatMoney(booking.bookedNet, quotation.currency)}</dd>
                 </div>
               )}
             </dl>

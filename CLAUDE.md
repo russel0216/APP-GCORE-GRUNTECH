@@ -440,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,728 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,733 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -457,9 +457,10 @@ and 3 on masters for the capitals, the group the SCORO import asks
 about, a deleted group, the group refused at save and the customer's
 address, and 7 across cad, finance, delivery and aftermarket for deleting
 a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on sales for
-the routes by who prepared the document):
+the routes by who prepared the document, and 5 on sales for the
+quotation's own currency and the order paper's margin %):
 foundation
-316, masters 92, sales 517, costing 157, pipeline 92, calendar 96, numbering
+316, masters 92, sales 522, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -2645,6 +2646,23 @@ SCORO.
   discount" — the exact figure that percentage gives through the mirror's
   own arithmetic, the nearer of the floor and the ceiling at six decimals —
   then Insert puts it in the box.
+- **A quotation has a CURRENCY of its own, PHP by default** (2026-10-11,
+  the owner's call: "interchangeable, but by default PHP").
+  `Quotation.currency`, one of `QUOTATION_CURRENCIES` in
+  `shared/quotation.ts` (PHP, USD, EUR, JPY, SGD, CNY, GBP, AUD, HKD —
+  anything else is a 400), picked in the editor's Currency select (the list
+  comes from `/next-number` and `GET /quotations/:id` as `currencies`).
+  Every figure of every revision is in it and NOTHING is converted: the
+  page, the list's Total and Margin cells, the PDF ("Total Price (USD):",
+  the line table's head) and its sales orders, which print in their
+  quotation's currency (`order.quotation.currency`). The PATCH refuses a
+  change once a revision is APPROVED or PENDING_APPROVAL, or a live sales
+  order booked it. The SCORO import takes the file's `currency` when it is
+  listed (blank is PHP). **The open item**: summaries that ADD quotations —
+  the list's Sum and team cards, the board, the forecast, Sales Analytics —
+  still add figures as they stand, so a USD quotation counts as that many
+  pesos there; the printed lists name a foreign currency beside its figure.
+  Converting needs exchange rates the owner has not decided on.
 - **`hideTotal` ("Hide total") only changes the paper**: the PDF prints the
   lines and prices without the totals block; the stored totals are computed
   as always, and a new revision copies the flag.
@@ -3067,7 +3085,11 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   see it — `withoutCostColumns()` strips the cost columns from the layout
   and `salesOrderPrintData(order, showCost)` sends no cost cell or cost
   total — because it is the internal booking record, never the customer's
-  copy (the invoice is G-FIN's).
+  copy (the invoice is G-FIN's). **The margin prints as a percentage too**
+  (2026-10-11, the owner's call): each line's margin cell carries its share
+  of the line's amount under it, and "Margin %:" (of the sum without tax,
+  `totalMarginPct`) follows "Margin sum:" — `{{order.marginPct}}` for a
+  layout that wants it in a box; all of it for cost viewers alone.
 
 ## The list of quotations (2026-10-08)
 

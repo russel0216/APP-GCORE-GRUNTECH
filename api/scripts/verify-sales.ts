@@ -2033,18 +2033,26 @@ async function main() {
         [
           row({ id: '8776', doc_no: scoroNumber(43), quote_name: `${TAG} Good row` }),
           row({ id: '8777', doc_no: scoroNumber(44), quote_name: `${TAG} Nobody’s row`, owner_name: `${TAG} Nobody Here` }),
-          row({ id: '8778', doc_no: scoroNumber(45), quote_name: `${TAG} Dollar row`, currency: 'USD' }),
+          row({ id: '8778', doc_no: scoroNumber(45), quote_name: `${TAG} Gold row`, currency: 'XAU' }),
           row({ id: '8779', doc_no: scoroNumber(46), quote_name: `${TAG} Odd status`, status_name: 'Daydream' }),
         ],
         true,
       );
       check(
-        'an unknown owner, a foreign currency and an unknown status are each an error naming it, and nothing is written',
+        'an unknown owner, a currency not on the list and an unknown status are each an error naming it, and nothing is written',
         bad.committed === false && bad.errors === 3 && bad.created === 1 &&
           bad.rows[1].message === `No login named "${TAG} Nobody Here" — add them in Admin › Users first` &&
-          (bad.rows[2].message ?? '').includes('USD') && (bad.rows[3].message ?? '').includes('Daydream') &&
+          (bad.rows[2].message ?? '').includes('XAU') && (bad.rows[3].message ?? '').includes('Daydream') &&
           (await quoteByNumber(scoroNumber(43))) === null,
         JSON.stringify(bad.rows.map((r) => r.message)),
+      );
+      // A quote in a listed currency comes in that currency; none said is PHP.
+      const dollars = await importScoro([row({ id: '8788', doc_no: scoroNumber(48), quote_name: `${TAG} Dollar row`, currency: 'usd' })], true);
+      check(
+        'a quote in a listed currency is imported in it (usd, read as USD), and a PHP one stays PHP',
+        dollars.committed === true && (await quoteByNumber(scoroNumber(48)))?.currency === 'USD' &&
+          (await quoteByNumber(scoroNumber(40)))?.currency === 'PHP',
+        `${dollars.committed} ${(await quoteByNumber(scoroNumber(48)))?.currency} ${(await quoteByNumber(scoroNumber(40)))?.currency}`,
       );
 
       // ── The lines export (the owner's second file): one row per line ─────
@@ -2591,6 +2599,7 @@ async function main() {
     });
     check('the editor creates a quotation and its lines in one request', made.status === 201, made.text.slice(0, 200));
     check('its name is saved in capitals', made.body.subject === upperText(`${TAG} Editor quote`), String(made.body.subject));
+    check('a quotation is in PHP unless another currency is picked', made.body.currency === 'PHP', String(made.body.currency));
     check('it takes the number the preview promised', made.body.number === promised.number, `${made.body.number} vs ${promised.number}`);
     check('and the number is issued once — the counter moved by exactly one', (await counter(promised.periodKey)) === issuedBefore + 1);
     const madeId = String(made.body.id);
@@ -2650,6 +2659,37 @@ async function main() {
       'the paper prints the sentence, bold over the description, as one product',
       partedPdf.status === 200 && partedText.includes('SCHNEIDERELECTRIC,CIRCUITBREAKER,EZC100H3030') && partedText.includes('30A,3P'),
       partedText.slice(0, 160),
+    );
+    // The currency is the quotation's own (2026-10-11): PHP unless picked,
+    // changeable while nothing is approved, printed in the head and the total.
+    const dollarQ = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Dollar quote`,
+      currency: 'USD',
+      lines: editorLines,
+    });
+    const badCurrency = await http(salesToken, 'PATCH', `/quotations/${dollarQ.body.id}`, { currency: 'XAU' });
+    const toEuro = await http(salesToken, 'PATCH', `/quotations/${dollarQ.body.id}`, { currency: 'EUR' });
+    const euroRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(dollarQ.body.id) } });
+    const euroText = pdfText(
+      Buffer.from(
+        await (
+          await fetch(`${BASE}/quotations/${dollarQ.body.id}/revisions/${euroRev.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
+        ).arrayBuffer(),
+      ),
+    );
+    check(
+      'a quotation takes the currency picked, changes it while a draft, refuses one not on the list, and prints it',
+      dollarQ.status === 201 && dollarQ.body.currency === 'USD' && badCurrency.status === 400 && toEuro.status === 200 &&
+        toEuro.body.currency === 'EUR' && euroText.includes('Total Price (EUR):') && !euroText.includes('(PHP)'),
+      `${dollarQ.status} ${dollarQ.body.currency} ${badCurrency.status} ${toEuro.status} ${toEuro.body.currency}`,
+    );
+    await prisma.quotationRevision.update({ where: { id: euroRev.id }, data: { status: 'APPROVED' } });
+    const lockedCurrency = await http(salesToken, 'PATCH', `/quotations/${dollarQ.body.id}`, { currency: 'PHP' });
+    check(
+      'once a revision is approved the currency stays as it was approved',
+      lockedCurrency.status === 400 && lockedCurrency.text.includes('currency cannot change'),
+      `${lockedCurrency.status} ${lockedCurrency.text.slice(0, 120)}`,
     );
     const partedRevs = await http(salesToken, 'GET', `/quotations/${partedId}`);
     const partedItems = ((partedRevs.body.revisions as { items: { brand: string | null; partNumber: string | null }[] }[])[0]?.items ?? []);
@@ -3617,6 +3657,13 @@ async function main() {
       ),
     );
     check('the same paper for a reader without cost rights carries no cost or margin', !soPdfOther.includes('Margin sum:') && !soPdfOther.includes('20,004.58'));
+    // The margin as a percentage too (2026-10-11): under each line's margin
+    // and as its own row under the margin sum — for cost viewers alone.
+    check(
+      'the order paper prints the margin as a percentage, per line and in total, only where cost shows',
+      /Margin %:\s*-?[\d.]+%/.test(soPdfOwner) && /\n-?\d+(\.\d)?%\n/.test(soPdfOwner) && !soPdfOther.includes('Margin %'),
+      (soPdfOwner.match(/Margin %:[^\n]*/) ?? [''])[0],
+    );
     // Rule 6: the money block in the quotation's words — VAT, never "Tax" —
     // and the bold total its last row: the internal cost and margin go above
     // the money, as the costing's estimate puts them.

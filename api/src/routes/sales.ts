@@ -113,6 +113,9 @@ import {
   costingScopeSections,
   quotationTaxOptions,
   QUOTATION_EXTRA_TAX_RATES,
+  QUOTATION_CURRENCIES,
+  QUOTATION_CURRENCY_CODES,
+  DEFAULT_QUOTATION_CURRENCY,
   productTitle,
   upperText,
   capsParts,
@@ -423,6 +426,7 @@ leadRoutes.get(
           select: {
             number: true,
             subject: true,
+            currency: true,
             outcome: true,
             // Every revision, newest first: the latest prints, and any with a
             // project books the quotation (QUOTATION_BOOKED_WHERE's twin).
@@ -507,7 +511,7 @@ leadRoutes.get(
             qt.number,
             qt.subject,
             latest ? `R${latest.revision} ${statusLabel(latest.status).toLowerCase()}` : '',
-            latest ? formatAmount(num(latest.total)) : '',
+            latest ? `${qt.currency !== currency ? `${qt.currency} ` : ''}${formatAmount(num(latest.total))}` : '',
             stageName(quotationStage(qt.outcome, booked, stages)),
           ];
         }),
@@ -1290,6 +1294,7 @@ quotationRoutes.get(
             stageLabel: stages.find((st) => st.key === quotationStage(r.outcome, booked, stages))?.label ?? null,
             probability: r.probability,
             expectedClosing: r.expectedClosing,
+            currency: r.currency,
             customer: r.customer,
             contact: r.contact,
             owner: r.owner,
@@ -1392,7 +1397,8 @@ quotationRoutes.get(
               r.subject,
               r.customer.name,
               stageLabel(quotationStage(r.outcome, booked, stages)),
-              formatAmount(quotationValue(r.revisions)),
+              // A quotation in another currency says so beside its figure.
+              `${r.currency !== currency ? `${r.currency} ` : ''}${formatAmount(quotationValue(r.revisions))}`,
               r.owner.name,
               r.expectedClosing ? formatShortDate(r.expectedClosing) : '',
               formatShortDate(r.createdAt),
@@ -1452,7 +1458,9 @@ quotationRoutes.get(
       // What the new revision will snapshot (the same fallbacks POST / uses),
       // so the editor's live tax line is the one the saved quotation stores.
       vatRate: company ? Number(company.vatRate) : 0.12,
-      currency: company?.currency ?? 'PHP',
+      // A new quotation is in PHP unless the author picks another (2026-10-11).
+      currency: DEFAULT_QUOTATION_CURRENCY,
+      currencies: QUOTATION_CURRENCIES,
       taxOptions: quotationTaxOptions(company ? Number(company.vatRate) : 0.12),
     });
   }),
@@ -1838,6 +1846,7 @@ quotationRoutes.get(
       })),
       companyVatRate: companyRate,
       taxOptions: quotationTaxOptions(companyRate),
+      currencies: QUOTATION_CURRENCIES,
       approvalOptions: options,
       approvalRoutes,
       // The customer's own address — what the quotation prints unless a site is chosen (2026-10-11).
@@ -2005,6 +2014,8 @@ const quotationSchema = z.object({
   terms: z.string().optional().nullable(),
   validityDays: z.number().int().min(1).optional(),
   expectedClosing: z.string().optional().nullable(),
+  /** PHP unless another is picked (2026-10-11); one of QUOTATION_CURRENCIES. */
+  currency: z.enum(QUOTATION_CURRENCY_CODES, { message: 'Choose a currency from the list' }).optional(),
   // SCORO's header fields. Payment terms default to the customer's own.
   prNumber: z.string().trim().max(120).optional().nullable(),
   delivery: z.string().trim().max(500).optional().nullable(),
@@ -2114,6 +2125,7 @@ quotationRoutes.post(
           // weighted pipeline multiplies by it.
           probability: body.probability ?? (lead?.probability ? lead.probability : 50),
           expectedClosing,
+          currency: body.currency ?? DEFAULT_QUOTATION_CURRENCY,
           revisions: {
             create: [
               {
@@ -2229,6 +2241,7 @@ quotationRoutes.patch(
         revisions: {
           select: { status: true, importedUnchanged: true, jobs: { select: { id: true, number: true }, take: 1 } },
         },
+        salesOrders: { where: { status: { not: 'CANCELLED' } }, select: { number: true }, take: 1 },
       },
     });
     if (!before) throw notFound('Quotation not found');
@@ -2256,6 +2269,17 @@ quotationRoutes.patch(
     if (body.probability !== undefined) data.probability = body.probability;
     if (body.lostReason !== undefined) data.lostReason = body.lostReason || null;
     if (body.expectedClosing !== undefined) data.expectedClosing = asDate(body.expectedClosing);
+    if (body.currency !== undefined && body.currency !== before.currency) {
+      // A figure somebody approved, or an order booked, was approved or
+      // booked in the currency it stood in; changing it would restate both.
+      if (before.revisions.some((r) => r.status === 'APPROVED' || r.status === 'PENDING_APPROVAL')) {
+        throw badRequest('The currency cannot change once a revision is approved or awaiting approval — raise a new quotation instead');
+      }
+      if (before.salesOrders.length) {
+        throw badRequest(`The currency cannot change — sales order ${before.salesOrders[0].number} was booked in ${before.currency}`);
+      }
+      data.currency = body.currency;
+    }
     if (body.contactId !== undefined) {
       data.contact = body.contactId ? { connect: { id: body.contactId } } : { disconnect: true };
     }
@@ -3032,9 +3056,9 @@ export async function quotationPrintData(
   revision: LoadedQuotation['revisions'][number],
   opts: { optionId?: string | null } = {},
 ): Promise<DesignData> {
-  const currency = await companyCurrency();
-  // The table's figures carry no currency; it is named once, in the head and
-  // in "Total Price (PHP):".
+  // The quotation's own currency (2026-10-11). The table's figures carry
+  // none; it is named once, in the head and in "Total Price (PHP):".
+  const currency = quotation.currency;
   const amount = (v: Prisma.Decimal | number) => formatAmount(Number(v));
   const rate = ratePct(revision.vatRate);
   const discountPct = Number(revision.discountPct);

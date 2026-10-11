@@ -50,6 +50,7 @@ export const SALES_ORDER_FIELDS: DesignField[] = [
   { key: 'order.net', label: 'Sum without tax', group: 'Money', sample: '125,000.00' },
   { key: 'order.vat', label: 'VAT', group: 'Money', sample: '15,000.00' },
   { key: 'order.total', label: 'Total', group: 'Money', sample: '140,000.00' },
+  { key: 'order.marginPct', label: 'Margin % of the sum without tax (cost viewers only)', group: 'Money', sample: '30.8%' },
   { key: 'quotation.number', label: 'Quotation number it books', group: 'Quotation', sample: '0012610001' },
   { key: 'quotation.subject', label: 'Quotation subject', group: 'Quotation', sample: 'Supply and installation of an air compressor' },
   { key: 'customer.name', label: 'Customer, registered name', group: 'Customer', sample: 'Sample Manufacturing Corp.' },
@@ -96,7 +97,10 @@ export function salesOrderSample(long = false): DesignData {
       amount: (price * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }),
       group,
       cost: { title: (cost * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }), body: provider },
-      margin: ((price - cost) * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }),
+      margin: {
+        title: ((price - cost) * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }),
+        body: `${Number((((price - cost) / price) * 100).toFixed(1))}%`,
+      },
     },
   });
   const rows: DesignData['rows'] = [
@@ -119,6 +123,7 @@ export function salesOrderSample(long = false): DesignData {
       { label: 'Total (PHP):', value: '140,000.00', bold: true },
       { label: 'Cost (PHP):', value: '86,500.00' },
       { label: 'Margin sum:', value: '38,500.00' },
+      { label: 'Margin %:', value: '30.8%' },
     ],
     signatories: [
       {

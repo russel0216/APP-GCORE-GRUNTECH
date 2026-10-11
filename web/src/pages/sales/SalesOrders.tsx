@@ -109,7 +109,8 @@ export interface SalesOrderRow {
   total: number;
   customer: { id: string; code: string; name: string };
   contact: { id: string; name: string; position: string | null } | null;
-  quotation: { id: string; number: string; subject: string };
+  /** The order is in its quotation's currency (2026-10-11). */
+  quotation: { id: string; number: string; subject: string; currency?: string };
   owner: { id: string; name: string };
   createdAt: string;
 }
@@ -211,7 +212,7 @@ export function SalesOrders() {
       align: 'right',
       render: (r) => (
         <span className={`mono${r.status === 'CANCELLED' ? ' faint' : ''}`} title={r.status === 'CANCELLED' ? 'Cancelled — books nothing' : undefined}>
-          {formatMoney(r.total)}
+          {formatMoney(r.total, r.quotation.currency)}
         </span>
       ),
     },
@@ -224,7 +225,7 @@ export function SalesOrders() {
             render: (r: SalesOrderListRow) =>
               r.margin ? (
                 <span title={`${r.margin.costedLines} of ${r.margin.lineCount} lines costed`}>
-                  <span className="mono">{formatMoney(r.margin.amount)}</span>
+                  <span className="mono">{formatMoney(r.margin.amount, r.quotation.currency)}</span>
                   {r.margin.pct !== null && <div className="faint">{r.margin.pct}%</div>}
                 </span>
               ) : (
@@ -500,7 +501,7 @@ export function SalesOrderDetail() {
         title={order.customer.name}
         status={order.status}
         statusExtra={SO_TONES}
-        amount={formatMoney(order.total)}
+        amount={formatMoney(order.total, order.quotation.currency)}
         amountLabel="Order total"
         meta={
           <>
@@ -662,18 +663,18 @@ export function SalesOrderDetail() {
                     <td className="right mono">
                       {l.quantity} {l.unit}
                     </td>
-                    <td className="right mono">{formatMoney(l.unitPrice)}</td>
-                    <td className="right mono">{formatMoney(l.amount)}</td>
+                    <td className="right mono">{formatMoney(l.unitPrice, order.quotation.currency)}</td>
+                    <td className="right mono">{formatMoney(l.amount, order.quotation.currency)}</td>
                     {showCost && (
                       <td className="right mono">
-                        {l.costAmount == null ? <span className="faint">—</span> : formatMoney(l.costAmount)}
+                        {l.costAmount == null ? <span className="faint">—</span> : formatMoney(l.costAmount, order.quotation.currency)}
                         {(l.providerSupplier || l.providerUser) && (
                           <div className="faint">{l.providerSupplier?.name ?? l.providerUser?.name}</div>
                         )}
                       </td>
                     )}
                     {showCost && (
-                      <td className="right mono">{l.margin == null ? <span className="faint">—</span> : formatMoney(l.margin)}</td>
+                      <td className="right mono">{l.margin == null ? <span className="faint">—</span> : formatMoney(l.margin, order.quotation.currency)}</td>
                     )}
                   </tr>
                 ),
@@ -685,28 +686,28 @@ export function SalesOrderDetail() {
         <div className="so-totals-wrap">
           <dl className="so-totals">
             <dt>Subtotal</dt>
-            <dd className="mono">{formatMoney(order.subtotal)}</dd>
+            <dd className="mono">{formatMoney(order.subtotal, order.quotation.currency)}</dd>
             {order.discountAmount > 0 && (
               <>
                 <dt>Discount ({order.discountPct}%)</dt>
-                <dd className="mono">-{formatMoney(order.discountAmount)}</dd>
+                <dd className="mono">-{formatMoney(order.discountAmount, order.quotation.currency)}</dd>
               </>
             )}
             <dt>{order.vatInclusive ? `VAT included (${(order.vatRate * 100).toFixed(0)}%)` : `Tax (${(order.vatRate * 100).toFixed(0)}%)`}</dt>
-            <dd className="mono">{formatMoney(order.vatAmount)}</dd>
+            <dd className="mono">{formatMoney(order.vatAmount, order.quotation.currency)}</dd>
             <dt className="so-grand">Total (PHP)</dt>
-            <dd className="mono so-grand">{formatMoney(order.total)}</dd>
+            <dd className="mono so-grand">{formatMoney(order.total, order.quotation.currency)}</dd>
           </dl>
           {showCost && order.costPanel && (
             <dl className="so-totals">
               <dt>Total cost</dt>
-              <dd className="mono">{formatMoney(order.costPanel.totalCost)}</dd>
+              <dd className="mono">{formatMoney(order.costPanel.totalCost, order.quotation.currency)}</dd>
               <dt>In-house</dt>
-              <dd className="mono">{formatMoney(order.costPanel.inHouseCost)}</dd>
+              <dd className="mono">{formatMoney(order.costPanel.inHouseCost, order.quotation.currency)}</dd>
               <dt>Outsourced</dt>
-              <dd className="mono">{formatMoney(order.costPanel.outsourcedCost)}</dd>
+              <dd className="mono">{formatMoney(order.costPanel.outsourcedCost, order.quotation.currency)}</dd>
               <dt className="so-grand">Total margin</dt>
-              <dd className="mono so-grand">{formatMoney(order.costPanel.totalMargin)}</dd>
+              <dd className="mono so-grand">{formatMoney(order.costPanel.totalMargin, order.quotation.currency)}</dd>
             </dl>
           )}
         </div>
@@ -816,7 +817,6 @@ export function SalesOrderEditor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const toast = useToast();
-  const { me } = useAuth();
   const [order, setOrder] = useState<(SalesOrderDetailRow & { taxOptions?: TaxOption[] }) | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
@@ -1057,7 +1057,7 @@ export function SalesOrderEditor() {
   }
 
   const showCost = order.canSeeCost;
-  const currency = me?.company?.currency ?? 'PHP';
+  const currency = order.quotation.currency ?? 'PHP';
   const pctLabel = (r: number) => `${Number((r * 100).toFixed(2))}%`;
   const serverTax: TaxOption[] = order.taxOptions ?? [{ rate: order.vatRate, label: pctLabel(order.vatRate) }];
   const taxOptions: TaxOption[] = serverTax.some((o) => Math.abs(o.rate - header.vatRate) < 0.00005)

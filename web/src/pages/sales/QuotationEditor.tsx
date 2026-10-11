@@ -100,6 +100,8 @@ interface Header {
   vatRate: number;
   /** SCORO's "Hide total": the PDF prints the lines without the totals. */
   hideTotal: boolean;
+  /** Every figure's currency: PHP unless another is picked (2026-10-11). */
+  currency: string;
   discountPct: string;
   /** SCORO's Status on the Modify page (edit only); applied on Save through the same move rules. */
   outcome: string;
@@ -116,6 +118,7 @@ interface Preview {
   usesEmployeeDigits: boolean;
   vatRate: number;
   currency: string;
+  currencies: { code: string; label: string }[];
 }
 
 interface LeadForQuote {
@@ -256,6 +259,7 @@ export function QuotationEditor() {
     vatInclusive: false,
     vatRate: 0.12,
     hideTotal: false,
+    currency: 'PHP',
     discountPct: '0',
     outcome: 'OPEN',
     lostReason: '',
@@ -288,7 +292,12 @@ export function QuotationEditor() {
   const vatRate = header.vatRate;
   /** What the Tax dropdown offers: the company's rate, and 0% (see checkVatRate on the server). */
   const companyRate = editing ? (quotation?.companyVatRate ?? revision?.vatRate ?? 0.12) : (preview?.vatRate ?? 0.12);
-  const currency = me?.company?.currency ?? preview?.currency ?? 'PHP';
+  const currency = header.currency || 'PHP';
+  /** What the Currency dropdown offers — the server's list, and the one the quotation is in. */
+  const currencyOptions = (() => {
+    const listed = (editing ? quotation?.currencies : preview?.currencies) ?? [{ code: 'PHP', label: 'PHP — Philippine peso' }];
+    return listed.some((c) => c.code === currency) ? listed : [...listed, { code: currency, label: currency }];
+  })();
 
   /** A change somebody made — as opposed to a prefill — marks the page dirty. */
   const set = useCallback(<K extends keyof Header>(key: K, value: Header[K]) => {
@@ -338,6 +347,7 @@ export function QuotationEditor() {
             vatInclusive: draft.vatInclusive,
             vatRate: draft.vatRate,
             hideTotal: draft.hideTotal ?? false,
+            currency: q.currency ?? 'PHP',
             discountPct: String(draft.discountPct ?? 0),
             outcome: q.outcome,
             lostReason: q.lostReason ?? '',
@@ -497,6 +507,7 @@ export function QuotationEditor() {
           // rate, which is what a new quotation may carry.
           ...(src.vatRate === 0 ? { vatRate: 0 } : {}),
           hideTotal: src.hideTotal ?? false,
+          currency: q.currency ?? 'PHP',
           discountPct: String(src.discountPct ?? 0),
         }));
         if (src.vatRate === 0) vatTouched.current = true;
@@ -838,6 +849,7 @@ export function QuotationEditor() {
           vatInclusive: header.vatInclusive,
           vatRate: header.vatRate,
           hideTotal: header.hideTotal,
+          currency: header.currency,
           discountPct: Number(header.discountPct || 0),
           ...(canPickAuthor && header.ownerId && header.ownerId !== myId ? { ownerId: header.ownerId } : {}),
           lines: payloadLines,
@@ -875,6 +887,7 @@ export function QuotationEditor() {
         expectedClosing: header.expectedClosing || null,
         contactId: header.contactId || null,
         siteId: header.siteId || null,
+        ...(header.currency !== quotation!.currency ? { currency: header.currency } : {}),
         ...(moved ? { outcome: header.outcome } : {}),
         ...(moved && header.outcome === 'LOST' ? { lostReason: header.lostReason.trim() } : {}),
       });
@@ -1124,7 +1137,15 @@ export function QuotationEditor() {
                 onChange={(e) => set('expectedClosing', e.target.value)}
               />
             </Field>
-            <Static label="Currency">{currency}</Static>
+            <Field label="Currency" hint="Every figure on this quotation is in it — nothing is converted">
+              <select id="qe-currency" value={currency} onChange={(e) => set('currency', e.target.value)}>
+                {currencyOptions.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
             {editing ? (
               <Field
                 label="Status"
@@ -1616,7 +1637,7 @@ export function QuotationEditor() {
               label="Hide total — the PDF prints the lines and their prices, without the totals"
             />
           </div>
-          {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} />}
+          {showCost && priced.length > 0 && <CostPanelBlock panel={totals.cost} currency={currency} />}
         </div>
 
         <div className="row qe-foot">
