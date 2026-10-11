@@ -440,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,753 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,754 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -461,9 +461,10 @@ the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
 order on one page, and one on sales for a subheading worded in
-line_comment, and 17 on workspace for the Help box's tickets):
+line_comment, and 17 on workspace for the Help box's tickets, and one on
+sales for a row the database refuses):
 foundation
-318, masters 92, sales 523, costing 157, pipeline 92, calendar 96, numbering
+318, masters 92, sales 524, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 63, accounts 124. The
@@ -2583,6 +2584,17 @@ SCORO.
   moved, the counter; a created customer and contact get rows of their own
   ("… from the SCORO quotes import"). The route hands every writer the
   actor (`Registered.write(records, actor?)`) for exactly such rows.
+  **A row the database refuses names itself** (2026-10-11, the owner's
+  report: the dry run passed on the live server and the commit answered
+  only "Something went wrong on our side"): each row's transaction runs
+  with `ROW_TRANSACTION` (15 s to start, 60 s to finish — the shared
+  server ran past Prisma's 5-second default), a customer it creates takes
+  `nextNumber('customer', …, isTaken)` so a code already on file is
+  stepped over, and any error in a row stops the import as a 400 —
+  "Stopped at quotation <number>: <reason>. The N quotations before it
+  were imported — run the import again to continue" — `rowFailure()`
+  putting a Prisma refusal (P2002, P2028, P2003, P2000, P2020) in words,
+  the full error still in the server log.
   verify-sales builds both files as SCORO writes them (UTF-16, tabs) and
   drives the spec and writer by name — the lines file's totals come out as
   SCORO's own; verify-masters pins the decoding, the delimiter and the

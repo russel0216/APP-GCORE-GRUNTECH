@@ -2219,6 +2219,37 @@ async function main() {
         JSON.stringify(stillSummary?.revisions[0].items.map((i) => i.title)),
       );
 
+      // ── A row the database refuses (2026-10-11, the owner's report) ──────
+      // A refusal in the write used to reach the screen as "Something went
+      // wrong on our side", the reason only in the server's log. Here the
+      // second row's number is taken between the check and the write: the
+      // import names the quotation and why, and keeps the row before it.
+      let stopped = '';
+      try {
+        await runImport(
+          decodeCsv(scoroFile([
+            row({ id: '8785', doc_no: scoroNumber(55), quote_name: `${TAG} Before the refusal` }),
+            row({ id: '8786', doc_no: scoroNumber(56), quote_name: `${TAG} Refused row` }),
+          ])),
+          scoroQuoteSpec,
+          true,
+          async (records) => {
+            await prisma.quotation.create({
+              data: { number: scoroNumber(56), customerId: stillSummary!.customerId, ownerId: sales.id, subject: `${TAG} Saved by hand meanwhile` },
+            });
+            await writeScoroQuotes(records as never, actor);
+          },
+        );
+      } catch (err) {
+        stopped = err instanceof Error ? err.message : String(err);
+      }
+      check(
+        'a row the database refuses stops the import with its number and reason, and the rows before it stand',
+        stopped.startsWith(`Stopped at quotation ${scoroNumber(56)}: a record with the same number is already on file.`) &&
+          stopped.includes('The 1 quotation before it was imported') && !!(await quoteByNumber(scoroNumber(55))),
+        stopped,
+      );
+
       // ── Deleting a group (2026-10-11, the owner's call) ──────────────────
       // Its lines move to OTHERS — every spelling sharing its key — the row
       // goes, and its key is remembered so the seed never brings it back.

@@ -4,7 +4,7 @@ import { required, optional, type ImportSpec, type ImportActor } from '../../sha
 import { nextNumber, setCounter, type CounterMove } from '../../shared/numbering';
 import { recalcQuotationRevision, upperText, QUOTATION_CURRENCY_CODES, DEFAULT_QUOTATION_CURRENCY } from '../../shared/quotation';
 import { FALLBACK_GROUP, groupKey, rememberGroups } from '../../shared/quotationGroups';
-import { badRequest } from '../../http/kit';
+import { badRequest, HttpError } from '../../http/kit';
 import { pipelineStages, stageProbability } from '../../shared/pipelineStages';
 import { audit } from '../../shared/audit';
 import { lineData, QUOTE_NUMBER, type QuotationLineInput } from '../sales';
@@ -486,6 +486,36 @@ export const SUMMARY_LINE_TITLE = 'As quoted in SCORO';
 export const summaryLineDescription = (number: string) =>
   `Imported from SCORO quote ${number} as one line — the SCORO lines were not in the file. Replace it with the real lines when they are imported.`;
 
+/**
+ * Each row's transaction may take its time: the live server is shared, and a
+ * quotation of forty lines with its customer, contact, recalc, counter and
+ * audit rows ran past Prisma's 5-second default there.
+ */
+const ROW_TRANSACTION = { maxWait: 15_000, timeout: 60_000 } as const;
+
+/**
+ * Why a row could not be written, in words the importer can act on — a
+ * database refusal used to reach the screen as "Something went wrong on our
+ * side", the real reason only in the server's log.
+ */
+export function rowFailure(err: unknown): string {
+  if (err instanceof HttpError) return err.message;
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (err.code === 'P2002') {
+      const target = (err.meta?.target as string[] | string | undefined) ?? 'a unique field';
+      return `a record with the same ${Array.isArray(target) ? target.join(', ') : target} is already on file`;
+    }
+    if (err.code === 'P2028') return 'the database took too long to answer';
+    if (err.code === 'P2003') return `it points at a record that is not on file (${String(err.meta?.field_name ?? 'a link')})`;
+    if (err.code === 'P2000') return `a value is too long for ${String(err.meta?.column_name ?? 'its column')}`;
+    if (err.code === 'P2020') return 'a figure is too large to store';
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  // A Prisma message carries the call site first; its last line is the cause.
+  const last = message.split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? 'an unexpected error';
+  return last.length > 300 ? `${last.slice(0, 300)}…` : last;
+}
+
 async function writeScoroQuotes(
   records: { record: ScoroQuoteRecord; existingId: string | null }[],
   actor?: ImportActor,
@@ -519,20 +549,40 @@ async function writeScoroQuotes(
       },
     ];
 
+  let written = 0;
   for (const { record, existingId } of records) {
+    try {
+      if (await writeOne(record, existingId)) written++;
+    } catch (err) {
+      // The rows before it stand (one transaction each); this one and the
+      // rest are not written. A second run skips what is already on file.
+      console.error(`SCORO import stopped at ${record.number}:`, err);
+      const reason = rowFailure(err);
+      throw new HttpError(
+        400,
+        `Stopped at quotation ${record.number}: ${reason}. ` +
+          (written
+            ? `The ${written} quotation${written === 1 ? '' : 's'} before it ${written === 1 ? 'was' : 'were'} imported — run the import again to continue; ${written === 1 ? 'it is' : 'they are'} skipped.`
+            : 'Nothing was imported.'),
+      );
+    }
+  }
+
+  /** Writes one record; true when it created or changed something. */
+  async function writeOne(record: ScoroQuoteRecord, existingId: string | null): Promise<boolean> {
     if (existingId) {
       // A quotation already in G-CORE is G-CORE's: the file does not touch it
       // — except to keep the summary line's promise. One that came from the
       // header-only export (revision 0 still a draft, exactly the one
       // "As quoted in SCORO" line) takes the real lines from a file that
       // carries them; anything else is left exactly as it is.
-      if (!record.lines) continue;
-      await prisma.$transaction(async (tx) => {
+      if (!record.lines) return false;
+      return prisma.$transaction(async (tx) => {
         const rev = await tx.quotationRevision.findFirst({
           where: { quotationId: existingId, revision: 0 },
           include: { items: { select: { id: true, title: true } } },
         });
-        if (!rev || rev.status !== 'DRAFT' || rev.items.length !== 1 || rev.items[0].title !== SUMMARY_LINE_TITLE) return;
+        if (!rev || rev.status !== 'DRAFT' || rev.items.length !== 1 || rev.items[0].title !== SUMMARY_LINE_TITLE) return false;
         await tx.quotationItem.delete({ where: { id: rev.items[0].id } });
         const fileLines = linesOf(record);
         await tx.quotationItem.createMany({ data: fileLines.map((line, i) => ({ revisionId: rev.id, ...lineData(line, i) })) });
@@ -549,8 +599,8 @@ async function writeScoroQuotes(
           undefined,
           tx,
         );
-      });
-      continue;
+        return true;
+      }, ROW_TRANSACTION);
     }
 
     // One transaction per row: the customer, the contact, the quotation, its
@@ -567,7 +617,9 @@ async function writeScoroQuotes(
         // sub-industry, the SCORO id in the notes so the next file matches it.
         const made = await tx.customer.create({
           data: {
-            code: await nextNumber('customer', tx),
+            // Stepping over a code already on file (one typed in by hand or
+            // brought by an import): the counter may stand behind them.
+            code: await nextNumber('customer', tx, {}, async (code) => !!(await tx.customer.findUnique({ where: { code }, select: { id: true } }))),
             name: record.customer.name,
             notes: record.customer.scoroId ? `(SCORO id ${record.customer.scoroId})` : null,
             createdById: actor?.id ?? null,
@@ -677,7 +729,8 @@ async function writeScoroQuotes(
         undefined,
         tx,
       );
-    });
+    }, ROW_TRANSACTION);
+    return true;
   }
 }
 
