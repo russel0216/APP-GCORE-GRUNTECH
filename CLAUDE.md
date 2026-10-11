@@ -440,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,735 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,736 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -460,9 +460,10 @@ a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on
 the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
-order on one page):
+order on one page, and one on sales for a subheading worded in
+line_comment):
 foundation
-318, masters 92, sales 522, costing 157, pipeline 92, calendar 96, numbering
+318, masters 92, sales 523, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -2503,7 +2504,11 @@ SCORO.
   without `groupBy` behaves as before) — and a group with line content
   (`product_name`, `line_comment` or `line_id` on any row) gets its rows as
   lines in file order instead of the summary line: `is_subheading` 1 is a
-  subheading of `product_name` and nothing else; otherwise `group` =
+  subheading of `product_name`, else of `line_comment` (the owner's quotes
+  export of 2026-10-11 put all 25 of its subheadings' words there and left
+  `product_name` empty, and the all-or-nothing import refused the whole
+  file over it), and nothing else — one with neither is refused, naming the
+  row; otherwise `group` =
   `product_group` as the import decides it (below), `title` =
   `product_name` whole (the three product boxes stay empty — SCORO's name
   is not reliably "brand, type, part"), `description` = `line_comment`,

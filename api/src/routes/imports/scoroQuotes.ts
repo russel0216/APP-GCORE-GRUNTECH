@@ -189,8 +189,12 @@ async function scoroLines(rows: Record<string, string>[], firstRowNumber: number
     const where = `line ${i + 1} (row ${firstRowNumber + i}): `;
     const name = collapse(row['product_name'] ?? '');
     if ((row['is_subheading'] ?? '').trim() === '1') {
-      if (!name) throw new Error(`${where}a subheading needs its product_name`);
-      lines.push({ isHeading: true, title: name, quantity: 0, unit: 'lot', unitPrice: 0 });
+      // SCORO writes a subheading's words in product_name or — in the
+      // owner's quotes export of 2026-10-11, every one of its 25 — in
+      // line_comment, leaving product_name empty. Either is the heading.
+      const heading = name || collapse(row['line_comment'] ?? '');
+      if (!heading) throw new Error(`${where}a subheading has no words — neither product_name nor line_comment`);
+      lines.push({ isHeading: true, title: heading, quantity: 0, unit: 'lot', unitPrice: 0 });
       continue;
     }
     const quantity = scoroDecimal(row, 'amount') ?? new Prisma.Decimal(0);

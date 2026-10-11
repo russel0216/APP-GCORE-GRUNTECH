@@ -2156,6 +2156,28 @@ async function main() {
 
       // The promised replacement: the header-only file first (the summary
       // line), then the lines file for the same number.
+      // SCORO's quotes export of 2026-10-11 wrote every subheading's words
+      // in line_comment and left product_name empty; one with neither is
+      // still refused, naming the row.
+      const commentHeads = await importScoro(
+        [
+          subheadingRow({ id: '8789', doc_no: scoroNumber(49), quote_name: `${TAG} Comment heading`, product_name: '', line_comment: 'TESTING AND COMMISSIONING' }),
+          pricedLine({ id: '8789', doc_no: scoroNumber(49), quote_name: `${TAG} Comment heading` }),
+        ],
+        true,
+        { groups: { [groupKey(`${TAG} Schneider Electric`)]: `${TAG} Mapped` } },
+      );
+      const headed49 = (await quoteByNumber(scoroNumber(49)))?.revisions[0]?.items.sort((x, y) => x.sortOrder - y.sortOrder) ?? [];
+      const noWords = await importScoro(
+        [subheadingRow({ id: '8790', doc_no: scoroNumber(47), quote_name: `${TAG} Wordless heading`, product_name: '', line_comment: '' })],
+        false,
+      );
+      check(
+        'a subheading whose words are in line_comment takes them as its heading; one with no words at all is refused',
+        commentHeads.committed === true && headed49[0]?.isHeading === true && headed49[0]?.title === 'TESTING AND COMMISSIONING' &&
+          noWords.errors === 1 && /no words/.test(String(noWords.rows[0]?.message)),
+        `${JSON.stringify(commentHeads.rows)} ${headed49[0]?.title} ${JSON.stringify(noWords.rows)}`,
+      );
       const summaryFirst = await importScoro([row({ id: '8782', doc_no: scoroNumber(52), quote_name: `${TAG} Summary then lines` })], true);
       const summarised = await quoteByNumber(scoroNumber(52));
       // Where the series stands after the new number raised it; the replacement must leave it there.
