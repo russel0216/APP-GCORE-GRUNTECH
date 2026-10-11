@@ -40,6 +40,7 @@ import {
   statusLabel,
   type PdfTotal,
   type Signatory,
+  formatQuantity,
 } from '../shared/pdf';
 import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
 import { salesOrderDesign, withoutCostColumns } from '../shared/salesOrderTemplate';
@@ -1282,8 +1283,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
       return;
     }
     const m = totals.lines[i];
-    const qty = Number(l.quantity);
-    const qtyText = Number.isInteger(qty) ? String(qty) : qty.toString();
+    const qtyText = formatQuantity(l.quantity);
     const title = (l.title ?? '').trim();
     const description = (l.description ?? '').trim();
     rows.push({

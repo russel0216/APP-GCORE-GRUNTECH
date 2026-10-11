@@ -6,7 +6,7 @@ import { recalcQuotationRevision } from '../../shared/quotation';
 import { groupKey, rememberGroups } from '../../shared/quotationGroups';
 import { pipelineStages, stageProbability } from '../../shared/pipelineStages';
 import { audit } from '../../shared/audit';
-import { lineData, QUOTE_NUMBER } from '../sales';
+import { lineData, QUOTE_NUMBER, type QuotationLineInput } from '../sales';
 import type { Registered } from '../imports';
 
 /**
@@ -25,10 +25,16 @@ import type { Registered } from '../imports';
  * quotation in G-CORE is G-CORE's, and a re-run of the same file changes
  * nothing.
  *
- * The file carries no line rows (SCORO's quote-lines export is a separate
- * file, still to come), so every quotation gets ONE summary line worth its
- * subtotal, costed at SCORO's total cost so the margin reads as SCORO's; the
- * lines export replaces it when it arrives.
+ * SCORO's export comes two ways (the owner's two files of 2026-10-11): the
+ * header alone, one row per quotation, or WITH the line columns — one row
+ * per line, the header repeated on every row. The rows are grouped by
+ * `doc_no` (`groupBy` / `buildGroup`, the framework's rule for a record
+ * that spans rows). A group with no line content gets ONE summary line
+ * worth its subtotal, costed at SCORO's total cost so the margin reads as
+ * SCORO's; a group with lines gets them, in file order. The one exception
+ * to "left as it is": a quotation that came from the header-only file —
+ * revision 0 DRAFT, exactly the summary line — takes the lines file's lines
+ * in place of its summary line, the promise the summary line made.
  */
 
 type Tx = Prisma.TransactionClient;
@@ -156,6 +162,77 @@ interface ScoroQuoteRecord {
   unitPrice: Prisma.Decimal;
   unitCost: Prisma.Decimal | null;
   group: string | null;
+  /** The file's lines, in order, when the export carries them; null for the header-only export. */
+  lines: QuotationLineInput[] | null;
+}
+
+/** Whether a row of the export carries a line: the lines export names a product, a comment or a line id on every row. */
+const hasLineContent = (row: Record<string, string>) => !!(row['product_name'] || row['line_comment'] || row['line_id']);
+
+/**
+ * The lines of one quotation's rows, each resolved in the shape `lineData`
+ * stores (the summary line's road). SCORO's `product_name` is the whole
+ * title — its sentence is not reliably "brand, type, part", so the three
+ * product boxes stay empty. SCORO stores the LINE's total cost
+ * (`line_cost`), and a line here carries a UNIT cost: `line_cost ÷ amount`
+ * to the centavo, from which `lineData` recomputes `costAmount` = qty ×
+ * unitCost — a centavo at most from SCORO's figure on a line whose cost does
+ * not divide evenly. A supplier or a person SCORO names is matched by name
+ * and never created; one not on file is kept in `costNote` so nothing is lost.
+ */
+async function scoroLines(rows: Record<string, string>[], firstRowNumber: number): Promise<QuotationLineInput[]> {
+  const lines: QuotationLineInput[] = [];
+  for (const [i, row] of rows.entries()) {
+    const where = `line ${i + 1} (row ${firstRowNumber + i}): `;
+    const name = collapse(row['product_name'] ?? '');
+    if ((row['is_subheading'] ?? '').trim() === '1') {
+      if (!name) throw new Error(`${where}a subheading needs its product_name`);
+      lines.push({ isHeading: true, title: name, quantity: 0, unit: 'lot', unitPrice: 0 });
+      continue;
+    }
+    const quantity = scoroDecimal(row, 'amount') ?? new Prisma.Decimal(0);
+    const price = scoroDecimal(row, 'price') ?? new Prisma.Decimal(0);
+    const lineCost = scoroDecimal(row, 'line_cost');
+    if (quantity.lt(0) || price.lt(0)) throw new Error(`${where}amount and price cannot be negative`);
+    const unitCost = lineCost && lineCost.gt(0) && quantity.gt(0) ? lineCost.div(quantity).toDecimalPlaces(2) : null;
+
+    const notes: string[] = [];
+    let providerSupplierId: string | null = null;
+    let providerUserId: string | null = null;
+    const supplierName = collapse(row['supplier_name'] ?? '');
+    const doerName = collapse(row['doer_name'] ?? '');
+    const internal = (row['is_internal'] ?? '').trim() === '1';
+    if (internal && doerName) {
+      const users = await prisma.user.findMany({ select: { id: true, name: true, isActive: true } });
+      const named = users.filter((u) => sameName(u.name, doerName));
+      providerUserId = (named.find((u) => u.isActive) ?? named[0])?.id ?? null;
+      if (!providerUserId) notes.push(`Doer in SCORO: ${doerName}`);
+    } else if (supplierName) {
+      const supplier = await prisma.supplier.findFirst({
+        where: { name: { equals: supplierName, mode: 'insensitive' } },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      providerSupplierId = supplier?.id ?? null;
+      if (!providerSupplierId) notes.push(`Supplier in SCORO: ${supplierName}`);
+    }
+    const costComment = (row['cost_comment'] ?? '').trim();
+    const costNote = [costComment, ...notes].filter(Boolean).join(' — ') || null;
+
+    lines.push({
+      group: collapse(row['product_group'] ?? '') || null,
+      title: name || null,
+      description: (row['line_comment'] ?? '').trim(),
+      quantity: Number(quantity),
+      unit: (row['unit'] ?? '').trim() || 'lot',
+      unitPrice: Number(price),
+      unitCost: unitCost === null ? null : Number(unitCost),
+      providerSupplierId,
+      providerUserId,
+      costNote,
+    });
+  }
+  return lines;
 }
 
 const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
@@ -168,7 +245,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
       header: 'doc_no',
       required: true,
       example: '0012603004',
-      hint: 'The quotation number, as SCORO numbered it; the series continues past it. A number already in G-CORE is left as it is',
+      hint: 'The quotation number, as SCORO numbered it; the series continues past it. One row per line groups by it. A number already in G-CORE is left as it is — except that a quotation imported from the header-only export (its one "As quoted in SCORO" line, still a draft) takes the lines from a file that carries them',
     },
     {
       header: 'payer',
@@ -201,7 +278,33 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
     { header: 'c_paymentterms', example: '50% Down payment / 50% Progress Billing', hint: 'Payment terms' },
     { header: 'estimated_closing_date', example: '2026-04-10', hint: 'Expected closing' },
     { header: 'id', example: '8773', hint: 'SCORO’s quote id, kept in the audit row' },
+    // The line columns of SCORO's lines export (2026-10-11, the owner's second file): one row per line.
+    { header: 'product_group', example: 'Schneider Electric', hint: 'The line’s group; a new one joins Admin › Categories › Quotation groups' },
+    { header: 'product_name', example: 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS', hint: 'The line’s title, as SCORO wrote it (a subheading’s text when is_subheading is 1)' },
+    { header: 'line_comment', example: '32A Tap-off unit -1 Whip TPN, includes: …', hint: 'The line’s description' },
+    { header: 'amount', example: '4704.000000000000', hint: 'The quantity' },
+    { header: 'unit', example: 'set', hint: 'The unit; blank is "lot"' },
+    { header: 'price', example: '69176.470000', hint: 'The unit price' },
+    { header: 'line_cost', example: '263424000.0000', hint: 'The LINE’s total cost; stored as a unit cost (÷ amount) to the centavo' },
+    { header: 'line_vat_percent', example: '12.000', hint: 'The first priced line’s rate is the revision’s VAT rate' },
+    { header: 'is_subheading', example: '0', hint: '1 makes the row a subheading over the lines below it' },
+    { header: 'supplier_name', example: 'SCHNEIDER ELECTRIC PHILIPPINES', hint: 'Who carries the cost — matched to a supplier by name, never created; otherwise kept in the cost note' },
+    { header: 'doer_name', example: '', hint: 'With is_internal 1, one of our people carrying the cost — matched to a login by name; otherwise kept in the cost note' },
+    { header: 'is_internal', example: '0', hint: '1 when the cost is carried in-house (doer_name), 0 when by a supplier' },
+    { header: 'cost_comment', example: '', hint: 'The line’s cost note' },
+    { header: 'line_id', example: '39866', hint: 'SCORO’s line id — a row with one is a line' },
   ],
+  // One row per line in the lines export: the rows sharing a doc_no are one quotation.
+  groupBy: (row) => (row['doc_no'] ?? '').trim(),
+  buildGroup: async (rows, firstRowNumber) => {
+    const header = await scoroQuoteSpec.build(rows[0], firstRowNumber);
+    if (!rows.some(hasLineContent)) return header;
+    const lines = await scoroLines(rows, firstRowNumber);
+    // The rate SCORO put on the lines, where it says; the header's otherwise.
+    const firstPriced = rows.find((r) => hasLineContent(r) && (r['is_subheading'] ?? '').trim() !== '1' && (r['line_vat_percent'] ?? '').trim());
+    const lineRate = firstPriced ? scoroDecimal(firstPriced, 'line_vat_percent') : null;
+    return { ...header, lines, vatRate: lineRate ? lineRate.div(100).toDecimalPlaces(4) : header.vatRate };
+  },
   existing: async (row) => {
     const number = (row['doc_no'] ?? '').trim();
     if (!number) return null;
@@ -293,6 +396,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
       unitPrice,
       unitCost: totalCost && totalCost.gt(0) ? totalCost.toDecimalPlaces(2) : null,
       group: others?.isActive ? others.name : null,
+      lines: null,
     };
   },
 };
@@ -307,9 +411,53 @@ async function writeScoroQuotes(
   actor?: ImportActor,
 ): Promise<void> {
   const by = { actorId: actor?.id ?? null, actorName: actor?.name ?? null };
+  /** The lines a record stores: the file's, or the one summary line. */
+  const linesOf = (record: ScoroQuoteRecord): QuotationLineInput[] =>
+    record.lines ?? [
+      {
+        group: record.group,
+        title: SUMMARY_LINE_TITLE,
+        description: summaryLineDescription(record.number),
+        quantity: 1,
+        unit: 'lot',
+        unitPrice: Number(record.unitPrice),
+        unitCost: record.unitCost === null ? null : Number(record.unitCost),
+      },
+    ];
+
   for (const { record, existingId } of records) {
-    // A quotation already in G-CORE is G-CORE's: the file does not touch it.
-    if (existingId) continue;
+    if (existingId) {
+      // A quotation already in G-CORE is G-CORE's: the file does not touch it
+      // — except to keep the summary line's promise. One that came from the
+      // header-only export (revision 0 still a draft, exactly the one
+      // "As quoted in SCORO" line) takes the real lines from a file that
+      // carries them; anything else is left exactly as it is.
+      if (!record.lines) continue;
+      await prisma.$transaction(async (tx) => {
+        const rev = await tx.quotationRevision.findFirst({
+          where: { quotationId: existingId, revision: 0 },
+          include: { items: { select: { id: true, title: true } } },
+        });
+        if (!rev || rev.status !== 'DRAFT' || rev.items.length !== 1 || rev.items[0].title !== SUMMARY_LINE_TITLE) return;
+        await tx.quotationItem.delete({ where: { id: rev.items[0].id } });
+        await tx.quotationItem.createMany({ data: record.lines!.map((line, i) => ({ revisionId: rev.id, ...lineData(line, i) })) });
+        await rememberGroups(tx, record.lines!.map((l) => l.group));
+        await recalcQuotationRevision(rev.id, tx);
+        await audit(
+          {
+            entityType: 'quotation',
+            entityId: existingId,
+            action: 'UPDATED',
+            summary: `Replaced the summary line with ${record.lines!.length} line${record.lines!.length === 1 ? '' : 's'} from the SCORO lines export`,
+            after: { scoroId: record.scoroId, number: record.number, lines: record.lines!.length },
+            ...by,
+          },
+          undefined,
+          tx,
+        );
+      });
+      continue;
+    }
 
     // One transaction per row: the customer, the contact, the quotation, its
     // revision, the line, the recalc and the counter stand or fall together.
@@ -401,25 +549,11 @@ async function writeScoroQuotes(
       });
       const revisionId = quotation.revisions[0].id;
 
-      // The one summary line, in the shape every quotation line is stored in.
-      await tx.quotationItem.create({
-        data: {
-          revisionId,
-          ...lineData(
-            {
-              group: record.group,
-              title: SUMMARY_LINE_TITLE,
-              description: summaryLineDescription(record.number),
-              quantity: 1,
-              unit: 'lot',
-              unitPrice: Number(record.unitPrice),
-              unitCost: record.unitCost === null ? null : Number(record.unitCost),
-            },
-            0,
-          ),
-        },
-      });
-      await rememberGroups(tx, [record.group]);
+      // The file's lines, or the one summary line, in the shape every
+      // quotation line is stored in; SCORO's groups join the master.
+      const lines = linesOf(record);
+      await tx.quotationItem.createMany({ data: lines.map((line, i) => ({ revisionId, ...lineData(line, i) })) });
+      await rememberGroups(tx, lines.map((l) => l.group));
       await recalcQuotationRevision(revisionId, tx);
 
       // The series follows the highest imported number and is never lowered
@@ -433,7 +567,7 @@ async function writeScoroQuotes(
           entityId: quotation.id,
           action: 'CREATED',
           summary: `Imported from SCORO quote CSV (SCORO id ${record.scoroId ?? '—'})`,
-          after: { scoroId: record.scoroId, number: record.number, outcome: record.outcome, ...(counter ? { counter } : {}) },
+          after: { scoroId: record.scoroId, number: record.number, outcome: record.outcome, lines: lines.length, ...(counter ? { counter } : {}) },
           ...by,
         },
         undefined,

@@ -186,6 +186,52 @@ async function main() {
     missingCol instanceof Error ? missingCol.message : 'no error',
   );
 
+
+  // A record that spans rows (the SCORO lines export, 2026-10-11): rows are
+  // grouped by a key in first-seen order, one result per group, the first
+  // row's number naming it; an error in one group's rows fails that group only.
+  {
+    const groupedWritten: { key: string; names: string[] }[] = [];
+    const grouped: ImportSpec<{ key: string; names: string[] }> = {
+      entity: 'grouped-test',
+      label: 'Grouped',
+      columns: [{ header: 'Key', required: true }, { header: 'Name', required: true }],
+      build: async (row) => ({ key: row['Key'], names: [row['Name']] }),
+      existing: async (row) => (row['Key'] === 'K2' ? 'existing-k2' : null),
+      groupBy: (row) => row['Key'],
+      buildGroup: async (rows, first) => {
+        const bad = rows.find((r) => r['Name'].includes('!'));
+        if (bad) throw new Error(`group from row ${first}: "${bad['Name']}" is not a name`);
+        return { key: rows[0]['Key'], names: rows.map((r) => r['Name']) };
+      },
+    };
+    const groupedWrite = async (records: { record: { key: string; names: string[] }; existingId: string | null }[]) => {
+      groupedWritten.push(...records.map((r) => r.record));
+    };
+    const two = await runImport('Key,Name\nK1,a\nK2,c\nk1,b\nK2,d', grouped, true, groupedWrite);
+    check(
+      'two groups of two rows → two results, in first-seen order, keyed case-blind, the first row numbering each',
+      two.total === 2 && two.created === 1 && two.updated === 1 && two.rows[0].row === 2 && two.rows[0].key === 'K1' && two.rows[0].action === 'create' &&
+        two.rows[1].row === 3 && two.rows[1].key === 'K2' && two.rows[1].action === 'update',
+      JSON.stringify(two.rows),
+    );
+    check(
+      'and each group is built from all of its rows, in file order',
+      JSON.stringify(groupedWritten) === JSON.stringify([{ key: 'K1', names: ['a', 'b'] }, { key: 'K2', names: ['c', 'd'] }]),
+      JSON.stringify(groupedWritten),
+    );
+    groupedWritten.length = 0;
+    const oneBad = await runImport('Key,Name\nK1,a\nK2,c\nK1,b!\nK2,d', grouped, true, groupedWrite);
+    check(
+      'an error in one group’s rows fails that group only, and nothing is written',
+      oneBad.total === 2 && oneBad.errors === 1 && oneBad.rows[0].action === 'error' && oneBad.rows[0].message === 'group from row 2: "b!" is not a name' &&
+        oneBad.rows[1].action === 'update' && oneBad.committed === false && groupedWritten.length === 0,
+      JSON.stringify(oneBad.rows),
+    );
+    const plainStill = await runImport('Name,Code\nAlpha,A1\nAlpha,A2', spec, false, write);
+    check('a spec without groupBy still refuses a repeated key as before', plainStill.errors === 1 && plainStill.rows[1].message === '"Alpha" appears more than once in this file');
+  }
+
   // ── 3. Teams and sub-industries — the two fixed lists ─────────────────────
   console.log('\nTeams and sub-industries');
 

@@ -149,6 +149,17 @@ export interface ImportSpec<T> {
   build: (row: Record<string, string>, rowNumber: number) => Promise<T>;
   /** Natural key used to report a row as an update rather than a create. */
   existing: (row: Record<string, string>) => Promise<string | null>;
+  /**
+   * For a record that spans rows (SCORO's quotes export with its lines,
+   * 2026-10-11: one row per line, the header repeated on each): the key the
+   * rows are grouped by, in first-seen order. Set, `runImport` calls
+   * `existing` on a group's first row and `buildGroup` (else `build` on the
+   * first row) once per group, and reports ONE result per group — `row` the
+   * group's first row number, `key` the group key.
+   */
+  groupBy?: (row: Record<string, string>) => string;
+  /** The record of one group of rows; `firstRowNumber` is the first row's, for messages. */
+  buildGroup?: (rows: Record<string, string>[], firstRowNumber: number) => Promise<T>;
 }
 
 /** Who is running the import — for the audit rows a writer files inside its transactions. */
@@ -210,17 +221,41 @@ export async function runImport<T>(
   const staged: { record: T; existingId: string | null }[] = [];
   const seenKeys = new Set<string>();
 
+  // The rows, then the groups: one row each, or — for a spec whose record
+  // spans rows (`groupBy`) — the rows sharing a key, in the order the key
+  // was first seen, the first row's number naming the group in the report.
+  const rows: { rowNumber: number; raw: Record<string, string> }[] = [];
   for (let r = 1; r < grid.length; r++) {
     const rowNumber = r + 1; // 1-based, and the header is row 1 — matches Excel
     const raw: Record<string, string> = {};
     headers.forEach((h, c) => {
       raw[h] = (grid[r][c] ?? '').trim();
     });
+    rows.push({ rowNumber, raw });
+  }
+  const groups: { key: string; rowNumber: number; rows: Record<string, string>[] }[] = [];
+  if (spec.groupBy) {
+    const byKey = new Map<string, (typeof groups)[number]>();
+    for (const { rowNumber, raw } of rows) {
+      const key = spec.groupBy(raw) || `row ${rowNumber}`;
+      const found = byKey.get(key.toLowerCase());
+      if (found) found.rows.push(raw);
+      else {
+        const group = { key, rowNumber, rows: [raw] };
+        byKey.set(key.toLowerCase(), group);
+        groups.push(group);
+      }
+    }
+  } else {
+    for (const { rowNumber, raw } of rows) {
+      groups.push({ key: raw[spec.columns[0].header] || `row ${rowNumber}`, rowNumber, rows: [raw] });
+    }
+  }
 
-    const key = raw[spec.columns[0].header] || `row ${rowNumber}`;
-
+  for (const { key, rowNumber, rows: groupRows } of groups) {
     // A file that repeats a key would otherwise apply twice, last one winning,
-    // with no indication that it happened.
+    // with no indication that it happened. (A grouped spec gathers repeats
+    // into one group, so this never fires for it.)
     if (seenKeys.has(key.toLowerCase())) {
       results.push({
         row: rowNumber,
@@ -233,8 +268,9 @@ export async function runImport<T>(
     seenKeys.add(key.toLowerCase());
 
     try {
-      const existingId = await spec.existing(raw);
-      const record = await spec.build(raw, rowNumber);
+      const existingId = await spec.existing(groupRows[0]);
+      const record =
+        spec.groupBy && spec.buildGroup ? await spec.buildGroup(groupRows, rowNumber) : await spec.build(groupRows[0], rowNumber);
       staged.push({ record, existingId });
       results.push({ row: rowNumber, action: existingId ? 'update' : 'create', key });
     } catch (err) {

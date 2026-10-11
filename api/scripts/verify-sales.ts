@@ -1743,6 +1743,10 @@ async function main() {
       'id', 'doc_no', 'doc_date', 'owner_name', 'doc_deadline', 'confirmed_date', 'payer', 'payer_id', 'contact_person',
       'doc_description', 'currency', 'status_name', 'status_changed_date', 'discount', 'total_sum', 'total_vat',
       'total_sum_vat', 'total_cost', 'c_prnumber', 'c_delivery', 'c_paymentterms', 'estimated_closing_date', 'quote_name',
+      // The lines export's columns (the owner's second file): blank on the header-only export.
+      'line_id', 'product_group', 'product_code', 'product_name', 'amount', 'unit', 'price', 'line_sum', 'line_vat_percent',
+      'vat_code', 'is_subheading', 'line_comment', 'line_dates', 'line_cost', 'cost_comment', 'supplier_name', 'doer_id',
+      'doer_name', 'is_internal', 'role_id', 'role_name',
     ] as const;
     type ScoroRow = Record<(typeof HEADERS)[number], string>;
     const scoroText = (rows: ScoroRow[]) =>
@@ -1786,7 +1790,8 @@ async function main() {
       doc_deadline: '2026-04-10',
       confirmed_date: '0000-00-00 00:00:00',
       payer: `${TAG} Balfour Joint Venture`,
-      payer_id: '4798',
+      // A SCORO id no real customer carries: the owner's own file (SCORO id 4798) may be in this database.
+      payer_id: '4798009871',
       contact_person: 'Leo Solis',
       doc_description: 'Quotation Validity : 120 days',
       currency: 'PHP',
@@ -1802,8 +1807,35 @@ async function main() {
       c_paymentterms: '50% Down payment / 50% Progress Billing',
       estimated_closing_date: '2026-04-10',
       quote_name: `${TAG} Tap-off Unit`,
+      line_id: '', product_group: '', product_code: '', product_name: '', amount: '', unit: '', price: '', line_sum: '',
+      line_vat_percent: '', vat_code: '', is_subheading: '0', line_comment: '', line_dates: '', line_cost: '', cost_comment: '',
+      supplier_name: '', doer_id: '', doer_name: '', is_internal: '0', role_id: '', role_name: '',
       ...over,
     });
+    // The owner's second file's row shape: one priced line (the same quotation
+    // the header-only file names, its header repeated) and a subheading row.
+    const pricedLine = (over: Partial<ScoroRow>): ScoroRow =>
+      row({
+        line_id: '39866',
+        product_group: `${TAG} Schneider Electric`,
+        product_name: 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS',
+        amount: '4704.000000000000',
+        unit: 'set',
+        price: '69176.470000',
+        line_sum: '325406114.88',
+        line_vat_percent: '12.000',
+        vat_code: '4',
+        line_comment: '32A Tap-off unit -1 Whip TPN, includes: 1x32A 3P Type C NG125L MCB',
+        line_cost: '263424000.0000',
+        supplier_name: `${TAG} Schneider Electric Philippines`,
+        total_sum: '325406114.88',
+        total_vat: '39048733.79',
+        total_sum_vat: '364454848.67',
+        total_cost: '263424000.0000',
+        ...over,
+      });
+    const subheadingRow = (over: Partial<ScoroRow>): ScoroRow =>
+      pricedLine({ line_id: '39867', product_group: '', product_name: 'OPTIONAL ITEMS', amount: '', unit: '', price: '', line_sum: '', line_cost: '', supplier_name: '', line_comment: '', is_subheading: '1', ...over });
     const actor = { id: sales.id, name: sales.name };
     const importScoro = (rows: ScoroRow[], commit: boolean) =>
       runImport(decodeCsv(scoroFile(rows)), scoroQuoteSpec, commit, (records) => writeScoroQuotes(records as never, actor));
@@ -1849,8 +1881,8 @@ async function main() {
         JSON.stringify({ number: q?.number, subject: q?.subject, outcome: q?.outcome, probability: q?.probability }),
       );
       check(
-        'the customer was created by name with "(SCORO id 4798)" in its notes, and the contact on it',
-        q?.customer.name === `${TAG} Balfour Joint Venture` && q.customer.notes === '(SCORO id 4798)' && q.customer.industryId === null &&
+        'the customer was created by name with "(SCORO id 4798009871)" in its notes, and the contact on it',
+        q?.customer.name === `${TAG} Balfour Joint Venture` && q.customer.notes === '(SCORO id 4798009871)' && q.customer.industryId === null &&
           q.customer.subIndustryId === null && q.contact?.name === 'Leo Solis' && q.contact.customerId === q.customerId,
         JSON.stringify({ name: q?.customer.name, notes: q?.customer.notes, contact: q?.contact?.name }),
       );
@@ -1960,6 +1992,117 @@ async function main() {
           (bad.rows[2].message ?? '').includes('USD') && (bad.rows[3].message ?? '').includes('Daydream') &&
           (await quoteByNumber(scoroNumber(43))) === null,
         JSON.stringify(bad.rows.map((r) => r.message)),
+      );
+
+      // ── The lines export (the owner's second file): one row per line ─────
+      const schneider = await prisma.supplier.create({ data: { code: `${TAG}-S9`, name: `${TAG} Schneider Electric Philippines` } });
+      const linesRows = [
+        pricedLine({ id: '8780', doc_no: scoroNumber(50), quote_name: `${TAG} Lines file` }),
+        subheadingRow({ id: '8780', doc_no: scoroNumber(50), quote_name: `${TAG} Lines file` }),
+      ];
+      const linesDry = await importScoro(linesRows, false);
+      check(
+        'the two rows of one quotation are ONE result, keyed by doc_no and numbered by the first row',
+        linesDry.total === 1 && linesDry.created === 1 && linesDry.rows[0].row === 2 && linesDry.rows[0].key === scoroNumber(50),
+        JSON.stringify(linesDry.rows),
+      );
+      const linesDone = await importScoro(linesRows, true);
+      const withLines = await quoteByNumber(scoroNumber(50));
+      const lrev = withLines?.revisions[0];
+      const l1 = lrev?.items[0];
+      const l2 = lrev?.items[1];
+      check('the commit creates it with the file’s lines', linesDone.committed && linesDone.created === 1 && lrev?.items.length === 2, JSON.stringify(linesDone.rows));
+      check(
+        'the priced line: group, title as SCORO wrote it, description, 4,704 set at 69,176.47, the amount, the unit cost ÷ quantity and its cost amount',
+        l1?.sortOrder === 0 && l1.group === `${TAG} Schneider Electric` && l1.title === 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS' && l1.brand === null &&
+          l1.description === '32A Tap-off unit -1 Whip TPN, includes: 1x32A 3P Type C NG125L MCB' && Number(l1.quantity) === 4704 && l1.unit === 'set' &&
+          money(Number(l1.unitPrice), 69_176.47) && money(Number(l1.amount), 325_406_114.88) && money(Number(l1.unitCost ?? 0), 56_000) &&
+          money(Number(l1.costAmount ?? 0), 263_424_000) && l1.isHeading === false,
+        JSON.stringify({ group: l1?.group, title: l1?.title, qty: l1?.quantity, price: l1?.unitPrice, amount: l1?.amount, cost: l1?.unitCost, costAmount: l1?.costAmount }),
+      );
+      check(
+        'its cost is carried by the supplier of that name, with no note',
+        l1?.providerSupplierId === schneider.id && l1.providerUserId === null && l1.costNote === null,
+        JSON.stringify({ supplier: l1?.providerSupplierId, note: l1?.costNote }),
+      );
+      check(
+        'the subheading row is a subheading: its text, nothing else',
+        l2?.sortOrder === 1 && l2.isHeading === true && l2.title === 'OPTIONAL ITEMS' && Number(l2.quantity) === 0 && Number(l2.unitPrice) === 0 && l2.group === null,
+        JSON.stringify({ heading: l2?.isHeading, title: l2?.title }),
+      );
+      check(
+        'SCORO’s group joined the master',
+        (await prisma.quotationGroup.count({ where: { key: groupKey(`${TAG} Schneider Electric`) } })) === 1,
+      );
+      check(
+        'and recalcQuotationRevision gives SCORO’s own totals: 325,406,114.88 / 39,048,733.79 / 364,454,848.67 at 12%',
+        !!lrev && money(Number(lrev.subtotal), 325_406_114.88) && money(Number(lrev.vatAmount), 39_048_733.79) && money(Number(lrev.total), 364_454_848.67) &&
+          Number(lrev.vatRate) === 0.12,
+        JSON.stringify({ subtotal: lrev?.subtotal, vat: lrev?.vatAmount, total: lrev?.total, rate: lrev?.vatRate }),
+      );
+      const headerAgain = await importScoro([row({ id: '8780', doc_no: scoroNumber(50), quote_name: `${TAG} Lines file` })], true);
+      const stillLines = await quoteByNumber(scoroNumber(50));
+      check(
+        'the header-only file for the same number afterwards reports an update and changes nothing',
+        headerAgain.updated === 1 && stillLines?.revisions[0].items.length === 2 && stillLines.updatedAt.getTime() === withLines?.updatedAt.getTime() &&
+          stillLines.revisions[0].updatedAt.getTime() === lrev?.updatedAt.getTime(),
+        JSON.stringify(headerAgain.rows),
+      );
+
+      // A supplier SCORO names that is not on file: kept in the cost note, never created.
+      const unknownSupplier = await importScoro(
+        [pricedLine({ id: '8781', doc_no: scoroNumber(51), quote_name: `${TAG} Unknown supplier`, supplier_name: `${TAG} Nobody Supplies`, cost_comment: 'landed cost' })],
+        true,
+      );
+      const noSupplier = (await quoteByNumber(scoroNumber(51)))?.revisions[0].items[0];
+      check(
+        'a supplier not on file leaves the line unassigned, its name and the cost comment in the cost note, and no supplier is created',
+        unknownSupplier.created === 1 && noSupplier?.providerSupplierId === null && noSupplier.costNote === `landed cost — Supplier in SCORO: ${TAG} Nobody Supplies` &&
+          (await prisma.supplier.count({ where: { name: `${TAG} Nobody Supplies` } })) === 0,
+        JSON.stringify({ supplier: noSupplier?.providerSupplierId, note: noSupplier?.costNote }),
+      );
+
+      // The promised replacement: the header-only file first (the summary
+      // line), then the lines file for the same number.
+      const summaryFirst = await importScoro([row({ id: '8782', doc_no: scoroNumber(52), quote_name: `${TAG} Summary then lines` })], true);
+      const summarised = await quoteByNumber(scoroNumber(52));
+      // Where the series stands after the new number raised it; the replacement must leave it there.
+      const seriesBeforeSwap = await seriesRow();
+      check('a header-only file makes the summary line', summaryFirst.created === 1 && summarised?.revisions[0].items.length === 1 && summarised.revisions[0].items[0].title === SUMMARY_LINE_TITLE);
+      const swapped = await importScoro(
+        [
+          pricedLine({ id: '8782', doc_no: scoroNumber(52), quote_name: `${TAG} Summary then lines` }),
+          subheadingRow({ id: '8782', doc_no: scoroNumber(52), quote_name: `${TAG} Summary then lines` }),
+        ],
+        true,
+      );
+      const replaced = await quoteByNumber(scoroNumber(52));
+      const rrev = replaced?.revisions[0];
+      check(
+        'the lines file for that number replaces the summary line with the real lines, reported as an update',
+        swapped.updated === 1 && swapped.created === 0 && rrev?.items.length === 2 && rrev.items[0].title === 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS' &&
+          rrev.items[1].isHeading === true && !rrev.items.some((i) => i.title === SUMMARY_LINE_TITLE) && replaced?.id === summarised?.id &&
+          money(Number(rrev.subtotal), 325_406_114.88) && money(Number(rrev.total), 364_454_848.67),
+        JSON.stringify({ rows: swapped.rows, items: rrev?.items.map((i) => i.title) }),
+      );
+      const swapTrail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: replaced?.id ?? '', action: 'UPDATED' }, orderBy: { at: 'desc' } });
+      check(
+        'and the trail says so; the series was not touched',
+        swapTrail?.summary === 'Replaced the summary line with 2 lines from the SCORO lines export' && (await seriesRow()) === seriesBeforeSwap,
+        `${swapTrail?.summary} / ${await seriesRow()} vs ${seriesBeforeSwap}`,
+      );
+      // A quotation whose revision has moved on is left alone, lines file or not.
+      await prisma.quotationRevision.update({ where: { id: rrev!.id }, data: { status: 'APPROVED' } });
+      const summaryApproved = await importScoro([row({ id: '8783', doc_no: scoroNumber(53), quote_name: `${TAG} Approved summary` })], true);
+      const approvedQ = await quoteByNumber(scoroNumber(53));
+      await prisma.quotationRevision.update({ where: { id: approvedQ!.revisions[0].id }, data: { status: 'APPROVED' } });
+      const leftAlone = await importScoro([pricedLine({ id: '8783', doc_no: scoroNumber(53), quote_name: `${TAG} Approved summary` })], true);
+      const stillSummary = await quoteByNumber(scoroNumber(53));
+      check(
+        'a summary-line quotation whose revision is no longer a draft keeps its summary line',
+        summaryApproved.created === 1 && leftAlone.updated === 1 && stillSummary?.revisions[0].items.length === 1 &&
+          stillSummary.revisions[0].items[0].title === SUMMARY_LINE_TITLE && stillSummary.revisions[0].status === 'APPROVED',
+        JSON.stringify(stillSummary?.revisions[0].items.map((i) => i.title)),
       );
     } finally {
       // The series as it stood before the section, whatever happened.

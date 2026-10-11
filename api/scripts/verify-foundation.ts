@@ -52,6 +52,7 @@ import {
   renderDocument,
   companyCurrency,
   formatAmount,
+  formatQuantity,
   formatDate,
   formatDateTime,
   formatMoney,
@@ -1217,6 +1218,12 @@ async function main() {
   // "±" on every amount this engine has ever produced.
   const money = formatMoney(1562.2);
   check('money reads as the reference prints it', money === 'PHP 1,562.20', money);
+  const qtys = [formatQuantity(4704), formatQuantity('4704.000'), formatQuantity('0.500'), formatQuantity('12345.678')];
+  check(
+    'a quantity prints with thousands separators and no trailing zeros',
+    qtys.join('|') === '4,704|4,704|0.5|12,345.678',
+    qtys.join('|'),
+  );
   check(
     'and is drawable by a standard PDF font',
     [...money].every((c) => c.codePointAt(0)! <= 0xff),

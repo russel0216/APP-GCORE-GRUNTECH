@@ -1498,3 +1498,11 @@ export function formatAmount(value: number | string): string {
     Number.isFinite(n) ? n : 0,
   );
 }
+
+/** A quantity on paper: thousands separators, the stored decimals (3 at most) and no trailing zeros — "4,704", "0.5". */
+export function formatQuantity(value: number | string | { toString(): string }): string {
+  const n = typeof value === 'number' ? value : Number(String(value));
+  return new Intl.NumberFormat('en-PH', { minimumFractionDigits: 0, maximumFractionDigits: 3 }).format(
+    Number.isFinite(n) ? n : 0,
+  );
+}

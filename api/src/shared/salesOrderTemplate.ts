@@ -1,4 +1,5 @@
 import { prisma } from '../prisma';
+import { formatQuantity } from './pdf';
 import {
   COMPANY_FIELDS,
   COST_COLUMNS,
@@ -88,8 +89,8 @@ export function salesOrderSample(long = false): DesignData {
   ) => ({
     cells: {
       product: { title, body },
-      qtyUnit: `${qty} ${unit}`,
-      qty: String(qty),
+      qtyUnit: `${formatQuantity(qty)} ${unit}`,
+      qty: formatQuantity(qty),
       unit,
       unitPrice: price.toLocaleString('en-PH', { minimumFractionDigits: 2 }),
       amount: (price * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }),

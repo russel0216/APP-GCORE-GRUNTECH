@@ -43,6 +43,7 @@ import {
   type PdfSection,
   type PdfTotal,
   type Signatory,
+  formatQuantity,
 } from '../shared/pdf';
 import { renderDesigned, type DesignData, type DesignRow } from '../shared/pdfDesign';
 import { quotationDesign } from '../shared/quotationTemplate';
@@ -2999,8 +3000,7 @@ export async function quotationPrintData(
       rows.push({ heading: (i.title ?? '').trim() });
       continue;
     }
-    const qty = Number(i.quantity);
-    const qtyText = Number.isInteger(qty) ? String(qty) : qty.toString();
+    const qtyText = formatQuantity(i.quantity);
     const title = (i.title ?? '').trim();
     const description = (i.description ?? '').trim();
     rows.push({

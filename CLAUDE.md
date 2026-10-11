@@ -109,7 +109,7 @@ four databases and four copies of "customer".
    `companyCurrency()` (one indexed read per print, never cached) is the code a
    route names in a table head or a total; `statusLabel()` is how an enum
    prints ("Pending approval"); `formatDate` is a record's date ("October 9,
-   2026"), `formatShortDate` a list's (MM/DD/YYYY).
+   2026"), `formatShortDate` a list's (MM/DD/YYYY); a quantity is `formatQuantity` ("4,704", "0.5" — thousands separators, three decimals at most, no trailing zeros), on the quotation and sales order papers and in both designed samples.
    **The quotation and the sales order are designed documents.** Each
    layout is DATA — boxes on an A4 page that an administrator places in
    Admin › PDF Templates — and prints through `renderDesigned(design, data)`
@@ -412,7 +412,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,673 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,691 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -420,10 +420,12 @@ foundation checks with it and added nine — the removal's once-only rule —
 the series that follows a typed quotation number with its review — the
 parser's two bounds and the walk that fits a transaction — 16 on sales and
 33 on numbering, the one creation of an employee with their login, 22
-on accounts, and the SCORO quotes import — 20 on sales, and 6 on masters
-for the UTF-16 decoding and the tab delimiter):
+on accounts, and the SCORO quotes import — 33 on sales, with the lines
+export and the summary line's replacement, and 10 on masters for the
+UTF-16 decoding, the tab delimiter and the grouping of rows, and one on
+foundation for the quantity formatter):
 foundation
-315, masters 85, sales 483, costing 157, pipeline 92, calendar 96, numbering
+316, masters 89, sales 496, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -2438,20 +2440,49 @@ SCORO.
   1 lot, under the active OTHERS group) worth the subtotal BEFORE discount
   — `total_sum ÷ (1 − discount/100)` to the centavo — costed at
   `total_cost` so the margin reads as SCORO's, written through the exported
-  `lineData()` and recalculated by `recalcQuotationRevision`; the quote-
-  lines export, still to come, replaces it. The quotation takes `doc_no` as
-  its number and `write` calls `setCounter('quotation', number, tx, { mode:
-  'raise' })` — the series follows the highest imported number and is never
-  lowered. **A number already in G-CORE is left as it is** (`existing` is
-  the case-blind number; the row reports "update" and `write` skips it), so
-  a re-run of the same file changes nothing. One transaction per row; the
+  `lineData()` and recalculated by `recalcQuotationRevision`. **The export
+  with the LINE columns** (the owner's second file, 2026-10-11: one row per
+  line, the header repeated on every row) is the same entity: the rows are
+  grouped by `doc_no` — `ImportSpec.groupBy` / `buildGroup`, the
+  framework's rule for ANY import whose record spans rows (`runImport`
+  partitions the data rows by the key in first-seen order, case-blind,
+  calls `existing` on a group's first row and `buildGroup` once per group,
+  and reports ONE result per group, `row` the first row's number; a spec
+  without `groupBy` behaves as before) — and a group with line content
+  (`product_name`, `line_comment` or `line_id` on any row) gets its rows as
+  lines in file order instead of the summary line: `is_subheading` 1 is a
+  subheading of `product_name` and nothing else; otherwise `group` =
+  `product_group` (joining the master through `rememberGroups`), `title` =
+  `product_name` whole (the three product boxes stay empty — SCORO's name
+  is not reliably "brand, type, part"), `description` = `line_comment`,
+  `quantity` = `amount`, `unit` (else "lot"), `unitPrice` = `price`,
+  `unitCost` = `line_cost ÷ amount` to the centavo (SCORO stores the LINE's
+  total cost; `lineData` recomputes `costAmount` = qty × unitCost, a
+  centavo at most from SCORO's figure), the supplier named by
+  `supplier_name` matched by name — or, with `is_internal` 1, the login
+  named by `doer_name` — never created, one not on file kept in `costNote`
+  ("Supplier in SCORO: …", joined to `cost_comment`); `vatRate` is the
+  first priced line's `line_vat_percent` where it says. The quotation takes
+  `doc_no` as its number and `write` calls `setCounter('quotation', number,
+  tx, { mode: 'raise' })` — the series follows the highest imported number
+  and is never lowered. **A number already in G-CORE is left as it is**
+  (`existing` is the case-blind number; the row reports "update" and
+  `write` skips it), so a re-run of the same file changes nothing — with
+  ONE exception, the summary line's promise: a quotation whose revision 0
+  is still DRAFT and holds exactly the one "As quoted in SCORO" line takes
+  the lines of a file that carries them (the summary line deleted, the
+  lines written, `rememberGroups`, `recalcQuotationRevision`, one
+  `quotation` UPDATED row "Replaced the summary line with N lines from the
+  SCORO lines export", in the row's transaction; the counter untouched);
+  anything else existing is untouched. One transaction per row; the
   quotation's CREATED audit row names SCORO's quote id and, where a series
   moved, the counter; a created customer and contact get rows of their own
   ("… from the SCORO quotes import"). The route hands every writer the
   actor (`Registered.write(records, actor?)`) for exactly such rows.
-  verify-sales builds the file as SCORO writes it (UTF-16, tabs) and drives
-  the spec and writer by name; verify-masters pins the decoding and the
-  delimiter.
+  verify-sales builds both files as SCORO writes them (UTF-16, tabs) and
+  drives the spec and writer by name — the lines file's totals come out as
+  SCORO's own; verify-masters pins the decoding, the delimiter and the
+  grouping. SCORO's invoices, which become sales orders, are still to come.
 - **One quotation arithmetic: `shared/quotation.ts`.** `subtotal` is PRE-discount;
   net = subtotal − discountAmount; VAT on net (honouring `vatInclusive` and the
   snapshotted rate); margin is measured against net of tax, never a VAT-inclusive
