@@ -138,8 +138,6 @@ model User {
 
   quoteLinesProvided   QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided      SalesOrderLine[] @relation("SoLineProvider")
-  legacyQuotesOwned    LegacyQuote[]    @relation("LegacyQuoteOwner")
-  legacyQuotesImported LegacyQuote[]    @relation("LegacyQuoteImporter")
 
   accountTokens AccountToken[]
 
@@ -572,7 +570,6 @@ model Customer {
   serviceReports ServiceReport[]
   jobOrders      JobOrder[]
   cadJobOrders   CadJobOrder[]
-  legacyQuotes   LegacyQuote[]
 
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
@@ -1326,9 +1323,6 @@ model Quotation {
   jobOrders  JobOrder[]
   cadJobOrders CadJobOrder[]
 
-  /// RETIRED 2026-10-10 with the SCORO archive; dropped with the model.
-  legacyQuote LegacyQuote?
-
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
   salesOrders SalesOrder[]
@@ -1567,79 +1561,6 @@ model QuotationGroup {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-}
-
-// ── SCORO archive (retired) ──────────────────────────────────────────────────
-
-/// RETIRED 2026-10-10. The SCORO archive is gone: the seed's
-/// removeScoroArchive() empties this table on deploy and nothing reads or
-/// writes it. Drop the model and its four relation fields (User
-/// legacyQuotesOwned / legacyQuotesImported, Customer legacyQuotes, Quotation
-/// legacyQuote) in a LATER push, once every install has deployed this one —
-/// db push drops an empty table without --accept-data-loss, and refuses a
-/// full one.
-model LegacyQuote {
-  id       String @id @default(cuid())
-  source   String @default("SCORO")
-  /// SCORO's own quote id.
-  sourceId String
-  number   String @unique
-
-  date             DateTime? @db.Date
-  dueDate          DateTime? @db.Date
-  estimatedClosing DateTime? @db.Date
-  confirmedAt      DateTime?
-
-  /// As SCORO spelled it; ownerUserId is the matched G-CORE login, if any.
-  ownerName   String
-  ownerUserId String?
-  ownerUser   User?   @relation("LegacyQuoteOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
-
-  customerName String
-  customerId   String?
-  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  contactName  String?
-  name         String?
-  projectName  String?
-
-  /// SCORO's status label verbatim (Opportunity, Negotiation, Confirmed...).
-  status          String
-  previousStatus  String?
-  statusChangedAt DateTime?
-  statusChangedBy String?
-
-  currency    String  @default("PHP")
-  discountPct Decimal @default(0) @db.Decimal(9, 6)
-  /// After discount, as SCORO reported it.
-  subtotal    Decimal @default(0) @db.Decimal(18, 2)
-  vat         Decimal @default(0) @db.Decimal(18, 2)
-  total       Decimal @default(0) @db.Decimal(18, 2)
-  cost        Decimal @default(0) @db.Decimal(18, 2)
-
-  prNumber     String?
-  delivery     String?
-  paymentTerms String?
-  comment      String?
-  invoiceNos   String?
-  isSent       Boolean @default(false)
-
-  /// [{ title, description, quantity, unit, unitPrice, amount }] as parsed
-  /// from SCORO's PDF. linesReconcile is false when they do not sum to subtotal.
-  lines          Json
-  linesReconcile Boolean @default(true)
-
-  continuedQuotationId String?    @unique
-  continuedQuotation   Quotation? @relation(fields: [continuedQuotationId], references: [id], onDelete: SetNull)
-
-  importedAt   DateTime @default(now())
-  importedById String?
-  importedBy   User?    @relation("LegacyQuoteImporter", fields: [importedById], references: [id], onDelete: SetNull)
-
-  @@unique([source, sourceId])
-  @@index([customerId])
-  @@index([ownerName])
-  @@index([status])
-  @@index([date])
 }
 
 // ── Sales calendar ───────────────────────────────────────────────────────────

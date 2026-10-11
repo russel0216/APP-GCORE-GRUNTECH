@@ -13,14 +13,15 @@ import { deleteAttachment } from './attachments';
  * quotations "continued" from it stay as ordinary quotations under the
  * numbers they carry.
  *
- * This is the ONE thing that still touches `prisma.legacyQuote`. The model
- * stays in the schema for this deploy because `prisma db push` refuses to
- * drop a table that holds rows and the deploy pushes BEFORE it seeds; once
- * every install has run this step the table is empty and a later push drops
- * it. Run by the seed on every deploy: the rows are deleted whenever any are
- * found, the audit row and the `seed.scoroArchiveRemoved` setting are
- * written once, and a later run with the setting present and nothing to
- * remove does nothing.
+ * The table itself went on 2026-10-11, the push after the one whose seed
+ * emptied it (`prisma db push` refuses to drop a table that holds rows, and
+ * the deploy pushes BEFORE it seeds — so the rows went in one deploy and the
+ * model in the next, once the owner said the first had run). What can still
+ * turn up are the archive's leavings — a PDF attached under its entity type,
+ * a saved view of its list — and this step, run by the seed on every deploy,
+ * removes whatever it finds; the audit row and the `seed.scoroArchiveRemoved`
+ * setting are written once, and a later run with the setting present and
+ * nothing to remove does nothing.
  */
 
 export const SCORO_ARCHIVE_REMOVED = 'seed.scoroArchiveRemoved';
@@ -30,7 +31,6 @@ export const ARCHIVE_ATTACHMENT = 'legacy_quote';
 export const ARCHIVE_LIST_KEY = 'quote-archive';
 
 export interface ArchiveRemoval {
-  quotes: number;
   pdfs: number;
   views: number;
   /** True on the run that wrote the audit row and the setting. */
@@ -42,10 +42,9 @@ export async function removeScoroArchive(): Promise<ArchiveRemoval | null> {
   // Row and file together, one by one — a stray PDF on disk is what a bare
   // deleteMany would leave behind.
   for (const pdf of pdfs) await deleteAttachment(pdf.id);
-  const quotes = await prisma.legacyQuote.deleteMany({});
   const views = await prisma.savedFilter.deleteMany({ where: { listKey: ARCHIVE_LIST_KEY } });
-  const removed = { quotes: quotes.count, pdfs: pdfs.length, views: views.count };
-  const anything = removed.quotes + removed.pdfs + removed.views > 0;
+  const removed = { pdfs: pdfs.length, views: views.count };
+  const anything = removed.pdfs + removed.views > 0;
 
   if (await prisma.setting.findUnique({ where: { key: SCORO_ARCHIVE_REMOVED } })) {
     return anything ? { ...removed, marked: false } : null;
@@ -55,7 +54,7 @@ export async function removeScoroArchive(): Promise<ArchiveRemoval | null> {
       entityType: ARCHIVE_ATTACHMENT,
       entityId: 'archive',
       action: 'DELETED',
-      summary: `Removed the SCORO archive: ${removed.quotes} quotes, ${removed.pdfs} PDFs`,
+      summary: `Removed the SCORO archive: ${removed.pdfs} PDFs, ${removed.views} saved views`,
       actorName: 'system',
       after: removed,
     });
@@ -66,8 +65,7 @@ export async function removeScoroArchive(): Promise<ArchiveRemoval | null> {
       key: SCORO_ARCHIVE_REMOVED,
       value: { at: new Date().toISOString(), ...removed },
       description:
-        'The read-only SCORO quotation archive was removed once (2026-10-10, the owner\'s call); ' +
-        'the LegacyQuote table stays empty until a later push drops it.',
+        'The read-only SCORO quotation archive was removed once (2026-10-10, the owner\'s call).',
     },
     update: {},
   });

@@ -2382,10 +2382,10 @@ SCORO.
   also scoro data"): `removeScoroArchive()` (`shared/scoroArchive.ts`), run by
   the seed on every deploy, empties `LegacyQuote` and deletes its PDFs once,
   audited (`legacy_quote` / `archive`, DELETED, marked in
-  `seed.scoroArchiveRemoved`); the model and its four relation fields stay
-  in the schema until the next push (db push cannot drop a full table, and
-  the deploy pushes before it seeds — drop them once every install has run
-  this one); nothing but that function reads or writes `prisma.legacyQuote`.
+  `seed.scoroArchiveRemoved`); the `LegacyQuote` model and its four relation
+  fields went in the NEXT push (2026-10-11, once the owner said the first
+  had deployed — db push cannot drop a full table, and the deploy pushes
+  before it seeds), and the step now only sweeps the archive's leavings.
   verify-foundation pins the once-only rule on the archive's leavings (a
   `legacy_quote` PDF and a saved view — never a row of the retired table),
   parking the install's own mark in `seed.scoroArchiveRemoved.__verify__`

@@ -2351,7 +2351,7 @@ async function main() {
         rows.length === 1 &&
           rows[0].actorName === 'system' &&
           rows[0].action === 'DELETED' &&
-          rows[0].summary === `Removed the SCORO archive: ${first?.quotes ?? 0} quotes, ${before.pdfs + 1} PDFs`,
+          rows[0].summary === `Removed the SCORO archive: ${before.pdfs + 1} PDFs, ${before.views + 1} saved views`,
         rows.map((r) => `${r.actorName}: ${r.summary}`).join(' | ') || 'none',
       );
       const written = (await prisma.setting.findUnique({ where: { key: SCORO_ARCHIVE_REMOVED } }))?.value as

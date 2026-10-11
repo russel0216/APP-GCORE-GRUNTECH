@@ -1195,15 +1195,14 @@ async function main() {
   // The SCORO archive is gone (2026-10-10, the owner's call: "remove also
   // scoro data" — SCORO's quotations and invoices will arrive again later as
   // real quotations and sales orders). Its rows and PDFs are removed here,
-  // audited once; the LegacyQuote table stays, empty, until a later push
-  // drops it (db push refuses to drop a full table, and it pushes before it
-  // seeds).
+  // audited once; the LegacyQuote table itself was dropped on 2026-10-11, the
+  // push after the one that emptied it.
   {
     const archive = await removeScoroArchive();
     // The step still stamps its setting on an install that never had an
     // archive; only a removal that removed something is worth a line.
-    if (archive && archive.quotes + archive.pdfs + archive.views > 0) {
-      console.log(`  · Removed the SCORO archive: ${archive.quotes} quote(s), ${archive.pdfs} PDF(s), ${archive.views} saved view(s)`);
+    if (archive && archive.pdfs + archive.views > 0) {
+      console.log(`  · Removed the SCORO archive's leavings: ${archive.pdfs} PDF(s), ${archive.views} saved view(s)`);
     }
   }
 
