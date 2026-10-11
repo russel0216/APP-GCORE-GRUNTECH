@@ -242,19 +242,21 @@ export const STANDARD_SALES_ORDER_DESIGN: PdfDesign = {
       size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE,
     },
     {
-      id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 560, y: 378, w: 245.89, h: 96,
-      size: 9, labelWidth: 130, textColor: INK, accentColor: PURPLE, ruleColor: RULE,
+      // Compact rows (2026-10-11, the owner's call): the six rows with cost
+      // fit above the approvals table, so a short order prints on one page.
+      id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 560, y: 372, w: 245.89, h: 90,
+      size: 8.5, labelWidth: 130, rowHeight: 15, textColor: INK, accentColor: PURPLE, ruleColor: RULE,
     },
     text({
-      id: 'notes', name: 'Notes', anchor: 'after', x: L, y: 378, w: 480, h: 21.8, showIf: 'order.comment',
+      id: 'notes', name: 'Notes', anchor: 'after', x: L, y: 372, w: 480, h: 21.8, showIf: 'order.comment',
       text: '**Notes:**\n{{order.comment}}', size: 9, lineGap: 1,
     }),
     text({
-      id: 'cancelled', name: 'Cancellation', anchor: 'after', x: L, y: 411, w: 480, h: 10.4, showIf: 'order.cancelReason',
+      id: 'cancelled', name: 'Cancellation', anchor: 'after', x: L, y: 405, w: 480, h: 10.4, showIf: 'order.cancelReason',
       text: '**Cancelled:** {{order.cancelReason}}', size: 9,
     }),
     text({
-      id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 424, w: 480, h: 8.1,
+      id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 418, w: 480, h: 8.1,
       text: 'Internal booking record — not for the customer. The sales invoice is issued by Finance.',
       size: 7, italic: true, color: GREY,
     }),

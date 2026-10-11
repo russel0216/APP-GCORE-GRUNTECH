@@ -161,6 +161,8 @@ const totalsBlock = z.object({
   anchor: z.enum(['after', 'last']).default('after'),
   size: num(6, 14).default(9),
   labelWidth: num(20, PAGE_HEIGHT).default(129.6),
+  /** Each row's height at 9pt (the total's is 5.5pt more), scaled with the type — lower is more compact. */
+  rowHeight: num(12, 40).default(24.5),
   textColor: color('#222222'),
   /** The total itself, and the heavier rule under it. */
   accentColor: color('#5B2A8C'),
@@ -1048,7 +1050,7 @@ class Renderer {
 
   private totalsHeight(b: TotalsBlock): number {
     const k = b.size / 9;
-    return (this.data.totals ?? []).reduce((n, r) => n + (r.bold ? 30 : 24.5) * k, 0);
+    return (this.data.totals ?? []).reduce((n, r) => n + (r.bold ? b.rowHeight + 5.5 : b.rowHeight) * k, 0);
   }
 
   /**
@@ -1061,7 +1063,7 @@ class Renderer {
     const padX = 7;
     let y = top;
     for (const r of this.data.totals ?? []) {
-      const h = (r.bold ? 30 : 24.5) * k;
+      const h = (r.bold ? b.rowHeight + 5.5 : b.rowHeight) * k;
       const s: Style = { size: r.bold ? b.size + 2 : b.size, italic: false, spacing: 0, upper: false };
       const ink = r.bold ? b.accentColor : b.textColor;
       const textY = y + (h - s.size) / 2;

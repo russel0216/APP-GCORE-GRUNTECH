@@ -440,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,734 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,735 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -459,9 +459,10 @@ address, and 7 across cad, finance, delivery and aftermarket for deleting
 a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on sales for
 the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
-foundation for the approvals as a one-row table):
+foundation for the approvals as a one-row table, and one for the short
+order on one page):
 foundation
-317, masters 92, sales 522, costing 157, pipeline 92, calendar 96, numbering
+318, masters 92, sales 522, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -3103,9 +3104,12 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   page number, so it never sits on the table. Admin › PDF Templates offers
   the choice ("Layout" on the sign-off box) and draws the table in its
   preview; a layout an administrator saved before keeps its columns until
-  the box is switched or the standard is put back. A short order with the
-  cost rows still runs to two pages — the six totals rows do not fit above
-  the table on page 1, as they did not fit above the old sign-offs.
+  the box is switched or the standard is put back. **The totals are compact** so a
+  short order prints on ONE page (the owner's call, same day): the totals
+  box takes a `rowHeight` (24.5 by default, the quotation's; "Row height"
+  in the editor), and the standard order layout sets 15 at 8.5pt, so the
+  six rows with cost end above the approvals table — verify-foundation
+  prints the two-line sample on one page.
 
 ## The list of quotations (2026-10-08)
 

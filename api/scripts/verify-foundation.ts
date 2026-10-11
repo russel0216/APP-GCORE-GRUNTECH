@@ -1959,6 +1959,12 @@ async function main() {
     const draftOrder = pdfRuns(await renderDesigned(STANDARD_SALES_ORDER_DESIGN, salesOrderSample(false)));
     const draftRun = draftOrder.find((r) => r.text.startsWith('DRAFT'));
     check(
+      'a short order (two lines, the six totals rows with cost) prints on ONE page, approvals and all',
+      Math.max(...draftOrder.map((r) => r.page)) === Math.min(...draftOrder.map((r) => r.page)) &&
+        draftOrder.some((r) => r.text === 'PREPARED BY') && draftOrder.some((r) => r.text.startsWith('Margin %')),
+      String(new Set(draftOrder.map((r) => r.page)).size),
+    );
+    check(
       'the draft note prints under the footer rule, clear of the approvals table',
       !!draftRun && draftRun.y > footerRule.y,
       JSON.stringify(draftRun),

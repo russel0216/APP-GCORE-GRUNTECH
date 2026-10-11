@@ -87,6 +87,8 @@ export interface TotalsBlock extends Base {
   type: 'totals';
   size: number;
   labelWidth: number;
+  /** Each row's height at 9pt; the total's is 5.5pt more. */
+  rowHeight: number;
   textColor: string;
   accentColor: string;
   ruleColor: string;

@@ -1284,7 +1284,7 @@ function TotalsBody({ block, sample, scale }: { block: TotalsBlock; sample: Samp
           key={i}
           className={`pt-totals-row${r.bold ? ' is-total' : ''}`}
           style={{
-            height: (r.bold ? 30 : 24.5) * k * scale,
+            height: (r.bold ? (block.rowHeight ?? 24.5) + 5.5 : (block.rowHeight ?? 24.5)) * k * scale,
             color: r.bold ? block.accentColor : block.textColor,
             borderBottom: `${(r.bold ? 2 : 0.75) * scale}px solid ${r.bold ? block.accentColor : block.ruleColor}`,
             fontSize: (r.bold ? block.size + 2 : block.size) * scale,
@@ -1663,6 +1663,7 @@ function Inspector({
           <div className="pt-grid-2">
             <NumberField label="Type size" value={block.size} min={6} max={14} disabled={ro} onChange={(v) => onPatch({ size: v }, 'size')} />
             <NumberField label="Label width (pt)" value={block.labelWidth} min={20} disabled={ro} onChange={(v) => onPatch({ labelWidth: v }, 'labelWidth')} />
+            <NumberField label="Row height (pt)" value={block.rowHeight ?? 24.5} min={12} max={40} disabled={ro} onChange={(v) => onPatch({ rowHeight: v }, 'rowHeight')} />
           </div>
           <ColorField label="Figures" value={block.textColor} disabled={ro} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
           <ColorField label="The total, and its rule" value={block.accentColor} disabled={ro} onChange={(v) => onPatch({ accentColor: v }, 'accentColor')} />
