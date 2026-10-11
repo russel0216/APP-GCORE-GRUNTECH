@@ -157,6 +157,7 @@ interface CadDetail extends CadRow {
   canHold: boolean;
   canResume: boolean;
   canCancel: boolean;
+  canDelete: boolean;
   canComment: boolean;
   canFilePlan: boolean;
   isDesigner: boolean;
@@ -752,6 +753,7 @@ export function CadJobOrderDetail() {
   const { id } = useParams<{ id: string }>();
   const { can, me } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const designers = useDesigners();
   const confirm = useConfirm();
   const [row, setRow] = useState<CadDetail | null>(null);
@@ -943,6 +945,20 @@ export function CadJobOrderDetail() {
               minReason: 3,
               reasonLabel: 'Why is it cancelled?',
               onConfirm: (reason) => step('Request cancelled', () => api.post(`/cad-job-orders/${r.id}/cancel`, { reason })),
+            },
+          },
+          r.canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${r.number}?`,
+              body: 'This cancelled request goes for good, with its revisions, comments and files. Its number is not reused.',
+              confirmLabel: 'Delete',
+              onConfirm: async () => {
+                await api.del(`/cad-job-orders/${r.id}`);
+                toast('ok', `${r.number} deleted`);
+                navigate('/g-ops/cad-job-orders');
+              },
             },
           },
         ]}

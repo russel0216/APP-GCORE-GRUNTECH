@@ -418,6 +418,21 @@ export function ProjectWorkspace() {
                 onConfirm: () => setStatus('CANCELLED'),
               },
             },
+          job.status === 'CANCELLED' &&
+            can('gops.projects.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${job.number}?`,
+                body: 'This cancelled project goes for good, with its scope, tasks, reports and ledger. Refused while an invoice, bill, PR, PO, stock issue, claim, advance or released budget request is filed against it. Its number is not reused.',
+                confirmLabel: 'Delete',
+                onConfirm: async () => {
+                  await api.del(`/jobs/${job.id}`);
+                  toast('ok', `${job.number} deleted`);
+                  navigate('/g-ops/projects');
+                },
+              },
+            },
         ]}
         modify={mayEdit ? () => setEditing(true) : undefined}
         confirm={confirm}

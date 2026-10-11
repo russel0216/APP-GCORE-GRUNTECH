@@ -2373,6 +2373,27 @@ async function main() {
       sSubmit.status === 200 && sCancel.status === 200 && sAfter?.status === 'CANCELLED',
       `${sSubmit.status} / ${sCancel.status} ${JSON.stringify(sCancel.body).slice(0, 120)} → ${sAfter?.status}`,
     );
+    // A cancelled claim may be deleted (2026-10-11) — with the delete right.
+    const rootUser = await prisma.user.findUnique({ where: { email: 'root@verifyf.local' } });
+    const sDelNoRight = await eng('DELETE', `/expense-claims/${sId}`);
+    const sDel = rootUser ? await as(rootUser)('DELETE', `/expense-claims/${sId}`) : null;
+    check(
+      'a cancelled claim is deleted by a holder of the delete right, and not by its claimant without it',
+      sDelNoRight.status === 403 && sDel?.status === 200 && !(await prisma.expenseClaim.findUnique({ where: { id: sId } })),
+      `${sDelNoRight.status} / ${sDel?.status} ${JSON.stringify(sDel?.body).slice(0, 120)}`,
+    );
+    // So may a cancelled budget request; an open one is cancelled first.
+    const brSpare = await eng('POST', '/budget-requests', { jobId: job.id, costCategoryId: subcontract.id, amount: 1_000, reason: `${TAG} spare request`, neededBy: todayIso });
+    const brSpareId = String(brSpare.body.id);
+    await eng('POST', `/budget-requests/${brSpareId}/submit`);
+    const brDelOpen = rootUser ? await as(rootUser)('DELETE', `/budget-requests/${brSpareId}`) : null;
+    const brSpareCancel = await eng('POST', `/budget-requests/${brSpareId}/cancel`, { reason: 'not needed' });
+    const brDel = rootUser ? await as(rootUser)('DELETE', `/budget-requests/${brSpareId}`) : null;
+    check(
+      'a budget request is deleted once cancelled, never while it is open',
+      brSpare.status === 201 && brDelOpen?.status === 400 && brSpareCancel.status === 200 && brDel?.status === 200 && !(await prisma.budgetRequest.findUnique({ where: { id: brSpareId } })),
+      `${brSpare.status} / open ${brDelOpen?.status} / cancel ${brSpareCancel.status} / delete ${brDel?.status} ${JSON.stringify(brDel?.body).slice(0, 120)}`,
+    );
 
     // ══ Modifying and cancelling a supplier bill (Phase 2) ══════════════════
     console.log('\nModifying a supplier bill (over HTTP)');

@@ -127,14 +127,14 @@ export const REGISTRY: ModuleDef[] = [
       // registers that follow are hidden (rule: hidden, never deleted): each
       // is a tab inside the project, and a link from the Projects page.
       { key: 'costing', group: 'Project Management', label: 'Costing', path: '/g-ops/costing', actions: OWNED, phase: 3 },
-      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED_KEPT, phase: 8, note: 'The project work order: sales raises it on a quotation, the project manager and the team leader approve, and approval builds the project' },
+      { key: 'job_orders', group: 'Project Management', label: 'Job Orders', path: '/g-ops/job-orders', actions: OWNED, phase: 8, note: 'The project work order: sales raises it on a quotation, the project manager and the team leader approve, and approval builds the project' },
       // The design team's queue (2026-10-09, the owner's call): a request for a
       // drawing, with files, revisions and a comment thread. No approval
       // route — "Approve" here is the Designer Lead's right to dispatch:
       // assign and reassign requests, set priority on any, close any.
-      { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'export', 'approve'], phase: 9,
+      { key: 'cad_job_orders', group: 'Project Management', label: 'CAD J.O.', path: '/g-ops/cad-job-orders', actions: ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'export', 'approve'], phase: 9,
         note: 'Requests to the design team: files, revisions (R0, R1…), progress, priority and a comment thread. Edit All = the design team (progress, revisions, priority on what is assigned to them); Approve = the Designer Lead (assigns, reassigns, closes any).' },
-      { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED_KEPT, phase: 4 },
+      { key: 'projects', group: 'Project Management', label: 'Projects', path: '/g-ops/projects', actions: OWNED, phase: 4 },
       { key: 'plans', group: 'Project Management', label: 'Approved Plans', path: '/g-ops/plans', actions: OWNED, phase: 4, hidden: true, note: 'Managed from a project’s Approved Plans tab' },
       { key: 'budget_monitoring', group: 'Project Management', label: 'Budget Monitoring', path: '/g-ops/budget-monitoring', actions: READ, phase: 4, hidden: true },
       { key: 'purchase_requests', group: 'Project Management', label: 'Purchase Requests', path: '/g-ops/purchase-requests', actions: ['view_own', 'view_all', 'edit_own', 'edit_all'], phase: 5, hidden: true },
@@ -220,7 +220,7 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'dashboard', group: 'Overview', label: 'Executive Dashboard', path: '/g-fin', actions: REPORT, phase: 7 },
       { key: 'ar', group: 'Money in', label: 'Accounts Receivable', path: '/g-fin/ar', actions: SHARED, phase: 7 },
       { key: 'ap', group: 'Money out', label: 'Accounts Payable', path: '/g-fin/ap', actions: SHARED, phase: 7 },
-      { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED_KEPT, phase: 7 },
+      { key: 'expenses', group: 'Money out', label: 'Expenses', path: '/g-fin/expenses', actions: OWNED, phase: 7 },
       { key: 'cash_advances', group: 'Money out', label: 'Cash Advances', path: '/g-fin/cash-advances', actions: OWNED_KEPT, phase: 7 },
       // Project cash: the budget requests finance releases and the teams
       // liquidate. Raised on the project (gops.budget_requests); this is

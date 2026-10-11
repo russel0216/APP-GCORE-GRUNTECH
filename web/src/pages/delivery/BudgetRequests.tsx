@@ -577,6 +577,12 @@ export function BudgetRequestDetail() {
     done();
   }
 
+  async function remove() {
+    await api.del(`/budget-requests/${id}`);
+    toast('ok', `${row!.number} deleted`);
+    navigate(-1);
+  }
+
   return (
     <div>
       <RecordHeader
@@ -642,6 +648,17 @@ export function BudgetRequestDetail() {
               onConfirm: cancel,
             },
           },
+          (row.status === 'DRAFT' || row.status === 'CANCELLED') &&
+            can('gops.budget_requests.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${row.number}?`,
+                body: `This ${row.status === 'CANCELLED' ? 'cancelled request' : 'draft'} goes for good. Its number is not reused.`,
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
         ]}
         modify={canModify ? () => setModal('edit') : undefined}
         confirm={confirm}

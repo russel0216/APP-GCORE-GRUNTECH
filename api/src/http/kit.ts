@@ -16,6 +16,22 @@ export const badRequest = (m: string, d?: unknown) => new HttpError(400, m, d);
 export const unauthorized = (m = 'Not signed in') => new HttpError(401, m);
 export const forbidden = (m = 'You do not have access to this') => new HttpError(403, m);
 export const notFound = (m = 'Not found') => new HttpError(404, m);
+
+/**
+ * Runs a delete, and turns a foreign-key refusal (Prisma P2003 — a record
+ * elsewhere still points at it) into a 400 that says so, rather than a 500.
+ * The delete's transaction has rolled back by then, so nothing went.
+ */
+export async function deleteOrRefuse<T>(what: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'P2003') {
+      throw badRequest(`${what} still has records filed against it, so it is kept — nothing was deleted`);
+    }
+    throw err;
+  }
+}
 export const conflict = (m: string) => new HttpError(409, m);
 
 /** Wraps an async handler so a rejected promise reaches the error middleware. */

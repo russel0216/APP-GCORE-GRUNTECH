@@ -745,6 +745,12 @@ export function JobOrderDetail() {
     await load();
   }
 
+  async function remove() {
+    await api.del(`/job-orders/${row!.id}`);
+    toast('ok', `${row!.number} deleted`);
+    navigate('/g-ops/job-orders');
+  }
+
   const r = row;
   const canWriteReport = r.status === 'APPROVED' && !!r.visit && !r.visit.report && can(reportPermission(r.kind, 'create'));
   const canInvoice = r.status === 'COMPLETED' && r.billable && !r.invoice && can('gfin.ar.create');
@@ -813,6 +819,17 @@ export function JobOrderDetail() {
               onConfirm: cancel,
             },
           },
+          r.status === 'CANCELLED' &&
+            can('gops.job_orders.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${r.number}?`,
+                body: `This cancelled job order goes for good. Its number is not reused.${r.job ? ` Project ${r.job.number} stays.` : ''}`,
+                confirmLabel: 'Delete',
+                onConfirm: remove,
+              },
+            },
         ]}
         modify={r.canEdit ? () => setModal('edit') : undefined}
         confirm={confirm}

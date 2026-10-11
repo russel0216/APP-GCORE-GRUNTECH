@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma, RequestStatus, type ApprovalRequest } from '@prisma/client';
 import { prisma } from '../prisma';
-import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden } from '../http/kit';
+import { deleteAttachmentsOf } from '../shared/attachments';
+import { handler, parseBody, listQuery, listResult, orderBy, idsFilter, notFound, badRequest, forbidden, deleteOrRefuse } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { canEditRecord } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -571,9 +572,20 @@ budgetRequestRoutes.delete(
     const request = await prisma.budgetRequest.findUnique({ where: { id: req.params.id } });
     if (!request) throw notFound('Budget request not found');
     if (!canEditRecord(me, 'gops', 'budget_requests', request.requestedById)) throw forbidden('That is someone else’s budget request');
-    if (request.status !== 'DRAFT') throw badRequest('Only a draft can be deleted — cancel it instead');
-    await prisma.budgetRequest.delete({ where: { id: request.id } });
-    await audit({ entityType: 'budget_request', entityId: request.id, action: 'DELETED', summary: `Deleted draft ${request.number}`, before: request }, req);
+    if (request.status !== 'DRAFT' && request.status !== 'CANCELLED') {
+      throw badRequest('Only a draft or a cancelled budget request can be deleted — cancel it first');
+    }
+    // A cancelled request never moved money (cancel comes before release), but
+    // a payment row pointing at it would be a fact on file: refused, not lost.
+    if (await prisma.paymentAllocation.count({ where: { budgetRequestId: request.id } })) {
+      throw badRequest('Money was released or returned on this request — it is kept');
+    }
+    await deleteOrRefuse(request.number, () => prisma.budgetRequest.delete({ where: { id: request.id } }));
+    await deleteAttachmentsOf('budget_request', [request.id]);
+    await audit(
+      { entityType: 'budget_request', entityId: request.id, action: 'DELETED', summary: `Deleted ${request.status === 'DRAFT' ? 'draft' : 'cancelled'} ${request.number}`, before: request },
+      req,
+    );
     res.json({ ok: true });
   }),
 );

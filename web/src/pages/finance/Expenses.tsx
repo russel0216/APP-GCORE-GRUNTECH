@@ -603,6 +603,7 @@ export function NewClaimModal({
 export function ExpenseClaimDetail() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
+  const navigate = useNavigate();
   const { me, can } = useAuth();
   const [row, setRow] = useState<Claim | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -744,6 +745,22 @@ export function ExpenseClaimDetail() {
                     : 'Nothing has been approved or paid on it.',
                 confirmLabel: `Cancel ${kindWord}`,
                 onConfirm: cancel,
+              },
+            },
+          row.status === 'CANCELLED' &&
+            (mine || can('gfin.expenses.edit_all')) &&
+            can('gfin.expenses.delete') && {
+              label: 'Delete',
+              danger: true,
+              confirm: {
+                title: `Delete ${row.number}?`,
+                body: `This cancelled ${kindWord} goes for good, with its receipts. Its number is not reused.`,
+                confirmLabel: 'Delete',
+                onConfirm: async () => {
+                  await api.del(`/expense-claims/${row.id}`);
+                  toast('ok', `${row.number} deleted`);
+                  navigate('/g-fin/expenses');
+                },
               },
             },
         ]}

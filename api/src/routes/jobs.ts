@@ -12,10 +12,12 @@ import {
   notFound,
   badRequest,
   forbidden,
+  deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
+import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
-import type { ResolvedUser } from '../permissions/resolve';
+import { canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
 import { renderDocument, formatAmount, formatMoney, formatShortDate, statusLabel, companyCurrency, type PdfSection } from '../shared/pdf';
 import { nextNumber } from '../shared/numbering';
@@ -1077,6 +1079,45 @@ const updateJobSchema = z.object({
   actualEndDate: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
+
+/**
+ * Deletes a CANCELLED project — the delete right, and the project's manager
+ * or edit_all. Its scope, tasks, reports, billings, ledger and budget
+ * requests cascade, so it is refused while money stands behind it: an
+ * invoice, supplier bill, PR, PO, stock issue, claim or advance filed against
+ * it, or a budget request past draft that was not cancelled or rejected. Job
+ * orders and approved plans pointing at it keep their place without it.
+ */
+jobRoutes.delete(
+  '/:id',
+  require_('gops.projects.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const job = await prisma.job.findUnique({ where: { id: req.params.id }, select: { id: true, number: true, name: true, status: true, projectManagerId: true } });
+    if (!job) throw notFound('Project not found');
+    if (!canEditRecord(me, 'gops', 'projects', job.projectManagerId ?? '')) throw forbidden('Only the project’s manager can delete it');
+    if (job.status !== 'CANCELLED') throw badRequest('Only a cancelled project can be deleted — cancel it first');
+    const inJob = { jobId: job.id };
+    const counts: [string, number][] = [
+      ['invoice', await prisma.invoice.count({ where: inJob })],
+      ['supplier bill', await prisma.supplierBill.count({ where: inJob })],
+      ['purchase request', await prisma.purchaseRequest.count({ where: inJob })],
+      ['purchase order', await prisma.purchaseOrder.count({ where: inJob })],
+      ['stock issue', await prisma.stockIssue.count({ where: inJob })],
+      ['expense claim', await prisma.expenseClaim.count({ where: inJob })],
+      ['cash advance', await prisma.cashAdvance.count({ where: inJob })],
+      ['budget request with money behind it', await prisma.budgetRequest.count({ where: { ...inJob, status: { notIn: ['DRAFT', 'CANCELLED', 'REJECTED'] } } })],
+    ];
+    const blockers = counts.filter(([, n]) => n > 0);
+    if (blockers.length) {
+      throw badRequest(`${job.number} has ${blockers.map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ')} filed against it — it is kept`);
+    }
+    await deleteOrRefuse(job.number, () => prisma.job.delete({ where: { id: job.id } }));
+    await deleteAttachmentsOf('job', [job.id]);
+    await audit({ entityType: 'job', entityId: job.id, action: 'DELETED', summary: `Deleted cancelled project ${job.number} — ${job.name}` }, req);
+    res.json({ ok: true });
+  }),
+);
 
 jobRoutes.patch(
   '/:id',

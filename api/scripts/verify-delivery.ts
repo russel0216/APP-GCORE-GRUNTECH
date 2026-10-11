@@ -1661,6 +1661,21 @@ async function main() {
       `${cancelledCount} cancelled · ${flat(projectsPaper.text).match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} / ${flat(budgetPaper.text).match(/Contract value [A-Z]{3} [\d,.]+/)?.[0]} vs ${listPeso(liveContract)} · ${flat(projectsPaper.text).match(/[^.]{0,40}in brackets[^.]*\./)?.[0] ?? 'no note'}`,
     );
 
+    // A cancelled project may be deleted (2026-10-11), its reports and
+    // billings going with it; a live one is cancelled first.
+    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: true } });
+    const delLive = await http(billerToken, 'DELETE', `/jobs/${job.id}`);
+    const delCancelled = await http(billerToken, 'DELETE', `/jobs/${cancelledJob.id}`);
+    await prisma.user.update({ where: { id: biller.id }, data: { isSuperAdmin: false } });
+    check(
+      'a live project is not deleted; a cancelled one is, with its reports and billings',
+      delLive.status === 400 &&
+        delCancelled.status === 200 &&
+        !(await prisma.job.findUnique({ where: { id: cancelledJob.id } })) &&
+        !(await prisma.progressReport.findUnique({ where: { id: otherReport.id } })),
+      `${delLive.status} / ${delCancelled.status} ${delCancelled.text}`,
+    );
+
     // Budget Monitoring's paper prints cost to date — budget monitoring's
     // figure — so it takes that right as well as the list's.
     const narrowBudget = await printed(narrowToken, `/jobs/budget-monitoring/pdf?search=${TAG}`);

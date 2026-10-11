@@ -19,11 +19,12 @@ import {
   notFound,
   badRequest,
   forbidden,
+  deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
-import { registerAttachmentGuard } from '../shared/attachments';
+import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { notify } from '../shared/notifications';
@@ -2824,6 +2825,30 @@ expenseRoutes.post(
       { entityType: 'expense_claim', entityId: claim.id, action: 'CANCELLED', summary: `${claim.number} cancelled` },
       req,
     );
+    res.json({ ok: true });
+  }),
+);
+
+/**
+ * Deletes a CANCELLED claim — the claimant or edit_all, with the delete right.
+ * A cancelled claim charged nothing and was never paid (the cancel refuses
+ * both), so nothing behind it moves; its receipts go with it.
+ */
+expenseRoutes.delete(
+  '/:id',
+  require_('gfin.expenses.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const claim = await prisma.expenseClaim.findUnique({ where: { id: req.params.id }, include: { allocations: { select: { id: true } } } });
+    if (!claim) throw notFound('Expense claim not found');
+    if (claim.claimedById !== me.id && !me.isSuperAdmin && !me.permissions.has('gfin.expenses.edit_all')) {
+      throw forbidden('That is someone else’s claim');
+    }
+    if (claim.status !== 'CANCELLED') throw badRequest('Only a cancelled claim can be deleted — cancel it first');
+    if (claim.allocations.length) throw badRequest('Money was applied to this claim — it is kept');
+    await deleteOrRefuse(claim.number, () => prisma.expenseClaim.delete({ where: { id: claim.id } }));
+    await deleteAttachmentsOf('expense_claim', [claim.id]);
+    await audit({ entityType: 'expense_claim', entityId: claim.id, action: 'DELETED', summary: `Deleted cancelled claim ${claim.number}` }, req);
     res.json({ ok: true });
   }),
 );

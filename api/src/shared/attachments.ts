@@ -158,6 +158,16 @@ export function attachmentPath(storedName: string): string {
   return resolved;
 }
 
+/**
+ * The files of records about to be deleted — rows and bytes. Called AFTER the
+ * records' own transaction has committed, so a refused delete keeps its files.
+ */
+export async function deleteAttachmentsOf(entityType: string, entityIds: string[]): Promise<void> {
+  if (!entityIds.length) return;
+  const rows = await prisma.attachment.findMany({ where: { entityType, entityId: { in: entityIds } }, select: { id: true } });
+  for (const r of rows) await deleteAttachment(r.id);
+}
+
 export async function deleteAttachment(id: string): Promise<void> {
   const row = await prisma.attachment.findUnique({ where: { id } });
   if (!row) return;

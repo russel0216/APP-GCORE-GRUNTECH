@@ -16,6 +16,7 @@ import {
   notFound,
   badRequest,
   forbidden,
+  deleteOrRefuse,
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, resolveUser, type ResolvedUser } from '../permissions/resolve';
@@ -26,7 +27,7 @@ import { mailConfig, sendMail } from '../shared/mail';
 import { renderDocument, formatDate, formatShortDate, formatDateTime, statusLabel, type PdfSection, type Signatory } from '../shared/pdf';
 import { contactsOf } from '../shared/approvals';
 import { registerSearch } from '../shared/search';
-import { registerAttachmentGuard, cadUpload, saveAttachment, attachmentPath } from '../shared/attachments';
+import { registerAttachmentGuard, cadUpload, saveAttachment, attachmentPath, deleteAttachmentsOf } from '../shared/attachments';
 import { dayKey } from '../shared/aftermarket';
 import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listReference, rangeNamed, namedInFilter, filterDay, dayOf, choice, sendListPdf } from '../shared/listPaper';
@@ -64,6 +65,7 @@ const P = {
   editOwn: 'gops.cad_job_orders.edit_own',
   editAll: 'gops.cad_job_orders.edit_all',
   approve: 'gops.cad_job_orders.approve',
+  delete: 'gops.cad_job_orders.delete',
   export: 'gops.cad_job_orders.export',
 } as const;
 
@@ -142,6 +144,8 @@ function flags(me: ResolvedUser, row: CadRow) {
     canHold: open && row.status !== 'ON_HOLD' && (requestor || worker),
     canResume: row.status === 'ON_HOLD' && (requestor || worker),
     canCancel: open && (requestor || lead),
+    // A cancelled request is the one that may go, by its requestor or the lead, with the delete right.
+    canDelete: row.status === 'CANCELLED' && can(me, P.delete) && (requestor || lead || me.isSuperAdmin),
     canComment: !CLOSED.includes(row.status) || requestor || worker,
     canFilePlan: row.status === 'COMPLETED' && !!row.jobId && !row.approvedPlanId && (requestor || worker),
     isDesigner: isDesigner(me),
@@ -898,6 +902,33 @@ cadJobOrderRoutes.post(
     await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'UPDATED', summary: `${row.number} resumed — ${STATUS_LABEL[back]}` }, req);
     await tell([row.requestedById, row.assignedToId], { type: 'cad.updated', title: `${row.number} resumed`, body: `${row.title} — ${STATUS_LABEL[back].toLowerCase()}`, link: linkOf(row.id) }, me.id);
     res.json(present(updated));
+  }),
+);
+
+/**
+ * Deletes a CANCELLED request — its requestor or the Designer Lead, with the
+ * delete right. Its revisions and comments cascade; their files go too. A
+ * plan already filed from it stays the project's.
+ */
+cadJobOrderRoutes.delete(
+  '/:id',
+  require_(P.delete),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const row = await load(req.params.id);
+    if (!flags(me, row).canDelete) {
+      throw badRequest(row.status !== 'CANCELLED' ? 'Only a cancelled request can be deleted — cancel it first' : 'Only whoever raised this request, or the Designer Lead, deletes it');
+    }
+    const [revisions, comments] = await Promise.all([
+      prisma.cadRevision.findMany({ where: { cadJobOrderId: row.id }, select: { id: true } }),
+      prisma.cadComment.findMany({ where: { cadJobOrderId: row.id }, select: { id: true } }),
+    ]);
+    await deleteOrRefuse(row.number, () => prisma.cadJobOrder.delete({ where: { id: row.id } }));
+    await deleteAttachmentsOf('cad_revision', revisions.map((r) => r.id));
+    await deleteAttachmentsOf('cad_comment', comments.map((c) => c.id));
+    await deleteAttachmentsOf('cad_job_order', [row.id]);
+    await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'DELETED', summary: `Deleted cancelled request ${row.number} — ${row.title}` }, req);
+    res.json({ ok: true });
   }),
 );
 

@@ -173,9 +173,8 @@ async function main() {
   console.log('The seed');
   const keys = new Set((await prisma.permission.findMany({ where: { key: { startsWith: 'gops.cad_job_orders.' } }, select: { key: true } })).map((p) => p.key));
   check(
-    'the CAD J.O. permissions exist, Approve among them (the Designer Lead’s dispatch right), and no Delete — a request is cancelled, never deleted',
-    ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'approve', 'export'].every((a) => keys.has(`gops.cad_job_orders.${a}`)) &&
-      !keys.has('gops.cad_job_orders.delete'),
+    'the CAD J.O. permissions exist, Approve among them (the Designer Lead’s dispatch right), and Delete — for a cancelled request only',
+    ['view_own', 'view_all', 'create', 'edit_own', 'edit_all', 'delete', 'approve', 'export'].every((a) => keys.has(`gops.cad_job_orders.${a}`)),
     [...keys].join(','),
   );
   const roleKeys = async (key: string) =>
@@ -577,6 +576,23 @@ async function main() {
       pendingCount(cancelledPaper.text) === 0 &&
       cancelledPaper.text.includes('Customer withdrew'),
     `${cancelledPaper.status} ${roles(cancelledPaper.text).join(',')} · ${slotsSaid(cancelledSlots)} · ${pendingCount(cancelledPaper.text)} pending`,
+  );
+
+  // A cancelled request may be deleted (2026-10-11, the owner's call) — by
+  // whoever holds the delete right and raised it or leads the team; an open
+  // one is cancelled first.
+  const id2Status = (await prisma.cadJobOrder.findUnique({ where: { id: id2 } }))?.status;
+  const delOpen = await http(adminT, 'DELETE', `/cad-job-orders/${id2}`);
+  check('an open request is not deleted — it is cancelled first', id2Status === 'CANCELLED' || delOpen.status === 400, `${id2Status} ${delOpen.status}`);
+  const delOutsider = await http(outsiderT, 'DELETE', `/cad-job-orders/${id3}`);
+  check('somebody without the delete right cannot delete a cancelled one', delOutsider.status === 403, String(delOutsider.status));
+  const delCancelled = await http(adminT, 'DELETE', `/cad-job-orders/${id3}`);
+  check(
+    'a cancelled request is deleted, its audit row says so',
+    delCancelled.status === 200 &&
+      !(await prisma.cadJobOrder.findUnique({ where: { id: id3 } })) &&
+      (await prisma.auditLog.count({ where: { entityType: 'cad_job_order', entityId: id3, action: 'DELETED' } })) === 1,
+    `${delCancelled.status} ${delCancelled.text}`,
   );
 
   // ══ Drawing types ═════════════════════════════════════════════════════════

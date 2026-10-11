@@ -1795,6 +1795,16 @@ async function main() {
         cancelledRoles.includes(`${TAG} customer postponed`),
       `${cancelReturned.status} ${cancelledPaper.status} ${signedCount(cancelledPaper.text)} signed, ${pendingCount(cancelledPaper.text)} pending`,
     );
+    // A cancelled job order may be deleted (2026-10-11) — with the delete right.
+    const joDelNoRight = await api(salesToken, 'DELETE', `/job-orders/${raised.body.id}`);
+    await prisma.user.update({ where: { id: sales.id }, data: { isSuperAdmin: true } });
+    const joDel = await api(salesToken, 'DELETE', `/job-orders/${raised.body.id}`);
+    await prisma.user.update({ where: { id: sales.id }, data: { isSuperAdmin: false } });
+    check(
+      'a cancelled job order is deleted by a holder of the delete right, not without it',
+      joDelNoRight.status === 403 && joDel.status === 200 && !(await prisma.jobOrder.findUnique({ where: { id: String(raised.body.id) } })),
+      `${joDelNoRight.status} / ${joDel.status} ${JSON.stringify(joDel.body).slice(0, 120)}`,
+    );
 
     // Submitted by somebody else who may (edit_all), the request is still the
     // AUTHOR's: filed in their name, so it goes to THEIR team leader — the
