@@ -901,7 +901,7 @@ const recalcRevision = recalcQuotationRevision;
  * too; the archive is gone, and the owner's coming upload of SCORO's
  * quotations makes them real quotations, which this check then sees.)
  */
-const QUOTE_NUMBER = /^[A-Za-z0-9][A-Za-z0-9\-/_.]{0,39}$/;
+export const QUOTE_NUMBER = /^[A-Za-z0-9][A-Za-z0-9\-/_.]{0,39}$/;
 
 async function numberTakenBy(
   number: string,
@@ -1921,10 +1921,12 @@ async function checkLine(
 /**
  * A line as stored: amount and cost amount computed here from quantity and
  * the two unit figures (never accepted from the client), and the order given.
- * The single-line POST, the whole-quotation create and the replace-all PUT all
- * write through this, so a line cannot be stored three slightly different ways.
+ * The whole-quotation create, the replace-all PUT and the SCORO quotes import
+ * (2026-10-11) all write through this, so a line cannot be stored three
+ * slightly different ways.
  */
-function lineData(line: z.infer<typeof itemSchema>, sortOrder: number) {
+export type QuotationLineInput = z.infer<typeof itemSchema>;
+export function lineData(line: QuotationLineInput, sortOrder: number) {
   // A subheading is words only: nothing to sell, nothing to cost.
   if (line.isHeading) {
     return {

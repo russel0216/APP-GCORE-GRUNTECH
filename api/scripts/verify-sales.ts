@@ -78,6 +78,10 @@ import { teamMembers, teamOf } from '../src/shared/team';
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
 import { OWNER_GROUPS, groupKey, rememberGroups, seedOwnerGroups } from '../src/shared/quotationGroups';
+import { decodeCsv, parseCsv, runImport, toCsv } from '../src/shared/csv';
+import { pipelineStages, stageProbability } from '../src/shared/pipelineStages';
+// The SCORO quotes import's spec and writer by name — what the route runs.
+import { scoroQuoteSpec, writeScoroQuotes, SUMMARY_LINE_TITLE } from '../src/routes/imports/scoroQuotes';
 import {
   flat,
   pdfText,
@@ -1730,6 +1734,239 @@ async function main() {
   }
 
   // ── 10. Cost is stripped server-side, and never printed ────────────────────
+  // ── SCORO quotations from SCORO's CSV (2026-10-11, the owner's file) ───────
+  console.log('\nSCORO quotations from SCORO’s CSV');
+  {
+    // The file as SCORO writes it: UTF-16 LE with a BOM, TAB-separated,
+    // every cell quoted, one header row.
+    const HEADERS = [
+      'id', 'doc_no', 'doc_date', 'owner_name', 'doc_deadline', 'confirmed_date', 'payer', 'payer_id', 'contact_person',
+      'doc_description', 'currency', 'status_name', 'status_changed_date', 'discount', 'total_sum', 'total_vat',
+      'total_sum_vat', 'total_cost', 'c_prnumber', 'c_delivery', 'c_paymentterms', 'estimated_closing_date', 'quote_name',
+    ] as const;
+    type ScoroRow = Record<(typeof HEADERS)[number], string>;
+    const scoroText = (rows: ScoroRow[]) =>
+      [HEADERS as readonly string[], ...rows.map((r) => HEADERS.map((h) => r[h]))]
+        .map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join('\t'))
+        .join('\r\n');
+    const scoroFile = (rows: ScoroRow[]) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(scoroText(rows), 'utf16le')]);
+
+    // A number in the house shape under the script's own series (EDITOR_TOKEN),
+    // rendered on the template's pattern: "98712603040" on {EMP}{YY}{MM}{SEQ}.
+    const scoroTemplate = await prisma.numberSequence.findFirstOrThrow({ where: { documentType: 'quotation', periodKey: '' } });
+    const scoroPrefix = (await prisma.company.findUnique({ where: { id: 'company' }, select: { numberPrefix: true } }))?.numberPrefix ?? 'GT';
+    const issued = new Date(Date.UTC(2026, 2, 11));
+    const scoroNumber = (seq: number) =>
+      renderPattern(scoroTemplate.pattern, { prefix: scoroPrefix, typeCode: scoroTemplate.typeCode, seq, padding: scoroTemplate.padding, at: new Date(2026, 2, 11), emp: EDITOR_TOKEN });
+    const parsedA = parseNumber(scoroTemplate, scoroPrefix, scoroNumber(40));
+    const seriesKey = parsedA?.periodKey ?? null;
+    const seriesRow = async () =>
+      seriesKey === null
+        ? null
+        : (await prisma.numberSequence.findUnique({ where: { documentType_periodKey: { documentType: 'quotation', periodKey: seriesKey } }, select: { lastNumber: true } }))?.lastNumber ?? null;
+    const seriesWas = await seriesRow();
+    const setSeries = async (lastNumber: number | null) => {
+      if (seriesKey === null) return;
+      if (lastNumber === null) await prisma.numberSequence.deleteMany({ where: { documentType: 'quotation', periodKey: seriesKey } });
+      else {
+        await prisma.numberSequence.updateMany({ where: { documentType: 'quotation', periodKey: seriesKey }, data: { lastNumber } });
+        if ((await seriesRow()) === null) {
+          const { id: _id, periodKey: _pk, lastNumber: _ln, ...tpl } = scoroTemplate;
+          void _id; void _pk; void _ln;
+          await prisma.numberSequence.create({ data: { ...tpl, periodKey: seriesKey, lastNumber } });
+        }
+      }
+    };
+
+    const row = (over: Partial<ScoroRow>): ScoroRow => ({
+      id: '8773',
+      doc_no: scoroNumber(40),
+      doc_date: '2026-03-11',
+      owner_name: sales.name,
+      doc_deadline: '2026-04-10',
+      confirmed_date: '0000-00-00 00:00:00',
+      payer: `${TAG} Balfour Joint Venture`,
+      payer_id: '4798',
+      contact_person: 'Leo Solis',
+      doc_description: 'Quotation Validity : 120 days',
+      currency: 'PHP',
+      status_name: 'Opportunity',
+      status_changed_date: '',
+      discount: '0.000000',
+      total_sum: '1250000.00',
+      total_vat: '150000.00',
+      total_sum_vat: '1400000.00',
+      total_cost: '900000.0000',
+      c_prnumber: 'PR-77',
+      c_delivery: '16 to 18 weeks Upon receive of Down Payment',
+      c_paymentterms: '50% Down payment / 50% Progress Billing',
+      estimated_closing_date: '2026-04-10',
+      quote_name: `${TAG} Tap-off Unit`,
+      ...over,
+    });
+    const actor = { id: sales.id, name: sales.name };
+    const importScoro = (rows: ScoroRow[], commit: boolean) =>
+      runImport(decodeCsv(scoroFile(rows)), scoroQuoteSpec, commit, (records) => writeScoroQuotes(records as never, actor));
+    const quoteByNumber = (number: string) =>
+      prisma.quotation.findFirst({
+        where: { number: { equals: number, mode: 'insensitive' } },
+        include: { customer: { include: { contacts: true } }, contact: true, revisions: { include: { items: true } } },
+      });
+
+    try {
+      // The file as bytes: the UTF-16 tab file reads to the same grid as a UTF-8 comma file.
+      const one = row({});
+      const asGrid = parseCsv(decodeCsv(scoroFile([one])));
+      const asCommas = parseCsv(toCsv([HEADERS as readonly string[], HEADERS.map((h) => one[h])]));
+      check(
+        'decodeCsv + parseCsv read the UTF-16 tab file to the same grid as a UTF-8 comma file',
+        JSON.stringify(asGrid) === JSON.stringify(asCommas) && asGrid[0][1] === 'doc_no' && asGrid[1][1] === scoroNumber(40),
+        JSON.stringify(asGrid[0].slice(0, 4)),
+      );
+      check('the number renders in the house shape under the script’s series', seriesKey !== null && parsedA?.seq === 40, `${scoroNumber(40)} → ${JSON.stringify(parsedA)}`);
+
+      // The series below where the file lands, so the raise is visible.
+      await setSeries(null);
+
+      const dry = await importScoro([one], false);
+      check('a dry run reports one to create and writes nothing', dry.committed === false && dry.created === 1 && dry.errors === 0, JSON.stringify(dry.rows));
+      check(
+        'and neither the quotation nor the customer exists after it',
+        (await quoteByNumber(scoroNumber(40))) === null && (await prisma.customer.count({ where: { name: `${TAG} Balfour Joint Venture` } })) === 0,
+      );
+      check('and the series was not moved by the dry run', (await seriesRow()) === null);
+
+      const committed = await importScoro([one], true);
+      check('the commit creates it', committed.committed && committed.created === 1 && committed.updated === 0, JSON.stringify(committed.rows));
+      const q = await quoteByNumber(scoroNumber(40));
+      const rev = q?.revisions[0];
+      const line = rev?.items[0];
+      const stages = await pipelineStages();
+      check(
+        'the quotation carries SCORO’s number, name, author and an Open outcome at the stage’s odds',
+        q?.number === scoroNumber(40) && q.subject === `${TAG} Tap-off Unit` && q.ownerId === sales.id && q.outcome === 'OPEN' &&
+          q.probability === stageProbability('OPEN', stages) && q.submittedAt === null && q.decidedAt === null,
+        JSON.stringify({ number: q?.number, subject: q?.subject, outcome: q?.outcome, probability: q?.probability }),
+      );
+      check(
+        'the customer was created by name with "(SCORO id 4798)" in its notes, and the contact on it',
+        q?.customer.name === `${TAG} Balfour Joint Venture` && q.customer.notes === '(SCORO id 4798)' && q.customer.industryId === null &&
+          q.customer.subIndustryId === null && q.contact?.name === 'Leo Solis' && q.contact.customerId === q.customerId,
+        JSON.stringify({ name: q?.customer.name, notes: q?.customer.notes, contact: q?.contact?.name }),
+      );
+      check(
+        'the revision’s subtotal, VAT and total are the file’s three figures, at the rate they imply',
+        !!rev && money(Number(rev.subtotal), 1_250_000) && money(Number(rev.vatAmount), 150_000) && money(Number(rev.total), 1_400_000) &&
+          Number(rev.vatRate) === 0.12 && Number(rev.discountPct) === 0 && rev.status === 'DRAFT' && rev.revision === 0,
+        JSON.stringify({ subtotal: rev?.subtotal, vat: rev?.vatAmount, total: rev?.total, rate: rev?.vatRate }),
+      );
+      check(
+        'the one summary line is worth the subtotal, costed at SCORO’s total cost, under OTHERS',
+        rev?.items.length === 1 && line?.title === SUMMARY_LINE_TITLE && money(Number(line.unitPrice), 1_250_000) && money(Number(line.amount), 1_250_000) &&
+          money(Number(line.unitCost ?? 0), 900_000) && money(Number(line.costAmount ?? 0), 900_000) && Number(line.quantity) === 1 &&
+          line.unit === 'lot' && line.isHeading === false && line.description.includes(scoroNumber(40)) &&
+          (line.group === 'OTHERS' || line.group === null),
+        JSON.stringify({ title: line?.title, price: line?.unitPrice, cost: line?.unitCost, group: line?.group }),
+      );
+      check(
+        'the quotation and its revision are dated the issue date; the closing date, the validity and the header fields come across',
+        q?.createdAt.getTime() === issued.getTime() && rev?.createdAt.getTime() === issued.getTime() &&
+          q.expectedClosing?.getTime() === Date.UTC(2026, 3, 10) && rev.validityDays === 30 && rev.notes === 'Quotation Validity : 120 days' &&
+          rev.prNumber === 'PR-77' && rev.delivery === '16 to 18 weeks Upon receive of Down Payment' && rev.paymentTerms === '50% Down payment / 50% Progress Billing',
+        JSON.stringify({ createdAt: q?.createdAt, revCreated: rev?.createdAt, closing: q?.expectedClosing, validity: rev?.validityDays }),
+      );
+      const trail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: q?.id ?? '', action: 'CREATED' } });
+      check(
+        'its audit row names SCORO’s quote id and the actor',
+        trail?.summary === 'Imported from SCORO quote CSV (SCORO id 8773)' && trail.actorId === sales.id,
+        trail?.summary ?? 'no row',
+      );
+      check(`the series (${seriesKey}) was raised to the imported SEQ`, (await seriesRow()) === 40, String(await seriesRow()));
+
+      // A second commit of the same file: one update, nothing changed.
+      const again = await importScoro([one], true);
+      const q2 = await quoteByNumber(scoroNumber(40));
+      check(
+        'the same file again reports one update and changes nothing — a number already in G-CORE is left as it is',
+        again.committed && again.updated === 1 && again.created === 0 && q2?.id === q?.id && q2.updatedAt.getTime() === q?.updatedAt.getTime() &&
+          (await prisma.quotation.count({ where: { number: { equals: scoroNumber(40), mode: 'insensitive' } } })) === 1 &&
+          (await prisma.customer.count({ where: { name: `${TAG} Balfour Joint Venture` } })) === 1 &&
+          q2.customer.contacts.length === 1,
+        JSON.stringify(again.rows),
+      );
+
+      // The series is never lowered: set it ahead, import a lower number.
+      await setSeries(45);
+      const confirmed = row({
+        id: '8774',
+        doc_no: scoroNumber(41),
+        quote_name: `${TAG} Confirmed one`,
+        status_name: 'Confirmed',
+        status_changed_date: '2026-03-20 09:15:00',
+        confirmed_date: '2026-03-25 00:00:00',
+        contact_person: 'leo  solis',
+      });
+      const rejected = row({
+        id: '8775',
+        doc_no: scoroNumber(42),
+        quote_name: `${TAG} Rejected one`,
+        status_name: 'Rejected',
+        status_changed_date: '2026-03-30',
+        discount: '10.000000',
+        total_sum: '1125000.00',
+        total_vat: '135000.00',
+        total_sum_vat: '1260000.00',
+        total_cost: '0.0000',
+        contact_person: '',
+      });
+      const two = await importScoro([confirmed, rejected], true);
+      check('a Confirmed and a Rejected row import as two creates', two.committed && two.created === 2, JSON.stringify(two.rows));
+      const won = await quoteByNumber(scoroNumber(41));
+      check(
+        'Confirmed becomes WON with an APPROVED revision, submitted on the status change and decided on the confirmed date',
+        won?.outcome === 'WON' && won.revisions[0]?.status === 'APPROVED' && won.probability === stageProbability('WON', stages) &&
+          won.submittedAt?.getTime() === Date.UTC(2026, 2, 20) && won.decidedAt?.getTime() === Date.UTC(2026, 2, 25),
+        JSON.stringify({ outcome: won?.outcome, status: won?.revisions[0]?.status, submitted: won?.submittedAt, decided: won?.decidedAt }),
+      );
+      check(
+        'and its contact is the one already on the customer, matched case-blind with spaces collapsed',
+        won?.contactId === q?.contactId && won?.customer.contacts.length === 1,
+      );
+      const lost = await quoteByNumber(scoroNumber(42));
+      check(
+        'Rejected becomes LOST with its reason, no contact, and the discount reaching SCORO’s net',
+        lost?.outcome === 'LOST' && lost.lostReason === 'SCORO status: Rejected' && lost.contactId === null && lost.decidedAt?.getTime() === Date.UTC(2026, 2, 30) &&
+          money(Number(lost.revisions[0].subtotal), 1_250_000) && money(Number(lost.revisions[0].discountAmount), 125_000) &&
+          money(Number(lost.revisions[0].vatAmount), 135_000) && money(Number(lost.revisions[0].total), 1_260_000) &&
+          lost.revisions[0].items[0].unitCost === null,
+        JSON.stringify({ outcome: lost?.outcome, reason: lost?.lostReason, totals: lost?.revisions[0] }),
+      );
+      check(`the series set ahead (45) was not lowered by the lower numbers`, (await seriesRow()) === 45, String(await seriesRow()));
+
+      // All or nothing: an unknown owner fails the row and nothing is written.
+      const bad = await importScoro(
+        [
+          row({ id: '8776', doc_no: scoroNumber(43), quote_name: `${TAG} Good row` }),
+          row({ id: '8777', doc_no: scoroNumber(44), quote_name: `${TAG} Nobody’s row`, owner_name: `${TAG} Nobody Here` }),
+          row({ id: '8778', doc_no: scoroNumber(45), quote_name: `${TAG} Dollar row`, currency: 'USD' }),
+          row({ id: '8779', doc_no: scoroNumber(46), quote_name: `${TAG} Odd status`, status_name: 'Daydream' }),
+        ],
+        true,
+      );
+      check(
+        'an unknown owner, a foreign currency and an unknown status are each an error naming it, and nothing is written',
+        bad.committed === false && bad.errors === 3 && bad.created === 1 &&
+          bad.rows[1].message === `No login named "${TAG} Nobody Here" — add them in Admin › Users first` &&
+          (bad.rows[2].message ?? '').includes('USD') && (bad.rows[3].message ?? '').includes('Daydream') &&
+          (await quoteByNumber(scoroNumber(43))) === null,
+        JSON.stringify(bad.rows.map((r) => r.message)),
+      );
+    } finally {
+      // The series as it stood before the section, whatever happened.
+      await setSeries(seriesWas);
+    }
+  }
+
   console.log('\nCost visibility over HTTP, and the SCORO-style PDF');
 
   // The checks below read the standard layout; cleanup() puts any saved one back.

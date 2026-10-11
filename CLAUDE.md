@@ -412,17 +412,18 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,647 assertions across twenty-two scripts** (counted 2026-10-10, after
+**3,673 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
 foundation checks with it and added nine — the removal's once-only rule —
 the series that follows a typed quotation number with its review — the
 parser's two bounds and the walk that fits a transaction — 16 on sales and
-33 on numbering, and the one creation of an employee with their login, 22
-on accounts):
+33 on numbering, the one creation of an employee with their login, 22
+on accounts, and the SCORO quotes import — 20 on sales, and 6 on masters
+for the UTF-16 decoding and the tab delimiter):
 foundation
-315, masters 79, sales 463, costing 157, pipeline 92, calendar 96, numbering
+315, masters 85, sales 483, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -2371,11 +2372,12 @@ leave the approver deciding on stale figures).
 Gruntech moved from SCORO. Customers came across through the ordinary CSV
 import (`tools/scoro/scoro_convert.py`, a workstation-side Python converter
 never installed on the server), and new work starts in G-CORE. SCORO's
-quotations and invoices are still to come: the owner will upload them later,
-and they will be REAL quotations and sales orders (2026-10-10: "later I will
-upload data of SCORO Quotation, it will act as part of the G-CORE; also the
-invoices from SCORO which will become a Sales Order in G-CORE") — not built
-yet. `docs/notes/{S,C,Q,R}-*.md` carry the detail of what was patterned on
+quotations come across the same way, as REAL quotations (2026-10-10: "later
+I will upload data of SCORO Quotation, it will act as part of the G-CORE;
+also the invoices from SCORO which will become a Sales Order in G-CORE"):
+the quotes export is built (below, 2026-10-11); the quote-lines export and
+the invoices, which become sales orders, are still to come.
+`docs/notes/{S,C,Q,R}-*.md` carry the detail of what was patterned on
 SCORO.
 
 - **The SCORO archive was removed on 2026-10-10** (the owner's call: "remove
@@ -2396,6 +2398,60 @@ SCORO.
   The read-only screen, its `gops.quote_archive.*` keys, the search provider,
   Customer 360's "SCORO history", the import CLI and `verify-archive` are
   gone with it.
+- **SCORO quotations arrive through the ordinary import** (2026-10-11, the
+  owner's file: "could you add this to the database so I can check if it's
+  possible to migrate data of SCORO from a CSV file"). The entity is
+  `scoro_quotes` (`routes/imports/scoroQuotes.ts`, registered in `REGISTRY`,
+  `gops.quotations.create`; the quotation list's ⋯ menu "Import from
+  SCORO…" opens the ordinary `ImportModal` on it), and it takes SCORO's
+  quotes export AS IT COMES: the columns are SCORO's own headers (`doc_no`,
+  `payer`, `quote_name`, `doc_date`, `owner_name` …), matched by name, and
+  the file is **UTF-16 LE with a BOM and TAB-separated** — `decodeCsv()` in
+  `shared/csv.ts` decodes a file by its BOM (UTF-16 LE or BE, else UTF-8
+  with its BOM stripped) and `parseCsv` sniffs the delimiter from the header
+  line (`sniffDelimiter`: more tabs than commas is a TAB), so every import
+  reads either kind; `POST /imports/:entity` decodes through it, never
+  `.toString('utf8')`. SCORO's null date `0000-00-00 00:00:00` is empty
+  everywhere. `build` RESOLVES and `write` CREATES (the plantilla import's
+  rule): the **owner** is a login whose name equals `owner_name` case-blind
+  with spaces collapsed — none is an ERROR ("No login named … — add them in
+  Admin › Users first"), never an invented author; the **customer** is
+  matched by SCORO id first (`(SCORO id 4798)` in its notes, as the company
+  import wrote it — whole tokens), then by name or legal name case-blind,
+  else CREATED by name alone in `write` (`nextNumber('customer', tx)`, the
+  SCORO id in the notes so the next file matches it, no team, no
+  sub-industry; a customer switched off is used as it is); the **contact**
+  is one of the customer's by name, else added with the name alone. The
+  **status map**: Opportunity, This Month Forecast, Hold → OPEN;
+  Negotiation → SUBMITTED; Closing → NEGOTIATION; Confirmed, Completed,
+  Confirmed Project → WON (revision 0 APPROVED); Rejected, Cancelled → LOST
+  with `lostReason` "SCORO status: <name>"; unknown → an error naming it.
+  Probability is the stage's odds (`stageProbability`), `submittedAt` the
+  status-change date (else `doc_date`) once moved, `decidedAt` the
+  confirmed date (else the status change, else `doc_date`) when decided.
+  `doc_date` is the issue date — `createdAt` of the quotation AND its
+  revision, a DATE at UTC midnight; `validityDays` is `doc_deadline` −
+  `doc_date` (30 when either is missing); `vatRate` is `total_vat ÷
+  total_sum` to four decimals (an imported rate is a fact, stored as read);
+  a `currency` other than the company's is an error. **The file carries no
+  lines**, so every quotation gets ONE summary line ("As quoted in SCORO",
+  1 lot, under the active OTHERS group) worth the subtotal BEFORE discount
+  — `total_sum ÷ (1 − discount/100)` to the centavo — costed at
+  `total_cost` so the margin reads as SCORO's, written through the exported
+  `lineData()` and recalculated by `recalcQuotationRevision`; the quote-
+  lines export, still to come, replaces it. The quotation takes `doc_no` as
+  its number and `write` calls `setCounter('quotation', number, tx, { mode:
+  'raise' })` — the series follows the highest imported number and is never
+  lowered. **A number already in G-CORE is left as it is** (`existing` is
+  the case-blind number; the row reports "update" and `write` skips it), so
+  a re-run of the same file changes nothing. One transaction per row; the
+  quotation's CREATED audit row names SCORO's quote id and, where a series
+  moved, the counter; a created customer and contact get rows of their own
+  ("… from the SCORO quotes import"). The route hands every writer the
+  actor (`Registered.write(records, actor?)`) for exactly such rows.
+  verify-sales builds the file as SCORO writes it (UTF-16, tabs) and drives
+  the spec and writer by name; verify-masters pins the decoding and the
+  delimiter.
 - **One quotation arithmetic: `shared/quotation.ts`.** `subtotal` is PRE-discount;
   net = subtotal − discountAmount; VAT on net (honouring `vatInclusive` and the
   snapshotted rate); margin is measured against net of tax, never a VAT-inclusive

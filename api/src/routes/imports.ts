@@ -9,6 +9,7 @@ import { nextNumber } from '../shared/numbering';
 import {
   runImport,
   templateFor,
+  decodeCsv,
   required,
   optional,
   decimal,
@@ -16,8 +17,10 @@ import {
   date,
   oneOf,
   type ImportSpec,
+  type ImportActor,
 } from '../shared/csv';
 import { employeesImport } from './imports/employees';
+import { scoroQuotesImport } from './imports/scoroQuotes';
 import { courseImport } from './academy';
 import { makePartner, safeHttpUrl, type ResourceKind } from '../shared/partners';
 
@@ -450,7 +453,8 @@ export const itemSpec: ImportSpec<Prisma.ItemCreateInput> = {
 export interface Registered {
   spec: ImportSpec<never>;
   permission: string;
-  write: (records: { record: never; existingId: string | null }[]) => Promise<void>;
+  /** `actor` is who pressed Import, for a writer that files audit rows of its own (the SCORO quotes). */
+  write: (records: { record: never; existingId: string | null }[], actor?: ImportActor) => Promise<void>;
 }
 
 /**
@@ -535,6 +539,8 @@ const REGISTRY: Record<string, Registered> = {
     write: itemWrite as unknown as Registered['write'],
   },
   courses: courseImport,
+  // SCORO's own quotes export, as it comes (2026-10-11): a real quotation per row.
+  scoro_quotes: scoroQuotesImport,
 };
 
 importRoutes.get(
@@ -583,11 +589,13 @@ importRoutes.post(
     if (!req.file) throw badRequest('Choose a CSV file');
     const commit = req.query.commit === 'true' || req.body?.commit === 'true';
 
+    // Decoded from whatever the file was written in (SCORO's export is
+    // UTF-16), never read as UTF-8 and hoped for.
     const report = await runImport(
-      req.file.buffer.toString('utf8'),
+      decodeCsv(req.file.buffer),
       entry.spec,
       commit,
-      entry.write,
+      (records) => entry.write(records, { id: me.id, name: me.name }),
     );
 
     if (report.committed) {

@@ -20,15 +20,54 @@ import { badRequest } from '../http/kit';
 // ── Parsing ──────────────────────────────────────────────────────────────────
 
 /**
+ * The text of an uploaded file, whatever Excel or SCORO wrote it in
+ * (2026-10-11, the owner's SCORO quotes export: UTF-16 LE with a BOM, which
+ * read as UTF-8 is a header of NUL-spaced letters and matches no column). A
+ * UTF-16 BOM (FF FE little-endian, FE FF big-endian) decodes the rest as
+ * UTF-16 — the big-endian bytes swapped pairwise first, since Node decodes
+ * only the little-endian order; a trailing odd byte is left out. Anything
+ * else is UTF-8, its own BOM stripped.
+ */
+export function decodeCsv(buffer: Buffer): string {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.subarray(2, 2 + Math.floor((buffer.length - 2) / 2) * 2).toString('utf16le');
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const body = Buffer.from(buffer.subarray(2, 2 + Math.floor((buffer.length - 2) / 2) * 2));
+    body.swap16();
+    return body.toString('utf16le');
+  }
+  const text = buffer.toString('utf8');
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
+ * The delimiter a file uses, read off its header line: a TAB when the line
+ * holds tabs and no commas, or more tabs than commas (SCORO's exports are
+ * tab-separated, 2026-10-11); otherwise the comma. Column names rarely hold
+ * a comma and never a tab, so the header is the one line that says.
+ */
+export function sniffDelimiter(text: string): ',' | '\t' {
+  const start = text.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const end = text.indexOf('\n', start);
+  const header = text.slice(start, end === -1 ? undefined : end);
+  const tabs = (header.match(/\t/g) ?? []).length;
+  const commas = (header.match(/,/g) ?? []).length;
+  return (tabs > 0 && commas === 0) || tabs > commas ? '\t' : ',';
+}
+
+/**
  * RFC 4180 parser. Handles quoted fields, embedded commas, doubled quotes and
  * newlines inside quotes — all of which appear the moment someone exports an
- * address column from Excel.
+ * address column from Excel. The delimiter is sniffed from the header line
+ * (`sniffDelimiter`): a tab-separated export parses by the same rules.
  */
 export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = '';
   let inQuotes = false;
+  const delimiter = sniffDelimiter(text);
 
   // Strip a UTF-8 BOM; Excel writes one and it silently corrupts the first header.
   let i = text.charCodeAt(0) === 0xfeff ? 1 : 0;
@@ -52,7 +91,7 @@ export function parseCsv(text: string): string[][] {
 
     if (ch === '"') {
       inQuotes = true;
-    } else if (ch === ',') {
+    } else if (ch === delimiter) {
       row.push(field);
       field = '';
     } else if (ch === '\r') {
@@ -110,6 +149,12 @@ export interface ImportSpec<T> {
   build: (row: Record<string, string>, rowNumber: number) => Promise<T>;
   /** Natural key used to report a row as an update rather than a create. */
   existing: (row: Record<string, string>) => Promise<string | null>;
+}
+
+/** Who is running the import — for the audit rows a writer files inside its transactions. */
+export interface ImportActor {
+  id: string;
+  name: string;
 }
 
 export interface RowResult {

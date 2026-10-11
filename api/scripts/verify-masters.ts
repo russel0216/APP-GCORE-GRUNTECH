@@ -12,7 +12,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { resolveUser, can } from '../src/permissions/resolve';
 import { nextNumber, previewNext } from '../src/shared/numbering';
-import { parseCsv, runImport, templateFor, type ImportSpec } from '../src/shared/csv';
+import { decodeCsv, parseCsv, runImport, sniffDelimiter, templateFor, toCsv, type ImportSpec } from '../src/shared/csv';
 // The real spec and writer the import route runs — importing the routes module
 // pulls in Express, which is harmless here and keeps this script from testing
 // a copy that has drifted from what users actually get.
@@ -92,6 +92,37 @@ async function main() {
 
   const blanks = parseCsv('a,b\n1,2\n\n\n3,4');
   check('blank lines are ignored', blanks.length === 3, `${blanks.length} rows`);
+
+  // SCORO's quotes export (2026-10-11, the owner's file) is UTF-16 LE with a
+  // BOM and TAB-separated; read as UTF-8 and split on commas it is one
+  // column of NUL-spaced letters. The bytes are decoded by their BOM and the
+  // delimiter is read off the header line, so the same grid comes out of
+  // either file.
+  const grid = [
+    ['doc_no', 'payer', 'quote_name', 'total_sum'],
+    ['0012603004', 'FIRST BALFOUR-LEIGHTON JOINT VENTURE', 'Tap-off Unit, "the big one"', '325406114.88'],
+    ['0012603005', 'Acme, Inc.', 'Two\nlines', '1.00'],
+  ];
+  const commaUtf8 = toCsv(grid);
+  const tabText = grid.map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join('\t')).join('\r\n');
+  const utf16le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(tabText, 'utf16le')]);
+  const utf16be = Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(tabText, 'utf16le').swap16()]);
+  const utf8Bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(commaUtf8, 'utf8')]);
+  check('a UTF-16 LE file with a BOM decodes to its text', decodeCsv(utf16le) === tabText);
+  check('a UTF-16 BE file with a BOM decodes to the same text', decodeCsv(utf16be) === tabText);
+  check('a UTF-8 file loses its BOM and nothing else', decodeCsv(utf8Bom) === commaUtf8 && decodeCsv(Buffer.from(commaUtf8)) === commaUtf8);
+  check('the delimiter is read off the header line: tabs → TAB, commas → comma', sniffDelimiter(tabText) === '\t' && sniffDelimiter(commaUtf8) === ',');
+  check(
+    'a header with a quoted comma and more tabs still reads as TAB; one with more commas as comma',
+    sniffDelimiter('"a, b"\tc\td\n1\t2\t3') === '\t' && sniffDelimiter('a,b,"c\td"\n1,2,3') === ',',
+  );
+  const fromTabs = parseCsv(decodeCsv(utf16le));
+  const fromCommas = parseCsv(commaUtf8);
+  check(
+    'the UTF-16 tab file and the UTF-8 comma file parse to the same grid',
+    JSON.stringify(fromTabs) === JSON.stringify(grid) && JSON.stringify(fromCommas) === JSON.stringify(grid),
+    JSON.stringify(fromTabs),
+  );
 
   // ── 2. The import contract ─────────────────────────────────────────────────
   console.log('\nCSV import');

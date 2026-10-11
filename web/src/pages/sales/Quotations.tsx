@@ -12,6 +12,7 @@ import { useConfirm } from '../../components/Confirm';
 import { SO_TONES, type SalesOrderRow } from './SalesOrders';
 import { loadPeople } from '../../components/People';
 import { Checkbox, Empty, ErrorBox, Loading, PdfButton, StatusBadge, formatDate, formatDateTime, formatMoney, initials, useToast, type Tone } from '../../components/ui';
+import { ImportModal, loadImportSpec } from '../../components/ImportModal';
 import type { CostPanel } from '../../lib/quotationMath';
 
 export const OUTCOMES = [
@@ -166,6 +167,10 @@ export function Quotations() {
   // The stages as the server names them (Admin › Pipeline Stages); the
   // defaults stand in until the first answer arrives.
   const [stageOptions, setStageOptions] = useState<{ value: string; label: string }[]>(STAGE_TABS);
+  // SCORO's quotes export, as it comes (2026-10-11, the owner's file): the
+  // customer list's import, with the SCORO entity.
+  const [importing, setImporting] = useState<{ label: string; columns: never[] } | null>(null);
+  const [reload, setReload] = useState(0);
 
   const seesAll = can('gops.quotations.view_all');
   // The owner's call: whoever may edit quotations opens on their own; a
@@ -379,8 +384,24 @@ export function Quotations() {
         printPath="/api/quotations/pdf"
         selectable
         rowLabel={(q) => `${q.number} ${q.subject}`}
+        reloadToken={reload}
         bulkActions={(ctx) => <QuotationBulkStatus ctx={ctx} />}
         teamScope={seesAll && !!me?.user.team}
+        menuItems={
+          can('gops.quotations.create')
+            ? [
+                {
+                  label: 'Import from SCORO…',
+                  hint: 'SCORO’s quotes export, as it comes — checked before anything is saved',
+                  onSelect: () => {
+                    void loadImportSpec('scoro_quotes').then((spec) => {
+                      if (spec) setImporting(spec as { label: string; columns: never[] });
+                    });
+                  },
+                },
+              ]
+            : []
+        }
         onSummary={(raw) => {
           const named = (raw as QuotationSummary).tabs;
           if (named?.length) setStageOptions(named.map((t) => ({ value: t.value, label: t.label })));
@@ -415,6 +436,16 @@ export function Quotations() {
           ) : null
         }
       />
+
+      {importing && (
+        <ImportModal
+          entity="scoro_quotes"
+          label={importing.label}
+          columns={importing.columns}
+          onClose={() => setImporting(null)}
+          onImported={() => setReload((r) => r + 1)}
+        />
+      )}
     </div>
   );
 }
