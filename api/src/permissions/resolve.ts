@@ -1,5 +1,6 @@
 import { prisma } from '../prisma';
 import { REGISTRY, type ModuleDef } from './registry';
+import { isChosenReceiver, RECEIVER_RIGHTS } from '../shared/helpReceivers';
 
 export interface ResolvedUser {
   id: string;
@@ -39,6 +40,9 @@ export async function resolveUser(userId: string): Promise<ResolvedUser | null> 
   for (const o of user.overrides) {
     if (o.effect === 'ALLOW') granted.add(o.permission.key);
   }
+  // Whoever a super admin chose to receive the Help box's tickets holds the
+  // screen's two rights, whatever their roles (shared/helpReceivers.ts).
+  if (await isChosenReceiver(user.id)) for (const key of RECEIVER_RIGHTS) granted.add(key);
   for (const o of user.overrides) {
     if (o.effect === 'DENY') granted.delete(o.permission.key);
   }

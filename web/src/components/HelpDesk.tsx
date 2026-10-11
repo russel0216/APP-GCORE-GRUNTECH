@@ -8,15 +8,17 @@ import { Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, useToast, typ
  * The Help box (2026-10-11, the owner's call: "a help chat box so every user
  * can raise a ticket for improvement, allow them to screenshot the problem").
  *
- * A "? Help" button in the bottom-right corner of every signed-in page. It
- * opens a panel — never a modal: the page stays usable behind it — with two
+ * A "? Help" button in the top bar of every signed-in page, beside Sign out
+ * (2026-10-11, the owner's call: the corner button was hard to reach). It
+ * opens a panel, dropping down under it — never a modal: the page stays usable behind it — with two
  * tabs. New ticket: what it is (an improvement, something wrong, a
  * question), a subject, a description, and the screenshot the box took of the
  * page the moment it was opened, which can be taken again, removed, or joined
  * by an image of the person's own (attached, or pasted with Ctrl+V). The
  * page's address and the window size go with it. My tickets: what the person
  * raised, each opening its own page, where the thread and the answers are.
- * Every super admin is told of a new ticket (api/src/routes/helpTickets.ts).
+ * The people a super admin chose are told of a new ticket — every super admin
+ * while nobody is chosen (api/src/shared/helpReceivers.ts).
  *
  * The draft lives as long as the Shell does, so closing the box and opening
  * it on another page keeps what was typed — and its screenshot, until the
@@ -53,7 +55,7 @@ interface MineRow {
 }
 
 /** What the screenshot leaves out: the Help box itself and the toasts over the page. */
-const outOfPicture = (el: Element) => el.classList.contains('help-fab') || el.classList.contains('help-panel') || el.classList.contains('toast-stack');
+const outOfPicture = (el: Element) => el.classList.contains('help-top') || el.classList.contains('help-panel') || el.classList.contains('toast-stack');
 
 let keySeq = 0;
 const picture = (blob: Blob, name: string): Picture => ({ key: `p${++keySeq}`, blob, url: URL.createObjectURL(blob), name });
@@ -76,7 +78,7 @@ export function HelpDesk() {
   const [mineError, setMineError] = useState<unknown>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const subjectRef = useRef<HTMLInputElement | null>(null);
-  const fabRef = useRef<HTMLButtonElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
 
   const here = `${location.pathname}${location.search}`;
 
@@ -117,7 +119,7 @@ export function HelpDesk() {
 
   function closeBox() {
     setOpen(false);
-    fabRef.current?.focus();
+    buttonRef.current?.focus();
   }
 
   useEffect(() => {
@@ -200,6 +202,19 @@ export function HelpDesk() {
 
   return (
     <>
+      <button
+        ref={buttonRef}
+        type="button"
+        className={`help-top${open ? ' open' : ''}`}
+        aria-expanded={open}
+        aria-label={open ? 'Close help' : 'Help — raise a ticket'}
+        onClick={() => (open ? closeBox() : openBox())}
+      >
+        <span className="help-top-mark" aria-hidden="true">
+          ?
+        </span>
+        Help
+      </button>
       {open && (
         <div className="help-panel" role="dialog" aria-label="Help and improvement" onPaste={onPaste}>
           <div className="help-head">
@@ -327,19 +342,6 @@ export function HelpDesk() {
           )}
         </div>
       )}
-      <button
-        ref={fabRef}
-        type="button"
-        className="help-fab"
-        aria-expanded={open}
-        aria-label={open ? 'Close help' : 'Help — raise a ticket'}
-        onClick={() => (open ? closeBox() : openBox())}
-      >
-        <span className="help-fab-mark" aria-hidden="true">
-          ?
-        </span>
-        Help
-      </button>
     </>
   );
 }

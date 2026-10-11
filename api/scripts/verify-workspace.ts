@@ -62,7 +62,20 @@ const MAIL = '@verifyws.local';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
+const RECEIVERS_STASH = 'helpTickets.receivers.__verify__';
+
 async function cleanup() {
+  // The receivers list as an administrator left it, put back whatever happened.
+  const stash = await prisma.setting.findUnique({ where: { key: RECEIVERS_STASH } });
+  if (stash) {
+    const kept = stash.value as { value: unknown } | null;
+    if (kept && kept.value !== null && kept.value !== undefined) {
+      await prisma.setting.upsert({ where: { key: 'helpTickets.receivers' }, create: { key: 'helpTickets.receivers', value: kept.value as never }, update: { value: kept.value as never } });
+    } else {
+      await prisma.setting.deleteMany({ where: { key: 'helpTickets.receivers' } });
+    }
+    await prisma.setting.delete({ where: { key: RECEIVERS_STASH } });
+  }
   // Help tickets the script raised: the bells they rang for the real super
   // admins, their screenshots (rows and bytes), then the tickets themselves.
   const tickets = await prisma.helpTicket.findMany({ where: { createdBy: { email: { endsWith: MAIL } } }, select: { id: true } });
@@ -816,6 +829,55 @@ async function main() {
     notDone.status === 201 && reopened?.status === 'NEW' && reopened.closedAt === null &&
       (await prisma.notification.count({ where: { userId: helpdesk.id, link, type: 'help.reply' } })) === 1,
     `${notDone.status} ${reopened?.status}`,
+  );
+
+  // ── Who receives them: chosen by a super admin (2026-10-11) ───────────────
+  const realReceivers = await prisma.setting.findUnique({ where: { key: 'helpTickets.receivers' } });
+  await prisma.setting.create({ data: { key: RECEIVERS_STASH, value: { value: (realReceivers?.value ?? null) as never } } });
+  const boss = await makeUser('ZZ Super', `boss${MAIL}`, []);
+  await prisma.user.update({ where: { id: boss.id }, data: { isSuperAdmin: true } });
+  const bossToken = signToken(boss.id, boss.email);
+  const byHelpdesk = await api(helpdeskToken, 'PUT', '/help-tickets/receivers', { userIds: [colleague.id] });
+  check('only a super admin chooses who receives the tickets — holding the screen’s rights is not enough', byHelpdesk.status === 403, String(byHelpdesk.status));
+  const sleeper = await makeUser('ZZ Sleeper', `sleeper${MAIL}`, []);
+  await prisma.user.update({ where: { id: sleeper.id }, data: { isActive: false } });
+  const withSleeper = await api(bossToken, 'PUT', '/help-tickets/receivers', { userIds: [colleague.id, sleeper.id] });
+  check('a switched-off login cannot be chosen', withSleeper.status === 400 && String(withSleeper.body.error).includes('ZZ Sleeper'), JSON.stringify(withSleeper.body));
+  const chose = await api(bossToken, 'PUT', '/help-tickets/receivers', { userIds: [colleague.id] });
+  const choseRow = await prisma.auditLog.findFirst({ where: { actorId: boss.id, entityType: 'help_ticket', entityId: 'receivers', action: 'UPDATED' } });
+  check('a super admin chooses a colleague, and the choice is audited by name', chose.status === 200 && !!choseRow?.summary.includes('ZZ Colleague'), choseRow?.summary);
+  const listed = await api(helpdeskToken, 'GET', '/help-tickets/receivers');
+  check(
+    'the register names who receives them, and says only a super admin may change it',
+    listed.status === 200 && (listed.body.receivers as { id: string }[]).map((r) => r.id).join() === colleague.id && listed.body.canChange === false,
+    JSON.stringify(listed.body).slice(0, 200),
+  );
+  const routed = await raise(workerToken, { subject: `${TAG} Routed to the colleague`, description: 'x' });
+  const routedLink = `/admin/help-tickets/${String(routed.body.id)}`;
+  const routedTo = await prisma.notification.findMany({ where: { link: routedLink, type: 'help.ticket' }, select: { userId: true } });
+  check(
+    'a new ticket now tells the people chosen, and no super admin',
+    routed.status === 201 && routedTo.length === 1 && routedTo[0].userId === colleague.id,
+    JSON.stringify(routedTo),
+  );
+  const asReceiver = await api(colleagueToken, 'GET', `/help-tickets?search=${TAG}`);
+  const receiverMe = await api(colleagueToken, 'GET', '/auth/me');
+  const receiverMenu = JSON.stringify(receiverMe.body.menu ?? '');
+  const receiverMove = await api(colleagueToken, 'POST', `/help-tickets/${String(routed.body.id)}/status`, { status: 'IN_PROGRESS' });
+  check(
+    'whoever is chosen reads the register, finds it in their menu and moves a ticket — with no role for it',
+    asReceiver.status === 200 && receiverMenu.includes('/admin/help-tickets') && receiverMove.status === 200,
+    `${asReceiver.status} / menu ${receiverMenu.includes('/admin/help-tickets')} / ${receiverMove.status}`,
+  );
+  const cleared = await api(bossToken, 'PUT', '/help-tickets/receivers', { userIds: [] });
+  const afterClear = await api(colleagueToken, 'GET', `/help-tickets?search=${TAG}`);
+  const back = await raise(workerToken, { subject: `${TAG} Back to the super admins`, description: 'x' });
+  const backTo = await prisma.notification.count({ where: { link: `/admin/help-tickets/${String(back.body.id)}`, type: 'help.ticket' } });
+  const supers = await prisma.user.count({ where: { isSuperAdmin: true, isActive: true } });
+  check(
+    'with nobody chosen, every super admin is told again, and the colleague loses the screen',
+    cleared.status === 200 && afterClear.status === 403 && backTo === supers,
+    `${afterClear.status} / ${backTo} of ${supers}`,
   );
 
   await cleanup();

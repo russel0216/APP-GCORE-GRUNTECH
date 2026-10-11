@@ -1,54 +1,55 @@
 /* The Help box and Help Tickets (2026-10-11). Tokens only. */
 
-.help-fab {
-  position: fixed;
-  right: var(--s-5);
-  bottom: var(--s-5);
-  z-index: 190;
+/* The button in the top bar, beside Sign out — the pill's height is the
+   card button's, so it sits level with the bell and the avatar. */
+.help-top {
   display: inline-flex;
   align-items: center;
   gap: var(--s-2);
-  height: 44px;
-  padding: 0 var(--s-4) 0 var(--s-2);
-  border: 0;
-  border-radius: 22px;
-  background: var(--magenta);
-  color: #fff;
+  height: var(--btn-h-sm);
+  padding: 0 var(--s-3) 0 var(--s-1);
+  border: 1px solid var(--magenta);
+  border-radius: calc(var(--btn-h-sm) / 2);
+  background: transparent;
+  color: var(--magenta);
   font: inherit;
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   font-weight: 600;
-  box-shadow: var(--shadow-md);
   cursor: pointer;
 }
 
-.help-fab:hover {
-  filter: brightness(1.08);
+.help-top:hover,
+.help-top.open {
+  background: var(--magenta);
+  color: #fff;
 }
 
-.help-fab-mark {
+.help-top-mark {
   display: inline-grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background: rgb(255 255 255 / 0.22);
+  background: var(--magenta);
+  color: #fff;
+  font-size: var(--fs-xs);
   font-weight: 700;
 }
 
-/* The toasts sit over the button, never on it. */
-.toast-stack {
-  bottom: calc(var(--s-5) + 56px);
+.help-top:hover .help-top-mark,
+.help-top.open .help-top-mark {
+  background: rgb(255 255 255 / 0.25);
 }
 
 .help-panel {
   position: fixed;
-  right: var(--s-5);
-  bottom: calc(var(--s-5) + 56px);
+  top: calc(var(--topbar-h) + var(--s-2));
+  right: var(--s-4);
   z-index: 190;
   display: flex;
   flex-direction: column;
   width: min(420px, calc(100vw - 2 * var(--s-4)));
-  max-height: calc(100vh - var(--s-5) - 56px - var(--s-5));
+  max-height: calc(100vh - var(--topbar-h) - var(--s-2) - var(--s-4));
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--line);
@@ -229,6 +230,35 @@
   font-size: var(--fs-sm);
 }
 
+/* ── Who receives them (Admin › Help Tickets) ─────────────────────────────── */
+
+.help-receivers {
+  margin-bottom: var(--card-gap);
+}
+
+.help-receivers-note {
+  margin: 0 0 var(--s-3);
+}
+
+.help-receivers .card-foot .spacer {
+  flex: 1;
+}
+
+.help-receiver-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+}
+
+.help-receiver-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
 /* ── A ticket's page ─────────────────────────────────────────────────────── */
 
 .help-description {
@@ -313,11 +343,6 @@
 }
 
 @media (max-width: 640px) {
-  .help-fab {
-    right: var(--s-4);
-    bottom: var(--s-4);
-  }
-
   .help-panel {
     right: var(--s-4);
     left: var(--s-4);
@@ -326,7 +351,7 @@
 }
 
 @media print {
-  .help-fab,
+  .help-top,
   .help-panel {
     display: none;
   }

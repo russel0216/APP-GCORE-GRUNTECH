@@ -16,6 +16,7 @@ import { registerAttachmentGuard, upload, saveAttachment } from '../shared/attac
 import { throttled } from '../shared/throttle';
 import { LIST_CAP, listReference, rangeNamed, filterDay, choice, sendListPdf, recordNamed } from '../shared/listPaper';
 import { manilaDayStart, manilaDayEnd } from '../shared/day';
+import { chosenReceiverIds, saveReceivers, ticketReceivers, MAX_RECEIVERS } from '../shared/helpReceivers';
 
 /**
  * The Help box (2026-10-11, the owner's call: "a help chat box so every user
@@ -25,8 +26,9 @@ import { manilaDayStart, manilaDayEnd } from '../shared/day';
  * Anybody signed in raises a ticket — an improvement, something wrong, a
  * question — with the screenshot the box took of the page they were on (or
  * an image of their own), and the page's address, their browser and window
- * size. Every active SUPER ADMIN is told, by bell and by email where SMTP is
- * set. The ticket's thread is the raiser's and the administrators': a reply
+ * size. The people a super admin chose on Admin › Help Tickets are told
+ * (shared/helpReceivers.ts) — every active SUPER ADMIN while nobody is
+ * chosen — by bell and by email where SMTP is set. The ticket's thread is the raiser's and the administrators': a reply
  * tells the other side, a change of status tells the raiser, and a reply from
  * the raiser on a closed ticket opens it again — they are saying it is not
  * done. No approval, no money.
@@ -115,11 +117,8 @@ async function tell(
   }
 }
 
-/** Who hears of a new ticket: every active super admin (the owner's call). */
-async function receivers(): Promise<string[]> {
-  const rows = await prisma.user.findMany({ where: { isSuperAdmin: true, isActive: true }, select: { id: true } });
-  return rows.map((r) => r.id);
-}
+/** Who hears of a new ticket: the people a super admin chose, else every active super admin. */
+const receivers = ticketReceivers;
 
 const person = { select: { id: true, name: true, email: true, photoPath: true } } as const;
 const listInclude = {
@@ -358,6 +357,57 @@ helpTicketRoutes.get(
       req,
     );
     sendListPdf(res, pdf, 'help-tickets.pdf');
+  }),
+);
+
+// ── Who receives them (above /:id) ──────────────────────────────────────────
+
+/** The chosen list, by name — read by whoever reads the register; changed by a super admin only. */
+helpTicketRoutes.get(
+  '/receivers',
+  requireAny(P.viewAll),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const ids = await chosenReceiverIds();
+    const people = await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, email: true, photoPath: true, isActive: true } });
+    const byId = new Map(people.map((p) => [p.id, p]));
+    res.json({
+      receivers: ids.map((id) => byId.get(id)).filter(Boolean),
+      // Nobody chosen: every active super admin, named so the card says who that is.
+      fallback: ids.length ? [] : await prisma.user.findMany({ where: { isSuperAdmin: true, isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      canChange: me.isSuperAdmin,
+    });
+  }),
+);
+
+helpTicketRoutes.put(
+  '/receivers',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!me.isSuperAdmin) throw forbidden('Only a super admin chooses who receives the tickets');
+    const body = parseBody(z.object({ userIds: z.array(z.string().min(1)).max(MAX_RECEIVERS, `At most ${MAX_RECEIVERS} people`) }), req.body);
+    const ids = [...new Set(body.userIds)];
+    const found = await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, isActive: true } });
+    const unknown = ids.filter((id) => !found.some((u) => u.id === id));
+    if (unknown.length) throw badRequest('One of the people chosen is not a login on file');
+    const inactive = found.filter((u) => !u.isActive);
+    if (inactive.length) throw badRequest(`${inactive.map((u) => u.name).join(', ')} ${inactive.length === 1 ? 'is' : 'are'} switched off — choose an active login`);
+    const before = await chosenReceiverIds();
+    const names = async (list: string[]) =>
+      (await prisma.user.findMany({ where: { id: { in: list } }, select: { id: true, name: true } })).map((u) => u.name);
+    await saveReceivers(ids);
+    await audit(
+      {
+        entityType: 'help_ticket',
+        entityId: 'receivers',
+        action: 'UPDATED',
+        summary: ids.length ? `Help tickets now go to ${(await names(ids)).join(', ')}` : 'Help tickets go to every super admin again',
+        before: { receivers: await names(before) },
+        after: { receivers: await names(ids) },
+      },
+      req,
+    );
+    res.json({ ok: true, userIds: ids });
   }),
 );
 

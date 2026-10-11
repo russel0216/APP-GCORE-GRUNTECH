@@ -440,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,754 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,761 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -461,13 +461,13 @@ the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
 order on one page, and one on sales for a subheading worded in
-line_comment, and 17 on workspace for the Help box's tickets, and one on
-sales for a row the database refuses):
+line_comment, and 24 on workspace for the Help box's tickets and who
+receives them, and one on sales for a row the database refuses):
 foundation
 318, masters 92, sales 524, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 63, accounts 124. The
+insights 98, insights-brief 50, workspace 70, accounts 124. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -2355,9 +2355,11 @@ The owner's call: "a help chat box so every user can raise a ticket for
 improvement, allow them to screenshot the problem" — and "super admins
 receive the tickets".
 
-- **A "? Help" button bottom-right on every signed-in page**
-  (`components/HelpDesk.tsx`, mounted once in `Shell.tsx`; the toasts sit
-  above it). It opens a PANEL, never a modal — the page stays usable —
+- **A "? Help" button in the top bar of every signed-in page, beside Sign
+  out** (`components/HelpDesk.tsx`, mounted once in `Shell.tsx`'s top bar;
+  2026-10-11, the owner's call — it sat bottom-right at first and was hard
+  to reach). It opens a PANEL dropping down under it, never a modal — the
+  page stays usable —
   with New ticket (Improvement / Something is wrong / Question, a subject,
   a description, the screenshot) and My tickets (`GET /help-tickets/mine`,
   each row opening the ticket's page). The draft lives as long as the
@@ -2380,9 +2382,22 @@ receive the tickets".
   Tickets, its paper `GET /help-tickets/pdf`, any ticket and its
   screenshots) and `admin.help_tickets.edit_all` answers and moves the
   status (New → In progress → Done, or Won't do with a reason). No seeded
-  role holds either. **Every active SUPER ADMIN is told of a new ticket**
-  (bell, and email where SMTP is set) — holding the view right is not
-  enough to be told. A reply tells the other side; a status move tells the
+  role holds either. **Who is told of a new ticket is chosen by a super
+  admin** (2026-10-11, the owner's call: "allow me to assign who receive
+  the help ticket"): the "Who receives new tickets" card on Admin › Help
+  Tickets (`PeoplePicker`), `GET/PUT /help-tickets/receivers` (above
+  `/:id`; read with the view right, changed by a SUPER ADMIN only, active
+  logins only, 50 at most, audited as `help_ticket` / `receivers`), one
+  Setting `helpTickets.receivers` = `{ userIds }` in
+  `shared/helpReceivers.ts`. **The people chosen hold both rights whatever
+  their roles**: `resolveUser()` adds `RECEIVER_RIGHTS` for them (a
+  per-user DENY still wins), so the menu, the page's Guard and the routes
+  agree with no role edited; the list is cached a minute per process and
+  dropped on save. **Nobody chosen is every active super admin** (bell,
+  and email where SMTP is set) — holding the view right is not enough to
+  be told. verify-workspace stashes the stored list in
+  `helpTickets.receivers.__verify__` for its run and `cleanup()` puts it
+  back. A reply tells the other side; a status move tells the
   raiser; **the raiser replying on a Done or Won't-do ticket opens it
   again** (NEW). Someone else's ticket is a 404. The page the person was
   on is kept only when it is a path inside the app; the browser line is

@@ -133,6 +133,8 @@ export function recordLink(entityType: string, id: string): string | null {
   if (!entityType) return null;
   const type = entityType.toLowerCase();
   if (type === 'setting') return settingLink(id);
+  // Who receives the Help box's tickets is set on the register itself.
+  if (type === 'help_ticket' && id === 'receivers') return '/admin/help-tickets';
   // A printed list audits as EXPORTED with entityId 'list' (CLAUDE.md, the
   // printed lists): that row opens the list itself, never a record page that
   // would ask the API for a record called "list". The same holds for a type

@@ -360,6 +360,8 @@ export function Shell() {
           <Avatar name={me?.user.name ?? '?'} photoId={me?.user.photoPath} />
         </button>
 
+        <HelpDesk />
+
         <button className="btn btn-ghost btn-sm" onClick={signOut}>
           Sign out
         </button>
@@ -580,7 +582,6 @@ export function Shell() {
           )}
 
           <LayoutEditor />
-          <HelpDesk />
         </div>
       </div>
 

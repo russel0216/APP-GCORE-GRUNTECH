@@ -7,7 +7,8 @@ import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
 import { openAttachment } from '../../components/Attachments';
 import { Stat } from '../../components/charts';
-import { usePeople } from '../../components/People';
+import { usePeople, toPerson } from '../../components/People';
+import { PeoplePicker } from '../../components/PeoplePicker';
 import { HELP_KINDS, HELP_STATUS_TONES } from '../../components/HelpDesk';
 import { Avatar, Empty, ErrorBox, Field, Loading, StatusBadge, formatDate, formatDateTime, useToast } from '../../components/ui';
 
@@ -102,6 +103,7 @@ export function HelpTickets() {
           <h1>Help Tickets</h1>
         </div>
       </div>
+      <ReceiversCard />
       <DataList<TicketRow>
         listKey="help-tickets"
         endpoint="/help-tickets"
@@ -114,7 +116,7 @@ export function HelpTickets() {
         onRowClick={(r) => navigate(`/admin/help-tickets/${r.id}`)}
         searchPlaceholder="Search number, subject, page, person…"
         emptyTitle="No tickets yet"
-        emptyHint="What people raise from the Help button, bottom-right on every page, lands here."
+        emptyHint="What people raise from the Help button, in the top bar of every page, lands here."
         summary={(raw) => {
           const s = raw as TicketSummary;
           return (
@@ -129,6 +131,94 @@ export function HelpTickets() {
         }}
       />
     </div>
+  );
+}
+
+interface ReceiversInfo {
+  receivers: Person[];
+  fallback: { id: string; name: string }[];
+  canChange: boolean;
+}
+
+/**
+ * Who receives new tickets (2026-10-11, the owner's call): chosen by a super
+ * admin, read by whoever reads the register. The people chosen are told of
+ * every new ticket and may answer them; nobody chosen is every super admin.
+ */
+function ReceiversCard() {
+  const toast = useToast();
+  const { people } = usePeople();
+  const [info, setInfo] = useState<ReceiversInfo | null>(null);
+  const [chosen, setChosen] = useState<string[]>([]);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.get<ReceiversInfo>('/help-tickets/receivers');
+      setInfo(data);
+      setChosen(data.receivers.map((r) => r.id));
+      setError(null);
+    } catch (err) {
+      setError(err);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!info) return error ? <ErrorBox error={error} /> : null;
+  const saved = info.receivers.map((r) => r.id);
+  const dirty = chosen.length !== saved.length || chosen.some((id, i) => id !== saved[i]);
+  const nobody = (info.fallback.length ? info.fallback.map((p) => p.name).join(', ') : 'nobody yet');
+
+  async function save() {
+    setBusy(true);
+    try {
+      await api.put('/help-tickets/receivers', { userIds: chosen });
+      toast('ok', chosen.length ? 'Saved — new tickets go to the people chosen' : 'Saved — new tickets go to every super admin');
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card help-receivers">
+      <h3 className="card-title">Who receives new tickets</h3>
+      <p className="faint help-receivers-note">
+        They get a bell (and an email where email is set up) for every new ticket, and may answer and close tickets. When nobody is
+        chosen, every super admin receives them{info.receivers.length ? '' : ` — now ${nobody}`}.
+      </p>
+      <ErrorBox error={error} />
+      {info.canChange ? (
+        <>
+          <PeoplePicker people={people.map(toPerson)} value={chosen} onChange={setChosen} max={50} />
+          <div className="card-foot">
+            <span className="faint">{chosen.length ? `${chosen.length} chosen` : 'Nobody chosen — every super admin'}</span>
+            <span className="spacer" />
+            <button type="button" className="btn btn-sm" disabled={!dirty || busy} onClick={() => setChosen(saved)}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-sm btn-primary" disabled={!dirty || busy} onClick={() => void save()}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </>
+      ) : info.receivers.length ? (
+        <ul className="help-receiver-list">
+          {info.receivers.map((r) => (
+            <li key={r.id}>
+              <Avatar name={r.name} photoId={r.photoPath} size={26} />
+              {r.name}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 
