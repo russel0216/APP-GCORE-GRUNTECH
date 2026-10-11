@@ -412,7 +412,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,691 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,697 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -423,9 +423,10 @@ parser's two bounds and the walk that fits a transaction — 16 on sales and
 on accounts, and the SCORO quotes import — 33 on sales, with the lines
 export and the summary line's replacement, and 10 on masters for the
 UTF-16 decoding, the tab delimiter and the grouping of rows, and one on
-foundation for the quantity formatter):
+foundation for the quantity formatter, and 6 on sales for the imported
+quotation that needs no approval until it is changed):
 foundation
-316, masters 89, sales 496, costing 157, pipeline 92, calendar 96, numbering
+316, masters 89, sales 502, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -2483,6 +2484,25 @@ SCORO.
   drives the spec and writer by name — the lines file's totals come out as
   SCORO's own; verify-masters pins the decoding, the delimiter and the
   grouping. SCORO's invoices, which become sales orders, are still to come.
+- **An imported quotation needs no approval until somebody changes it**
+  (2026-10-11, the owner's call: "the import from SCORO will not have
+  approval details below the quotation, only the Prepared by; if they
+  modify the quotation and save the changes, that's the only time they need
+  the approval"). The import marks revision 0
+  `QuotationRevision.importedUnchanged`; while it stands the PDF prints
+  Prepared by alone (no route, no Pending), `GET /quotations/:id` offers no
+  route or option, the page shows no Submit for approval but a one-line
+  note, and Won is open to it — `standsApproved()` in `shared/pipeline.ts`
+  (an APPROVED revision, or a DRAFT still as imported) is the one test the
+  PATCH, the list's rows and the board ask. **A saved change clears it for
+  good**: `PUT …/lines` (every Modify save), `PATCH …/revisions/:id` and
+  "Fill from costing" — and a submit for approval; a status move does not. The Modify page says so in
+  its lead line, and its own Status keeps Won behind a real approval, since
+  its save clears the mark before the status is applied. The seed's
+  `markUnchangedScoroImports()` marks quotations imported before the mark
+  existed, where the trail shows no saved change to revision 0 (the
+  summaries those three routes write); a changed one is never re-marked.
+  The summary line's replacement leaves the mark as it finds it.
 - **One quotation arithmetic: `shared/quotation.ts`.** `subtotal` is PRE-discount;
   net = subtotal − discountAmount; VAT on net (honouring `vatInclusive` and the
   snapshotted rate); margin is measured against net of tax, never a VAT-inclusive

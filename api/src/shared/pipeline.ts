@@ -406,6 +406,8 @@ export interface BoardRevision {
   createdAt: Date;
   /** The quotation's own discount, in percent (to six decimals). */
   discountPct: Prisma.Decimal | number;
+  /** As imported from SCORO and unchanged since — see `standsApproved`. */
+  importedUnchanged?: boolean;
   costing: {
     contractValue: Prisma.Decimal | number;
     totalCost: Prisma.Decimal | number;
@@ -581,7 +583,7 @@ function quotationCard(q: BoardQuotation, now: Date, me: ResolvedUser): Card | n
     (best, r) => (best === null || r.revision > best.revision ? r : best),
     null,
   );
-  const hasApprovedRevision = q.revisions.some((r) => r.status === 'APPROVED');
+  const hasApprovedRevision = q.revisions.some(standsApproved);
   const job = q.revisions.flatMap((r) => r.jobs)[0] ?? null;
   const probability = column === 'WON' ? 100 : column === 'LOST' ? 0 : q.probability;
   const planned = q.activities[0];
@@ -875,4 +877,15 @@ export function buildBoard(input: {
     },
     people: [...people.values()].sort((a, b) => a.name.localeCompare(b.name)),
   };
+}
+
+/**
+ * Whether a revision stands as approved for the moves that need one (Won):
+ * an APPROVED revision, or a draft brought in by the SCORO import and not
+ * changed since (`importedUnchanged`) — SCORO had already issued it, so it
+ * needs no approval until somebody changes it (2026-10-11, the owner's call).
+ * The board, the list, the page and the PATCH all ask this one question.
+ */
+export function standsApproved(r: { status: string; importedUnchanged?: boolean | null }): boolean {
+  return r.status === 'APPROVED' || (r.status === 'DRAFT' && r.importedUnchanged === true);
 }

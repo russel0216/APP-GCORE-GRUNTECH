@@ -364,3 +364,39 @@ export function productTitle(parts: { brand?: string | null; productType?: strin
     .filter(Boolean);
   return t.length ? t.join(', ') : null;
 }
+
+/** The audit summaries a saved change to revision 0 leaves (routes/sales.ts). */
+const R0_CHANGED = [
+  { summary: { startsWith: 'Revision 0:' } },
+  { summary: { startsWith: 'Updated the terms of revision 0' } },
+  { summary: { startsWith: 'Filled revision 0 ' } },
+  { AND: [{ summary: { startsWith: 'Replaced the lines of ' } }, { summary: { contains: ' R0: ' } }] },
+];
+
+/**
+ * Marks the quotations brought in by the SCORO import before the mark existed
+ * (2026-10-11) as "as imported, unchanged" — revision 0 of every quotation the
+ * import created whose trail shows no saved change to that revision since.
+ * Run by the seed on every deploy: a quotation somebody changed keeps the
+ * audit row of the change, so it is never marked again. Returns the count.
+ */
+export async function markUnchangedScoroImports(): Promise<number> {
+  const imported = await prisma.auditLog.findMany({
+    where: { entityType: 'quotation', action: 'CREATED', summary: { startsWith: 'Imported from SCORO quote CSV' } },
+    select: { entityId: true },
+  });
+  const ids = [...new Set(imported.map((r) => r.entityId))];
+  if (!ids.length) return 0;
+  const changed = await prisma.auditLog.findMany({
+    where: { entityType: 'quotation', action: 'UPDATED', entityId: { in: ids }, OR: R0_CHANGED },
+    select: { entityId: true },
+  });
+  const touched = new Set(changed.map((r) => r.entityId));
+  const unchanged = ids.filter((id) => !touched.has(id));
+  if (!unchanged.length) return 0;
+  const { count } = await prisma.quotationRevision.updateMany({
+    where: { quotationId: { in: unchanged }, revision: 0, importedUnchanged: false, status: { in: ['DRAFT', 'APPROVED'] } },
+    data: { importedUnchanged: true },
+  });
+  return count;
+}

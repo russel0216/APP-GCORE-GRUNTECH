@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { allPermissions, permissionsFor } from '../src/permissions/registry';
 import { DOCUMENT_TYPES } from '../src/shared/numbering';
 import { backfillPositions } from '../src/shared/plantilla';
-import { withdrawStaleQuotationApprovals } from '../src/shared/quotation';
+import { markUnchangedScoroImports, withdrawStaleQuotationApprovals } from '../src/shared/quotation';
 import { linkLegacyBookings } from '../src/shared/salesOrderBooking';
 import { closeLegacyBudgetIncreases } from '../src/shared/budgetRequests';
 import { migrateCostingMargins } from '../src/shared/costingLegacy';
@@ -1204,6 +1204,14 @@ async function main() {
     if (archive && archive.pdfs + archive.views > 0) {
       console.log(`  · Removed the SCORO archive's leavings: ${archive.pdfs} PDF(s), ${archive.views} saved view(s)`);
     }
+  }
+
+  // Quotations imported from SCORO before the "as imported, unchanged" mark
+  // existed (2026-10-11) take it where nobody has changed them since: they
+  // need no approval until a change is saved. A second run marks none.
+  {
+    const marked = await markUnchangedScoroImports();
+    if (marked) console.log(`  · Marked ${marked} SCORO-imported quotation revision(s) as unchanged since import`);
   }
 
   // Activity types as data (2026-10-08): the six built-ins under the enum's

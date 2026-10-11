@@ -1372,6 +1372,11 @@ model QuotationRevision {
   /// totals — a rate sheet, where the customer picks lines rather than buying
   /// the lot. The stored totals are still computed; only the paper omits them.
   hideTotal    Boolean @default(false)
+  /// A revision brought in by the SCORO import and not changed since
+  /// (2026-10-11, the owner's call): it needs no approval — the paper prints
+  /// Prepared by alone, the page offers no route and Won is open to it — until
+  /// somebody saves a change to it from Modify, which clears this for good.
+  importedUnchanged Boolean @default(false)
 
   approvedById String?
   approvedBy   User?     @relation("RevisionApprover", fields: [approvedById], references: [id], onDelete: SetNull)

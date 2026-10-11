@@ -541,6 +541,8 @@ async function writeScoroQuotes(
                 delivery: record.delivery,
                 paymentTerms: record.paymentTerms,
                 createdAt: record.issuedAt,
+                // As SCORO issued it: no approval until somebody changes it.
+                importedUnchanged: true,
               },
             ],
           },

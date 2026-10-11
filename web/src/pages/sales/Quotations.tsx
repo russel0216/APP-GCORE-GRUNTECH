@@ -662,6 +662,8 @@ export interface Revision {
   vatInclusive: boolean;
   /** SCORO's "Hide total": the PDF leaves the totals off. */
   hideTotal?: boolean;
+  /** As imported from SCORO and unchanged since: no approval until a change is saved. */
+  importedUnchanged?: boolean;
   prNumber: string | null;
   delivery: string | null;
   paymentTerms: string | null;
@@ -817,6 +819,11 @@ export function QuotationDetail() {
   const showPanel = quotation.canSeeCost && !!revision?.costPanel && revision.items.length > 0;
   const editable = quotation.canEdit && revision?.status === 'DRAFT';
   const approved = quotation.revisions.find((r) => r.status === 'APPROVED') ?? null;
+  // A draft as imported from SCORO and unchanged since needs no approval
+  // (2026-10-11, the owner's call): it may go to Won, and nothing asks for a
+  // route until a change is saved from Modify (`standsApproved` on the server).
+  const unchangedImport = quotation.revisions.find((r) => r.status === 'DRAFT' && r.importedUnchanged) ?? null;
+  const standing = approved ?? unchangedImport;
   // The quotation's value: the approved revision, else the latest (`quotationValue()` on the server).
   const valueRevision =
     approved ??
@@ -885,7 +892,7 @@ export function QuotationDetail() {
 
   const issued = revision ? dayKeyOf(new Date(revision.createdAt)) : null;
   const due = revision && issued ? addDays(issued, revision.validityDays) : null;
-  const canSubmit = editable && !!revision && revision.items.length > 0;
+  const canSubmit = editable && !!revision && revision.items.length > 0 && !revision.importedUnchanged;
   const canSend = quotation.canEdit && moves.some((m) => m.value === 'SUBMITTED');
   const address = quotation.site?.address
     ? [quotation.site.address, quotation.site.city].filter(Boolean).join(', ')
@@ -1115,6 +1122,15 @@ export function QuotationDetail() {
 
       <ErrorBox error={error} />
 
+      {editable && revision?.importedUnchanged && (
+        <div className="card sales-card-gap" role="note">
+          <p className="faint">
+            Imported from SCORO as it was issued there, so it needs no approval and its PDF is signed by the person who
+            prepared it alone. Once a change is saved from Modify, it goes through approval like any other quotation.
+          </p>
+        </div>
+      )}
+
       {canSubmit &&
         (() => {
           // The route the submit would take — the option's when it is
@@ -1288,7 +1304,7 @@ export function QuotationDetail() {
                     >
                       <option value="">Change status…</option>
                       {statusMoves.map((o) => {
-                        const needsApproval = o.value === 'WON' && !approved;
+                        const needsApproval = o.value === 'WON' && !standing;
                         return (
                           <option key={o.value} value={o.value} disabled={needsApproval}>
                             {reopening ? `Reopen — ${o.label}` : o.label}
@@ -1299,7 +1315,7 @@ export function QuotationDetail() {
                     </select>
                     <p id="qd-status-hint" className="faint sales-hint">
                       Moving it here also moves its lead, so the pipeline stays honest.
-                      {quotation.outcome !== 'WON' && !approved
+                      {quotation.outcome !== 'WON' && !standing
                         ? ' Won is available once a revision is approved — only the approved revision becomes a project.'
                         : ''}
                     </p>

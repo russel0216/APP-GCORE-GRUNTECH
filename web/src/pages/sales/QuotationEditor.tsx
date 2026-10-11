@@ -963,7 +963,9 @@ export function QuotationEditor() {
             </h1>
             <p className="faint qe-lead">
               {editing
-                ? `Draft revision ${revision!.revision}. Nothing changes until you save.`
+                ? revision!.importedUnchanged
+                  ? `Draft revision ${revision!.revision}, as imported from SCORO. Saving a change means it goes through approval like any other quotation.`
+                  : `Draft revision ${revision!.revision}. Nothing changes until you save.`
                 : 'Nothing is saved — and no number is used — until you press Save.'}
             </p>
           </div>

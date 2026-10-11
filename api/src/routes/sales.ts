@@ -85,6 +85,7 @@ import {
   leadStages,
   leadStageStatuses,
   valueRevision,
+  standsApproved,
 } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { env } from '../env';
@@ -1104,6 +1105,7 @@ const LIST_REVISION_SELECT = {
   discountPct: true,
   vatRate: true,
   vatInclusive: true,
+  importedUnchanged: true,
 } as const;
 
 /** Cents, so a sum of hundreds of totals does not drift by a centavo. */
@@ -1308,7 +1310,7 @@ quotationRoutes.get(
             // What the bulk status change needs to plan a move the way the
             // PATCH will judge it (assertOutcomeChange); the PATCH still decides.
             canEdit: canEditRecord(me, 'gops', 'quotations', r.ownerId),
-            hasApprovedRevision: r.revisions.some((v) => v.status === 'APPROVED'),
+            hasApprovedRevision: r.revisions.some(standsApproved),
             hasJob: r.revisions.some((v) => v.jobs.length > 0),
           };
         }),
@@ -1798,7 +1800,9 @@ quotationRoutes.get(
     const companyRate = company ? Number(company.vatRate) : 0.12;
     // The routes a submitter may opt into for the draft, at its total — e.g.
     // "Add the CEO as approver" once it is over ₱1,000,000.
-    const draft = quotation.revisions.find((r) => r.status === 'DRAFT');
+    // A draft as imported from SCORO and unchanged since needs no approval
+    // until a change is saved, so no route is offered for it.
+    const draft = quotation.revisions.find((r) => r.status === 'DRAFT' && !r.importedUnchanged);
     const options = draft ? await approvalOptions('quotation', Number(draft.total)) : [];
     // Where "Submit for approval" goes from here, and who decides each step —
     // the standard route and each option's — named before anybody presses it.
@@ -2221,7 +2225,7 @@ quotationRoutes.patch(
       where: { id: req.params.id },
       include: {
         revisions: {
-          select: { status: true, jobs: { select: { id: true, number: true }, take: 1 } },
+          select: { status: true, importedUnchanged: true, jobs: { select: { id: true, number: true }, take: 1 } },
         },
       },
     });
@@ -2235,7 +2239,7 @@ quotationRoutes.patch(
       const job = before.revisions.flatMap((r) => r.jobs)[0] ?? null;
       assertOutcomeChange(before.outcome, body.outcome, {
         lostReason: body.lostReason !== undefined ? body.lostReason : before.lostReason,
-        hasApprovedRevision: before.revisions.some((r) => r.status === 'APPROVED'),
+        hasApprovedRevision: before.revisions.some(standsApproved),
         hasJob: job !== null,
         jobNumber: job?.number ?? null,
       });
@@ -2584,6 +2588,8 @@ quotationRoutes.patch(
         ...(body.prNumber !== undefined ? { prNumber: body.prNumber || null } : {}),
         ...(body.delivery !== undefined ? { delivery: body.delivery || null } : {}),
         ...(body.paymentTerms !== undefined ? { paymentTerms: body.paymentTerms || null } : {}),
+        // A saved change ends "as imported from SCORO": approval from here on.
+        importedUnchanged: false,
       },
     });
     await recalcRevision(req.params.revisionId);
@@ -2630,6 +2636,7 @@ quotationRoutes.post(
 
     await prisma.$transaction(async (tx) => {
       await tx.quotationItem.deleteMany({ where: { revisionId: req.params.revisionId } });
+      await tx.quotationRevision.update({ where: { id: req.params.revisionId }, data: { importedUnchanged: false } });
       await tx.quotationItem.createMany({
         // The one mapping (shared/quotation.ts) — the editor previews the same.
         data: quotationLinesFromSections(sections).map((line) => ({
@@ -2680,6 +2687,9 @@ quotationRoutes.put(
       }
       for (const [i, line] of body.lines.entries()) await checkLine(line, tx, `Line ${i + 1}: `);
       const removed = await tx.quotationItem.deleteMany({ where: { revisionId } });
+      // A saved change ends "as imported from SCORO" (standsApproved): the
+      // revision needs approval from here on, like any other draft.
+      await tx.quotationRevision.update({ where: { id: revisionId }, data: { importedUnchanged: false } });
       if (body.lines.length) {
         await tx.quotationItem.createMany({
           data: body.lines.map((line, i) => ({ revisionId, ...lineData(line, i) })),
@@ -2738,7 +2748,8 @@ quotationRoutes.post(
 
     await prisma.quotationRevision.update({
       where: { id: revision.id },
-      data: { status: 'PENDING_APPROVAL' },
+      // Sent for approval, it is no longer "as imported": the paper prints the route.
+      data: { status: 'PENDING_APPROVAL', importedUnchanged: false },
     });
 
     try {
@@ -3039,11 +3050,15 @@ export async function quotationPrintData(
   // signed before that (`approvalSlots`): its content never changed after,
   // and nobody will sign the rest. Each with how to reach them, read here
   // for the paper only: the quotation's own response never carries a mobile.
-  const slots = await approvalSlots(
-    'quotation',
-    revision.id,
-    revision.status === 'DRAFT' ? { amount: Number(revision.total), requesterId: owner.id, optionId: opts.optionId } : undefined,
-  );
+  // A revision as imported from SCORO and unchanged since needs no approval
+  // (2026-10-11, the owner's call): Prepared by alone, no route.
+  const slots = revision.importedUnchanged
+    ? []
+    : await approvalSlots(
+        'quotation',
+        revision.id,
+        revision.status === 'DRAFT' ? { amount: Number(revision.total), requesterId: owner.id, optionId: opts.optionId } : undefined,
+      );
   const signatories: Signatory[] = [
     {
       role: 'Prepared by',
@@ -3052,7 +3067,7 @@ export async function quotationPrintData(
       ...ownerContact,
       at: revision.createdAt,
     },
-    ...(slots.length ? slotSignatories(slots) : await unroutedApproval(revision)),
+    ...(revision.importedUnchanged ? [] : slots.length ? slotSignatories(slots) : await unroutedApproval(revision)),
   ];
 
   return {
@@ -3727,6 +3742,7 @@ async function loadBoard(req: Parameters<typeof currentUser>[0]): Promise<BoardR
             validityDays: true,
             createdAt: true,
             discountPct: true,
+            importedUnchanged: true,
             costing: { select: { contractValue: true, totalCost: true } },
             jobs: { select: { id: true, number: true }, take: 1 },
           },

@@ -52,6 +52,7 @@ import {
   quotationStages,
   leadStage,
   leadStages,
+  standsApproved,
 } from '../src/shared/pipeline';
 import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
 import { valueRevision as valuedRevisionOf } from '../src/shared/pipeline';
@@ -71,7 +72,8 @@ import { listQuery } from '../src/http/kit';
 // onApprovalSettled subscriber. The real API gets it via src/index.ts, and the
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
-import { leadListSummary, leadListWhere, quotationListSummary, quotationListWhere } from '../src/routes/sales';
+import { leadListSummary, leadListWhere, printableQuotation, quotationListSummary, quotationListWhere, quotationPrintData } from '../src/routes/sales';
+import { markUnchangedScoroImports } from '../src/shared/quotation';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
 import { teamMembers, teamOf } from '../src/shared/team';
 // The same for the sales order's subscriber — act() below settles in this
@@ -1914,6 +1916,45 @@ async function main() {
         trail?.summary ?? 'no row',
       );
       check(`the series (${seriesKey}) was raised to the imported SEQ`, (await seriesRow()) === 40, String(await seriesRow()));
+
+      // As SCORO issued it, it needs no approval until somebody saves a
+      // change (2026-10-11, the owner's call): the mark, the paper's one
+      // sign-off, Won open to it — and a saved change ends it.
+      check('an imported revision is marked as imported and unchanged', rev?.importedUnchanged === true, String(rev?.importedUnchanged));
+      check(
+        'standsApproved: an approved revision, or a draft as imported — never a changed draft or a pending one',
+        standsApproved({ status: 'APPROVED' }) && standsApproved({ status: 'DRAFT', importedUnchanged: true }) &&
+          !standsApproved({ status: 'DRAFT', importedUnchanged: false }) && !standsApproved({ status: 'PENDING_APPROVAL', importedUnchanged: true }),
+      );
+      if (q && rev) {
+        const salesResolved = (await resolveUser(sales.id))!;
+        const paper = await quotationPrintData(await printableQuotation(salesResolved, q.id), (await printableQuotation(salesResolved, q.id)).revisions.find((r) => r.id === rev.id)!);
+        const roles = (paper.signatories ?? []).map((sg) => sg.role);
+        check('its paper is signed by Prepared by alone — no route, no Pending', roles.length === 1 && roles[0] === 'Prepared by', JSON.stringify(roles));
+        // A saved change (what PUT …/lines and PATCH …/revisions do) ends it,
+        // and the backfill never marks a quotation whose trail shows one.
+        await prisma.quotationRevision.update({ where: { id: rev.id }, data: { importedUnchanged: false } });
+        const changedRow = await prisma.auditLog.create({
+          data: { entityType: 'quotation', entityId: q.id, action: 'UPDATED', summary: `Replaced the lines of ${q.number} R0: 1 → 1 line` },
+        });
+        await markUnchangedScoroImports();
+        check(
+          'the backfill leaves a changed import unmarked',
+          (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: rev.id } })).importedUnchanged === false,
+        );
+        const changedPaper = await quotationPrintData(await printableQuotation(salesResolved, q.id), (await printableQuotation(salesResolved, q.id)).revisions.find((r) => r.id === rev.id)!);
+        check(
+          'once changed, its paper prints the route after Prepared by',
+          (changedPaper.signatories ?? []).length > 1 && changedPaper.signatories![0].role === 'Prepared by',
+          JSON.stringify((changedPaper.signatories ?? []).map((sg) => sg.role)),
+        );
+        await prisma.auditLog.delete({ where: { id: changedRow.id } });
+        await markUnchangedScoroImports();
+        check(
+          'and marks an import made before the mark existed, while its trail shows no change',
+          (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: rev.id } })).importedUnchanged === true,
+        );
+      }
 
       // A second commit of the same file: one update, nothing changed.
       const again = await importScoro([one], true);
