@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { Attachments } from '../../components/Attachments';
 import { ActivityLog } from '../../components/ActivityLog';
@@ -549,6 +550,8 @@ export function Leads() {
 
       <DataList<LeadRow>
         listKey="leads"
+        // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
+        defaultFilters={{ createdFrom: yearStartKey(new Date()) }}
         endpoint="/leads"
         columns={columns}
         rowKey={(l) => l.id}

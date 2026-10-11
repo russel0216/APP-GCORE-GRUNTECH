@@ -76,8 +76,10 @@ import {
   readListUrl,
   readView,
   saveView,
+  startFilters,
   viewQuery,
   writeListUrl,
+  yearStartKey,
   type FilterDef,
 } from '../../web/src/lib/listUrl';
 import {
@@ -2250,6 +2252,21 @@ async function main() {
       keys.join(',') === 'ownerId,createdFrom,createdTo,customerId,stage',
       keys.join(','),
     );
+
+    // Year to date on a bare visit (2026-10-11): defaults fill a URL that names
+    // no search and none of the list's filters — never a link that filters.
+    const ytd = { createdFrom: yearStartKey(new Date(2026, 9, 11, 23, 30)) };
+    const bareVisit = startFilters(readListUrl(new URLSearchParams('scope=all&new=1'), keys), undefined, ytd);
+    const linkedVisit = startFilters(readListUrl(new URLSearchParams('closingFrom=2026-11-01&stage=OPPORTUNITY'), [...keys, 'closingFrom']), undefined, ytd);
+    const searched = startFilters(readListUrl(new URLSearchParams('q=pump'), keys), { ownerId: 'u1' }, ytd);
+    check(
+      'a list’s defaults (year to date) fill a bare visit only; a link that filters, or a search, keeps its own set',
+      ytd.createdFrom === '2026-01-01' && JSON.stringify(bareVisit) === JSON.stringify({ createdFrom: '2026-01-01' }) &&
+        !('createdFrom' in linkedVisit) && linkedVisit.stage === 'OPPORTUNITY' && JSON.stringify(searched) === JSON.stringify({ ownerId: 'u1' }),
+      JSON.stringify({ bareVisit, linkedVisit, searched }),
+    );
+    const ytdUrl = writeListUrl(new URLSearchParams(), { q: '', scope: 'all', page: 1, active: bareVisit }, { filterKeys: keys, defaultScope: 'all' });
+    check('a default is written to the URL like any filter, so removing its chip shows everything', ytdUrl.get('createdFrom') === '2026-01-01', ytdUrl.toString());
 
     const linked = new URLSearchParams('stage=COMPLETED&createdFrom=2026-03-01&new=1&visit=abc&scope=all&page=2&q=pump');
     const read = readListUrl(linked, keys);

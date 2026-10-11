@@ -270,6 +270,19 @@ four databases and four copies of "customer".
     query (the G-CHAIN "awaiting delivery" tile and `?awaiting=true` are asserted
     equal). A page mounting two DataLists at once passes `urlState={false}` on
     one of them, or they share `?page=`.
+    **A default is not a preset** (2026-10-11, the owner's call: "default
+    view of quotation, leads, sales order is year to date"):
+    `defaultFilters` on DataList fills a BARE visit only — no `?q=` and none
+    of the list's filter keys in the URL (`startFilters()` in
+    `lib/listUrl.ts`, pinned by verify-foundation) — and is written to the
+    URL like any filter the person set, so removing its chip shows
+    everything and Back returns to it; a link that filters (a dashboard
+    tile, the Forecast's closing dates) is never narrowed by it, so its
+    count and the list's total stay one query. The Quotations and Leads
+    lists open on `createdFrom` = 1 January of this year, Sales Orders on
+    `dateFrom` (`yearStartKey()`), the summary cards and the printed list
+    following. A preset (`initialFilters`) stays what a menu entry IS and
+    is never written.
 
 17. **Every numeric input is `components/NumberInput.tsx`** (2026-10-06, the
     owner's call) — never `<input type="number">`, never a hand-rolled
@@ -440,7 +453,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,761 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,763 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -462,9 +475,10 @@ quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
 order on one page, and one on sales for a subheading worded in
 line_comment, and 24 on workspace for the Help box's tickets and who
-receives them, and one on sales for a row the database refuses):
+receives them, and one on sales for a row the database refuses, and 2 on
+foundation for the sales lists' year-to-date default):
 foundation
-318, masters 92, sales 524, costing 157, pipeline 92, calendar 96, numbering
+320, masters 92, sales 524, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 70, accounts 124. The

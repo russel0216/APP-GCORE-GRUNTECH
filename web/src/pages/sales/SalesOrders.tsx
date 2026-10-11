@@ -4,6 +4,7 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
+import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { NumberInput } from '../../components/NumberInput';
 import { RecordHeader } from '../../components/RecordHeader';
@@ -291,6 +292,8 @@ export function SalesOrders() {
 
       <DataList<SalesOrderListRow>
         listKey="sales-orders"
+        // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
+        defaultFilters={{ dateFrom: yearStartKey(new Date()) }}
         endpoint="/sales-orders"
         columns={columns}
         rowKey={(r) => r.id}

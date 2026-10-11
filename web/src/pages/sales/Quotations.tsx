@@ -4,6 +4,7 @@ import { ApiError, api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
+import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
 import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
@@ -374,6 +375,8 @@ export function Quotations() {
 
       <DataList<QuotationRow>
         listKey="quotations"
+        // Year to date on a bare visit (2026-10-11, the owner's call); a link that filters keeps its own set.
+        defaultFilters={{ createdFrom: yearStartKey(new Date()) }}
         endpoint="/quotations"
         columns={columns}
         rowKey={(q) => q.id}

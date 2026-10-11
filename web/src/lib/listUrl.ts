@@ -121,6 +121,30 @@ export function writeListUrl(
 }
 
 /**
+ * The filters a list opens with (2026-10-11, the owner's call: "default view
+ * of quotation, leads, sales order is year to date"): the route's presets,
+ * then the screen's DEFAULTS only on a bare visit — a URL naming no search
+ * and none of the list's filters — then whatever the URL says. A link that
+ * filters (a dashboard tile, the Forecast's closing dates) is never narrowed
+ * further by a default, so its count and the list's total stay one query.
+ * Unlike a preset, a default is written to the URL like any filter the person
+ * set, so removing its chip shows everything and Back returns to it.
+ */
+export function startFilters(
+  url: Pick<ListUrlState, 'q' | 'filters'>,
+  presets: Record<string, string> | undefined,
+  defaults: Record<string, string> | undefined,
+): Record<string, string> {
+  const bare = !url.q && Object.keys(url.filters).length === 0;
+  return { ...(presets ?? {}), ...(bare ? (defaults ?? {}) : {}), ...url.filters };
+}
+
+/** Year to date as a date range's FROM key: the first of January of `today`'s year ('YYYY-01-01', local). */
+export function yearStartKey(today: Date): string {
+  return `${today.getFullYear()}-01-01`;
+}
+
+/**
  * A saved view: the list's search, scope and filters as a query string — no
  * page, and nothing the list does not own. Kept per viewer in the browser.
  */

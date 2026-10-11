@@ -10,6 +10,7 @@ import {
   togglePage,
   readListUrl,
   readView,
+  startFilters,
   saveView,
   viewQuery,
   writeListUrl,
@@ -100,6 +101,13 @@ interface Props<T> {
    * a preset, such as the three service-report menus.
    */
   initialFilters?: Record<string, string>;
+  /**
+   * Filters the list opens with on a bare visit only — no search and none of
+   * its filters in the URL (`startFilters()` in lib/listUrl.ts): the sales
+   * lists' year to date. Written to the URL like any filter, so removing the
+   * chip shows everything; a link that filters is never narrowed by them.
+   */
+  defaultFilters?: Record<string, string>;
   /** Bump to force a reload from outside (after a create, say). */
   reloadToken?: number;
   /**
@@ -161,6 +169,7 @@ export function DataList<T>({
   emptyHint,
   emptyAction,
   initialFilters,
+  defaultFilters,
   reloadToken = 0,
   urlState = true,
   printPath,
@@ -192,10 +201,7 @@ export function DataList<T>({
   const [sort, setSort] = useState<string | null>(null);
   const [dir, setDir] = useState<'asc' | 'desc'>('desc');
   const [scope, setScope] = useState<ListScope>(fromUrl.scope ?? defaultScope);
-  const [active, setActive] = useState<Record<string, string>>({
-    ...(initialFilters ?? {}),
-    ...fromUrl.filters,
-  });
+  const [active, setActive] = useState<Record<string, string>>(() => startFilters(fromUrl, initialFilters, defaultFilters));
 
   // A preset that changes because the route changed — Preventive Maintenance to
   // Service Inspections, say — is a different screen, not a filter the user set.
@@ -204,7 +210,7 @@ export function DataList<T>({
   useEffect(() => {
     if (presetKey === firstPreset.current) return;
     firstPreset.current = presetKey;
-    setActive({ ...(initialFilters ?? {}), ...(urlState ? readListUrl(params, filterKeys).filters : {}) });
+    setActive(startFilters(urlState ? readListUrl(params, filterKeys) : { q: null, filters: {} }, initialFilters, defaultFilters));
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetKey]);
@@ -233,7 +239,9 @@ export function DataList<T>({
     setDebounced(next.q ?? '');
     setPage(next.page ?? 1);
     setScope(next.scope ?? defaultScope);
-    setActive({ ...(initialFilters ?? {}), ...next.filters });
+    // A bare URL arriving from outside (the menu entry clicked again) opens
+    // on the defaults, as a first visit does.
+    setActive(startFilters(next, initialFilters, defaultFilters));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params, urlState, filterKeysKey]);
 
