@@ -54,7 +54,7 @@ export const SALES_ORDER_FIELDS: DesignField[] = [
   { key: 'quotation.subject', label: 'Quotation subject', group: 'Quotation', sample: 'Supply and installation of an air compressor' },
   { key: 'customer.name', label: 'Customer, registered name', group: 'Customer', sample: 'Sample Manufacturing Corp.' },
   { key: 'customer.code', label: 'Customer code', group: 'Customer', sample: 'CUS-0042' },
-  { key: 'customer.address', label: 'Address (the quotation’s site)', group: 'Customer', sample: 'Lot 5 Phase 2, Light Industry Park, Laguna' },
+  { key: 'customer.address', label: 'Address (the quotation’s site, else the customer’s address)', group: 'Customer', sample: 'Lot 5 Phase 2, Light Industry Park, Laguna' },
   { key: 'customer.phone', label: 'Customer phone', group: 'Customer', sample: '(049) 555 0142' },
   { key: 'customer.tin', label: 'Customer TIN', group: 'Customer', sample: '123-456-789-000' },
   { key: 'contact.name', label: 'Contact', group: 'Contact', sample: 'Engr. Juan Dela Cruz' },

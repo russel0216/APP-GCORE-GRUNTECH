@@ -2,8 +2,9 @@ import { Prisma, type QuotationOutcome, type RevisionStatus } from '@prisma/clie
 import { prisma } from '../../prisma';
 import { required, optional, type ImportSpec, type ImportActor } from '../../shared/csv';
 import { nextNumber, setCounter, type CounterMove } from '../../shared/numbering';
-import { recalcQuotationRevision } from '../../shared/quotation';
-import { groupKey, rememberGroups } from '../../shared/quotationGroups';
+import { recalcQuotationRevision, upperText } from '../../shared/quotation';
+import { FALLBACK_GROUP, groupKey, rememberGroups } from '../../shared/quotationGroups';
+import { badRequest } from '../../http/kit';
 import { pipelineStages, stageProbability } from '../../shared/pipelineStages';
 import { audit } from '../../shared/audit';
 import { lineData, QUOTE_NUMBER, type QuotationLineInput } from '../sales';
@@ -279,7 +280,11 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
     { header: 'estimated_closing_date', example: '2026-04-10', hint: 'Expected closing' },
     { header: 'id', example: '8773', hint: 'SCORO’s quote id, kept in the audit row' },
     // The line columns of SCORO's lines export (2026-10-11, the owner's second file): one row per line.
-    { header: 'product_group', example: 'Schneider Electric', hint: 'The line’s group; a new one joins Admin › Categories › Quotation groups' },
+    {
+      header: 'product_group',
+      example: 'Schneider Electric',
+      hint: 'The line’s group, matched to Admin › Categories › Quotation groups; one not on the list is filed under the group you choose when you import, else OTHERS',
+    },
     { header: 'product_name', example: 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS', hint: 'The line’s title, as SCORO wrote it (a subheading’s text when is_subheading is 1)' },
     { header: 'line_comment', example: '32A Tap-off unit -1 Whip TPN, includes: …', hint: 'The line’s description' },
     { header: 'amount', example: '4704.000000000000', hint: 'The quantity' },
@@ -385,7 +390,7 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
       issuedAt,
       expectedClosing: scoroDate(row, 'estimated_closing_date'),
       validityDays,
-      subject: optional(row, 'quote_name') ?? `SCORO quote ${number}`,
+      subject: upperText(optional(row, 'quote_name') ?? `SCORO quote ${number}`),
       notes: optional(row, 'doc_description'),
       prNumber: optional(row, 'c_prnumber'),
       delivery: optional(row, 'c_delivery'),
@@ -399,7 +404,75 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
       lines: null,
     };
   },
+  // The groups the file uses that are not on the list (2026-10-11, the
+  // owner's call: "let me decide, or set it as OTHERS"): the dry run asks,
+  // and the commit's `options.groups` answers, OTHERS where it says nothing.
+  summarize: async (records) => {
+    const unlisted = await unlistedScoroGroups(records);
+    if (!unlisted.length) return undefined;
+    return { groups: { unlisted, choices: (await listedGroups()).map((g) => g.name), fallback: FALLBACK_GROUP } };
+  },
 };
+
+/** The groups the quotation editor's dropdown offers: the active ones, in their order. */
+async function listedGroups(): Promise<{ name: string; key: string }[]> {
+  return prisma.quotationGroup.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    select: { name: true, key: true },
+  });
+}
+
+/** The key a line's SCORO group answers to; '' for a priced line that names none. */
+const scoroGroupKey = (group: string | null | undefined) => (group ? groupKey(group) : '');
+
+/**
+ * Every group the records' lines name that is not on the list — and '' for
+ * priced lines that name none — with how many lines and quotations use it.
+ */
+export async function unlistedScoroGroups(
+  records: { number: string; lines: QuotationLineInput[] | null }[],
+): Promise<{ key: string; name: string; lines: number; quotations: number }[]> {
+  const listed = new Set((await listedGroups()).map((g) => g.key));
+  const found = new Map<string, { key: string; name: string; lines: number; numbers: Set<string> }>();
+  for (const record of records) {
+    for (const line of record.lines ?? []) {
+      if (line.isHeading) continue;
+      const key = scoroGroupKey(line.group);
+      if (listed.has(key)) continue;
+      const entry = found.get(key) ?? { key, name: line.group ?? '(no group)', lines: 0, numbers: new Set<string>() };
+      entry.lines++;
+      entry.numbers.add(record.number);
+      found.set(key, entry);
+    }
+  }
+  return [...found.values()].map(({ numbers, ...e }) => ({ ...e, quotations: numbers.size }));
+}
+
+/**
+ * How the commit files each line: a group on the list under the list's own
+ * spelling, one that is not under the group the person chose for it
+ * (`options.groups`, keyed by the SCORO group's key), else OTHERS. A choice
+ * that is not a group on the list is refused before anything is written.
+ */
+async function groupResolver(options?: Record<string, unknown>) {
+  const listed = new Map((await listedGroups()).map((g) => [g.key, g.name]));
+  const fallback = listed.get(groupKey(FALLBACK_GROUP)) ?? FALLBACK_GROUP;
+  const chosen = new Map<string, string>();
+  const asked = options?.groups;
+  if (asked && typeof asked === 'object' && !Array.isArray(asked)) {
+    for (const [key, value] of Object.entries(asked as Record<string, unknown>)) {
+      if (typeof value !== 'string' || !value.trim()) continue;
+      const name = listed.get(groupKey(value));
+      if (!name) throw badRequest(`"${value}" is not a group on the list — choose one from Admin › Categories › Quotation groups`);
+      chosen.set(key, name);
+    }
+  }
+  return (group: string | null | undefined): string => {
+    const key = scoroGroupKey(group);
+    return listed.get(key) ?? chosen.get(key) ?? fallback;
+  };
+}
 
 /** What the summary line says of itself until the lines export replaces it. */
 export const SUMMARY_LINE_TITLE = 'As quoted in SCORO';
@@ -409,13 +482,27 @@ export const summaryLineDescription = (number: string) =>
 async function writeScoroQuotes(
   records: { record: ScoroQuoteRecord; existingId: string | null }[],
   actor?: ImportActor,
+  options?: Record<string, unknown>,
 ): Promise<void> {
   const by = { actorId: actor?.id ?? null, actorName: actor?.name ?? null };
-  /** The lines a record stores: the file's, or the one summary line. */
+  // Every line under a group on the list — refused here, before anything is
+  // written, when a choice names a group that is not.
+  const groupOf = await groupResolver(options);
+  /** The groups a record's lines were moved off, for its audit row. */
+  const movedGroups = (record: ScoroQuoteRecord) => {
+    const moved: Record<string, string> = {};
+    for (const l of record.lines ?? []) {
+      if (l.isHeading) continue;
+      const to = groupOf(l.group);
+      if ((l.group ?? '') !== to && scoroGroupKey(l.group) !== groupKey(to)) moved[l.group ?? '(no group)'] = to;
+    }
+    return moved;
+  };
+  /** The lines a record stores: the file's, each under a listed group, or the one summary line. */
   const linesOf = (record: ScoroQuoteRecord): QuotationLineInput[] =>
-    record.lines ?? [
+    record.lines?.map((l) => (l.isHeading ? l : { ...l, group: groupOf(l.group) })) ?? [
       {
-        group: record.group,
+        group: groupOf(record.group),
         title: SUMMARY_LINE_TITLE,
         description: summaryLineDescription(record.number),
         quantity: 1,
@@ -440,8 +527,8 @@ async function writeScoroQuotes(
         });
         if (!rev || rev.status !== 'DRAFT' || rev.items.length !== 1 || rev.items[0].title !== SUMMARY_LINE_TITLE) return;
         await tx.quotationItem.delete({ where: { id: rev.items[0].id } });
-        await tx.quotationItem.createMany({ data: record.lines!.map((line, i) => ({ revisionId: rev.id, ...lineData(line, i) })) });
-        await rememberGroups(tx, record.lines!.map((l) => l.group));
+        const fileLines = linesOf(record);
+        await tx.quotationItem.createMany({ data: fileLines.map((line, i) => ({ revisionId: rev.id, ...lineData(line, i) })) });
         await recalcQuotationRevision(rev.id, tx);
         await audit(
           {
@@ -449,7 +536,7 @@ async function writeScoroQuotes(
             entityId: existingId,
             action: 'UPDATED',
             summary: `Replaced the summary line with ${record.lines!.length} line${record.lines!.length === 1 ? '' : 's'} from the SCORO lines export`,
-            after: { scoroId: record.scoroId, number: record.number, lines: record.lines!.length },
+            after: { scoroId: record.scoroId, number: record.number, lines: record.lines!.length, groupsMoved: movedGroups(record) },
             ...by,
           },
           undefined,
@@ -552,10 +639,10 @@ async function writeScoroQuotes(
       const revisionId = quotation.revisions[0].id;
 
       // The file's lines, or the one summary line, in the shape every
-      // quotation line is stored in; SCORO's groups join the master.
+      // quotation line is stored in — each under a group on the list.
       const lines = linesOf(record);
       await tx.quotationItem.createMany({ data: lines.map((line, i) => ({ revisionId, ...lineData(line, i) })) });
-      await rememberGroups(tx, lines.map((l) => l.group));
+      await rememberGroups(tx, [FALLBACK_GROUP]);
       await recalcQuotationRevision(revisionId, tx);
 
       // The series follows the highest imported number and is never lowered
@@ -569,7 +656,14 @@ async function writeScoroQuotes(
           entityId: quotation.id,
           action: 'CREATED',
           summary: `Imported from SCORO quote CSV (SCORO id ${record.scoroId ?? '—'})`,
-          after: { scoroId: record.scoroId, number: record.number, outcome: record.outcome, lines: lines.length, ...(counter ? { counter } : {}) },
+          after: {
+            scoroId: record.scoroId,
+            number: record.number,
+            outcome: record.outcome,
+            lines: lines.length,
+            groupsMoved: movedGroups(record),
+            ...(counter ? { counter } : {}),
+          },
           ...by,
         },
         undefined,

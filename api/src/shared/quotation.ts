@@ -358,6 +358,28 @@ export async function withdrawStaleQuotationApprovals(revisionIds?: string[]): P
  * out. Null when none is given, so a line typed as a title alone (every line
  * from before, SCORO's included) keeps the title it has.
  */
+/**
+ * Capital letters, as the owner asked for the quote name and a line's Brand,
+ * Product type and Part number (2026-10-11). A character whose capital is not
+ * one character inside Latin-1 is left as typed: 'µ' would become a Greek
+ * capital the PDF fonts cannot draw, and 'ß' would grow into "SS". The web's
+ * copy is `web/src/lib/caps.ts`, pinned equal by verify-sales.
+ */
+export function upperText(value: string): string {
+  let out = '';
+  for (const ch of value) {
+    const up = ch.toUpperCase();
+    out += up.length === 1 && up.charCodeAt(0) <= 0xff ? up : ch;
+  }
+  return out;
+}
+
+/** A line's Brand, Product type and Part number in capitals, empty ones null. */
+export function capsParts(line: { brand?: string | null; productType?: string | null; partNumber?: string | null }) {
+  const cap = (v?: string | null) => (v && v.trim() ? upperText(v.trim()) : null);
+  return { brand: cap(line.brand), productType: cap(line.productType), partNumber: cap(line.partNumber) };
+}
+
 export function productTitle(parts: { brand?: string | null; productType?: string | null; partNumber?: string | null }): string | null {
   const t = [parts.brand, parts.productType, parts.partNumber]
     .map((p) => (p ?? '').trim().replace(/\s+/g, ' '))

@@ -16,6 +16,7 @@ import {
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
+import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
 import { nextNumber } from '../shared/numbering';
 import { manilaDate } from '../shared/day';
@@ -27,6 +28,7 @@ import {
   stripLineCost,
   QUOTATION_EXTRA_TAX_RATES,
   productTitle,
+  capsParts,
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
@@ -92,7 +94,7 @@ export function canSeeOrderCost(me: ReturnType<typeof currentUser>, ownerId: str
 }
 
 const ORDER_INCLUDE = {
-  customer: { select: { id: true, code: true, name: true, tin: true, phone: true } },
+  customer: { select: { id: true, code: true, name: true, tin: true, phone: true, address: true } },
   contact: { select: { id: true, name: true, position: true } },
   quotation: { select: { id: true, number: true, subject: true, siteId: true } },
   owner: { select: { id: true, name: true, email: true, position: true } },
@@ -860,10 +862,9 @@ salesOrderRoutes.put(
               orderId: order.id,
               isHeading: false,
               group: l.group || null,
-              brand: l.brand || null,
-              productType: l.productType || null,
-              partNumber: l.partNumber || null,
-              title: productTitle(l) ?? (l.title || null),
+              // In capitals, as on the quotation (2026-10-11).
+              ...capsParts(l),
+              title: productTitle(capsParts(l)) ?? (l.title || null),
               description: l.description ?? '',
               quantity: d(l.quantity),
               unit: l.unit,
@@ -1263,7 +1264,7 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'quotation.subject': order.quotation.subject,
     'customer.name': order.customer.name,
     'customer.code': order.customer.code,
-    'customer.address': [site?.address, site?.city].filter(Boolean).join(', '),
+    'customer.address': documentAddress(order.customer, site),
     'customer.phone': order.customer.phone ?? '',
     'customer.tin': order.customer.tin ?? '',
     'contact.name': contact?.name ?? '',

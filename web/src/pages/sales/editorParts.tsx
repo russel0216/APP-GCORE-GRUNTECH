@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { upperText } from '../../lib/caps';
 import { api, qs } from '../../lib/api';
 import { lineAmount, quotationTotals } from '../../lib/quotationMath';
 import { formatMoney } from '../../components/ui';
@@ -134,9 +135,10 @@ export function linePayload(l: Line) {
   }
   return {
     group: l.group.trim() || null,
-    brand: l.brand.trim() || null,
-    productType: l.productType.trim() || null,
-    partNumber: l.partNumber.trim() || null,
+    // In capitals (2026-10-11); the server capitalises them too.
+    brand: upperText(l.brand.trim()) || null,
+    productType: upperText(l.productType.trim()) || null,
+    partNumber: upperText(l.partNumber.trim()) || null,
     title: productSentence(l) ?? (l.title.trim() || null),
     description: l.description,
     quantity: Number(l.quantity),
@@ -153,8 +155,22 @@ export const lineField = (key: string, field: string) => `qe-line-${key}-${field
 
 /** The three boxes as the paper prints them — the server's `productTitle`, mirrored. Null when all three are empty. */
 export function productSentence(l: { brand: string; productType: string; partNumber: string }): string | null {
-  const parts = [l.brand, l.productType, l.partNumber].map((p) => p.trim().replace(/\s+/g, ' ')).filter(Boolean);
+  const parts = [l.brand, l.productType, l.partNumber].map((p) => upperText(p.trim().replace(/\s+/g, ' '))).filter(Boolean);
   return parts.length ? parts.join(', ') : null;
+}
+
+/**
+ * Why a line's group will not do, or null (2026-10-11, the owner's call:
+ * "don't proceed save of quotation if the group is not selected"): a priced
+ * line names a group, and one ON THE LIST — an older spelling or a group since
+ * switched off still shows in its dropdown, marked, but must be chosen again.
+ * `known` is the active list; while it has not loaded only emptiness counts.
+ */
+export function groupProblem(l: Line, known: KnownGroup[]): string | null {
+  if (l.isHeading) return null;
+  if (!l.group.trim()) return 'Choose a product group';
+  if (known.length && !knownGroupOf(known, l.group)) return 'Choose a product group from the list';
+  return null;
 }
 
 /** A group as the editor's dropdown offers it (Admin › Categories › Quotation groups). */

@@ -322,6 +322,7 @@ export function Customer360Page() {
               <Detail label="Phone" value={customer.phone} />
               <Detail label="Email" value={customer.email} />
               <Detail label="Website" value={customer.website} />
+              <Detail label="Address" value={customer.address} />
             </dl>
           </div>
 

@@ -587,3 +587,15 @@ tr.qe-line-heading td {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
+/* Capitals as typed (2026-10-11, the owner's call): the quote name and a
+   line's Brand, Product type and Part number. Saved in capitals by the editor
+   and the server alike; the placeholder keeps its own case. */
+.caps-input,
+.qe-product-parts input {
+  text-transform: uppercase;
+}
+.caps-input::placeholder,
+.qe-product-parts input::placeholder {
+  text-transform: none;
+}

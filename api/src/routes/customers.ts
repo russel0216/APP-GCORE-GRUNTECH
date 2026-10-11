@@ -579,6 +579,8 @@ const customerSchema = z.object({
   phone: z.string().trim().optional().nullable(),
   email: z.string().trim().email('Enter a valid email').optional().nullable().or(z.literal('')),
   website: z.string().trim().optional().nullable(),
+  /** The address a quotation prints unless a site is chosen on it (2026-10-11). */
+  address: z.string().trim().max(500).optional().nullable(),
   notes: z.string().optional().nullable(),
   isActive: z.boolean().default(true),
 });
@@ -612,6 +614,7 @@ customerRoutes.post(
           phone: body.phone || null,
           email: body.email || null,
           website: body.website || null,
+          address: body.address || null,
           notes: body.notes || null,
           isActive: body.isActive,
           createdById: me.id,
@@ -666,6 +669,7 @@ customerRoutes.patch(
         ...(body.phone !== undefined ? { phone: body.phone || null } : {}),
         ...(body.email !== undefined ? { email: body.email || null } : {}),
         ...(body.website !== undefined ? { website: body.website || null } : {}),
+        ...(body.address !== undefined ? { address: body.address || null } : {}),
         ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
         ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
       },

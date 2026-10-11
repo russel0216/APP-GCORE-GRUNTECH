@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { upperText } from '../../lib/caps';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -26,6 +27,7 @@ import {
   partsFromSuggestion,
   productSentence,
   knownGroupOf,
+  groupProblem,
   type KnownGroup,
   blankLine,
   CellError,
@@ -215,6 +217,9 @@ export function QuotationEditor() {
   const [contacts, setContacts] = useState<Option[]>([]);
   const [sites, setSites] = useState<Option[]>([]);
   const [customerTerms, setCustomerTerms] = useState<string | null>(null);
+  // The customer's own address — what the quotation prints unless a site is chosen (2026-10-11).
+  const [customerAddress, setCustomerAddress] = useState<string | null>(null);
+  const [siteAddresses, setSiteAddresses] = useState<Record<string, string>>({});
   const [leads, setLeads] = useState<{ id: string; companyName: string }[]>([]);
   const [lead, setLead] = useState<LeadForQuote | null>(null);
   const [costings, setCostings] = useState<CostingOption[]>([]);
@@ -534,14 +539,26 @@ export function QuotationEditor() {
       setContacts([]);
       setSites([]);
       setCustomerTerms(null);
+      setCustomerAddress(null);
+      setSiteAddresses({});
       return;
     }
     api
-      .get<{ name: string; paymentTerms: string | null; contacts: Option[]; sites: Option[] }>(`/customers/${customerId}`)
+      .get<{
+        name: string;
+        paymentTerms: string | null;
+        address: string | null;
+        contacts: Option[];
+        sites: (Option & { address?: string | null; city?: string | null })[];
+      }>(`/customers/${customerId}`)
       .then((c) => {
         setContacts(c.contacts);
         setSites(c.sites);
         setCustomerTerms(c.paymentTerms);
+        setCustomerAddress(c.address?.trim() || null);
+        setSiteAddresses(
+          Object.fromEntries(c.sites.map((st) => [st.id, [st.address, st.city].map((p) => (p ?? '').trim()).filter(Boolean).join(', ')])),
+        );
         setHeader((h) => {
           if (h.customer?.id !== customerId) return h;
           const next = { ...h };
@@ -770,7 +787,8 @@ export function QuotationEditor() {
     for (const l of priced) {
       if (l.isHeading) continue;
       // The owner's call (2026-10-08): a quotation cannot proceed with a line that names no product group.
-      if (!l.group.trim()) flag(lineField(l.key, 'group'), 'Choose a product group');
+      const groupWrong = groupProblem(l, knownGroups);
+      if (groupWrong) flag(lineField(l.key, 'group'), groupWrong);
       if (!productSentence(l) && !l.title.trim() && !l.description.trim()) {
         flag(lineField(l.key, 'productType'), 'Give the line a brand, product type or part number, or a description');
       }
@@ -806,7 +824,7 @@ export function QuotationEditor() {
           siteId: header.siteId || null,
           leadId: header.leadId || null,
           costingId: header.costingId || null,
-          subject: header.subject.trim(),
+          subject: upperText(header.subject.trim()),
           // Sent only when it is not the suggestion: otherwise the next free
           // number is issued as the quotation is saved.
           ...(header.number.trim() && header.number.trim() !== preview?.number ? { number: header.number.trim() } : {}),
@@ -852,7 +870,7 @@ export function QuotationEditor() {
       // quotation page and the board, and a refusal leaves the lines saved.
       const moved = header.outcome !== quotation!.outcome;
       await api.patch(`/quotations/${quotation!.id}`, {
-        subject: header.subject.trim(),
+        subject: upperText(header.subject.trim()),
         ...(header.number.trim() !== quotation!.number ? { number: header.number.trim() } : {}),
         expectedClosing: header.expectedClosing || null,
         contactId: header.contactId || null,
@@ -1027,21 +1045,34 @@ export function QuotationEditor() {
                 </div>
               </LooseField>
             )}
-            {sites.length > 0 && (
-              <Field label="Site">
-                <select value={header.siteId} onChange={(e) => set('siteId', e.target.value)}>
-                  <option value="">— none —</option>
-                  {sites.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            )}
+            {header.customer &&
+              // The customer's own address prints; a site, when one is chosen, prints instead (2026-10-11).
+              (sites.length > 0 ? (
+                <Field
+                  label="Address"
+                  hint={
+                    (header.siteId ? siteAddresses[header.siteId] : customerAddress) ||
+                    (header.siteId ? 'This site has no address' : 'No address on the customer yet — add one on the customer')
+                  }
+                >
+                  <select value={header.siteId} onChange={(e) => set('siteId', e.target.value)}>
+                    <option value="">The customer’s address</option>
+                    {sites.map((st) => (
+                      <option key={st.id} value={st.id}>
+                        Site: {st.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ) : (
+                <Static label="Address">
+                  {customerAddress ?? <span className="faint">No address on the customer yet — add one on the customer</span>}
+                </Static>
+              ))}
             <Field label="Quote name" required error={errors.subject}>
               <input
                 id="qe-subject"
+                className="caps-input"
                 value={header.subject}
                 autoFocus={!!(preset.leadId || preset.costingId || preset.customerId || preset.duplicate) && !editing}
                 onChange={(e) => set('subject', e.target.value)}
@@ -1348,6 +1379,7 @@ export function QuotationEditor() {
                         {groupOptions(l.group).map((g) => (
                           <option key={g.name} value={g.name}>
                             {g.name}
+                            {knownGroupOf(knownGroups, g.name) ? '' : ' — not on the list'}
                           </option>
                         ))}
                       </select>
@@ -1857,7 +1889,7 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
       const moved = form.outcome !== current;
       await api.patch(`/quotations/${quotation.id}`, {
         ...(form.number.trim() !== quotation.number ? { number: form.number.trim() } : {}),
-        subject: form.subject.trim(),
+        subject: upperText(form.subject.trim()),
         contactId: form.contactId || null,
         siteId: form.siteId || null,
         expectedClosing: form.expectedClosing || null,
@@ -1975,9 +2007,9 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               </Field>
             )}
             {sites.length > 0 && (
-              <Field label="Site">
+              <Field label="Address" hint="The customer’s address prints unless a site is chosen.">
                 <select value={form.siteId} onChange={(e) => setForm((f) => ({ ...f, siteId: e.target.value }))}>
-                  <option value="">— none —</option>
+                  <option value="">The customer’s address</option>
                   {sites.map((st) => (
                     <option key={st.id} value={st.id}>
                       {st.name}
@@ -1987,7 +2019,7 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               </Field>
             )}
             <Field label="Quote name" required>
-              <input value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} />
+              <input className="caps-input" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} />
             </Field>
           </div>
           <div className="qe-col">

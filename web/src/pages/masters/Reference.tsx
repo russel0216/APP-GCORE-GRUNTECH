@@ -163,6 +163,8 @@ interface CategorySpec<T extends CategoryRow> {
   canSave?: (form: Form) => boolean;
   /** Whether this row may be deleted — besides `admin.categories.delete`, which the modal checks. */
   deletable: (row: T) => boolean;
+  /** What the foot's Delete asks, where deleting does more than remove the row. */
+  deleteQuestion?: (row: T) => string;
   /** The note above an existing row's fields: what is fixed on it, or why it cannot be deleted. */
   notice?: (row: T) => ReactNode;
 }
@@ -353,9 +355,9 @@ const QUOTATION_GROUPS: CategorySpec<QuotationGroup> = {
     { key: 'lines', head: 'Lines', headClass: 'right', cellClass: 'right', render: (g) => (g.lineCount ?? 0).toLocaleString('en-US') },
     { key: 'status', head: 'Status', render: (g) => activeBadge(g.isActive) },
   ],
-  empty: { title: 'No quotation groups yet', hint: 'A group typed on a quotation line is added here when the quotation is saved.' },
+  empty: { title: 'No quotation groups yet', hint: 'Add the groups a quotation line may be filed under.' },
   footnote:
-    "The quotation editor offers these for a line's Group, which every priced line must choose. A line keeps the group it was saved with, so renaming one here does not rewrite quotations already issued; a group in use is deactivated rather than deleted. Picking a group with a brand fills the line's Brand box when it is empty.",
+    "The quotation editor offers these for a line's Group, which every priced line must choose. A line keeps the group it was saved with, so renaming one here does not rewrite quotations already issued. Deleting a group moves the lines filed under it to OTHERS; OTHERS itself cannot be deleted. Picking a group with a brand fills the line's Brand box when it is empty.",
   blank: { name: '', description: '', brand: '', sortOrder: 0, isActive: true },
   fromRow: (g) => ({ name: g.name, description: g.description ?? '', brand: g.brand ?? '', sortOrder: g.sortOrder, isActive: g.isActive }),
   fields: () => [
@@ -373,12 +375,17 @@ const QUOTATION_GROUPS: CategorySpec<QuotationGroup> = {
   ],
   payload: (f) => ({ ...f, description: text(f.description).trim() || null, brand: text(f.brand).trim() || null }),
   canSave: (f) => !!text(f.name).trim(),
-  deletable: (g) => (g.lineCount ?? 0) === 0,
-  notice: (g) => {
+  // Any group but OTHERS may go (2026-10-11, the owner's call): its lines move to OTHERS.
+  deletable: (g) => g.name.trim().toUpperCase() !== 'OTHERS',
+  deleteQuestion: (g) => {
     const inUse = g.lineCount ?? 0;
-    if (inUse === 0) return null;
-    return `${inUse === 1 ? 'One quotation line is' : `${inUse.toLocaleString('en-US')} quotation lines are`} filed under this group, so it cannot be deleted — untick Active to stop it being suggested.`;
+    const lines = inUse === 0 ? '' : ` ${inUse === 1 ? 'The one quotation line' : `The ${inUse.toLocaleString('en-US')} quotation lines`} filed under it move to OTHERS.`;
+    return `Delete the quotation group ${g.name}?${lines} It cannot be undone.`;
   },
+  notice: (g) =>
+    g.name.trim().toUpperCase() === 'OTHERS'
+      ? 'OTHERS is where the lines of a deleted group go, so it cannot be deleted.'
+      : null,
 };
 
 const ACTIVITY_TYPES: CategorySpec<ActivityTypeDef> = {
@@ -715,7 +722,7 @@ function CategoryModal<T extends CategoryRow>({
             row && spec.deletable(row) && can('admin.categories.delete')
               ? {
                   label: 'Delete',
-                  question: `Delete the ${spec.noun} ${row.name}? It cannot be undone.`,
+                  question: spec.deleteQuestion ? spec.deleteQuestion(row) : `Delete the ${spec.noun} ${row.name}? It cannot be undone.`,
                   onConfirm: remove,
                   disabled: busy,
                 }

@@ -77,6 +77,11 @@ export const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
     },
     { header: 'Payment Terms', example: '30 days' },
     { header: 'Credit Limit', example: '500000' },
+    {
+      header: 'Address',
+      example: 'Carmen, Cagayan de Oro',
+      hint: 'The address a quotation prints; blank takes the site’s address and city, and never clears one on file',
+    },
     { header: 'Phone', example: '+63 88 123 4567' },
     { header: 'Email', example: 'purchasing@samplehospital.ph' },
     { header: 'Website', example: 'www.samplehospital.ph' },
@@ -115,6 +120,12 @@ export const customerSpec: ImportSpec<Prisma.CustomerCreateInput> = {
     phone: optional(row, 'Phone'),
     email: optional(row, 'Email'),
     website: optional(row, 'Website'),
+    // The customer's own address (2026-10-11): the file's Address, else its
+    // site's address and city; a blank leaves an address on file as it is.
+    ...((): { address?: string } => {
+      const address = optional(row, 'Address') ?? ([optional(row, 'Site Address'), optional(row, 'Site City')].filter(Boolean).join(', ') || null);
+      return address ? { address } : {};
+    })(),
     notes: optional(row, 'Notes'),
     isActive: bool(row, 'Active'),
     // Carried through to the writer below.
@@ -453,8 +464,16 @@ export const itemSpec: ImportSpec<Prisma.ItemCreateInput> = {
 export interface Registered {
   spec: ImportSpec<never>;
   permission: string;
-  /** `actor` is who pressed Import, for a writer that files audit rows of its own (the SCORO quotes). */
-  write: (records: { record: never; existingId: string | null }[], actor?: ImportActor) => Promise<void>;
+  /**
+   * `actor` is who pressed Import, for a writer that files audit rows of its
+   * own (the SCORO quotes); `options` is the person's answer to what the dry
+   * run's `extra` asked (the SCORO quotes' groups), sent with the commit.
+   */
+  write: (
+    records: { record: never; existingId: string | null }[],
+    actor?: ImportActor,
+    options?: Record<string, unknown>,
+  ) => Promise<void>;
 }
 
 /**
@@ -588,6 +607,16 @@ importRoutes.post(
 
     if (!req.file) throw badRequest('Choose a CSV file');
     const commit = req.query.commit === 'true' || req.body?.commit === 'true';
+    // The answers to what the dry run asked (`extra`), as JSON beside the file.
+    let options: Record<string, unknown> | undefined;
+    if (typeof req.body?.options === 'string' && req.body.options.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(req.body.options);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) options = parsed as Record<string, unknown>;
+      } catch {
+        throw badRequest('The import options are not readable');
+      }
+    }
 
     // Decoded from whatever the file was written in (SCORO's export is
     // UTF-16), never read as UTF-8 and hoped for.
@@ -595,7 +624,7 @@ importRoutes.post(
       decodeCsv(req.file.buffer),
       entry.spec,
       commit,
-      (records) => entry.write(records, { id: me.id, name: me.name }),
+      (records) => entry.write(records, { id: me.id, name: me.name }, options),
     );
 
     if (report.committed) {

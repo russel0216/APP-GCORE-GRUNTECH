@@ -17,6 +17,7 @@ import {
 } from '../http/kit';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
+import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext, setCounter, type CounterMove } from '../shared/numbering';
 import { notify } from '../shared/notifications';
@@ -113,6 +114,8 @@ import {
   quotationTaxOptions,
   QUOTATION_EXTRA_TAX_RATES,
   productTitle,
+  upperText,
+  capsParts,
 } from '../shared/quotation';
 
 const d = (v: number | string | null | undefined) =>
@@ -971,15 +974,9 @@ async function loadQuotation(id: string) {
           email: true,
           website: true,
           paymentTerms: true,
-          // The customer block on the PDF prints an address; a customer keeps
-          // its addresses on its sites, so the first active one stands in
-          // when the quotation names none.
-          sites: {
-            where: { isActive: true },
-            select: { address: true, city: true },
-            orderBy: { createdAt: 'asc' },
-            take: 1,
-          },
+          // The customer block on the PDF prints the customer's own address
+          // unless the quotation names a site (2026-10-11, documentAddress).
+          address: true,
         },
       },
       contact: { select: { id: true, name: true, position: true, email: true, phone: true, mobile: true } },
@@ -1778,7 +1775,7 @@ quotationRoutes.get(
 
     const showCost = canSeeQuotationCost(me, quotation.ownerId);
     const { customer, ...rest } = quotation;
-    const { sites, ...customerRest } = customer;
+    const customerRest = customer;
 
     // SCORO's status block: the previous status, who moved it and when, and
     // how long it sat in each — read off the audit rows every move writes.
@@ -1843,7 +1840,8 @@ quotationRoutes.get(
       taxOptions: quotationTaxOptions(companyRate),
       approvalOptions: options,
       approvalRoutes,
-      customer: { ...customerRest, address: sites[0] ? [sites[0].address, sites[0].city].filter(Boolean).join(', ') : null },
+      // The customer's own address — what the quotation prints unless a site is chosen (2026-10-11).
+      customer: { ...customerRest, address: documentAddress(customerRest) || null },
       revisions: quotation.revisions.map((r) =>
         presentRevision(r as unknown as Record<string, unknown>, showCost),
       ),
@@ -1892,6 +1890,7 @@ const itemSchema = z.object(itemFields);
 async function checkLine(
   line: {
     isHeading?: boolean | null;
+    group?: string | null;
     title?: string | null;
     brand?: string | null;
     productType?: string | null;
@@ -1910,6 +1909,9 @@ async function checkLine(
   if (!(line.title ?? '').trim() && !productTitle(line) && !(line.description ?? '').trim()) {
     throw badRequest(`${where}Give the line a brand, product type or part number, or a description`);
   }
+  // The owner's call (2026-10-08, held at save since 2026-10-11): no
+  // quotation is saved with a priced line that names no product group.
+  if (!(line.group ?? '').trim()) throw badRequest(`${where}Choose a product group`);
   if (line.providerSupplierId && line.providerUserId) {
     throw badRequest(`${where}A line’s cost is carried by a supplier OR by one of our people, not both`);
   }
@@ -1958,10 +1960,9 @@ export function lineData(line: QuotationLineInput, sortOrder: number) {
   return {
     isHeading: false,
     group: line.group || null,
-    brand: line.brand || null,
-    productType: line.productType || null,
-    partNumber: line.partNumber || null,
-    title: productTitle(line) ?? (line.title || null),
+    // The three product boxes in capitals (2026-10-11), and the title is their sentence.
+    ...capsParts(line),
+    title: productTitle(capsParts(line)) ?? (line.title || null),
     description: line.description ?? '',
     quantity: d(line.quantity),
     unit: line.unit,
@@ -1994,7 +1995,8 @@ const quotationSchema = z.object({
   contactId: z.string().optional().nullable(),
   siteId: z.string().optional().nullable(),
   leadId: z.string().optional().nullable(),
-  subject: z.string().trim().min(2, 'Give the quotation a subject'),
+  // In capitals, as the owner asked (2026-10-11).
+  subject: z.string().trim().min(2, 'Give the quotation a subject').transform(upperText),
   /** Typed by hand. Omitted, the next free number in the author's series is issued. */
   number: z.string().trim().min(1).max(40).optional(),
   /** No longer asked for on the page; a quotation takes its lead's, else 50. */
@@ -2946,11 +2948,8 @@ export async function quotationPrintData(
   // prints {{quotation.total}} in a box of its own included.
   const money = (v: string) => (revision.hideTotal ? '' : v);
 
-  const place = quotation.site?.address
-    ? [quotation.site.address, quotation.site.city]
-    : quotation.customer.sites[0]
-      ? [quotation.customer.sites[0].address, quotation.customer.sites[0].city]
-      : [];
+  // The chosen site's, else the customer's own address (2026-10-11).
+  const place = [documentAddress(quotation.customer, quotation.site)];
   const contact = quotation.contact;
   const owner = quotation.owner;
   // How to reach the author — `contactOf`, the one reader: the login's

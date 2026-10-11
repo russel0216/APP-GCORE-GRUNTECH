@@ -32,6 +32,23 @@ interface ImportReport {
   updated: number;
   errors: number;
   rows: RowResult[];
+  /** What the dry run asks before the file is applied (the SCORO quotes' groups). */
+  extra?: { groups?: GroupQuestion };
+}
+
+/** A SCORO group not on Admin › Categories › Quotation groups, and how many lines use it. */
+interface UnlistedGroup {
+  key: string;
+  name: string;
+  lines: number;
+  quotations: number;
+}
+
+/** "Let me decide, or set it as OTHERS" (2026-10-11): each unlisted group, the list, the default. */
+interface GroupQuestion {
+  unlisted: UnlistedGroup[];
+  choices: string[];
+  fallback: string;
 }
 
 export function ImportModal({
@@ -53,6 +70,9 @@ export function ImportModal({
   const [report, setReport] = useState<ImportReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // Where each group not on the list goes, keyed by the SCORO group's key.
+  const [groupChoice, setGroupChoice] = useState<Record<string, string>>({});
+  const question = report && !report.committed ? report.extra?.groups : undefined;
 
   async function send(commit: boolean) {
     if (!file) return;
@@ -61,6 +81,11 @@ export function ImportModal({
     try {
       const form = new FormData();
       form.append('file', file);
+      // The answers to what the check asked: each unlisted group's choice, else the default.
+      if (commit && question?.unlisted.length) {
+        const groups = Object.fromEntries(question.unlisted.map((g) => [g.key, groupChoice[g.key] ?? question.fallback]));
+        form.append('options', JSON.stringify({ groups }));
+      }
       const result = await api.post<ImportReport>(
         `/imports/${entity}${commit ? '?commit=true' : ''}`,
         form,
@@ -170,6 +195,50 @@ export function ImportModal({
               </>
             )}
           </div>
+
+          {question && question.unlisted.length > 0 && (
+            <section className="import-groups" aria-labelledby="import-groups-title">
+              <h3 id="import-groups-title" className="svc-subhead">
+                Groups not on the list
+              </h3>
+              <p className="faint">
+                These groups are not in Admin › Categories › Quotation groups. Choose where their lines go; they go to{' '}
+                {question.fallback} unless you pick another. Nothing is added to the list.
+              </p>
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Group in the file</th>
+                    <th className="right">Lines</th>
+                    <th>File under</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {question.unlisted.map((g) => (
+                    <tr key={g.key}>
+                      <td>{g.name}</td>
+                      <td className="right">
+                        {g.lines} in {g.quotations} quotation{g.quotations === 1 ? '' : 's'}
+                      </td>
+                      <td>
+                        <select
+                          aria-label={`File the lines of ${g.name} under`}
+                          value={groupChoice[g.key] ?? question.fallback}
+                          onChange={(e) => setGroupChoice((c) => ({ ...c, [g.key]: e.target.value }))}
+                        >
+                          {question.choices.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
 
           <div className="table-wrap" style={{ maxHeight: 280 }}>
             <table className="data">

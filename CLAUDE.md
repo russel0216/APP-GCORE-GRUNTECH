@@ -412,7 +412,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,697 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,711 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -424,9 +424,12 @@ on accounts, and the SCORO quotes import — 33 on sales, with the lines
 export and the summary line's replacement, and 10 on masters for the
 UTF-16 decoding, the tab delimiter and the grouping of rows, and one on
 foundation for the quantity formatter, and 6 on sales for the imported
-quotation that needs no approval until it is changed):
+quotation that needs no approval until it is changed, and 11 on sales
+and 3 on masters for the capitals, the group the SCORO import asks
+about, a deleted group, the group refused at save and the customer's
+address):
 foundation
-316, masters 89, sales 502, costing 157, pipeline 92, calendar 96, numbering
+316, masters 92, sales 513, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 144, chain 191, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 315, aftermarket 258, cad 97,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
@@ -1284,6 +1287,21 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   administrator turns back on stays on. Admin › Categories calls the card
   **Teams** (people, not customers, in its count); the routes stay
   `/reference/industries`, the audit type `industry`.
+- **A customer has an ADDRESS of its own, and it is what a quotation
+  prints** (2026-10-11, the owner's call: "this is the default on
+  quotation shown; site can be selected if needed"). `Customer.address`
+  (free text, the customer form and Customer 360, the import's `Address`
+  column — else its Site Address and Site City joined; a blank cell never
+  clears one). `documentAddress(customer, site?)` in
+  `shared/customerAddress.ts` is the one rule: the site's address and
+  city when the document names a site, else the customer's address — the
+  quotation's and the sales order's `customer.address` field both read it.
+  The editor's "Address" row shows the customer's address, and offers
+  "Site: …" only where the customer has sites, the hint saying what will
+  print. `backfillCustomerAddresses()` (the seed, once, marked by
+  `seed.customerAddressBackfilled`) gave every customer with none its
+  first active site's address, so a quotation printed before prints the
+  same.
 - **A customer carries no industry any more — a SUB-INDUSTRY, optional**
   (2026-10-08, the owner's call: "remove the customer industry; later they
   manually input which sub-industry the customer falls on"). `SubIndustry`
@@ -2438,7 +2456,7 @@ SCORO.
   total_sum` to four decimals (an imported rate is a fact, stored as read);
   a `currency` other than the company's is an error. **The file carries no
   lines**, so every quotation gets ONE summary line ("As quoted in SCORO",
-  1 lot, under the active OTHERS group) worth the subtotal BEFORE discount
+  1 lot, under the group the file names — see below — else OTHERS) worth the subtotal BEFORE discount
   — `total_sum ÷ (1 − discount/100)` to the centavo — costed at
   `total_cost` so the margin reads as SCORO's, written through the exported
   `lineData()` and recalculated by `recalcQuotationRevision`. **The export
@@ -2453,7 +2471,7 @@ SCORO.
   (`product_name`, `line_comment` or `line_id` on any row) gets its rows as
   lines in file order instead of the summary line: `is_subheading` 1 is a
   subheading of `product_name` and nothing else; otherwise `group` =
-  `product_group` (joining the master through `rememberGroups`), `title` =
+  `product_group` as the import decides it (below), `title` =
   `product_name` whole (the three product boxes stay empty — SCORO's name
   is not reliably "brand, type, part"), `description` = `line_comment`,
   `quantity` = `amount`, `unit` (else "lot"), `unitPrice` = `price`,
@@ -2484,6 +2502,22 @@ SCORO.
   drives the spec and writer by name — the lines file's totals come out as
   SCORO's own; verify-masters pins the decoding, the delimiter and the
   grouping. SCORO's invoices, which become sales orders, are still to come.
+- **A SCORO group not on the list is the importer's call, else OTHERS**
+  (2026-10-11, the owner's call: "let me decide or set it as OTHER"). The
+  import never adds a group to the master: a file's group matched by
+  `groupKey()` to a listed (active) group takes the master's spelling;
+  anything else is ASKED. `ImportSpec.summarize(records)` — the
+  framework's hook for a question only the whole file can raise — puts
+  `report.extra.groups` (`unlisted`: each group with its lines and
+  quotations, `choices`, `fallback`) on the dry run, and `ImportModal`
+  shows "Groups not on the list" with a "File under" select per group,
+  OTHERS preselected; the commit posts `options` (JSON in the form,
+  `{ groups: { <key>: <listed name> } }`), which the route hands the
+  writer (`Registered.write(records, actor, options)`). A choice that is
+  not a listed group is a 400 before anything is written; a group with no
+  choice is OTHERS. The quotation's CREATED row records `groupsMoved`
+  (SCORO's name → the group used). The summary line takes the file's
+  `product_group` the same way.
 - **An imported quotation needs no approval until somebody changes it**
   (2026-10-11, the owner's call: "the import from SCORO will not have
   approval details below the quotation, only the Prepared by; if they
@@ -2714,6 +2748,17 @@ SCORO.
   description, use count) from quotations the caller may read, a line's cost
   only where `canSeeQuotationCost` allows, and items with their list price
   (standard cost only with `gops.costing.view_all` or `gchain.items.view_all`).
+- **The quote name and the product boxes are CAPITALS** (2026-10-11, the
+  owner's call). The boxes show what is typed in capitals (`.caps-input`,
+  `.qe-product-parts input`: `text-transform`, placeholders left alone)
+  and the server STORES capitals: `quotationSchema.subject` and
+  `lineData()` go through `upperText()` / `capsParts()` in
+  `shared/quotation.ts` (the sales order's lines too), and the SCORO
+  import's `quote_name`. `upperText` leaves a character whose capital is
+  not one Latin-1 character as typed ('µ' — the PDF fonts are WinAnsi, the
+  rule `caps()` keeps); `web/src/lib/caps.ts` is its copy, pinned equal by
+  verify-sales. Nothing on file is rewritten: an old quotation's name and
+  lines take capitals the next time they are saved.
 - **A line is ONE row, as SCORO edits it** (2026-10-02): Group | Product and
   description | Quantity and unit | Unit price | Amount (with-VAT under) |
   Cost and provider info (toggles and provider, then notes beside the unit
@@ -2759,17 +2804,30 @@ SCORO.
   to change, anyone signed in to read) is what the editor's Group
   **dropdown** offers (active ones) and what "By group" names. `key` is the
   name trimmed, single-spaced and lower-cased: one group per spelling.
-  Renaming a group never rewrites a saved line; a group any line uses is
-  deactivated, not deleted (the next save would only add it back).
+  Renaming a group never rewrites a saved line.
+- **A group can be deleted, and its lines go to OTHERS** (2026-10-11, the
+  owner's call: "allow me to delete also the group in the category").
+  `deleteGroup(tx, group)` in `shared/quotationGroups.ts` moves every
+  quotation line and sales order line filed under it — any spelling, by
+  `groupKey` — to `FALLBACK_GROUP` (OTHERS), deletes the row and records
+  its key in the `quotationGroups.deleted` Setting, so `seedOwnerGroups()`
+  never brings one of the owner's twelve back; adding a group of that name
+  again clears the mark. OTHERS itself cannot be deleted (the route and
+  the Categories card both say why). The question in the modal says how
+  many lines will move; the audit row says how many did.
 - **Every priced line names its group** (2026-10-08, the owner's call: "it
   should be selected or else the quotation cannot be proceeded"). The
   editor refuses to save a line without one — a `<select>` of the master,
-  with the line's own group as an extra row when it is not on it (an older
-  spelling, one since deactivated) so an old quotation still saves — and
-  the API refuses **submit for approval** (quotation and sales order) while
-  any priced line has none, which is the gate for a quotation filled another
-  way (SCORO, from a costing). The line routes still take a line without a
-  group (scripts, imports), and `rememberGroups` still adds a typed one.
+  and since 2026-10-11 ("don't proceed save of quotation if the group are
+  not selected") a group NOT on the list is refused too (`groupProblem()`
+  in `editorParts.tsx`, both editors; the line's old group stays visible
+  as "— not on the list" so the person sees what to change). **The API
+  refuses the save as well**: `checkLine()` in `routes/sales.ts` answers
+  "Line N: Choose a product group" for a priced line with none, on `POST
+  /quotations` and `PUT …/lines`, before a number is issued. Submit for
+  approval (quotation and sales order) still refuses a priced line without
+  a group — the gate for a quotation filled another way (from a costing),
+  and `rememberGroups` still adds a group an API caller names.
 - **A group carries what it covers and a brand** (`description`, `brand`):
   the description is the dropdown's hint under the choice; picking a group
   fills an empty Brand box with its brand. `OWNER_GROUPS` in

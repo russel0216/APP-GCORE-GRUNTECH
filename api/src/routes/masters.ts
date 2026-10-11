@@ -18,7 +18,7 @@ import {
 import { authenticate, require_, currentUser } from '../auth/middleware';
 import { can } from '../permissions/resolve';
 import { audit } from '../shared/audit';
-import { groupKey } from '../shared/quotationGroups';
+import { deleteGroup, deletedGroupKeys, FALLBACK_GROUP, groupKey, setDeletedGroupKeys } from '../shared/quotationGroups';
 import { activityTypeKey } from '../shared/activityTypes';
 import { nextNumber } from '../shared/numbering';
 import { manilaDayEnd, manilaDayStart } from '../shared/day';
@@ -1405,7 +1405,13 @@ referenceRoutes.post(
     if (await prisma.quotationGroup.findUnique({ where: { key } })) {
       throw conflict(`There is already a group "${body.name}"`);
     }
-    const created = await prisma.quotationGroup.create({ data: { ...body, name: body.name.replace(/\s+/g, ' '), key } });
+    const created = await prisma.$transaction(async (tx) => {
+      const made = await tx.quotationGroup.create({ data: { ...body, name: body.name.replace(/\s+/g, ' '), key } });
+      // Filed again by hand, a group once deleted is no longer kept out of the seed.
+      const deleted = await deletedGroupKeys(tx);
+      if (deleted.delete(key)) await setDeletedGroupKeys(tx, deleted);
+      return made;
+    });
     await audit(
       { entityType: 'quotation_group', entityId: created.id, action: 'CREATED', summary: `Created quotation group "${created.name}"` },
       req,
@@ -1453,16 +1459,29 @@ referenceRoutes.delete(
   handler(async (req, res) => {
     const group = await prisma.quotationGroup.findUnique({ where: { id: req.params.id } });
     if (!group) throw notFound('Quotation group not found');
-    // Lines keep the text, so deleting a used group would only see it added
-    // back the next time one of those quotations is saved.
-    const used = await prisma.quotationItem.count({ where: { group: { equals: group.name, mode: 'insensitive' } } });
-    if (used > 0) throw badRequest(`${used} quotation line(s) are filed under "${group.name}" — deactivate it instead`);
-    await prisma.quotationGroup.delete({ where: { id: group.id } });
+    // OTHERS is where a deleted group's lines go (2026-10-11).
+    if (group.key === groupKey(FALLBACK_GROUP)) {
+      throw badRequest(`${group.name} is where the lines of a deleted group go — it cannot be deleted`);
+    }
+    // Its lines move to OTHERS first: a line keeps its group as text, and a
+    // line still carrying the name would bring the group back on its next save.
+    const moved = await prisma.$transaction((tx) => deleteGroup(tx, group));
+    const movedText = [
+      moved.quotationLines ? `${moved.quotationLines} quotation line(s)` : '',
+      moved.orderLines ? `${moved.orderLines} sales order line(s)` : '',
+    ].filter(Boolean);
     await audit(
-      { entityType: 'quotation_group', entityId: group.id, action: 'DELETED', summary: `Deleted quotation group "${group.name}"`, before: group },
+      {
+        entityType: 'quotation_group',
+        entityId: group.id,
+        action: 'DELETED',
+        summary: `Deleted quotation group "${group.name}"${movedText.length ? `; ${movedText.join(' and ')} moved to ${FALLBACK_GROUP}` : ''}`,
+        before: group,
+        after: moved,
+      },
       req,
     );
-    res.json({ ok: true });
+    res.json({ ok: true, ...moved });
   }),
 );
 

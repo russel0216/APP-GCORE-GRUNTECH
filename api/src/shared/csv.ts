@@ -160,6 +160,13 @@ export interface ImportSpec<T> {
   groupBy?: (row: Record<string, string>) => string;
   /** The record of one group of rows; `firstRowNumber` is the first row's, for messages. */
   buildGroup?: (rows: Record<string, string>[], firstRowNumber: number) => Promise<T>;
+  /**
+   * What the person importing must decide before the file is applied, read
+   * off the records the dry run built — returned on the report as `extra`
+   * (the SCORO quotes' groups not on the list, 2026-10-11). Their answer
+   * comes back with the commit as the route's `options`.
+   */
+  summarize?(records: T[]): Promise<Record<string, unknown> | undefined>;
 }
 
 /** Who is running the import — for the audit rows a writer files inside its transactions. */
@@ -183,6 +190,8 @@ export interface ImportReport {
   updated: number;
   errors: number;
   rows: RowResult[];
+  /** The spec's `summarize`: what is asked of the person importing. */
+  extra?: Record<string, unknown>;
 }
 
 export function templateFor(spec: ImportSpec<unknown>): string {
@@ -285,6 +294,7 @@ export async function runImport<T>(
 
   const errors = results.filter((r) => r.action === 'error').length;
   const shouldWrite = commit && errors === 0;
+  const extra = spec.summarize ? await spec.summarize(staged.map((s) => s.record)) : undefined;
   if (shouldWrite) await write(staged);
 
   return {
@@ -295,6 +305,7 @@ export async function runImport<T>(
     updated: results.filter((r) => r.action === 'update').length,
     errors,
     rows: results,
+    ...(extra ? { extra } : {}),
   };
 }
 

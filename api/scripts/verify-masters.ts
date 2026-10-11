@@ -314,6 +314,29 @@ async function main() {
   check('the contact is marked primary', imported?.contacts[0]?.isPrimary === true);
   check('its site came with it', imported?.sites.length === 1);
   check('the site city was kept', imported?.sites[0]?.city === 'Cagayan de Oro');
+  // The customer's own address (2026-10-11): the file's Address, else its site's.
+  check(
+    'with no Address column the customer takes its site’s address and city as its own',
+    !!imported?.sites[0] && imported.address === [imported.sites[0].address, imported.sites[0].city].filter(Boolean).join(', '),
+    `${imported?.address}`,
+  );
+  const addressed = await runImport(
+    ['Name,Address,Site Name,Site Address,Site City', `${TAG} Addressed Co,"Lot 5, Light Industry Park, Laguna",Plant,Elsewhere,Cebu`].join('\n'),
+    customerSpec,
+    true,
+    customerWrite,
+  );
+  const addressedRow = await prisma.customer.findFirst({ where: { name: `${TAG} Addressed Co` } });
+  check(
+    'the Address column is the customer’s address, whatever the site says',
+    addressed.committed && addressedRow?.address === 'Lot 5, Light Industry Park, Laguna',
+    `${addressedRow?.address}`,
+  );
+  await runImport(['Name,Address', `${TAG} Addressed Co,`].join('\n'), customerSpec, true, customerWrite);
+  check(
+    'a re-import with the Address blank leaves the address on file',
+    (await prisma.customer.findFirst({ where: { name: `${TAG} Addressed Co` } }))?.address === 'Lot 5, Light Industry Park, Laguna',
+  );
   check(
     'a code was generated for the blank column',
     /^GT-CUST-\d{4}-\d{4}$/.test(imported?.code ?? ''),

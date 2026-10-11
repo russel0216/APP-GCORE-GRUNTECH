@@ -544,6 +544,10 @@ model Customer {
   /// Free text, e.g. "30 days", "50% down, balance on turnover".
   paymentTerms String?
   creditLimit  Decimal?  @db.Decimal(18, 2)
+  /// The customer's own address (2026-10-11, the owner's call): what a
+  /// quotation prints by default. A site, where one is chosen on the
+  /// quotation, prints instead.
+  address      String?
   phone        String?
   email        String?
   website      String?

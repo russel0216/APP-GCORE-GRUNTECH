@@ -27,6 +27,8 @@ export interface CustomerRow {
   phone: string | null;
   email: string | null;
   website: string | null;
+  /** The address a quotation prints unless a site is chosen on it (2026-10-11). */
+  address: string | null;
   notes: string | null;
   isActive: boolean;
   contactCount: number;
@@ -475,6 +477,7 @@ export function CustomerForm({
     phone: customer?.phone ?? '',
     email: customer?.email ?? '',
     website: customer?.website ?? '',
+    address: customer?.address ?? '',
     notes: customer?.notes ?? '',
     isActive: customer?.isActive ?? true,
   });
@@ -519,6 +522,7 @@ export function CustomerForm({
         phone: form.phone || null,
         email: form.email || null,
         website: form.website || null,
+        address: form.address.trim() || null,
         notes: form.notes || null,
         isActive: form.isActive,
       };
@@ -614,6 +618,10 @@ export function CustomerForm({
           <input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} />
         </Field>
       </div>
+
+      <Field label="Address" hint="What a quotation prints. A site chosen on the quotation prints instead.">
+        <textarea rows={2} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+      </Field>
 
       <Field label="Notes">
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />

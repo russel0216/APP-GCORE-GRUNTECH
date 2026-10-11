@@ -5263,3 +5263,11 @@ a.icon-row:hover {
   margin-bottom: var(--s-1);
   font-size: var(--fs-sm);
 }
+
+/* The import window's "Groups not on the list" (2026-10-11). */
+.import-groups {
+  margin-block: var(--s-3);
+}
+.import-groups .faint {
+  margin-block: var(--s-1) var(--s-2);
+}

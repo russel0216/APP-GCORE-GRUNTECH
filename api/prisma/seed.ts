@@ -14,6 +14,7 @@ import { SUB_INDUSTRIES, seedSubIndustries } from '../src/shared/subIndustries';
 import { CAD_DRAWING_TYPES, seedCadDrawingTypes } from '../src/shared/cadDrawingTypes';
 import { migrateFaceThreshold } from '../src/shared/faceSamples';
 import { removeScoroArchive } from '../src/shared/scoroArchive';
+import { backfillCustomerAddresses } from '../src/shared/customerAddress';
 import { prisma as sharedPrisma } from '../src/prisma';
 
 const prisma = new PrismaClient();
@@ -1204,6 +1205,13 @@ async function main() {
     if (archive && archive.pdfs + archive.views > 0) {
       console.log(`  · Removed the SCORO archive's leavings: ${archive.pdfs} PDF(s), ${archive.views} saved view(s)`);
     }
+  }
+
+  // The customer's own address (2026-10-11): once, every customer without
+  // one takes its first site's, so quotations print what they printed before.
+  {
+    const filled = await backfillCustomerAddresses();
+    if (filled) console.log(`  · Gave ${filled} customer(s) their first site's address as their own`);
   }
 
   // Quotations imported from SCORO before the "as imported, unchanged" mark

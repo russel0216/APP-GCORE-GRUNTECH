@@ -43,7 +43,7 @@ export const QUOTATION_FIELDS: DesignField[] = [
   { key: 'customer.name', label: 'Customer, registered name', group: 'Customer', sample: 'Sample Manufacturing Corp.' },
   { key: 'customer.tradeName', label: 'Customer, trading name', group: 'Customer', sample: 'Sample Manufacturing' },
   { key: 'customer.code', label: 'Customer code', group: 'Customer', sample: 'CUS-0042' },
-  { key: 'customer.address', label: 'Address (the site, else the first site)', group: 'Customer', sample: 'Lot 5 Phase 2, Light Industry Park, Laguna' },
+  { key: 'customer.address', label: 'Address (the site, else the customer’s address)', group: 'Customer', sample: 'Lot 5 Phase 2, Light Industry Park, Laguna' },
   { key: 'customer.phone', label: 'Customer phone', group: 'Customer', sample: '(049) 555 0142' },
   { key: 'customer.email', label: 'Customer email', group: 'Customer', sample: 'purchasing@sample.ph' },
   { key: 'contact.name', label: 'Contact', group: 'Contact', sample: 'Engr. Juan Dela Cruz' },

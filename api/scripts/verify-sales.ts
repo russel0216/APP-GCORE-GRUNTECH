@@ -73,7 +73,10 @@ import { listQuery } from '../src/http/kit';
 // test has to exercise the same wiring or it proves nothing about production.
 import '../src/routes/sales';
 import { leadListSummary, leadListWhere, printableQuotation, quotationListSummary, quotationListWhere, quotationPrintData } from '../src/routes/sales';
-import { markUnchangedScoroImports } from '../src/shared/quotation';
+import { capsParts, markUnchangedScoroImports, upperText } from '../src/shared/quotation';
+import { upperText as webUpperText } from '../../web/src/lib/caps';
+import { deleteGroup, deletedGroupKeys, setDeletedGroupKeys } from '../src/shared/quotationGroups';
+import { documentAddress } from '../src/shared/customerAddress';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
 import { teamMembers, teamOf } from '../src/shared/team';
 // The same for the sales order's subscriber — act() below settles in this
@@ -1839,8 +1842,8 @@ async function main() {
     const subheadingRow = (over: Partial<ScoroRow>): ScoroRow =>
       pricedLine({ line_id: '39867', product_group: '', product_name: 'OPTIONAL ITEMS', amount: '', unit: '', price: '', line_sum: '', line_cost: '', supplier_name: '', line_comment: '', is_subheading: '1', ...over });
     const actor = { id: sales.id, name: sales.name };
-    const importScoro = (rows: ScoroRow[], commit: boolean) =>
-      runImport(decodeCsv(scoroFile(rows)), scoroQuoteSpec, commit, (records) => writeScoroQuotes(records as never, actor));
+    const importScoro = (rows: ScoroRow[], commit: boolean, options?: Record<string, unknown>) =>
+      runImport(decodeCsv(scoroFile(rows)), scoroQuoteSpec, commit, (records) => writeScoroQuotes(records as never, actor, options));
     const quoteByNumber = (number: string) =>
       prisma.quotation.findFirst({
         where: { number: { equals: number, mode: 'insensitive' } },
@@ -1878,7 +1881,7 @@ async function main() {
       const stages = await pipelineStages();
       check(
         'the quotation carries SCORO’s number, name, author and an Open outcome at the stage’s odds',
-        q?.number === scoroNumber(40) && q.subject === `${TAG} Tap-off Unit` && q.ownerId === sales.id && q.outcome === 'OPEN' &&
+        q?.number === scoroNumber(40) && q.subject === upperText(`${TAG} Tap-off Unit`) && q.ownerId === sales.id && q.outcome === 'OPEN' &&
           q.probability === stageProbability('OPEN', stages) && q.submittedAt === null && q.decidedAt === null,
         JSON.stringify({ number: q?.number, subject: q?.subject, outcome: q?.outcome, probability: q?.probability }),
       );
@@ -2047,15 +2050,25 @@ async function main() {
         linesDry.total === 1 && linesDry.created === 1 && linesDry.rows[0].row === 2 && linesDry.rows[0].key === scoroNumber(50),
         JSON.stringify(linesDry.rows),
       );
-      const linesDone = await importScoro(linesRows, true);
+      // A group not on the list is asked about (2026-10-11): the dry run names it.
+      const unlisted = (linesDry.extra as { groups?: { unlisted: { key: string; name: string; lines: number; quotations: number }[]; fallback: string } } | undefined)?.groups;
+      check(
+        'the dry run names a group that is not on the list, with its lines and quotations, OTHERS the default',
+        unlisted?.fallback === 'OTHERS' && unlisted.unlisted.length === 1 && unlisted.unlisted[0].name === `${TAG} Schneider Electric` &&
+          unlisted.unlisted[0].key === groupKey(`${TAG} Schneider Electric`) && unlisted.unlisted[0].lines === 1 && unlisted.unlisted[0].quotations === 1,
+        JSON.stringify(unlisted),
+      );
+      // The person chose a group on the list for it.
+      await prisma.quotationGroup.create({ data: { key: groupKey(`${TAG} Mapped`), name: `${TAG} Mapped` } });
+      const linesDone = await importScoro(linesRows, true, { groups: { [groupKey(`${TAG} Schneider Electric`)]: `${TAG} Mapped` } });
       const withLines = await quoteByNumber(scoroNumber(50));
       const lrev = withLines?.revisions[0];
       const l1 = lrev?.items[0];
       const l2 = lrev?.items[1];
       check('the commit creates it with the file’s lines', linesDone.committed && linesDone.created === 1 && lrev?.items.length === 2, JSON.stringify(linesDone.rows));
       check(
-        'the priced line: group, title as SCORO wrote it, description, 4,704 set at 69,176.47, the amount, the unit cost ÷ quantity and its cost amount',
-        l1?.sortOrder === 0 && l1.group === `${TAG} Schneider Electric` && l1.title === 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS' && l1.brand === null &&
+        'the priced line: the group chosen for it, title as SCORO wrote it, description, 4,704 set at 69,176.47, the amount, the unit cost ÷ quantity and its cost amount',
+        l1?.sortOrder === 0 && l1.group === `${TAG} Mapped` && l1.title === 'SCHNEIDER ELECTRIC, TAP-OFF UNIT, 32 AMPS' && l1.brand === null &&
           l1.description === '32A Tap-off unit -1 Whip TPN, includes: 1x32A 3P Type C NG125L MCB' && Number(l1.quantity) === 4704 && l1.unit === 'set' &&
           money(Number(l1.unitPrice), 69_176.47) && money(Number(l1.amount), 325_406_114.88) && money(Number(l1.unitCost ?? 0), 56_000) &&
           money(Number(l1.costAmount ?? 0), 263_424_000) && l1.isHeading === false,
@@ -2072,8 +2085,14 @@ async function main() {
         JSON.stringify({ heading: l2?.isHeading, title: l2?.title }),
       );
       check(
-        'SCORO’s group joined the master',
-        (await prisma.quotationGroup.count({ where: { key: groupKey(`${TAG} Schneider Electric`) } })) === 1,
+        'a group not on the list joins nothing: the master never gets SCORO’s spelling',
+        (await prisma.quotationGroup.count({ where: { key: groupKey(`${TAG} Schneider Electric`) } })) === 0,
+      );
+      const trailMoved = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: withLines?.id ?? '', action: 'CREATED' } });
+      check(
+        'the quotation’s trail names the group each line was moved off and where to',
+        JSON.stringify((trailMoved?.after as { groupsMoved?: unknown } | null)?.groupsMoved) === JSON.stringify({ [`${TAG} Schneider Electric`]: `${TAG} Mapped` }),
+        JSON.stringify(trailMoved?.after),
       );
       check(
         'and recalcQuotationRevision gives SCORO’s own totals: 325,406,114.88 / 39,048,733.79 / 364,454,848.67 at 12%',
@@ -2096,11 +2115,26 @@ async function main() {
         true,
       );
       const noSupplier = (await quoteByNumber(scoroNumber(51)))?.revisions[0].items[0];
+      check('a group not on the list with no choice made goes to OTHERS', noSupplier?.group === 'OTHERS', String(noSupplier?.group));
       check(
         'a supplier not on file leaves the line unassigned, its name and the cost comment in the cost note, and no supplier is created',
         unknownSupplier.created === 1 && noSupplier?.providerSupplierId === null && noSupplier.costNote === `landed cost — Supplier in SCORO: ${TAG} Nobody Supplies` &&
           (await prisma.supplier.count({ where: { name: `${TAG} Nobody Supplies` } })) === 0,
         JSON.stringify({ supplier: noSupplier?.providerSupplierId, note: noSupplier?.costNote }),
+      );
+
+      let refusedChoice = '';
+      try {
+        await importScoro([pricedLine({ id: '8784', doc_no: scoroNumber(54), quote_name: `${TAG} Bad choice` })], true, {
+          groups: { [groupKey(`${TAG} Schneider Electric`)]: `${TAG} Nowhere` },
+        });
+      } catch (err) {
+        refusedChoice = err instanceof Error ? err.message : String(err);
+      }
+      check(
+        'a choice that is not a group on the list is refused, and nothing is written',
+        refusedChoice.includes('is not a group on the list') && (await quoteByNumber(scoroNumber(54))) === null,
+        refusedChoice,
       );
 
       // The promised replacement: the header-only file first (the summary
@@ -2145,10 +2179,53 @@ async function main() {
           stillSummary.revisions[0].items[0].title === SUMMARY_LINE_TITLE && stillSummary.revisions[0].status === 'APPROVED',
         JSON.stringify(stillSummary?.revisions[0].items.map((i) => i.title)),
       );
+
+      // ── Deleting a group (2026-10-11, the owner's call) ──────────────────
+      // Its lines move to OTHERS — every spelling sharing its key — the row
+      // goes, and its key is remembered so the seed never brings it back.
+      const doomed = await prisma.quotationGroup.create({ data: { key: groupKey(`${TAG} Doomed`), name: `${TAG} Doomed` } });
+      await prisma.quotationItem.update({ where: { id: noSupplier!.id }, data: { group: `${TAG.toLowerCase()}  DOOMED` } });
+      const moved = await prisma.$transaction((tx) => deleteGroup(tx, doomed));
+      const afterDelete = await prisma.quotationItem.findUniqueOrThrow({ where: { id: noSupplier!.id } });
+      const deletedKeys = await deletedGroupKeys();
+      check(
+        'deleting a group moves its lines (any spelling of it) to OTHERS, removes it and remembers its key',
+        moved.quotationLines === 1 && afterDelete.group === 'OTHERS' && (await prisma.quotationGroup.count({ where: { id: doomed.id } })) === 0 &&
+          deletedKeys.has(groupKey(`${TAG} Doomed`)),
+        JSON.stringify({ moved, group: afterDelete.group }),
+      );
+      deletedKeys.delete(groupKey(`${TAG} Doomed`));
+      await prisma.$transaction((tx) => setDeletedGroupKeys(tx, deletedKeys));
     } finally {
       // The series as it stood before the section, whatever happened.
       await setSeries(seriesWas);
     }
+  }
+
+  // ── Capitals and the printed address (2026-10-11, the owner's calls) ──────
+  console.log('\nCapitals on the quotation, and the address it prints');
+  {
+    const samples = ['tap-off unit', 'filter 0.01µm', 'straße', 'açaí — ok', 'Schneider Electric, ezc100h3030'];
+    check(
+      'the quote name and product boxes go to capitals; µ and ß stay as typed, so the PDF fonts can draw them',
+      upperText('tap-off unit') === 'TAP-OFF UNIT' && upperText('filter 0.01µm') === 'FILTER 0.01µM' && upperText('straße') === 'STRAßE' &&
+        upperText('açaí — ok') === 'AÇAÍ — OK',
+      JSON.stringify(samples.map(upperText)),
+    );
+    check('the web’s copy capitalises exactly as the server does', samples.every((t) => webUpperText(t) === upperText(t)));
+    const parts = capsParts({ brand: ' schneider electric ', productType: 'circuit breaker', partNumber: '' });
+    check(
+      'a line’s Brand, Product type and Part number are stored in capitals, an empty one null',
+      parts.brand === 'SCHNEIDER ELECTRIC' && parts.productType === 'CIRCUIT BREAKER' && parts.partNumber === null,
+      JSON.stringify(parts),
+    );
+    check(
+      'the printed address: the chosen site’s address and city, else the customer’s own, else nothing',
+      documentAddress({ address: 'Paranaque City' }, { address: 'Plant 2', city: 'Laguna' }) === 'Plant 2, Laguna' &&
+        documentAddress({ address: ' Paranaque City ' }, null) === 'Paranaque City' &&
+        documentAddress({ address: 'Paranaque City' }, { address: null, city: null }) === 'Paranaque City' &&
+        documentAddress({ address: null }) === '',
+    );
   }
 
   console.log('\nCost visibility over HTTP, and the SCORO-style PDF');
@@ -2479,12 +2556,23 @@ async function main() {
         providerSupplierId: supplier.id,
         costNote: `${TAG} editor note`,
       },
-      { title: 'Second', description: '', quantity: 1.5, unit: 'set', unitPrice: 3_333.33, unitCost: 1_000, providerUserId: sales.id },
+      { group: `${TAG} Installation`, title: 'Second', description: '', quantity: 1.5, unit: 'set', unitPrice: 3_333.33, unitCost: 1_000, providerUserId: sales.id },
       { group: `${TAG} Installation`, title: '', description: 'Third, description only', quantity: 3, unit: 'pc', unitPrice: 99.99 },
     ];
 
     const promised = await previewNext('quotation', { ownerId: sales.id });
     const issuedBefore = await counter(promised.periodKey);
+    // No quotation is saved with a priced line that names no group (2026-10-11).
+    const noGroupSave = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} No group`,
+      lines: [{ title: 'Ungrouped', description: '', quantity: 1, unit: 'lot', unitPrice: 100 }],
+    });
+    check(
+      'a priced line with no group is refused at save, naming the line, and burns no number',
+      noGroupSave.status === 400 && noGroupSave.text.includes('Line 1: Choose a product group') && (await counter(promised.periodKey)) === issuedBefore,
+      `${noGroupSave.status} ${noGroupSave.text.slice(0, 120)}`,
+    );
     const made = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       leadId: editorLead.id,
@@ -2493,6 +2581,7 @@ async function main() {
       lines: editorLines,
     });
     check('the editor creates a quotation and its lines in one request', made.status === 201, made.text.slice(0, 200));
+    check('its name is saved in capitals', made.body.subject === upperText(`${TAG} Editor quote`), String(made.body.subject));
     check('it takes the number the preview promised', made.body.number === promised.number, `${made.body.number} vs ${promised.number}`);
     check('and the number is issued once — the counter moved by exactly one', (await counter(promised.periodKey)) === issuedBefore + 1);
     const madeId = String(made.body.id);
@@ -2540,7 +2629,7 @@ async function main() {
         pi[0].brand === 'SCHNEIDER ELECTRIC' &&
         pi[0].productType === 'CIRCUIT BREAKER' &&
         pi[0].partNumber === 'EZC100H3030' &&
-        pi[1]?.title === 'Pressure gauge, PG-63' &&
+        pi[1]?.title === 'PRESSURE GAUGE, PG-63' &&
         pi[1].brand === null &&
         pi[2]?.title === 'Typed as a title' &&
         pi[2].partNumber === null,
@@ -2602,16 +2691,19 @@ async function main() {
       partedOrder.text.slice(0, 160),
     );
 
-    // Every priced line names its product group before the quotation moves on.
+    // Every priced line names its product group before the quotation moves
+    // on. Saving one without is refused (above); a line filed another way —
+    // an import, an older line — is still caught at submit.
     const ungrouped = await http(salesToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Ungrouped quote`,
-      lines: [{ title: 'No group', quantity: 1, unit: 'lot', unitPrice: 10 }],
+      lines: [{ group: `${TAG} Installation`, title: 'No group', quantity: 1, unit: 'lot', unitPrice: 10 }],
     });
     const ungroupedRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(ungrouped.body.id) } });
+    await prisma.quotationItem.updateMany({ where: { revisionId: ungroupedRev.id }, data: { group: null } });
     const gated = await http(salesToken, 'POST', `/quotations/${ungrouped.body.id}/revisions/${ungroupedRev.id}/submit`, {});
     check(
-      'a line is saved without a group, but the quotation cannot be submitted until every priced line has one',
+      'a line that reached the database without a group still keeps the quotation from being submitted',
       ungrouped.status === 201 && gated.status === 400 && /product group/.test(gated.text) &&
         (await prisma.quotationRevision.findUniqueOrThrow({ where: { id: ungroupedRev.id } })).status === 'DRAFT',
       `${ungrouped.status} ${gated.status} ${gated.text.slice(0, 120)}`,
@@ -3313,7 +3405,7 @@ async function main() {
     const so2Body = so2.body as unknown as { id: string; number: string; total: number; lines: { title: string | null }[] };
     check(
       'the second order is .1 — one family — and summarises what is left into one line worth it',
-      so2.status === 201 && so2Body.number === `${so1Body.number}.1` && so2Body.lines.length === 1 && so2Body.lines[0].title === `${TAG} Booked plant` && money(so2Body.total, 51_875 * 1.12),
+      so2.status === 201 && so2Body.number === `${so1Body.number}.1` && so2Body.lines.length === 1 && so2Body.lines[0].title === upperText(`${TAG} Booked plant`) && money(so2Body.total, 51_875 * 1.12),
       so2.text.slice(0, 200),
     );
     const nothing = await http(salesToken, 'POST', '/sales-orders', { quotationId: soQuoteId, mode: 'all' });
@@ -3983,7 +4075,7 @@ async function main() {
     });
     check(
       'the approver is told it was withdrawn, linked to the quotation',
-      toldManager?.title === `Withdrawn: ${TAG} Changed while pending` && toldManager.body === `${changed.body.number} R0 — superseded by R1`,
+      toldManager?.title === `Withdrawn: ${upperText(`${TAG} Changed while pending`)}` && toldManager.body === `${changed.body.number} R0 — superseded by R1`,
       JSON.stringify(toldManager),
     );
     check(

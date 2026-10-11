@@ -31,6 +31,7 @@ import {
   partsFromSuggestion,
   productSentence,
   knownGroupOf,
+  groupProblem,
   type KnownGroup,
   blankLine,
   CellError,
@@ -980,7 +981,8 @@ export function SalesOrderEditor() {
     if (!priced.some((l) => !l.isHeading)) flag('lines', 'Add at least one line', lines[0] ? lineField(lines[0].key, 'productType') : 'so-add-line');
     for (const l of priced) {
       if (l.isHeading) continue;
-      if (!l.group.trim()) flag(lineField(l.key, 'group'), 'Choose a product group');
+      const groupWrong = groupProblem(l, groups);
+      if (groupWrong) flag(lineField(l.key, 'group'), groupWrong);
       if (!productSentence(l) && !l.title.trim() && !l.description.trim()) {
         flag(lineField(l.key, 'productType'), 'Give the line a brand, product type or part number, or a description');
       }
@@ -1218,6 +1220,7 @@ export function SalesOrderEditor() {
                         {groupOptions(l.group).map((g) => (
                           <option key={g.name} value={g.name}>
                             {g.name}
+                            {knownGroupOf(groups, g.name) ? '' : ' — not on the list'}
                           </option>
                         ))}
                       </select>
