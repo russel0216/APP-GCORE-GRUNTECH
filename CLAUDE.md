@@ -2682,6 +2682,15 @@ SCORO.
   role holds it) AND authorship (`canEditRecord`); refused when won, built into
   a project or a job order, or pending approval. A lead left with no
   quotation steps back to COSTING (it has a costing) or QUALIFIED, audited.
+  **Purge is the super admin's way out for sample data** (2026-10-11):
+  `DELETE /quotations/:id/purge` (⋯ "Purge (sample data)", offered only
+  where Delete is refused) removes the quotation WITH its sales orders,
+  job orders and the projects built from its revisions, in one
+  transaction, withdrawing open requests through `cancelOpenRequest`. It
+  refuses — naming what blocks it — while an invoice, supplier bill, PR,
+  PO, stock issue, claim or advance is filed against the project or an
+  invoice against a job order; any other foreign key it meets rolls the
+  whole purge back as a 400. One DELETED audit row names what went.
 - **Optional approval routes are data.** `ApprovalWorkflow.optionLabel` marks a
   route the submitter may tick; `pickWorkflow` never picks one unasked;
   `approvalOptions(type, amount)` lists those in band; `submitForApproval({

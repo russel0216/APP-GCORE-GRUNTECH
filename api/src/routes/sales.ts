@@ -2355,6 +2355,102 @@ quotationRoutes.patch(
 );
 
 /**
+ * PURGE — a super admin removes a quotation with everything built on it: its
+ * sales orders, the job orders raised from it, and the projects made from its
+ * revisions (their tasks, reports and ledger rows cascade). Meant for sample
+ * and test data. Open approval requests are withdrawn through the engine. A
+ * document finance or procurement filed against a project (an invoice, a
+ * supplier bill, a PR, a PO, a stock issue, a claim, an advance) refuses the
+ * whole purge, naming what blocks it — money on file is never purged.
+ */
+quotationRoutes.delete(
+  '/:id/purge',
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    if (!me.isSuperAdmin) throw forbidden('Only a super admin can purge a quotation');
+    const quotation = await prisma.quotation.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, number: true, subject: true, revisions: { select: { id: true, jobs: { select: { id: true, number: true } } } } },
+    });
+    if (!quotation) throw notFound('Quotation not found');
+    const jobs = quotation.revisions.flatMap((r) => r.jobs);
+    const jobIds = jobs.map((j) => j.id);
+    const orders = await prisma.salesOrder.findMany({ where: { quotationId: quotation.id }, select: { id: true, number: true } });
+    const orderIds = orders.map((o) => o.id);
+    const jobOrders = await prisma.jobOrder.findMany({
+      where: {
+        OR: [
+          { quotationId: quotation.id },
+          ...(orderIds.length ? [{ salesOrderId: { in: orderIds } }] : []),
+          ...(jobIds.length ? [{ jobId: { in: jobIds } }] : []),
+        ],
+      },
+      select: { id: true, number: true },
+    });
+    const joIds = jobOrders.map((j) => j.id);
+
+    if (jobIds.length) {
+      const inJob = { jobId: { in: jobIds } };
+      const counts: [string, number][] = [
+        ['invoice', await prisma.invoice.count({ where: inJob })],
+        ['supplier bill', await prisma.supplierBill.count({ where: inJob })],
+        ['purchase request', await prisma.purchaseRequest.count({ where: inJob })],
+        ['purchase order', await prisma.purchaseOrder.count({ where: inJob })],
+        ['stock issue', await prisma.stockIssue.count({ where: inJob })],
+        ['expense claim', await prisma.expenseClaim.count({ where: inJob })],
+        ['cash advance', await prisma.cashAdvance.count({ where: inJob })],
+      ];
+      const blockers = counts.filter(([, n]) => n > 0);
+      if (blockers.length) {
+        throw badRequest(
+          `Project ${jobs.map((j) => j.number).join(', ')} has ${blockers.map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ')} filed against it — those are not purged`,
+        );
+      }
+    }
+    if (joIds.length && (await prisma.invoice.count({ where: { jobOrderId: { in: joIds } } }))) {
+      throw badRequest('A job order raised from it has been invoiced — that is not purged');
+    }
+
+    const reason = `purged by ${me.name}`;
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          for (const r of quotation.revisions) await cancelOpenRequest('quotation', r.id, tx, reason, me.id);
+          for (const id of orderIds) await cancelOpenRequest('sales_order', id, tx, reason, me.id);
+          for (const id of joIds) await cancelOpenRequest('job_order', id, tx, reason, me.id);
+          if (joIds.length) await tx.jobOrder.deleteMany({ where: { id: { in: joIds } } });
+          if (orderIds.length) await tx.salesOrder.deleteMany({ where: { id: { in: orderIds } } });
+          if (jobIds.length) await tx.job.deleteMany({ where: { id: { in: jobIds } } });
+          await tx.quotation.delete({ where: { id: quotation.id } });
+        },
+        { timeout: 30_000 },
+      );
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') {
+        throw badRequest(`Something else is still filed against it (${String(err.meta?.field_name ?? 'a linked record')}) — nothing was removed`);
+      }
+      throw err;
+    }
+
+    await audit(
+      {
+        entityType: 'quotation',
+        entityId: quotation.id,
+        action: 'DELETED',
+        summary: `Purged quotation ${quotation.number} — ${quotation.subject}`,
+        after: {
+          projects: jobs.map((j) => j.number),
+          salesOrders: orders.map((o) => o.number),
+          jobOrders: jobOrders.map((j) => j.number),
+        },
+      },
+      req,
+    );
+    res.json({ ok: true, projects: jobs.length, salesOrders: orders.length, jobOrders: jobOrders.length });
+  }),
+);
+
+/**
  * Deletes a quotation — the author's, or anyone's for edit_all, and only with
  * gops.quotations.delete. Refused while it is a commercial fact somebody built
  * on: won, made into a project or a job order, or with the approver (decide

@@ -775,7 +775,7 @@ export function QuotationDetail() {
   // `?order=1` opens the Create Sales Order panel: the sales order list's
   // "+ New sales order" lands here with the quotation chosen (2026-10-09).
   const [params] = useSearchParams();
-  const { can } = useAuth();
+  const { me, can } = useAuth();
   const toast = useToast();
   // Delete, Lost and the rarer moves ask here, in the bar under the header.
   const confirm = useConfirm();
@@ -860,6 +860,12 @@ export function QuotationDetail() {
     await api.patch(`/quotations/${quotation!.id}`, { outcome: 'LOST', lostReason: reason });
     toast('ok', `${quotation!.number} marked lost`);
     await load();
+  }
+
+  async function purge() {
+    const r = await api.del<{ projects: number; salesOrders: number; jobOrders: number }>(`/quotations/${quotation!.id}/purge`);
+    toast('ok', `${quotation!.number} purged — ${r.projects} project(s), ${r.salesOrders} sales order(s), ${r.jobOrders} job order(s) with it`);
+    navigate('/g-ops/quotations');
   }
 
   async function remove() {
@@ -1115,6 +1121,17 @@ export function QuotationDetail() {
               onConfirm: remove,
             },
           },
+          !canDelete &&
+            me?.user.isSuperAdmin && {
+              label: 'Purge (sample data)',
+              danger: true,
+              confirm: {
+                title: `Purge ${quotation.number}?`,
+                body: `Removes the quotation with its sales orders, job orders and the project built from it${jobs.length ? ` (${jobs.map((j) => j.number).join(', ')})` : ''}. For sample and test data — refused if an invoice, bill, PR, PO, stock issue, claim or advance is filed against the project. It cannot be undone.`,
+                confirmLabel: 'Purge',
+                onConfirm: purge,
+              },
+            },
         ]}
         modify={quotation.canEdit ? editHref : undefined}
         confirm={confirm}
