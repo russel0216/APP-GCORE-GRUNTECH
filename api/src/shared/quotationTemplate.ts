@@ -232,7 +232,7 @@ export const STANDARD_QUOTATION_DESIGN: PdfDesign = {
       // and when — 58pt, ending 10pt above the footer rule.
       id: 'signoffs', name: 'Sign-offs', type: 'signoffs', anchor: 'last', x: L, y: 714, w: W, h: 60,
       size: 8, colWidth: 133, headColor: PURPLE, textColor: INK,
-      nameSize: 10, showPosition: false, showPhone: true, showEmail: true,
+      nameSize: 10, showPosition: false, showPhone: true, showEmail: true, style: 'columns', ruleColor: RULE,
     },
     { id: 'footer-rule', name: 'Footer rule', type: 'line', anchor: 'every', x: L, y: 784.51, w: W, h: 0.75, color: RULE },
     text({

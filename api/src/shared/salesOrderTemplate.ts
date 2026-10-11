@@ -118,12 +118,12 @@ export function salesOrderSample(long = false): DesignData {
     fields,
     rows,
     totals: [
-      { label: 'Subtotal:', value: '125,000.00' },
-      { label: 'Tax (12%):', value: '15,000.00' },
-      { label: 'Total (PHP):', value: '140,000.00', bold: true },
       { label: 'Cost (PHP):', value: '86,500.00' },
       { label: 'Margin sum:', value: '38,500.00' },
       { label: 'Margin %:', value: '30.8%' },
+      { label: 'Subtotal:', value: '125,000.00' },
+      { label: 'VAT (12%):', value: '15,000.00' },
+      { label: 'Total (PHP):', value: '140,000.00', bold: true },
     ],
     signatories: [
       {
@@ -229,7 +229,7 @@ export const STANDARD_SALES_ORDER_DESIGN: PdfDesign = {
       size: 9.5, bold: true, lineGap: 3,
     }),
     {
-      id: 'items', name: 'Lines', type: 'items', anchor: 'first', x: L, y: 212, w: W, h: 210,
+      id: 'items', name: 'Lines', type: 'items', anchor: 'first', x: L, y: 212, w: W, h: 150,
       columns: [
         { key: 'group', label: 'Group', width: 70, align: 'left' },
         { key: 'product', label: 'Product name and additional info', width: 270, align: 'left' },
@@ -242,33 +242,33 @@ export const STANDARD_SALES_ORDER_DESIGN: PdfDesign = {
       size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE,
     },
     {
-      id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 560, y: 440, w: 245.89, h: 100,
+      id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 560, y: 378, w: 245.89, h: 96,
       size: 9, labelWidth: 130, textColor: INK, accentColor: PURPLE, ruleColor: RULE,
     },
     text({
-      id: 'notes', name: 'Notes', anchor: 'after', x: L, y: 440, w: 480, h: 21.8, showIf: 'order.comment',
+      id: 'notes', name: 'Notes', anchor: 'after', x: L, y: 378, w: 480, h: 21.8, showIf: 'order.comment',
       text: '**Notes:**\n{{order.comment}}', size: 9, lineGap: 1,
     }),
     text({
-      id: 'cancelled', name: 'Cancellation', anchor: 'after', x: L, y: 473, w: 480, h: 10.4, showIf: 'order.cancelReason',
+      id: 'cancelled', name: 'Cancellation', anchor: 'after', x: L, y: 411, w: 480, h: 10.4, showIf: 'order.cancelReason',
       text: '**Cancelled:** {{order.cancelReason}}', size: 9,
     }),
     text({
-      id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 486, w: 480, h: 8.1,
+      id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 424, w: 480, h: 8.1,
       text: 'Internal booking record — not for the customer. The sales invoice is issued by Finance.',
       size: 7, italic: true, color: GREY,
     }),
     {
-      // Beside the totals, flowing after the content: on the short page a
-      // last-page block would take a page of its own whenever the cost
-      // totals run past it, and an internal record does not need one.
-      id: 'signoffs', name: 'Sign-offs', type: 'signoffs', anchor: 'after', x: L, y: 504, w: 500, h: 60,
-      size: 8, colWidth: 150, headColor: PURPLE, textColor: INK,
-      nameSize: 10, showPosition: false, showPhone: true, showEmail: true,
+      // One bordered row across the foot of the last page (2026-10-11, the
+      // owner's call): each approver's step, name and date — nothing else.
+      id: 'signoffs', name: 'Approvals', type: 'signoffs', anchor: 'last', x: L, y: 482, w: W, h: 50,
+      size: 8, colWidth: 150, headColor: PURPLE, textColor: INK, ruleColor: RULE,
+      nameSize: 9.5, showPosition: false, showPhone: false, showEmail: false, style: 'table',
     },
     text({
-      id: 'draft-note', name: 'Draft note', anchor: 'every', x: L, y: 528, w: 300, h: 9.3, showIf: 'order.draftNote',
-      text: '{{order.draftNote}}', size: 8, bold: true, color: GREY, uppercase: true,
+      // Under the strapline, opposite the page number, so it never sits on the approvals.
+      id: 'draft-note', name: 'Draft note', anchor: 'every', x: L, y: 575, w: 300, h: 8.7, showIf: 'order.draftNote',
+      text: '{{order.draftNote}}', size: 7.5, bold: true, color: GREY, uppercase: true,
     }),
     { id: 'footer-rule', name: 'Footer rule', type: 'line', anchor: 'every', x: L, y: 540, w: W, h: 0.75, color: RULE },
     text({

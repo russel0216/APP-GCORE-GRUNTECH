@@ -183,6 +183,13 @@ const signoffsBlock = z.object({
   /** How to reach them, under the name: the contact number, then the email. */
   showPhone: z.boolean().default(true),
   showEmail: z.boolean().default(true),
+  /**
+   * `columns`: side by side, the role over the name and its lines.
+   * `table`: one bordered row across the block's width — the role in the
+   * head, the name and the date (or "Pending") in the cell (2026-10-11).
+   */
+  style: z.enum(['columns', 'table']).default('columns'),
+  ruleColor: color('#D9D9D9'),
 });
 
 const designBlockSchema = z.discriminatedUnion('type', [
@@ -1104,7 +1111,64 @@ class Renderer {
     return { role, name, rest, head, nameStyle, text };
   }
 
+  /** The table style's cells: equal columns across the block, each padded. */
+  private signoffTable(b: SignoffsBlock) {
+    const n = Math.max(1, this.data.signatories.length);
+    const width = b.w / n;
+    const pad = 5;
+    const head: Style = { size: b.size, italic: false, spacing: 0, upper: true };
+    const nameStyle: Style = { size: b.nameSize, italic: false, spacing: 0, upper: false };
+    const text: Style = { size: b.size, italic: false, spacing: 0, upper: false };
+    const cells = this.data.signatories.map((person, i) => {
+      const inner = width - 2 * pad;
+      const role = wrap(this.doc, [[{ text: pdfSafe(person.role), bold: true }]], inner, head).slice(0, 2);
+      const name = person.name ? wrap(this.doc, [[{ text: pdfSafe(person.name), bold: true }]], inner, nameStyle).slice(0, 2) : [];
+      const when = wrap(this.doc, [[{ text: person.name && person.at ? formatDateTime(person.at) : 'Pending', bold: false }]], inner, text);
+      return { x: b.x + i * width, role, name, when };
+    });
+    const headH = Math.max(1, ...cells.map((c) => c.role.length)) * head.size * LINE + 2 * pad;
+    const bodyH =
+      Math.max(...cells.map((c) => c.name.length * (nameStyle.size * LINE + 1) + c.when.length * (text.size * LINE + 1)), text.size * LINE) +
+      2 * pad;
+    return { cells, width, pad, head, nameStyle, text, headH, bodyH };
+  }
+
+  private drawSignoffTable(b: SignoffsBlock, top: number) {
+    const doc = this.doc;
+    const t = this.signoffTable(b);
+    const bottom = top + t.headH + t.bodyH;
+    doc.save();
+    doc.lineWidth(0.75).strokeColor(b.ruleColor);
+    doc.rect(b.x, top, b.w, bottom - top).stroke();
+    doc.moveTo(b.x, top + t.headH).lineTo(b.x + b.w, top + t.headH).stroke();
+    for (let i = 1; i < t.cells.length; i++) {
+      doc.moveTo(b.x + i * t.width, top).lineTo(b.x + i * t.width, bottom).stroke();
+    }
+    doc.restore();
+    for (const c of t.cells) {
+      const inner = t.width - 2 * t.pad;
+      let y = top + t.pad;
+      for (const line of c.role) {
+        drawLaid(doc, line, c.x + t.pad, y, inner, 'left', t.head, b.headColor);
+        y += t.head.size * LINE;
+      }
+      y = top + t.headH + t.pad;
+      for (const line of c.name) {
+        drawLaid(doc, line, c.x + t.pad, y, inner, 'left', t.nameStyle, b.textColor);
+        y += t.nameStyle.size * LINE + 1;
+      }
+      for (const line of c.when) {
+        drawLaid(doc, line, c.x + t.pad, y, inner, 'left', t.text, b.textColor);
+        y += t.text.size * LINE + 1;
+      }
+    }
+  }
+
   private signoffsHeight(b: SignoffsBlock): number {
+    if (b.style === 'table') {
+      const t = this.signoffTable(b);
+      return t.headH + t.bodyH;
+    }
     const cols = this.signoffColumns(b);
     let tallest = 0;
     this.data.signatories.forEach((person, i) => {
@@ -1124,6 +1188,10 @@ class Renderer {
    * signature rules.
    */
   private drawSignoffs(b: SignoffsBlock, top: number) {
+    if (b.style === 'table') {
+      this.drawSignoffTable(b, top);
+      return;
+    }
     const cols = this.signoffColumns(b);
     this.data.signatories.forEach((person, i) => {
       const { x, width } = cols[i];

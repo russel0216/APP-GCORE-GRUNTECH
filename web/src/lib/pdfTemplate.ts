@@ -103,6 +103,10 @@ export interface SignoffsBlock extends Base {
   showPosition: boolean;
   showPhone: boolean;
   showEmail: boolean;
+  /** `columns`: side by side; `table`: one bordered row — the step, then the name and date. */
+  style: 'columns' | 'table';
+  /** The table's borders. */
+  ruleColor: string;
 }
 
 export type Block = TextBlock | LineBlock | BoxBlock | LogoBlock | ItemsBlock | TotalsBlock | SignoffsBlock;

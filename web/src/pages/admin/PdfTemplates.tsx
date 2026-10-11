@@ -1300,6 +1300,33 @@ function TotalsBody({ block, sample, scale }: { block: TotalsBlock; sample: Samp
 
 function SignoffsBody({ block, sample, scale }: { block: SignoffsBlock; sample: Sample; scale: number }) {
   const people = sample.signatories;
+  if (block.style === 'table') {
+    // One bordered row, equal columns across the box — the step in the
+    // head, the name and the date (or "Pending") under it, as the PDF draws it.
+    return (
+      <div
+        className="pt-signoff-table"
+        style={{
+          fontSize: block.size * scale,
+          color: block.textColor,
+          borderColor: block.ruleColor,
+          gridTemplateColumns: `repeat(${Math.max(1, people.length)}, 1fr)`,
+        }}
+      >
+        {people.map((p, i) => (
+          <b key={`h${i}`} className="pt-signoff-table-head" style={{ color: block.headColor, borderColor: block.ruleColor }}>
+            {p.role}
+          </b>
+        ))}
+        {people.map((p, i) => (
+          <div key={`c${i}`} className="pt-signoff-table-cell" style={{ borderColor: block.ruleColor }}>
+            {p.name && <b style={{ fontSize: block.nameSize * scale }}>{p.name}</b>}
+            <span>{p.name && p.at ? formatDateTime(p.at) : 'Pending'}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
   // The PDF's own columns (the designed engine sets them 10pt apart), so a
   // crowded block — the sales order's five — reads here as it prints.
   const cols = signoffColumns({ x: block.x, w: block.w, colWidth: block.colWidth, gutter: 10 }, people.length);
@@ -1646,16 +1673,31 @@ function Inspector({
       {block.type === 'signoffs' && (
         <>
           <h3 className="pt-section">Sign-offs</h3>
+          <Field label="Layout" hint="A one-row table sits at the foot of the last page and prints only the name and the date.">
+            <select value={block.style ?? 'columns'} disabled={ro} onChange={(e) => onPatch({ style: e.target.value as SignoffsBlock['style'] })}>
+              <option value="columns">Columns — role, name, contact lines, date</option>
+              <option value="table">One-row table — step, name and date only</option>
+            </select>
+          </Field>
           <div className="pt-grid-2">
             <NumberField label="Name size (pt)" value={block.nameSize} min={6} max={18} disabled={ro} onChange={(v) => onPatch({ nameSize: v }, 'nameSize')} />
             <NumberField label="Details size (pt)" value={block.size} min={6} max={14} disabled={ro} onChange={(v) => onPatch({ size: v }, 'size')} />
-            <NumberField label="Column width (pt)" value={block.colWidth} min={40} disabled={ro} onChange={(v) => onPatch({ colWidth: v }, 'colWidth')} />
+            {block.style !== 'table' && (
+              <NumberField label="Column width (pt)" value={block.colWidth} min={40} disabled={ro} onChange={(v) => onPatch({ colWidth: v }, 'colWidth')} />
+            )}
           </div>
-          <Checkbox checked={block.showPhone} onChange={(v) => !ro && onPatch({ showPhone: v })} label="The contact number, under the name" />
-          <Checkbox checked={block.showEmail} onChange={(v) => !ro && onPatch({ showEmail: v })} label="The email, under the name" />
-          <Checkbox checked={block.showPosition} onChange={(v) => !ro && onPatch({ showPosition: v })} label="The position, under the name" />
+          {block.style !== 'table' && (
+            <>
+              <Checkbox checked={block.showPhone} onChange={(v) => !ro && onPatch({ showPhone: v })} label="The contact number, under the name" />
+              <Checkbox checked={block.showEmail} onChange={(v) => !ro && onPatch({ showEmail: v })} label="The email, under the name" />
+              <Checkbox checked={block.showPosition} onChange={(v) => !ro && onPatch({ showPosition: v })} label="The position, under the name" />
+            </>
+          )}
           <ColorField label="Headings" value={block.headColor} disabled={ro} onChange={(v) => onPatch({ headColor: v }, 'headColor')} />
           <ColorField label="Names and details" value={block.textColor} disabled={ro} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
+          {block.style === 'table' && (
+            <ColorField label="Table borders" value={block.ruleColor ?? '#D9D9D9'} disabled={ro} onChange={(v) => onPatch({ ruleColor: v }, 'ruleColor')} />
+          )}
           <p className="hint">
             One column a person: who prepared it, then every approval step, each dated once done and “Pending” until then. The contact
             number is the person’s phone in Admin › Users, else the mobile they keep on My Account.

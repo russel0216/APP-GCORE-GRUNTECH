@@ -550,6 +550,34 @@
   text-transform: uppercase;
 }
 
+/*
+  The one-row table (a sign-off block's "table" layout): equal columns,
+  a head row with the step and a cell with the name and the date. The
+  border widths are the PDF's 0.75pt, scaled.
+*/
+.pt-signoff-table {
+  display: grid;
+  border: calc(0.75px * var(--pt)) solid;
+  border-left: 0;
+}
+
+.pt-signoff-table-head,
+.pt-signoff-table-cell {
+  padding: calc(5px * var(--pt));
+  border-left: calc(0.75px * var(--pt)) solid;
+  overflow-wrap: anywhere;
+}
+
+.pt-signoff-table-head {
+  text-transform: uppercase;
+  border-bottom: calc(0.75px * var(--pt)) solid;
+}
+
+.pt-signoff-table-cell {
+  display: flex;
+  flex-direction: column;
+}
+
 /* The name: bold, at its own size, a point's gap under it as the PDF sets it. */
 .pt-signoff-name {
   margin-bottom: calc(1px * var(--pt));

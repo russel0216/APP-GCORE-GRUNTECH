@@ -1937,12 +1937,32 @@ async function main() {
       orderOverruns.length === 0 && ['PREPARED BY', 'TEAM LEADER', 'COST CONTROLLER', 'CEO APPROVAL'].every((r) => orderLines.includes(r)),
       orderOverruns.join('; ') || 'none',
     );
+    // The approvals are ONE bordered row at the foot of the last page
+    // (2026-10-11, the owner's call): the step, the name and the date —
+    // no phone, no email — and the draft note under the footer rule, never
+    // on the table.
+    const orderText = pdfText(order).replace(/\s+/g, ' ');
     check(
-      'and an email wider than its column breaks after its @, never mid-word',
-      orderLines.includes('maria.santos@') && orderLines.includes('gruntechnology.com') && !orderLines.some((l) => /^chnology|grunte$/.test(l)),
-      orderLines.filter((l) => l.includes('@') || l.includes('gruntech')).join(' / '),
+      'the one-row approvals table prints the name and the date, never a phone or an email',
+      !['maria.santos@', 'juan.delacruz@', '0917 555 0100', 'ctg@'].some((t) => orderText.includes(t)) &&
+        orderText.includes('Maria Clara Santos-Villanueva') && orderText.includes('Erica Mae Bautista') && orderText.includes('Pending'),
+      orderText.slice(-300),
     );
-    check('the names print whole in the narrower columns', orderLines.includes('Santos-Villanueva') && orderLines.includes('Erica Mae Bautista'));
+    const orderRuns = pdfRuns(order);
+    const lastPage = Math.max(...orderRuns.map((r) => r.page));
+    const preparedRun = orderRuns.find((r) => r.text === 'PREPARED BY');
+    check(
+      'and it sits at the foot of the last page, above the footer rule',
+      !!preparedRun && preparedRun.page === lastPage && preparedRun.y >= orderBox.y - 1 && preparedRun.y < footerRule.y,
+      JSON.stringify(preparedRun),
+    );
+    const draftOrder = pdfRuns(await renderDesigned(STANDARD_SALES_ORDER_DESIGN, salesOrderSample(false)));
+    const draftRun = draftOrder.find((r) => r.text.startsWith('DRAFT'));
+    check(
+      'the draft note prints under the footer rule, clear of the approvals table',
+      !!draftRun && draftRun.y > footerRule.y,
+      JSON.stringify(draftRun),
+    );
 
     // The rule for filling text, and the browser's copy of it.
     const cases: [string, Record<string, string>, boolean][] = [
