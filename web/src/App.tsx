@@ -16,6 +16,7 @@ import { Appearance } from './pages/admin/Appearance';
 import { Numbering } from './pages/admin/Numbering';
 import { Workflows } from './pages/admin/Workflows';
 import { Audit } from './pages/admin/Audit';
+import { HelpTickets, HelpTicketPage } from './pages/admin/HelpTickets';
 import { PdfTemplates } from './pages/admin/PdfTemplates';
 import { PipelineStages } from './pages/admin/PipelineStages';
 import { Customers } from './pages/masters/Customers';
@@ -261,6 +262,16 @@ function Routed() {
             </Guard>
           }
         />
+        <Route
+          path="/admin/help-tickets"
+          element={
+            <Guard permission="admin.help_tickets.view_all">
+              <HelpTickets />
+            </Guard>
+          }
+        />
+        {/* A ticket's page is its raiser's as well as the administrators': the API decides who may open it. */}
+        <Route path="/admin/help-tickets/:id" element={<HelpTicketPage />} />
         <Route
           path="/admin/pdf-templates"
           element={

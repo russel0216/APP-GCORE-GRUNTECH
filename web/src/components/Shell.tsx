@@ -6,6 +6,7 @@ import { CommandPalette } from './CommandPalette';
 import { Avatar, relativeTime } from './ui';
 import { Icon, sectionIcon } from './Icon';
 import { LayoutEditor } from './LayoutEditor';
+import { HelpDesk } from './HelpDesk';
 import { NavigationProvider, type BackTarget, type NavigationApi } from './Navigation';
 
 interface Notification {
@@ -579,6 +580,7 @@ export function Shell() {
           )}
 
           <LayoutEditor />
+          <HelpDesk />
         </div>
       </div>
 

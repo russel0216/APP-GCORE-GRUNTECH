@@ -440,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,736 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,753 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -461,12 +461,12 @@ the routes by who prepared the document, and 5 on sales for the
 quotation's own currency and the order paper's margin %, and a net one on
 foundation for the approvals as a one-row table, and one for the short
 order on one page, and one on sales for a subheading worded in
-line_comment):
+line_comment, and 17 on workspace for the Help box's tickets):
 foundation
 318, masters 92, sales 523, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 46, accounts 124. The
+insights 98, insights-brief 50, workspace 63, accounts 124. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -2347,6 +2347,53 @@ leave the approver deciding on stale figures).
 - **Sub-industry reporting puts UNCLASSIFIED last**, and the sub-industry
   table sums to the report's own totals — asserted. (It grouped by the
   customer's industry until 2026-10-08, when the industry became the team.)
+
+## The Help box: help tickets (2026-10-11)
+
+The owner's call: "a help chat box so every user can raise a ticket for
+improvement, allow them to screenshot the problem" — and "super admins
+receive the tickets".
+
+- **A "? Help" button bottom-right on every signed-in page**
+  (`components/HelpDesk.tsx`, mounted once in `Shell.tsx`; the toasts sit
+  above it). It opens a PANEL, never a modal — the page stays usable —
+  with New ticket (Improvement / Something is wrong / Question, a subject,
+  a description, the screenshot) and My tickets (`GET /help-tickets/mine`,
+  each row opening the ticket's page). The draft lives as long as the
+  Shell, so closing the box keeps what was typed.
+- **The screenshot is taken in the browser** by `captureScreen()` in
+  `lib/screenshot.ts`: the visible part of the page redrawn from its DOM by
+  html-to-image as a PNG (the box and the toasts filtered out), no
+  screen-sharing prompt, nothing sent until the ticket is. The library is
+  a dynamic import — only the screenshot's chunk carries it. Take it
+  again, remove it, attach an image or paste one (Ctrl+V); five pictures
+  at most, images only (the route refuses anything else and deletes what
+  multer wrote). `html-to-image` was added to `web/package.json` and the
+  lockfile from the npm registry by hand, because `npm install` here
+  re-resolves SheetJS from cdn.sheetjs.com, which this sandbox cannot
+  reach; the server's install fetches both normally.
+- **The API is `routes/helpTickets.ts`** (`/api/help-tickets`, `HelpTicket`
+  + `HelpTicketReply`, numbering type `help_ticket`, GT-HT-2026-0001).
+  Raising, reading and answering one's OWN ticket needs only a login;
+  `admin.help_tickets.view_all` reads every ticket (Admin › Records › Help
+  Tickets, its paper `GET /help-tickets/pdf`, any ticket and its
+  screenshots) and `admin.help_tickets.edit_all` answers and moves the
+  status (New → In progress → Done, or Won't do with a reason). No seeded
+  role holds either. **Every active SUPER ADMIN is told of a new ticket**
+  (bell, and email where SMTP is set) — holding the view right is not
+  enough to be told. A reply tells the other side; a status move tells the
+  raiser; **the raiser replying on a Done or Won't-do ticket opens it
+  again** (NEW). Someone else's ticket is a 404. The page the person was
+  on is kept only when it is a path inside the app; the browser line is
+  shown to administrators only. Screenshots are attachments on
+  `help_ticket` with a guard (the raiser or view_all) and a write guard
+  that refuses the generic attachment routes. 20 tickets an hour per
+  person (`shared/throttle.ts`).
+- **One page for both sides**: `/admin/help-tickets/:id` (`HelpTicketPage`
+  in `pages/admin/HelpTickets.tsx`, no Guard — the API decides), where the
+  raiser and the administrators read the thread and reply; the bell links
+  there. verify-workspace raises tickets as a user with no rights and
+  cleans up the bells they rang for the real super admins.
 
 ## Accounts and sign-in
 

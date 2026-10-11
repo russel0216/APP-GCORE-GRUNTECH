@@ -301,6 +301,8 @@ export const REGISTRY: ModuleDef[] = [
       { key: 'pipeline_stages', group: 'Process', label: 'Pipeline Stages', path: '/admin/pipeline-stages', actions: SETTINGS, phase: 3,
         note: 'The sales pipeline’s stages, as SCORO’s statuses: name, odds, colour and which are on the board' },
       { key: 'audit', group: 'Records', label: 'Audit Logs', path: '/admin/audit', actions: READ, phase: 1 },
+      { key: 'help_tickets', group: 'Records', label: 'Help Tickets', path: '/admin/help-tickets', actions: SETTINGS, phase: 10,
+        note: 'What people raised from the Help box: improvements, faults and questions, with their screenshots' },
       { key: 'settings', group: 'Configuration', label: 'System Settings', path: '/admin/settings', actions: SETTINGS, phase: 1 },
       { key: 'appearance', group: 'Configuration', label: 'Appearance & Layout', path: '/admin/appearance', actions: SETTINGS, phase: 1, note: 'Spacing, type, colour and layout of every screen' },
     ],

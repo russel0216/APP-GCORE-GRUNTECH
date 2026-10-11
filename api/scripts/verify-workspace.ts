@@ -29,6 +29,8 @@ import { env } from '../src/env';
 import { signToken } from '../src/auth/middleware';
 import { nextNumber } from '../src/shared/numbering';
 import { submitForApproval } from '../src/shared/approvals';
+import { deleteAttachmentsOf } from '../src/shared/attachments';
+import fs from 'node:fs';
 import {
   between,
   pdfText,
@@ -61,6 +63,16 @@ const MAIL = '@verifyws.local';
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
 async function cleanup() {
+  // Help tickets the script raised: the bells they rang for the real super
+  // admins, their screenshots (rows and bytes), then the tickets themselves.
+  const tickets = await prisma.helpTicket.findMany({ where: { createdBy: { email: { endsWith: MAIL } } }, select: { id: true } });
+  const ticketIds = tickets.map((t) => t.id);
+  if (ticketIds.length) {
+    await prisma.notification.deleteMany({ where: { link: { in: ticketIds.map((id) => `/admin/help-tickets/${id}`) } } });
+    await deleteAttachmentsOf('help_ticket', ticketIds);
+    await prisma.auditLog.deleteMany({ where: { entityType: 'help_ticket', entityId: { in: ticketIds } } });
+    await prisma.helpTicket.deleteMany({ where: { id: { in: ticketIds } } });
+  }
   await prisma.approvalRequest.deleteMany({ where: { documentType: { startsWith: TAG } } });
   await prisma.approvalWorkflow.deleteMany({ where: { documentType: { startsWith: TAG } } });
   await prisma.salesActivity.deleteMany({ where: { subject: { startsWith: TAG } } });
@@ -690,6 +702,121 @@ async function main() {
   );
   const specimenRows = await prisma.auditLog.count({ where: { actorId: worker.id, entityType: 'pdf_specimen', action: 'EXPORTED' } });
   check('printing it is audited as EXPORTED, like every PDF', specimenRows === 1, String(specimenRows));
+
+  // ══ The Help box: tickets raised by anybody, answered by the super admins ══
+
+  console.log('\nHelp tickets');
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const raise = async (token: string, fields: Record<string, string>, files: { name: string; type: string; bytes: Buffer }[] = []) => {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) form.set(k, v);
+    for (const f of files) form.append('files', new Blob([f.bytes], { type: f.type }), f.name);
+    const res = await fetch(`${BASE}/help-tickets`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  };
+  const helpRole = await makeRole('zzws_help', `${TAG} Help tickets`, ['admin.help_tickets.view_all', 'admin.help_tickets.edit_all']);
+  const helpdesk = await makeUser('ZZ Helpdesk', `helpdesk${MAIL}`, [helpRole.id]);
+  const helpdeskToken = signToken(helpdesk.id, helpdesk.email);
+  const uploads = () => fs.readdirSync(env.uploadDir).length;
+
+  const before = uploads();
+  const refusedFile = await raise(workerToken, { subject: `${TAG} not a picture`, description: 'x' }, [{ name: 'notes.pdf', type: 'application/pdf', bytes: Buffer.from('%PDF-1.4') }]);
+  check(
+    'a ticket carrying anything but an image is refused, and nothing it uploaded is left on disk',
+    refusedFile.status === 400 && uploads() === before && (await prisma.helpTicket.count({ where: { subject: `${TAG} not a picture` } })) === 0,
+    `${refusedFile.status} ${JSON.stringify(refusedFile.body).slice(0, 120)}`,
+  );
+
+  const raised = await raise(
+    workerToken,
+    { kind: 'PROBLEM', subject: `${TAG} The save button does nothing`, description: 'Pressed Save twice.', pagePath: '/g-ops/quotations?stage=open', viewport: '1440×900' },
+    [{ name: 'screenshot.png', type: 'image/png', bytes: PNG }],
+  );
+  const ticketId = String(raised.body.id ?? '');
+  const ticket = ticketId ? await prisma.helpTicket.findUnique({ where: { id: ticketId } }) : null;
+  check(
+    'anybody signed in raises a ticket — no right needed — numbered by nextNumber, with the page it was raised on',
+    raised.status === 201 && !!ticket && /-HT-/.test(ticket.number) && ticket.kind === 'PROBLEM' && ticket.status === 'NEW' && ticket.pagePath === '/g-ops/quotations?stage=open' && ticket.createdById === worker.id,
+    `${raised.status} ${JSON.stringify(raised.body).slice(0, 160)}`,
+  );
+  const shots = await prisma.attachment.findMany({ where: { entityType: 'help_ticket', entityId: ticketId } });
+  check('its screenshot is kept on the ticket', shots.length === 1 && shots[0].mimeType === 'image/png', String(shots.length));
+  const link = `/admin/help-tickets/${ticketId}`;
+  const admins = await prisma.user.count({ where: { isSuperAdmin: true, isActive: true } });
+  const told = await prisma.notification.count({ where: { link, type: 'help.ticket' } });
+  check('every active super admin is told of it, each by a bell linking to the ticket', admins > 0 && told === admins, `${told} of ${admins}`);
+  check('the right to read them all is not enough to be told — the super admins receive tickets', (await prisma.notification.count({ where: { link, userId: helpdesk.id } })) === 0);
+
+  const pasted = await raise(workerToken, { subject: `${TAG} pasted address`, description: 'x', pagePath: 'https://elsewhere.example/phish' });
+  const pastedRow = pasted.body.id ? await prisma.helpTicket.findUnique({ where: { id: String(pasted.body.id) } }) : null;
+  check('a page that is not a path inside the app is not kept', pasted.status === 201 && pastedRow?.pagePath === null, String(pastedRow?.pagePath));
+
+  const workerList = await api(workerToken, 'GET', '/help-tickets');
+  const helpMine = await api(workerToken, 'GET', '/help-tickets/mine');
+  const mineRows = (helpMine.body as unknown as { id: string }[]) ?? [];
+  check(
+    'the raiser lists their own tickets, never the register',
+    workerList.status === 403 && helpMine.status === 200 && Array.isArray(mineRows) && mineRows.some((r) => r.id === ticketId),
+    `${workerList.status} / ${helpMine.status}`,
+  );
+  const ownView = await api(workerToken, 'GET', `/help-tickets/${ticketId}`);
+  check(
+    'the raiser opens their ticket with its screenshot, but no administrator’s tools and no browser line',
+    ownView.status === 200 && (ownView.body.files as unknown[]).length === 1 && ownView.body.canManage === false && ownView.body.canReply === true && ownView.body.userAgent === null,
+    String(ownView.status),
+  );
+  const nosy = await api(colleagueToken, 'GET', `/help-tickets/${ticketId}`);
+  const nosyFile = await fetch(`${BASE}/attachments/file/${shots[0]?.id}`, { headers: { Authorization: `Bearer ${colleagueToken}` } });
+  check('a colleague can open neither the ticket (404) nor its screenshot', nosy.status === 404 && nosyFile.status === 404, `${nosy.status} / ${nosyFile.status}`);
+  const sideDoor = await fetch(`${BASE}/attachments/help_ticket/${ticketId}`, { method: 'POST', headers: { Authorization: `Bearer ${workerToken}` }, body: new FormData() });
+  check('files reach a ticket only through its own routes, never the generic attachment door', sideDoor.status === 403, String(sideDoor.status));
+
+  const register = await api(helpdeskToken, 'GET', `/help-tickets?search=${TAG}`);
+  const regRows = register.body.rows as { id: string }[] | undefined;
+  const regSummary = register.body.summary as { count: number; new: number } | undefined;
+  check(
+    'the register lists it for a holder of the view right, its cards counting the same set',
+    register.status === 200 && !!regRows?.some((r) => r.id === ticketId) && regSummary?.count === register.body.total && (regSummary?.new ?? 0) >= 1,
+    `${register.status} ${JSON.stringify(regSummary)}`,
+  );
+  const paper = await fetch(`${BASE}/help-tickets/pdf?search=${TAG}`, { headers: { Authorization: `Bearer ${helpdeskToken}` } });
+  const paperText = paper.ok ? pdfText(Buffer.from(await paper.arrayBuffer())) : '';
+  check(
+    'the register prints, the paper naming the ticket and its filter, and the print is audited',
+    paper.status === 200 && paperText.includes(ticket?.number ?? '??') && paperText.includes(`search "${TAG}"`) &&
+      (await prisma.auditLog.count({ where: { actorId: helpdesk.id, entityType: 'help_ticket', entityId: 'list', action: 'EXPORTED' } })) === 1,
+    String(paper.status),
+  );
+
+  const outsider = await api(colleagueToken, 'POST', `/help-tickets/${ticketId}/replies`, { body: 'me too' });
+  const answer = await api(helpdeskToken, 'POST', `/help-tickets/${ticketId}/replies`, { body: 'Looking at it.' });
+  check(
+    'an administrator answers, the raiser is told; a colleague cannot even find it to answer',
+    outsider.status === 404 && answer.status === 201 && (await prisma.notification.count({ where: { userId: worker.id, link, type: 'help.reply' } })) === 1,
+    `${outsider.status} / ${answer.status}`,
+  );
+  const selfClose = await api(workerToken, 'POST', `/help-tickets/${ticketId}/status`, { status: 'DONE' });
+  const bareDecline = await api(helpdeskToken, 'POST', `/help-tickets/${ticketId}/status`, { status: 'WONT_DO' });
+  check('only an administrator moves the status, and declining one needs a reason', selfClose.status === 403 && bareDecline.status === 400, `${selfClose.status} / ${bareDecline.status}`);
+  const done = await api(helpdeskToken, 'POST', `/help-tickets/${ticketId}/status`, { status: 'DONE', note: 'Fixed in the next deploy.' });
+  const doneRow = await prisma.helpTicket.findUnique({ where: { id: ticketId } });
+  check(
+    'marking it done closes it, says so in the thread and tells the raiser',
+    done.status === 200 && doneRow?.status === 'DONE' && !!doneRow.closedAt &&
+      (await prisma.helpTicketReply.count({ where: { ticketId, status: 'DONE' } })) === 1 &&
+      (await prisma.notification.count({ where: { userId: worker.id, link, type: 'help.reply' } })) === 2,
+    `${done.status} ${doneRow?.status}`,
+  );
+  const twice = await api(helpdeskToken, 'POST', `/help-tickets/${ticketId}/status`, { status: 'DONE' });
+  check('a move to the status it already has is refused', twice.status === 400, String(twice.status));
+  const notDone = await api(workerToken, 'POST', `/help-tickets/${ticketId}/replies`, { body: 'Still happens on my laptop.' });
+  const reopened = await prisma.helpTicket.findUnique({ where: { id: ticketId } });
+  check(
+    'the raiser replying on a closed ticket opens it again, and the administrator who answered is told',
+    notDone.status === 201 && reopened?.status === 'NEW' && reopened.closedAt === null &&
+      (await prisma.notification.count({ where: { userId: helpdesk.id, link, type: 'help.reply' } })) === 1,
+    `${notDone.status} ${reopened?.status}`,
+  );
 
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);

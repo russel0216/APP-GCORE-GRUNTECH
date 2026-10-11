@@ -135,6 +135,8 @@ model User {
   cadCompleted       CadJobOrder[]     @relation("CadCompletedBy")
   cadRevisions       CadRevision[]     @relation("CadRevisionSubmitter")
   cadComments        CadComment[]      @relation("CadCommentAuthor")
+  helpTickets        HelpTicket[]      @relation("HelpTicketRaiser")
+  helpTicketReplies  HelpTicketReply[] @relation("HelpTicketReplyAuthor")
 
   quoteLinesProvided   QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided      SalesOrderLine[] @relation("SoLineProvider")
@@ -4394,4 +4396,61 @@ model CadComment {
   createdAt     DateTime     @default(now())
 
   @@index([cadJobOrderId, createdAt])
+}
+
+// ── Help tickets (2026-10-11) ───────────────────────────────────────────────
+// The Help box on every page: anybody signed in raises a ticket for an
+// improvement, a fault or a question, with a screenshot of the screen they
+// were on; super admins are told and answer it in Admin › Help Tickets.
+
+enum HelpTicketKind {
+  IMPROVEMENT
+  PROBLEM
+  QUESTION
+}
+
+enum HelpTicketStatus {
+  NEW
+  IN_PROGRESS
+  DONE
+  WONT_DO
+}
+
+model HelpTicket {
+  id          String           @id @default(cuid())
+  number      String           @unique
+  kind        HelpTicketKind   @default(IMPROVEMENT)
+  subject     String
+  description String
+  status      HelpTicketStatus @default(NEW)
+  /// Where the person was when they raised it — the page's path and query.
+  pagePath    String?
+  /// The browser and the window size, for a fault that shows on one screen only.
+  userAgent   String?
+  viewport    String?
+  createdById String
+  createdBy   User             @relation("HelpTicketRaiser", fields: [createdById], references: [id], onDelete: Cascade)
+  /// When it was last marked Done or Won't do; null while it is open.
+  closedAt    DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  replies     HelpTicketReply[]
+
+  @@index([createdById, createdAt])
+  @@index([status, createdAt])
+}
+
+model HelpTicketReply {
+  id        String            @id @default(cuid())
+  ticketId  String
+  ticket    HelpTicket        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  /// Null once the login that wrote it is gone; the reply stays in the thread.
+  authorId  String?
+  author    User?             @relation("HelpTicketReplyAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  body      String
+  /// The status this reply moved the ticket to, when it did.
+  status    HelpTicketStatus?
+  createdAt DateTime          @default(now())
+
+  @@index([ticketId, createdAt])
 }
