@@ -12,8 +12,10 @@ import {
   badRequest,
   forbidden,
   idsFilter,
+  deleteOrRefuse,
   type ListQuery,
 } from '../http/kit';
+import { deleteAttachmentsOf } from '../shared/attachments';
 import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
 import { can, canEditRecord, type ResolvedUser } from '../permissions/resolve';
 import { audit } from '../shared/audit';
@@ -324,6 +326,8 @@ purchaseRequestRoutes.get(
       // a pending one pulled back, by its requester or an edit_all holder.
       canEdit: pr.status === 'DRAFT' && mayEditPr(me, pr),
       canWithdraw: pr.status === 'PENDING_APPROVAL' && mayEditPr(me, pr),
+      // POST /:id/cancel's own rule, short of the canvass check it makes itself.
+      canCancel: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(pr.status) && pr.orders.length === 0 && mayEditPr(me, pr),
     });
   }),
 );
@@ -800,6 +804,70 @@ purchaseRequestRoutes.post(
   }),
 );
 
+/**
+ * Cancels a purchase request (2026-10-11, the owner's call) — its requester
+ * or edit_all, with a reason. A draft, a pending one (its request withdrawn
+ * through the engine in the same transaction) or an approved one nothing has
+ * been bought on: no purchase order, and no canvass still open or awarded.
+ * An approved direct-to-job request releases the budget it committed. The
+ * claim is on the status it was read in, so a decision landing meanwhile
+ * refuses the cancel rather than being written over.
+ */
+purchaseRequestRoutes.post(
+  '/:id/cancel',
+  requireAny(...PR_EDIT),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { orders: true } }, canvasses: { where: { status: { not: 'CANCELLED' } }, select: { number: true } } },
+    });
+    if (!pr) throw notFound('Purchase request not found');
+    if (!mayEditPr(me, pr)) throw forbidden('This request belongs to someone else');
+    if (!['DRAFT', 'PENDING_APPROVAL', 'APPROVED'].includes(pr.status)) {
+      throw badRequest(pr.status === 'CANCELLED' ? 'This request is already cancelled' : `A ${statusLabel(pr.status).toLowerCase()} request cannot be cancelled`);
+    }
+    if (pr._count.orders > 0) throw badRequest('Purchase orders were raised from this request — cancel those first');
+    if (pr.canvasses.length) throw badRequest(`Canvass ${pr.canvasses.map((c) => c.number).join(', ')} is still on this request — cancel it first`);
+
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.purchaseRequest.updateMany({
+        where: { id: pr.id, status: pr.status },
+        data: { status: 'CANCELLED', notes: `${pr.notes ? `${pr.notes}\n` : ''}Cancelled: ${body.reason}` },
+      });
+      if (!claimed.count) throw badRequest('It changed a moment ago — reload to see where it stands');
+      if (pr.status === 'PENDING_APPROVAL') {
+        const withdrawn = await cancelOpenRequest('purchase_request', pr.id, tx, `cancelled by ${me.name}: ${body.reason}`, me.id);
+        if (!withdrawn.length) {
+          const last = await tx.approvalRequest.findFirst({
+            where: { documentType: 'purchase_request', documentId: pr.id },
+            orderBy: { createdAt: 'desc' },
+            select: { status: true },
+          });
+          if (last && (last.status === 'APPROVED' || last.status === 'REJECTED')) {
+            throw badRequest('It was decided a moment ago — reload to see where it stands');
+          }
+        }
+      }
+      if (pr.status === 'APPROVED' && pr.kind === 'DIRECT_TO_JOB' && pr.jobId) {
+        await releaseCommitment(tx, {
+          jobId: pr.jobId,
+          sourceType: 'purchase_request',
+          sourceId: pr.id,
+          reason: `${pr.number} cancelled`,
+          createdById: me.id,
+        });
+      }
+    });
+    await audit(
+      { entityType: 'purchase_request', entityId: pr.id, action: 'CANCELLED', summary: `${pr.number} cancelled — ${body.reason}` },
+      req,
+    );
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
 /** The trail's line for a decision that found its document no longer waiting for one. */
 async function notApplied(entityType: string, documentId: string, number: string, status: string, outcome: ApprovalOutcome) {
   await audit({
@@ -905,12 +973,13 @@ purchaseRequestRoutes.delete(
       include: { _count: { select: { orders: true } } },
     });
     if (!pr) throw notFound('Purchase request not found');
-    if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED') {
-      throw badRequest('Only a draft or rejected request can be deleted');
+    if (pr.status !== 'DRAFT' && pr.status !== 'REJECTED' && pr.status !== 'CANCELLED') {
+      throw badRequest('Only a draft, rejected or cancelled request can be deleted — cancel it first');
     }
     if (pr._count.orders > 0) throw badRequest('Purchase orders were raised from this request');
 
-    await prisma.purchaseRequest.delete({ where: { id: req.params.id } });
+    await deleteOrRefuse(pr.number, () => prisma.purchaseRequest.delete({ where: { id: req.params.id } }));
+    await deleteAttachmentsOf('purchase_request', [pr.id]);
     await audit(
       { entityType: 'purchase_request', entityId: req.params.id, action: 'DELETED', summary: `Deleted ${pr.number}` },
       req,

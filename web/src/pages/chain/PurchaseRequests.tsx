@@ -461,6 +461,7 @@ interface PrDetail {
   canEdit: boolean;
   /** PENDING_APPROVAL and the caller may pull it back to draft. */
   canWithdraw: boolean;
+  canCancel: boolean;
   estimatedTotal: number;
   job: { id: string; number: string; name: string } | null;
   warehouse: { id: string; name: string } | null;
@@ -583,9 +584,16 @@ export function PurchaseRequestDetail() {
   const sourcing = pr.status === 'APPROVED' || pr.status === 'PARTIALLY_ORDERED';
   // The API's own rule: a draft or rejected request with no order raised from it.
   const mayDelete =
-    (pr.status === 'DRAFT' || pr.status === 'REJECTED') &&
+    (pr.status === 'DRAFT' || pr.status === 'REJECTED' || pr.status === 'CANCELLED') &&
     pr.orders.length === 0 &&
     can('gchain.purchase_requests.delete');
+
+  async function cancel(reason: string) {
+    if (!pr) return;
+    await api.post(`/purchase-requests/${pr.id}/cancel`, { reason });
+    toast('ok', `${pr.number} cancelled`);
+    await load();
+  }
 
   /** Asked in the confirm bar, which shows a refusal — so this throws rather than catching. */
   async function remove() {
@@ -658,12 +666,30 @@ export function PurchaseRequestDetail() {
               onConfirm: withdraw,
             },
           },
+          pr.canCancel && {
+            label: 'Cancel purchase request',
+            danger: true,
+            confirm: {
+              title: `Cancel ${pr.number}?`,
+              body:
+                pr.status === 'PENDING_APPROVAL'
+                  ? 'Its approval is withdrawn and the approvers are told.'
+                  : pr.status === 'APPROVED'
+                    ? 'Nothing was ordered on it; the budget it committed is released.'
+                    : 'Nothing has been approved or ordered on it.',
+              confirmLabel: 'Cancel purchase request',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why is it cancelled?',
+              onConfirm: cancel,
+            },
+          },
           mayDelete && {
             label: 'Delete',
             danger: true,
             confirm: {
               title: `Delete ${pr.number}?`,
-              body: 'It cannot be undone.',
+              body: `This ${pr.status === 'CANCELLED' ? 'cancelled request' : pr.status === 'REJECTED' ? 'rejected request' : 'draft'} goes for good. Its number is not reused.`,
               confirmLabel: 'Delete',
               onConfirm: remove,
             },

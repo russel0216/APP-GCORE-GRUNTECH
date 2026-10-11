@@ -1396,6 +1396,26 @@ async function main() {
     const prPrints = await prisma.auditLog.count({ where: { entityType: 'purchase_request', entityId: big.id, action: 'EXPORTED' } });
     check('both prints of the request are on its trail as EXPORTED', prPrints === 2, String(prPrints));
 
+    // Cancelling a request, and deleting it once cancelled (2026-10-11).
+    const cancelNoReason = await api(requesterToken, 'POST', `/purchase-requests/${big.id}/cancel`, {});
+    const cancelStranger = await api(otherRequesterToken, 'POST', `/purchase-requests/${big.id}/cancel`, { reason: 'not mine' });
+    const cancelled = await api(requesterToken, 'POST', `/purchase-requests/${big.id}/cancel`, { reason: 'no longer needed' });
+    const cancelledRow = await prisma.purchaseRequest.findUnique({ where: { id: big.id } });
+    check(
+      'its requester cancels it with a reason; nobody else does, and not without one',
+      cancelNoReason.status === 400 && cancelStranger.status === 403 && cancelled.status === 200 && cancelledRow?.status === 'CANCELLED',
+      `${cancelNoReason.status} ${cancelStranger.status} ${cancelled.status} ${cancelledRow?.status}`,
+    );
+    const delNoRight = await api(requesterToken, 'DELETE', `/purchase-requests/${big.id}`);
+    await prisma.user.update({ where: { id: requester.id }, data: { isSuperAdmin: true } });
+    const delCancelled = await api(requesterToken, 'DELETE', `/purchase-requests/${big.id}`);
+    await prisma.user.update({ where: { id: requester.id }, data: { isSuperAdmin: false } });
+    check(
+      'a cancelled request is deleted with the delete right, not without it',
+      delNoRight.status === 403 && delCancelled.status === 200 && !(await prisma.purchaseRequest.findUnique({ where: { id: big.id } })),
+      `${delNoRight.status} ${delCancelled.status}`,
+    );
+
     // ── The printed request once it is refused ──────────────────────────
     // A rejection is final for a request (settlePurchaseRequest), so nobody
     // will ever sign the steps still unsigned: the paper prints no "Pending"

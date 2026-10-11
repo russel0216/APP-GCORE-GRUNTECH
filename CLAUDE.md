@@ -40,7 +40,13 @@ four databases and four copies of "customer".
    that still points at it is a 400, nothing deleted), removes its files
    with `deleteAttachmentsOf()` after the commit, and writes one DELETED
    audit row. On the page it is ⋯ › **Delete**, last and red, asked in
-   the confirm bar — the sales order's item, word for word.
+   the confirm bar — the sales order's item, word for word. **A purchase
+   request is cancelled too** (2026-10-11): `POST /purchase-requests/:id/
+   cancel { reason }` — its requester or edit_all, a draft, a pending one
+   (withdrawn through `cancelOpenRequest`, refused if a decision landed
+   first) or an approved one with no PO and no live canvass, releasing the
+   budget an approved direct-to-job request committed; the reason goes on
+   its notes. Its Delete takes a draft, a rejected or a cancelled one.
 2. **Never invent a second approval path.** Every document type routes through
    `api/src/shared/approvals.ts`. Call `submitForApproval(...)`, subscribe with
    `onApprovalSettled(...)`, and when a document moves on before anybody
@@ -426,7 +432,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,718 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,720 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -442,10 +448,10 @@ quotation that needs no approval until it is changed, and 11 on sales
 and 3 on masters for the capitals, the group the SCORO import asks
 about, a deleted group, the group refused at save and the customer's
 address, and 7 across cad, finance, delivery and aftermarket for deleting
-a cancelled document):
+a cancelled document, and 2 on chain for cancelling a purchase request):
 foundation
 316, masters 92, sales 513, costing 157, pipeline 92, calendar 96, numbering
-79, partners 120, delivery 145, chain 191, hr 431, plantilla 123, meetings
+79, partners 120, delivery 145, chain 193, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
 verify scripts share
