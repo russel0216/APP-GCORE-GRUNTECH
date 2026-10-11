@@ -1179,6 +1179,10 @@ function presentCanvass(canvass: LoadedCanvass, me: ResolvedUser) {
     // edit_all's), the supplier rows edit_all's. An award is the record.
     canEdit: open && mayEditCanvass(me, canvass),
     canEditSuppliers: open && can(me, 'gchain.canvass.edit_all'),
+    // POST /:id/cancel and DELETE /:id's own rules (the cancel also refuses
+    // an award an order was placed on).
+    canCancel: (open || canvass.status === 'AWARDED') && mayEditCanvass(me, canvass),
+    canDelete: canvass.status === 'CANCELLED' && can(me, 'gchain.canvass.delete') && mayEditCanvass(me, canvass),
   };
 }
 
@@ -1217,6 +1221,63 @@ canvassRoutes.patch(
       req,
     );
     res.json(presentCanvass((await loadCanvass(canvass.id))!, me));
+  }),
+);
+
+/**
+ * Cancels a canvass (2026-10-11, the owner's call) — its opener or
+ * edit_all, with a reason kept on its notes. An OPEN one, or an AWARDED one
+ * no live purchase order was placed on (an order's supplier is the award,
+ * `awardedCanvass()`): cancel the order first. Claimed on the status it was
+ * read in, so an award landing meanwhile refuses the cancel.
+ */
+canvassRoutes.post(
+  '/:id/cancel',
+  requireAny('gchain.canvass.edit_own', 'gchain.canvass.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const body = parseBody(z.object({ reason: z.string().trim().min(3, 'Say why it is cancelled').max(2000) }), req.body);
+    const canvass = await prisma.canvass.findUnique({
+      where: { id: req.params.id },
+      include: { suppliers: { where: { isSelected: true }, select: { supplierId: true } } },
+    });
+    if (!canvass) throw notFound('Canvass not found');
+    if (!mayEditCanvass(me, canvass)) throw forbidden('This canvass belongs to someone else');
+    if (canvass.status === 'CANCELLED') throw badRequest(`${canvass.number} is already cancelled`);
+    if (canvass.status === 'AWARDED') {
+      const winners = canvass.suppliers.map((s) => s.supplierId);
+      const orders = await prisma.purchaseOrder.findMany({
+        where: { requestId: canvass.requestId, supplierId: { in: winners }, status: { not: 'CANCELLED' } },
+        select: { number: true },
+      });
+      if (orders.length) {
+        throw badRequest(`Purchase order ${orders.map((o) => o.number).join(', ')} was placed on this award — cancel it first`);
+      }
+    }
+    const claimed = await prisma.canvass.updateMany({
+      where: { id: canvass.id, status: canvass.status },
+      data: { status: 'CANCELLED', notes: `${canvass.notes ? `${canvass.notes}\n` : ''}Cancelled: ${body.reason}` },
+    });
+    if (!claimed.count) throw badRequest(`${canvass.number} changed a moment ago — reload to see it`);
+    await audit({ entityType: 'canvass', entityId: canvass.id, action: 'CANCELLED', summary: `${canvass.number} cancelled — ${body.reason}` }, req);
+    res.json({ ok: true, status: 'CANCELLED' });
+  }),
+);
+
+/** Deletes a CANCELLED canvass — its opener or edit_all, with the delete right. Its suppliers and quotes go with it. */
+canvassRoutes.delete(
+  '/:id',
+  require_('gchain.canvass.delete'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const canvass = await prisma.canvass.findUnique({ where: { id: req.params.id } });
+    if (!canvass) throw notFound('Canvass not found');
+    if (!mayEditCanvass(me, canvass)) throw forbidden('This canvass belongs to someone else');
+    if (canvass.status !== 'CANCELLED') throw badRequest('Only a cancelled canvass can be deleted — cancel it first');
+    await deleteOrRefuse(canvass.number, () => prisma.canvass.delete({ where: { id: canvass.id } }));
+    await deleteAttachmentsOf('canvass', [canvass.id]);
+    await audit({ entityType: 'canvass', entityId: canvass.id, action: 'DELETED', summary: `Deleted cancelled canvass ${canvass.number}` }, req);
+    res.json({ ok: true });
   }),
 );
 

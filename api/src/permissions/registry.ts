@@ -253,7 +253,7 @@ export const REGISTRY: ModuleDef[] = [
     submodules: [
       { key: 'dashboard', group: 'Overview', label: 'Dashboard', path: '/g-chain', actions: REPORT, phase: 5 },
       { key: 'purchase_requests', group: 'Procurement', label: 'Purchase Requests', path: '/g-chain/purchase-requests', actions: OWNED, phase: 5 },
-      { key: 'canvass', group: 'Procurement', label: 'Canvass / RFQ', path: '/g-chain/canvass', actions: OWNED_KEPT, phase: 5 },
+      { key: 'canvass', group: 'Procurement', label: 'Canvass / RFQ', path: '/g-chain/canvass', actions: OWNED, phase: 5 },
       { key: 'purchase_orders', group: 'Procurement', label: 'Purchase Orders', path: '/g-chain/purchase-orders', actions: OWNED, phase: 5 },
       { key: 'receiving', group: 'Warehouse', label: 'Receiving', path: '/g-chain/receiving', actions: SHARED_KEPT, phase: 5 },
       { key: 'stock_issuance', group: 'Warehouse', label: 'Stock Issuance', path: '/g-chain/stock-issuance', actions: SHARED, phase: 5 },

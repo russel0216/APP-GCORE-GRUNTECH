@@ -116,6 +116,10 @@ interface CanvassDetailData {
   canEdit: boolean;
   /** OPEN and the caller holds edit_all: add, modify, quote, remove and award suppliers. */
   canEditSuppliers: boolean;
+  /** OPEN, or AWARDED with no order on it, and the caller may edit it. */
+  canCancel: boolean;
+  /** CANCELLED, and the caller holds the delete right and may edit it. */
+  canDelete: boolean;
   request: {
     id: string;
     number: string;
@@ -178,6 +182,20 @@ export function CanvassDetail() {
     await load();
   }
 
+  async function cancel(reason: string) {
+    if (!canvass) return;
+    await api.post(`/canvasses/${canvass.id}/cancel`, { reason });
+    toast('ok', `${canvass.number} cancelled`);
+    await load();
+  }
+
+  async function remove() {
+    if (!canvass) return;
+    await api.del(`/canvasses/${canvass.id}`);
+    toast('ok', `${canvass.number} deleted`);
+    navigate('/g-chain/canvass');
+  }
+
   const winner = canvass.suppliers.find((s) => s.isSelected);
   // The API's own rule: an open canvass, and edit_all, for its supplier rows.
   const mayEdit = canvass.canEditSuppliers;
@@ -230,6 +248,34 @@ export function CanvassDetail() {
             </button>
           )
         }
+        more={[
+          canvass.canCancel && {
+            label: 'Cancel canvass',
+            danger: true,
+            confirm: {
+              title: `Cancel ${canvass.number}?`,
+              body:
+                canvass.status === 'AWARDED'
+                  ? 'The award is withdrawn; no order was placed on it. The purchase request can be canvassed again.'
+                  : 'The quotes stay on it as a record. The purchase request can be canvassed again.',
+              confirmLabel: 'Cancel canvass',
+              reason: 'required',
+              minReason: 3,
+              reasonLabel: 'Why is it cancelled?',
+              onConfirm: cancel,
+            },
+          },
+          canvass.canDelete && {
+            label: 'Delete',
+            danger: true,
+            confirm: {
+              title: `Delete ${canvass.number}?`,
+              body: 'This cancelled canvass goes for good. Its number is not reused.',
+              confirmLabel: 'Delete',
+              onConfirm: remove,
+            },
+          },
+        ]}
         modify={canvass.canEdit ? () => setModifying(true) : undefined}
         confirm={confirm}
       />

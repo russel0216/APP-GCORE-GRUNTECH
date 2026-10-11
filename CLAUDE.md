@@ -47,6 +47,14 @@ four databases and four copies of "customer".
    first) or an approved one with no PO and no live canvass, releasing the
    budget an approved direct-to-job request committed; the reason goes on
    its notes. Its Delete takes a draft, a rejected or a cancelled one.
+   **So is a canvass / RFQ** (2026-10-11; canvass is `OWNED` now):
+   `POST /canvasses/:id/cancel { reason }` — its opener or edit_all, an
+   OPEN one or an AWARDED one with no live PO from the winner on its
+   request (refused naming the order otherwise), claimed on the status it
+   read, the reason on its notes; a cancelled canvass no longer blocks the
+   request's own cancel, and the request may be canvassed again. `DELETE
+   /canvasses/:id` takes only a cancelled one, its supplier rows and quotes
+   cascading with it.
 2. **Never invent a second approval path.** Every document type routes through
    `api/src/shared/approvals.ts`. Call `submitForApproval(...)`, subscribe with
    `onApprovalSettled(...)`, and when a document moves on before anybody
@@ -432,7 +440,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,724 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,728 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -452,7 +460,7 @@ a cancelled document, and 2 on chain for cancelling a purchase request, and 4 on
 the routes by who prepared the document):
 foundation
 316, masters 92, sales 517, costing 157, pipeline 92, calendar 96, numbering
-79, partners 120, delivery 145, chain 193, hr 431, plantilla 123, meetings
+79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 46, accounts 124. The
 verify scripts share

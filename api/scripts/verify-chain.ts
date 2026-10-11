@@ -1751,6 +1751,49 @@ async function main() {
     const canvassAudits = await prisma.auditLog.count({ where: { entityType: 'canvass', entityId: openCanvass.id, action: 'UPDATED' } });
     check('each change to the canvass is audited', canvassAudits >= 4, String(canvassAudits));
 
+    // ── Cancelling and deleting a canvass ────────────────────────────────
+    console.log('\nCancelling and deleting a canvass (over HTTP)');
+    const liveOrders = await prisma.purchaseOrder.count({
+      where: { requestId: pr.id, supplierId: supplier.id, status: { not: 'CANCELLED' } },
+    });
+    const awardedCancel = await api(canvassLeadToken, 'POST', `/canvasses/${openCanvass.id}/cancel`, { reason: 'changed our mind' });
+    check(
+      'an award with a live order on it is not cancelled — the order goes first',
+      liveOrders > 0 ? awardedCancel.status === 400 && /cancel it first/.test(String(awardedCancel.body.error)) : awardedCancel.status === 200,
+      `${liveOrders} ${awardedCancel.status} ${String(awardedCancel.body.error)}`,
+    );
+    const toCancel = await prisma.canvass.create({
+      data: { number: await nextNumber('canvass'), requestId: pr.id, createdById: canvasser.id, suppliers: { create: [{ supplierId: otherSupplier.id }] } },
+    });
+    const flagsOpen = await api(canvasserToken, 'GET', `/canvasses/${toCancel.id}`);
+    const cNoReason = await api(canvasserToken, 'POST', `/canvasses/${toCancel.id}/cancel`, {});
+    const cStranger = await api(otherCanvasserToken, 'POST', `/canvasses/${toCancel.id}/cancel`, { reason: 'not mine' });
+    const delOpen = await api(canvasserToken, 'DELETE', `/canvasses/${toCancel.id}`);
+    const cDone = await api(canvasserToken, 'POST', `/canvasses/${toCancel.id}/cancel`, { reason: 'supplier list was wrong' });
+    const cAgain = await api(canvasserToken, 'POST', `/canvasses/${toCancel.id}/cancel`, { reason: 'twice' });
+    const cRow = await prisma.canvass.findUniqueOrThrow({ where: { id: toCancel.id } });
+    check(
+      'its opener cancels an open canvass with a reason; nobody else, not without one, and not twice',
+      flagsOpen.body.canCancel === true && flagsOpen.body.canDelete === false &&
+        cNoReason.status === 400 && cStranger.status === 403 && cDone.status === 200 && cAgain.status === 400 &&
+        cRow.status === 'CANCELLED' && /supplier list was wrong/.test(cRow.notes ?? ''),
+      `${flagsOpen.body.canCancel} ${flagsOpen.body.canDelete} ${cNoReason.status} ${cStranger.status} ${cDone.status} ${cAgain.status} ${cRow.status}`,
+    );
+    const delNoCanvassRight = await api(canvasserToken, 'DELETE', `/canvasses/${toCancel.id}`);
+    await prisma.user.update({ where: { id: canvasser.id }, data: { isSuperAdmin: true } });
+    const flagsCancelled = await api(canvasserToken, 'GET', `/canvasses/${toCancel.id}`);
+    const delCanvass = await api(canvasserToken, 'DELETE', `/canvasses/${toCancel.id}`);
+    await prisma.user.update({ where: { id: canvasser.id }, data: { isSuperAdmin: false } });
+    check(
+      'a cancelled canvass is deleted with the delete right (never an open one), its suppliers with it',
+      delOpen.status === 403 && delNoCanvassRight.status === 403 && flagsCancelled.body.canDelete === true &&
+        delCanvass.status === 200 && !(await prisma.canvass.findUnique({ where: { id: toCancel.id } })) &&
+        (await prisma.canvassSupplier.count({ where: { canvassId: toCancel.id } })) === 0,
+      `${delOpen.status} ${delNoCanvassRight.status} ${flagsCancelled.body.canDelete} ${delCanvass.status}`,
+    );
+    const cancelAudit = await prisma.auditLog.count({ where: { entityType: 'canvass', entityId: toCancel.id, action: { in: ['CANCELLED', 'DELETED'] } } });
+    check('the cancel and the delete are audited', cancelAudit === 2, String(cancelAudit));
+
     // ── Manila's day ──────────────────────────────────────────────────────
     // A DATE the server fills in or compares with is Manila's date; the UTC
     // date is still yesterday's until 08:00, when crews collect materials and
