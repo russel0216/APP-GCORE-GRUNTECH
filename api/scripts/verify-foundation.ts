@@ -110,6 +110,7 @@ import { recordLink } from '../../web/src/lib/links';
 import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
+import { attachmentKind, fitImage } from '../src/shared/pdfAttachments';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -2823,6 +2824,23 @@ async function main() {
     `a sheet past ${MAX_ROWS.toLocaleString()} rows is cut there and says so`,
     long?.rows.length === MAX_ROWS && long?.truncatedRows === true,
     `${long?.rows.length} ${long?.truncatedRows}`,
+  );
+
+  // ── Attachments printed behind a document (2026-10-12) ────────────────────
+  console.log('\nAttachments on paper');
+  const bigImage = fitImage(4000, 3000);
+  const smallImage = fitImage(200, 100);
+  check(
+    'an image is fitted inside the 36pt margins, never enlarged past its pixels, and centred',
+    bigImage.width <= 595.28 - 72 + 1e-6 && bigImage.x >= 36 - 1e-6 && bigImage.y >= 36 && smallImage.width === 200 && smallImage.height === 100 &&
+      Math.abs(smallImage.x - (595.28 - 200) / 2) < 1e-6,
+    JSON.stringify({ bigImage, smallImage }),
+  );
+  check(
+    'a file is printed by what it is: a PDF, an image, or only listed',
+    attachmentKind({ fileName: 'PO.PDF', mimeType: 'application/octet-stream' }) === 'pdf' &&
+      attachmentKind({ fileName: 'site.webp', mimeType: 'image/webp' }) === 'image' &&
+      attachmentKind({ fileName: 'specs.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }) === 'other',
   );
 
   // ── Done ───────────────────────────────────────────────────────────────────

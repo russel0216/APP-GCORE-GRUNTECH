@@ -11,6 +11,9 @@
  */
 
 import bcrypt from 'bcryptjs';
+import sharp from 'sharp';
+import { PDFDocument } from 'pdf-lib';
+import { deleteAttachment } from '../src/shared/attachments';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../src/prisma';
 import { env } from '../src/env';
@@ -205,6 +208,11 @@ async function putSeriesBack() {
 }
 
 async function cleanup() {
+  // The files the attachment checks uploaded or copied — rows AND bytes:
+  // the rows would cascade with their uploader, the files on disk would not.
+  for (const f of await prisma.attachment.findMany({ where: { uploadedBy: { email: { endsWith: '@verifys.local' } } }, select: { id: true } })) {
+    await deleteAttachment(f.id);
+  }
   await putSavedLayoutBack();
   await putSeriesBack();
   if (await editorTokenIsSpare()) {
@@ -3827,6 +3835,51 @@ async function main() {
       ],
     });
     const soQuoteId = String(soQuote.body.id);
+
+    // ── Attachments on the quotation, printed behind it, copied to the order (2026-10-12) ──
+    console.log('\nAttachments on the quotation and the sales order');
+    const soQuoteRev = (soQuote.body.revisions as { id: string }[])[0].id;
+    const pngBytes = await sharp({ create: { width: 400, height: 300, channels: 3, background: '#c03030' } }).png().toBuffer();
+    const twoPager = await PDFDocument.create();
+    twoPager.addPage([300, 400]);
+    twoPager.addPage([300, 400]);
+    const pdfBytes2 = Buffer.from(await twoPager.save());
+    const uploadTo = async (token: string, entity: string, id: string, name: string, type: string, bytes: Buffer) => {
+      const form = new FormData();
+      form.append('files', new Blob([bytes], { type }), name);
+      const res = await fetch(`${BASE}/attachments/${entity}/${id}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
+      return { status: res.status, text: await res.text() };
+    };
+    const upPng = await uploadTo(salesToken, 'quotation', soQuoteId, `${TAG}-site-photo.png`, 'image/png', pngBytes);
+    const upPdf = await uploadTo(otherToken, 'quotation', soQuoteId, `${TAG}-customer-PO.pdf`, 'application/pdf', pdfBytes2);
+    const upDoc = await uploadTo(salesToken, 'quotation', soQuoteId, `${TAG}-specs.docx`, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', Buffer.from('not really a docx'));
+    const upBad = await uploadTo(salesToken, 'quotation', soQuoteId, `${TAG}-broken.pdf`, 'application/pdf', Buffer.from('%PDF-1.4 this is not a pdf'));
+    check('the author attaches a photo, a Word file and a damaged PDF to the quotation', [upPng, upDoc, upBad].every((u) => u.status === 201), upPng.text.slice(0, 120));
+    check('a colleague who may raise sales orders files the customer’s PO on it', upPdf.status === 201, upPdf.text.slice(0, 120));
+    const lonerToken = signToken(loner.id, loner.email);
+    const lonerList = await http(lonerToken, 'GET', `/attachments/quotation/${soQuoteId}`);
+    const lonerUp = await uploadTo(lonerToken, 'quotation', soQuoteId, `${TAG}-x.png`, 'image/png', pngBytes);
+    check(
+      'someone who may not open the quotation can neither see its files nor add one',
+      (lonerList.status === 403 || lonerList.status === 404) && (lonerUp.status === 403 || lonerUp.status === 404),
+      `${lonerList.status} ${lonerUp.status}`,
+    );
+    const pagesOf = async (buf: Buffer) => (await PDFDocument.load(buf)).getPageCount();
+    const bytesOf = async (url: string, token = salesToken) => Buffer.from(await (await fetch(`${BASE}${url}`, { headers: { Authorization: `Bearer ${token}` } })).arrayBuffer());
+    const qBare = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf?attachments=0`);
+    const qFull = await bytesOf(`/quotations/${soQuoteId}/revisions/${soQuoteRev}/pdf`);
+    const qFullText = pdfText(qFull);
+    check(
+      'printed, the quotation carries its files: an Attachments page, the photo on a page, the PO’s two pages',
+      (await pagesOf(qFull)) === (await pagesOf(qBare)) + 1 + 1 + 2,
+      `${await pagesOf(qBare)} → ${await pagesOf(qFull)}`,
+    );
+    check(
+      'the Attachments page names all four, says what cannot be printed, and how many pages follow',
+      qFullText.includes('ATTACHMENTS') && [`${TAG}-site-photo.png`, `${TAG}-customer-PO.pdf`, `${TAG}-specs.docx`, `${TAG}-broken.pdf`].every((n) => qFullText.includes(n)) &&
+        qFullText.includes('Not printable') && qFullText.includes('Could not be read') && qFullText.includes('3 pages follow'),
+    );
+    check('“Print without attachments” is the bare quotation', !pdfText(qBare).includes(`${TAG}-site-photo.png`));
     // SCORO's Create invoice: what is left to book, then bookings against it.
     const booking0 = await http(salesToken, 'GET', `/sales-orders/booking?quotationId=${soQuoteId}`);
     const bk0 = booking0.body as unknown as { net: number; availableNet: number; lines: { id: string; available: number; booked: number; isHeading: boolean }[] };
@@ -3846,6 +3899,29 @@ async function main() {
     });
     check('a sales order books half of each line — progress booking, SCORO\u2019s 50%', so1.status === 201, so1.text.slice(0, 160));
     const so1Body = so1.body as unknown as { id: string; number: string; status: string; total: number; lines: { group: string | null; unitCost: number | null; quantity: number; amount: number; costAmount: number | null }[] };
+
+    // The quotation's files travel with the order it books.
+    const soFiles = await prisma.attachment.findMany({ where: { entityType: 'sales_order', entityId: so1Body.id }, orderBy: { uploadedAt: 'asc' } });
+    const qFiles = await prisma.attachment.findMany({ where: { entityType: 'quotation', entityId: soQuoteId }, orderBy: { uploadedAt: 'asc' } });
+    check(
+      'raising the order copied the quotation’s four files onto it — rows and bytes of their own, captioned',
+      soFiles.length === 4 &&
+        soFiles.every((f, i) => f.fileName === qFiles[i].fileName && f.size === qFiles[i].size && f.storedName !== qFiles[i].storedName && (f.caption ?? '').startsWith('From quotation')),
+      soFiles.map((f) => f.fileName).join(', '),
+    );
+    const soBare = await bytesOf(`/sales-orders/${so1Body.id}/pdf?attachments=0`);
+    const soFull = await bytesOf(`/sales-orders/${so1Body.id}/pdf`);
+    check(
+      'the order prints with them too, so its approvers see the PO',
+      (await pagesOf(soFull)) === (await pagesOf(soBare)) + 4 && pdfText(soFull).includes(`${TAG}-customer-PO.pdf`),
+      `${await pagesOf(soBare)} → ${await pagesOf(soFull)}`,
+    );
+    const dropCopy = await http(salesToken, 'DELETE', `/attachments/${soFiles[0].id}`);
+    check(
+      'removing a copy from the order leaves the quotation’s original',
+      dropCopy.status === 200 && (await prisma.attachment.count({ where: { entityType: 'quotation', entityId: soQuoteId } })) === 4,
+      dropCopy.text.slice(0, 120),
+    );
     check(
       'its lines carry the booked quantity, the amount for it, and cost scaled with it',
       so1Body.status === 'DRAFT' &&
@@ -4054,7 +4130,11 @@ async function main() {
     );
     check(
       'and the paper is A4 on its side — the cost columns are why it is landscape',
-      soPdfBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]'),
+      // The order's own first page (attachments behind it keep their own sizes).
+      await (async () => {
+        const first = (await PDFDocument.load(soPdfBytes)).getPage(0).getSize();
+        return Math.abs(first.width - 841.89) < 0.01 && Math.abs(first.height - 595.28) < 0.01;
+      })(),
     );
     // The CEO's own order (the owner's example): it waits on the Team Leader
     // of the CEO's team, back support and the cost controller; its CEO step

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ApiError, api, qs } from '../../lib/api';
+import { ApiError, api, openPdf, qs } from '../../lib/api';
+import { Attachments } from '../../components/Attachments';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
@@ -1050,6 +1051,13 @@ export function QuotationDetail() {
         }
         print={revision ? `/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption })}` : undefined}
         more={[
+          // Print carries the attached files behind the quotation (2026-10-12); this is the bare paper.
+          revision && {
+            label: 'Print without attachments',
+            hint: 'The quotation alone, without the files attached to it',
+            onSelect: () =>
+              openPdf(`/api/quotations/${quotation.id}/revisions/${revision.id}/pdf${qs({ option: chosenOption, attachments: 0 })}`, (e) => setError(e)),
+          },
           can('gops.quotations.create') &&
             revision && {
               label: 'Duplicate',
@@ -1513,6 +1521,18 @@ export function QuotationDetail() {
               reloadToken={reload}
             />
           )}
+
+          {/* Between the sales orders and the activity (2026-10-12, the owner's
+              call): a PO, a drawing, a photo — printed behind the quotation, and
+              copied onto every sales order raised from it. */}
+          <div className="sales-card-gap">
+            <Attachments
+              entityType="quotation"
+              entityId={quotation.id}
+              hint="A purchase order, a drawing, a photo — printed after the quotation, and copied onto the sales order raised from it."
+              canEdit={quotation.canEdit || can('gops.sales_orders.create')}
+            />
+          </div>
 
           <div className="sales-card-gap">
             <ActivityLog quotationId={quotation.id} canEdit={quotation.canEdit} />

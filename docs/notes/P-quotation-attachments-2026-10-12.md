@@ -8,7 +8,8 @@ also transfers, so the complete approval of the sales order prints with the
 attached documents. The attachment card sits at the bottom of the sales
 order. Correct also the spacing of the approval card and the order card."
 
-Status: **planned, not built.**
+Status: **built 2026-10-12** on the defaults below — see CLAUDE.md,
+"Attachments on the quotation and the sales order".
 
 ## What is there today
 

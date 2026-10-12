@@ -68,6 +68,8 @@ import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listDay, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, dayOf, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
 import { toCsv } from '../shared/insights';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
+import { attachedFiles, withAttachments } from '../shared/pdfAttachments';
+import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
   probabilityAfterMove,
@@ -2587,6 +2589,9 @@ quotationRoutes.delete(
       }
       throw err;
     }
+    // Their files go with them, once the records are gone.
+    await deleteAttachmentsOf('quotation', [quotation.id]);
+    await deleteAttachmentsOf('sales_order', orderIds);
 
     await audit(
       {
@@ -2654,6 +2659,7 @@ quotationRoutes.delete(
       await tx.lead.update({ where: { id: lead.id }, data: { status } });
       return { ...lead, to: status };
     });
+    await deleteAttachmentsOf('quotation', [quotation.id]);
 
     await audit(
       {
@@ -3337,6 +3343,36 @@ export async function quotationPrintData(
   };
 }
 
+/**
+ * The quotation's files (2026-10-12, the owner's call: "add attachment card
+ * … picture, pdf or any document related to the quotation, e.g. Purchase
+ * Order"). Read by whoever may read the quotation — a stand-in deciding it
+ * included (`printableQuotation`); added and removed by whoever may edit it,
+ * or by a reader who may raise sales orders (sales files the customer's PO on
+ * a quotation somebody else wrote).
+ */
+registerAttachmentGuard(
+  'quotation',
+  async (user, id) => {
+    try {
+      await printableQuotation(user, id);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  {
+    write: async (user, id) => {
+      if (user.isSuperAdmin) return true;
+      const q = await prisma.quotation.findUnique({ where: { id }, select: { ownerId: true } });
+      if (!q) return false;
+      if (canEditRecord(user, 'gops', 'quotations', q.ownerId)) return true;
+      const reads = user.permissions.has('gops.quotations.view_all') || q.ownerId === user.id;
+      return reads && user.permissions.has('gops.sales_orders.create');
+    },
+  },
+);
+
 quotationRoutes.get(
   '/:id/revisions/:revisionId/pdf',
   requireAnyOrDecider('gops.quotations.view_all', 'gops.quotations.view_own'),
@@ -3352,14 +3388,22 @@ quotationRoutes.get(
     // ignored.
     const { design } = await quotationDesign();
     const optionId = typeof req.query.option === 'string' && req.query.option ? req.query.option : null;
-    const pdf = await renderDesigned(design, await quotationPrintData(quotation, revision, { optionId }));
+    const bare = await renderDesigned(design, await quotationPrintData(quotation, revision, { optionId }));
+    // The quotation's attachments print behind it (2026-10-12) unless
+    // `?attachments=0` asks for the bare document.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('quotation', quotation.id);
+    const { pdf, listed } = await withAttachments(bare, files, {
+      title: 'Quotation',
+      number: quotation.number,
+      reference: quotation.customer.name,
+    });
 
     await audit(
       {
         entityType: 'quotation',
         entityId: quotation.id,
         action: 'EXPORTED',
-        summary: `Printed ${quotation.number} R${revision.revision}`,
+        summary: `Printed ${quotation.number} R${revision.revision}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
       },
       req,
     );

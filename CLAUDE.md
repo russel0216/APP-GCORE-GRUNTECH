@@ -505,7 +505,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,849 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,860 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -539,9 +539,10 @@ foundation and 22 on sales for the routing sheet of 2026-10-12 — the
 preparer's own signature, the stand-in and the team's leader, and 4 on
 foundation and 4 on sales for the sales order paper of the owner's slide, and
 17 on sales for the contact person on the paper, its quick-add and the boxes
-that remember):
+that remember, and 2 on foundation and 9 on sales for the attachments printed
+behind the quotation and the sales order):
 foundation
-347, masters 92, sales 576, costing 157, pipeline 92, calendar 96, numbering
+349, masters 92, sales 585, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -3449,6 +3450,56 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   in the editor), and the standard order layout sets 15 at 8.5pt, so the
   six rows with cost end above the approvals table — verify-foundation
   prints the two-line sample on one page.
+
+## Attachments on the quotation and the sales order (2026-10-12)
+
+The owner's call: "add attachment card between sales order and activity …
+e.g. Purchase Order; when print or save as, it also includes the attached
+documents; when created as sales order, the attachment also transfers …
+the attachment card at the bottom of the sales order"
+(`docs/notes/P-quotation-attachments-2026-10-12.md`).
+
+- **The cards are the one `Attachments` card**, `entityType` `quotation`
+  (between Sales orders and Activity; the files belong to the quotation, so
+  a new revision keeps them) and `sales_order` (last on the order page).
+  **Guards** (`registerAttachmentGuard`, in `routes/sales.ts` and
+  `routes/salesOrders.ts`): read = the record's own visibility, a stand-in
+  deciding it included (`printableQuotation` / `assertOrderVisible`);
+  write = whoever may edit it (`canEditRecord`), and on a quotation also a
+  READER holding `gops.sales_orders.create` (sales files the customer's PO
+  on a colleague's quotation). Deleting or purging a quotation and deleting
+  an order remove their files (`deleteAttachmentsOf`, after the commit).
+- **The paper carries them**: `withAttachments(pdf, files, doc)` in
+  `shared/pdfAttachments.ts`, applied by `GET /quotations/:id/revisions/
+  :rid/pdf` and `GET /sales-orders/:id/pdf` only (never the list papers,
+  the template preview or the specimen). The document's own pages first,
+  unchanged (its "Page n of m" stays its own); then, when anything is
+  attached, an **Attachments page** through `renderDocument` naming every
+  file, who added it and when, and what became of it ("Printed — 2
+  pages", "Not printable — open it in G-CORE", "Could not be read …");
+  then each PDF's pages copied whole and each image (JPEG/PNG, WEBP and GIF
+  made PNG through `sharp`, EXIF-turned) on an A4 page of its own,
+  `fitImage()` inside the 36pt margins and never enlarged, its name under
+  it. Word, Excel, CAD and zips are listed, never converted (that needs
+  LibreOffice on the shared host). A damaged or protected PDF is listed and
+  the paper still prints. **`pdf-lib` (1.17.1)** is the merger — pdfkit
+  cannot read a PDF; added to the lockfile by merging only its entries (the
+  sandbox's npm strips `libc` fields from every other entry). `?attachments=0`
+  prints the bare document — "Print without attachments" in the ⋯ of both
+  pages; the list's PDF column stays the bare paper. The EXPORTED row says
+  how many went with it.
+- **The order takes the quotation's files**: `POST /sales-orders` copies
+  them after the commit through `copyAttachments()` (bytes copied, rows of
+  their own captioned "From quotation <number>" — the CAD plan's rule), so
+  removing a copy never touches the original; a failed copy is logged and
+  never fails the order. A file added to the quotation later stays there.
+- **verify-sales** uploads a PNG, a two-page PDF (by a colleague — the PO
+  rule), a Word file and a damaged PDF, proves a view-own reader is kept
+  out, counts the pages (bare + 1 + 1 + 2), reads the Attachments page,
+  follows the copies onto the order and its paper, and deletes the files on
+  disk in `cleanup()` (every attachment uploaded by a `@verifys.local` user).
+  The order's landscape check reads the FIRST page's size through pdf-lib,
+  since attachments behind it keep their own.
 
 ## The list of quotations (2026-10-08)
 

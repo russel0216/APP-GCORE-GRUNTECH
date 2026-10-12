@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'r
 import { ContactPicker, type ContactRef } from '../../components/ContactPicker';
 import { MemoryInput, ORDER_MEMORY } from '../../components/MemoryInput';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, qs } from '../../lib/api';
+import { api, openPdf, qs } from '../../lib/api';
+import { Attachments } from '../../components/Attachments';
 import { useAuth } from '../../lib/auth';
 import { ApprovalStepper, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
@@ -541,6 +542,12 @@ export function SalesOrderDetail() {
         }
         print={`/api/sales-orders/${order.id}/pdf`}
         more={[
+          // Print carries the attached files behind the order (2026-10-12); this is the bare paper.
+          {
+            label: 'Print without attachments',
+            hint: 'The order alone, without the files attached to it',
+            onSelect: () => openPdf(`/api/sales-orders/${order.id}/pdf?attachments=0`, (e) => setError(e)),
+          },
           order.canEdit &&
             pending && {
               label: 'Pull back and edit',
@@ -619,7 +626,8 @@ export function SalesOrderDetail() {
         <div className="alert warn">Cancelled — {order.cancelReason}</div>
       )}
 
-      <div className="grid grid-2">
+      {/* The same gap as every other card on the page (2026-10-12: the grid sat flush under the Approval card). */}
+      <div className="grid grid-2 sales-card-gap">
         <div className="card">
           <h3 className="card-title">Order</h3>
           <Row label="Customer" value={order.customer.name} />
@@ -720,6 +728,17 @@ export function SalesOrderDetail() {
             </dl>
           )}
         </div>
+      </div>
+
+      {/* Last on the page (2026-10-12, the owner's call): the quotation's files,
+          copied when the order was raised, and its own — printed behind the order. */}
+      <div className="sales-card-gap">
+        <Attachments
+          entityType="sales_order"
+          entityId={order.id}
+          hint="Copied from the quotation when the order was raised, and anything added since — printed after the order."
+          canEdit={order.canEdit}
+        />
       </div>
     </div>
   );

@@ -32,6 +32,8 @@ import {
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
 import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
+import { attachedFiles, copyAttachments, withAttachments } from '../shared/pdfAttachments';
+import { registerAttachmentGuard, deleteAttachmentsOf } from '../shared/attachments';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
 import {
   companyCurrency,
@@ -793,6 +795,23 @@ salesOrderRoutes.post(
       return { fresh, picks: picks.length, of: booking.lines.filter((l) => !l.isHeading).length };
     });
 
+    // The quotation's files travel with the order it books (2026-10-12, the
+    // owner's call), so the approvers' paper carries the customer's PO.
+    // Copied after the commit — bytes and rows of their own — and never
+    // allowed to fail the order: a copy that fails is logged, and the files
+    // can still be added to the order by hand.
+    let filesCopied = 0;
+    try {
+      filesCopied = await copyAttachments(
+        { entityType: 'quotation', entityId: quotation.id },
+        { entityType: 'sales_order', entityId: order.fresh.id },
+        `From quotation ${quotation.number}`,
+        me.id,
+      );
+    } catch (err) {
+      console.error(`[sales-order] copying ${quotation.number}'s attachments to ${order.fresh.number} failed`, err);
+    }
+
     await audit(
       {
         entityType: 'sales_order',
@@ -800,7 +819,7 @@ salesOrderRoutes.post(
         action: 'CREATED',
         summary: `Created sales order ${order.fresh.number} from quotation ${quotation.number} (${
           body.mode === 'summary' ? `summarised, ${order.picks} of ${order.of} lines` : `${order.picks} of ${order.of} lines`
-        })`,
+        })${filesCopied ? `, with its ${filesCopied} attachment${filesCopied === 1 ? '' : 's'}` : ''}`,
       },
       req,
     );
@@ -1187,6 +1206,7 @@ salesOrderRoutes.delete(
       throw badRequest('Only a draft or a cancelled sales order can be deleted — cancel it first');
     }
     await prisma.salesOrder.delete({ where: { id: order.id } });
+    await deleteAttachmentsOf('sales_order', [order.id]);
     await audit(
       { entityType: 'sales_order', entityId: order.id, action: 'DELETED', summary: `Deleted sales order ${order.number}`, before: order },
       req,
@@ -1208,6 +1228,32 @@ const PRINT_INCLUDE = {
 export type PrintableSalesOrder = Prisma.SalesOrderGetPayload<{ include: typeof PRINT_INCLUDE }>;
 
 /** The order, for printing: whoever prints it must be able to open it. */
+/**
+ * The order's files (2026-10-12): read under the order's own visibility (a
+ * stand-in deciding it included), added and removed by whoever may edit it.
+ * The quotation's files are copied onto it when it is raised.
+ */
+registerAttachmentGuard(
+  'sales_order',
+  async (user, id) => {
+    const order = await prisma.salesOrder.findUnique({ where: { id }, select: { id: true, ownerId: true } });
+    if (!order) return false;
+    try {
+      await assertOrderVisible(user, order, false);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  {
+    write: async (user, id) => {
+      if (user.isSuperAdmin) return true;
+      const order = await prisma.salesOrder.findUnique({ where: { id }, select: { ownerId: true } });
+      return !!order && canEditRecord(user, 'gops', 'sales_orders', order.ownerId);
+    },
+  },
+);
+
 export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id: string, deciderOnly = false): Promise<PrintableSalesOrder> {
   const order = await prisma.salesOrder.findUnique({ where: { id }, include: PRINT_INCLUDE });
   if (!order) throw notFound('Sales order not found');
@@ -1478,10 +1524,23 @@ salesOrderRoutes.get(
     const showCost = canSeeOrderCost(me, order.ownerId);
     const { design } = await salesOrderDesign();
     const data = await salesOrderPrintData(order, showCost);
-    const pdf = await renderDesigned(showCost ? design : withoutCostColumns(design), data);
+    const bare = await renderDesigned(showCost ? design : withoutCostColumns(design), data);
+    // The order's attachments — the quotation's, copied when it was raised,
+    // and its own — print behind it (2026-10-12) unless `?attachments=0`.
+    const files = req.query.attachments === '0' ? [] : await attachedFiles('sales_order', order.id);
+    const { pdf, listed } = await withAttachments(bare, files, {
+      title: 'Sales order',
+      number: order.number,
+      reference: order.customer.name,
+    });
 
     await audit(
-      { entityType: 'sales_order', entityId: order.id, action: 'EXPORTED', summary: `Printed sales order ${order.number}` },
+      {
+        entityType: 'sales_order',
+        entityId: order.id,
+        action: 'EXPORTED',
+        summary: `Printed sales order ${order.number}${listed ? ` with ${listed} attachment${listed === 1 ? '' : 's'}` : ''}`,
+      },
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
