@@ -736,6 +736,18 @@ customerRoutes.post(
     if (!customer) throw notFound('Customer not found');
 
     const contact = await prisma.$transaction(async (tx) => {
+      // One person once per customer (2026-10-12): the quotation editor files
+      // a contact as it is typed, and a double click or two people at once
+      // must not file the same name twice. Locked on the customer's row so
+      // the check and the insert are one decision.
+      await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${req.params.id} FOR UPDATE`;
+      const name = body.name.replace(/\s+/g, ' ');
+      const same = await tx.customerContact.findFirst({
+        where: { customerId: req.params.id, name: { equals: name, mode: 'insensitive' } },
+        select: { name: true },
+      });
+      if (same) throw conflict(`${same.name} is already a contact of ${customer.name} — pick them from the list`);
+      body.name = name;
       if (body.isPrimary) {
         await tx.customerContact.updateMany({
           where: { customerId: req.params.id },

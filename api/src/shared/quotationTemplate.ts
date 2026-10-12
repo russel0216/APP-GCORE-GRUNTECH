@@ -51,6 +51,7 @@ export const QUOTATION_FIELDS: DesignField[] = [
   { key: 'contact.nameAndPosition', label: 'Contact, with their position', group: 'Contact', sample: 'Engr. Juan Dela Cruz, Facilities Head' },
   { key: 'contact.email', label: 'Contact’s email', group: 'Contact', sample: 'juan.delacruz@sample.ph' },
   { key: 'contact.phone', label: 'Contact’s phone, else mobile', group: 'Contact', sample: '0917 555 0142' },
+  { key: 'contact.mobile', label: 'Contact’s mobile, else phone', group: 'Contact', sample: '0917 555 0142' },
   { key: 'site.name', label: 'Site', group: 'Site', sample: 'Laguna Plant' },
   { key: 'site.address', label: 'Site address', group: 'Site', sample: 'Lot 5 Phase 2, Light Industry Park, Laguna' },
   { key: 'owner.name', label: 'Prepared by', group: 'Prepared by', sample: 'Maria Santos' },
@@ -180,8 +181,16 @@ export const STANDARD_QUOTATION_DESIGN: PdfDesign = {
       text: 'CUSTOMER', size: 8.5, bold: true, color: PURPLE,
     }),
     text({
-      id: 'customer', name: 'Customer', anchor: 'first', x: L, y: 159, w: 246, h: 47,
-      text: ['**{{customer.name}}**', '{{customer.address}}', '{{customer.phone}}', 'Attention: {{contact.nameAndPosition}}'].join('\n'),
+      // The contact's number and email under the Attention line (2026-10-12,
+      // the owner's call); a part with nothing to print drops out.
+      id: 'customer', name: 'Customer', anchor: 'first', x: L, y: 159, w: 246, h: 59,
+      text: [
+        '**{{customer.name}}**',
+        '{{customer.address}}',
+        '{{customer.phone}}',
+        'Attention: {{contact.nameAndPosition}}',
+        'Mobile: {{contact.mobile}} | Email: {{contact.email}}',
+      ].join('\n'),
       size: 9.5, lineGap: 1,
     }),
     text({

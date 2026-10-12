@@ -67,6 +67,7 @@ import {
 import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listDay, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, dayOf, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
 import { toCsv } from '../shared/insights';
+import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { activityEnumOf, activityTypeNames, humaniseTypeKey } from '../shared/activityTypes';
 import {
   probabilityAfterMove,
@@ -1497,74 +1498,151 @@ quotationRoutes.get(
 );
 
 /**
- * What the Brand and Product type boxes offer as they are typed
- * (2026-10-08): the values used before on lines the caller may read —
- * a product type under the brand typed first — plus, for Brand, the
- * partners' brands and the brands the product groups carry. Values only,
- * case-blind, fifty at most. Declared above `/:id`.
+ * What a box offers as it is typed: what was typed in it before.
+ *
+ * Brand and Product type (2026-10-08) — the values used before on lines the
+ * caller may read, a product type under the brand typed first, plus for
+ * Brand the partners' brands and the brands the product groups carry, in
+ * alphabetical order. Every other box (2026-10-12, the owner's call: "in all
+ * of the input, even description, allow memory suggestion of previous
+ * input") — the quote name, delivery, payment terms, terms and conditions,
+ * the comment, the reason a quotation was lost, a line's description and
+ * unit — newest first; a description under the product typed on its line
+ * (brand, product type, part number) first, then any. Values only, never a
+ * figure or a cost, from quotations the caller may read; each text once,
+ * case- and space-blind (`shared/memory.ts`). An unknown field is a 400.
+ * Declared above `/:id`.
  */
+export const QUOTATION_MEMORY_FIELDS = [
+  'brand',
+  'productType',
+  'subject',
+  'delivery',
+  'paymentTerms',
+  'terms',
+  'notes',
+  'lostReason',
+  'description',
+  'unit',
+] as const;
+type QuotationMemoryField = (typeof QUOTATION_MEMORY_FIELDS)[number];
+const MEMORY_FIELD_WORDS: Record<QuotationMemoryField, string> = {
+  brand: 'brand',
+  productType: 'productType',
+  subject: 'subject',
+  delivery: 'delivery',
+  paymentTerms: 'paymentTerms',
+  terms: 'terms',
+  notes: 'notes',
+  lostReason: 'lostReason',
+  description: 'description',
+  unit: 'unit',
+};
+
 quotationRoutes.get(
   '/suggest/fields',
   requireAny('gops.quotations.create', 'gops.quotations.edit_own', 'gops.quotations.edit_all'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const field = req.query.field === 'productType' ? 'productType' : 'brand';
-    const q = String(req.query.q ?? '').trim().slice(0, 80);
-    const brand = String(req.query.brand ?? '').trim();
+    const field = choice(String(req.query.field ?? '') || undefined, QUOTATION_MEMORY_FIELDS, 'Field', (f) => MEMORY_FIELD_WORDS[f]) ?? 'brand';
+    const q = memoryTerm(req.query.q);
+    const brand = memoryTerm(req.query.brand);
+    const productType = memoryTerm(req.query.productType);
+    const partNumber = memoryTerm(req.query.partNumber);
     const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
-    const readable = { revision: { quotation: onlyOwn ? { ownerId: me.id } : {} } };
-    const values: string[] = [];
-    if (field === 'brand') {
-      const [lines, partners, groups] = await Promise.all([
-        prisma.quotationItem.findMany({
-          where: { isHeading: false, brand: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) }, ...readable },
-          distinct: ['brand'],
-          select: { brand: true },
-          orderBy: { brand: 'asc' },
-          take: 50,
-        }),
-        prisma.supplier.findMany({
+    const mine: Prisma.QuotationWhereInput = onlyOwn ? { ownerId: me.id } : {};
+    const readable = { revision: { quotation: mine } };
+    const like = (column: string) => (q ? { [column]: { contains: q, mode: 'insensitive' as const } } : {});
+
+    if (field === 'brand' || field === 'productType') {
+      const values: string[] = [];
+      if (field === 'brand') {
+        const [lines, partners, groups] = await Promise.all([
+          prisma.quotationItem.findMany({
+            where: { isHeading: false, brand: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) }, ...readable },
+            distinct: ['brand'],
+            select: { brand: true },
+            orderBy: { brand: 'asc' },
+            take: 50,
+          }),
+          prisma.supplier.findMany({
+            where: {
+              isPartner: true,
+              isActive: true,
+              ...(q ? { OR: [{ brand: { contains: q, mode: 'insensitive' } }, { name: { contains: q, mode: 'insensitive' } }] } : {}),
+            },
+            select: { brand: true, name: true },
+            take: 50,
+          }),
+          prisma.quotationGroup.findMany({
+            where: { isActive: true, brand: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) } },
+            select: { brand: true },
+            take: 50,
+          }),
+        ]);
+        values.push(...lines.map((l) => l.brand!), ...partners.map((p) => p.brand ?? p.name), ...groups.map((g) => g.brand!));
+      } else {
+        const lines = await prisma.quotationItem.findMany({
           where: {
-            isPartner: true,
-            isActive: true,
-            ...(q ? { OR: [{ brand: { contains: q, mode: 'insensitive' } }, { name: { contains: q, mode: 'insensitive' } }] } : {}),
+            isHeading: false,
+            productType: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) },
+            ...(brand ? { brand: { equals: brand, mode: 'insensitive' } } : {}),
+            ...readable,
           },
-          select: { brand: true, name: true },
+          distinct: ['productType'],
+          select: { productType: true },
+          orderBy: { productType: 'asc' },
           take: 50,
-        }),
-        prisma.quotationGroup.findMany({
-          where: { isActive: true, brand: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) } },
-          select: { brand: true },
-          take: 50,
-        }),
-      ]);
-      values.push(...lines.map((l) => l.brand!), ...partners.map((p) => p.brand ?? p.name), ...groups.map((g) => g.brand!));
-    } else {
-      const lines = await prisma.quotationItem.findMany({
-        where: {
-          isHeading: false,
-          productType: { not: null, ...(q ? { contains: q, mode: 'insensitive' } : {}) },
-          ...(brand ? { brand: { equals: brand, mode: 'insensitive' } } : {}),
-          ...readable,
-        },
-        distinct: ['productType'],
-        select: { productType: true },
-        orderBy: { productType: 'asc' },
-        take: 50,
+        });
+        values.push(...lines.map((l) => l.productType!));
+      }
+      const out = distinctTexts(values.map((v) => v.replace(/\s+/g, ' ')), '', 50);
+      out.sort((a, b) => a.localeCompare(b));
+      res.json(out);
+      return;
+    }
+
+    if (field === 'description' || field === 'unit') {
+      const column = field;
+      const base: Prisma.QuotationItemWhereInput = { isHeading: false, [column]: { not: '' }, ...like(column), ...readable };
+      // The product typed on the line, as narrowly as it was typed.
+      const product: Prisma.QuotationItemWhereInput[] = [];
+      if (field === 'description') {
+        if (partNumber) product.push({ partNumber: { equals: partNumber, mode: 'insensitive' } });
+        if (brand) product.push({ brand: { equals: brand, mode: 'insensitive' } });
+        if (productType) product.push({ productType: { equals: productType, mode: 'insensitive' } });
+      }
+      const read = (where: Prisma.QuotationItemWhereInput) =>
+        prisma.quotationItem.findMany({
+          where,
+          select: { description: true, unit: true },
+          orderBy: { revision: { createdAt: 'desc' } },
+          take: MEMORY_SCAN,
+        });
+      const [first, any] = await Promise.all([product.length ? read({ AND: [base, ...product] }) : Promise.resolve([]), read(base)]);
+      res.json(distinctTexts([...first, ...any].map((r) => r[column]), q));
+      return;
+    }
+
+    if (field === 'terms' || field === 'notes' || field === 'delivery' || field === 'paymentTerms') {
+      const rows = await prisma.quotationRevision.findMany({
+        where: { [field]: { not: null }, ...like(field), quotation: mine },
+        select: { terms: true, notes: true, delivery: true, paymentTerms: true },
+        orderBy: { createdAt: 'desc' },
+        take: MEMORY_SCAN,
       });
-      values.push(...lines.map((l) => l.productType!));
+      res.json(distinctTexts(rows.map((r) => r[field]), q));
+      return;
     }
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const v of values) {
-      const clean = v.trim().replace(/\s+/g, ' ');
-      const key = clean.toUpperCase();
-      if (!clean || seen.has(key)) continue;
-      seen.add(key);
-      out.push(clean);
-    }
-    out.sort((a, b) => a.localeCompare(b));
-    res.json(out.slice(0, 50));
+
+    // A quotation's own boxes: the quote name, why it was lost.
+    const rows = await prisma.quotation.findMany({
+      where: { ...(field === 'subject' ? {} : { [field]: { not: null } }), ...like(field), ...mine },
+      select: { subject: true, lostReason: true },
+      orderBy: { updatedAt: 'desc' },
+      take: MEMORY_SCAN,
+    });
+    res.json(distinctTexts(rows.map((r) => r[field]), q));
   }),
 );
 
@@ -3168,6 +3246,7 @@ export async function quotationPrintData(
     'contact.nameAndPosition': contact ? `${contact.name}${contact.position ? `, ${contact.position}` : ''}` : '',
     'contact.email': contact?.email ?? '',
     'contact.phone': contact?.phone || contact?.mobile || '',
+    'contact.mobile': contact?.mobile || contact?.phone || '',
     'site.name': quotation.site?.name ?? '',
     'site.address': [quotation.site?.address, quotation.site?.city].filter(Boolean).join(', '),
     'owner.name': owner.name,

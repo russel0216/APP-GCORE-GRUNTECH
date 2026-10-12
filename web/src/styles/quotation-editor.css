@@ -172,6 +172,19 @@
 }
 
 /*
+  The table scrolls sideways, so a list that floated over the rows would be
+  cut off at the card's edge: inside the lines, a suggestion list (the part
+  number's, a description's or unit's memory, the provider lookup) opens in
+  the cell itself and pushes its row down.
+*/
+.qe-table-wrap .lookup-menu {
+  position: static;
+  max-height: 14rem;
+  margin-top: var(--s-1);
+  min-width: 0;
+}
+
+/*
   One row per line, SCORO's way. Every column but the product has a fixed
   width, so the product and its description take whatever the others leave —
   about 680px on a 1920px screen with the cost columns, more without them.
@@ -511,7 +524,7 @@ tr.qe-line-heading td {
   gap: var(--s-1);
 }
 
-.qe-product-parts + textarea {
+.qe-product-parts + .memory {
   margin-top: var(--s-1);
 }
 

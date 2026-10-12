@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { ContactPicker, type ContactRef } from '../../components/ContactPicker';
+import { MemoryInput, ORDER_MEMORY } from '../../components/MemoryInput';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -36,7 +38,8 @@ import {
   type KnownGroup,
   blankLine,
   CellError,
-  ContactSelect,
+  DescriptionBox,
+  UnitBox,
   CostCell,
   figure,
   isBlank,
@@ -49,7 +52,6 @@ import {
   Static,
   withTax,
   type Line,
-  type Option,
   type ProductSuggestion,
   type TaxOption,
 } from './editorParts';
@@ -838,7 +840,7 @@ export function SalesOrderEditor() {
   const [calcOpen, setCalcOpen] = useState(false);
   /** "+ Append quote": another quotation's lines, as on the quotation editor. */
   const [appendOpen, setAppendOpen] = useState(false);
-  const [contacts, setContacts] = useState<Option[]>([]);
+  const [contacts, setContacts] = useState<ContactRef[]>([]);
   const [header, setHeader] = useState<SoHeader>({
     orderDate: '',
     termsDays: '30',
@@ -881,7 +883,7 @@ export function SalesOrderEditor() {
         setLines(rows.length ? rows : [blankLine()]);
         setIdByKey(Object.fromEntries(rows.map((l, i) => [l.key, o.lines[i].id])));
         api
-          .get<{ contacts: Option[] }>(`/customers/${o.customer.id}`)
+          .get<{ contacts: ContactRef[] }>(`/customers/${o.customer.id}`)
           .then((c) => setContacts(c.contacts))
           .catch(() => setContacts([]));
       })
@@ -1102,7 +1104,14 @@ export function SalesOrderEditor() {
             <Static label="Customer">
               <div className="qe-client">
                 <Link to={`/g-ops/customers/${order.customer.id}`}>{order.customer.name}</Link>
-                <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
+                <ContactPicker
+                  customerId={order.customer.id}
+                  contacts={contacts}
+                  value={header.contactId}
+                  onChange={(v) => set('contactId', v)}
+                  onAdded={(c) => setContacts((cs) => [...cs, c])}
+                  onError={setError}
+                />
               </div>
             </Static>
             <Static label="Quotation">
@@ -1113,7 +1122,7 @@ export function SalesOrderEditor() {
             </Static>
             <Static label="Author">{order.owner.name}</Static>
             <Field label="Comment" hint="Printed under Notes on the order">
-              <textarea rows={3} value={header.comment} onChange={(e) => set('comment', e.target.value)} />
+              <MemoryInput multiline source={ORDER_MEMORY} field="comment" rows={3} value={header.comment} onChange={(e) => set('comment', e.target.value)} />
             </Field>
           </div>
 
@@ -1122,7 +1131,14 @@ export function SalesOrderEditor() {
               <NumberInput kind="count" min={0} max={365} value={header.termsDays} onChange={(e) => set('termsDays', e.target.value)} />
             </Field>
             <Field label="Payment method">
-              <input value={header.paymentMethod} placeholder="e.g. Bank transfer" onChange={(e) => set('paymentMethod', e.target.value)} />
+              <MemoryInput
+                source={ORDER_MEMORY}
+                field="paymentMethod"
+                minChars={0}
+                value={header.paymentMethod}
+                placeholder="e.g. Bank transfer"
+                onChange={(e) => set('paymentMethod', e.target.value)}
+              />
             </Field>
             <Field label="PO Number" hint="The customer's purchase order this books against">
               <input value={header.poNumber} onChange={(e) => set('poNumber', e.target.value)} />
@@ -1243,13 +1259,7 @@ export function SalesOrderEditor() {
                         onChange={(patch) => updateLine(l.key, patch)}
                         onPick={(sg) => pickProduct(l, sg)}
                       />
-                      <textarea
-                        aria-label={`Line ${n} description`}
-                        placeholder="Description"
-                        rows={Math.min(10, Math.max(2, l.description.split('\n').length + 1))}
-                        value={l.description}
-                        onChange={(e) => updateLine(l.key, { description: e.target.value })}
-                      />
+                      <DescriptionBox line={l} n={n} source={ORDER_MEMORY} onChange={(v) => updateLine(l.key, { description: v })} />
                       <CellError id={`${lineField(l.key, 'productType')}-error`} message={err('productType')} />
                     </td>
                     <td>
@@ -1265,7 +1275,7 @@ export function SalesOrderEditor() {
                           aria-invalid={err('quantity') ? true : undefined}
                           onChange={(e) => updateLine(l.key, { quantity: e.target.value })}
                         />
-                        <input aria-label={`Line ${n} unit`} placeholder="lot" value={l.unit} onChange={(e) => updateLine(l.key, { unit: e.target.value })} />
+                        <UnitBox line={l} n={n} source={ORDER_MEMORY} onChange={(v) => updateLine(l.key, { unit: v })} />
                       </div>
                       <CellError message={err('quantity')} />
                     </td>

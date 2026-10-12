@@ -450,6 +450,37 @@ four databases and four copies of "customer".
       **Both pickers say why nothing is listed** — "could not be listed"
       when the lookup failed, "no … matches" once it answered — and offer
       the quick-add only after the lookup has answered for what was typed.
+    - **A contact person** (2026-10-12, the owner's call: "allow to add
+      contact person; if it's not on the database allow also add"):
+      `ContactPicker` (`components/ContactPicker.tsx`) on the quotation
+      editor, its Modify page and the sales order editor — the chosen
+      customer's contacts as it is typed, and **add "X" as a new contact**
+      for a `gops.customers.edit_all` holder, which opens a panel under the
+      box (name, position, mobile, email — never a dialog) and files them
+      through the ordinary `POST /customers/:id/contacts`. That route
+      refuses a name the customer already has (trimmed, single-spaced,
+      case-blind; 409), under a lock on the customer's row. Under the box,
+      the contact's number and email — what the Attention line prints
+      (`Mobile: {{contact.mobile}} | Email: {{contact.email}}` under
+      `Attention:` on both standard layouts; `contact.mobile` is the
+      mobile, else the phone; a saved layout keeps its own boxes).
+      `ContactSelect` is gone.
+    - **Every text box of the two editors remembers** (2026-10-12, the
+      owner's call: "in all of the input, even description, allow memory
+      suggestion of previous input"): `MemoryInput` (`components/
+      MemoryInput.tsx`, `multiline` for a textarea, a `fieldControl`) asks
+      `GET /quotations/suggest/fields?field=` (brand, productType, subject,
+      delivery, paymentTerms, terms, notes, lostReason, description, unit)
+      or `GET /sales-orders/suggest/fields?field=` (comment, paymentMethod,
+      description, unit) — values only, from documents the caller may
+      read, newest first (Brand and Product type alphabetical), each text
+      once case- and space-blind, the very text typed never offered back
+      (`shared/memory.ts`); an unknown field is a 400. A description under
+      the line's brand, product type or part number comes first. Numbers,
+      dates, money, PR No. and PO No. never remember. Inside the line
+      table a suggestion list opens IN the cell (`.qe-table-wrap
+      .lookup-menu`), because the table scrolls sideways and would cut a
+      floating one off.
     - **All three are `fieldControl`s**, like `NumberInput`: inside a `Field` the
       label, the hint and the error reach the control, and a control marked
       `required` puts the asterisk on its label.
@@ -474,7 +505,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,832 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,849 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -506,9 +537,11 @@ the team picked on a quotation and followed by its sales order, and one
 on sales for old quotations taking their author's team, and 16 on
 foundation and 22 on sales for the routing sheet of 2026-10-12 — the
 preparer's own signature, the stand-in and the team's leader, and 4 on
-foundation and 4 on sales for the sales order paper of the owner's slide):
+foundation and 4 on sales for the sales order paper of the owner's slide, and
+17 on sales for the contact person on the paper, its quick-add and the boxes
+that remember):
 foundation
-347, masters 92, sales 559, costing 157, pipeline 92, calendar 96, numbering
+347, masters 92, sales 576, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The

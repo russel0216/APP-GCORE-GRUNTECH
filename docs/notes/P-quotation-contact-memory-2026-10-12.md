@@ -10,7 +10,11 @@ The picture: the New quotation editor, "CAGA" typed in Customer, the
 dropdown offering *add "CAGA" as a new customer* — `CustomerPicker`'s
 quick-add.
 
-Status: **planned, not built.**
+Status: **built 2026-10-12**, on the defaults below. One change from the
+plan: the number line reads `{{contact.mobile}}` (mobile, else phone — a new
+field) so "Mobile:" names what it prints; `{{contact.phone}}` keeps its
+meaning (phone, else mobile). The 409 is pinned in verify-sales over HTTP,
+not verify-masters.
 
 ## What is there today
 

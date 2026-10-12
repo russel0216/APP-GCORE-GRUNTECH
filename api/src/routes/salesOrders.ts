@@ -31,6 +31,7 @@ import {
   capsParts,
 } from '../shared/quotation';
 import { valueRevision } from '../shared/pipeline';
+import { distinctTexts, memoryTerm, MEMORY_SCAN } from '../shared/memory';
 import { bookingFor, thou } from '../shared/salesOrderBooking';
 import {
   companyCurrency,
@@ -97,7 +98,7 @@ export function canSeeOrderCost(me: ReturnType<typeof currentUser>, ownerId: str
 
 const ORDER_INCLUDE = {
   customer: { select: { id: true, code: true, name: true, tin: true, phone: true, address: true } },
-  contact: { select: { id: true, name: true, position: true } },
+  contact: { select: { id: true, name: true, position: true, email: true, phone: true, mobile: true } },
   quotation: { select: { id: true, number: true, subject: true, siteId: true, currency: true } },
   owner: { select: { id: true, name: true, email: true, position: true } },
 } as const;
@@ -527,6 +528,59 @@ salesOrderRoutes.get(
 );
 
 // ── One order ────────────────────────────────────────────────────────────────
+
+/**
+ * What the order editor's boxes offer as they are typed (2026-10-12, the
+ * owner's call: memory in every box) — the comment, the payment method and a
+ * line's description and unit, newest first: from the orders the caller may
+ * read, and for a line also from the quotations they may read (an order's
+ * lines come from quotations). Values only; an unknown field is a 400.
+ * Declared above `/:id`.
+ */
+const ORDER_MEMORY_FIELDS = ['comment', 'paymentMethod', 'description', 'unit'] as const;
+
+salesOrderRoutes.get(
+  '/suggest/fields',
+  requireAny('gops.sales_orders.create', 'gops.sales_orders.edit_own', 'gops.sales_orders.edit_all'),
+  handler(async (req, res) => {
+    const me = currentUser(req);
+    const field = choice(String(req.query.field ?? '') || undefined, ORDER_MEMORY_FIELDS, 'Field', (f) => f);
+    if (!field) throw badRequest(`Field is one of ${ORDER_MEMORY_FIELDS.join(', ')}`);
+    const q = memoryTerm(req.query.q);
+    const orders: Prisma.SalesOrderWhereInput =
+      me.isSuperAdmin || me.permissions.has('gops.sales_orders.view_all') ? {} : { ownerId: me.id };
+    const quotations: Prisma.QuotationWhereInput =
+      me.isSuperAdmin || me.permissions.has('gops.quotations.view_all') ? {} : { ownerId: me.id };
+    const contains = q ? { contains: q, mode: 'insensitive' as const } : {};
+
+    if (field === 'comment' || field === 'paymentMethod') {
+      const rows = await prisma.salesOrder.findMany({
+        where: { ...orders, [field]: { not: null, ...contains } },
+        select: { comment: true, paymentMethod: true },
+        orderBy: { updatedAt: 'desc' },
+        take: MEMORY_SCAN,
+      });
+      res.json(distinctTexts(rows.map((r) => r[field]), q));
+      return;
+    }
+    const where = { isHeading: false, [field]: { not: '', ...contains } };
+    const [own, quoted] = await Promise.all([
+      prisma.salesOrderLine.findMany({
+        where: { ...where, order: orders },
+        select: { description: true, unit: true },
+        orderBy: { order: { updatedAt: 'desc' } },
+        take: MEMORY_SCAN,
+      }),
+      prisma.quotationItem.findMany({
+        where: { ...where, revision: { quotation: quotations } },
+        select: { description: true, unit: true },
+        orderBy: { revision: { createdAt: 'desc' } },
+        take: MEMORY_SCAN,
+      }),
+    ]);
+    res.json(distinctTexts([...own, ...quoted].map((r) => r[field]), q));
+  }),
+);
 
 salesOrderRoutes.get(
   '/:id',
@@ -1315,6 +1369,9 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'contact.name': contact?.name ?? '',
     'contact.position': contact?.position ?? '',
     'contact.nameAndPosition': contact ? `${contact.name}${contact.position ? `, ${contact.position}` : ''}` : '',
+    'contact.email': contact?.email ?? '',
+    'contact.phone': contact?.phone || contact?.mobile || '',
+    'contact.mobile': contact?.mobile || contact?.phone || '',
     'owner.name': order.owner.name,
     'owner.position': order.owner.position ?? '',
     'owner.email': order.owner.email ?? '',

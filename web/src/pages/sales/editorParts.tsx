@@ -5,6 +5,7 @@ import { lineAmount, quotationTotals } from '../../lib/quotationMath';
 import { formatMoney } from '../../components/ui';
 import { Icon } from '../../components/Icon';
 import { NumberInput } from '../../components/NumberInput';
+import { MemoryInput, QUOTATION_MEMORY } from '../../components/MemoryInput';
 
 /*
   The pieces the quotation editor and the sales order editor share
@@ -368,20 +369,6 @@ export function CostCell({
 }
 
 /** The contact person, beside the customer as SCORO has it. Nothing until the customer has contacts. */
-export function ContactSelect({ contacts, value, onChange }: { contacts: Option[]; value: string; onChange: (v: string) => void }) {
-  if (contacts.length === 0) return null;
-  return (
-    <select aria-label="Contact person" value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">— contact person —</option>
-      {contacts.map((c) => (
-        <option key={c.id} value={c.id}>
-          {c.name}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 export interface QuotationListRow {
   id: string;
   number: string;
@@ -493,9 +480,8 @@ export function ProviderLookup({
 
 /**
  * The Brand and Product type boxes: free text, with what was used before
- * offered underneath as it is typed (`/quotations/suggest/fields`) — a product
- * type under the brand typed first. A plain datalist: the keyboard reaches it
- * as any text box.
+ * offered underneath (`/quotations/suggest/fields`) — a product type under
+ * the brand typed first — through the one remembering box, `MemoryInput`.
  */
 function FieldSuggest({
   id,
@@ -518,41 +504,62 @@ function FieldSuggest({
   describedBy?: string;
   onChange: (v: string) => void;
 }) {
-  const [options, setOptions] = useState<string[]>([]);
-  const [focused, setFocused] = useState(false);
-  useEffect(() => {
-    if (!focused) return;
-    const t = setTimeout(() => {
-      api
-        .get<string[]>(`/quotations/suggest/fields${qs({ field, q: value.trim() || undefined, brand: field === 'productType' ? brand?.trim() || undefined : undefined })}`)
-        .then(setOptions)
-        .catch(() => setOptions([]));
-    }, 200);
-    return () => clearTimeout(t);
-  }, [field, value, brand, focused]);
-  const listId = `${id}-list`;
   return (
-    <>
-      <input
-        id={id}
-        className="qe-title"
-        list={listId}
-        aria-label={label}
-        placeholder={placeholder}
-        autoComplete="off"
-        aria-invalid={invalid || undefined}
-        aria-describedby={describedBy}
-        value={value}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        onChange={(e) => onChange(e.target.value)}
-      />
-      <datalist id={listId}>
-        {options.map((o) => (
-          <option key={o} value={o} />
-        ))}
-      </datalist>
-    </>
+    <MemoryInput
+      source={QUOTATION_MEMORY}
+      field={field}
+      params={field === 'productType' ? { brand: brand?.trim() || undefined } : undefined}
+      minChars={0}
+      id={id}
+      className="qe-title"
+      aria-label={label}
+      placeholder={placeholder}
+      aria-invalid={invalid || undefined}
+      aria-describedby={describedBy}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  );
+}
+
+/**
+ * A line's description, remembering the descriptions written before — those
+ * written for the product typed on the line (brand, product type, part
+ * number) first (2026-10-12). Both editors draw it; `source` is the editor's
+ * own memory (`QUOTATION_MEMORY`, `ORDER_MEMORY`).
+ */
+export function DescriptionBox({ line, n, source, onChange }: { line: Line; n: number; source: string; onChange: (v: string) => void }) {
+  return (
+    <MemoryInput
+      multiline
+      source={source}
+      field="description"
+      params={{
+        brand: line.brand.trim() || undefined,
+        productType: line.productType.trim() || undefined,
+        partNumber: line.partNumber.trim() || undefined,
+      }}
+      aria-label={`Line ${n} description`}
+      placeholder="Description"
+      rows={Math.min(10, Math.max(2, line.description.split('\n').length + 1))}
+      value={line.description}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  );
+}
+
+/** A line's unit, remembering the units used before (lot, pcs, set …). */
+export function UnitBox({ line, n, source, onChange }: { line: Line; n: number; source: string; onChange: (v: string) => void }) {
+  return (
+    <MemoryInput
+      source={source}
+      field="unit"
+      minChars={0}
+      aria-label={`Line ${n} unit`}
+      placeholder="lot"
+      value={line.unit}
+      onChange={(e) => onChange(e.target.value)}
+    />
   );
 }
 

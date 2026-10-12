@@ -5113,6 +5113,73 @@ a.icon-row:hover {
   font-size: var(--fs-md);
 }
 
+/* A box that remembers (MemoryInput): what was typed before, one line each. */
+.memory {
+  min-width: 0;
+}
+
+.memory > textarea,
+.memory > input {
+  width: 100%;
+}
+
+.memory-menu {
+  min-width: 16rem;
+}
+
+.memory-menu button {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The contact person (ContactPicker): its number and email under the box,
+   and the quick-add panel in the page, never a dialog. */
+.contact-picker {
+  min-width: 0;
+}
+
+.contact-reach {
+  margin-top: var(--s-1);
+  font-size: var(--fs-sm);
+}
+
+.contact-reach-line {
+  display: block;
+  font-size: var(--fs-xs);
+}
+
+.contact-add {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.contact-add-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--fs-sm);
+}
+
+.contact-add-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+
+@media (max-width: 640px) {
+  .contact-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Nothing on file matches, and this person may not file a new one. */
 .lookup-none {
   padding: var(--s-2) var(--s-3);

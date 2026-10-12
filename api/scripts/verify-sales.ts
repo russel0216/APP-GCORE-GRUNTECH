@@ -252,6 +252,8 @@ async function cleanup() {
     await prisma.auditLog.deleteMany({ where: { actorId: { in: ids } } });
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
+  // The view-own role the memory check signs in with.
+  await prisma.role.deleteMany({ where: { key: { startsWith: `${TAG.toLowerCase()}_` } } });
 }
 
 async function makeUser(name: string, email: string, roleKeys: string[]) {
@@ -2577,6 +2579,87 @@ async function main() {
     );
     check('Delivery prints as a labelled line', text.includes('Delivery:') && text.includes('4 to 6 weeks'));
     check('it prints the line title and its description', text.includes('Air compressor installation') && text.includes('Mechanical and electrical tie-in'));
+
+    // ── The contact on the paper, its quick-add, and the boxes that remember (2026-10-12) ──
+    console.log('\nThe contact person on the paper, adding one, and memory in every box');
+    check(
+      'the Attention line is followed by the contact’s mobile and email',
+      text.includes(`Attention: ${TAG} Engr. Cruz, Facilities Head`) && text.includes('Mobile: 0917 555 0101 | Email: cruz@zz.local'),
+    );
+    // Adding a contact from the editor is the customer's own route.
+    const added = await http(salesToken, 'POST', `/customers/${clinic.id}/contacts`, { name: `${TAG} Ms.  Reyes`, mobile: '0918 222 0303' });
+    check('a salesperson files a new contact on the customer (name and mobile)', added.status === 201 && added.body.mobile === '0918 222 0303', added.text.slice(0, 160));
+    const twice = await http(salesToken, 'POST', `/customers/${clinic.id}/contacts`, { name: `${TAG.toLowerCase()} ms. reyes` });
+    check(
+      'the same name again on the same customer is a 409 naming them, whatever its case or spacing',
+      twice.status === 409 && String(twice.body.error ?? twice.text).includes('already a contact'),
+      twice.text.slice(0, 160),
+    );
+    check(
+      'and only one was filed',
+      (await prisma.customerContact.count({ where: { customerId: clinic.id, name: { contains: 'Reyes', mode: 'insensitive' } } })) === 1,
+    );
+    const toReyes = await http(salesToken, 'PATCH', `/quotations/${qid}`, { contactId: String(added.body.id) });
+    const reyesPaper = pdfText(
+      Buffer.from(await (await fetch(`${BASE}/quotations/${qid}/revisions/${rev0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+    );
+    check(
+      'a contact with a mobile and no email prints the mobile alone under Attention',
+      toReyes.status === 200 && reyesPaper.split('\n').includes('Mobile: 0918 222 0303'),
+      toReyes.text.slice(0, 160),
+    );
+    await http(salesToken, 'PATCH', `/quotations/${qid}`, { contactId: null });
+    const nobodyPaper = pdfText(
+      Buffer.from(await (await fetch(`${BASE}/quotations/${qid}/revisions/${rev0.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+    );
+    check('no contact prints neither the Attention line nor the number line', !nobodyPaper.includes('Attention:') && !nobodyPaper.includes('Mobile:'));
+    await http(salesToken, 'PATCH', `/quotations/${qid}`, { contactId: clinic.contacts[0].id });
+
+    // Memory: what was typed before, from quotations the caller may read.
+    const remember = async (token: string, query: string) => http(token, 'GET', `/quotations/suggest/fields?${query}`);
+    const delivery = await remember(salesToken, 'field=delivery&q=4%20to%206');
+    check('Delivery remembers what was typed before', delivery.status === 200 && (delivery.body as unknown as string[]).includes('4 to 6 weeks'), delivery.text.slice(0, 160));
+    const descr = await remember(salesToken, 'field=description&q=electrical%20tie');
+    check('a line’s description remembers too', (descr.body as unknown as string[]).includes('Mechanical and electrical tie-in'), descr.text.slice(0, 160));
+    const subj = await remember(salesToken, `field=subject&q=${encodeURIComponent(`${TAG} scoro-style`)}`);
+    check('the quote name remembers, case-blind', (subj.body as unknown as string[]).some((s) => s.toUpperCase() === `${TAG} SCORO-STYLE QUOTE`), subj.text.slice(0, 160));
+    const typedBack = await remember(salesToken, 'field=delivery&q=4%20to%206%20weeks');
+    check('the very text typed is not offered back', !(typedBack.body as unknown as string[]).some((s) => s.toUpperCase() === '4 TO 6 WEEKS'), typedBack.text.slice(0, 160));
+    const unit = await remember(salesToken, 'field=unit');
+    check('the unit lists what was used, each once', Array.isArray(unit.body) && (unit.body as unknown as string[]).filter((u) => u.toLowerCase() === 'lot').length === 1, unit.text.slice(0, 160));
+    const badField = await remember(salesToken, 'field=unitPrice');
+    check('a box that is not remembered (a figure) is a 400', badField.status === 400, badField.text.slice(0, 160));
+    // The described product first: two descriptions, the one written for this brand leads.
+    await prisma.quotationItem.updateMany({ where: { revisionId: rev0.id, description: 'Start-up and hand-over' }, data: { brand: `${TAG} ATLAS` } });
+    const byBrand = await remember(salesToken, `field=description&brand=${encodeURIComponent(`${TAG} ATLAS`)}`);
+    check(
+      'a description written for the line’s brand comes first',
+      (byBrand.body as unknown as string[])[0] === 'Start-up and hand-over',
+      byBrand.text.slice(0, 200),
+    );
+    // A reader of their own quotations only is never offered a colleague's words.
+    const ownRoleKeys = ['gops.quotations.view_own', 'gops.quotations.create', 'gops.quotations.edit_own'];
+    const ownPerms = await prisma.permission.findMany({ where: { key: { in: ownRoleKeys } } });
+    const ownRole = await prisma.role.create({
+      data: { key: `${TAG.toLowerCase()}_own_quotes`, name: `${TAG} own quotations`, permissions: { create: ownPerms.map((p) => ({ permissionId: p.id })) } },
+    });
+    const loner = await prisma.user.create({
+      data: { name: 'Verify Loner', email: 'loner@verifys.local', passwordHash: 'x', roles: { create: [{ roleId: ownRole.id }] } },
+    });
+    const lonerDelivery = await remember(signToken(loner.id, loner.email), 'field=delivery&q=4%20to%206');
+    check(
+      'a view-own reader is offered none of a colleague’s texts',
+      lonerDelivery.status === 200 && !(lonerDelivery.body as unknown as string[]).includes('4 to 6 weeks'),
+      lonerDelivery.text.slice(0, 160),
+    );
+    const orderMemory = await http(salesToken, 'GET', '/sales-orders/suggest/fields?field=description&q=hand-over');
+    check(
+      'the sales order editor remembers quotation lines’ descriptions too',
+      orderMemory.status === 200 && (orderMemory.body as unknown as string[]).includes('Start-up and hand-over'),
+      orderMemory.text.slice(0, 160),
+    );
+    const orderBad = await http(salesToken, 'GET', '/sales-orders/suggest/fields?field=total');
+    check('and refuses a box it does not remember', orderBad.status === 400, orderBad.text.slice(0, 160));
     const masterGroups = await http(salesToken, 'GET', '/reference/quotation-groups?active=true');
     const installation = (masterGroups.body as unknown as { name: string; lineCount: number }[]).find(
       (g) => g.name === `${TAG} Installation`,
@@ -3939,12 +4022,18 @@ async function main() {
     const released = await http(salesToken, 'PATCH', `/sales-orders/${so1Body.id}`, { siNumber: 'SI-4622', drNumber: 'DR-991' });
     check('but still takes its release references', released.status === 200, String(released.status));
 
+    await prisma.salesOrder.update({ where: { id: so1Body.id }, data: { contactId: clinic.contacts[0].id } });
     const soPdfBytes = Buffer.from(
       await (
         await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })
       ).arrayBuffer(),
     );
     const soPdfOwner = pdfText(soPdfBytes);
+    check(
+      'the order paper prints the contact’s mobile and email under Attention, as the quotation does (2026-10-12)',
+      soPdfOwner.includes('Attention:') && soPdfOwner.includes('Mobile: 0917 555 0101 | Email: cruz@zz.local'),
+      soPdfOwner.slice(soPdfOwner.indexOf('CUSTOMER'), soPdfOwner.indexOf('CUSTOMER') + 300),
+    );
     check(
       'the PDF prints through the Sales Order template: customer, PO, totals — and cost and margin for who may see them',
       soPdfOwner.includes('SALES ORDER') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('TOTAL COST') && soPdfOwner.includes('SI / BS No.: SI-4622'),

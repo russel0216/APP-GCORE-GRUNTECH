@@ -5,6 +5,8 @@ import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { addDays, dayKeyOf, daysBetween, isDayKey, parseDay, todayLocal } from '../../lib/day';
 import { quotationTotals, type LineMargin } from '../../lib/quotationMath';
+import { ContactPicker, type ContactRef } from '../../components/ContactPicker';
+import { MemoryInput, QUOTATION_MEMORY } from '../../components/MemoryInput';
 import { CustomerPicker, type CustomerRef } from '../../components/CustomerPicker';
 import { PersonSelect, loadPeople, type PersonRow } from '../../components/People';
 import { useConfirm } from '../../components/Confirm';
@@ -31,7 +33,8 @@ import {
   type KnownGroup,
   blankLine,
   CellError,
-  ContactSelect,
+  DescriptionBox,
+  UnitBox,
   CostCell,
   figure,
   isBlank,
@@ -222,7 +225,7 @@ export function QuotationEditor() {
 
   const [preview, setPreview] = useState<Preview | null>(null);
   const [authors, setAuthors] = useState<PersonRow[]>([]);
-  const [contacts, setContacts] = useState<Option[]>([]);
+  const [contacts, setContacts] = useState<ContactRef[]>([]);
   const [sites, setSites] = useState<Option[]>([]);
   const [customerTerms, setCustomerTerms] = useState<string | null>(null);
   // The customer's own address — what the quotation prints unless a site is chosen (2026-10-11).
@@ -576,7 +579,7 @@ export function QuotationEditor() {
         name: string;
         paymentTerms: string | null;
         address: string | null;
-        contacts: Option[];
+        contacts: ContactRef[];
         sites: (Option & { address?: string | null; city?: string | null })[];
       }>(`/customers/${customerId}`)
       .then((c) => {
@@ -1049,7 +1052,14 @@ export function QuotationEditor() {
               <Static label="Customer">
                 <div className="qe-client">
                   <Link to={`/g-ops/customers/${quotation!.customer.id}`}>{quotation!.customer.name}</Link>
-                  <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
+                  <ContactPicker
+                    customerId={quotation!.customer.id}
+                    contacts={contacts}
+                    value={header.contactId}
+                    onChange={(v) => set('contactId', v)}
+                    onAdded={(c) => setContacts((cs) => [...cs, c])}
+                    onError={setError}
+                  />
                 </div>
               </Static>
             ) : (
@@ -1073,7 +1083,14 @@ export function QuotationEditor() {
                       });
                     }}
                   />
-                  <ContactSelect contacts={contacts} value={header.contactId} onChange={(v) => set('contactId', v)} />
+                  <ContactPicker
+                    customerId={header.customer?.id ?? null}
+                    contacts={contacts}
+                    value={header.contactId}
+                    onChange={(v) => set('contactId', v)}
+                    onAdded={(c) => setContacts((cs) => [...cs, c])}
+                    onError={setError}
+                  />
                 </div>
               </LooseField>
             )}
@@ -1102,7 +1119,9 @@ export function QuotationEditor() {
                 </Static>
               ))}
             <Field label="Quote name" required error={errors.subject}>
-              <input
+              <MemoryInput
+                source={QUOTATION_MEMORY}
+                field="subject"
                 id="qe-subject"
                 className="caps-input"
                 value={header.subject}
@@ -1130,7 +1149,7 @@ export function QuotationEditor() {
               <Static label="Author">{ownerName}</Static>
             )}
             <Field label="Comment" hint="Printed under Notes on the quotation">
-              <textarea rows={3} value={header.notes} onChange={(e) => set('notes', e.target.value)} />
+              <MemoryInput multiline source={QUOTATION_MEMORY} field="notes" rows={3} value={header.notes} onChange={(e) => set('notes', e.target.value)} />
             </Field>
           </div>
 
@@ -1219,7 +1238,10 @@ export function QuotationEditor() {
             )}
             {editing && header.outcome === 'LOST' && current !== 'LOST' && (
               <Field label="Why it was lost" required error={errors.lostReason} hint="Sales Analytics reports the reasons">
-                <textarea
+                <MemoryInput
+                  multiline
+                  source={QUOTATION_MEMORY}
+                  field="lostReason"
                   id="qe-lostReason"
                   rows={2}
                   value={header.lostReason}
@@ -1303,13 +1325,15 @@ export function QuotationEditor() {
             <input value={header.prNumber} onChange={(e) => set('prNumber', e.target.value)} />
           </Field>
           <Field label="Delivery" hint="e.g. 4 to 6 weeks upon receipt of PO">
-            <input value={header.delivery} onChange={(e) => set('delivery', e.target.value)} />
+            <MemoryInput source={QUOTATION_MEMORY} field="delivery" value={header.delivery} onChange={(e) => set('delivery', e.target.value)} />
           </Field>
           <Field
             label="Payment Terms"
             hint={customerTerms ? `The customer's usual: ${customerTerms}` : undefined}
           >
-            <input
+            <MemoryInput
+              source={QUOTATION_MEMORY}
+              field="paymentTerms"
               value={header.paymentTerms}
               onChange={(e) => {
                 termsTouched.current = true;
@@ -1318,7 +1342,7 @@ export function QuotationEditor() {
             />
           </Field>
           <Field label="Terms and conditions">
-            <textarea rows={3} value={header.terms} onChange={(e) => set('terms', e.target.value)} />
+            <MemoryInput multiline source={QUOTATION_MEMORY} field="terms" rows={3} value={header.terms} onChange={(e) => set('terms', e.target.value)} />
           </Field>
         </div>
 
@@ -1459,13 +1483,7 @@ export function QuotationEditor() {
                         onChange={(patch) => updateLine(l.key, patch)}
                         onPick={(sg) => pickProduct(l, sg)}
                       />
-                      <textarea
-                        aria-label={`Line ${n} description`}
-                        placeholder="Description"
-                        rows={Math.min(10, Math.max(2, l.description.split('\n').length + 1))}
-                        value={l.description}
-                        onChange={(e) => updateLine(l.key, { description: e.target.value })}
-                      />
+                      <DescriptionBox line={l} n={n} source={QUOTATION_MEMORY} onChange={(v) => updateLine(l.key, { description: v })} />
                       <CellError id={`${lineField(l.key, 'productType')}-error`} message={err('productType')} />
                     </td>
                     <td>
@@ -1482,12 +1500,7 @@ export function QuotationEditor() {
                           aria-invalid={err('quantity') ? true : undefined}
                           onChange={(e) => updateLine(l.key, { quantity: e.target.value })}
                         />
-                        <input
-                          aria-label={`Line ${n} unit`}
-                          placeholder="lot"
-                          value={l.unit}
-                          onChange={(e) => updateLine(l.key, { unit: e.target.value })}
-                        />
+                        <UnitBox line={l} n={n} source={QUOTATION_MEMORY} onChange={(v) => updateLine(l.key, { unit: v })} />
                       </div>
                       <CellError message={err('quantity')} />
                     </td>
@@ -1885,7 +1898,7 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
     lostReason: quotation.lostReason ?? '',
   }));
   const [form, setForm] = useState(initial);
-  const [contacts, setContacts] = useState<Option[]>([]);
+  const [contacts, setContacts] = useState<ContactRef[]>([]);
   const [sites, setSites] = useState<Option[]>([]);
   const [numberProblem, setNumberProblem] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -1895,7 +1908,7 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
 
   useEffect(() => {
     api
-      .get<{ contacts: Option[]; sites: Option[] }>(`/customers/${quotation.customer.id}`)
+      .get<{ contacts: ContactRef[]; sites: Option[] }>(`/customers/${quotation.customer.id}`)
       .then((c) => {
         setContacts(c.contacts);
         setSites(c.sites);
@@ -2056,18 +2069,16 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
             <Static label="Customer">
               <Link to={`/g-ops/customers/${quotation.customer.id}`}>{quotation.customer.name}</Link>
             </Static>
-            {contacts.length > 0 && (
-              <Field label="Contact person">
-                <select value={form.contactId} onChange={(e) => setForm((f) => ({ ...f, contactId: e.target.value }))}>
-                  <option value="">— none —</option>
-                  {contacts.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            )}
+            <Field label="Contact person">
+              <ContactPicker
+                customerId={quotation.customer.id}
+                contacts={contacts}
+                value={form.contactId}
+                onChange={(v) => setForm((f) => ({ ...f, contactId: v }))}
+                onAdded={(c) => setContacts((cs) => [...cs, c])}
+                onError={setError}
+              />
+            </Field>
             {sites.length > 0 && (
               <Field label="Address" hint="The customer’s address prints unless a site is chosen.">
                 <select value={form.siteId} onChange={(e) => setForm((f) => ({ ...f, siteId: e.target.value }))}>
@@ -2081,7 +2092,13 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
               </Field>
             )}
             <Field label="Quote name" required>
-              <input className="caps-input" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} />
+              <MemoryInput
+                source={QUOTATION_MEMORY}
+                field="subject"
+                className="caps-input"
+                value={form.subject}
+                onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))}
+              />
             </Field>
           </div>
           <div className="qe-col">
@@ -2108,7 +2125,14 @@ function QuotationDetailsEditor({ quotation, onRevisionRaised }: { quotation: Qu
             </Field>
             {form.outcome === 'LOST' && current !== 'LOST' && (
               <Field label="Why it was lost" required hint="Sales Analytics reports the reasons">
-                <textarea rows={2} value={form.lostReason} onChange={(e) => setForm((f) => ({ ...f, lostReason: e.target.value }))} />
+                <MemoryInput
+                  multiline
+                  source={QUOTATION_MEMORY}
+                  field="lostReason"
+                  rows={2}
+                  value={form.lostReason}
+                  onChange={(e) => setForm((f) => ({ ...f, lostReason: e.target.value }))}
+                />
               </Field>
             )}
           </div>
