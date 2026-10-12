@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { LeadStatus, Prisma } from '@prisma/client';
+import { LeadStatus, Prisma, QuotationOutcome } from '@prisma/client';
 import { prisma } from '../prisma';
 import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, teamMembers, teamOf, teamShares, type TeamRef, type TeamShare } from '../shared/team';
 import {
@@ -112,8 +112,16 @@ import {
   NO_TEAM_ID,
   FORECAST_BREAKDOWNS,
   weightedOf,
+  compareWindow,
+  compareForecasts,
+  outcomeOdds,
+  COMPARE_MODES,
+  COMPARE_MODE_LABELS,
+  type CompareMode,
+  type ForecastCompare,
+  type ForecastCell,
+  type ForecastChange,
   type ForecastBreakdown,
-  type ForecastLine,
   type RangePreset,
   type Forecast,
   type ForecastPeriod,
@@ -4234,21 +4242,34 @@ const FORECAST_LEAD_STATUSES = ['NEW', 'CONTACTED', 'QUALIFIED', 'SITE_VISIT', '
 
 interface ForecastLoad {
   forecast: Forecast;
+  /** The compared window beside it, when `?compare=` asked for one (2026-10-12). */
+  compare: ForecastCompare | null;
   stages: { key: string; label: string; color: string }[];
   /** Everyone who owns something in scope, before the owner filter — the page's owner picker. */
   people: { id: string; name: string }[];
   includeLeads: boolean;
   scope: 'mine' | 'team' | 'all';
-  ownerId: string | null;
+  /** The ticked salespeople, teams and product groups (2026-10-12: several of each). */
+  ownerIds: string[];
   /** What narrowed it, for the paper's reference line. */
   filters: string[];
   /** The ready-made range the window came from, when one was asked for. */
   preset: RangePreset | null;
-  teamId: string | null;
-  group: string | null;
+  teamIds: string[];
+  groups: string[];
   /** The pickers: the active teams and the active product groups (keys as the rows carry them). */
   teams: { id: string; code: string; name: string }[];
   groupChoices: { key: string; name: string }[];
+}
+
+/** `a,b,c` — a filter that takes several values (2026-10-12); one value reads as before. */
+function listOf(value: string | undefined): string[] {
+  return [...new Set((value ?? '').split(',').map((v) => v.trim()).filter(Boolean))];
+}
+
+/** "A, B" — or "A, B and 3 more" past three. */
+function namesOf(names: string[]): string {
+  return names.length <= 3 ? names.join(', ') : `${names.slice(0, 3).join(', ')} and ${names.length - 3} more`;
 }
 
 /**
@@ -4257,6 +4278,11 @@ interface ForecastLoad {
  * list can never show different sets), each valued by `quotationValue()`;
  * and, when asked, the open leads with no quotation at their estimate. The
  * bucketing is `buildForecast()` in shared/forecast.ts, pure.
+ *
+ * With a comparison (`?compare=prev-period|prev-year|custom`, 2026-10-12)
+ * both windows are read ALIKE: the open rows as always, plus every won and
+ * lost quotation DECIDED inside the window (its decision's Manila day, else
+ * its expected closing), won in full and lost at nothing (`outcomeOdds`).
  */
 async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<ForecastLoad> {
   const me = currentUser(req);
@@ -4265,7 +4291,7 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
   if (!FORECAST_PERIODS.includes(period)) throw badRequest('Period is week, month, quarter or year — or range, the whole window as one');
   const today = manilaDayKey(new Date());
   const defaults = defaultWindow(today, period);
-  for (const [key, label] of [['from', 'From'], ['to', 'To']] as const) {
+  for (const [key, label] of [['from', 'From'], ['to', 'To'], ['compareFrom', 'Compare from'], ['compareTo', 'Compare to']] as const) {
     if (query[key] && !isDayKey(query[key]!)) throw badRequest(`${label} is a date written YYYY-MM-DD`);
   }
   // A ready-made range (2026-10-12) wins over typed dates; it is resolved on
@@ -4280,9 +4306,24 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
   } catch (err) {
     throw badRequest(err instanceof Error ? err.message : 'That window is too wide');
   }
+  // The comparison (2026-10-12): the period before, the same period last year, or typed days.
+  const compareMode: CompareMode | null = query.compare ? choice(query.compare, COMPARE_MODES, 'Compare with', (m) => COMPARE_MODE_LABELS[m])! : null;
+  let compareDays: { from: string; to: string } | null = null;
+  if (compareMode) {
+    if (compareMode === 'custom' && (!query.compareFrom || !query.compareTo)) {
+      throw badRequest('A custom comparison needs Compare from and Compare to');
+    }
+    compareDays = compareWindow(from, to, compareMode, compareMode === 'custom' ? { from: query.compareFrom!, to: query.compareTo! } : undefined);
+    if (compareDays.from > compareDays.to) throw badRequest('Compare from is after Compare to');
+    try {
+      periodsBetween(compareDays.from, compareDays.to, period);
+    } catch (err) {
+      throw badRequest(err instanceof Error ? `The compared window: ${err.message}` : 'The compared window is too wide');
+    }
+  }
   const includeLeads = query.leads === 'true';
-  const ownerId = query.ownerId?.trim() || null;
-  // The Team and Product group filters (2026-10-12): a team id or `none`, a group key or `none`.
+  // Salesperson, Team and Product group take several values (2026-10-12, the owner's tick boxes).
+  const ownerIds = listOf(query.ownerId);
   const teams = await prisma.industry.findMany({
     where: { isActive: true },
     orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
@@ -4293,14 +4334,18 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
     orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     select: { key: true, name: true },
   });
-  const teamId = query.teamId?.trim() || null;
-  if (teamId && teamId !== NO_TEAM_ID && !(await prisma.industry.findUnique({ where: { id: teamId }, select: { id: true } }))) {
-    throw badRequest('That team is not on file');
-  }
-  const group = query.group?.trim() || null;
-  if (group && group !== 'none' && !(await prisma.quotationGroup.findUnique({ where: { key: group }, select: { id: true } }))) {
-    throw badRequest('That product group is not on file');
-  }
+  const teamIds = listOf(query.teamId);
+  const realTeamIds = teamIds.filter((t) => t !== NO_TEAM_ID);
+  const teamRows = realTeamIds.length
+    ? await prisma.industry.findMany({ where: { id: { in: realTeamIds } }, select: { id: true, code: true } })
+    : [];
+  if (teamRows.length !== realTeamIds.length) throw badRequest('That team is not on file');
+  const groups = listOf(query.group);
+  const realGroups = groups.filter((g) => g !== 'none');
+  const groupRows = realGroups.length
+    ? await prisma.quotationGroup.findMany({ where: { key: { in: realGroups } }, select: { key: true, name: true } })
+    : [];
+  if (groupRows.length !== realGroups.length) throw badRequest('That product group is not on file');
 
   const stages = await pipelineStages();
   const team = await teamOf(me.id);
@@ -4309,16 +4354,37 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
   const lq = { ...listQuery(req), search: '', filters: {} };
   const stageOf = (key: string) => stages.find((s) => s.key === key);
   const { where: quotationWhere } = quotationListWhere(me, lq, stages, team?.id ?? null);
-  const quotations = await prisma.quotation.findMany({
-    where: { AND: [quotationWhere, { outcome: { in: [...FORECAST_OUTCOMES] } }] },
-    include: {
-      customer: { select: { id: true, name: true } },
-      owner: { select: { id: true, name: true, ...OWNER_TEAM_SELECT.select } },
-      team: TEAM_REF_SELECT,
-      revisions: {
-        select: { revision: true, status: true, total: true, items: { select: { group: true, amount: true, isHeading: true } } },
-      },
+  const include = {
+    customer: { select: { id: true, name: true } },
+    owner: { select: { id: true, name: true, ...OWNER_TEAM_SELECT.select } },
+    team: TEAM_REF_SELECT,
+    revisions: {
+      select: { revision: true, status: true, total: true, items: { select: { group: true, amount: true, isHeading: true } } },
     },
+  } satisfies Prisma.QuotationInclude;
+  // The decided quotations a comparison reads: won or lost on a day inside
+  // either window (the decision's Manila day; one with no decision date by
+  // its expected closing).
+  const windows = compareDays ? [{ from, to }, compareDays] : [];
+  const decidedWhere: Prisma.QuotationWhereInput[] = windows.map((w) => ({
+    OR: [
+      { decidedAt: { gte: manilaDayStart(w.from), lte: manilaDayEnd(w.to) } },
+      { decidedAt: null, expectedClosing: { gte: new Date(`${w.from}T00:00:00.000Z`), lte: new Date(`${w.to}T00:00:00.000Z`) } },
+    ],
+  }));
+  const quotations = await prisma.quotation.findMany({
+    where: {
+      AND: [
+        quotationWhere,
+        {
+          OR: [
+            { outcome: { in: [...FORECAST_OUTCOMES] } },
+            ...(decidedWhere.length ? [{ outcome: { in: ['WON', 'LOST'] as QuotationOutcome[] }, OR: decidedWhere }] : []),
+          ],
+        },
+      ],
+    },
+    include,
   });
   // A group's key is the master's (`groupKey`); a quotation's lines split its value across them.
   const sharesOf = (value: number, lines: { group: string | null; amount: Prisma.Decimal | number; isHeading?: boolean }[]) => {
@@ -4326,9 +4392,15 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
     return shares.length ? shares : [{ key: NO_GROUP_KEY, group: NO_GROUP, value }];
   };
   const rows: ForecastRow[] = quotations.map((q) => {
-    const closing = q.expectedClosing ? q.expectedClosing.toISOString().slice(0, 10) : null;
+    const decided = q.outcome === 'WON' || q.outcome === 'LOST';
+    const closing = decided && q.decidedAt
+      ? manilaDayKey(q.decidedAt)
+      : q.expectedClosing
+        ? q.expectedClosing.toISOString().slice(0, 10)
+        : null;
     const value = quotationValue(q.revisions);
     const stage = quotationStage(q.outcome, false, stages);
+    const probability = outcomeOdds(q.outcome, q.probability);
     return {
       kind: 'quotation',
       id: q.id,
@@ -4340,11 +4412,11 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
       stage,
       stageLabel: stageOf(stage)?.label ?? stage,
       status: q.outcome,
-      probability: q.probability,
+      probability,
       expectedClosing: closing,
       value,
-      weighted: weightedOf(value, q.probability),
-      overdue: closing !== null && closing < today,
+      weighted: weightedOf(value, probability),
+      overdue: !decided && closing !== null && closing < today,
       link: `/g-ops/quotations/${q.id}`,
       team: quotationTeamOf(q),
       groups: sharesOf(value, valueRevision(q.revisions)?.items ?? []),
@@ -4388,39 +4460,54 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
   }
 
   const people = [...new Map(rows.map((r) => [r.owner.id, r.owner])).values()].sort((a, b) => a.name.localeCompare(b.name));
-  const groupWanted = group === 'none' ? NO_GROUP_KEY : group;
+  const groupsWanted = new Set(groups.map((g) => (g === 'none' ? NO_GROUP_KEY : g)));
   const chosen = rows
-    .filter((r) => !ownerId || r.owner.id === ownerId)
-    .filter((r) => !teamId || (r.team?.id ?? NO_TEAM_ID) === teamId)
-    // A group filter keeps the quotations with a line in it, and only that
-    // group's share of each: the OMEGA AIR forecast is the OMEGA AIR money.
+    .filter((r) => !ownerIds.length || ownerIds.includes(r.owner.id))
+    .filter((r) => !teamIds.length || teamIds.includes(r.team?.id ?? NO_TEAM_ID))
+    // A group filter keeps the quotations with a line in any ticked group,
+    // and only those groups' shares of each, summed: the OMEGA AIR forecast
+    // is the OMEGA AIR money.
     .flatMap((r): ForecastRow[] => {
-      if (groupWanted === null) return [r];
-      const share = r.groups.find((g) => g.key === groupWanted);
-      return share ? [{ ...r, value: share.value, weighted: weightedOf(share.value, r.probability), groups: [share] }] : [];
+      if (!groupsWanted.size) return [r];
+      const shares = r.groups.filter((g) => groupsWanted.has(g.key));
+      if (!shares.length) return [];
+      const value = shares.reduce((t, g) => t + Math.round(g.value * 100), 0) / 100;
+      return [{ ...r, value, weighted: weightedOf(value, r.probability), groups: shares }];
     });
-  const teamNamed = teamId === NO_TEAM_ID ? 'no team' : teams.find((t) => t.id === teamId)?.code;
-  const groupNamed = group === 'none' ? NO_GROUP : activeGroups.find((g) => g.key === group)?.name;
+  // A decided row belongs to the window it was decided in; open rows are read by both.
+  const inWindow = (r: ForecastRow, w: { from: string; to: string }) =>
+    !(r.status === 'WON' || r.status === 'LOST') || (r.expectedClosing !== null && r.expectedClosing >= w.from && r.expectedClosing <= w.to);
+  const ownerNames = ownerIds.map((id) => people.find((p) => p.id === id)?.name ?? 'one person');
+  const teamNames = teamIds.map((id) => (id === NO_TEAM_ID ? 'no team' : teamRows.find((t) => t.id === id)?.code ?? 'one team'));
+  const groupNames = groups.map((g) => (g === 'none' ? NO_GROUP : groupRows.find((r) => r.key === g)?.name ?? g));
   const filters = [
     preset ? RANGE_PRESET_LABELS[preset].toLowerCase() : null,
     lq.scope === 'mine' ? 'mine only' : lq.scope === 'team' ? 'my team' : null,
-    ownerId ? `owner ${people.find((p) => p.id === ownerId)?.name ?? 'one person'}` : null,
-    teamId ? `team ${teamNamed ?? 'one team'}` : null,
-    group ? `product group ${groupNamed ?? group}` : null,
+    ownerIds.length ? `${ownerIds.length > 1 ? 'owners' : 'owner'} ${namesOf(ownerNames)}` : null,
+    teamIds.length ? `${teamIds.length > 1 ? 'teams' : 'team'} ${namesOf(teamNames)}` : null,
+    groups.length ? `${groups.length > 1 ? 'product groups' : 'product group'} ${namesOf(groupNames)}` : null,
     includeLeads ? 'leads without a quotation included' : null,
+    compareDays ? `compared with ${listDay(compareDays.from)} to ${listDay(compareDays.to)}, won and lost quotations included` : null,
   ].filter((f): f is string => !!f);
 
+  let forecast = buildForecast({ period, from, to, today, rows: compareDays ? chosen.filter((r) => inWindow(r, { from, to })) : chosen });
+  let compare: ForecastCompare | null = null;
+  if (compareDays && compareMode) {
+    const previous = buildForecast({ period, ...compareDays, today, rows: chosen.filter((r) => inWindow(r, compareDays!)) });
+    ({ forecast, compare } = compareForecasts(forecast, previous, compareMode));
+  }
   return {
-    forecast: buildForecast({ period, from, to, today, rows: chosen }),
+    forecast,
+    compare,
     stages: stages.map((s) => ({ key: s.key, label: s.label, color: s.color })),
     people,
     includeLeads,
     scope: lq.scope,
-    ownerId,
+    ownerIds,
     filters,
     preset,
-    teamId,
-    group,
+    teamIds,
+    groups,
     teams,
     groupChoices: activeGroups.map((g) => ({ key: g.key, name: g.name })),
   };
@@ -4451,15 +4538,16 @@ function breakdownOfQuery(by: unknown): ForecastBreakdown {
  * period when the window holds six or fewer (they fit across the page),
  * else the window as one figure beside before, after and undated.
  */
-function breakdownSection(f: Forecast, by: ForecastBreakdown, currency: string): PdfSection {
+function breakdownSection(f: Forecast, by: ForecastBreakdown, currency: string, compare: ForecastCompare | null): PdfSection {
   const lines = by === 'owner' ? f.byOwner : by === 'team' ? f.byTeam : f.byGroup;
-  const perPeriod = f.buckets.length <= 6;
-  const windowOf = (l: ForecastLine) => f.buckets.reduce((t, b) => t + Math.round((l.periods[b.key]?.weighted ?? 0) * 100), 0) / 100;
+  // With a comparison the window is one column beside the compared window's and the change.
+  const perPeriod = !compare && f.buckets.length <= 6;
   const money = (n: number) => (n ? formatAmount(n) : '—');
   const head = [
     BREAKDOWN_WORD[by],
     by === 'group' ? 'Quotations' : 'Deals',
     ...(perPeriod ? f.buckets.map((b) => b.label) : ['In the window']),
+    ...(compare ? ['Previous', 'Change'] : []),
     'Before',
     'After',
     'No date',
@@ -4474,7 +4562,8 @@ function breakdownSection(f: Forecast, by: ForecastBreakdown, currency: string):
     rows: lines.map((l) => [
       l.hint ? { title: l.name, body: l.hint } : l.name,
       String(l.count),
-      ...(perPeriod ? f.buckets.map((b) => money(l.periods[b.key]?.weighted ?? 0)) : [money(windowOf(l))]),
+      ...(perPeriod ? f.buckets.map((b) => money(l.periods[b.key]?.weighted ?? 0)) : [money(l.window.weighted)]),
+      ...(compare ? comparedCells(compare.lines[by][l.id]?.previous, compare.lines[by][l.id]?.change) : []),
       money(l.earlier.weighted),
       money(l.later.weighted),
       money(l.undated.weighted),
@@ -4482,6 +4571,20 @@ function breakdownSection(f: Forecast, by: ForecastBreakdown, currency: string):
       formatAmount(l.weighted),
     ]),
   };
+}
+
+/** "+1,234.00 (+12.5%)", "−500.00", "new" — a weighted change as the paper and the CSV print it. */
+function changeWords(change: ForecastChange | null | undefined): string {
+  if (!change) return '';
+  if (change.weighted === 0) return '0.00';
+  const sign = change.weighted > 0 ? '+' : '−';
+  const pct = change.weightedPct === null ? ' (new)' : ` (${change.weightedPct > 0 ? '+' : change.weightedPct < 0 ? '−' : ''}${Math.abs(change.weightedPct).toFixed(1)}%)`;
+  return `${sign}${formatAmount(Math.abs(change.weighted))}${pct}`;
+}
+
+/** The compared window's weighted figure and the change, for a paper's row. */
+function comparedCells(previous: ForecastCell | null | undefined, change: ForecastChange | null | undefined): string[] {
+  return previous ? [previous.weighted ? formatAmount(previous.weighted) : '—', changeWords(change)] : ['—', ''];
 }
 
 const PERIOD_WORD: Record<ForecastPeriod, string> = { week: 'Weekly', month: 'Monthly', quarter: 'Quarterly', year: 'Annually', range: 'Whole range' };
@@ -4500,9 +4603,13 @@ pipelineRoutes.get(
   '/forecast.csv',
   require_('gops.forecast.export'),
   handler(async (req, res) => {
-    const { forecast } = await loadForecast(req);
+    const { forecast, compare } = await loadForecast(req);
+    // A period's compared figures ride on each of its rows (2026-10-12), empty without a comparison.
+    const pairOf = new Map(forecast.buckets.map((b, i) => [b.key, compare?.pairs[i] ?? null]));
     const rows = forecastGroups(forecast).flatMap(({ label, group }) =>
-      group.rows.map((r) => [
+      group.rows.map((r) => {
+        const pair = 'key' in group ? pairOf.get((group as { key: string }).key) ?? null : null;
+        return [
         label,
         r.kind,
         r.number,
@@ -4518,7 +4625,14 @@ pipelineRoutes.get(
         // Appended 2026-10-12 (columns are appended, never reordered): the team and the group split.
         r.team?.code ?? 'No team',
         r.groups.map((g) => `${g.group} ${g.value.toFixed(2)}`).join('; '),
-      ]),
+        // Appended 2026-10-12: the compared window's figures for this row's period, and the change.
+        pair?.previous?.label ?? '',
+        pair?.previous ? String(pair.previous.count) : '',
+        pair?.previous ? pair.previous.value.toFixed(2) : '',
+        pair?.previous ? pair.previous.weighted.toFixed(2) : '',
+        pair?.change ? pair.change.weighted.toFixed(2) : '',
+      ];
+      }),
     );
     await audit(
       {
@@ -4533,7 +4647,7 @@ pipelineRoutes.get(
     res.setHeader('Content-Disposition', 'attachment; filename="sales-forecast.csv"');
     res.send(
       toCsv(
-        ['Period', 'Kind', 'Number', 'Customer', 'Title', 'Salesperson', 'Stage', 'Probability %', 'Expected closing', 'Value', 'Weighted', 'Overdue', 'Team', 'Product groups'],
+        ['Period', 'Kind', 'Number', 'Customer', 'Title', 'Salesperson', 'Stage', 'Probability %', 'Expected closing', 'Value', 'Weighted', 'Overdue', 'Team', 'Product groups', 'Compared period', 'Previous count', 'Previous value', 'Previous weighted', 'Change (weighted)'],
         rows,
       ),
     );
@@ -4545,20 +4659,38 @@ pipelineRoutes.get(
   '/forecast.pdf',
   require_('gops.forecast.export'),
   handler(async (req, res) => {
-    const { forecast, filters } = await loadForecast(req);
+    const { forecast, filters, compare } = await loadForecast(req);
     const currency = await companyCurrency();
     // A list's dates are MM/DD/YYYY (rule 6), the window's edges included.
     const all = forecastGroups(forecast, listDay);
     const groups = all.filter(({ group }) => group.count > 0);
+    const pairOf = new Map(forecast.buckets.map((b, i) => [b.key, compare?.pairs[i] ?? null]));
     const sections: PdfSection[] = [
       {
         kind: 'table',
-        title: `By period — ${PERIOD_WORD[forecast.period].toLowerCase()}`,
-        head: ['Period', 'Quotations', `Value (${currency})`, `Weighted (${currency})`, 'Past closing'],
-        align: ['left', 'right', 'right', 'right', 'right'],
+        title: `By period — ${PERIOD_WORD[forecast.period].toLowerCase()}${compare ? ` — against ${compare.label.toLowerCase()}` : ''}`,
+        head: [
+          'Period',
+          'Quotations',
+          `Value (${currency})`,
+          `Weighted (${currency})`,
+          ...(compare ? ['Previous period', `Previous weighted (${currency})`, 'Change'] : []),
+          'Past closing',
+        ],
+        align: ['left', 'right', 'right', 'right', ...(compare ? (['left', 'right', 'right'] as const) : []), 'right'],
         rows: all
           .filter(({ group }, i) => group.count > 0 || (i > 0 && i < all.length - 2))
-          .map(({ label, group }) => [label, String(group.count), formatAmount(group.value), formatAmount(group.weighted), String(group.overdue)]),
+          .map(({ label, group }) => {
+            const pair = 'key' in group ? pairOf.get((group as { key: string }).key) ?? null : null;
+            return [
+              label,
+              String(group.count),
+              formatAmount(group.value),
+              formatAmount(group.weighted),
+              ...(compare ? [pair?.previous?.label ?? '', ...comparedCells(pair?.previous, pair?.change)] : []),
+              String(group.overdue),
+            ];
+          }),
       },
       // The money block: the window, then everything open — the grand total,
       // the one bold row, last.
@@ -4567,11 +4699,20 @@ pipelineRoutes.get(
         rows: [
           { label: `In the window (${forecast.inWindow.count})`, value: formatMoney(forecast.inWindow.value, currency) },
           { label: 'In the window, weighted', value: formatMoney(forecast.inWindow.weighted, currency) },
+          ...(compare
+            ? [
+                {
+                  label: `${compare.label}, weighted (${listDay(compare.from)} to ${listDay(compare.to)})`,
+                  value: formatMoney(compare.inWindow.previous.weighted, currency),
+                },
+                { label: 'Change, weighted', value: changeWords(compare.inWindow.change) },
+              ]
+            : []),
           { label: 'Everything open, weighted', value: formatMoney(forecast.totals.weighted, currency) },
           { label: `Everything open (${forecast.totals.count})`, value: formatMoney(forecast.totals.value, currency), bold: true },
         ],
       },
-      breakdownSection(forecast, breakdownOfQuery(req.query.by), currency),
+      breakdownSection(forecast, breakdownOfQuery(req.query.by), currency, compare),
       ...groups.map(
         ({ label, group }): PdfSection => ({
           kind: 'table',

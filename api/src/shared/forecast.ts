@@ -296,6 +296,8 @@ export interface ForecastLine extends ForecastCell {
   hint?: string;
   overdue: number;
   periods: Record<string, ForecastCell>;
+  /** The periods together: what the line holds inside the window (a comparison measures this). */
+  window: ForecastCell;
   earlier: ForecastCell;
   later: ForecastCell;
   undated: ForecastCell;
@@ -387,6 +389,18 @@ export function breakdownOf(
   }
   const out = (a: Acc | undefined): ForecastCell =>
     a ? { count: a.count, value: a.value / 100, weighted: Math.round(a.weighted) / 100 } : { count: 0, value: 0, weighted: 0 };
+  // The window as one cell: each row once, value in cents, weighted rounded once.
+  const windowOf = (l: { cells: Map<string, Acc> }): ForecastCell => {
+    const w = acc();
+    for (const k of bucketKeys) {
+      const c = l.cells.get(k);
+      if (!c) continue;
+      for (const id of c.ids) w.ids.add(id);
+      w.value += c.value;
+      w.weighted += c.weighted;
+    }
+    return { count: w.ids.size, value: w.value / 100, weighted: Math.round(w.weighted) / 100 };
+  };
   return [...lines.values()]
     .map((l) => ({
       id: l.id,
@@ -395,6 +409,7 @@ export function breakdownOf(
       ...out(l.all),
       overdue: l.overdue.size,
       periods: Object.fromEntries(bucketKeys.map((k) => [k, out(l.cells.get(k))])),
+      window: windowOf(l),
       earlier: out(l.cells.get('earlier')),
       later: out(l.cells.get('later')),
       undated: out(l.cells.get('undated')),
@@ -514,5 +529,181 @@ export function buildForecast(input: {
     inWindow: sum(buckets),
     totals: sum([...buckets, earlierGroup, laterGroup, undatedGroup]),
     owners,
+  };
+}
+
+
+// ── Comparison (2026-10-12) ──────────────────────────────────────────────────
+//
+// The owner's call: "create a comparison range so I can compare for example
+// current year versus previous year". A second window beside the first,
+// read ALIKE: while a comparison is on, both windows count every quotation
+// that closes in them whatever its outcome — a won one in full (odds 100), a
+// lost one valued but weighted at nothing (odds 0), an open one at its own
+// odds — because last year's quotations are mostly decided, and read as
+// open-only they would be a handful of leftovers.
+
+export const COMPARE_MODES = ['prev-period', 'prev-year', 'custom'] as const;
+export type CompareMode = (typeof COMPARE_MODES)[number];
+export const COMPARE_MODE_LABELS: Record<CompareMode, string> = {
+  'prev-period': 'The period before',
+  'prev-year': 'The same period last year',
+  custom: 'Custom',
+};
+
+/** A day key moved by whole years; 29 February lands on 28 February in a common year. */
+export function shiftYears(key: string, years: number): string {
+  const y = Number(yearOf(key)) + years;
+  const m = monthOf(key);
+  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return `${y}-${String(m + 1).padStart(2, '0')}-${String(Math.min(dayOf(key), last)).padStart(2, '0')}`;
+}
+
+/** Days from `from` to `to`, both counted. */
+export function daysIn(from: string, to: string): number {
+  return Math.round((toDate(to).getTime() - toDate(from).getTime()) / 86_400_000) + 1;
+}
+
+/**
+ * The compared window: `prev-period` is a window of the same length ending
+ * the day before `from`; `prev-year` moves both edges back a year; `custom`
+ * is the days given.
+ */
+export function compareWindow(
+  from: string,
+  to: string,
+  mode: CompareMode,
+  custom?: { from: string; to: string },
+): { from: string; to: string } {
+  switch (mode) {
+    case 'prev-period': {
+      const end = addDays(from, -1);
+      return { from: addDays(end, -(daysIn(from, to) - 1)), to: end };
+    }
+    case 'prev-year':
+      return { from: shiftYears(from, -1), to: shiftYears(to, -1) };
+    case 'custom':
+      if (!custom) throw new Error('A custom comparison needs its own From and To');
+      return custom;
+  }
+}
+
+/** The odds a comparison reads a quotation at: won in full, lost at nothing, open at its own. */
+export function outcomeOdds(outcome: string, probability: number): number {
+  if (outcome === 'WON') return 100;
+  if (outcome === 'LOST') return 0;
+  return probability;
+}
+
+/** A figure against the one it is compared with. `pct` is null when there was nothing before. */
+export interface ForecastChange {
+  value: number;
+  valuePct: number | null;
+  weighted: number;
+  weightedPct: number | null;
+}
+
+/** The change from `prev` to `cur`, in cents; percentages to one decimal. */
+export function changeOf(cur: ForecastCell, prev: ForecastCell): ForecastChange {
+  const pct = (a: number, b: number) => (b === 0 ? null : Math.round(((a - b) / Math.abs(b)) * 1000) / 10);
+  return {
+    value: (cents(cur.value) - cents(prev.value)) / 100,
+    valuePct: pct(cents(cur.value), cents(prev.value)),
+    weighted: (cents(cur.weighted) - cents(prev.weighted)) / 100,
+    weightedPct: pct(cents(cur.weighted), cents(prev.weighted)),
+  };
+}
+
+export interface ForecastComparePair {
+  /** The compared window's bucket in the same position, or null past its end. */
+  previous: (PeriodBucket & ForecastCell) | null;
+  change: ForecastChange | null;
+}
+
+export interface ForecastCompare {
+  mode: CompareMode;
+  label: string;
+  from: string;
+  to: string;
+  /** One per bucket of the CURRENT window, paired by position (October with October, Q1 with Q1). */
+  pairs: ForecastComparePair[];
+  /** The compared window's buckets the current one has no partner for (a longer compared window). */
+  unpaired: (PeriodBucket & ForecastCell)[];
+  inWindow: { previous: ForecastCell; change: ForecastChange };
+  /** Each line's in-window figure in the compared window, by breakdown and line id. */
+  lines: Record<ForecastBreakdown, Record<string, { previous: ForecastCell; change: ForecastChange }>>;
+}
+
+const cellOf = (c: ForecastCell): ForecastCell => ({ count: c.count, value: c.value, weighted: c.weighted });
+const ZERO: ForecastCell = { count: 0, value: 0, weighted: 0 };
+
+/**
+ * The current Forecast with the compared one beside it: buckets paired by
+ * position, the window's totals and each breakdown line's in-window figure
+ * against itself. A line found only in the compared window (a salesperson
+ * who sold last year and holds nothing now) joins the current breakdown at
+ * zero, so its fall is shown rather than dropped. Pure: the page, the CSV
+ * and the paper all read the changes from here.
+ */
+export function compareForecasts(
+  current: Forecast,
+  previous: Forecast,
+  mode: CompareMode,
+): { forecast: Forecast; compare: ForecastCompare } {
+  const pairs: ForecastComparePair[] = current.buckets.map((b, i) => {
+    const p = previous.buckets[i];
+    if (!p) return { previous: null, change: null };
+    const prev = { key: p.key, label: p.label, from: p.from, to: p.to, ...cellOf(p) };
+    return { previous: prev, change: changeOf(b, prev) };
+  });
+  const unpaired = previous.buckets.slice(current.buckets.length).map((p) => ({ key: p.key, label: p.label, from: p.from, to: p.to, ...cellOf(p) }));
+  const keys = current.buckets.map((b) => b.key);
+  const zeroLine = (l: ForecastLine): ForecastLine => ({
+    id: l.id,
+    name: l.name,
+    ...(l.hint ? { hint: l.hint } : {}),
+    ...ZERO,
+    overdue: 0,
+    periods: Object.fromEntries(keys.map((k) => [k, { ...ZERO }])),
+    window: { ...ZERO },
+    earlier: { ...ZERO },
+    later: { ...ZERO },
+    undated: { ...ZERO },
+  });
+  const merged: Record<ForecastBreakdown, ForecastLine[]> = { owner: [], team: [], group: [] };
+  const lines: ForecastCompare['lines'] = { owner: {}, team: {}, group: {} };
+  const sources: Record<ForecastBreakdown, [ForecastLine[], ForecastLine[]]> = {
+    owner: [current.byOwner, previous.byOwner],
+    team: [current.byTeam, previous.byTeam],
+    group: [current.byGroup, previous.byGroup],
+  };
+  for (const by of FORECAST_BREAKDOWNS) {
+    const [cur, prev] = sources[by];
+    const prevById = new Map(prev.map((l) => [l.id, l]));
+    const curIds = new Set(cur.map((l) => l.id));
+    // Lines only in the compared window go before the catch-all line (which `breakdownOf` put last).
+    const extra = prev.filter((l) => !curIds.has(l.id) && l.window.count > 0).map(zeroLine);
+    const catchAll = cur.length && (cur[cur.length - 1].id === NO_TEAM_ID || cur[cur.length - 1].id === NO_GROUP_KEY) ? 1 : 0;
+    const extraCatch = extra.filter((l) => l.id === NO_TEAM_ID || l.id === NO_GROUP_KEY);
+    const extraRest = extra.filter((l) => l.id !== NO_TEAM_ID && l.id !== NO_GROUP_KEY);
+    merged[by] = [...cur.slice(0, cur.length - catchAll), ...extraRest, ...cur.slice(cur.length - catchAll), ...extraCatch];
+    for (const l of merged[by]) {
+      const p = prevById.get(l.id)?.window ?? ZERO;
+      lines[by][l.id] = { previous: cellOf(p), change: changeOf(l.window, p) };
+    }
+  }
+  const prevWindow = cellOf(previous.inWindow);
+  return {
+    forecast: { ...current, byOwner: merged.owner, byTeam: merged.team, byGroup: merged.group },
+    compare: {
+      mode,
+      label: COMPARE_MODE_LABELS[mode],
+      from: previous.from,
+      to: previous.to,
+      pairs,
+      unpaired,
+      inWindow: { previous: prevWindow, change: changeOf(current.inWindow, prevWindow) },
+      lines,
+    },
   };
 }

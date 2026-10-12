@@ -15,8 +15,9 @@
   color: var(--muted);
 }
 
-.forecast .fc-control input,
-.forecast .fc-control select {
+.forecast .fc-control > input,
+.forecast .fc-control > select,
+.forecast .fc-control .tick-picker {
   min-width: calc(var(--s-8) * 4);
 }
 
@@ -136,4 +137,44 @@
 .forecast .fc-matrix tfoot td,
 .forecast .fc-matrix tfoot th {
   font-weight: 600;
+}
+
+/*
+  By period on the whole width (2026-10-12): the Weighted column carries its
+  bar, so the separate bar panel went and nothing is cut off at the edge.
+  The comparison's change reads without colour (a sign and a percentage);
+  a fall also takes the warn tone.
+*/
+.forecast .fc-periods td,
+.forecast .fc-periods th {
+  white-space: nowrap;
+}
+
+.forecast .fc-periods .fc-bar-col {
+  width: 18%;
+  min-width: calc(var(--s-8) * 2);
+}
+
+.forecast .fc-periods .fc-period .fc-cell-sub {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.forecast .fc-periods .fc-cell-sub {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.forecast .fc-change.down .fc-cell-main {
+  color: var(--warn);
+}
+
+.forecast .fc-change.up .fc-cell-main {
+  color: var(--ok);
+}
+
+.forecast .fc-compare-note {
+  margin: 0 0 var(--block-gap);
+  font-size: var(--fs-sm);
 }

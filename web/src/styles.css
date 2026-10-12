@@ -5101,6 +5101,102 @@ a.icon-row:hover {
   background: var(--surface-2);
 }
 
+/*
+  Pick several (components/TickPicker.tsx, 2026-10-12): a button the size of
+  a select that reads what is ticked, and a panel of tick boxes under it.
+*/
+.tick-picker {
+  position: relative;
+}
+
+.tick-picker-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  width: 100%;
+  height: var(--field-h);
+  padding: 0 var(--s-3);
+  background: var(--field-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tick-picker-btn:focus-visible,
+.tick-picker-btn[aria-expanded='true'] {
+  border-color: var(--magenta);
+  box-shadow: 0 0 0 3px rgb(var(--magenta-rgb) / 0.18);
+  outline: none;
+}
+
+.tick-picker-btn.has-value {
+  border-color: var(--magenta);
+}
+
+.tick-picker-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tick-picker-caret {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.tick-menu {
+  position: absolute;
+  z-index: 5;
+  left: 0;
+  top: calc(100% + 2px);
+  min-width: 100%;
+  width: max-content;
+  max-width: calc(var(--s-8) * 10);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.tick-menu ul {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  max-height: calc(var(--s-8) * 6);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+.tick-menu-hint {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.tick-menu-empty {
+  margin: 0;
+  padding: var(--s-3);
+}
+
+.tick-menu-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-top: 1px solid var(--line-soft);
+  font-size: var(--fs-sm);
+}
+
 /* The escape hatch reads as a different kind of thing to the matches. */
 .lookup-new {
   border-top: 1px solid var(--line-soft);

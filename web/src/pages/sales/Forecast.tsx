@@ -3,7 +3,8 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, openPdf, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { parseDay } from '../../lib/day';
-import { BarList, Panel, Stat } from '../../components/charts';
+import { BarList, MiniBar, Panel, Stat } from '../../components/charts';
+import { TickPicker } from '../../components/TickPicker';
 import { Checkbox, Empty, ErrorBox, Loading, StatusBadge, formatDate, formatMoney, useToast } from '../../components/ui';
 import { ExportButton } from '../insights/Overview';
 import { STAGE_TONES } from './Quotations';
@@ -62,6 +63,7 @@ interface Line extends Cell {
   hint?: string;
   overdue: number;
   periods: Record<string, Cell>;
+  window: Cell;
   earlier: Cell;
   later: Cell;
   undated: Cell;
@@ -102,6 +104,68 @@ interface Bucket extends Group {
   to: string;
 }
 
+/** The comparison (2026-10-12): the period before, the same period last year, or typed days. */
+type CompareMode = 'prev-period' | 'prev-year' | 'custom';
+const COMPARES: { value: CompareMode; label: string }[] = [
+  { value: 'prev-period', label: 'The period before' },
+  { value: 'prev-year', label: 'The same period last year' },
+  { value: 'custom', label: 'Custom' },
+];
+const isCompare = (v: string | null): v is CompareMode => COMPARES.some((c) => c.value === v);
+
+interface Change {
+  value: number;
+  valuePct: number | null;
+  weighted: number;
+  weightedPct: number | null;
+}
+
+interface PrevBucket extends Cell {
+  key: string;
+  label: string;
+  from: string;
+  to: string;
+}
+
+interface Compare {
+  mode: CompareMode;
+  label: string;
+  from: string;
+  to: string;
+  pairs: { previous: PrevBucket | null; change: Change | null }[];
+  unpaired: PrevBucket[];
+  inWindow: { previous: Cell; change: Change };
+  lines: Record<By, Record<string, { previous: Cell; change: Change }>>;
+}
+
+/** "+12.5%", "−3.0%", "new" (nothing before), "±0" — readable without colour. */
+function pctWords(pct: number | null, amount: number): string {
+  if (amount === 0) return '±0';
+  if (pct === null) return 'new';
+  return `${pct > 0 ? '+' : pct < 0 ? '−' : ''}${Math.abs(pct).toFixed(1)}%`;
+}
+
+/** A change cell: the amount signed, the percentage under it; a fall in the warn tone. */
+function ChangeCell({ change, field = 'weighted' }: { change: Change | null | undefined; field?: 'weighted' | 'value' }) {
+  if (!change) return <span className="faint">—</span>;
+  const amount = field === 'weighted' ? change.weighted : change.value;
+  const pct = field === 'weighted' ? change.weightedPct : change.valuePct;
+  return (
+    <span className={`fc-cell fc-change${amount < 0 ? ' down' : amount > 0 ? ' up' : ''}`}>
+      <span className="fc-cell-main">
+        {amount > 0 ? '+' : amount < 0 ? '−' : ''}
+        {formatMoney(Math.abs(amount))}
+      </span>
+      <span className="fc-cell-sub">{pctWords(pct, amount)}</span>
+    </span>
+  );
+}
+
+/** A card's line under its figure: the compared window's figure and the change. */
+function compareSub(previous: number, change: { amount: number; pct: number | null }, label: string): string {
+  return `${label} ${formatMoney(previous)} · ${pctWords(change.pct, change.amount)}`;
+}
+
 interface ForecastData {
   period: Period;
   from: string;
@@ -122,7 +186,7 @@ interface ForecastData {
   preset: string | null;
   includeLeads: boolean;
   scope: 'mine' | 'team' | 'all';
-  ownerId: string | null;
+  compare: Compare | null;
 }
 
 type Scope = 'mine' | 'team' | 'all';
@@ -144,11 +208,22 @@ export function Forecast() {
   const to = params.get('to') ?? '';
   const scopeParam = params.get('scope');
   const scope: Scope = scopeParam === 'mine' || scopeParam === 'all' ? scopeParam : scopeParam === 'team' && hasTeam ? 'team' : defaultScope;
-  const ownerId = params.get('ownerId') ?? '';
+  // Several of each (2026-10-12, the owner's tick boxes): comma-separated in the URL; one value reads as before.
+  const listParam = (key: string) => (params.get(key) ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  const ownerIds = listParam('ownerId');
+  const ownerId = ownerIds.join(',');
   const leads = params.get('leads') === 'true';
   const range = params.get('range') ?? '';
-  const teamId = params.get('teamId') ?? '';
-  const group = params.get('group') ?? '';
+  const teamIds = listParam('teamId');
+  const teamId = teamIds.join(',');
+  const groupKeys = listParam('group');
+  const group = groupKeys.join(',');
+  const compareParam = params.get('compare');
+  const compare: CompareMode | '' = isCompare(compareParam) ? compareParam : '';
+  const compareFrom = params.get('compareFrom') ?? '';
+  const compareTo = params.get('compareTo') ?? '';
+  // A custom comparison is asked for only once both of its days are typed.
+  const compareAsked = compare === 'custom' ? (compareFrom && compareTo ? 'custom' : '') : compare;
   const byParam = params.get('by');
   const by: By = isBy(byParam) ? byParam : 'owner';
 
@@ -162,6 +237,9 @@ export function Forecast() {
     teamId,
     group,
     leads: leads ? 'true' : '',
+    compare: compareAsked,
+    compareFrom: compareAsked === 'custom' ? compareFrom : '',
+    compareTo: compareAsked === 'custom' ? compareTo : '',
   });
   // The paper prints the breakdown the page shows.
   const paperQuery = qs({
@@ -174,6 +252,9 @@ export function Forecast() {
     teamId,
     group,
     leads: leads ? 'true' : '',
+    compare: compareAsked,
+    compareFrom: compareAsked === 'custom' ? compareFrom : '',
+    compareTo: compareAsked === 'custom' ? compareTo : '',
     by: by === 'owner' ? '' : by,
   });
 
@@ -288,41 +369,72 @@ export function Forecast() {
             onChange={(e) => e.target.value && set({ range: null, from: data?.from ?? from, to: e.target.value })}
           />
         </label>
-        <label className="fc-control">
+        <div className="fc-control">
           <span>Salesperson</span>
-          <select value={ownerId} onChange={(e) => set({ ownerId: e.target.value })}>
-            <option value="">Everyone</option>
-            {(data?.people ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="fc-control">
+          <TickPicker
+            label="Salespeople"
+            noun="salespeople"
+            none="Everyone"
+            choices={(data?.people ?? []).map((p) => ({ value: p.id, label: p.name }))}
+            value={ownerIds}
+            onChange={(v) => set({ ownerId: v.join(',') })}
+          />
+        </div>
+        <div className="fc-control">
           <span>Team</span>
-          <select value={teamId} onChange={(e) => set({ teamId: e.target.value })}>
-            <option value="">Every team</option>
-            {(data?.teams ?? []).map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.code} — {t.name}
-              </option>
-            ))}
-            <option value="none">No team</option>
-          </select>
-        </label>
-        <label className="fc-control">
+          <TickPicker
+            label="Teams"
+            noun="teams"
+            none="Every team"
+            choices={[
+              ...(data?.teams ?? []).map((t) => ({ value: t.id, label: t.code, hint: t.name })),
+              { value: 'none', label: 'No team' },
+            ]}
+            value={teamIds}
+            onChange={(v) => set({ teamId: v.join(',') })}
+          />
+        </div>
+        <div className="fc-control">
           <span>Product group</span>
-          <select value={group} onChange={(e) => set({ group: e.target.value })}>
-            <option value="">Every group</option>
-            {(data?.groupChoices ?? []).map((g) => (
-              <option key={g.key} value={g.key}>
-                {g.name}
+          <TickPicker
+            label="Product groups"
+            noun="product groups"
+            none="Every group"
+            choices={[...(data?.groupChoices ?? []).map((g) => ({ value: g.key, label: g.name })), { value: 'none', label: 'No group' }]}
+            value={groupKeys}
+            onChange={(v) => set({ group: v.join(',') })}
+          />
+        </div>
+        {/* The comparison (2026-10-12): a second window beside the first. */}
+        <label className="fc-control">
+          <span>Compare with</span>
+          <select
+            value={compare}
+            onChange={(e) => {
+              const v = e.target.value;
+              set({ compare: v || null, ...(v === 'custom' ? {} : { compareFrom: null, compareTo: null }) });
+            }}
+          >
+            <option value="">Nothing</option>
+            {COMPARES.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
               </option>
             ))}
-            <option value="none">No group</option>
           </select>
         </label>
+        {compare === 'custom' && (
+          <>
+            <label className="fc-control">
+              <span>Compare from</span>
+              <input type="date" value={compareFrom} onChange={(e) => set({ compareFrom: e.target.value || null })} />
+            </label>
+            <label className="fc-control">
+              <span>Compare to</span>
+              <input type="date" value={compareTo} onChange={(e) => set({ compareTo: e.target.value || null })} />
+            </label>
+          </>
+        )}
         <Checkbox checked={leads} onChange={(v) => set({ leads: v ? 'true' : null })} label="Include leads without a quotation" />
       </div>
 
@@ -330,7 +442,7 @@ export function Forecast() {
         <ErrorBox error={error} />
       ) : !data ? (
         <Loading />
-      ) : data.totals.count === 0 ? (
+      ) : data.totals.count === 0 && !data.compare?.inWindow.previous.count ? (
         <Empty
           title="Nothing to forecast"
           hint={`Open quotations${leads ? ' and leads' : ''} appear here under the ${periodWord} their expected closing date falls in. None are open in this view.`}
@@ -366,7 +478,10 @@ function ForecastBody({
   ];
   const listLink = (fromDay?: string, toDay?: string) =>
     `/g-ops/quotations${qs({ closingFrom: fromDay, closingTo: toDay, scope: scope === 'mine' ? '' : scope })}`;
-  const peakWeighted = Math.max(...data.buckets.map((b) => b.weighted), 0);
+  const peakWeighted = Math.max(...data.buckets.map((b) => b.weighted), ...(data.compare?.pairs.map((p) => p.previous?.weighted ?? 0) ?? []), 0);
+  const cmp = data.compare;
+  const prevWord = cmp ? (cmp.mode === 'prev-year' ? 'last year' : cmp.mode === 'prev-period' ? 'before' : 'compared') : '';
+  const cols = 5 + (cmp ? 2 : 0);
 
   return (
     <>
@@ -375,9 +490,23 @@ function ForecastBody({
           label="In the window"
           value={formatMoney(data.inWindow.value)}
           figure
-          sub={`${data.inWindow.count} closing ${formatDate(parseDay(data.from))} – ${formatDate(parseDay(data.to))}`}
+          sub={
+            cmp
+              ? compareSub(cmp.inWindow.previous.value, { amount: cmp.inWindow.change.value, pct: cmp.inWindow.change.valuePct }, prevWord)
+              : `${data.inWindow.count} closing ${formatDate(parseDay(data.from))} – ${formatDate(parseDay(data.to))}`
+          }
         />
-        <Stat label="Weighted" value={formatMoney(data.inWindow.weighted)} figure tone="neon" sub="at each quotation's own odds" />
+        <Stat
+          label="Weighted"
+          value={formatMoney(data.inWindow.weighted)}
+          figure
+          tone="neon"
+          sub={
+            cmp
+              ? compareSub(cmp.inWindow.previous.weighted, { amount: cmp.inWindow.change.weighted, pct: cmp.inWindow.change.weightedPct }, prevWord)
+              : "at each quotation's own odds"
+          }
+        />
         <Stat
           label="Past their closing date"
           value={data.totals.overdue}
@@ -392,79 +521,137 @@ function ForecastBody({
         />
       </div>
 
-      <div className="grid grid-2 fc-panels">
-        <Panel title="By period">
-          <div className="table-wrap">
-            <table className="data fc-periods">
-              <thead>
-                <tr>
-                  <th>Period</th>
-                  <th className="right">{leads ? 'Deals' : 'Quotations'}</th>
-                  <th className="right">Value</th>
-                  <th className="right">Weighted</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.buckets.map((b) => (
-                  <tr key={b.key} className={b.count === 0 ? 'fc-empty' : ''}>
+      {cmp && (
+        <p className="muted fc-compare-note">
+          Comparing {formatDate(parseDay(data.from))} – {formatDate(parseDay(data.to))} with {cmp.label.toLowerCase()},{' '}
+          {formatDate(parseDay(cmp.from))} – {formatDate(parseDay(cmp.to))}. Both windows count won quotations in full and lost ones at
+          nothing (by the day they were decided), and open ones at their odds, so the two are read alike.
+        </p>
+      )}
+
+      {/* By period takes the whole width (2026-10-12): its Weighted column carries the bar, so nothing is cut off. */}
+      <div className="fc-panels">
+      <Panel title={cmp ? `By period — against ${cmp.label.toLowerCase()}` : 'By period'}>
+        <div className="table-wrap">
+          <table className="data fc-periods">
+            <thead>
+              <tr>
+                <th>Period</th>
+                <th className="right">{leads ? 'Deals' : 'Quotations'}</th>
+                <th className="right">Value</th>
+                <th className="right">Weighted</th>
+                <th className="fc-bar-col" aria-label="Weighted, as a bar" />
+                {cmp && <th className="right">Previous</th>}
+                {cmp && <th className="right">Change</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {data.buckets.map((b, i) => {
+                const pair = cmp?.pairs[i];
+                return (
+                  <tr key={b.key} className={b.count === 0 && !pair?.previous?.count ? 'fc-empty' : ''}>
                     <td className="fc-period">
                       <Link to={listLink(b.from, b.to)}>{b.label}</Link>
                       {b.overdue > 0 && <span className="fc-past"> · {b.overdue} past closing</span>}
+                      {pair?.previous && <span className="fc-cell-sub">vs {pair.previous.label}</span>}
                     </td>
                     <td className="right mono">{b.count}</td>
                     <td className="right mono">{b.count ? formatMoney(b.value) : '—'}</td>
                     <td className="right mono">{b.count ? formatMoney(b.weighted) : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td className="fc-period">
-                    In the window
-                    {data.inWindow.overdue > 0 && <span className="fc-past"> · {data.inWindow.overdue} past closing</span>}
-                  </td>
-                  <td className="right mono">{data.inWindow.count}</td>
-                  <td className="right mono">{formatMoney(data.inWindow.value)}</td>
-                  <td className="right mono">{formatMoney(data.inWindow.weighted)}</td>
-                </tr>
-                {(data.earlier.count > 0 || data.later.count > 0 || data.undated.count > 0) && (
-                  <tr className="fc-outside">
-                    <td className="fc-period">
-                      Outside it
-                      <span className="faint">
-                        {' '}
-                        — {[
-                          data.earlier.count ? `${data.earlier.count} earlier` : null,
-                          data.later.count ? `${data.later.count} later` : null,
-                          data.undated.count ? `${data.undated.count} undated` : null,
-                        ]
-                          .filter(Boolean)
-                          .join(', ')}
-                      </span>
+                    <td className="fc-bar-col">
+                      <MiniBar value={b.weighted} peak={peakWeighted} />
                     </td>
-                    <td className="right mono">{data.totals.count - data.inWindow.count}</td>
-                    <td className="right mono">{formatMoney(data.totals.value - data.inWindow.value)}</td>
-                    <td className="right mono">{formatMoney(data.totals.weighted - data.inWindow.weighted)}</td>
+                    {cmp && (
+                      <td className="right mono">
+                        {pair?.previous ? (
+                          pair.previous.count ? (
+                            <span className="fc-cell">
+                              <span className="fc-cell-main">{formatMoney(pair.previous.weighted)}</span>
+                              <span className="fc-cell-sub">
+                                {pair.previous.count} · {formatMoney(pair.previous.value)}
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="faint">—</span>
+                          )
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
+                      </td>
+                    )}
+                    {cmp && (
+                      <td className="right mono">
+                        <ChangeCell change={pair?.change} />
+                      </td>
+                    )}
                   </tr>
+                );
+              })}
+              {cmp?.unpaired.map((p) => (
+                <tr key={`prev-${p.key}`} className="fc-empty">
+                  <td className="fc-period">
+                    <span className="faint">—</span>
+                    <span className="fc-cell-sub">vs {p.label}</span>
+                  </td>
+                  <td className="right mono" colSpan={4} />
+                  <td className="right mono">{p.count ? formatMoney(p.weighted) : '—'}</td>
+                  <td className="right mono">
+                    <span className="faint">—</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td className="fc-period">
+                  In the window
+                  {data.inWindow.overdue > 0 && <span className="fc-past"> · {data.inWindow.overdue} past closing</span>}
+                </td>
+                <td className="right mono">{data.inWindow.count}</td>
+                <td className="right mono">{formatMoney(data.inWindow.value)}</td>
+                <td className="right mono">{formatMoney(data.inWindow.weighted)}</td>
+                <td className="fc-bar-col" />
+                {cmp && (
+                  <td className="right mono">
+                    <span className="fc-cell">
+                      <span className="fc-cell-main">{formatMoney(cmp.inWindow.previous.weighted)}</span>
+                      <span className="fc-cell-sub">
+                        {cmp.inWindow.previous.count} · {formatMoney(cmp.inWindow.previous.value)}
+                      </span>
+                    </span>
+                  </td>
                 )}
-              </tfoot>
-            </table>
-          </div>
-        </Panel>
-        <Panel title="Weighted value by period" blurb="Value × probability, the figure to plan against.">
-          {peakWeighted > 0 ? (
-            <BarList
-              slices={data.buckets.map((b) => ({
-                label: b.label,
-                value: b.weighted,
-                display: `${formatMoney(b.weighted)} · ${b.count}`,
-                to: listLink(b.from, b.to),
-              }))}
-            />
-          ) : (
-            <p className="muted">Nothing closes in this window.</p>
-          )}
-        </Panel>
+                {cmp && (
+                  <td className="right mono">
+                    <ChangeCell change={cmp.inWindow.change} />
+                  </td>
+                )}
+              </tr>
+              {(data.earlier.count > 0 || data.later.count > 0 || data.undated.count > 0) && (
+                <tr className="fc-outside">
+                  <td className="fc-period">
+                    Outside it
+                    <span className="faint">
+                      {' '}
+                      — {[
+                        data.earlier.count ? `${data.earlier.count} earlier` : null,
+                        data.later.count ? `${data.later.count} later` : null,
+                        data.undated.count ? `${data.undated.count} undated` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(', ')}
+                    </span>
+                  </td>
+                  <td className="right mono">{data.totals.count - data.inWindow.count}</td>
+                  <td className="right mono">{formatMoney(data.totals.value - data.inWindow.value)}</td>
+                  <td className="right mono">{formatMoney(data.totals.weighted - data.inWindow.weighted)}</td>
+                  <td colSpan={cols - 4} />
+                </tr>
+              )}
+            </tfoot>
+          </table>
+        </div>
+      </Panel>
       </div>
 
       <Breakdown data={data} by={by} onBy={onBy} scope={scope} leads={leads} grouped={grouped} />
@@ -554,6 +741,9 @@ function Breakdown({
 }) {
   const lines = by === 'owner' ? data.byOwner : by === 'team' ? data.byTeam : data.byGroup;
   const word = BYS.find((b) => b.value === by)!.label;
+  // With a comparison each line's window stands beside the compared window's (2026-10-12).
+  const cmp = data.compare;
+  const compared = (id: string) => cmp?.lines[by][id];
   // A salesperson's figures open the quotation list on that person (and that period's closing dates).
   const ownerLink = (id: string, fromDay?: string, toDay?: string) =>
     `/g-ops/quotations${qs({ ownerId: id, closingFrom: fromDay, closingTo: toDay, scope: scope === 'mine' ? '' : scope })}`;
@@ -585,6 +775,7 @@ function Breakdown({
         Weighted (value × odds) in each period, the full value under it.
         {by === 'group' && !grouped && ' A quotation is split across its product groups by its line amounts, so it may count under more than one.'}
         {by === 'team' && " A quotation counts under the team it was tagged with, else its author's."}
+        {cmp && ` "Previous" is each line's window ${cmp.label.toLowerCase()} (${formatDate(parseDay(cmp.from))} – ${formatDate(parseDay(cmp.to))}); the change is weighted.`}
       </p>
       {lines.length === 0 ? (
         <p className="muted">Nothing in this view.</p>
@@ -606,6 +797,9 @@ function Breakdown({
                 <tr>
                   <th>{word}</th>
                   <th className="right">{by === 'group' || !leads ? 'Quotations' : 'Deals'}</th>
+                  {cmp && <th className="right">In the window</th>}
+                  {cmp && <th className="right">Previous</th>}
+                  {cmp && <th className="right">Change</th>}
                   {data.buckets.map((b) => (
                     <th key={b.key} className="right">
                       {b.label}
@@ -626,6 +820,13 @@ function Breakdown({
                       {l.overdue > 0 && <span className="fc-past"> · {l.overdue} past closing</span>}
                     </td>
                     <td className="right mono">{l.count}</td>
+                    {cmp && <td className="right mono fc-matrix-total">{cell(l.window)}</td>}
+                    {cmp && <td className="right mono">{cell(compared(l.id)?.previous)}</td>}
+                    {cmp && (
+                      <td className="right mono">
+                        <ChangeCell change={compared(l.id)?.change} />
+                      </td>
+                    )}
                     {data.buckets.map((b) => (
                       <td key={b.key} className="right mono">
                         {cell(l.periods[b.key], by === 'owner' ? ownerLink(l.id, b.from, b.to) : undefined)}
@@ -642,6 +843,13 @@ function Breakdown({
                 <tr>
                   <td className="fc-matrix-name">Everything in view</td>
                   <td className="right mono">{data.totals.count}</td>
+                  {cmp && <td className="right mono fc-matrix-total">{foot(data.inWindow)}</td>}
+                  {cmp && <td className="right mono">{foot(cmp.inWindow.previous)}</td>}
+                  {cmp && (
+                    <td className="right mono">
+                      <ChangeCell change={cmp.inWindow.change} />
+                    </td>
+                  )}
                   {data.buckets.map((b) => (
                     <td key={b.key} className="right mono">
                       {foot(b)}

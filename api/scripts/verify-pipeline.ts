@@ -540,7 +540,101 @@ async function main() {
   const badTeam = await http(managerToken, 'GET', '/pipeline/forecast?teamId=nope');
   const badGroup = await http(managerToken, 'GET', '/pipeline/forecast?group=nope');
   check('an unknown range, team or group is a 400', [badRange, badTeam, badGroup].every((r) => r.status === 400), `${badRange.status} ${badTeam.status} ${badGroup.status}`);
-  check('the CSV appends Team and Product groups', fcCsv.text.split('\n')[0].trim().endsWith('Overdue,Team,Product groups'), fcCsv.text.split('\n')[0]);
+  check(
+    'the CSV appends Team and Product groups, then the comparison’s columns',
+    fcCsv.text.split('\n')[0].trim().endsWith('Overdue,Team,Product groups,Compared period,Previous count,Previous value,Previous weighted,Change (weighted)'),
+    fcCsv.text.split('\n')[0],
+  );
+  // Tick boxes (2026-10-12): several salespeople, teams or groups at once.
+  const twoOwners = await http(managerToken, 'GET', `/pipeline/forecast?period=month&from=2026-11-01&to=2026-12-31&scope=all&ownerId=${manager.id},${seller.id}`);
+  const twoBody = twoOwners.body as unknown as FcFull & { ownerIds: string[] };
+  check(
+    'two salespeople ticked list both people’s deals',
+    twoOwners.status === 200 && twoBody.ownerIds.length === 2 && [manager.id, seller.id].every((id) => twoBody.byOwner.some((l) => l.id === id)) && twoBody.byOwner.length === 2,
+    `${twoOwners.status} ${JSON.stringify(twoBody.byOwner?.map((l) => l.name))}`,
+  );
+  const realGroup = (full as unknown as { groupChoices: { key: string }[] }).groupChoices[0]?.key;
+  const twoGroups = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&group=none,${encodeURIComponent(realGroup ?? 'none')}`);
+  const noGroupLine = full.byGroup.find((l) => l.id === '');
+  const realLine = full.byGroup.find((l) => l.id === realGroup);
+  check(
+    'two product groups ticked sum the two groups’ shares, nothing else',
+    twoGroups.status === 200 &&
+      centsOf((twoGroups.body as unknown as FcFull).totals.value) === centsOf((noGroupLine?.value ?? 0) + (realLine?.value ?? 0)),
+    `${twoGroups.status} ${(twoGroups.body as unknown as FcFull).totals?.value}`,
+  );
+
+  // The comparison (2026-10-12): won and lost quotations decided in a window join it, in full and at nothing.
+  const decided = async (subject: string, outcome: 'WON' | 'LOST', total: number, decidedAt: string) =>
+    prisma.quotation.create({
+      data: {
+        number: await nextNumber('quotation', prisma, { ownerId: manager.id }),
+        customerId: customer.id,
+        ownerId: manager.id,
+        subject: `${TAG} ${subject}`,
+        outcome,
+        probability: 40,
+        decidedAt: new Date(decidedAt),
+        ...(outcome === 'LOST' ? { lostReason: 'verify' } : {}),
+        revisions: { create: [{ revision: 0, status: 'APPROVED', vatRate: D(0.12), subtotal: D(total), total: D(total) }] },
+      },
+    });
+  const wonLastYear = await decided('Won last November', 'WON', 500_000, '2025-11-10T04:00:00Z');
+  const lostLastYear = await decided('Lost last December', 'LOST', 80_000, '2025-12-02T04:00:00Z');
+  const wonThisYear = await decided('Won this November', 'WON', 100_000, '2026-11-15T04:00:00Z');
+  try {
+    const plain = (await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}`)).body as unknown as FcFull & { compare: unknown };
+    const vsLastYear = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&compare=prev-year`);
+    interface FcPair { previous: { key: string; count: number; value: number; weighted: number } | null; change: { weighted: number } | null }
+    const cmpBody = vsLastYear.body as unknown as FcFull & {
+      compare: { from: string; to: string; pairs: FcPair[]; inWindow: { previous: FcCell }; lines: { owner: Record<string, { previous: FcCell }> } };
+    };
+    const novNow = cmpBody.buckets?.find((b) => b.key === '2026-11');
+    check(
+      'with no comparison a decided quotation is not in the Forecast',
+      plain.compare === null && !plain.buckets.some((b) => b.rows.some((r) => r.number === wonThisYear.number)),
+    );
+    check(
+      'compared with last year: the window a year back, November against November',
+      vsLastYear.status === 200 && cmpBody.compare.from === '2025-11-01' && cmpBody.compare.to === '2025-12-31' &&
+        cmpBody.compare.pairs.map((p) => p.previous?.key).join() === '2025-11,2025-12',
+      `${vsLastYear.status} ${JSON.stringify(cmpBody.compare ?? vsLastYear.text.slice(0, 160))}`,
+    );
+    check(
+      'last November holds the won quotation in full; last December the lost one, valued but weighted at nothing',
+      cmpBody.compare.pairs[0].previous?.count === 1 && cents(cmpBody.compare.pairs[0].previous.weighted, 500_000) &&
+        cmpBody.compare.pairs[1].previous?.count === 1 && cents(cmpBody.compare.pairs[1].previous.value, 80_000) && cmpBody.compare.pairs[1].previous.weighted === 0,
+      JSON.stringify(cmpBody.compare.pairs),
+    );
+    check(
+      'this November gains the quotation won in it, at 100%, beside the open ones',
+      novNow?.count === (nov?.count ?? 0) + 1 && cents(novNow.weighted, (nov?.weighted ?? 0) + 100_000) && novNow.rows.some((r) => r.number === wonThisYear.number),
+      JSON.stringify(novNow && { count: novNow.count, weighted: novNow.weighted }),
+    );
+    check(
+      'the salesperson’s line is compared with their own last year',
+      cents(cmpBody.compare.lines.owner[manager.id]?.previous.weighted ?? -1, 500_000) && cents(cmpBody.compare.inWindow.previous.value, 580_000),
+      JSON.stringify(cmpBody.compare.lines.owner),
+    );
+    const prevPeriod = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&compare=prev-period`);
+    check(
+      'the period before is the two months before',
+      prevPeriod.status === 200 && (prevPeriod.body as unknown as typeof cmpBody).compare.from === '2026-09-01' && (prevPeriod.body as unknown as typeof cmpBody).compare.to === '2026-10-31',
+      `${prevPeriod.status}`,
+    );
+    const custom = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&compare=custom&compareFrom=2025-11-01&compareTo=2025-11-30`);
+    check('a custom comparison reads the days typed', custom.status === 200 && (custom.body as unknown as typeof cmpBody).compare.pairs[1].previous === null, `${custom.status}`);
+    const customBare = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&compare=custom`);
+    const badCompare = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&compare=last-decade`);
+    check('a custom comparison without its days, or an unknown one, is a 400', customBare.status === 400 && badCompare.status === 400, `${customBare.status} ${badCompare.status}`);
+    const cmpCsv = await http(managerToken, 'GET', `/pipeline/forecast.csv?${fcQuery}&compare=prev-year`);
+    check('the CSV carries the compared period on its rows', cmpCsv.status === 200 && cmpCsv.text.includes('November 2025'), `${cmpCsv.status}`);
+    const cmpPdf = await http(managerToken, 'GET', `/pipeline/forecast.pdf?${fcQuery}&compare=prev-year&by=team`);
+    check('the paper prints the comparison', cmpPdf.status === 200 && cmpPdf.contentType.startsWith('application/pdf'), `${cmpPdf.status}`);
+  } finally {
+    await prisma.quotationRevision.deleteMany({ where: { quotationId: { in: [wonLastYear.id, lostLastYear.id, wonThisYear.id] } } });
+    await prisma.quotation.deleteMany({ where: { id: { in: [wonLastYear.id, lostLastYear.id, wonThisYear.id] } } });
+  }
   const byPdf = await http(managerToken, 'GET', `/pipeline/forecast.pdf?${fcQuery}&by=group`);
   check('the paper prints the chosen breakdown', byPdf.status === 200 && byPdf.contentType.startsWith('application/pdf'), `${byPdf.status}`);
   const fcDenied = await http(sellerToken, 'GET', '/pipeline/forecast');

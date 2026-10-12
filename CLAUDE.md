@@ -505,7 +505,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,878 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,897 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -541,9 +541,10 @@ foundation and 4 on sales for the sales order paper of the owner's slide, and
 17 on sales for the contact person on the paper, its quick-add and the boxes
 that remember, and 2 on foundation and 9 on sales for the attachments printed
 behind the quotation and the sales order, and 9 on sales and 9 on pipeline
-for the Forecast's breakdowns and its date range):
+for the Forecast's breakdowns and its date range, and 7 on sales and 12
+on pipeline for its tick-box filters and the comparison range):
 foundation
-349, masters 92, sales 594, costing 157, pipeline 101, calendar 96, numbering
+349, masters 92, sales 601, costing 157, pipeline 113, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -1598,6 +1599,40 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   appends `Team` and `Product groups`; the PDF prints the chosen
   breakdown (`?by=`) after the totals, one column per period up to six,
   else "In the window".
+- **Tick boxes and a comparison range** (2026-10-12, the owner's call: "the
+  product group, sales personnel and team have tick box" and "compare for
+  example current year versus previous year";
+  `docs/notes/P-forecast-compare-2026-10-12.md`). **By period takes the
+  whole width** — its Weighted column carries a `MiniBar`, the separate bar
+  panel is gone, nothing is cut off. **Salesperson, Team and Product group
+  are `TickPicker`s** (`components/TickPicker.tsx`, a `fieldControl`: a
+  select-sized button reading what is ticked, a panel of tick boxes with
+  Clear and Done, Escape and focus-out close it); the URL keys stay
+  `ownerId`, `teamId`, `group`, comma-separated (`listOf()` in the route;
+  one value reads as before), the response says `ownerIds`, `teamIds`,
+  `groups`; several groups ticked make a quotation's value the SUM of the
+  ticked groups' shares. **`?compare=prev-period|prev-year|custom`**
+  (`compareFrom`/`compareTo` for custom, a 400 without them) is
+  `compareWindow()` in `shared/forecast.ts` — the same length ending the
+  day before `from`; both edges a year back, 29 February to 28 February;
+  or the days typed. **While a comparison is on, both windows are read
+  alike**: the open rows as always PLUS every won and lost quotation
+  DECIDED inside the window (`decidedAt`'s Manila day, else its expected
+  closing), won at odds 100 and lost at 0 (`outcomeOdds()`); with no
+  comparison nothing changes, open quotations only. `compareForecasts()`
+  (pure) pairs the buckets BY POSITION (October with October, Q1 with Q1;
+  past the compared window's end a pair is null, its extra buckets
+  `unpaired`), compares the window and each breakdown line's `window` cell
+  (every `ForecastLine` now carries it: its periods together) with the same
+  line's in the compared window, and adds a line found only there at zero.
+  `changeOf()` is the one change (amount in cents, percentage to one
+  decimal, null when nothing came before). The page: the cards' subs
+  ("last year ₱… · +27.0%"), a note saying how the windows are read,
+  Previous and Change on By period, In the window / Previous / Change after
+  the count in the breakdown; the CSV appends `Compared period`,
+  `Previous count`, `Previous value`, `Previous weighted`, `Change
+  (weighted)` to each row (empty without a comparison); the paper adds the
+  same columns and two totals rows.
 
 ### Sales: board, calendar, costing
 

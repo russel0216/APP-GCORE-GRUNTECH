@@ -72,6 +72,11 @@ import {
   periodStart,
   weightedOf,
   type ForecastRow,
+  compareWindow,
+  compareForecasts,
+  changeOf,
+  outcomeOdds,
+  shiftYears,
 } from '../src/shared/forecast';
 import { listQuery } from '../src/http/kit';
 // Imported for its side effect: this is what registers the quotation's
@@ -1117,6 +1122,61 @@ async function main() {
     'a period cell of the breakdown is that period’s share: Salesperson A in October',
     fb.byOwner[0].periods['2026-10'].count === 1 && fb.byOwner[0].periods['2026-10'].weighted === 660 && fb.byOwner[0].earlier.value === 1000,
     JSON.stringify(fb.byOwner[0].periods),
+  );
+
+  console.log('\nThe Forecast: a comparison range');
+  check(
+    'the period before is a window of the same length ending the day before; last year moves both edges a year',
+    JSON.stringify(compareWindow('2026-10-01', '2027-09-30', 'prev-period')) === JSON.stringify({ from: '2025-10-01', to: '2026-09-30' }) &&
+      JSON.stringify(compareWindow('2026-10-05', '2026-11-20', 'prev-period')) === JSON.stringify({ from: '2026-08-19', to: '2026-10-04' }) &&
+      JSON.stringify(compareWindow('2026-01-01', '2026-12-31', 'prev-year')) === JSON.stringify({ from: '2025-01-01', to: '2025-12-31' }) &&
+      JSON.stringify(compareWindow('2026-01-01', '2026-03-31', 'custom', { from: '2024-02-01', to: '2024-02-29' })) ===
+        JSON.stringify({ from: '2024-02-01', to: '2024-02-29' }),
+  );
+  check(
+    'a 29 February a year back lands on 28 February; a leap window before is 366 days',
+    shiftYears('2028-02-29', -1) === '2027-02-28' &&
+      compareWindow('2028-02-29', '2028-03-31', 'prev-year').from === '2027-02-28' &&
+      compareWindow('2028-01-01', '2028-12-31', 'prev-period').from === '2026-12-31',
+    JSON.stringify(compareWindow('2028-01-01', '2028-12-31', 'prev-period')),
+  );
+  check('a comparison reads won in full, lost at nothing, open at its own odds', outcomeOdds('WON', 30) === 100 && outcomeOdds('LOST', 90) === 0 && outcomeOdds('SUBMITTED', 45) === 45);
+  const ch = changeOf({ count: 2, value: 1200, weighted: 600 }, { count: 1, value: 1000, weighted: 800 });
+  const fresh = changeOf({ count: 1, value: 50, weighted: 25 }, { count: 0, value: 0, weighted: 0 });
+  check('a change is the difference and its percentage; nothing before has no percentage', ch.value === 200 && ch.valuePct === 20 && ch.weighted === -200 && ch.weightedPct === -25 && fresh.weightedPct === null, JSON.stringify([ch, fresh]));
+  const cur = buildForecast({
+    period: 'quarter',
+    from: '2026-01-01',
+    to: '2026-12-31',
+    today: '2026-10-12',
+    rows: [fRow(21, '2026-02-10', 1000, 50, 'A', KAT), fRow(22, '2026-08-01', 400, 100, 'B', HIT)],
+  });
+  const prev = buildForecast({
+    period: 'quarter',
+    from: '2025-01-01',
+    to: '2025-06-30',
+    today: '2026-10-12',
+    rows: [fRow(31, '2025-03-01', 600, 100, 'A', KAT), fRow(32, '2025-05-05', 300, 100, 'D', KAT)],
+  });
+  const cmp = compareForecasts(cur, prev, 'custom');
+  check(
+    'buckets pair by position, and past the compared window’s end there is no partner',
+    cmp.compare.pairs.map((p) => p.previous?.key ?? '-').join() === '2025-Q1,2025-Q2,-,-' &&
+      cmp.compare.pairs[0].change!.weighted === -100 && cmp.compare.pairs[1].change!.weightedPct === -100 && cmp.compare.pairs[2].change === null && cmp.compare.unpaired.length === 0,
+    JSON.stringify(cmp.compare.pairs.map((p) => [p.previous?.key, p.change?.weighted])),
+  );
+  check(
+    'each line is compared with itself, and a salesperson found only before joins the breakdown at zero',
+    cmp.forecast.byOwner.map((l) => l.id).join() === 'A,B,D' &&
+      cmp.compare.lines.owner.A.previous.weighted === 600 && cmp.compare.lines.owner.A.change.weighted === -100 &&
+      cmp.compare.lines.owner.D.previous.weighted === 300 && cmp.compare.lines.owner.D.change.weighted === -300 &&
+      cmp.compare.lines.team.kat.previous.weighted === 900 && cmp.compare.inWindow.change.weighted === 0,
+    JSON.stringify(cmp.compare.lines.owner),
+  );
+  check(
+    'a line’s window is its periods together',
+    cmp.forecast.byOwner[0].window.weighted === 500 && cmp.forecast.byOwner[0].window.count === 1,
+    JSON.stringify(cmp.forecast.byOwner[0].window),
   );
 
   const b2 = board(

@@ -5,7 +5,15 @@ product group, sales personnel and team have tick box. 3. Create a
 comparison range so I can compare for example current year versus previous
 year."
 
-Status: **planned, not built.**
+Status: **built 2026-10-12** on the defaults below — see CLAUDE.md,
+"Forecast (2026-10-08)". Three changes from the plan: a won or lost
+quotation is placed by the DAY IT WAS DECIDED (its expected closing only
+when it carries no decision date) — "won last November" is a decision, not
+a hope; the breakdown compares each line's IN-WINDOW figure (In the window,
+Previous, Change, placed right after the count so they show without
+scrolling), not its Total, which also holds rows outside the window; and
+the CSV's five comparison columns are always there, empty without a
+comparison, so a sheet built on the export keeps its columns.
 
 ## What is there today
 
