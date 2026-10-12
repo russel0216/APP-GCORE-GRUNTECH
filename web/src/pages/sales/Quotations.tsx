@@ -736,7 +736,7 @@ export interface QuotationDetail {
   site: { id: string; name: string; address?: string | null; city?: string | null } | null;
   lead: { id: string; number: string; companyName: string } | null;
   owner: { id: string; name: string };
-  /** The team the SCORO import tagged it with; absent, it follows the owner's team. */
+  /** The team picked on it (the author's at creation, or the SCORO import's tag); absent, it follows the author's team. */
   team?: { id: string; code: string; name: string } | null;
   revisions: Revision[];
   /** Oldest first. */
@@ -1293,7 +1293,7 @@ export function QuotationDetail() {
               <Detail label="Author">{quotation.owner.name}</Detail>
               {quotation.team && (
                 <Detail label="Team">
-                  {quotation.team.code} <span className="qd-sub">{quotation.team.name} — tagged at import</span>
+                  {quotation.team.code} <span className="qd-sub">{quotation.team.name}</span>
                 </Detail>
               )}
               <Detail label="Due date">

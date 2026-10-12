@@ -2793,6 +2793,36 @@ async function main() {
       lockedCurrency.status === 400 && lockedCurrency.text.includes('currency cannot change'),
       `${lockedCurrency.status} ${lockedCurrency.text.slice(0, 120)}`,
     );
+    // The team is picked on the quotation, the author's by default (2026-10-12),
+    // and a sales order counts under its quotation's team.
+    const [hitTeam, uitTeam] = await Promise.all(
+      ['HIT', 'UIT'].map((code) => prisma.industry.findFirstOrThrow({ where: { code }, select: { id: true } })),
+    );
+    const authorTeam = (await prisma.employee.findUnique({ where: { userId: sales.id }, select: { industryId: true } }))?.industryId ?? null;
+    const byDefault = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Team default`, lines: editorLines });
+    const picked = await http(salesToken, 'POST', '/quotations', { customerId: clinic.id, subject: `${TAG} Team picked`, teamId: hitTeam.id, lines: editorLines });
+    check(
+      'a quotation counts under the author’s team by default, or the team picked on it',
+      byDefault.status === 201 && (byDefault.body.teamId ?? null) === authorTeam && picked.status === 201 && picked.body.teamId === hitTeam.id,
+      `${byDefault.status} ${byDefault.body.teamId} (author ${authorTeam}) / ${picked.status} ${picked.body.teamId}`,
+    );
+    const toUit = await http(salesToken, 'PATCH', `/quotations/${picked.body.id}`, { teamId: uitTeam.id });
+    const badTeam = await http(salesToken, 'PATCH', `/quotations/${picked.body.id}`, { teamId: 'nope' });
+    const teamTrail = await prisma.auditLog.count({ where: { entityType: 'quotation', entityId: String(picked.body.id), summary: { contains: 'team:' } } });
+    check(
+      'the team changes on Modify, is audited, and an unknown one is a 400',
+      toUit.status === 200 && toUit.body.teamId === uitTeam.id && badTeam.status === 400 && teamTrail === 1,
+      `${toUit.status} ${toUit.body.teamId} / ${badTeam.status} / ${teamTrail}`,
+    );
+    const teamOrder = await http(salesToken, 'POST', '/sales-orders', { quotationId: picked.body.id, mode: 'all' });
+    const teamOrderList = await http(salesToken, 'GET', `/sales-orders?scope=all&ids=${teamOrder.body.id}`);
+    const orderTeams = ((teamOrderList.body.summary as { teams?: { id: string | null; code: string; count: number }[] } | undefined)?.teams ?? []);
+    check(
+      'and its sales order counts under the quotation’s team, not the author’s',
+      teamOrder.status === 201 && orderTeams.find((t) => t.id === uitTeam.id)?.count === 1 &&
+        orderTeams.filter((t) => t.id !== uitTeam.id).every((t) => t.count === 0),
+      JSON.stringify(orderTeams.map((t) => [t.code, t.count])),
+    );
     const partedRevs = await http(salesToken, 'GET', `/quotations/${partedId}`);
     const partedItems = ((partedRevs.body.revisions as { items: { brand: string | null; partNumber: string | null }[] }[])[0]?.items ?? []);
     check('and the page gets the three boxes back to edit', partedItems[0]?.brand === 'SCHNEIDER ELECTRIC' && partedItems[0]?.partNumber === 'EZC100H3030');

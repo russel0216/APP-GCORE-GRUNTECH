@@ -470,7 +470,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,782 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,785 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -497,9 +497,10 @@ foundation for the sales lists' year-to-date default, and 5 on sales for
 the team the SCORO import tags its quotations with, and 4 on foundation
 and 4 on workspace for the views on the person's account, and 3 on
 foundation for the teams Back Support supports, and 2 on workspace for
-deleting a role, and one on accounts for the team picked on a user):
+deleting a role, and one on accounts for the team picked on a user, and 3 on sales for
+the team picked on a quotation and followed by its sales order):
 foundation
-327, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
+327, masters 92, sales 532, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -3103,6 +3104,22 @@ the quotation's and the sales order's route depends on the PREPARER's role.
   with no employee record cannot keep one (the select is disabled and the
   PATCH says so); a change audits an `employee` UPDATED row. The user list
   has a Team column.
+- **The team is picked on the quotation itself, the author's by default**
+  (2026-10-12, the owner's call: "allow sales to pick the team on the
+  quotation itself, but make it default by their team"). The editor's
+  "Team" select (beside Currency) starts on the author's team —
+  `/next-number` sends `ownerTeamId` and `teams`, and follows a change of
+  author until somebody picks — and `POST /quotations` STORES
+  `Quotation.teamId`: the one picked (`pickedTeam()`: active, else a 400)
+  or the author's own (`teamOf(ownerId)`), so a quotation keeps the team
+  it was raised under when its author later moves. `PATCH` takes `teamId`
+  at any stage (a category, not a figure; null goes back to following the
+  author's) and writes its own audit row ("… team: KAT → HIT"). The rule
+  stays `quotationTeamWhere()` / `quotationTeamOf()` — the stored team,
+  else the author's. **A sales order counts under its QUOTATION's team**:
+  `salesOrderListWhere`'s Team view, its summary's team cards and "My
+  team" read `quotation: quotationTeamWhere(…)` / `quotationTeamOf(o.
+  quotation)`, never the order's own author's team.
 - **A role you made can be deleted** (2026-10-12, the owner's call: "allow
   me also to delete role created"): `DELETE /roles/:id`
   (`admin.roles.delete`, the Delete in the role modal's foot) takes it off

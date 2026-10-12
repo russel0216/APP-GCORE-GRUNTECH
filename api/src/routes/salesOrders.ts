@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { OWNER_TEAM_SELECT, teamMembers, teamOf, teamShares } from '../shared/team';
+import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, teamOf, teamShares } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -224,7 +224,8 @@ export function salesOrderListWhere(
   const and: Prisma.SalesOrderWhereInput[] = [];
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all');
   if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
-  if (q.scope === 'team') and.push(team ? { owner: teamMembers(team) } : { ownerId: me.id });
+  // An order counts under its QUOTATION's team (2026-10-12): the team picked on the quotation, else its author's.
+  if (q.scope === 'team') and.push(team ? { quotation: quotationTeamWhere(team) } : { ownerId: me.id });
   const f = q.filters;
   if (f.customerId) and.push({ customerId: f.customerId });
   if (f.quotationId) and.push({ quotationId: f.quotationId });
@@ -286,10 +287,14 @@ export async function salesOrderListSummary(
     prisma.salesOrder.count({ where: { AND: [where, { status: 'CANCELLED' }] } }),
     opts.teamWhere ? prisma.salesOrder.aggregate({ where: { AND: [where, LIVE, opts.teamWhere] }, _sum: { total: true }, _count: { _all: true } }) : null,
     opts.margin ? prisma.salesOrder.findMany({ where: { AND: [where, LIVE] }, select: { id: true, discountPct: true, vatRate: true, vatInclusive: true } }) : null,
-    // A card per team (2026-10-09): the booked value split by the order's owner's team.
-    prisma.salesOrder.findMany({ where: { AND: [where, LIVE] }, select: { total: true, owner: OWNER_TEAM_SELECT } }),
+    // A card per team (2026-10-09): the booked value split by the team of the
+    // quotation it books (2026-10-12) — picked there, else its author's.
+    prisma.salesOrder.findMany({
+      where: { AND: [where, LIVE] },
+      select: { total: true, quotation: { select: { team: TEAM_REF_SELECT, owner: OWNER_TEAM_SELECT } } },
+    }),
   ]);
-  const teams = await teamShares(owned.map((o) => ({ team: o.owner.employee?.industry ?? null, cents: Math.round(num(o.total) * 100) })));
+  const teams = await teamShares(owned.map((o) => ({ team: quotationTeamOf(o.quotation), cents: Math.round(num(o.total) * 100) })));
   // The totals row's margin: every live order with a costed line, the row's
   // own figure summed, against the orders' sums without tax (the quotation
   // list's rule, over SalesOrderLine).
@@ -364,7 +369,7 @@ salesOrderRoutes.get(
       }),
       prisma.salesOrder.count({ where }),
       salesOrderListSummary(base, where, {
-        teamWhere: team ? { owner: teamMembers(team.id) } : null,
+        teamWhere: team ? { quotation: quotationTeamWhere(team.id) } : null,
         margin:
           me.isSuperAdmin ||
           me.permissions.has('gops.sales_orders.edit_all') ||

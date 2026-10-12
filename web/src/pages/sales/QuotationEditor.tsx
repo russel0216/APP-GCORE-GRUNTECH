@@ -102,6 +102,8 @@ interface Header {
   hideTotal: boolean;
   /** Every figure's currency: PHP unless another is picked (2026-10-11). */
   currency: string;
+  /** The team it counts under — the author's unless picked (2026-10-12). '' follows the author's. */
+  teamId: string;
   discountPct: string;
   /** SCORO's Status on the Modify page (edit only); applied on Save through the same move rules. */
   outcome: string;
@@ -119,6 +121,9 @@ interface Preview {
   vatRate: number;
   currency: string;
   currencies: { code: string; label: string }[];
+  /** The author's own team — what a new quotation counts under unless another is picked. */
+  ownerTeamId: string | null;
+  teams: { id: string; code: string; name: string }[];
 }
 
 interface LeadForQuote {
@@ -260,6 +265,7 @@ export function QuotationEditor() {
     vatRate: 0.12,
     hideTotal: false,
     currency: 'PHP',
+    teamId: '',
     discountPct: '0',
     outcome: 'OPEN',
     lostReason: '',
@@ -268,6 +274,15 @@ export function QuotationEditor() {
   const vatTouched = useRef(false);
   /** Once somebody types a number, the suggestion never replaces it. */
   const numberTouched = useRef(false);
+  /** Once somebody picks a team, the author's team arriving late never replaces it. */
+  const teamTouched = useRef(false);
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive?: boolean }[]>([]);
+  useEffect(() => {
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then(setTeams)
+      .catch(() => setTeams([]));
+  }, []);
   /** Why the typed number cannot be used — said beside the box as it is typed. */
   const [numberProblem, setNumberProblem] = useState<string | null>(null);
   /** Bumped to re-read the quotation (after raising a new revision here). */
@@ -348,6 +363,7 @@ export function QuotationEditor() {
             vatRate: draft.vatRate,
             hideTotal: draft.hideTotal ?? false,
             currency: q.currency ?? 'PHP',
+            teamId: q.team?.id ?? '',
             discountPct: String(draft.discountPct ?? 0),
             outcome: q.outcome,
             lostReason: q.lostReason ?? '',
@@ -400,6 +416,7 @@ export function QuotationEditor() {
           ...h,
           ...(vatTouched.current ? {} : { vatRate: p.vatRate }),
           ...(numberTouched.current ? {} : { number: p.number }),
+          ...(teamTouched.current ? {} : { teamId: p.ownerTeamId ?? '' }),
         }));
       })
       .catch(() => setPreview(null));
@@ -850,6 +867,7 @@ export function QuotationEditor() {
           vatRate: header.vatRate,
           hideTotal: header.hideTotal,
           currency: header.currency,
+          ...(header.teamId ? { teamId: header.teamId } : {}),
           discountPct: Number(header.discountPct || 0),
           ...(canPickAuthor && header.ownerId && header.ownerId !== myId ? { ownerId: header.ownerId } : {}),
           lines: payloadLines,
@@ -888,6 +906,7 @@ export function QuotationEditor() {
         contactId: header.contactId || null,
         siteId: header.siteId || null,
         ...(header.currency !== quotation!.currency ? { currency: header.currency } : {}),
+        ...((header.teamId || null) !== (quotation!.team?.id ?? null) ? { teamId: header.teamId || null } : {}),
         ...(moved ? { outcome: header.outcome } : {}),
         ...(moved && header.outcome === 'LOST' ? { lostReason: header.lostReason.trim() } : {}),
       });
@@ -1136,6 +1155,28 @@ export function QuotationEditor() {
                 value={header.expectedClosing}
                 onChange={(e) => set('expectedClosing', e.target.value)}
               />
+            </Field>
+            <Field
+              label="Team"
+              hint="The team this quotation and its sales orders count under — the team cards, the Team view and the forecast. It starts as the author's team."
+            >
+              <select
+                id="qe-team"
+                value={header.teamId}
+                onChange={(e) => {
+                  teamTouched.current = true;
+                  set('teamId', e.target.value);
+                }}
+              >
+                <option value="">— the author's team —</option>
+                {teams
+                  .filter((t) => t.isActive !== false || t.id === header.teamId)
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.code} — {t.name}
+                    </option>
+                  ))}
+              </select>
             </Field>
             <Field label="Currency" hint="Every figure on this quotation is in it — nothing is converted">
               <select id="qe-currency" value={currency} onChange={(e) => set('currency', e.target.value)}>

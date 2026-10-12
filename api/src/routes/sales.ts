@@ -1451,6 +1451,7 @@ quotationRoutes.get(
       // "Your last quotation": what the suggestion continues from.
       prisma.quotation.findFirst({ where: { ownerId }, orderBy: { createdAt: 'desc' }, select: { number: true } }),
     ]);
+    const [ownerTeam, teams] = await Promise.all([teamOf(ownerId), activeTeams()]);
     res.json({
       number: preview.number,
       lastNumber: last?.number ?? null,
@@ -1465,6 +1466,9 @@ quotationRoutes.get(
       // A new quotation is in PHP unless the author picks another (2026-10-11).
       currency: DEFAULT_QUOTATION_CURRENCY,
       currencies: QUOTATION_CURRENCIES,
+      // The team the quotation counts under (2026-10-12): the author's, unless picked.
+      ownerTeamId: ownerTeam?.id ?? null,
+      teams,
       taxOptions: quotationTaxOptions(company ? Number(company.vatRate) : 0.12),
     });
   }),
@@ -2024,7 +2028,32 @@ const quotationSchema = z.object({
   prNumber: z.string().trim().max(120).optional().nullable(),
   delivery: z.string().trim().max(500).optional().nullable(),
   paymentTerms: z.string().trim().max(500).optional().nullable(),
+  /**
+   * The team it counts under (2026-10-12, the owner's call: "allow sales to
+   * pick the team on the quotation itself, but make it default by their
+   * team"). Omitted on create, the author's team; null on a PATCH, back to
+   * following the author's.
+   */
+  teamId: z.string().optional().nullable(),
 });
+
+/** The active teams, in the master's order — what the editor's Team select offers. */
+async function activeTeams() {
+  return prisma.industry.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+    select: { id: true, code: true, name: true },
+  });
+}
+
+/** A team picked on a quotation: an active one, or a 400 naming the field. */
+async function pickedTeam(teamId: string | null | undefined, keep?: string | null): Promise<string | null> {
+  if (!teamId) return null;
+  if (teamId === keep) return teamId;
+  const team = await prisma.industry.findFirst({ where: { id: teamId, isActive: true }, select: { id: true } });
+  if (!team) throw badRequest('teamId: that team was not found or is switched off');
+  return team.id;
+}
 
 /**
  * What the full-page editor sends on "Save": the header, the SCORO revision
@@ -2101,6 +2130,9 @@ quotationRoutes.post(
       select: { paymentTerms: true },
     });
     const lines = body.lines ?? [];
+    // The team: the one picked, else the author's own — stored, so the
+    // quotation keeps the team it was raised under.
+    const teamId = body.teamId ? await pickedTeam(body.teamId) : ((await teamOf(ownerId))?.id ?? null);
     // Before the transaction, so a refused rate or number burns no number.
     await checkVatRate(body.vatRate);
     if (body.number) await checkQuoteNumber(body.number);
@@ -2130,6 +2162,7 @@ quotationRoutes.post(
           probability: body.probability ?? (lead?.probability ? lead.probability : 50),
           expectedClosing,
           currency: body.currency ?? DEFAULT_QUOTATION_CURRENCY,
+          teamId,
           revisions: {
             create: [
               {
@@ -2290,6 +2323,11 @@ quotationRoutes.patch(
     if (body.siteId !== undefined) {
       data.site = body.siteId ? { connect: { id: body.siteId } } : { disconnect: true };
     }
+    // The team is a category, not a figure: it moves at any stage.
+    if (body.teamId !== undefined && (body.teamId || null) !== before.teamId) {
+      const teamId = await pickedTeam(body.teamId, before.teamId);
+      data.team = teamId ? { connect: { id: teamId } } : { disconnect: true };
+    }
     if (body.outcome !== undefined) {
       data.outcome = body.outcome;
       if (body.outcome === 'SUBMITTED') data.submittedAt = new Date();
@@ -2378,6 +2416,24 @@ quotationRoutes.patch(
       },
       req,
     );
+    if ((quotation.teamId ?? null) !== (before.teamId ?? null)) {
+      const codes = await prisma.industry.findMany({
+        where: { id: { in: [before.teamId, quotation.teamId].filter((x): x is string => !!x) } },
+        select: { id: true, code: true },
+      });
+      const code = (id: string | null) => (id ? (codes.find((c) => c.id === id)?.code ?? '?') : "the author's");
+      await audit(
+        {
+          entityType: 'quotation',
+          entityId: quotation.id,
+          action: 'UPDATED',
+          summary: `Quotation ${quotation.number} team: ${code(before.teamId)} → ${code(quotation.teamId)}`,
+          before: { teamId: before.teamId },
+          after: { teamId: quotation.teamId },
+        },
+        req,
+      );
+    }
     res.json(quotation);
   }),
 );
