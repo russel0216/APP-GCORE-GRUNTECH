@@ -880,6 +880,54 @@ async function main() {
     `${afterClear.status} / ${backTo} of ${supers}`,
   );
 
+  // ── Your own list views (2026-10-12): columns, and the one that opens ─────
+  const LIST = `${TAG.toLowerCase()}-quotations`;
+  const first = await api(workerToken, 'POST', `/saved-filters/${LIST}`, {
+    name: 'Open deals',
+    query: { scope: 'mine', stage: 'OPPORTUNITY' },
+    hiddenColumns: ['probability', 'modified'],
+    isDefault: true,
+  });
+  const second = await api(workerToken, 'POST', `/saved-filters/${LIST}`, {
+    name: 'Won',
+    query: { scope: 'all', stage: 'CONFIRMED' },
+    isDefault: true,
+  });
+  const mineViews = await api(workerToken, 'GET', `/saved-filters/${LIST}`);
+  const rows = mineViews.body as unknown as { id: string; isDefault: boolean; hiddenColumns: unknown; mine: boolean }[];
+  const firstRow = rows.find((r) => r.id === first.body.id);
+  check(
+    'a view keeps the columns it hides, and a new opening view takes the place of the old one',
+    first.status === 201 && second.status === 201 && rows.length === 2 && rows.every((r) => r.mine) &&
+      JSON.stringify(firstRow?.hiddenColumns) === '["probability","modified"]' &&
+      rows.filter((r) => r.isDefault).map((r) => r.id).join() === String(second.body.id),
+    JSON.stringify(rows),
+  );
+  const backToFirst = await api(workerToken, 'PATCH', `/saved-filters/${String(first.body.id)}`, { isDefault: true, hiddenColumns: null });
+  const afterPatch = (await api(workerToken, 'GET', `/saved-filters/${LIST}`)).body as unknown as { id: string; isDefault: boolean; hiddenColumns: unknown }[];
+  check(
+    'making another one the opening view clears the first; null hidden columns keeps the person’s own',
+    backToFirst.status === 200 &&
+      afterPatch.filter((r) => r.isDefault).map((r) => r.id).join() === String(first.body.id) &&
+      afterPatch.find((r) => r.id === first.body.id)?.hiddenColumns === null,
+    JSON.stringify(afterPatch),
+  );
+  const othersView = await api(colleagueToken, 'GET', `/saved-filters/${LIST}`);
+  const othersPatch = await api(colleagueToken, 'PATCH', `/saved-filters/${String(first.body.id)}`, { isDefault: false });
+  const othersDelete = await api(colleagueToken, 'DELETE', `/saved-filters/${String(first.body.id)}`);
+  check(
+    'views are the person’s own: a colleague neither sees nor changes them',
+    Array.isArray(othersView.body) && (othersView.body as unknown[]).length === 0 && othersPatch.status === 404 && othersDelete.status === 404,
+    `${JSON.stringify(othersView.body)} / ${othersPatch.status} / ${othersDelete.status}`,
+  );
+  const badColumns = await api(workerToken, 'POST', `/saved-filters/${LIST}`, { name: 'x', query: {}, hiddenColumns: 'total' });
+  const forgotten = await api(workerToken, 'DELETE', `/saved-filters/${String(second.body.id)}`);
+  check(
+    'a malformed column list is a 400, and a view is forgotten by its owner',
+    badColumns.status === 400 && forgotten.status === 200,
+    `${badColumns.status} / ${forgotten.status}`,
+  );
+
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;

@@ -78,6 +78,14 @@ import {
   saveView,
   startFilters,
   viewQuery,
+  cleanViewName,
+  isBareVisit,
+  openingView,
+  viewHidden,
+  queryObject,
+  queryString,
+  keepDefaults,
+  fillDefaults,
   writeListUrl,
   yearStartKey,
   type FilterDef,
@@ -2319,6 +2327,45 @@ async function main() {
       'saving a view of the same name replaces it, case-blind; a blank name saves nothing',
       views.length === 1 && views[0].name === 'MY OPEN DEALS' && views[0].query === 'scope=mine',
       JSON.stringify(views),
+    );
+    // Your own views (2026-10-12): the opening view, its columns, its query.
+    const myViews = [
+      { name: 'Won this year', isDefault: false },
+      { name: 'My open deals', isDefault: true },
+    ];
+    check(
+      'a bare visit opens on the person’s opening view; a link, a search or a scope in the URL never does',
+      openingView(readListUrl(new URLSearchParams('new=1&page=2'), keys), myViews)?.name === 'My open deals' &&
+        openingView(readListUrl(new URLSearchParams('stage=LOST'), keys), myViews) === null &&
+        openingView(readListUrl(new URLSearchParams('q=pump'), keys), myViews) === null &&
+        openingView(readListUrl(new URLSearchParams('scope=all'), keys), myViews) === null &&
+        openingView(readListUrl(new URLSearchParams(''), keys), [{ isDefault: false }]) === null &&
+        isBareVisit(readListUrl(new URLSearchParams('jobId=j1'), keys)),
+    );
+    const cols = ['number', 'name', 'customer', 'total'];
+    check(
+      'a view’s hidden columns keep to the list’s own keys, and never hide them all',
+      JSON.stringify(viewHidden(['total', 'gone', 'total', 7], cols)) === '["total"]' &&
+        viewHidden(null, cols) === null &&
+        viewHidden('total', cols) === null &&
+        JSON.stringify(viewHidden([...cols], cols)) === '[]',
+    );
+    check(
+      'a view’s query goes to the API as an object and comes back as the same string; a name is kept tidy',
+      queryString(queryObject(q1)) === q1 &&
+        queryString({ scope: 'all', stage: '', n: 3 }) === 'scope=all' &&
+        queryString([1]) === null &&
+        cleanViewName('  My   open\tdeals ') === 'My open deals' &&
+        cleanViewName('x'.repeat(60)).length === 40,
+    );
+    const kept = keepDefaults('scope=all&createdFrom=2026-01-01&stage=LOST', { createdFrom: '2026-01-01' });
+    check(
+      'a view saved on year to date keeps year to date: next year it opens on next year’s 1 January',
+      kept === 'scope=all&createdFrom=%40default&stage=LOST' &&
+        fillDefaults(kept, { createdFrom: '2027-01-01' }) === 'scope=all&createdFrom=2027-01-01&stage=LOST' &&
+        fillDefaults(kept, undefined) === 'scope=all&stage=LOST' &&
+        keepDefaults('createdFrom=2025-06-01', { createdFrom: '2026-01-01' }) === 'createdFrom=2025-06-01',
+      kept,
     );
     const page = ['a', 'b', 'c'];
     check(

@@ -172,11 +172,98 @@ export function readView(query: string, filterKeys: string[], defaultScope: List
  * replaced in place, a new one goes last, and a blank name saves nothing.
  */
 export function saveView(views: SavedView[], name: string, query: string): SavedView[] {
-  const clean = name.trim().replace(/\s+/g, ' ').slice(0, 40);
+  const clean = cleanViewName(name);
   if (!clean) return views;
   const at = views.findIndex((v) => v.name.toLowerCase() === clean.toLowerCase());
   if (at >= 0) return views.map((v, i) => (i === at ? { name: clean, query } : v));
   return [...views, { name: clean, query }];
+}
+
+// ── Your own views (2026-10-12) ──────────────────────────────────────────────
+// The owner's call: "custom column and save so this will be the one who always
+// pops up during viewing of list by user". A view is kept on the person's
+// account (`/api/saved-filters/:listKey`), carries the columns it hides beside
+// the search, scope and filters, and one of them may be the list's OPENING
+// view — applied on a bare visit, as `defaultFilters` are, and in their place.
+
+/** A view as the list holds it: `query` is `viewQuery()`'s string. */
+export interface ListView extends SavedView {
+  id: string;
+  /** The columns it hides; null keeps whatever columns the person has on. */
+  hidden: string[] | null;
+  isDefault: boolean;
+}
+
+/** A view's name as it is kept: trimmed, single-spaced, at most 40 characters. */
+export function cleanViewName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').slice(0, 40);
+}
+
+/**
+ * A bare visit: the URL names no search, no scope and none of the list's
+ * filters — the menu entry, not a link. Only a bare visit opens on a view;
+ * a link that says what it wants is never changed under it.
+ */
+export function isBareVisit(url: Pick<ListUrlState, 'q' | 'scope' | 'filters'>): boolean {
+  return !url.q && !url.scope && Object.keys(url.filters).length === 0;
+}
+
+/** The view a list opens with: the person's opening view on a bare visit, else none. */
+export function openingView<V extends { isDefault: boolean }>(
+  url: Pick<ListUrlState, 'q' | 'scope' | 'filters'>,
+  views: V[],
+): V | null {
+  if (!isBareVisit(url)) return null;
+  return views.find((v) => v.isDefault) ?? null;
+}
+
+/**
+ * The columns a view hides, kept to the list's own column keys — a column
+ * since removed from the screen is dropped, never an error. A view that
+ * would hide every column hides none (a table of nothing is not a choice).
+ */
+export function viewHidden(hidden: unknown, columnKeys: string[]): string[] | null {
+  if (!Array.isArray(hidden)) return null;
+  const known = new Set(columnKeys);
+  const kept = [...new Set(hidden.filter((k): k is string => typeof k === 'string' && known.has(k)))];
+  return kept.length >= columnKeys.length ? [] : kept;
+}
+
+/**
+ * A filter a view took from the list's defaults is kept as the DEFAULT, not
+ * its value of the day: a view saved on year to date is still year to date
+ * next January, not 1 January of the year it was saved. `DEFAULT_TOKEN`
+ * stands for it in the stored query; `fillDefaults` puts today's value back.
+ */
+export const DEFAULT_TOKEN = '@default';
+
+export function keepDefaults(query: string, defaults: Record<string, string> | undefined): string {
+  if (!defaults) return query;
+  const p = new URLSearchParams(query);
+  for (const [k, v] of Object.entries(defaults)) if (v && p.get(k) === v) p.set(k, DEFAULT_TOKEN);
+  return p.toString();
+}
+
+export function fillDefaults(query: string, defaults: Record<string, string> | undefined): string {
+  const p = new URLSearchParams(query);
+  for (const [k, v] of [...p.entries()]) {
+    if (v !== DEFAULT_TOKEN) continue;
+    if (defaults?.[k]) p.set(k, defaults[k]);
+    else p.delete(k);
+  }
+  return p.toString();
+}
+
+/** A view's query as the API keeps it (an object) and as the list compares it (a string). */
+export function queryObject(query: string): Record<string, string> {
+  return Object.fromEntries(new URLSearchParams(query));
+}
+export function queryString(query: unknown): string | null {
+  if (typeof query === 'string') return query;
+  if (!query || typeof query !== 'object' || Array.isArray(query)) return null;
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(query as Record<string, unknown>)) if (typeof v === 'string' && v) p.set(k, v);
+  return p.toString();
 }
 
 /** Filters set, for the Filters button's badge — the tab strip shows its own. */

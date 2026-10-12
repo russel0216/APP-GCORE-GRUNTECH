@@ -195,9 +195,26 @@ four databases and four copies of "customer".
    lead and sales order lists, and the API's `?scope=team` falls back to
    Mine for a viewer with none. **A list screen is its title and the list**:
    no paragraph under the title, and the primary button is "+ New …" on
-   every one of them (the owner's call, 2026-10-08). Saved
-   views are per viewer in localStorage (`gcore_views_<listKey>`), like column
-   choices. **Mass actions** (`selectable`): tick boxes and a bar over the
+   every one of them (the owner's call, 2026-10-08). **Saved views are the
+   person's own, on their ACCOUNT** (2026-10-12, the owner's call: "custom
+   column and save so this will be the one who always pops up during viewing
+   of list by user"): `SavedFilter` rows through `/api/saved-filters/:listKey`
+   (GET answers `mine`; a colleague's view is never theirs to change), each
+   holding the search, scope and filters AND the columns it hides
+   (`hiddenColumns`, null keeps the person's own), and at most one per person
+   per list is the **opening view** (`isDefault`, ★ on its chip; "Open this
+   list with it" on Save view, or "Save as my view…" in the Columns panel) —
+   making one the opening view clears the other in the same transaction. A
+   BARE visit (no `?q=`, `?scope=` or declared filter in the URL —
+   `isBareVisit()` / `openingView()` in `lib/listUrl.ts`) opens on it in
+   place of `defaultFilters`, and its rows wait for the views so nothing
+   flashes; a link that filters is never changed under it. A filter the view
+   took from the list's defaults is stored as `@default`
+   (`keepDefaults`/`fillDefaults`), so year to date stays year to date next
+   January. Views kept in the browser before (`gcore_views_<listKey>`) move
+   to the account once, by name. Loose column choices stay per browser in
+   localStorage (`gcore_cols_<listKey>`); a view's columns win when it is
+   applied. **Mass actions** (`selectable`): tick boxes and a bar over the
    table with Export selected, Print selected (`printPath` with the ticked
    keys as `?ids=` — so a `printPath` endpoint must honour `ids` through
    `idsFilter()` in `api/src/http/kit.ts`, ANDed with its visibility rule,
@@ -453,7 +470,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,768 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,776 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -477,12 +494,13 @@ order on one page, and one on sales for a subheading worded in
 line_comment, and 24 on workspace for the Help box's tickets and who
 receives them, and one on sales for a row the database refuses, and 2 on
 foundation for the sales lists' year-to-date default, and 5 on sales for
-the team the SCORO import tags its quotations with):
+the team the SCORO import tags its quotations with, and 4 on foundation
+and 4 on workspace for the views on the person's account):
 foundation
-320, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
+324, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 70, accounts 124. The
+insights 98, insights-brief 50, workspace 74, accounts 124. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database

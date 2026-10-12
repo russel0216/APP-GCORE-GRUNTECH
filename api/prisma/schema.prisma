@@ -3331,9 +3331,14 @@ model SavedFilter {
   name      String
   query     Json
   isShared  Boolean  @default(false)
+  /// The list's columns this view hides (2026-10-12) — null keeps the viewer's own choice.
+  hiddenColumns Json?
+  /// The view the list opens with on a bare visit — one per person per list.
+  isDefault Boolean  @default(false)
   createdAt DateTime @default(now())
 
   @@index([listKey])
+  @@index([userId, listKey])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

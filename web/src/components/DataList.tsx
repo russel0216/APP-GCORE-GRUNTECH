@@ -11,13 +11,21 @@ import {
   readListUrl,
   readView,
   startFilters,
-  saveView,
+  cleanViewName,
+  fillDefaults,
+  keepDefaults,
+  isBareVisit,
+  openingView,
+  queryObject,
+  queryString,
+  viewHidden,
   viewQuery,
   writeListUrl,
   type DateRangeFilterDef,
   type FilterDef,
   type ListOption,
   type ListScope,
+  type ListView,
   type LookupFilterDef,
   type SavedView,
 } from '../lib/listUrl';
@@ -240,8 +248,10 @@ export function DataList<T>({
     setPage(next.page ?? 1);
     setScope(next.scope ?? defaultScope);
     // A bare URL arriving from outside (the menu entry clicked again) opens
-    // on the defaults, as a first visit does.
-    setActive(startFilters(next, initialFilters, defaultFilters));
+    // on the person's opening view, else the defaults, as a first visit does.
+    const opening = openingView(next, viewsRef.current);
+    if (opening) applyView(opening);
+    else setActive(startFilters(next, initialFilters, defaultFilters));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params, urlState, filterKeysKey]);
 
@@ -298,24 +308,67 @@ export function DataList<T>({
     }
   }, [hidden, listKey]);
 
-  // Saved views are the same kind of convenience: one viewer's, one browser's.
-  const [views, setViews] = useState<SavedView[]>(() => {
-    try {
-      const raw = localStorage.getItem(`gcore_views_${listKey}`);
-      const parsed = raw ? (JSON.parse(raw) as SavedView[]) : [];
-      return Array.isArray(parsed) ? parsed.filter((v) => v && typeof v.name === 'string' && typeof v.query === 'string') : [];
-    } catch {
-      return [];
-    }
-  });
-  function storeViews(next: SavedView[]) {
-    setViews(next);
-    try {
-      localStorage.setItem(`gcore_views_${listKey}`, JSON.stringify(next));
-    } catch {
-      /* ignore */
-    }
-  }
+  /*
+    Your own views (2026-10-12, the owner's call: "custom column and save so
+    this will be the one who always pops up"): kept on the person's account,
+    so they follow them to any browser, each with the columns it hides, and
+    one may be the list's OPENING view. On a bare visit the rows wait for the
+    views, so the first fetch is already the view's and nothing flashes.
+  */
+  const [views, setViews] = useState<ListView[]>([]);
+  const viewsRef = useRef<ListView[]>([]);
+  viewsRef.current = views;
+  const columnKeys = columns.map((c) => c.key);
+  const [viewsReady, setViewsReady] = useState(() => !(urlState ? isBareVisit(initial) : true));
+  const waitingForViews = useRef(!viewsReady);
+  const [viewError, setViewError] = useState<string | null>(null);
+
+  const fetchViews = useCallback(async (): Promise<ListView[]> => {
+    const rows = await api.get<ServerView[]>(`/saved-filters/${encodeURIComponent(listKey)}`);
+    return rows.filter((r) => r.mine).flatMap((r) => {
+      const stored = queryString(r.query);
+      const query = stored === null ? null : fillDefaults(stored, defaultFilters);
+      return query === null ? [] : [{ id: r.id, name: r.name, query, hidden: viewHidden(r.hiddenColumns, columnKeys), isDefault: r.isDefault }];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listKey]);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let rows: ListView[] = [];
+      try {
+        rows = await fetchViews();
+        // Views saved in this browser before they moved to the account go
+        // up once, by name, and leave the browser.
+        const local = readLocalViews(listKey);
+        const missing = local.filter((v) => !rows.some((r) => r.name.toLowerCase() === v.name.toLowerCase()));
+        if (local.length && !movingViews.has(listKey)) {
+          movingViews.add(listKey);
+          for (const v of missing) {
+            await api.post(`/saved-filters/${encodeURIComponent(listKey)}`, { name: v.name, query: queryObject(v.query) });
+          }
+          forgetLocalViews(listKey);
+          if (missing.length) rows = await fetchViews();
+        }
+      } catch {
+        /* no views is a list that opens as it always did */
+      }
+      if (!live) return;
+      setViews(rows);
+      if (waitingForViews.current) {
+        waitingForViews.current = false;
+        const opening = openingView(urlState ? initial : { q: null, scope: null, filters: {} }, rows);
+        if (opening) applyView(opening);
+      }
+      setViewsReady(true);
+    })();
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listKey]);
+
   const [viewName, setViewName] = useState('');
 
   useEffect(() => {
@@ -350,8 +403,9 @@ export function DataList<T>({
   }, [endpoint, query]);
 
   useEffect(() => {
+    if (!viewsReady) return;
     void load();
-  }, [load, reloadToken]);
+  }, [load, reloadToken, viewsReady]);
 
   const onSummaryRef = useRef(onSummary);
   onSummaryRef.current = onSummary;
@@ -491,13 +545,52 @@ export function DataList<T>({
 
   const currentView = viewQuery({ q: debounced, scope, active }, filterKeys);
 
-  function applyView(view: SavedView) {
+  function applyView(view: SavedView & { hidden?: string[] | null }) {
     const v = readView(view.query, filterKeys, defaultScope);
     setSearch(v.q);
     setDebounced(v.q);
     setScope(v.scope);
     setActive({ ...(initialFilters ?? {}), ...v.active });
     setPage(1);
+    if (view.hidden) setHidden(new Set(view.hidden));
+  }
+
+  const [makeOpening, setMakeOpening] = useState(true);
+  const [savingView, setSavingView] = useState(false);
+
+  async function saveCurrentView() {
+    const name = cleanViewName(viewName);
+    if (!name) return;
+    setSavingView(true);
+    setViewError(null);
+    const body = {
+      name,
+      query: queryObject(keepDefaults(currentView, defaultFilters)),
+      hiddenColumns: columns.filter((c) => hidden.has(c.key)).map((c) => c.key),
+      isDefault: makeOpening,
+    };
+    try {
+      const same = views.find((v) => v.name.toLowerCase() === name.toLowerCase());
+      if (same) await api.patch(`/saved-filters/${same.id}`, body);
+      else await api.post(`/saved-filters/${encodeURIComponent(listKey)}`, body);
+      setViews(await fetchViews());
+      setPanel(null);
+    } catch (err) {
+      setViewError(err instanceof Error ? err.message : 'The view could not be saved');
+    } finally {
+      setSavingView(false);
+    }
+  }
+
+  async function changeView(view: ListView, change: 'opening' | 'forget') {
+    setViewError(null);
+    try {
+      if (change === 'forget') await api.del(`/saved-filters/${view.id}`);
+      else await api.patch(`/saved-filters/${view.id}`, { isDefault: !view.isDefault });
+      setViews(await fetchViews());
+    } catch (err) {
+      setViewError(err instanceof Error ? err.message : 'The view could not be changed');
+    }
   }
 
   // Names for the chips of lookup filters: the label picked, or what
@@ -692,6 +785,8 @@ export function DataList<T>({
                   onClick={() => {
                     setMenuOpen(false);
                     setViewName('');
+                    setMakeOpening(!views.some((v) => v.isDefault));
+                    setViewError(null);
                     setPanel('save');
                   }}
                 >
@@ -784,6 +879,18 @@ export function DataList<T>({
               <span>{c.label}</span>
             </label>
           ))}
+          <button
+            type="button"
+            className="btn btn-sm list-columns-save"
+            onClick={() => {
+              setViewName(views.find((v) => v.isDefault)?.name ?? '');
+              setMakeOpening(true);
+              setViewError(null);
+              setPanel('save');
+            }}
+          >
+            Save as my view…
+          </button>
         </section>
       )}
 
@@ -792,9 +899,7 @@ export function DataList<T>({
           className="list-save-view"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!viewName.trim()) return;
-            storeViews(saveView(views, viewName, currentView));
-            setPanel(null);
+            void saveCurrentView();
           }}
         >
           <input
@@ -809,21 +914,40 @@ export function DataList<T>({
               if (e.key === 'Escape') setPanel(null);
             }}
           />
-          <button type="submit" className="btn btn-primary btn-sm" disabled={!viewName.trim()}>
-            Save view
+          <label className="checkbox">
+            <input type="checkbox" checked={makeOpening} onChange={(e) => setMakeOpening(e.target.checked)} />
+            <span>Open this list with it</span>
+          </label>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={!cleanViewName(viewName) || savingView}>
+            {savingView ? 'Saving…' : 'Save view'}
           </button>
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPanel(null)}>
             Cancel
           </button>
-          <span className="faint">Keeps this search, Mine/All and the filters, in this browser.</span>
+          <span className="faint">
+            Keeps this search, Mine/All, the filters and the columns on your account
+            {views.some((v) => v.name.toLowerCase() === cleanViewName(viewName).toLowerCase()) ? ' — replacing the view of that name' : ''}.
+          </span>
         </form>
       )}
 
+      {viewError && <p className="list-view-error" role="alert">{viewError}</p>}
+
       {views.length > 0 && (
-        <div className="list-views" aria-label="Saved views">
+        <div className="list-views" aria-label="Your views">
           <span>Views:</span>
           {views.map((v) => (
-            <span key={v.name} className={`list-chip${v.query === currentView ? ' view-active' : ''}`}>
+            <span key={v.id} className={`list-chip${v.query === currentView ? ' view-active' : ''}${v.isDefault ? ' view-opening' : ''}`}>
+              <button
+                type="button"
+                className="view-star"
+                aria-pressed={v.isDefault}
+                aria-label={v.isDefault ? `${v.name} opens this list — stop that` : `Open this list with ${v.name}`}
+                title={v.isDefault ? 'Opens this list — click to stop' : 'Open this list with this view'}
+                onClick={() => void changeView(v, 'opening')}
+              >
+                {v.isDefault ? '★' : '☆'}
+              </button>
               <button
                 type="button"
                 className="view-apply"
@@ -832,11 +956,7 @@ export function DataList<T>({
               >
                 {v.name}
               </button>
-              <button
-                type="button"
-                aria-label={`Forget the view ${v.name}`}
-                onClick={() => storeViews(views.filter((x) => x.name !== v.name))}
-              >
+              <button type="button" aria-label={`Forget the view ${v.name}`} onClick={() => void changeView(v, 'forget')}>
                 ×
               </button>
             </span>
@@ -1232,4 +1352,36 @@ function extractText(node: ReactNode): string {
 function csvCell(value: string): string {
   const v = value.replace(/\s+/g, ' ').trim();
   return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** A saved view as `/api/saved-filters/:listKey` sends it. */
+interface ServerView {
+  id: string;
+  name: string;
+  query: unknown;
+  hiddenColumns: unknown;
+  isDefault: boolean;
+  mine: boolean;
+}
+
+/** Lists whose browser views are being moved to the account — once per page load. */
+const movingViews = new Set<string>();
+
+/** Views kept in this browser before 2026-10-12, when they moved to the person's account. */
+function readLocalViews(listKey: string): SavedView[] {
+  try {
+    const raw = localStorage.getItem(`gcore_views_${listKey}`);
+    const parsed = raw ? (JSON.parse(raw) as SavedView[]) : [];
+    return Array.isArray(parsed) ? parsed.filter((v) => v && typeof v.name === 'string' && typeof v.query === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function forgetLocalViews(listKey: string) {
+  try {
+    localStorage.removeItem(`gcore_views_${listKey}`);
+  } catch {
+    /* ignore */
+  }
 }

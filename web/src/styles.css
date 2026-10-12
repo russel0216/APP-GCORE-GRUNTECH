@@ -1497,6 +1497,34 @@ small,
   color: var(--text);
 }
 
+/* Your own views (2026-10-12): the star says which one opens the list. */
+.list-views .list-chip {
+  padding-left: var(--s-1);
+}
+
+.list-chip .view-star {
+  padding: 0 var(--s-1);
+  color: var(--faint);
+}
+
+.list-chip.view-opening .view-star {
+  color: var(--warn);
+}
+
+.list-chip.view-opening {
+  font-weight: 600;
+}
+
+.list-columns-save {
+  margin-left: auto;
+}
+
+.list-view-error {
+  margin: 0 0 var(--s-3);
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
 .list-save-view {
   display: flex;
   flex-wrap: wrap;
@@ -1505,7 +1533,7 @@ small,
   margin-bottom: var(--s-3);
 }
 
-.list-save-view input {
+.list-save-view input[type='text'] {
   max-width: 20rem;
 }
 

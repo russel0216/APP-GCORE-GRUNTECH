@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Prisma } from '@prisma/client';
 import { ratePct } from '../shared/listPaper';
 import fs from 'node:fs';
 import { z } from 'zod';
@@ -844,65 +845,108 @@ attachmentRoutes.delete(
 export const savedFilterRoutes = Router();
 savedFilterRoutes.use(authenticate);
 
+/** A list's key: what DataList and the board name themselves by. */
+const listKeyParam = z.string().trim().min(1).max(80);
+const hiddenColumnsSchema = z.array(z.string().trim().min(1).max(60)).max(100).nullable();
+/** The most views one person keeps on one list. */
+const MAX_VIEWS_PER_LIST = 50;
+
+/**
+ * A view saved as the list's opening view (2026-10-12, the owner's call:
+ * "custom column and save so this will be the one who always pops up") is
+ * the ONLY default its owner has on that list — the others are cleared in
+ * the same transaction, so two can never both claim the bare visit.
+ */
+async function clearOtherDefaults(tx: Prisma.TransactionClient, userId: string, listKey: string, keepId: string) {
+  await tx.savedFilter.updateMany({
+    where: { userId, listKey, isDefault: true, id: { not: keepId } },
+    data: { isDefault: false },
+  });
+}
+
 savedFilterRoutes.get(
   '/:listKey',
   handler(async (req, res) => {
     const me = currentUser(req);
-    res.json(
-      await prisma.savedFilter.findMany({
-        where: {
-          listKey: req.params.listKey,
-          OR: [{ userId: me.id }, { isShared: true }],
-        },
-        orderBy: { name: 'asc' },
-      }),
-    );
+    const listKey = parseBody(listKeyParam, req.params.listKey);
+    const rows = await prisma.savedFilter.findMany({
+      where: { listKey, OR: [{ userId: me.id }, { isShared: true }] },
+      orderBy: { name: 'asc' },
+    });
+    // `mine` says which views are the caller's own — only those open a list
+    // or may be changed; a colleague's shared view is a view, never a default.
+    res.json(rows.map((r) => ({ ...r, mine: r.userId === me.id, isDefault: r.userId === me.id && r.isDefault })));
   }),
 );
 
 savedFilterRoutes.post(
   '/:listKey',
   handler(async (req, res) => {
+    const me = currentUser(req);
+    const listKey = parseBody(listKeyParam, req.params.listKey);
     const body = parseBody(
-      z.object({ name: z.string().min(1), query: z.record(z.unknown()), isShared: z.boolean().default(false) }),
+      z.object({
+        name: z.string().trim().min(1).max(60),
+        query: z.record(z.unknown()),
+        isShared: z.boolean().default(false),
+        hiddenColumns: hiddenColumnsSchema.optional(),
+        isDefault: z.boolean().default(false),
+      }),
       req.body,
     );
-    const row = await prisma.savedFilter.create({
-      data: {
-        listKey: req.params.listKey,
-        userId: currentUser(req).id,
-        name: body.name,
-        query: body.query as object,
-        isShared: body.isShared,
-      },
+    const count = await prisma.savedFilter.count({ where: { userId: me.id, listKey } });
+    if (count >= MAX_VIEWS_PER_LIST) throw badRequest(`You keep ${MAX_VIEWS_PER_LIST} views on this list at most — forget one first`);
+    const row = await prisma.$transaction(async (tx) => {
+      const created = await tx.savedFilter.create({
+        data: {
+          listKey,
+          userId: me.id,
+          name: body.name,
+          query: body.query as object,
+          isShared: body.isShared,
+          hiddenColumns: body.hiddenColumns ?? Prisma.DbNull,
+          isDefault: body.isDefault,
+        },
+      });
+      if (body.isDefault) await clearOtherDefaults(tx, me.id, listKey, created.id);
+      return created;
     });
-    res.status(201).json(row);
+    res.status(201).json({ ...row, mine: true });
   }),
 );
 
-/** Rename, re-point or share a view — the owner's only, scoped like delete. */
+/** Rename, re-point, share or make it the opening view — the owner's only, scoped like delete. */
 savedFilterRoutes.patch(
   '/:id',
   handler(async (req, res) => {
     const me = currentUser(req);
     const body = parseBody(
       z.object({
-        name: z.string().min(1).optional(),
+        name: z.string().trim().min(1).max(60).optional(),
         query: z.record(z.unknown()).optional(),
         isShared: z.boolean().optional(),
+        hiddenColumns: hiddenColumnsSchema.optional(),
+        isDefault: z.boolean().optional(),
       }),
       req.body,
     );
-    const result = await prisma.savedFilter.updateMany({
-      where: { id: req.params.id, userId: me.id },
-      data: {
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.query !== undefined ? { query: body.query as object } : {}),
-        ...(body.isShared !== undefined ? { isShared: body.isShared } : {}),
-      },
+    const row = await prisma.$transaction(async (tx) => {
+      const result = await tx.savedFilter.updateMany({
+        where: { id: req.params.id, userId: me.id },
+        data: {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.query !== undefined ? { query: body.query as object } : {}),
+          ...(body.isShared !== undefined ? { isShared: body.isShared } : {}),
+          ...(body.hiddenColumns !== undefined ? { hiddenColumns: body.hiddenColumns ?? Prisma.DbNull } : {}),
+          ...(body.isDefault !== undefined ? { isDefault: body.isDefault } : {}),
+        },
+      });
+      if (!result.count) throw notFound('Saved filter not found');
+      const updated = await tx.savedFilter.findUniqueOrThrow({ where: { id: req.params.id } });
+      if (body.isDefault) await clearOtherDefaults(tx, me.id, updated.listKey, updated.id);
+      return updated;
     });
-    if (!result.count) throw notFound('Saved filter not found');
-    res.json(await prisma.savedFilter.findUnique({ where: { id: req.params.id } }));
+    res.json({ ...row, mine: true });
   }),
 );
 
