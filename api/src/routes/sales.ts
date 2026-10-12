@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { LeadStatus, Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
-import { OWNER_TEAM_SELECT, teamMembers, teamOf, teamShares, type TeamRef, type TeamShare } from '../shared/team';
+import { OWNER_TEAM_SELECT, TEAM_REF_SELECT, quotationTeamOf, quotationTeamWhere, teamMembers, teamOf, teamShares, type TeamRef, type TeamShare } from '../shared/team';
 import {
   handler,
   parseBody,
@@ -987,6 +987,8 @@ async function loadQuotation(id: string) {
       site: { select: { id: true, name: true, address: true, city: true } },
       lead: { select: { id: true, number: true, companyName: true } },
       owner: { select: { id: true, name: true, position: true, email: true, phone: true } },
+      // The team the SCORO import tagged it with, when one was chosen.
+      team: { select: { id: true, code: true, name: true } },
       revisions: {
         orderBy: { revision: 'desc' },
         include: {
@@ -1030,7 +1032,7 @@ export function quotationListWhere(
 
   const onlyOwn = !me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all');
   if (onlyOwn || q.scope === 'mine') and.push({ ownerId: me.id });
-  if (q.scope === 'team') and.push(team ? { owner: teamMembers(team) } : { ownerId: me.id });
+  if (q.scope === 'team') and.push(team ? quotationTeamWhere(team) : { ownerId: me.id });
 
   if (q.search) {
     and.push({
@@ -1139,6 +1141,7 @@ export async function quotationListSummary(
       select: {
         revisions: { select: LIST_REVISION_SELECT },
         owner: OWNER_TEAM_SELECT,
+        team: TEAM_REF_SELECT,
       },
     }),
     opts.teamWhere
@@ -1156,7 +1159,8 @@ export async function quotationListSummary(
   for (const r of valued) {
     const cents = toCents(quotationValue(r.revisions));
     valueCents += cents;
-    shares.push({ team: r.owner.employee?.industry ?? null, cents });
+    // The tag the SCORO import gave it, else its owner's team.
+    shares.push({ team: quotationTeamOf(r), cents });
   }
   const teams = await teamShares(shares);
 
@@ -1237,7 +1241,7 @@ quotationRoutes.get(
       }),
       prisma.quotation.count({ where }),
       quotationListSummary(base, where, stages, {
-        teamWhere: team ? { owner: teamMembers(team.id) } : null,
+        teamWhere: team ? quotationTeamWhere(team.id) : null,
         // The totals row's margin only where every listed quotation's cost is
         // the caller's to see: all of them, or the set is their own.
         margin:

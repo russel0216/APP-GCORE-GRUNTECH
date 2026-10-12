@@ -414,10 +414,16 @@ const scoroQuoteSpec: ImportSpec<ScoroQuoteRecord> = {
   // The groups the file uses that are not on the list (2026-10-11, the
   // owner's call: "let me decide, or set it as OTHERS"): the dry run asks,
   // and the commit's `options.groups` answers, OTHERS where it says nothing.
+  // And the team the file's quotations are tagged with (2026-10-12, the
+  // owner's call: "allow me also to select which team it goes"): asked on
+  // every check, `options.team` answering; none chosen follows each owner.
   summarize: async (records) => {
     const unlisted = await unlistedScoroGroups(records);
-    if (!unlisted.length) return undefined;
-    return { groups: { unlisted, choices: (await listedGroups()).map((g) => g.name), fallback: FALLBACK_GROUP } };
+    const teams = await prisma.industry.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], select: { id: true, code: true, name: true } });
+    return {
+      ...(unlisted.length ? { groups: { unlisted, choices: (await listedGroups()).map((g) => g.name), fallback: FALLBACK_GROUP } } : {}),
+      ...(teams.length ? { teams: { choices: teams, quotations: records.length } } : {}),
+    };
   },
 };
 
@@ -481,6 +487,20 @@ async function groupResolver(options?: Record<string, unknown>) {
   };
 }
 
+/**
+ * The team the importer tagged the file's quotations with: an ACTIVE team
+ * (Industry row) by id, or none — each quotation then follows its owner's
+ * team. Checked before anything is written.
+ */
+async function teamChoice(options?: Record<string, unknown>): Promise<{ id: string; code: string } | null> {
+  const asked = options?.team;
+  if (asked === undefined || asked === null || asked === '') return null;
+  if (typeof asked !== 'string') throw badRequest('The team to tag the quotations with is not readable');
+  const team = await prisma.industry.findFirst({ where: { id: asked, isActive: true }, select: { id: true, code: true } });
+  if (!team) throw badRequest('That team is not on the list — choose one from Admin › Categories › Teams');
+  return team;
+}
+
 /** What the summary line says of itself until the lines export replaces it. */
 export const SUMMARY_LINE_TITLE = 'As quoted in SCORO';
 export const summaryLineDescription = (number: string) =>
@@ -525,6 +545,7 @@ async function writeScoroQuotes(
   // Every line under a group on the list — refused here, before anything is
   // written, when a choice names a group that is not.
   const groupOf = await groupResolver(options);
+  const team = await teamChoice(options);
   /** The groups a record's lines were moved off, for its audit row. */
   const movedGroups = (record: ScoroQuoteRecord) => {
     const moved: Record<string, string> = {};
@@ -572,17 +593,28 @@ async function writeScoroQuotes(
   async function writeOne(record: ScoroQuoteRecord, existingId: string | null): Promise<boolean> {
     if (existingId) {
       // A quotation already in G-CORE is G-CORE's: the file does not touch it
-      // — except to keep the summary line's promise. One that came from the
-      // header-only export (revision 0 still a draft, exactly the one
-      // "As quoted in SCORO" line) takes the real lines from a file that
-      // carries them; anything else is left exactly as it is.
-      if (!record.lines) return false;
+      // — except to keep the summary line's promise, and to take the team the
+      // importer chose. One that came from the header-only export (revision
+      // 0 still a draft, exactly the one "As quoted in SCORO" line) takes the
+      // real lines from a file that carries them; anything else is left
+      // exactly as it is.
+      let tagged = false;
+      if (team) {
+        const moved = await prisma.quotation.updateMany({ where: { id: existingId, NOT: { teamId: team.id } }, data: { teamId: team.id } });
+        if (moved.count) {
+          tagged = true;
+          await audit(
+            { entityType: 'quotation', entityId: existingId, action: 'UPDATED', summary: `Tagged with team ${team.code} from ${SOURCE}`, after: { team: team.code }, ...by },
+          );
+        }
+      }
+      if (!record.lines) return tagged;
       return prisma.$transaction(async (tx) => {
         const rev = await tx.quotationRevision.findFirst({
           where: { quotationId: existingId, revision: 0 },
           include: { items: { select: { id: true, title: true } } },
         });
-        if (!rev || rev.status !== 'DRAFT' || rev.items.length !== 1 || rev.items[0].title !== SUMMARY_LINE_TITLE) return false;
+        if (!rev || rev.status !== 'DRAFT' || rev.items.length !== 1 || rev.items[0].title !== SUMMARY_LINE_TITLE) return tagged;
         await tx.quotationItem.delete({ where: { id: rev.items[0].id } });
         const fileLines = linesOf(record);
         await tx.quotationItem.createMany({ data: fileLines.map((line, i) => ({ revisionId: rev.id, ...lineData(line, i) })) });
@@ -674,6 +706,8 @@ async function writeScoroQuotes(
           lostReason: record.lostReason,
           expectedClosing: record.expectedClosing,
           currency: record.currency,
+          // The team the importer chose; none follows the owner's team.
+          teamId: team?.id ?? null,
           createdAt: record.issuedAt,
           revisions: {
             create: [
@@ -722,6 +756,7 @@ async function writeScoroQuotes(
             outcome: record.outcome,
             lines: lines.length,
             groupsMoved: movedGroups(record),
+            ...(team ? { team: team.code } : {}),
             ...(counter ? { counter } : {}),
           },
           ...by,

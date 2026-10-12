@@ -30,6 +30,22 @@ export function teamMembers(teamId: string): Prisma.UserWhereInput {
 }
 
 /**
+ * A QUOTATION's team (2026-10-12, the owner's call: "on SCORO import allow
+ * me to select which team it goes"): the team it was tagged with, else its
+ * owner's. The Team view, the team cards and the Forecast all read it
+ * through these two, so a tagged quotation is counted under its tag
+ * everywhere and nowhere under its owner's team.
+ */
+export function quotationTeamWhere(teamId: string): Prisma.QuotationWhereInput {
+  return { OR: [{ teamId }, { teamId: null, owner: teamMembers(teamId) }] };
+}
+
+/** The tag if there is one, else the owner's team — `team` and `owner` as QUOTATION_TEAM_SELECT brings them. */
+export function quotationTeamOf(row: { team: TeamRef; owner: { employee: { industry: TeamRef } | null } }): TeamRef {
+  return row.team ?? row.owner.employee?.industry ?? null;
+}
+
+/**
  * The owner's five sales teams (2026-10-08) — the seeded Industry rows:
  * system rows, undeletable, renamable, never recoded (the quotation list's
  * "Quotes by team" and the Team view key on them).
@@ -101,6 +117,9 @@ export type TeamRef = { id: string; code: string; name: string } | null;
 
 /** The select that brings an owner's team along with a row. */
 export const OWNER_TEAM_SELECT = { select: { employee: { select: { industry: { select: { id: true, code: true, name: true } } } } } } as const;
+
+/** A team as a row's relation brings it. */
+export const TEAM_REF_SELECT = { select: { id: true, code: true, name: true } } as const;
 
 /**
  * Splits a listed set by its owners' teams — every active team in the

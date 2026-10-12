@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { api, downloadBlob } from '../lib/api';
-import { ErrorBox, Modal, useToast } from './ui';
+import { ErrorBox, Field, Modal, useToast } from './ui';
 
 /**
  * CSV import, shared by every master screen.
@@ -32,8 +32,14 @@ interface ImportReport {
   updated: number;
   errors: number;
   rows: RowResult[];
-  /** What the dry run asks before the file is applied (the SCORO quotes' groups). */
-  extra?: { groups?: GroupQuestion };
+  /** What the dry run asks before the file is applied (the SCORO quotes' groups, and the team to tag them with). */
+  extra?: { groups?: GroupQuestion; teams?: TeamQuestion };
+}
+
+/** "Allow me also to select which team it goes" (2026-10-12): the active teams, and how many quotations the file holds. */
+interface TeamQuestion {
+  choices: { id: string; code: string; name: string }[];
+  quotations: number;
 }
 
 /** A SCORO group not on Admin › Categories › Quotation groups, and how many lines use it. */
@@ -73,6 +79,9 @@ export function ImportModal({
   // Where each group not on the list goes, keyed by the SCORO group's key.
   const [groupChoice, setGroupChoice] = useState<Record<string, string>>({});
   const question = report && !report.committed ? report.extra?.groups : undefined;
+  // The team the file's quotations are tagged with; '' follows each owner's team.
+  const [teamChoice, setTeamChoice] = useState('');
+  const teamQuestion = report && !report.committed ? report.extra?.teams : undefined;
 
   async function send(commit: boolean) {
     if (!file) return;
@@ -81,10 +90,13 @@ export function ImportModal({
     try {
       const form = new FormData();
       form.append('file', file);
-      // The answers to what the check asked: each unlisted group's choice, else the default.
-      if (commit && question?.unlisted.length) {
-        const groups = Object.fromEntries(question.unlisted.map((g) => [g.key, groupChoice[g.key] ?? question.fallback]));
-        form.append('options', JSON.stringify({ groups }));
+      // The answers to what the check asked: each unlisted group's choice,
+      // else the default; and the team, when one was picked.
+      if (commit && (question?.unlisted.length || (teamQuestion && teamChoice))) {
+        const groups = question?.unlisted.length
+          ? Object.fromEntries(question.unlisted.map((g) => [g.key, groupChoice[g.key] ?? question.fallback]))
+          : undefined;
+        form.append('options', JSON.stringify({ ...(groups ? { groups } : {}), ...(teamQuestion && teamChoice ? { team: teamChoice } : {}) }));
       }
       const result = await api.post<ImportReport>(
         `/imports/${entity}${commit ? '?commit=true' : ''}`,
@@ -195,6 +207,29 @@ export function ImportModal({
               </>
             )}
           </div>
+
+          {teamQuestion && teamQuestion.choices.length > 0 && (
+            <section className="import-groups" aria-labelledby="import-team-title">
+              <h3 id="import-team-title" className="svc-subhead">
+                Team
+              </h3>
+              <p className="faint">
+                Tag the {teamQuestion.quotations} quotation{teamQuestion.quotations === 1 ? '' : 's'} in this file with a team: the team cards
+                and the Team view count them under it. Left as it is, each one follows its owner’s team. Quotations already on file from
+                this file take the team too.
+              </p>
+              <Field label="Tag with team">
+                <select value={teamChoice} onChange={(e) => setTeamChoice(e.target.value)}>
+                  <option value="">— each owner’s team —</option>
+                  {teamQuestion.choices.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.code} — {t.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </section>
+          )}
 
           {question && question.unlisted.length > 0 && (
             <section className="import-groups" aria-labelledby="import-groups-title">

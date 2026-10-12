@@ -666,6 +666,8 @@ model Industry {
   customers Customer[]
   /// The people on this team (Employee.industryId).
   employees Employee[]
+  /// Quotations tagged with this team (the SCORO import, 2026-10-12).
+  quotationsTagged Quotation[] @relation("QuotationTeam")
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 }
@@ -1336,6 +1338,11 @@ model Quotation {
   /// owner's call: "interchangeable, by default PHP"). One of
   /// QUOTATION_CURRENCIES; its sales orders print in it too.
   currency        String    @default("PHP")
+  /// The team a quotation is counted under when somebody tagged it (the
+  /// SCORO import's "Tag with team", 2026-10-12); null follows the owner's
+  /// team — `quotationTeamWhere()` / `quotationTeamOf()` in shared/team.ts.
+  teamId          String?
+  team            Industry? @relation("QuotationTeam", fields: [teamId], references: [id], onDelete: SetNull)
 
   revisions  QuotationRevision[]
   activities SalesActivity[]
@@ -1349,6 +1356,7 @@ model Quotation {
   @@index([customerId])
   @@index([ownerId])
   @@index([outcome])
+  @@index([teamId])
 }
 
 model QuotationRevision {

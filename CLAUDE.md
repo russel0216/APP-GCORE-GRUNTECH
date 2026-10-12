@@ -453,7 +453,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,763 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,768 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -476,9 +476,10 @@ foundation for the approvals as a one-row table, and one for the short
 order on one page, and one on sales for a subheading worded in
 line_comment, and 24 on workspace for the Help box's tickets and who
 receives them, and one on sales for a row the database refuses, and 2 on
-foundation for the sales lists' year-to-date default):
+foundation for the sales lists' year-to-date default, and 5 on sales for
+the team the SCORO import tags its quotations with):
 foundation
-320, masters 92, sales 524, costing 157, pipeline 92, calendar 96, numbering
+320, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 70, accounts 124. The
@@ -2644,6 +2645,25 @@ SCORO.
   choice is OTHERS. The quotation's CREATED row records `groupsMoved`
   (SCORO's name → the group used). The summary line takes the file's
   `product_group` the same way.
+- **The importer tags the file's quotations with a TEAM** (2026-10-12,
+  the owner's call: "on SCORO import allow me also to select which team it
+  goes or tag"). `Quotation.teamId` (an Industry row, nullable, SetNull) is
+  the tag; **a quotation's team is its tag, else its owner's**
+  (`quotationTeamWhere()` / `quotationTeamOf()` in `shared/team.ts`, the one
+  rule) — the quotation list's Team view and "My team" share, its team
+  cards and the Forecast's Team view all read it, so a tagged quotation is
+  counted under its tag and never under its owner's team. The check asks
+  (`summarize` sends `extra.teams`: the active teams and how many
+  quotations the file holds; `ImportModal` shows "Tag with team", "— each
+  owner's team —" first) and the commit's `options.team` answers: an ACTIVE
+  team or a 400 before anything is written (`teamChoice()`). The file's new
+  quotations take it (their CREATED row names it), and quotations ALREADY
+  on file from the same file are re-tagged when the team differs (one
+  `quotation` UPDATED row "Tagged with team KAT from the SCORO quotes
+  import") — the one change a re-run makes to an existing quotation besides
+  the summary line's replacement. No team chosen leaves a tag already
+  there as it is. The quotation page shows a tag as "Team: KAT — tagged at
+  import"; nothing else sets one yet.
 - **An imported quotation needs no approval until somebody changes it**
   (2026-10-11, the owner's call: "the import from SCORO will not have
   approval details below the quotation, only the Prepared by; if they

@@ -78,7 +78,7 @@ import { upperText as webUpperText } from '../../web/src/lib/caps';
 import { deleteGroup, deletedGroupKeys, setDeletedGroupKeys } from '../src/shared/quotationGroups';
 import { documentAddress } from '../src/shared/customerAddress';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
-import { teamMembers, teamOf } from '../src/shared/team';
+import { quotationTeamWhere, teamMembers, teamOf } from '../src/shared/team';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
@@ -2248,6 +2248,55 @@ async function main() {
         stopped.startsWith(`Stopped at quotation ${scoroNumber(56)}: a record with the same number is already on file.`) &&
           stopped.includes('The 1 quotation before it was imported') && !!(await quoteByNumber(scoroNumber(55))),
         stopped,
+      );
+
+      // ── The team the importer tags a file with (2026-10-12) ──────────────
+      const [tagTeam, retagTeam] = await prisma.industry.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }], take: 2, select: { id: true, code: true } });
+      const tagRow = row({ id: '8787', doc_no: scoroNumber(57), quote_name: `${TAG} Tagged with a team` });
+      const tagCheck = await importScoro([tagRow], false);
+      const asked = (tagCheck.extra as { teams?: { choices: { id: string }[]; quotations: number } } | undefined)?.teams;
+      check(
+        'the check asks which team to tag the file with — every active team, and how many quotations the file holds',
+        !!asked && asked.quotations === 1 && asked.choices.some((t) => t.id === tagTeam.id),
+        JSON.stringify(asked).slice(0, 160),
+      );
+      const tagged = await importScoro([tagRow], true, { team: tagTeam.id });
+      const taggedQ = await quoteByNumber(scoroNumber(57));
+      const taggedTrail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: taggedQ?.id ?? '', action: 'CREATED' } });
+      check(
+        'a team chosen tags every quotation the file creates, and its trail names the team',
+        tagged.created === 1 && taggedQ?.teamId === tagTeam.id && (taggedTrail?.after as { team?: string } | null)?.team === tagTeam.code,
+        `${taggedQ?.teamId} / ${JSON.stringify(taggedTrail?.after).slice(0, 120)}`,
+      );
+      const ownerTeam = await teamOf(sales.id);
+      const tagStages = await pipelineStages();
+      const tagSummary = await quotationListSummary({ id: taggedQ!.id }, { id: taggedQ!.id }, tagStages, { teamWhere: quotationTeamWhere(tagTeam.id) });
+      const counted = tagSummary.teams.filter((t) => t.count > 0).map((t) => t.code);
+      const inTagView = await prisma.quotation.count({ where: { AND: [{ id: taggedQ!.id }, quotationTeamWhere(tagTeam.id)] } });
+      const inOwnerView = ownerTeam && ownerTeam.id !== tagTeam.id ? await prisma.quotation.count({ where: { AND: [{ id: taggedQ!.id }, quotationTeamWhere(ownerTeam.id)] } }) : 0;
+      check(
+        'the team cards and the Team view count a tagged quotation under its tag, never under its owner’s team',
+        counted.join() === tagTeam.code && tagSummary.team?.count === 1 && inTagView === 1 && inOwnerView === 0,
+        JSON.stringify({ counted, team: tagSummary.team, inTagView, inOwnerView }),
+      );
+      const retagged = await importScoro([tagRow], true, { team: retagTeam.id });
+      const retaggedQ = await quoteByNumber(scoroNumber(57));
+      const retagTrail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: taggedQ!.id, action: 'UPDATED' }, orderBy: { at: 'desc' } });
+      check(
+        'the same file run again with another team re-tags the quotations already on file, and says so on their trail',
+        retagged.updated === 1 && retaggedQ?.teamId === retagTeam.id && retagTrail?.summary === `Tagged with team ${retagTeam.code} from the SCORO quotes import`,
+        `${retaggedQ?.teamId} / ${retagTrail?.summary}`,
+      );
+      let badTeam = '';
+      try {
+        await importScoro([row({ id: '8788', doc_no: scoroNumber(58), quote_name: `${TAG} Unknown team` })], true, { team: 'not-a-team' });
+      } catch (err) {
+        badTeam = err instanceof Error ? err.message : String(err);
+      }
+      check(
+        'a team that is not on the list is refused before anything is written',
+        badTeam.includes('not on the list') && !(await quoteByNumber(scoroNumber(58))),
+        badTeam,
       );
 
       // ── Deleting a group (2026-10-11, the owner's call) ──────────────────
