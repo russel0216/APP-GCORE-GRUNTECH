@@ -92,6 +92,12 @@ export interface TotalsBlock extends Base {
   textColor: string;
   accentColor: string;
   ruleColor: string;
+  /** Bordered cells, the figure over its label (the sales order's); else rows (the quotation's). */
+  grid?: boolean;
+  /** Cells to a band, in a grid. */
+  perBand?: number;
+  /** Between two bands of a grid. */
+  bandGap?: number;
 }
 
 export interface SignoffsBlock extends Base {

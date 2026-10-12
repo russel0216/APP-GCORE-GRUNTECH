@@ -474,7 +474,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,824 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,832 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -505,9 +505,10 @@ deleting a role, and one on accounts for the team picked on a user, and 3 on sal
 the team picked on a quotation and followed by its sales order, and one
 on sales for old quotations taking their author's team, and 16 on
 foundation and 22 on sales for the routing sheet of 2026-10-12 — the
-preparer's own signature, the stand-in and the team's leader):
+preparer's own signature, the stand-in and the team's leader, and 4 on
+foundation and 4 on sales for the sales order paper of the owner's slide):
 foundation
-343, masters 92, sales 555, costing 157, pipeline 92, calendar 96, numbering
+347, masters 92, sales 559, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -3062,7 +3063,8 @@ The owner's routing sheet ("APPROVAL ROUTER — SALES ORDER AND QUOTATION").
 The owner's updated sheet gives EVERY preparer (CEO / President, Team
 Leader, Industry Specialist) the same route: **Quotation** — Team Leader,
 and the CEO / President too over ₱1,000,000; **Sales order** — Team Leader,
-Admin Back Support, Cost Controller, CEO / President. The four routes keyed
+Back Support (its step's name since the owner's slide of the same day,
+corrected in place through `previously`), Cost Controller, CEO / President. The four routes keyed
 to a preparer's role (below, 2026-10-11) are in the seed's RETIRED list;
 `requesterRoleId`, `pickWorkflow`'s preparer logic and the "Prepared by"
 field stay as data an administrator may still use. Three rules came with it:
@@ -3343,6 +3345,36 @@ OWNED, `routes/salesOrders.ts`, patterned on SCORO quote 8442 → invoices
   All for a reader (finance). No bulk status change: submitting, issuing and
   cancelling an order each have consequences of their own, and stay on the
   order's page.
+- **The order shows NO discount — its lines carry it** (2026-10-12, the
+  owner's slide: "don't reflect the discount and the approval always sits
+  at the bottom of the document"; `docs/notes/P-sales-order-paper-
+  2026-10-12.md`). `quotationTotals` (and its mirror) give every line
+  `netAmount` — its share of `net`, the remainder on the largest line so
+  the lines add up to `net` exactly (`spread()`) — `netMargin` (its share
+  of `netOfTax` less its cost, so the lines add up to `cost.totalMargin`)
+  and `netMarginPct`, and the panel `netMarginPct`, all TWO decimals
+  (the owner's call: "always 2 decimal places"). The order's paper and
+  its PAGE (`GET /sales-orders/:id` sends `netUnitPrice`, `netAmount`,
+  `netMargin`, `netMarginPct` per line and `netOfTax`; `netUnitPrice()`
+  in `routes/salesOrders.ts`) print the lines after the discount and the
+  money as **Total price** (the sum after the discount, before VAT),
+  **Total cost**, **Margin**, **VAT (12%)**, **VAT included** and **Margin
+  (%)** (`16.29`) — never Subtotal, Discount or Sum without tax; a reader
+  without cost rights gets the first, VAT and VAT included. The EDITOR
+  keeps the list price and the discount box: that is where a discount is
+  set. The quotation keeps its discount row everywhere — a customer is
+  shown the discount; the booking record is not. On paper the money is
+  the totals box's **grid** (`grid: true`, `perBand`, `bandGap` on the
+  totals block in `shared/pdfDesign.ts` — bordered cells, the figure bold
+  over its label in capitals, a band flush right; "Layout: Grid" in Admin
+  › PDF Templates; the quotation's stays rows): two bands of three under
+  the table, flush right, the internal note to its left, then — anchored
+  `last` — "The name, date and time are considered a digital signature of
+  approval" and the one-row approvals table, its bottom just over the
+  footer rule, at the foot of the LAST page whatever the order's length
+  (verify-foundation pins both a short order on one page and a 40-line
+  one). An administrator's SAVED order layout keeps its own boxes: "Put
+  the standard back" in Admin › PDF Templates brings the new one.
 - **The quotation page lists the orders booked from it** (2026-10-07, the
   owner's call, as SCORO lists a quote's invoices): `QuotationSalesOrders` in
   `pages/sales/Quotations.tsx`, under the Lines card, reads the ordinary

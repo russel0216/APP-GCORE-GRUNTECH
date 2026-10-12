@@ -498,6 +498,33 @@
   font-weight: 700;
 }
 
+/* The grid style: bands of bordered cells, each band flush right. */
+.pt-totals-grid {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.pt-totals-band {
+  display: flex;
+}
+
+.pt-totals-cell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-end;
+  padding: 0 calc(5px * var(--pt));
+  border: 1px solid;
+  margin-left: -1px;
+  line-height: 1.15;
+}
+
+.pt-totals-cell > span {
+  text-transform: uppercase;
+}
+
 .pt-totals-value {
   flex: 1;
   padding-right: calc(7px * var(--pt));

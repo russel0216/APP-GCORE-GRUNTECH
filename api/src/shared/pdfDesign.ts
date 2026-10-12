@@ -167,6 +167,16 @@ const totalsBlock = z.object({
   /** The total itself, and the heavier rule under it. */
   accentColor: color('#5B2A8C'),
   ruleColor: color('#D9D9D9'),
+  /**
+   * false — label and figure on a line each, the quotation's; true — the
+   * rows laid into bordered cells, `perBand` to a band, the figure bold over
+   * its label in capitals (the sales order's, 2026-10-12). In a grid
+   * `rowHeight` is a band's height and no row is set apart as the total.
+   */
+  grid: z.boolean().default(false),
+  perBand: z.number().int().min(1).max(6).default(3),
+  /** The space between two bands of a grid. */
+  bandGap: num(0, 20).default(4),
 });
 
 const signoffsBlock = z.object({
@@ -1050,7 +1060,49 @@ class Renderer {
 
   private totalsHeight(b: TotalsBlock): number {
     const k = b.size / 9;
-    return (this.data.totals ?? []).reduce((n, r) => n + (r.bold ? b.rowHeight + 5.5 : b.rowHeight) * k, 0);
+    const rows = this.data.totals ?? [];
+    if (b.grid) {
+      const bands = Math.ceil(rows.length / b.perBand);
+      return bands ? bands * b.rowHeight * k + (bands - 1) * b.bandGap : 0;
+    }
+    return rows.reduce((n, r) => n + (r.bold ? b.rowHeight + 5.5 : b.rowHeight) * k, 0);
+  }
+
+  /**
+   * The grid: the rows in bordered cells, `perBand` to a band and the
+   * band's cells equal across the block (a band of fewer rows fills from the
+   * left), the figure bold on top and its label in small capitals under it,
+   * both right-aligned.
+   */
+  private drawTotalsGrid(b: TotalsBlock, top: number) {
+    const doc = this.doc;
+    const k = b.size / 9;
+    const rows = this.data.totals ?? [];
+    const bandH = b.rowHeight * k;
+    const pad = 5;
+    const value: Style = { size: b.size + 1.5, italic: false, spacing: 0, upper: false };
+    const label: Style = { size: Math.max(5, b.size - 1.5), italic: false, spacing: 0, upper: true };
+    const cellW = b.w / b.perBand;
+    for (let band = 0; band * b.perBand < rows.length; band++) {
+      const y = top + band * (bandH + b.bandGap);
+      const cells = rows.slice(band * b.perBand, band * b.perBand + b.perBand);
+      const used = cells.length * cellW;
+      const x0 = b.x + b.w - used;
+      doc.save();
+      doc.lineWidth(0.75).strokeColor(b.ruleColor);
+      doc.rect(x0, y, used, bandH).stroke();
+      for (let i = 1; i < cells.length; i++) doc.moveTo(x0 + i * cellW, y).lineTo(x0 + i * cellW, y + bandH).stroke();
+      doc.restore();
+      const gap = (bandH - value.size * LINE - label.size * LINE) / 2;
+      cells.forEach((r, i) => {
+        const x = x0 + i * cellW + pad;
+        const inner = cellW - 2 * pad;
+        const v = laid(doc, [{ text: pdfSafe(r.value), bold: true }], value);
+        const l = laid(doc, [{ text: pdfSafe(r.label.toUpperCase()), bold: false }], label);
+        drawLaid(doc, v, x, y + gap, inner, 'right', value, b.textColor);
+        drawLaid(doc, l, x, y + gap + value.size * LINE, inner, 'right', label, b.textColor);
+      });
+    }
   }
 
   /**
@@ -1058,6 +1110,7 @@ class Renderer {
    * bold row — larger, in the accent colour, over a heavier rule.
    */
   private drawTotals(b: TotalsBlock, top: number) {
+    if (b.grid) return this.drawTotalsGrid(b, top);
     const doc = this.doc;
     const k = b.size / 9;
     const padX = 7;

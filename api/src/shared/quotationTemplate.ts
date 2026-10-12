@@ -206,6 +206,7 @@ export const STANDARD_QUOTATION_DESIGN: PdfDesign = {
     {
       id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 327.48, y: 491, w: 231.8, h: 79,
       size: 9, labelWidth: 129.6, rowHeight: 24.5, textColor: INK, accentColor: PURPLE, ruleColor: RULE,
+      grid: false, perBand: 3, bandGap: 4,
     },
     text({
       id: 'delivery', name: 'Delivery', anchor: 'after', x: L, y: 586, w: W, h: 10.4,

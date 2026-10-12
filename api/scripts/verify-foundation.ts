@@ -2145,10 +2145,45 @@ async function main() {
     const draftOrder = pdfRuns(await renderDesigned(STANDARD_SALES_ORDER_DESIGN, salesOrderSample(false)));
     const draftRun = draftOrder.find((r) => r.text.startsWith('DRAFT'));
     check(
-      'a short order (two lines, the six totals rows with cost) prints on ONE page, approvals and all',
+      'a short order (two lines, the six totals cells with cost) prints on ONE page, approvals and all',
       Math.max(...draftOrder.map((r) => r.page)) === Math.min(...draftOrder.map((r) => r.page)) &&
-        draftOrder.some((r) => r.text === 'PREPARED BY') && draftOrder.some((r) => r.text.startsWith('Margin %')),
+        draftOrder.some((r) => r.text === 'PREPARED BY') && draftOrder.some((r) => r.text === 'MARGIN (%)'),
       String(new Set(draftOrder.map((r) => r.page)).size),
+    );
+    // The owner's slide (2026-10-12): the totals are two bands of three
+    // cells, flush right under the table, the figure over its label — and
+    // no Subtotal or Discount anywhere; the approvals keep to the foot.
+    // The last run of each label: the line table's head says MARGIN too.
+    const cellAt = (label: string) => draftOrder.filter((r) => r.text === label).pop();
+    const totalsBox = STANDARD_SALES_ORDER_DESIGN.blocks.find((b) => b.type === 'totals')!;
+    const [tp, tc, mg, vat, inc, pct] = ['TOTAL PRICE', 'TOTAL COST', 'MARGIN', 'VAT (12%)', 'VAT INCLUDED', 'MARGIN (%)'].map(cellAt);
+    check(
+      'the totals are two bands of three cells, the figure over its label, flush right',
+      !!tp && !!tc && !!mg && !!vat && !!inc && !!pct &&
+        tp.y === tc.y && tc.y === mg.y && vat.y === inc.y && inc.y === pct.y && vat.y > tp.y &&
+        tp.x < tc.x && tc.x < mg.x && tp.x >= totalsBox.x - 1 &&
+        draftOrder.some((r) => r.text === '125,000.00' && r.y < tp.y) && draftOrder.some((r) => r.text === '30.80' && r.y < pct.y),
+      JSON.stringify([tp, mg, vat, pct]),
+    );
+    check(
+      'no Subtotal, no Discount, no "Sum without tax" on the order paper',
+      !draftOrder.some((r) => /^(Subtotal|Discount|Sum without tax)/i.test(r.text)),
+    );
+    const sigNote = draftOrder.find((r) => r.text.startsWith('The name, date and time are considered a digital signature'));
+    const prepared = draftOrder.find((r) => r.text === 'PREPARED BY');
+    check(
+      'the digital-signature note sits right above the approvals table, which ends over the footer rule',
+      !!sigNote && !!prepared && sigNote.y < prepared.y && prepared.y - sigNote.y < 30 && orderBox.y + orderBox.h <= footerRule.y,
+      JSON.stringify([sigNote?.y, prepared?.y]),
+    );
+    const longOrder = pdfRuns(await renderDesigned(STANDARD_SALES_ORDER_DESIGN, salesOrderSample(true)));
+    const longLast = Math.max(...longOrder.map((r) => r.page));
+    const longPrepared = longOrder.find((r) => r.text === 'PREPARED BY');
+    const longCells = longOrder.find((r) => r.text === 'TOTAL PRICE');
+    check(
+      'a long order keeps the approvals at the foot of its LAST page, the totals cells above them',
+      longLast > 0 && longPrepared?.page === longLast && longPrepared.y >= orderBox.y - 1 && !!longCells && longCells.page === longLast && longCells.y < longPrepared.y,
+      JSON.stringify({ longLast, longPrepared, longCells }),
     );
     check(
       'the draft note prints under the footer rule, clear of the approvals table',

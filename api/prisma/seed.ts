@@ -796,17 +796,19 @@ const WORKFLOWS: WorkflowSeed[] = [
     // Since the routing sheet (2026-10-11) the general route — an Industry
     // Specialist's, or anyone's not keyed above: the Team Leader falls back
     // to the Team Leader role, the last step is the CEO / President role.
+    // Step 2 is "Back Support" since 2026-10-12 (the owner's slide); the
+    // route as it stood before — "Admin Back Support" — is `previously`.
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
-      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 2, name: 'Back Support', approverType: 'ROLE', roleKey: 'back_support' },
       { sequence: 3, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
       { sequence: 4, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
     previously: [
-      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
-      { sequence: 2, name: 'Back Support / Admin', approverType: 'ROLE', roleKey: 'back_support' },
+      { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
+      { sequence: 2, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
       { sequence: 3, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
-      { sequence: 4, name: 'CEO approval', approverType: 'ROLE', roleKey: 'executive' },
+      { sequence: 4, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {

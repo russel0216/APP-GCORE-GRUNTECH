@@ -1277,6 +1277,26 @@ function TotalsBody({ block, sample, scale }: { block: TotalsBlock; sample: Samp
   const k = block.size / 9;
   const rows = sample.totals ?? [];
   if (!rows.length) return <span className="pt-placeholder">Totals</span>;
+  if (block.grid) {
+    // Bands of bordered cells, the figure over its label, as the PDF draws them.
+    const cols = block.perBand ?? 3;
+    const bands: (typeof rows)[] = [];
+    for (let i = 0; i < rows.length; i += cols) bands.push(rows.slice(i, i + cols));
+    return (
+      <div className="pt-totals-grid" style={{ gap: (block.bandGap ?? 4) * scale }}>
+        {bands.map((band, b) => (
+          <div key={b} className="pt-totals-band" style={{ height: block.rowHeight * k * scale, width: `${(band.length / cols) * 100}%` }}>
+            {band.map((r, i) => (
+              <div key={i} className="pt-totals-cell" style={{ borderColor: block.ruleColor, color: block.textColor }}>
+                <strong style={{ fontSize: (block.size + 1.5) * scale }}>{r.value}</strong>
+                <span style={{ fontSize: Math.max(5, block.size - 1.5) * scale }}>{r.label}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="pt-totals">
       {rows.map((r, i) => (
@@ -1660,10 +1680,30 @@ function Inspector({
       {block.type === 'totals' && (
         <>
           <h3 className="pt-section">Totals</h3>
+          <Field label="Layout" hint="A grid lays the figures in bordered cells, each over its label, a band of cells to a line.">
+            <select value={block.grid ? 'grid' : 'rows'} disabled={ro} onChange={(e) => onPatch({ grid: e.target.value === 'grid' })}>
+              <option value="rows">Rows — label and figure on a line each</option>
+              <option value="grid">Grid — the figure over its label, in cells</option>
+            </select>
+          </Field>
           <div className="pt-grid-2">
             <NumberField label="Type size" value={block.size} min={6} max={14} disabled={ro} onChange={(v) => onPatch({ size: v }, 'size')} />
-            <NumberField label="Label width (pt)" value={block.labelWidth} min={20} disabled={ro} onChange={(v) => onPatch({ labelWidth: v }, 'labelWidth')} />
-            <NumberField label="Row height (pt)" value={block.rowHeight ?? 24.5} min={12} max={40} disabled={ro} onChange={(v) => onPatch({ rowHeight: v }, 'rowHeight')} />
+            {block.grid ? (
+              <>
+                <NumberField label="Cells to a band" value={block.perBand ?? 3} min={1} max={6} disabled={ro} onChange={(v) => onPatch({ perBand: Math.round(v) }, 'perBand')} />
+                <NumberField label="Gap between bands (pt)" value={block.bandGap ?? 4} min={0} max={20} disabled={ro} onChange={(v) => onPatch({ bandGap: v }, 'bandGap')} />
+              </>
+            ) : (
+              <NumberField label="Label width (pt)" value={block.labelWidth} min={20} disabled={ro} onChange={(v) => onPatch({ labelWidth: v }, 'labelWidth')} />
+            )}
+            <NumberField
+              label={block.grid ? 'Band height (pt)' : 'Row height (pt)'}
+              value={block.rowHeight ?? 24.5}
+              min={12}
+              max={40}
+              disabled={ro}
+              onChange={(v) => onPatch({ rowHeight: v }, 'rowHeight')}
+            />
           </div>
           <ColorField label="Figures" value={block.textColor} disabled={ro} onChange={(v) => onPatch({ textColor: v }, 'textColor')} />
           <ColorField label="The total, and its rule" value={block.accentColor} disabled={ro} onChange={(v) => onPatch({ accentColor: v }, 'accentColor')} />

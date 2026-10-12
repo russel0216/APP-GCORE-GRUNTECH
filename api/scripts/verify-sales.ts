@@ -1768,6 +1768,38 @@ async function main() {
     );
   }
 
+  {
+    // The order after its discount (2026-10-12, the owner's slide): GT-SO-
+    // 2026-0005 — one line at 1,130,000.00, cost 784,778.84, 192,500.00 off
+    // (17.035398%) — prints 937,500.00 with a margin of 152,721.16, 16.29%.
+    const slide = quotationTotals({ lines: [{ amount: 1_130_000, costAmount: 784_778.84 }], discountPct: 17.035398, vatRate: 0.12 });
+    check(
+      "the owner's order after its discount: 937,500.00, margin 152,721.16 at 16.29% — the line and the total agree",
+      slide.net === 937_500 && slide.lines[0].netAmount === 937_500 && slide.lines[0].netMargin === 152_721.16 &&
+        slide.lines[0].netMarginPct === 16.29 && slide.cost.totalMargin === 152_721.16 && slide.cost.netMarginPct === 16.29 &&
+        slide.vatAmount === 112_500 && slide.total === 1_050_000,
+      JSON.stringify({ net: slide.net, line: slide.lines[0], pct: slide.cost.netMarginPct }),
+    );
+    // The lines' shares add up to the net exactly, and their margins to the
+    // total margin, on any order — VAT inclusive too — and the page's copy agrees.
+    let seed = 20261012;
+    const rand = () => ((seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648);
+    let off = 0;
+    for (let n = 0; n < 300; n++) {
+      const lines = Array.from({ length: 1 + Math.floor(rand() * 6) }, () => ({
+        amount: Math.round(rand() * 5_000_000) / 100,
+        costAmount: Math.round(rand() * 3_000_000) / 100,
+      }));
+      const input = { lines, discountPct: Math.round(rand() * 35_000_000) / 1_000_000, vatRate: 0.12, vatInclusive: rand() < 0.5 };
+      const t = quotationTotals(input);
+      const cents = (v: number) => Math.round(v * 100);
+      const sumNet = t.lines.reduce((a, l) => a + cents(l.netAmount), 0);
+      const sumMargin = t.lines.reduce((a, l) => a + cents(l.netMargin ?? 0), 0);
+      if (sumNet !== cents(t.net) || sumMargin !== cents(t.cost.totalMargin) || !same(editorTotals(input), t)) off++;
+    }
+    check('on 300 generated orders the lines after the discount add up to the net and the margin, both sides alike', off === 0, `${off} off`);
+  }
+
   // ── 10. Cost is stripped server-side, and never printed ────────────────────
   // ── SCORO quotations from SCORO's CSV (2026-10-11, the owner's file) ───────
   console.log('\nSCORO quotations from SCORO’s CSV');
@@ -3846,7 +3878,7 @@ async function main() {
       'the order names its four signatures — the team leader (the sales managers, with no "Reports to"), back support, the cost controller, the CEO — each by name, and offers no option',
       soRouteBody.needsApproval === true &&
         soRouteBody.approvalOptions.length === 0 &&
-        soSteps.map((s) => s.name).join(' › ') === 'Team Leader › Admin Back Support › Cost Controller › CEO / President' &&
+        soSteps.map((s) => s.name).join(' › ') === 'Team Leader › Back Support › Cost Controller › CEO / President' &&
         soSteps[0].approvers.some((p) => p.id === manager.id) &&
         soSteps[1].approvers.some((p) => p.id === backSupport.id) &&
         soSteps[2].approvers.some((p) => p.id === costController.id) &&
@@ -3861,12 +3893,12 @@ async function main() {
     const shape = (r: typeof tlSo) => r?.steps.map((st) => `${st.name}${st.held ? '*' : ''}`).join(' › ');
     check(
       "a Team Leader's order: the four steps, their own Team Leader step theirs",
-      shape(tlSo) === 'Team Leader* › Admin Back Support › Cost Controller › CEO / President',
+      shape(tlSo) === 'Team Leader* › Back Support › Cost Controller › CEO / President',
       shape(tlSo),
     );
     check(
       "the CEO / President's order: the four steps, the CEO step theirs, the Team Leader their team's",
-      shape(ceoSo) === 'Team Leader › Admin Back Support › Cost Controller › CEO / President*' &&
+      shape(ceoSo) === 'Team Leader › Back Support › Cost Controller › CEO / President*' &&
         !!ceoSo?.steps[0].approvers.some((p) => p.id === sitLeader.id),
       shape(ceoSo),
     );
@@ -3915,7 +3947,7 @@ async function main() {
     const soPdfOwner = pdfText(soPdfBytes);
     check(
       'the PDF prints through the Sales Order template: customer, PO, totals — and cost and margin for who may see them',
-      soPdfOwner.includes('SALES ORDER') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('Margin sum:') && soPdfOwner.includes('SI / BS No.: SI-4622'),
+      soPdfOwner.includes('SALES ORDER') && soPdfOwner.includes('4500001134') && soPdfOwner.includes('TOTAL COST') && soPdfOwner.includes('SI / BS No.: SI-4622'),
       soPdfOwner.slice(0, 200),
     );
     // A name wraps inside its column (five sign-offs share the block), so the
@@ -3980,27 +4012,66 @@ async function main() {
         ).arrayBuffer(),
       ),
     );
-    check('the same paper for a reader without cost rights carries no cost or margin', !soPdfOther.includes('Margin sum:') && !soPdfOther.includes('20,004.58'));
+    check('the same paper for a reader without cost rights carries no cost or margin', !soPdfOther.includes('TOTAL COST') && !soPdfOther.includes('20,004.58'));
     // The margin as a percentage too (2026-10-11): under each line's margin
     // and as its own row under the margin sum — for cost viewers alone.
     check(
       'the order paper prints the margin as a percentage, per line and in total, only where cost shows',
-      /Margin %:\s*-?[\d.]+%/.test(soPdfOwner) && /\n-?\d+(\.\d)?%\n/.test(soPdfOwner) && !soPdfOther.includes('Margin %'),
-      (soPdfOwner.match(/Margin %:[^\n]*/) ?? [''])[0],
+      // Always two decimals (2026-10-12, the owner's call): "16.29%" under a
+      // line's margin, "16.29" in the MARGIN (%) cell.
+      /\n-?\d+\.\d\d\nMARGIN \(%\)/.test(soPdfOwner) && /\n-?\d+\.\d\d%\n/.test(soPdfOwner) && !soPdfOther.includes('MARGIN (%)'),
+      (soPdfOwner.match(/[^\n]*\nMARGIN \(%\)/) ?? [''])[0],
     );
-    // Rule 6: the money block in the quotation's words — VAT, never "Tax" —
-    // and the bold total its last row: the internal cost and margin go above
-    // the money, as the costing's estimate puts them.
-    const soVatAt = soPdfOwner.search(/VAT \(\d+(\.\d+)?%\):/);
-    const soTotalAt = soPdfOwner.indexOf('Total (PHP):');
+    // The owner's slide (2026-10-12): cells in the quotation's words — VAT,
+    // never "Tax" — Total price, Total cost, Margin, VAT, VAT included and
+    // Margin (%), and no Subtotal or Discount: the lines carry the discount.
     check(
-      'its money block names VAT as the quotation does, never "Tax", and the bold total is its last row',
-      soVatAt >= 0 && !soPdfOwner.includes('Tax (') && soTotalAt > soVatAt &&
-        soPdfOwner.indexOf('Margin sum:') < soPdfOwner.indexOf('Subtotal:') && soPdfOwner.indexOf('Subtotal:') < soVatAt &&
-        !/Total \(PHP\):[\s\S]*(Cost \(PHP\):|Margin sum:)/.test(soPdfOwner),
-      soPdfOwner.slice(soPdfOwner.indexOf('Cost (PHP):') - 20, soTotalAt + 40).replace(/\n/g, ' | '),
+      'its money is the six cells — Total price, Total cost, Margin, VAT, VAT included, Margin (%) — never "Tax", no Subtotal',
+      ['TOTAL PRICE', 'TOTAL COST', 'MARGIN', 'VAT INCLUDED', 'MARGIN (%)'].every((t) => soPdfOwner.includes(`\n${t}`)) &&
+        /VAT \(\d+(\.\d+)?%\)/.test(soPdfOwner) && !soPdfOwner.includes('Tax (') && !/Subtotal|Discount|Sum without tax/i.test(soPdfOwner),
+      soPdfOwner.slice(soPdfOwner.indexOf('TOTAL PRICE') - 60, soPdfOwner.indexOf('MARGIN (%)') + 12).replace(/\n/g, ' | '),
     );
-    check('and the same words for a reader without cost rights', /VAT \(\d+(\.\d+)?%\):/.test(soPdfOther) && soPdfOther.includes('Total (PHP):') && !soPdfOther.includes('Tax ('));
+    check(
+      'and a reader without cost rights gets Total price, VAT and VAT included alone',
+      ['TOTAL PRICE', 'VAT INCLUDED'].every((t) => soPdfOther.includes(t)) && /VAT \(\d+(\.\d+)?%\)/.test(soPdfOther) &&
+        !soPdfOther.includes('TOTAL COST') && !soPdfOther.includes('MARGIN (%)') && !soPdfOther.includes('Tax ('),
+    );
+    // A discount is carried by the lines (2026-10-12, "don't reflect the
+    // discount"): the order's own lines at 10% off, on the paper and the page.
+    const soLinesNow = await prisma.salesOrderLine.findMany({ where: { orderId: so1Body.id }, orderBy: { sortOrder: 'asc' } });
+    const soBefore = await prisma.salesOrder.findUniqueOrThrow({ where: { id: so1Body.id }, select: { discountPct: true } });
+    await prisma.salesOrder.update({ where: { id: so1Body.id }, data: { discountPct: 10 } });
+    const soNet = quotationTotals({ lines: soLinesNow, discountPct: 10, vatRate: 0.12 });
+    const discPaper = pdfText(
+      Buffer.from(await (await fetch(`${BASE}/sales-orders/${so1Body.id}/pdf`, { headers: { Authorization: `Bearer ${salesToken}` } })).arrayBuffer()),
+    );
+    const fmt2 = (v: number) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    check(
+      'with a discount, the paper prints each line after it and no discount row',
+      soNet.lines.filter((l, i) => !soLinesNow[i].isHeading).every((l) => discPaper.includes(fmt2(l.netAmount))) &&
+        discPaper.includes(fmt2(soNet.net)) && !/Discount|Subtotal/i.test(discPaper) && !discPaper.includes(fmt2(soNet.subtotal)) &&
+        // No list price printed (where it is not also somebody's cost figure).
+        !soLinesNow.some(
+          (l, i) =>
+            !l.isHeading &&
+            Number(l.amount) !== soNet.lines[i].netAmount &&
+            !soLinesNow.some((c) => c.costAmount != null && Number(c.costAmount) === Number(l.amount)) &&
+            discPaper.includes(`\n${fmt2(Number(l.amount))}\n`),
+        ),
+      discPaper.slice(discPaper.indexOf('MARGIN') - 10, discPaper.indexOf('TOTAL PRICE') + 20).replace(/\n/g, ' | '),
+    );
+    const discPage = (await http(salesToken, 'GET', `/sales-orders/${so1Body.id}`)).body as unknown as {
+      netOfTax: number;
+      lines: { isHeading: boolean; amount: number; netAmount: number; netUnitPrice: number; quantity: number; netMargin?: number | null }[];
+    };
+    check(
+      'and the page sends the same after-discount figures beside the list price the editor keeps',
+      discPage.netOfTax === soNet.netOfTax &&
+        discPage.lines.every((l, i) => l.netAmount === soNet.lines[i].netAmount && l.amount === soNet.lines[i].amount) &&
+        discPage.lines.filter((l) => !l.isHeading).every((l, i) => l.netMargin === soNet.lines.filter((_, j) => !discPage.lines[j].isHeading)[i].netMargin),
+      JSON.stringify(discPage.lines.map((l) => [l.amount, l.netAmount, l.netUnitPrice, l.netMargin])),
+    );
+    await prisma.salesOrder.update({ where: { id: so1Body.id }, data: { discountPct: soBefore.discountPct } });
     // Reopened and issued again with no route standing (the issue route
     // refuses while one is active, so the direct issue is written as that
     // route writes it): the four signatures of the approval it was reopened

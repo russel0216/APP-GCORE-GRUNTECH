@@ -1,7 +1,14 @@
 # Plan — the sales order paper as the owner's slide (2026-10-12)
 
-Written 2026-10-12 for the next session (Opus 5.5). It is a plan, not a
-change: nothing below is built. Read `CLAUDE.md` first — rule 6 (one dress,
+Written 2026-10-12 for the next session (Opus 5.5). **Built the same day**;
+CLAUDE.md ("Sales orders" — "The order shows NO discount") is the record.
+The owner answered the three questions: the order PAGE shows the
+after-discount figures too; the step is "Back Support"; every percentage
+is two decimals. Departures from the plan: the totals block's fields are
+`grid` / `perBand` / `bandGap` (not `style` / `columns` / `gridGap`, which
+clash with the sign-off and line boxes in the editor's patch type); a
+line's margin is its share of `netOfTax` less its cost, so the lines add
+up to the total margin on a VAT-inclusive order too. Read `CLAUDE.md` first — rule 6 (one dress,
 `renderDesigned`), "Sales orders (2026-10-07)" (the designed order, its
 cost columns, the one-row approvals table) and "Quotation PDF template"
 (anchors `first` / `after` / `last`, `designSchema`, the editor's copy in

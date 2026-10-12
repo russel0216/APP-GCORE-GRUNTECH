@@ -38,6 +38,29 @@ const out = (v: Prisma.Decimal) => Number(r2(v).toFixed(2));
 /** A percentage of `base`, to one decimal; null when the base is nothing. */
 const pctOf = (part: Prisma.Decimal, base: Prisma.Decimal) =>
   base.isZero() ? null : Number(part.div(base).mul(100).toDecimalPlaces(1, Prisma.Decimal.ROUND_HALF_UP).toFixed(1));
+/** The same, to TWO decimals — the sales order's figures (2026-10-12, the owner's call). */
+const pct2Of = (part: Prisma.Decimal, base: Prisma.Decimal) =>
+  base.isZero() ? null : Number(part.div(base).mul(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toFixed(2));
+
+/**
+ * `total` split across the lines in proportion to their amounts, each share
+ * rounded to the centavo and the remainder put on the largest line, so the
+ * shares add up to `total` exactly (the `groupShares` rule).
+ */
+function spread(total: Prisma.Decimal, weights: Prisma.Decimal[]): Prisma.Decimal[] {
+  const sum = weights.reduce((a, w) => a.add(w), new Prisma.Decimal(0));
+  if (sum.isZero()) return weights.map(() => new Prisma.Decimal(0));
+  const shares = weights.map((w) => r2(total.mul(w).div(sum)));
+  const rest = total.sub(shares.reduce((a, x) => a.add(x), new Prisma.Decimal(0)));
+  if (!rest.isZero()) {
+    let big = 0;
+    weights.forEach((w, i) => {
+      if (w.abs().gt(weights[big].abs())) big = i;
+    });
+    shares[big] = shares[big].add(rest);
+  }
+  return shares;
+}
 
 export interface QuotationLineMoney {
   amount: Money;
@@ -65,6 +88,16 @@ export interface LineMargin {
   /** margin ÷ amount. */
   marginPct: number | null;
   kind: 'inHouse' | 'outsourced' | 'unassigned';
+  /**
+   * The line AFTER the quote-level discount (2026-10-12, the owner's call: the
+   * sales order shows no discount — its lines carry it): the line's share of
+   * `net`, the shares adding up to `net` exactly.
+   */
+  netAmount: number;
+  /** The line's share of `netOfTax` less its cost — the lines add up to `cost.totalMargin`. */
+  netMargin: number | null;
+  /** netMargin ÷ the line's share of `netOfTax`, to two decimals. */
+  netMarginPct: number | null;
 }
 
 export interface CostPanel {
@@ -84,6 +117,8 @@ export interface CostPanel {
   totalMarginPct: number | null;
   inHouseMarginPct: number | null;
   outsourcedMarginPct: number | null;
+  /** `totalMarginPct` to two decimals — the sales order's figure. */
+  netMarginPct: number | null;
   /** Lines with a cost entered, against all lines — a panel on half the lines is half a panel. */
   costedLines: number;
   lineCount: number;
@@ -132,6 +167,8 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
   const cost = { inHouse: zero(), outsourced: zero(), unassigned: zero() };
   const revenue = { inHouse: zero(), outsourced: zero(), unassigned: zero() };
   let costedLines = 0;
+  const netShares = spread(net, amounts);
+  const taxFreeShares = spread(netOfTax, amounts);
 
   const lines: LineMargin[] = input.lines.map((l, i) => {
     const kind = lineKind(l);
@@ -142,12 +179,16 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
     cost[kind] = cost[kind].add(c ?? 0);
     revenue[kind] = revenue[kind].add(amount);
     const margin = c ? amount.sub(c) : null;
+    const netMargin = c ? taxFreeShares[i].sub(c) : null;
     return {
       amount: out(amount),
       costAmount: c ? out(c) : null,
       margin: margin ? out(margin) : null,
       marginPct: margin ? pctOf(margin, amount) : null,
       kind,
+      netAmount: out(netShares[i]),
+      netMargin: netMargin ? out(netMargin) : null,
+      netMarginPct: netMargin ? pct2Of(netMargin, taxFreeShares[i]) : null,
     };
   });
 
@@ -183,6 +224,7 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
       totalMarginPct: pctOf(totalMargin, netOfTax),
       inHouseMarginPct: pctOf(inHouseMargin, netOfTax),
       outsourcedMarginPct: pctOf(outsourcedMargin, netOfTax),
+      netMarginPct: pct2Of(totalMargin, netOfTax),
       costedLines,
       lineCount: input.lines.filter((l) => !l.isHeading).length,
     },

@@ -159,6 +159,8 @@ function presentOrder(order: Record<string, unknown>, showCost: boolean) {
     vatAmount: num(order.vatAmount as Prisma.Decimal),
     total: num(order.total as Prisma.Decimal),
     net: totals ? totals.net : num(order.subtotal as Prisma.Decimal) - num(order.discountAmount as Prisma.Decimal),
+    // The order's "Total price" — after the discount, before VAT (2026-10-12).
+    ...(totals ? { netOfTax: totals.netOfTax } : {}),
   };
   if (lines) {
     presented.lines = lines.map((l, n) => {
@@ -167,6 +169,10 @@ function presentOrder(order: Record<string, unknown>, showCost: boolean) {
         quantity: num(l.quantity as Prisma.Decimal),
         unitPrice: num(l.unitPrice as Prisma.Decimal),
         amount: num(l.amount as Prisma.Decimal),
+        // What the order's page and paper show (2026-10-12): the line after
+        // the discount. The editor keeps the list price and the discount.
+        netUnitPrice: netUnitPrice(totals!.lines[n].netAmount, l.quantity as Prisma.Decimal, l.unitPrice as Prisma.Decimal),
+        netAmount: totals!.lines[n].netAmount,
       };
       if (!showCost) return stripLineCost(line);
       const m = totals!.lines[n];
@@ -176,6 +182,8 @@ function presentOrder(order: Record<string, unknown>, showCost: boolean) {
         costAmount: m.costAmount,
         margin: m.margin,
         marginPct: m.marginPct,
+        netMargin: m.netMargin,
+        netMarginPct: m.netMarginPct,
       };
     });
     if (showCost && totals) presented.costPanel = totals.cost;
@@ -1239,9 +1247,21 @@ async function orderRouteSlots(order: { id: string; status: string; total: Prism
  * without it no cost cell, cost total or margin is in the data at all — a
  * layout that places the cost columns prints them empty.
  */
-/** A margin's share as the paper prints it: "23.45%", two decimals at most. */
+/** A margin's share as the paper prints it: "16.29%", always two decimals (2026-10-12, the owner's call). */
 function marginPctText(pct: number): string {
-  return `${Number(pct.toFixed(2))}%`;
+  return `${pct.toFixed(2)}%`;
+}
+
+/**
+ * A line's unit price AFTER the order's discount, as the paper and the page
+ * show it (2026-10-12, the owner's call: "don't reflect the discount" — the
+ * lines carry it): the line's share of the net over its quantity, to the
+ * centavo; the list price where there is no quantity.
+ */
+export function netUnitPrice(netAmount: number, quantity: Prisma.Decimal | number, listPrice: Prisma.Decimal | number): number {
+  const q = new Prisma.Decimal(quantity);
+  if (q.isZero()) return num(listPrice);
+  return Number(new Prisma.Decimal(netAmount).div(q).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toFixed(2));
 }
 
 export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: boolean): Promise<DesignData> {
@@ -1282,7 +1302,9 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
     'order.net': amount(totals.net),
     'order.vat': amount(totals.vatAmount),
     'order.total': amount(totals.total),
-    'order.marginPct': showCost && totals.cost.totalMarginPct != null ? marginPctText(totals.cost.totalMarginPct) : '',
+    'order.marginPct': showCost && totals.cost.netMarginPct != null ? marginPctText(totals.cost.netMarginPct) : '',
+    'order.cost': showCost ? amount(totals.cost.totalCost) : '',
+    'order.margin': showCost ? amount(totals.cost.totalMargin) : '',
     'quotation.number': order.quotation.number,
     'quotation.subject': order.quotation.subject,
     'customer.name': order.customer.name,
@@ -1317,8 +1339,9 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
         qtyUnit: `${qtyText} ${l.unit}`,
         qty: qtyText,
         unit: l.unit,
-        unitPrice: amount(num(l.unitPrice)),
-        amount: amount(num(l.amount)),
+        // After the discount: the order paper shows no discount, its lines carry it.
+        unitPrice: amount(netUnitPrice(m.netAmount, l.quantity, l.unitPrice)),
+        amount: amount(m.netAmount),
         group: l.group ?? '',
         ...(showCost
           ? {
@@ -1326,41 +1349,39 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
                 title: l.costAmount == null ? '' : amount(num(l.costAmount)),
                 body: l.providerSupplier?.name ?? l.providerUser?.name ?? undefined,
               },
-              // The margin and, under it, its share of the line's amount.
+              // The margin after the discount and, under it, its share.
               margin:
-                m.margin == null
+                m.netMargin == null
                   ? ''
-                  : m.marginPct == null
-                    ? amount(m.margin)
-                    : { title: amount(m.margin), body: marginPctText(m.marginPct) },
+                  : m.netMarginPct == null
+                    ? amount(m.netMargin)
+                    : { title: amount(m.netMargin), body: marginPctText(m.netMarginPct) },
             }
           : {}),
       },
     });
   });
 
-  // The money block in the quotation's words (VAT, never "Tax"), the bold
-  // total its last row (rule 6). The internal cost and margin — only where
-  // the caller may see cost — go first, as the costing's estimate puts them:
-  // what the order costs and earns, then what the customer is charged.
-  const totalRows: PdfTotal[] = [];
-  if (showCost) {
-    totalRows.push({ label: `Cost (${currency}):`, value: amount(totals.cost.totalCost) });
-    totalRows.push({ label: 'Margin sum:', value: amount(totals.cost.totalMargin) });
-    if (totals.cost.totalMarginPct != null) {
-      totalRows.push({ label: 'Margin %:', value: marginPctText(totals.cost.totalMarginPct) });
-    }
-  }
-  totalRows.push({ label: 'Subtotal:', value: amount(totals.subtotal) });
-  if (totals.discountAmount > 0) {
-    totalRows.push({
-      label: `Discount (${num(order.discountPct).toFixed(num(order.discountPct) % 1 ? 2 : 0)}%):`,
-      value: `-${amount(totals.discountAmount)}`,
-    });
-    if (!order.vatInclusive) totalRows.push({ label: 'Sum without tax:', value: amount(totals.net) });
-  }
-  totalRows.push({ label: order.vatInclusive ? `VAT included (${rate}):` : `VAT (${rate}):`, value: amount(totals.vatAmount) });
-  totalRows.push({ label: `Total (${currency}):`, value: amount(totals.total), bold: true });
+  // The money as the owner's slide has it (2026-10-12): cells, the figure
+  // over its label — Total price (the sum after the discount, before VAT),
+  // Total cost and Margin, then VAT, VAT included and Margin (%) — and NO
+  // discount: the lines already carry it. Cost and margin only for a caller
+  // who may see cost (the standard layout lays them out three to a band).
+  const vatLabel = order.vatInclusive ? `VAT included (${rate})` : `VAT (${rate})`;
+  const totalRows: PdfTotal[] = showCost
+    ? [
+        { label: 'Total price', value: amount(totals.netOfTax) },
+        { label: 'Total cost', value: amount(totals.cost.totalCost) },
+        { label: 'Margin', value: amount(totals.cost.totalMargin) },
+        { label: vatLabel, value: amount(totals.vatAmount) },
+        { label: order.vatInclusive ? 'Total' : 'VAT included', value: amount(totals.total), bold: true },
+        { label: 'Margin (%)', value: totals.cost.netMarginPct == null ? '—' : totals.cost.netMarginPct.toFixed(2) },
+      ]
+    : [
+        { label: 'Total price', value: amount(totals.netOfTax) },
+        { label: vatLabel, value: amount(totals.vatAmount) },
+        { label: order.vatInclusive ? 'Total' : 'VAT included', value: amount(totals.total), bold: true },
+      ];
 
   // Prepared by the author; then the route as the workflow names its steps
   // (rule 6) — Team Leader, Back Support / Admin, Cost Controller, CEO

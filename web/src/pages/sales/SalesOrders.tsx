@@ -83,6 +83,11 @@ interface SoLine {
   costNote?: string | null;
   margin?: number | null;
   marginPct?: number | null;
+  /** After the order's discount — what the order's page and paper show (2026-10-12). */
+  netUnitPrice?: number;
+  netAmount?: number;
+  netMargin?: number | null;
+  netMarginPct?: number | null;
   providerSupplier?: { id: string; name: string } | null;
   providerUser?: { id: string; name: string } | null;
 }
@@ -127,7 +132,9 @@ interface SalesOrderDetailRow extends SalesOrderRow {
   /** Optional routes the submitter may tick — "Add the CEO as approver". */
   approvalOptions?: { id: string; label: string }[];
   approvalRoutes?: { standard: ApprovalRoute | null; options: { id: string; route: ApprovalRoute | null }[] } | null;
-  costPanel?: { totalCost: number; inHouseCost: number; outsourcedCost: number; totalMargin: number };
+  costPanel?: { totalCost: number; inHouseCost: number; outsourcedCost: number; totalMargin: number; netMarginPct?: number | null };
+  /** "Total price": after the discount, before VAT. */
+  netOfTax?: number;
 }
 
 /** The statuses, as the list's tabs — in the order an order lives them. */
@@ -657,8 +664,8 @@ export function SalesOrderDetail() {
                     <td className="right mono">
                       {l.quantity} {l.unit}
                     </td>
-                    <td className="right mono">{formatMoney(l.unitPrice, order.quotation.currency)}</td>
-                    <td className="right mono">{formatMoney(l.amount, order.quotation.currency)}</td>
+                    <td className="right mono">{formatMoney(l.netUnitPrice ?? l.unitPrice, order.quotation.currency)}</td>
+                    <td className="right mono">{formatMoney(l.netAmount ?? l.amount, order.quotation.currency)}</td>
                     {showCost && (
                       <td className="right mono">
                         {l.costAmount == null ? <span className="faint">—</span> : formatMoney(l.costAmount, order.quotation.currency)}
@@ -668,7 +675,16 @@ export function SalesOrderDetail() {
                       </td>
                     )}
                     {showCost && (
-                      <td className="right mono">{l.margin == null ? <span className="faint">—</span> : formatMoney(l.margin, order.quotation.currency)}</td>
+                      <td className="right mono">
+                        {l.netMargin == null ? (
+                          <span className="faint">—</span>
+                        ) : (
+                          <>
+                            {formatMoney(l.netMargin, order.quotation.currency)}
+                            {l.netMarginPct != null && <div className="faint">{l.netMarginPct.toFixed(2)}%</div>}
+                          </>
+                        )}
+                      </td>
                     )}
                   </tr>
                 ),
@@ -677,31 +693,28 @@ export function SalesOrderDetail() {
           </table>
         </div>
 
+        {/*
+          The order's money as its paper prints it (2026-10-12, the owner's
+          call): no discount — the lines carry it — Total price, VAT and VAT
+          included, and for a cost viewer Total cost, Margin and Margin (%).
+        */}
         <div className="so-totals-wrap">
           <dl className="so-totals">
-            <dt>Subtotal</dt>
-            <dd className="mono">{formatMoney(order.subtotal, order.quotation.currency)}</dd>
-            {order.discountAmount > 0 && (
-              <>
-                <dt>Discount ({order.discountPct}%)</dt>
-                <dd className="mono">-{formatMoney(order.discountAmount, order.quotation.currency)}</dd>
-              </>
-            )}
-            <dt>{order.vatInclusive ? `VAT included (${(order.vatRate * 100).toFixed(0)}%)` : `Tax (${(order.vatRate * 100).toFixed(0)}%)`}</dt>
+            <dt>Total price</dt>
+            <dd className="mono">{formatMoney(order.netOfTax ?? order.net, order.quotation.currency)}</dd>
+            <dt>{order.vatInclusive ? `VAT included (${(order.vatRate * 100).toFixed(0)}%)` : `VAT (${(order.vatRate * 100).toFixed(0)}%)`}</dt>
             <dd className="mono">{formatMoney(order.vatAmount, order.quotation.currency)}</dd>
-            <dt className="so-grand">Total (PHP)</dt>
+            <dt className="so-grand">{order.vatInclusive ? 'Total' : 'VAT included'}</dt>
             <dd className="mono so-grand">{formatMoney(order.total, order.quotation.currency)}</dd>
           </dl>
           {showCost && order.costPanel && (
             <dl className="so-totals">
               <dt>Total cost</dt>
               <dd className="mono">{formatMoney(order.costPanel.totalCost, order.quotation.currency)}</dd>
-              <dt>In-house</dt>
-              <dd className="mono">{formatMoney(order.costPanel.inHouseCost, order.quotation.currency)}</dd>
-              <dt>Outsourced</dt>
-              <dd className="mono">{formatMoney(order.costPanel.outsourcedCost, order.quotation.currency)}</dd>
-              <dt className="so-grand">Total margin</dt>
-              <dd className="mono so-grand">{formatMoney(order.costPanel.totalMargin, order.quotation.currency)}</dd>
+              <dt>Margin</dt>
+              <dd className="mono">{formatMoney(order.costPanel.totalMargin, order.quotation.currency)}</dd>
+              <dt className="so-grand">Margin (%)</dt>
+              <dd className="mono so-grand">{order.costPanel.netMarginPct == null ? '—' : order.costPanel.netMarginPct.toFixed(2)}</dd>
             </dl>
           )}
         </div>

@@ -127,6 +127,25 @@ function fixed(a: Dec, dp: number): number {
 const r2 = (v: Dec) => toDP(v, 2);
 const out = (v: Dec) => fixed(v, 2);
 const pctOf = (part: Dec, base: Dec) => (isZero(base) ? null : fixed(toDP(mul(div(part, base), D(100)), 1), 1));
+const pct2Of = (part: Dec, base: Dec) => (isZero(base) ? null : fixed(toDP(mul(div(part, base), D(100)), 2), 2));
+const absDec = (a: Dec): Dec => ({ n: abs(a.n), s: a.s });
+
+/** `spread` in quotation.ts: shares of `total` by weight, the remainder on the largest. */
+function spread(total: Dec, weights: Dec[]): Dec[] {
+  const zero: Dec = { n: ZERO_N, s: 0 };
+  const sum = weights.reduce((a, w) => add(a, w), zero);
+  if (isZero(sum)) return weights.map(() => zero);
+  const shares = weights.map((w) => r2(div(mul(total, w), sum)));
+  const rest = sub(total, shares.reduce((a, x) => add(a, x), zero));
+  if (!isZero(rest)) {
+    let big = 0;
+    weights.forEach((w, i) => {
+      if (cmp(absDec(w), absDec(weights[big])) > 0) big = i;
+    });
+    shares[big] = add(shares[big], rest);
+  }
+  return shares;
+}
 
 // ── The mirror ──────────────────────────────────────────────────────────────
 
@@ -152,6 +171,9 @@ export interface LineMargin {
   margin: number | null;
   marginPct: number | null;
   kind: 'inHouse' | 'outsourced' | 'unassigned';
+  netAmount: number;
+  netMargin: number | null;
+  netMarginPct: number | null;
 }
 
 export interface CostPanel {
@@ -169,6 +191,7 @@ export interface CostPanel {
   totalMarginPct: number | null;
   inHouseMarginPct: number | null;
   outsourcedMarginPct: number | null;
+  netMarginPct: number | null;
   costedLines: number;
   lineCount: number;
 }
@@ -220,6 +243,8 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
   const cost = { inHouse: zero(), outsourced: zero(), unassigned: zero() };
   const revenue = { inHouse: zero(), outsourced: zero(), unassigned: zero() };
   let costedLines = 0;
+  const netShares = spread(net, amounts);
+  const taxFreeShares = spread(netOfTax, amounts);
 
   const lines: LineMargin[] = input.lines.map((l, i) => {
     const kind = lineKind(l);
@@ -230,12 +255,16 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
     cost[kind] = add(cost[kind], c ?? zero());
     revenue[kind] = add(revenue[kind], amount);
     const margin = c ? sub(amount, c) : null;
+    const netMargin = c ? sub(taxFreeShares[i], c) : null;
     return {
       amount: out(amount),
       costAmount: c ? out(c) : null,
       margin: margin ? out(margin) : null,
       marginPct: margin ? pctOf(margin, amount) : null,
       kind,
+      netAmount: out(netShares[i]),
+      netMargin: netMargin ? out(netMargin) : null,
+      netMarginPct: netMargin ? pct2Of(netMargin, taxFreeShares[i]) : null,
     };
   });
 
@@ -270,6 +299,7 @@ export function quotationTotals(input: QuotationTotalsInput): QuotationTotals {
       totalMarginPct: pctOf(totalMargin, netOfTax),
       inHouseMarginPct: pctOf(inHouseMargin, netOfTax),
       outsourcedMarginPct: pctOf(outsourcedMargin, netOfTax),
+      netMarginPct: pct2Of(totalMargin, netOfTax),
       costedLines,
       lineCount: input.lines.filter((l) => !l.isHeading).length,
     },

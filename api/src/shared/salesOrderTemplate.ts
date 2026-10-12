@@ -47,10 +47,12 @@ export const SALES_ORDER_FIELDS: DesignField[] = [
   { key: 'order.vatRate', label: 'VAT rate, 12%', group: 'Money', sample: '12%' },
   { key: 'order.subtotal', label: 'Subtotal', group: 'Money', sample: '125,000.00' },
   { key: 'order.discount', label: 'Discount', group: 'Money', sample: '' },
-  { key: 'order.net', label: 'Sum without tax', group: 'Money', sample: '125,000.00' },
+  { key: 'order.net', label: 'Total price (after the discount, before VAT)', group: 'Money', sample: '125,000.00' },
   { key: 'order.vat', label: 'VAT', group: 'Money', sample: '15,000.00' },
   { key: 'order.total', label: 'Total', group: 'Money', sample: '140,000.00' },
-  { key: 'order.marginPct', label: 'Margin % of the sum without tax (cost viewers only)', group: 'Money', sample: '30.8%' },
+  { key: 'order.cost', label: 'Total cost (cost viewers only)', group: 'Money', sample: '86,500.00' },
+  { key: 'order.margin', label: 'Margin (cost viewers only)', group: 'Money', sample: '38,500.00' },
+  { key: 'order.marginPct', label: 'Margin % of the total price (cost viewers only)', group: 'Money', sample: '30.80%' },
   { key: 'quotation.number', label: 'Quotation number it books', group: 'Quotation', sample: '0012610001' },
   { key: 'quotation.subject', label: 'Quotation subject', group: 'Quotation', sample: 'Supply and installation of an air compressor' },
   { key: 'customer.name', label: 'Customer, registered name', group: 'Customer', sample: 'Sample Manufacturing Corp.' },
@@ -99,7 +101,7 @@ export function salesOrderSample(long = false): DesignData {
       cost: { title: (cost * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }), body: provider },
       margin: {
         title: ((price - cost) * qty).toLocaleString('en-PH', { minimumFractionDigits: 2 }),
-        body: `${Number((((price - cost) / price) * 100).toFixed(1))}%`,
+        body: `${(((price - cost) / price) * 100).toFixed(2)}%`,
       },
     },
   });
@@ -117,13 +119,14 @@ export function salesOrderSample(long = false): DesignData {
     title: 'Sales Order (sample)',
     fields,
     rows,
+    // The order's cells (2026-10-12): no discount, no subtotal — the lines carry it.
     totals: [
-      { label: 'Cost (PHP):', value: '86,500.00' },
-      { label: 'Margin sum:', value: '38,500.00' },
-      { label: 'Margin %:', value: '30.8%' },
-      { label: 'Subtotal:', value: '125,000.00' },
-      { label: 'VAT (12%):', value: '15,000.00' },
-      { label: 'Total (PHP):', value: '140,000.00', bold: true },
+      { label: 'Total price', value: '125,000.00' },
+      { label: 'Total cost', value: '86,500.00' },
+      { label: 'Margin', value: '38,500.00' },
+      { label: 'VAT (12%)', value: '15,000.00' },
+      { label: 'VAT included', value: '140,000.00', bold: true },
+      { label: 'Margin (%)', value: '30.80' },
     ],
     signatories: [
       {
@@ -134,8 +137,10 @@ export function salesOrderSample(long = false): DesignData {
         email: 'maria.santos@gruntech.com',
         at: new Date('2026-10-07T01:30:00Z'),
       },
-      { role: 'Noted by' },
-      { role: 'Approved by' },
+      { role: 'Team Leader', name: 'Jose Reyes', at: new Date('2026-10-07T02:10:00Z') },
+      { role: 'Back Support', name: 'Ana Cruz' },
+      { role: 'Cost Controller', name: 'Ben Lim' },
+      { role: 'CEO / President', name: 'Carter Gasiong' },
     ],
   };
 }
@@ -241,29 +246,38 @@ export const STANDARD_SALES_ORDER_DESIGN: PdfDesign = {
       ],
       size: 9, headColor: PURPLE, headingColor: GREEN, textColor: INK, bodyColor: '#555555', ruleColor: RULE,
     },
-    {
-      // Compact rows (2026-10-11, the owner's call): the six rows with cost
-      // fit above the approvals table, so a short order prints on one page.
-      id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 560, y: 372, w: 245.89, h: 90,
-      size: 8.5, labelWidth: 130, rowHeight: 15, textColor: INK, accentColor: PURPLE, ruleColor: RULE,
-    },
     text({
-      id: 'notes', name: 'Notes', anchor: 'after', x: L, y: 372, w: 480, h: 21.8, showIf: 'order.comment',
-      text: '**Notes:**\n{{order.comment}}', size: 9, lineGap: 1,
-    }),
-    text({
-      id: 'cancelled', name: 'Cancellation', anchor: 'after', x: L, y: 405, w: 480, h: 10.4, showIf: 'order.cancelReason',
-      text: '**Cancelled:** {{order.cancelReason}}', size: 9,
-    }),
-    text({
-      id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 418, w: 480, h: 8.1,
+      id: 'internal-note', name: 'Internal note', anchor: 'after', x: L, y: 364, w: 480, h: 8.1,
       text: 'Internal booking record — not for the customer. The sales invoice is issued by Finance.',
       size: 7, italic: true, color: GREY,
     }),
     {
+      // The owner's slide (2026-10-12): two bands of three cells under the
+      // table, flush right — Total price, Total cost, Margin; VAT, VAT
+      // included, Margin (%) — the figure over its label, and no discount.
+      id: 'totals', name: 'Totals', type: 'totals', anchor: 'after', x: 541, y: 376, w: 264.89, h: 65,
+      size: 8.5, labelWidth: 130, rowHeight: 33, textColor: INK, accentColor: PURPLE, ruleColor: RULE,
+      grid: true, perBand: 3, bandGap: 3,
+    },
+    text({
+      id: 'notes', name: 'Notes', anchor: 'after', x: L, y: 380, w: 480, h: 21.8, showIf: 'order.comment',
+      text: '**Notes:**\n{{order.comment}}', size: 9, lineGap: 1,
+    }),
+    text({
+      id: 'cancelled', name: 'Cancellation', anchor: 'after', x: L, y: 410, w: 480, h: 10.4, showIf: 'order.cancelReason',
+      text: '**Cancelled:** {{order.cancelReason}}', size: 9,
+    }),
+    text({
+      // Over the approvals, on the last page with them (2026-10-12, the owner's slide).
+      id: 'signature-note', name: 'Signature note', anchor: 'last', x: L, y: 463, w: 480, h: 8.7,
+      text: 'The name, date and time are considered a digital signature of approval', size: 7.5, italic: true, color: GREY,
+    }),
+    {
       // One bordered row across the foot of the last page (2026-10-11, the
-      // owner's call): each approver's step, name and date — nothing else.
-      id: 'signoffs', name: 'Approvals', type: 'signoffs', anchor: 'last', x: L, y: 482, w: W, h: 50,
+      // owner's call): each approver's step, name and date — nothing else. It
+      // keeps its bottom edge just over the footer rule (2026-10-12: "the
+      // approval always sits at the bottom of the document").
+      id: 'signoffs', name: 'Approvals', type: 'signoffs', anchor: 'last', x: L, y: 477, w: W, h: 60,
       size: 8, colWidth: 150, headColor: PURPLE, textColor: INK, ruleColor: RULE,
       nameSize: 9.5, showPosition: false, showPhone: false, showEmail: false, style: 'table',
     },
