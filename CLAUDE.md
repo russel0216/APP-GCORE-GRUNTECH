@@ -505,7 +505,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,860 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,878 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -540,9 +540,10 @@ preparer's own signature, the stand-in and the team's leader, and 4 on
 foundation and 4 on sales for the sales order paper of the owner's slide, and
 17 on sales for the contact person on the paper, its quick-add and the boxes
 that remember, and 2 on foundation and 9 on sales for the attachments printed
-behind the quotation and the sales order):
+behind the quotation and the sales order, and 9 on sales and 9 on pipeline
+for the Forecast's breakdowns and its date range):
 foundation
-349, masters 92, sales 585, costing 157, pipeline 92, calendar 96, numbering
+349, masters 92, sales 594, costing 157, pipeline 101, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -1571,6 +1572,32 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
   its closing dates (`closingFrom`/`closingTo`, declared keys — rule 16); the
   consolidated list groups the quotations under their period with the stage
   on `StatusBadge` (`STAGE_TONES`, exported from `Quotations.tsx`).
+- **Breakdowns and a chosen range** (2026-10-12, the owner's call:
+  "Forecast of Sales Person, by Product Group, by Team" and "a specified
+  date range"; `docs/notes/P-forecast-breakdowns-2026-10-12.md`). Each row
+  carries its `team` (`quotationTeamOf`; a lead's is its assignee's) and
+  its `groups` (`groupShares()` of its value over the value revision's
+  lines; a lead is one "No group" share), and `buildForecast` returns
+  `byOwner`, `byTeam` and `byGroup` — one `breakdownOf()` shape: a line
+  per person / team / group with a cell per period plus earlier, later,
+  undated and total, value summed in cents and weighted rounded once per
+  cell, the catch-all ("No team", "No group") last. A row counts once per
+  line, so a quotation split across groups counts under each, but values
+  add up to the forecast's own (verify-pipeline asserts all three). The
+  page's **Breakdown** panel switches Salesperson · Team · Product group
+  (`?by=`), a matrix of weighted over value with a bar list; a
+  salesperson's cell links to the quotation list on their closing dates.
+  **Filters** `?teamId=` (an id or `none`) and `?group=` (a group key or
+  `none`) — the group filter keeps only that group's SHARE of each
+  quotation; an unknown one is a 400. **The range**: `?range=` presets
+  (`rangePreset()`: this month / quarter / year, next 30 / 90 days, next
+  12 months — on the Manila day, beating a typed from/to), the first and
+  last periods CLIPPED to from/to ("5–31 Oct 2026", their links carrying
+  the clipped dates; a period inside keeps its name), and
+  `period=range` ("Whole range") — the window as one bucket. The CSV
+  appends `Team` and `Product groups`; the PDF prints the chosen
+  breakdown (`?by=`) after the totals, one column per period up to six,
+  else "In the window".
 
 ### Sales: board, calendar, costing
 

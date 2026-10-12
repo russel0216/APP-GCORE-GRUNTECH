@@ -4,7 +4,12 @@ The owner's words: "on forecast /g-ops/forecast I want to maximize this to:
 1. Forecast of Sales Person, 2. Forecast by Product Group, 3. Forecast by
 Team." And: "I want to have a specified date range."
 
-Status: **planned, not built.**
+Status: **built 2026-10-12** on the defaults below — see CLAUDE.md,
+"Forecast (2026-10-08)". Two changes from the plan: the CSV appends `Team`
+and `Product groups` columns to every quotation row (a second table would
+break a sheet built on the export) and the PDF prints the chosen breakdown
+(`?by=`) as a table after the totals; the API still sends `owners` beside
+`byOwner`, for any caller reading it.
 
 ## What is there today
 

@@ -489,6 +489,60 @@ async function main() {
   check('an unknown period is a 400', fcBad.status === 400 && errorOf(fcBad).includes('week, month, quarter or year'), `${fcBad.status}`);
   const fcBadDay = await http(managerToken, 'GET', '/pipeline/forecast?period=month&from=2026-13-01');
   check('a malformed date is a 400', fcBadDay.status === 400, `${fcBadDay.status}`);
+
+  // The breakdowns, the date range and the two filters (2026-10-12).
+  interface FcCell { count: number; value: number; weighted: number }
+  interface FcLine extends FcCell { id: string; name: string; periods: Record<string, FcCell>; earlier: FcCell; later: FcCell; undated: FcCell }
+  interface FcFull extends FcBody { from: string; to: string; today: string; preset: string | null; byOwner: FcLine[]; byTeam: FcLine[]; byGroup: FcLine[]; totals: { count: number; value: number; weighted: number } }
+  const full = fc.body as unknown as FcFull;
+  const centsOf = (n: number) => Math.round(n * 100);
+  const sums = (lines: FcLine[]) => lines.reduce((t, l) => t + centsOf(l.value), 0);
+  check(
+    'by salesperson: the manager is the one line, and their November cell is November',
+    full.byOwner?.length === 1 && full.byOwner[0].id === manager.id && centsOf(full.byOwner[0].periods['2026-11'].value) === centsOf(nov?.value ?? -1),
+    JSON.stringify(full.byOwner?.map((l) => [l.name, l.periods])),
+  );
+  check(
+    'by team and by product group, the lines add up to everything in view',
+    sums(full.byTeam) === centsOf(full.totals.value) && sums(full.byGroup) === centsOf(full.totals.value),
+    `${sums(full.byTeam)} ${sums(full.byGroup)} ${centsOf(full.totals.value)}`,
+  );
+  const someGroup = full.byGroup?.[0];
+  const byGroupFc = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&group=${encodeURIComponent(someGroup?.id || 'none')}`);
+  const grouped = byGroupFc.body as unknown as FcFull;
+  check(
+    'a product group filter shows only that group’s share of each quotation',
+    byGroupFc.status === 200 && centsOf(grouped.totals.value) === centsOf(someGroup?.value ?? -1) && grouped.byGroup.length === 1,
+    `${byGroupFc.status} ${grouped.totals?.value} vs ${someGroup?.name} ${someGroup?.value}`,
+  );
+  const someTeam = full.byTeam?.[0];
+  const byTeamFc = await http(managerToken, 'GET', `/pipeline/forecast?${fcQuery}&teamId=${encodeURIComponent(someTeam?.id ?? 'none')}`);
+  check(
+    'a team filter keeps that team’s deals',
+    byTeamFc.status === 200 && centsOf((byTeamFc.body as unknown as FcFull).totals.value) === centsOf(someTeam?.value ?? -1),
+    `${byTeamFc.status} ${byTeamFc.text.slice(0, 120)}`,
+  );
+  const preset = await http(managerToken, 'GET', `/pipeline/forecast?period=month&range=next-30&scope=all&ownerId=${manager.id}`);
+  const presetBody = preset.body as unknown as FcFull;
+  check(
+    'a ready-made range runs from today: Next 30 days',
+    preset.status === 200 && presetBody.preset === 'next-30' && presetBody.from === presetBody.today && presetBody.buckets[0].from === presetBody.today,
+    `${preset.status} ${presetBody.from} ${presetBody.today}`,
+  );
+  const wholeRange = await http(managerToken, 'GET', `/pipeline/forecast?period=range&from=2026-11-01&to=2026-12-31&scope=all&ownerId=${manager.id}`);
+  const wholeBody = wholeRange.body as unknown as FcFull;
+  check(
+    '"Whole range" is one period holding the two months',
+    wholeRange.status === 200 && wholeBody.buckets.length === 1 && wholeBody.buckets[0].count === (nov?.count ?? 0) + (dec?.count ?? 0),
+    `${wholeRange.status} ${JSON.stringify(wholeBody.buckets?.map((b) => [b.key, b.count]))}`,
+  );
+  const badRange = await http(managerToken, 'GET', '/pipeline/forecast?range=last-week');
+  const badTeam = await http(managerToken, 'GET', '/pipeline/forecast?teamId=nope');
+  const badGroup = await http(managerToken, 'GET', '/pipeline/forecast?group=nope');
+  check('an unknown range, team or group is a 400', [badRange, badTeam, badGroup].every((r) => r.status === 400), `${badRange.status} ${badTeam.status} ${badGroup.status}`);
+  check('the CSV appends Team and Product groups', fcCsv.text.split('\n')[0].trim().endsWith('Overdue,Team,Product groups'), fcCsv.text.split('\n')[0]);
+  const byPdf = await http(managerToken, 'GET', `/pipeline/forecast.pdf?${fcQuery}&by=group`);
+  check('the paper prints the chosen breakdown', byPdf.status === 200 && byPdf.contentType.startsWith('application/pdf'), `${byPdf.status}`);
   const fcDenied = await http(sellerToken, 'GET', '/pipeline/forecast');
   check('GET /pipeline/forecast without gops.forecast.view_all is 403', fcDenied.status === 403, `${fcDenied.status}`);
 

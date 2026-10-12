@@ -61,6 +61,9 @@ import { DEFAULT_STAGES } from '../src/shared/pipelineStages';
 import { valueRevision as valuedRevisionOf } from '../src/shared/pipeline';
 import {
   buildForecast,
+  rangePreset,
+  type RangePreset,
+  type ForecastLine,
   defaultWindow,
   isoWeek,
   periodBucket,
@@ -983,7 +986,15 @@ async function main() {
     tooWide = true;
   }
   check('a window of more than MAX_BUCKETS periods is refused', tooWide);
-  const fRow = (n: number, closing: string | null, value: number, probability: number, owner = 'A'): ForecastRow => ({
+  const fRow = (
+    n: number,
+    closing: string | null,
+    value: number,
+    probability: number,
+    owner = 'A',
+    team: ForecastRow['team'] = null,
+    groups?: ForecastRow['groups'],
+  ): ForecastRow => ({
     kind: 'quotation',
     id: `q${n}`,
     number: `Q-${n}`,
@@ -1000,6 +1011,8 @@ async function main() {
     weighted: weightedOf(value, probability),
     overdue: closing !== null && closing < '2026-10-08',
     link: '/',
+    team,
+    groups: groups ?? [{ key: '', group: 'No group', value }],
   });
   const fc = buildForecast({
     period: 'month',
@@ -1024,6 +1037,87 @@ async function main() {
   // A: 33.0033 + 66.0066 + 40.004 + 50.005 = 189.0189; B: 150.015 + 540.054 = 690.069.
   check('owners are ranked by weighted value, each with their own share', fc.owners.map((o) => `${o.id}:${o.count}:${o.weighted}`).join() === 'B:2:690.07,A:4:189.02', fc.owners.map((o) => `${o.id}:${o.count}:${o.weighted}`).join());
   check('rows within a group are in closing-date order', fc.buckets[0].rows.map((r) => r.number).join() === 'Q-1,Q-2');
+
+  // ── The breakdowns and the date range (2026-10-12) ───────────────────────
+  console.log('\nThe Forecast: by salesperson, team and product group, over a chosen range');
+  const KAT = { id: 'kat', code: 'KAT', name: 'Key Account Team' };
+  const HIT = { id: 'hit', code: 'HIT', name: 'Healthcare Industry Team' };
+  const fb = buildForecast({
+    period: 'month',
+    from: '2026-10-05',
+    to: '2026-11-20',
+    today: '2026-10-08',
+    rows: [
+      fRow(11, '2026-10-02', 1000, 50, 'A', KAT, [{ key: 'omega air', group: 'OMEGA AIR', value: 700 }, { key: 'services', group: 'SERVICES', value: 300 }]),
+      fRow(12, '2026-10-20', 2000.01, 33, 'A', HIT, [{ key: 'omega air', group: 'OMEGA AIR', value: 2000.01 }]),
+      fRow(13, '2026-11-20', 300.03, 90, 'B', KAT, [{ key: 'services', group: 'SERVICES', value: 100.01 }, { key: 'omega air', group: 'OMEGA AIR', value: 200.02 }]),
+      fRow(14, '2026-11-21', 500, 10, 'B'), // after the range's last day
+      fRow(15, null, 400.4, 25, 'C', HIT),
+    ],
+  });
+  check(
+    'a range that starts and ends inside a month cuts its first and last period to its own days',
+    fb.buckets.map((b) => `${b.key}|${b.label}|${b.from}|${b.to}`).join() ===
+      '2026-10|5–31 Oct 2026|2026-10-05|2026-10-31,2026-11|1–20 Nov 2026|2026-11-01|2026-11-20',
+    fb.buckets.map((b) => `${b.key}|${b.label}|${b.from}|${b.to}`).join(),
+  );
+  check('a period the range covers whole keeps its name', periodsBetween('2026-09-15', '2026-12-10', 'month')[1].label === 'October 2026');
+  check(
+    'the day before the range is earlier, the day after it later',
+    fb.earlier.rows.map((r) => r.number).join() === 'Q-11' && fb.later.rows.map((r) => r.number).join() === 'Q-14',
+  );
+  const whole = periodsBetween('2026-10-05', '2026-11-20', 'range');
+  check('"Whole range" is one period over exactly the range', whole.length === 1 && whole[0].label === '5 Oct – 20 Nov 2026' && whole[0].from === '2026-10-05' && whole[0].to === '2026-11-20', JSON.stringify(whole));
+  check(
+    'the presets read the Manila day they are asked on',
+    [
+      ['this-month', '2026-10-01', '2026-10-31'],
+      ['this-quarter', '2026-10-01', '2026-12-31'],
+      ['this-year', '2026-01-01', '2026-12-31'],
+      ['next-30', '2026-10-12', '2026-11-10'],
+      ['next-90', '2026-10-12', '2027-01-09'],
+      ['next-12m', '2026-10-12', '2027-10-11'],
+    ].every(([p, f, t]) => {
+      const r = rangePreset(p as RangePreset, '2026-10-12');
+      return r.from === f && r.to === t;
+    }) && rangePreset('next-12m', '2028-02-29').to === '2029-02-27',
+  );
+  const addsUp = (lines: ForecastLine[]) => {
+    const cents = (n: number) => Math.round(n * 100);
+    const sumOf = (pick: (l: ForecastLine) => number) => lines.reduce((t, l) => t + cents(pick(l)), 0);
+    return (
+      fb.buckets.every((b) => sumOf((l) => l.periods[b.key].value) === cents(b.value)) &&
+      sumOf((l) => l.earlier.value) === cents(fb.earlier.value) &&
+      sumOf((l) => l.later.value) === cents(fb.later.value) &&
+      sumOf((l) => l.undated.value) === cents(fb.undated.value) &&
+      sumOf((l) => l.value) === cents(fb.totals.value) &&
+      // The weighted sum is rounded once per cell: within a centavo per line.
+      Math.abs(sumOf((l) => l.weighted) - cents(fb.totals.weighted)) <= lines.length
+    );
+  };
+  check(
+    'by salesperson: one line each, ranked by weighted, adding up to the forecast',
+    fb.byOwner.map((l) => `${l.id}:${l.count}`).join() === 'A:2,B:2,C:1' && addsUp(fb.byOwner),
+    fb.byOwner.map((l) => `${l.id}:${l.count}:${l.weighted}`).join(),
+  );
+  check(
+    'by team: a quotation under its team, "No team" last, adding up to the forecast',
+    fb.byTeam.map((l) => `${l.name}:${l.count}`).join() === 'KAT:2,HIT:2,No team:1' && fb.byTeam[0].hint === 'Key Account Team' && addsUp(fb.byTeam),
+    fb.byTeam.map((l) => `${l.name}:${l.count}:${l.weighted}`).join(),
+  );
+  const omega = fb.byGroup.find((l) => l.name === 'OMEGA AIR')!;
+  check(
+    'by product group: each quotation split by its lines, counted under every group it touches, the values adding up',
+    fb.byGroup.map((l) => l.name).join() === 'OMEGA AIR,SERVICES,No group' &&
+      omega.count === 3 && omega.value === 2900.03 && omega.periods['2026-11'].value === 200.02 && omega.earlier.value === 700 &&
+      addsUp(fb.byGroup),
+    fb.byGroup.map((l) => `${l.name}:${l.count}:${l.value}`).join(),
+  );
+  check(
+    'a period cell of the breakdown is that period’s share: Salesperson A in October',
+    fb.byOwner[0].periods['2026-10'].count === 1 && fb.byOwner[0].periods['2026-10'].weighted === 660 && fb.byOwner[0].earlier.value === 1000,
+    JSON.stringify(fb.byOwner[0].periods),
+  );
 
   const b2 = board(
     [

@@ -56,15 +56,6 @@
   color: var(--warn);
 }
 
-.forecast .fc-owners {
-  margin-top: var(--block-gap);
-}
-
-.forecast .fc-owners h4 {
-  margin: 0 0 var(--s-2);
-  color: var(--muted);
-}
-
 .forecast .fc-group + .fc-group {
   margin-top: var(--block-gap);
 }
@@ -79,4 +70,70 @@
 
 .forecast .fc-group-head .faint {
   font-weight: 400;
+}
+
+/*
+  The breakdown (2026-10-12): by salesperson, team or product group, one
+  column per period. The name column stays put while the periods scroll; a
+  cell is the weighted figure over the full value, smaller.
+*/
+.forecast .fc-breakdown {
+  margin-top: var(--block-gap);
+}
+
+.forecast .fc-breakdown-head {
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.forecast .fc-breakdown-note {
+  margin: var(--s-2) 0 var(--s-3);
+  font-size: var(--fs-sm);
+}
+
+.forecast .fc-matrix-wrap {
+  margin-top: var(--s-4);
+}
+
+.forecast .fc-matrix th,
+.forecast .fc-matrix td {
+  white-space: nowrap;
+}
+
+.forecast .fc-matrix .fc-matrix-name {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  text-align: left;
+  font-weight: 600;
+  min-width: 12rem;
+}
+
+.forecast .fc-matrix thead th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+
+.forecast .fc-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.forecast .fc-matrix .fc-cell-sub,
+.forecast .fc-matrix-name .fc-cell-sub {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.forecast .fc-matrix-total,
+.forecast .fc-matrix tfoot td,
+.forecast .fc-matrix tfoot th {
+  font-weight: 600;
 }

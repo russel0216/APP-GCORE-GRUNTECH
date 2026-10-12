@@ -21,13 +21,51 @@ import { STAGE_TONES } from './Quotations';
   as a link.
 */
 
-type Period = 'week' | 'month' | 'quarter' | 'year';
+type Period = 'week' | 'month' | 'quarter' | 'year' | 'range';
 const PERIODS: { value: Period; label: string; word: string }[] = [
   { value: 'week', label: 'Weekly', word: 'week' },
   { value: 'month', label: 'Monthly', word: 'month' },
   { value: 'quarter', label: 'Quarterly', word: 'quarter' },
   { value: 'year', label: 'Annually', word: 'year' },
+  // The whole window as one period (2026-10-12): a range no calendar period names.
+  { value: 'range', label: 'Whole range', word: 'range' },
 ];
+
+/** The ready-made ranges (2026-10-12); the server resolves each on the Manila day (`rangePreset()`). */
+const RANGES: { value: string; label: string }[] = [
+  { value: 'this-month', label: 'This month' },
+  { value: 'this-quarter', label: 'This quarter' },
+  { value: 'this-year', label: 'This year' },
+  { value: 'next-30', label: 'Next 30 days' },
+  { value: 'next-90', label: 'Next 90 days' },
+  { value: 'next-12m', label: 'Next 12 months' },
+];
+
+/** The breakdowns (2026-10-12, the owner's call: by salesperson, by product group, by team). */
+type By = 'owner' | 'team' | 'group';
+const BYS: { value: By; label: string }[] = [
+  { value: 'owner', label: 'Salesperson' },
+  { value: 'team', label: 'Team' },
+  { value: 'group', label: 'Product group' },
+];
+const isBy = (v: string | null): v is By => BYS.some((b) => b.value === v);
+
+interface Cell {
+  count: number;
+  value: number;
+  weighted: number;
+}
+
+interface Line extends Cell {
+  id: string;
+  name: string;
+  hint?: string;
+  overdue: number;
+  periods: Record<string, Cell>;
+  earlier: Cell;
+  later: Cell;
+  undated: Cell;
+}
 const isPeriod = (v: string | null): v is Period => PERIODS.some((p) => p.value === v);
 
 interface Row {
@@ -75,8 +113,13 @@ interface ForecastData {
   undated: Group;
   inWindow: { count: number; value: number; weighted: number; overdue: number };
   totals: { count: number; value: number; weighted: number; overdue: number };
-  owners: { id: string; name: string; count: number; value: number; weighted: number }[];
+  byOwner: Line[];
+  byTeam: Line[];
+  byGroup: Line[];
   people: { id: string; name: string }[];
+  teams: { id: string; code: string; name: string }[];
+  groupChoices: { key: string; name: string }[];
+  preset: string | null;
   includeLeads: boolean;
   scope: 'mine' | 'team' | 'all';
   ownerId: string | null;
@@ -103,14 +146,35 @@ export function Forecast() {
   const scope: Scope = scopeParam === 'mine' || scopeParam === 'all' ? scopeParam : scopeParam === 'team' && hasTeam ? 'team' : defaultScope;
   const ownerId = params.get('ownerId') ?? '';
   const leads = params.get('leads') === 'true';
+  const range = params.get('range') ?? '';
+  const teamId = params.get('teamId') ?? '';
+  const group = params.get('group') ?? '';
+  const byParam = params.get('by');
+  const by: By = isBy(byParam) ? byParam : 'owner';
 
   const query = qs({
     period,
-    from,
-    to,
+    range,
+    from: range ? '' : from,
+    to: range ? '' : to,
     scope: scope === 'all' ? '' : scope,
     ownerId,
+    teamId,
+    group,
     leads: leads ? 'true' : '',
+  });
+  // The paper prints the breakdown the page shows.
+  const paperQuery = qs({
+    period,
+    range,
+    from: range ? '' : from,
+    to: range ? '' : to,
+    scope: scope === 'all' ? '' : scope,
+    ownerId,
+    teamId,
+    group,
+    leads: leads ? 'true' : '',
+    by: by === 'owner' ? '' : by,
   });
 
   /** Writes one or more keys back to the URL (replace, never a history entry); '' or null removes the key. */
@@ -155,8 +219,9 @@ export function Forecast() {
                 type="button"
                 className={p.value === period ? 'active' : ''}
                 aria-pressed={p.value === period}
-                // A new period opens on its own default window — twelve weeks, twelve months, eight quarters, three years.
-                onClick={() => set({ period: p.value, from: null, to: null })}
+                // A new period opens on its own default window — twelve weeks, twelve months, eight quarters,
+                // three years — unless a range was chosen: the range stays, cut into the new periods.
+                onClick={() => set(range || from || to || p.value === 'range' ? { period: p.value } : { period: p.value, from: null, to: null })}
               >
                 {p.label}
               </button>
@@ -179,7 +244,7 @@ export function Forecast() {
           <button
             type="button"
             className="btn"
-            onClick={() => openPdf(`/api/pipeline/forecast.pdf${query}`, () => toast('error', 'The PDF could not be opened'))}
+            onClick={() => openPdf(`/api/pipeline/forecast.pdf${paperQuery}`, () => toast('error', 'The PDF could not be opened'))}
           >
             Print
           </button>
@@ -187,19 +252,42 @@ export function Forecast() {
       </div>
 
       <div className="row fc-controls">
+        {/* A specified date range (2026-10-12): a ready-made one, or Custom — typing a date. */}
+        <label className="fc-control">
+          <span>Range</span>
+          <select
+            value={range || (from || to ? 'custom' : '')}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === 'custom') set({ range: null, from: data?.from ?? from, to: data?.to ?? to });
+              else set({ range: v || null, from: null, to: null });
+            }}
+          >
+            <option value="">Default window</option>
+            {RANGES.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.label}
+              </option>
+            ))}
+            <option value="custom">Custom</option>
+          </select>
+        </label>
         <label className="fc-control">
           <span>From</span>
-          <input type="date" value={data?.from ?? from} onChange={(e) => set({ from: e.target.value })} />
+          <input
+            type="date"
+            value={data?.from ?? from}
+            onChange={(e) => e.target.value && set({ range: null, from: e.target.value, to: data?.to ?? to })}
+          />
         </label>
         <label className="fc-control">
           <span>To</span>
-          <input type="date" value={data?.to ?? to} onChange={(e) => set({ to: e.target.value })} />
+          <input
+            type="date"
+            value={data?.to ?? to}
+            onChange={(e) => e.target.value && set({ range: null, from: data?.from ?? from, to: e.target.value })}
+          />
         </label>
-        {(from || to) && (
-          <button type="button" className="btn btn-sm" onClick={() => set({ from: null, to: null })}>
-            Default window
-          </button>
-        )}
         <label className="fc-control">
           <span>Salesperson</span>
           <select value={ownerId} onChange={(e) => set({ ownerId: e.target.value })}>
@@ -209,6 +297,30 @@ export function Forecast() {
                 {p.name}
               </option>
             ))}
+          </select>
+        </label>
+        <label className="fc-control">
+          <span>Team</span>
+          <select value={teamId} onChange={(e) => set({ teamId: e.target.value })}>
+            <option value="">Every team</option>
+            {(data?.teams ?? []).map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.code} — {t.name}
+              </option>
+            ))}
+            <option value="none">No team</option>
+          </select>
+        </label>
+        <label className="fc-control">
+          <span>Product group</span>
+          <select value={group} onChange={(e) => set({ group: e.target.value })}>
+            <option value="">Every group</option>
+            {(data?.groupChoices ?? []).map((g) => (
+              <option key={g.key} value={g.key}>
+                {g.name}
+              </option>
+            ))}
+            <option value="none">No group</option>
           </select>
         </label>
         <Checkbox checked={leads} onChange={(v) => set({ leads: v ? 'true' : null })} label="Include leads without a quotation" />
@@ -224,13 +336,28 @@ export function Forecast() {
           hint={`Open quotations${leads ? ' and leads' : ''} appear here under the ${periodWord} their expected closing date falls in. None are open in this view.`}
         />
       ) : (
-        <ForecastBody data={data} scope={scope} leads={leads} />
+        <ForecastBody data={data} scope={scope} leads={leads} by={by} onBy={(b) => set({ by: b === 'owner' ? null : b })} grouped={!!group} />
       )}
     </div>
   );
 }
 
-function ForecastBody({ data, scope, leads }: { data: ForecastData; scope: Scope; leads: boolean }) {
+function ForecastBody({
+  data,
+  scope,
+  leads,
+  by,
+  onBy,
+  grouped,
+}: {
+  data: ForecastData;
+  scope: Scope;
+  leads: boolean;
+  by: By;
+  onBy: (b: By) => void;
+  /** A product group is chosen: every figure is that group's share. */
+  grouped: boolean;
+}) {
   const groups: { key: string; label: string; group: Group; from?: string; to?: string }[] = [
     { key: 'earlier', label: `Before ${formatDate(parseDay(data.from))}`, group: data.earlier },
     ...data.buckets.map((b) => ({ key: b.key, label: b.label, group: b, from: b.from, to: b.to })),
@@ -337,33 +464,10 @@ function ForecastBody({ data, scope, leads }: { data: ForecastData; scope: Scope
           ) : (
             <p className="muted">Nothing closes in this window.</p>
           )}
-          {data.owners.length > 1 && (
-            <div className="fc-owners">
-              <h4>By salesperson</h4>
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>Who</th>
-                    <th className="right">{leads ? 'Deals' : 'Quotations'}</th>
-                    <th className="right">Value</th>
-                    <th className="right">Weighted</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.owners.map((o) => (
-                    <tr key={o.id}>
-                      <td>{o.name}</td>
-                      <td className="right mono">{o.count}</td>
-                      <td className="right mono">{formatMoney(o.value)}</td>
-                      <td className="right mono">{formatMoney(o.weighted)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </Panel>
       </div>
+
+      <Breakdown data={data} by={by} onBy={onBy} scope={scope} leads={leads} grouped={grouped} />
 
       <section className="card fc-list">
         <h3 className="card-title">{leads ? 'Quotations and leads' : 'Quotations'} by expected closing</h3>
@@ -422,5 +526,137 @@ function ForecastBody({ data, scope, leads }: { data: ForecastData; scope: Scope
           ))}
       </section>
     </>
+  );
+}
+
+/**
+ * The breakdown (2026-10-12, the owner's call: "forecast of sales person, by
+ * product group, by team"): one row per salesperson, team or product group,
+ * its weighted figure in each period of the window (the value small under
+ * it), then before / after / no date and the total; the foot is the
+ * forecast's own figures, which the lines add up to. A product group's row
+ * is its share of each quotation, split by line amount.
+ */
+function Breakdown({
+  data,
+  by,
+  onBy,
+  scope,
+  leads,
+  grouped,
+}: {
+  data: ForecastData;
+  by: By;
+  onBy: (b: By) => void;
+  scope: Scope;
+  leads: boolean;
+  grouped: boolean;
+}) {
+  const lines = by === 'owner' ? data.byOwner : by === 'team' ? data.byTeam : data.byGroup;
+  const word = BYS.find((b) => b.value === by)!.label;
+  // A salesperson's figures open the quotation list on that person (and that period's closing dates).
+  const ownerLink = (id: string, fromDay?: string, toDay?: string) =>
+    `/g-ops/quotations${qs({ ownerId: id, closingFrom: fromDay, closingTo: toDay, scope: scope === 'mine' ? '' : scope })}`;
+  const cell = (c: Cell | undefined, link?: string) => {
+    if (!c || c.count === 0) return <span className="faint">—</span>;
+    const figure = (
+      <>
+        <span className="fc-cell-main">{formatMoney(c.weighted)}</span>
+        <span className="fc-cell-sub">{formatMoney(c.value)}</span>
+      </>
+    );
+    return link ? <Link to={link} className="fc-cell">{figure}</Link> : <span className="fc-cell">{figure}</span>;
+  };
+  const foot = (c: Cell) => cell(c);
+  const peak = Math.max(...lines.map((l) => l.weighted), 0);
+  return (
+    <section className="card fc-breakdown">
+      <div className="row fc-breakdown-head">
+        <h3 className="card-title">By {word.toLowerCase()}</h3>
+        <div className="scope-switch" role="group" aria-label="Break the forecast down by">
+          {BYS.map((b) => (
+            <button key={b.value} type="button" className={b.value === by ? 'active' : ''} aria-pressed={b.value === by} onClick={() => onBy(b.value)}>
+              {b.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="muted fc-breakdown-note">
+        Weighted (value × odds) in each period, the full value under it.
+        {by === 'group' && !grouped && ' A quotation is split across its product groups by its line amounts, so it may count under more than one.'}
+        {by === 'team' && " A quotation counts under the team it was tagged with, else its author's."}
+      </p>
+      {lines.length === 0 ? (
+        <p className="muted">Nothing in this view.</p>
+      ) : (
+        <>
+          {peak > 0 && lines.length > 1 && (
+            <BarList
+              slices={lines.map((l) => ({
+                label: l.hint ? `${l.name} — ${l.hint}` : l.name,
+                value: l.weighted,
+                display: `${formatMoney(l.weighted)} · ${l.count}`,
+                to: by === 'owner' ? ownerLink(l.id) : undefined,
+              }))}
+            />
+          )}
+          <div className="table-wrap fc-matrix-wrap">
+            <table className="data fc-matrix">
+              <thead>
+                <tr>
+                  <th>{word}</th>
+                  <th className="right">{by === 'group' || !leads ? 'Quotations' : 'Deals'}</th>
+                  {data.buckets.map((b) => (
+                    <th key={b.key} className="right">
+                      {b.label}
+                    </th>
+                  ))}
+                  <th className="right">Before</th>
+                  <th className="right">After</th>
+                  <th className="right">No date</th>
+                  <th className="right">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l) => (
+                  <tr key={l.id || 'none'}>
+                    <td className="fc-matrix-name">
+                      {by === 'owner' ? <Link to={ownerLink(l.id)}>{l.name}</Link> : l.name}
+                      {l.hint && <span className="fc-cell-sub">{l.hint}</span>}
+                      {l.overdue > 0 && <span className="fc-past"> · {l.overdue} past closing</span>}
+                    </td>
+                    <td className="right mono">{l.count}</td>
+                    {data.buckets.map((b) => (
+                      <td key={b.key} className="right mono">
+                        {cell(l.periods[b.key], by === 'owner' ? ownerLink(l.id, b.from, b.to) : undefined)}
+                      </td>
+                    ))}
+                    <td className="right mono">{cell(l.earlier)}</td>
+                    <td className="right mono">{cell(l.later)}</td>
+                    <td className="right mono">{cell(l.undated)}</td>
+                    <td className="right mono fc-matrix-total">{cell(l)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td className="fc-matrix-name">Everything in view</td>
+                  <td className="right mono">{data.totals.count}</td>
+                  {data.buckets.map((b) => (
+                    <td key={b.key} className="right mono">
+                      {foot(b)}
+                    </td>
+                  ))}
+                  <td className="right mono">{foot(data.earlier)}</td>
+                  <td className="right mono">{foot(data.later)}</td>
+                  <td className="right mono">{foot(data.undated)}</td>
+                  <td className="right mono fc-matrix-total">{foot(data.totals)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
   );
 }

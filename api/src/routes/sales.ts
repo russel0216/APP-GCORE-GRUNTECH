@@ -21,7 +21,7 @@ import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
 import { nextNumber, previewNext, setCounter, type CounterMove } from '../shared/numbering';
 import { notify } from '../shared/notifications';
-import { rememberGroups } from '../shared/quotationGroups';
+import { groupKey, rememberGroups } from '../shared/quotationGroups';
 import {
   submitForApproval,
   onApprovalSettled,
@@ -92,6 +92,8 @@ import {
   leadStageStatuses,
   valueRevision,
   standsApproved,
+  groupShares,
+  NO_GROUP,
 } from '../shared/pipeline';
 import { manilaDayEnd, manilaDayKey, manilaDayStart } from '../shared/day';
 import { env } from '../env';
@@ -103,7 +105,16 @@ import {
   FORECAST_PERIODS,
   isDayKey,
   periodsBetween,
+  rangePreset,
+  RANGE_PRESETS,
+  RANGE_PRESET_LABELS,
+  NO_GROUP_KEY,
+  NO_TEAM_ID,
+  FORECAST_BREAKDOWNS,
   weightedOf,
+  type ForecastBreakdown,
+  type ForecastLine,
+  type RangePreset,
   type Forecast,
   type ForecastPeriod,
   type ForecastRow,
@@ -4231,6 +4242,13 @@ interface ForecastLoad {
   ownerId: string | null;
   /** What narrowed it, for the paper's reference line. */
   filters: string[];
+  /** The ready-made range the window came from, when one was asked for. */
+  preset: RangePreset | null;
+  teamId: string | null;
+  group: string | null;
+  /** The pickers: the active teams and the active product groups (keys as the rows carry them). */
+  teams: { id: string; code: string; name: string }[];
+  groupChoices: { key: string; name: string }[];
 }
 
 /**
@@ -4244,14 +4262,18 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
   const me = currentUser(req);
   const query = req.query as Record<string, string | undefined>;
   const period = (query.period ?? 'month') as ForecastPeriod;
-  if (!FORECAST_PERIODS.includes(period)) throw badRequest('Period is week, month, quarter or year');
+  if (!FORECAST_PERIODS.includes(period)) throw badRequest('Period is week, month, quarter or year — or range, the whole window as one');
   const today = manilaDayKey(new Date());
   const defaults = defaultWindow(today, period);
   for (const [key, label] of [['from', 'From'], ['to', 'To']] as const) {
     if (query[key] && !isDayKey(query[key]!)) throw badRequest(`${label} is a date written YYYY-MM-DD`);
   }
-  const from = query.from ?? defaults.from;
-  const to = query.to ?? defaults.to;
+  // A ready-made range (2026-10-12) wins over typed dates; it is resolved on
+  // the Manila day here, so the page and the paper read the same days.
+  const preset = query.range ? choice(query.range, RANGE_PRESETS, 'Range', (r) => RANGE_PRESET_LABELS[r])! : null;
+  const presetDays = preset ? rangePreset(preset, today) : null;
+  const from = presetDays?.from ?? query.from ?? defaults.from;
+  const to = presetDays?.to ?? query.to ?? defaults.to;
   if (from > to) throw badRequest('From is after To');
   try {
     periodsBetween(from, to, period);
@@ -4260,6 +4282,25 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
   }
   const includeLeads = query.leads === 'true';
   const ownerId = query.ownerId?.trim() || null;
+  // The Team and Product group filters (2026-10-12): a team id or `none`, a group key or `none`.
+  const teams = await prisma.industry.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+    select: { id: true, code: true, name: true },
+  });
+  const activeGroups = await prisma.quotationGroup.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    select: { key: true, name: true },
+  });
+  const teamId = query.teamId?.trim() || null;
+  if (teamId && teamId !== NO_TEAM_ID && !(await prisma.industry.findUnique({ where: { id: teamId }, select: { id: true } }))) {
+    throw badRequest('That team is not on file');
+  }
+  const group = query.group?.trim() || null;
+  if (group && group !== 'none' && !(await prisma.quotationGroup.findUnique({ where: { key: group }, select: { id: true } }))) {
+    throw badRequest('That product group is not on file');
+  }
 
   const stages = await pipelineStages();
   const team = await teamOf(me.id);
@@ -4272,10 +4313,18 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
     where: { AND: [quotationWhere, { outcome: { in: [...FORECAST_OUTCOMES] } }] },
     include: {
       customer: { select: { id: true, name: true } },
-      owner: { select: { id: true, name: true } },
-      revisions: { select: { revision: true, status: true, total: true } },
+      owner: { select: { id: true, name: true, ...OWNER_TEAM_SELECT.select } },
+      team: TEAM_REF_SELECT,
+      revisions: {
+        select: { revision: true, status: true, total: true, items: { select: { group: true, amount: true, isHeading: true } } },
+      },
     },
   });
+  // A group's key is the master's (`groupKey`); a quotation's lines split its value across them.
+  const sharesOf = (value: number, lines: { group: string | null; amount: Prisma.Decimal | number; isHeading?: boolean }[]) => {
+    const shares = groupShares(value, lines, groupKey).map((g) => ({ key: g.group === NO_GROUP ? NO_GROUP_KEY : g.key, group: g.group, value: g.value }));
+    return shares.length ? shares : [{ key: NO_GROUP_KEY, group: NO_GROUP, value }];
+  };
   const rows: ForecastRow[] = quotations.map((q) => {
     const closing = q.expectedClosing ? q.expectedClosing.toISOString().slice(0, 10) : null;
     const value = quotationValue(q.revisions);
@@ -4297,6 +4346,8 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
       weighted: weightedOf(value, q.probability),
       overdue: closing !== null && closing < today,
       link: `/g-ops/quotations/${q.id}`,
+      team: quotationTeamOf(q),
+      groups: sharesOf(value, valueRevision(q.revisions)?.items ?? []),
     };
   });
   if (includeLeads) {
@@ -4305,7 +4356,7 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
       where: { AND: [leadWhere, { status: { in: [...FORECAST_LEAD_STATUSES] }, quotations: { none: {} } }] },
       include: {
         customer: { select: { id: true, name: true } },
-        assignedTo: { select: { id: true, name: true } },
+        assignedTo: { select: { id: true, name: true, ...OWNER_TEAM_SELECT.select } },
       },
     });
     for (const l of leads) {
@@ -4319,7 +4370,7 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
         title: l.customer?.name ?? l.companyName,
         subject: l.description ? l.description.split('\n')[0] : null,
         customer: l.customer,
-        owner: l.assignedTo,
+        owner: { id: l.assignedTo.id, name: l.assignedTo.name },
         stage,
         stageLabel: stageOf(stage)?.label ?? stage,
         status: l.status,
@@ -4329,15 +4380,33 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
         weighted: weightedOf(value, l.probability),
         overdue: closing !== null && closing < today,
         link: `/g-ops/leads/${l.id}`,
+        // A lead counts under its assignee's team, and under no group: it has no lines yet.
+        team: l.assignedTo.employee?.industry ?? null,
+        groups: [{ key: NO_GROUP_KEY, group: NO_GROUP, value }],
       });
     }
   }
 
   const people = [...new Map(rows.map((r) => [r.owner.id, r.owner])).values()].sort((a, b) => a.name.localeCompare(b.name));
-  const chosen = ownerId ? rows.filter((r) => r.owner.id === ownerId) : rows;
+  const groupWanted = group === 'none' ? NO_GROUP_KEY : group;
+  const chosen = rows
+    .filter((r) => !ownerId || r.owner.id === ownerId)
+    .filter((r) => !teamId || (r.team?.id ?? NO_TEAM_ID) === teamId)
+    // A group filter keeps the quotations with a line in it, and only that
+    // group's share of each: the OMEGA AIR forecast is the OMEGA AIR money.
+    .flatMap((r): ForecastRow[] => {
+      if (groupWanted === null) return [r];
+      const share = r.groups.find((g) => g.key === groupWanted);
+      return share ? [{ ...r, value: share.value, weighted: weightedOf(share.value, r.probability), groups: [share] }] : [];
+    });
+  const teamNamed = teamId === NO_TEAM_ID ? 'no team' : teams.find((t) => t.id === teamId)?.code;
+  const groupNamed = group === 'none' ? NO_GROUP : activeGroups.find((g) => g.key === group)?.name;
   const filters = [
+    preset ? RANGE_PRESET_LABELS[preset].toLowerCase() : null,
     lq.scope === 'mine' ? 'mine only' : lq.scope === 'team' ? 'my team' : null,
     ownerId ? `owner ${people.find((p) => p.id === ownerId)?.name ?? 'one person'}` : null,
+    teamId ? `team ${teamNamed ?? 'one team'}` : null,
+    group ? `product group ${groupNamed ?? group}` : null,
     includeLeads ? 'leads without a quotation included' : null,
   ].filter((f): f is string => !!f);
 
@@ -4349,6 +4418,11 @@ async function loadForecast(req: Parameters<typeof currentUser>[0]): Promise<For
     scope: lq.scope,
     ownerId,
     filters,
+    preset,
+    teamId,
+    group,
+    teams,
+    groupChoices: activeGroups.map((g) => ({ key: g.key, name: g.name })),
   };
 }
 
@@ -4365,7 +4439,52 @@ function forecastGroups(
   ];
 }
 
-const PERIOD_WORD: Record<ForecastPeriod, string> = { week: 'Weekly', month: 'Monthly', quarter: 'Quarterly', year: 'Annually' };
+const BREAKDOWN_WORD: Record<ForecastBreakdown, string> = { owner: 'Salesperson', team: 'Team', group: 'Product group' };
+
+/** `?by=` — the breakdown the page shows, the paper prints (salesperson unless asked). */
+function breakdownOfQuery(by: unknown): ForecastBreakdown {
+  return choice(typeof by === 'string' && by ? by : undefined, FORECAST_BREAKDOWNS, 'Breakdown', (b) => BREAKDOWN_WORD[b]) ?? 'owner';
+}
+
+/**
+ * The breakdown on paper: one row per line, its weighted figure in each
+ * period when the window holds six or fewer (they fit across the page),
+ * else the window as one figure beside before, after and undated.
+ */
+function breakdownSection(f: Forecast, by: ForecastBreakdown, currency: string): PdfSection {
+  const lines = by === 'owner' ? f.byOwner : by === 'team' ? f.byTeam : f.byGroup;
+  const perPeriod = f.buckets.length <= 6;
+  const windowOf = (l: ForecastLine) => f.buckets.reduce((t, b) => t + Math.round((l.periods[b.key]?.weighted ?? 0) * 100), 0) / 100;
+  const money = (n: number) => (n ? formatAmount(n) : '—');
+  const head = [
+    BREAKDOWN_WORD[by],
+    by === 'group' ? 'Quotations' : 'Deals',
+    ...(perPeriod ? f.buckets.map((b) => b.label) : ['In the window']),
+    'Before',
+    'After',
+    'No date',
+    `Value (${currency})`,
+    `Weighted (${currency})`,
+  ];
+  return {
+    kind: 'table',
+    title: `By ${BREAKDOWN_WORD[by].toLowerCase()} — weighted (${currency})`,
+    head,
+    align: ['left', ...head.slice(1).map(() => 'right' as const)],
+    rows: lines.map((l) => [
+      l.hint ? { title: l.name, body: l.hint } : l.name,
+      String(l.count),
+      ...(perPeriod ? f.buckets.map((b) => money(l.periods[b.key]?.weighted ?? 0)) : [money(windowOf(l))]),
+      money(l.earlier.weighted),
+      money(l.later.weighted),
+      money(l.undated.weighted),
+      formatAmount(l.value),
+      formatAmount(l.weighted),
+    ]),
+  };
+}
+
+const PERIOD_WORD: Record<ForecastPeriod, string> = { week: 'Weekly', month: 'Monthly', quarter: 'Quarterly', year: 'Annually', range: 'Whole range' };
 
 pipelineRoutes.get(
   '/forecast',
@@ -4396,6 +4515,9 @@ pipelineRoutes.get(
         r.value.toFixed(2),
         r.weighted.toFixed(2),
         r.overdue ? 'yes' : 'no',
+        // Appended 2026-10-12 (columns are appended, never reordered): the team and the group split.
+        r.team?.code ?? 'No team',
+        r.groups.map((g) => `${g.group} ${g.value.toFixed(2)}`).join('; '),
       ]),
     );
     await audit(
@@ -4411,7 +4533,7 @@ pipelineRoutes.get(
     res.setHeader('Content-Disposition', 'attachment; filename="sales-forecast.csv"');
     res.send(
       toCsv(
-        ['Period', 'Kind', 'Number', 'Customer', 'Title', 'Salesperson', 'Stage', 'Probability %', 'Expected closing', 'Value', 'Weighted', 'Overdue'],
+        ['Period', 'Kind', 'Number', 'Customer', 'Title', 'Salesperson', 'Stage', 'Probability %', 'Expected closing', 'Value', 'Weighted', 'Overdue', 'Team', 'Product groups'],
         rows,
       ),
     );
@@ -4449,6 +4571,7 @@ pipelineRoutes.get(
           { label: `Everything open (${forecast.totals.count})`, value: formatMoney(forecast.totals.value, currency), bold: true },
         ],
       },
+      breakdownSection(forecast, breakdownOfQuery(req.query.by), currency),
       ...groups.map(
         ({ label, group }): PdfSection => ({
           kind: 'table',
