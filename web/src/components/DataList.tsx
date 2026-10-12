@@ -705,6 +705,44 @@ export function DataList<T>({
           </button>
         )}
 
+        {/*
+          A filtered list used to look exactly like an empty one. Three rows out
+          of four hundred with nothing on screen explaining why is how people
+          conclude their data has gone missing. One chip per filter, each
+          removable, and the way out of all of them.
+        */}
+        {(chips.length > 0 || debounced) && (
+          <div className="list-chips list-chips-inline" aria-label="What narrows this list">
+            {debounced && (
+              <span className="list-chip">
+                Matching “{debounced}”
+                <button
+                  type="button"
+                  aria-label="Clear the search"
+                  onClick={() => {
+                    setSearch('');
+                    setDebounced('');
+                    setPage(1);
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            )}
+            {chips.map((c) => (
+              <span key={c.id} className="list-chip">
+                {c.text}
+                <button type="button" aria-label={`Remove ${c.text}`} onClick={c.clear}>
+                  ×
+                </button>
+              </span>
+            ))}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearAll}>
+              Clear all
+            </button>
+          </div>
+        )}
+
         <div className="list-tools">
           <div className="menu-wrap">
             <button
@@ -961,44 +999,6 @@ export function DataList<T>({
               </button>
             </span>
           ))}
-        </div>
-      )}
-
-      {/*
-        A filtered list used to look exactly like an empty one. Three rows out
-        of four hundred with nothing on screen explaining why is how people
-        conclude their data has gone missing. One chip per filter, each
-        removable, and the way out of all of them.
-      */}
-      {(chips.length > 0 || debounced) && (
-        <div className="list-chips" aria-label="What narrows this list">
-          {debounced && (
-            <span className="list-chip">
-              Matching “{debounced}”
-              <button
-                type="button"
-                aria-label="Clear the search"
-                onClick={() => {
-                  setSearch('');
-                  setDebounced('');
-                  setPage(1);
-                }}
-              >
-                ×
-              </button>
-            </span>
-          )}
-          {chips.map((c) => (
-            <span key={c.id} className="list-chip">
-              {c.text}
-              <button type="button" aria-label={`Remove ${c.text}`} onClick={c.clear}>
-                ×
-              </button>
-            </span>
-          ))}
-          <button type="button" className="btn btn-ghost btn-sm" onClick={clearAll}>
-            Clear all
-          </button>
         </div>
       )}
 

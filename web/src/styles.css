@@ -1450,6 +1450,12 @@ small,
   filtered list used to look exactly like an empty one; three rows out of four
   hundred with nothing saying why is how people conclude data went missing.
 */
+/* The chips sit on the toolbar line, beside Filters (2026-10-12, the owner's call). */
+.list-toolbar .list-chips-inline {
+  margin-bottom: 0;
+  flex: 0 1 auto;
+}
+
 .list-chips,
 .list-views {
   display: flex;
