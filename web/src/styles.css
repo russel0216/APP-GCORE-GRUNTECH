@@ -4903,31 +4903,35 @@ a.icon-row:hover {
 
 /* ────────────────────────── Attachments ────────────────────────────────── */
 /*
-  Files on a record. A list, not a gallery: what matters is the name, who put
-  it there and when — a thumbnail of a scope of work tells you nothing.
+  Files on a record, one under another, each with its first page at the
+  card's full width (2026-10-12, the owner's call: "the arrangement is
+  vertical … so the viewer can easily view the attachment without opening it
+  in a new tab"). The name, who put it there and when head each one; the
+  name and the page open the whole file. A file that cannot be drawn (Word,
+  Excel, CAD, a zip) is a short band saying what it is.
 */
-.attach-list {
+.attach-stack {
   display: flex;
   flex-direction: column;
-  gap: var(--s-1);
+  gap: var(--s-5);
   list-style: none;
   margin: 0 0 var(--card-gap);
   padding: 0;
 }
 
-.attach-row {
+.attach-item {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--s-2);
-  padding: var(--s-2);
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  color: var(--muted);
+  min-width: 0;
 }
 
-.attach-row:hover {
-  background: var(--surface-2);
-  border-color: var(--line);
+.attach-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .attach-name {
@@ -4937,10 +4941,12 @@ a.icon-row:hover {
   cursor: pointer;
   color: var(--text);
   font: inherit;
+  font-weight: 600;
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
 }
 
 .attach-name:hover {
@@ -4949,10 +4955,60 @@ a.icon-row:hover {
 }
 
 .attach-meta {
-  margin-left: auto;
   font-size: var(--fs-xs);
   color: var(--faint);
-  white-space: nowrap;
+}
+
+.attach-remove {
+  margin-left: auto;
+}
+
+.attach-open {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: zoom-in;
+}
+
+.attach-thumb {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.attach-thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--paper, #fff);
+}
+
+/* A picture keeps its own size up to the card's width. */
+.attach-thumb-image img {
+  width: auto;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.attach-thumb-kind {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  min-height: calc(var(--s-8) * 1.5);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  padding: var(--s-3);
+}
+
+.attach-thumb-kind .faint {
+  font-weight: 400;
+  font-size: var(--fs-xs);
 }
 
 /* Somewhere to drop a file, which is how most people expect to attach one. */
@@ -4971,11 +5027,6 @@ a.icon-row:hover {
   background: rgb(var(--neon-rgb) / 0.06);
 }
 
-@media (max-width: 640px) {
-  .attach-meta {
-    display: none;
-  }
-}
 
 /* ─────────────────────── Activity log on a record ──────────────────────── */
 .activity-form {

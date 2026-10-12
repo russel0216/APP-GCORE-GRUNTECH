@@ -3555,6 +3555,20 @@ the attachment card at the bottom of the sales order"
   their own captioned "From quotation <number>" — the CAD plan's rule), so
   removing a copy never touches the original; a failed copy is logged and
   never fails the order. A file added to the quotation later stays there.
+- **The card shows every file's first page** (2026-10-12, the owner's
+  call: "the viewer can easily view the attachment without opening it"):
+  the one `Attachments` card lists its files ONE UNDER ANOTHER, each headed
+  by its name, size, who and when (and Remove), with the first page at the
+  card's full width under it — a picture as itself, a PDF's page 1 drawn to
+  a picture by **pdf.js 4.10.38, vendored in `web/public/pdfjs/`** (the
+  legacy build's two files, its licence and a README with the registry
+  integrity; `lib/pdfThumb.ts` loads it only when a PDF comes into view, so
+  no bundle carries it and npm never resolves it — this sandbox cannot
+  re-resolve the lockfile). The bytes come through the token-bearing file
+  route, so each record's attachment guard still decides, fetched only when
+  the item scrolls into view and never past 20 MB. Word, Excel, CAD and
+  zips are a band naming their type (drawing them needs a converter on the
+  shared host). The name and the page still open the whole file.
 - **verify-sales** uploads a PNG, a two-page PDF (by a colleague — the PO
   rule), a Word file and a damaged PDF, proves a view-own reader is kept
   out, counts the pages (bare + 1 + 1 + 2), reads the Attachments page,
