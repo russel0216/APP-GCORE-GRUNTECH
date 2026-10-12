@@ -470,7 +470,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,779 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,781 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -496,12 +496,13 @@ receives them, and one on sales for a row the database refuses, and 2 on
 foundation for the sales lists' year-to-date default, and 5 on sales for
 the team the SCORO import tags its quotations with, and 4 on foundation
 and 4 on workspace for the views on the person's account, and 3 on
-foundation for the teams Back Support supports):
+foundation for the teams Back Support supports, and 2 on workspace for
+deleting a role):
 foundation
 327, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 74, accounts 124. The
+insights 98, insights-brief 50, workspace 76, accounts 124. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -3091,6 +3092,15 @@ the quotation's and the sales order's route depends on the PREPARER's role.
   every team), else every holder — a document never stalls for want of a
   supporter. "Reports to" is untouched by it. Nothing set is the old rule:
   every holder.
+- **A role you made can be deleted** (2026-10-12, the owner's call: "allow
+  me also to delete role created"): `DELETE /roles/:id`
+  (`admin.roles.delete`, the Delete in the role modal's foot) takes it off
+  everybody holding it in the same transaction — the question says how
+  many — and audits who lost it. Refused: a seeded (`isSystem`) role, which
+  the seed would make again and its routes name (the modal says so), and a
+  role any approval route still names, as a step or as "Prepared by" — the
+  400 names the routes, because deleting it would leave a step routing to
+  nobody.
 - **Assign the roles in Admin › Users**: until somebody holds Team Leader
   (for anyone with no "Reports to") and CEO / President, those steps route
   to nobody and `audit-workflows.ts` says so.

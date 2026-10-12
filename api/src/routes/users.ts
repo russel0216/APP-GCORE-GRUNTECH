@@ -699,6 +699,14 @@ roleRoutes.put(
   }),
 );
 
+/**
+ * Delete a role (2026-10-12, the owner's call: "allow me also to delete role
+ * created"). A seeded (system) role stays — the seed would make it again and
+ * the seeded approval routes name it. A role still holding people is taken
+ * off them in the same transaction (the question says how many). A role an
+ * approval route names — a step, or "Prepared by" — is refused, naming the
+ * routes: deleting it would leave a step routing to nobody.
+ */
 roleRoutes.delete(
   '/:id',
   require_('admin.roles.delete'),
@@ -708,17 +716,34 @@ roleRoutes.delete(
       include: { _count: { select: { users: true } } },
     });
     if (!role) throw notFound('Role not found');
-    if (role.isSystem) throw badRequest('System roles cannot be deleted — edit its permissions instead');
-    if (role._count.users > 0) {
-      throw badRequest(`${role._count.users} user(s) still have this role — reassign them first`);
+    if (role.isSystem) throw badRequest('A built-in role cannot be deleted — remove its permissions or take it off people instead');
+    const routes = await prisma.approvalWorkflow.findMany({
+      where: { OR: [{ requesterRoleId: role.id }, { steps: { some: { roleId: role.id } } }] },
+      select: { name: true },
+      orderBy: { name: 'asc' },
+    });
+    if (routes.length) {
+      throw badRequest(
+        `The approval route${routes.length > 1 ? 's' : ''} ${routes.map((r) => `"${r.name}"`).join(', ')} still use${routes.length > 1 ? '' : 's'} this role — change ${routes.length > 1 ? 'them' : 'it'} in Admin › Approval Workflows first`,
+      );
     }
+    const holders = await prisma.userRole.findMany({ where: { roleId: role.id }, select: { user: { select: { email: true } } } });
 
-    await prisma.role.delete({ where: { id: role.id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.userRole.deleteMany({ where: { roleId: role.id } });
+      await tx.role.delete({ where: { id: role.id } });
+    });
     await audit(
-      { entityType: 'role', entityId: role.id, action: 'DELETED', summary: `Deleted role ${role.name}` },
+      {
+        entityType: 'role',
+        entityId: role.id,
+        action: 'DELETED',
+        summary: `Deleted role ${role.name}${holders.length ? ` (taken off ${holders.length} user${holders.length > 1 ? 's' : ''})` : ''}`,
+        before: { key: role.key, name: role.name, users: holders.map((h) => h.user.email) },
+      },
       req,
     );
-    res.json({ ok: true });
+    res.json({ ok: true, removedFrom: holders.length });
   }),
 );
 

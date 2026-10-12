@@ -208,7 +208,9 @@ function RoleEditor({
             role && !role.isSystem && can('admin.roles.delete')
               ? {
                   label: 'Delete',
-                  question: `Delete the role ${role.name}? It cannot be undone.`,
+                  question: `Delete the role ${role.name}?${
+                    role.userCount ? ` It is taken off the ${role.userCount} ${role.userCount === 1 ? 'person' : 'people'} who hold it.` : ''
+                  } It cannot be undone.`,
                   onConfirm: remove,
                 }
               : undefined
@@ -221,6 +223,9 @@ function RoleEditor({
       }
     >
       <ErrorBox error={error} />
+      {role?.isSystem && can('admin.roles.delete') && (
+        <p className="faint">A built-in role cannot be deleted — remove its permissions or take it off people instead. Roles you made can be deleted here.</p>
+      )}
 
       <div className="grid grid-2">
         <Field label="Role name">

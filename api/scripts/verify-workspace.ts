@@ -928,6 +928,30 @@ async function main() {
     `${badColumns.status} / ${forgotten.status}`,
   );
 
+  // ── Deleting a role (2026-10-12) ──────────────────────────────────────────
+  const made = await makeRole('zzws_made', 'ZZ Made role', []);
+  const holder = await makeUser('ZZ Holder', `holder${MAIL}`, [made.id]);
+  const routedRole = await makeRole('zzws_routed', 'ZZ Routed role', []);
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_role`, name: `${TAG} route`, steps: { create: [{ sequence: 1, name: 'ZZ step', approverType: 'ROLE', roleId: routedRole.id }] } },
+  });
+  const builtIn = await prisma.role.findUniqueOrThrow({ where: { key: 'employee' } });
+  const delMade = await api(bossToken, 'DELETE', `/roles/${made.id}`);
+  const holderRoles = await prisma.userRole.count({ where: { userId: holder.id } });
+  check(
+    'a role you made is deleted even while people hold it — it is taken off them',
+    delMade.status === 200 && delMade.body.removedFrom === 1 && holderRoles === 0 && !(await prisma.role.findUnique({ where: { id: made.id } })),
+    `${delMade.status} ${JSON.stringify(delMade.body)}`,
+  );
+  const delRouted = await api(bossToken, 'DELETE', `/roles/${routedRole.id}`);
+  const delBuiltIn = await api(bossToken, 'DELETE', `/roles/${builtIn.id}`);
+  check(
+    'a role an approval route uses is refused, naming the route; a built-in role is refused',
+    delRouted.status === 400 && String(delRouted.body.error ?? delRouted.body.message ?? JSON.stringify(delRouted.body)).includes(`${TAG} route`) &&
+      delBuiltIn.status === 400 && !!(await prisma.role.findUnique({ where: { id: routedRole.id } })),
+    `${delRouted.status} ${JSON.stringify(delRouted.body)} / ${delBuiltIn.status}`,
+  );
+
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;
