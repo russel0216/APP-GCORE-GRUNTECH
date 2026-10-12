@@ -52,6 +52,7 @@ import {
   RECOMMENDATION_LABEL,
 } from '../shared/evaluations';
 import { LIST_CAP, listReference, choice, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Employee evaluations — probation and trainee reviews (model §4.7).
@@ -1083,7 +1084,7 @@ evaluationRoutes.get(
 
     await audit({ entityType: 'evaluation', entityId: ev.id, action: 'EXPORTED', summary: `Printed ${ev.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${ev.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Employee Evaluation', number: ev.number, author: ev.evaluator.name, date: ev.submittedAt ?? ev.createdAt })));
     res.send(pdf);
   }),
 );

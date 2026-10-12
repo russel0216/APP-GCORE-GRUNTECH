@@ -29,6 +29,7 @@ import { renderDocument, companyCurrency, formatAmount, formatMoney, formatShort
 import { cents, D, num, dayKey, daysBetween, financeSettings } from '../shared/finance';
 import { claimInclude, presentClaim, cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Cash advances — money issued to a person BEFORE it is spent.
@@ -652,7 +653,7 @@ advanceRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Cash Advance', number: row.number, author: row.requestedBy.name, date: row.requestDate })));
     res.send(pdf);
   }),
 );

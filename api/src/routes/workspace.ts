@@ -24,6 +24,8 @@ import { aftermarketSettings, renewalPipeline, sweepOverdue } from '../shared/af
 import { activityTypeNames } from '../shared/activityTypes';
 import { celebrationsBetween, yearsText } from '../shared/celebrations';
 import { manilaDayKey } from '../shared/day';
+import { contentDisposition, paperFileName } from '../shared/paperName';
+import { issueTicket, ticketPath, TICKET_TTL_MS } from '../shared/printTickets';
 
 // ════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -974,6 +976,23 @@ export const pdfRoutes = Router();
 pdfRoutes.use(authenticate);
 
 /**
+ * A print ticket (2026-10-12, shared/printTickets.ts): `openPdf()` asks for
+ * one and opens `path?ticket=…` in a new tab, so the paper is a real address
+ * and the browser saves it under the server's standard name. Only a paper's
+ * address (a `/pdf` path under /api) takes one; nothing is checked here
+ * beyond that — the GET the ticket opens runs every check a bearer would.
+ */
+pdfRoutes.post(
+  '/tickets',
+  handler(async (req, res) => {
+    const { path } = parseBody(z.object({ path: z.string().min(1).max(2000) }), req.body);
+    const at = ticketPath(path);
+    if (!at || !/(\/pdf(\/|$)|\.pdf$)/.test(at.split('?')[0])) throw badRequest('A print ticket is for a paper\'s address under /api');
+    res.json({ ticket: issueTicket(currentUser(req).id, at), expiresInSeconds: TICKET_TTL_MS / 1000 });
+  }),
+);
+
+/**
  * Renders a specimen of every section kind the engine supports — fields,
  * text, a table with a subheading row and title-over-description cells, the
  * totals block, a Gantt appendix on landscape pages of its own — with a
@@ -1121,7 +1140,7 @@ pdfRoutes.get(
 
     await audit({ entityType: 'pdf_specimen', entityId: 'specimen', action: 'EXPORTED', summary: `Printed the document specimen ${documentNumber}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="gcore-specimen.pdf"');
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Specimen', author: currentUser(req).name, date: new Date() })));
     res.send(pdf);
   }),
 );

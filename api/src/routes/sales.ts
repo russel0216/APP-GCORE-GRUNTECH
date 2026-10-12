@@ -144,6 +144,7 @@ import {
   upperText,
   capsParts,
 } from '../shared/quotation';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -570,7 +571,7 @@ leadRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${lead.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Lead', number: lead.number, author: lead.createdBy?.name, date: lead.createdAt })));
     res.send(pdf);
   }),
 );
@@ -3428,7 +3429,7 @@ quotationRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${quotation.number}-R${revision.revision}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Quotation', number: quotation.number, revision: revision.revision, author: quotation.owner.name, date: revision.createdAt })));
     res.send(pdf);
   }),
 );

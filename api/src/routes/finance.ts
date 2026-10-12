@@ -91,6 +91,7 @@ import {
   type AgedRow,
   type SettleableKind,
 } from '../shared/finance';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 function asDate(value: string, label: string): Date {
   const date = new Date(value);
@@ -604,7 +605,7 @@ invoiceRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Invoice', number: inv.number, author: inv.createdBy.name, date: inv.invoiceDate })));
     res.send(pdf);
   }),
 );
@@ -2983,7 +2984,7 @@ expenseRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${claim.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Expense Claim', number: claim.number, author: claim.claimedBy.name, date: claim.claimDate })));
     res.send(pdf);
   }),
 );

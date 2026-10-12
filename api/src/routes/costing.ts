@@ -47,6 +47,7 @@ import {
   type Signatory,
 } from '../shared/pdf';
 import { LIST_CAP, listReference, recordNamed, sendListPdf, totalLabel, choice, ratePct } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Costing (model §5.3).
@@ -1934,7 +1935,7 @@ costingRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${costing.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Costing', number: costing.number, author: costing.owner.name, date: costing.createdAt })));
     res.send(pdf);
   }),
 );

@@ -169,7 +169,11 @@ four databases and four copies of "customer".
    (`components/Menu.tsx`, the board's menu moved there) with Columns, Export
    CSV, Print (`printPath`, sent the list's own query), Save view and Refresh
    on the right. Never put a tool button back on the toolbar line. Filters open
-   in a panel and show as removable chips; a filter is a select, a
+   in a panel and show as removable chips ON the toolbar line, after Filters
+   (2026-10-12): the chips are one block that fills what is left of the line
+   and wraps inside itself, the search box keeps its 280px, and the ⋯ menu is
+   pinned to the line's right end (`.list-lead`, `.list-chips-inline`,
+   `.list-toolbar-main`); a filter is a select, a
    `dateRange` (two keys) or a `lookup` (`search` + `describe`).
    **No tab strip and no totals row** (2026-10-08, the owner's call: "remove
    this line in all, not necessary" / "instead it become a summary card at
@@ -505,7 +509,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,897 assertions across twenty-two scripts** (counted 2026-10-12, after
+**3,908 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -542,12 +546,14 @@ foundation and 4 on sales for the sales order paper of the owner's slide, and
 that remember, and 2 on foundation and 9 on sales for the attachments printed
 behind the quotation and the sales order, and 9 on sales and 9 on pipeline
 for the Forecast's breakdowns and its date range, and 7 on sales and 12
-on pipeline for its tick-box filters and the comparison range):
+on pipeline for its tick-box filters and the comparison range, and 6 on
+foundation and 5 on workspace for the paper's file name and the print
+ticket):
 foundation
-349, masters 92, sales 601, costing 157, pipeline 113, calendar 96, numbering
+355, masters 92, sales 601, costing 157, pipeline 113, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 76, accounts 125. The
+insights 98, insights-brief 50, workspace 81, accounts 125. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -1334,6 +1340,34 @@ are grouped by area; the model doc carries the business version (§4.1, §4.5,
 - **Employee routes live in `routes/employees.ts`, the employee import in
   `routes/imports/employees.ts`.** `imports.ts` exports `Registered`, so a module
   (the Academy's `courseImport`) is wired into `REGISTRY` with one line.
+- **A paper is saved under ONE name** (2026-10-12, the owner's call: "a
+  standard file name — document numbering, author, document's date";
+  `docs/notes/P-paper-names-and-chips-2026-10-12.md`):
+  `<Kind> <Number> R<n> - <Author> - <YYYY-MM-DD>.pdf` ("Quotation
+  0062602018 R0 - Carter Gasiong - 2026-10-08.pdf"), `paperFileName()` in
+  `shared/paperName.ts`, pure — the author is who prepared the document
+  (the owner, requester, filer: the paper's first sign-off), the date the
+  document's own on the Manila day; a list paper (`sendListPdf`) is its
+  kind, who printed it and today. Refused characters become "-", a missing
+  part drops out, `contentDisposition()` sends an ASCII `filename` and the
+  exact name in `filename*`. Every PDF route names its file through them;
+  never write a `Content-Disposition` for a PDF by hand. CSV and `.ics`
+  names are unchanged.
+- **The name reaches the browser through a PRINT TICKET**
+  (`shared/printTickets.ts`): `openPdf()` opened a nameless `blob:` URL,
+  so Save as offered a random id. Now it opens a tab inside the click,
+  asks `POST /api/pdf/tickets { path }` (a paper's address only: a `/pdf`
+  or `.pdf` path under /api) and points the tab at `path?ticket=…`.
+  The ticket is the liveness challenge's design — an HMAC with the JWT
+  secret over `userId.path.issuedAt.nonce`, two minutes, ONE use (a map of
+  spent nonces), the path compared in one spelling (`ticketPath()`, the
+  `ticket` parameter taken out). `authenticate` takes it in place of a
+  bearer on a GET of exactly that path, then every guard and audit row
+  runs as for a bearer; a second router under the same prefix keeps the
+  user the ticket resolved. Reused, expired, another path, another login
+  or a non-GET is a 401, and `errorMiddleware` answers a ticketed GET with
+  a small page saying why, never JSON. Reloading such a tab is refused
+  (the ticket is spent): print again from G-CORE.
 - **Shared web pieces from Phase 10**: `PeoplePicker` (pure UI over
   `{ id, name, sub?, group? }[]`), `MeetLink`, `SettingListCard` (the
   `/hr-settings/lists/:key` editor), `RecordHeader`'s `statusExtra`,

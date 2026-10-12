@@ -5,7 +5,14 @@ have a standard file name (for example Document Numbering, Author,
 documents date). 2. On filter when the space for 1 line is not enough make
 it 2 line, just prioritize the space at the 1st line."
 
-Status: **planned, not built.**
+Status: **built 2026-10-12** on the defaults below — see CLAUDE.md,
+"Shared seams". Three changes from the plan: the ticket route is
+`POST /api/pdf/tickets` (beside the specimen, not a router of its own); a
+ticket is issued only for a paper's address (`/pdf` or `.pdf` under /api);
+and the chip layout pins the ⋯ menu to the toolbar's top-right, so when
+the first line has no room left for the chips they take a whole second
+line (at 1100px with a search and the scope switch) instead of pushing ⋯
+down. Rule 9's toolbar note in CLAUDE.md is unchanged otherwise.
 
 ## 1. The file name a paper is saved under
 

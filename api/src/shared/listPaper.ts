@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { badRequest } from '../http/kit';
 import { formatShortDate, statusLabel, type PdfSection } from './pdf';
+import { contentDisposition, kindOfFile, paperFileName } from './paperName';
 
 /**
  * THE PRINTED LISTS (rule 6, A5) — the one copy of what every list's paper
@@ -192,9 +193,14 @@ export function scopeNamed(scope: string, team: { code: string } | null, onlyOwn
   return onlyOwn || scope === 'mine' || scope === 'team' ? mine : null;
 }
 
-/** A printed list goes out inline, under its own file name. */
+/**
+ * A printed list goes out inline under the standard name (2026-10-12):
+ * the list's kind from its old file name, who printed it, and today —
+ * "Sales Forecast - Carter Gasiong - 2026-10-12.pdf" (`shared/paperName.ts`).
+ */
 export function sendListPdf(res: Response, pdf: Buffer, filename: string) {
+  const name = paperFileName({ kind: kindOfFile(filename), author: res.req.user?.name, date: new Date() });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+  res.setHeader('Content-Disposition', contentDisposition(name));
   res.send(pdf);
 }

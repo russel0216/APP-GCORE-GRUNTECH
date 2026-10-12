@@ -952,6 +952,50 @@ async function main() {
     `${delRouted.status} ${JSON.stringify(delRouted.body)} / ${delBuiltIn.status}`,
   );
 
+  // ══ Print tickets and the paper's name (2026-10-12) ══════════════════════
+  console.log('\nPrint tickets');
+  const paperPath = '/api/pdf/specimen';
+  const raw = async (path: string, init?: RequestInit) => fetch(`${BASE.replace(/\/api$/, '')}${path}`, init);
+  const issued = await api(workerToken, 'POST', '/pdf/tickets', { path: paperPath });
+  const printTicket = String(issued.body.ticket ?? '');
+  const opened = await raw(`${paperPath}?ticket=${encodeURIComponent(printTicket)}`);
+  const disposition = opened.headers.get('content-disposition') ?? '';
+  const bytes = Buffer.from(await opened.arrayBuffer());
+  check(
+    'a ticket opens the paper with no bearer, as its own person, under the standard name',
+    issued.status === 200 && opened.status === 200 && bytes.subarray(0, 5).toString() === '%PDF-' &&
+      /filename\*=UTF-8''Specimen%20-%20ZZ%20Worker%20-%20\d{4}-\d{2}-\d{2}\.pdf/.test(disposition),
+    `${issued.status} ${opened.status} ${disposition}`,
+  );
+  const reused = await raw(`${paperPath}?ticket=${encodeURIComponent(printTicket)}`);
+  const reusedText = await reused.text();
+  check(
+    'the same ticket a second time is a 401, and the tab reads a page saying why, not JSON',
+    reused.status === 401 && reusedText.includes('already used') && (reused.headers.get('content-type') ?? '').includes('text/html'),
+    `${reused.status} ${reusedText.slice(0, 120)}`,
+  );
+  const elsewhere = (await api(workerToken, 'POST', '/pdf/tickets', { path: paperPath })).body.ticket as string;
+  const otherPath = await raw(`/api/my-work?ticket=${encodeURIComponent(elsewhere)}`);
+  const colleagueTicket = (await api(colleagueToken, 'POST', '/pdf/tickets', { path: paperPath })).body.ticket as string;
+  const swapped = colleagueTicket.replace(`.${colleague.id}.`, `.${worker.id}.`);
+  const asWorker = await raw(`${paperPath}?ticket=${encodeURIComponent(swapped)}`);
+  check(
+    'a ticket on another address, or rewritten to another login, is a 401 and opens nothing',
+    otherPath.status === 401 && asWorker.status === 401,
+    `${otherPath.status} ${asWorker.status}`,
+  );
+  const fresh = (await api(workerToken, 'POST', '/pdf/tickets', { path: paperPath })).body.ticket as string;
+  const posted = await raw(`${paperPath}?ticket=${encodeURIComponent(fresh)}`, { method: 'POST' });
+  const notPaper = await api(workerToken, 'POST', '/pdf/tickets', { path: '/api/my-work' });
+  const offSite = await api(workerToken, 'POST', '/pdf/tickets', { path: 'https://example.com/api/pdf/specimen' });
+  check(
+    'a ticket never opens a write, and is issued only for a paper\'s address under /api',
+    posted.status === 401 && notPaper.status === 400 && offSite.status === 400,
+    `${posted.status} ${notPaper.status} ${offSite.status}`,
+  );
+  const unsigned = await fetch(`${BASE}/pdf/tickets`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: paperPath }) });
+  check('nobody signed out is given a ticket', unsigned.status === 401, String(unsigned.status));
+
   await cleanup();
   console.log(`\n${passed} passed, ${failed} failed\n`);
   if (failed > 0) process.exitCode = 1;

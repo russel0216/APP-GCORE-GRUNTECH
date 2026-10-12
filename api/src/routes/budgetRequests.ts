@@ -22,6 +22,7 @@ import { renderDocument, formatMoney, formatAmount, formatShortDate, statusLabel
 import { cents, D, num, dayKey, daysBetween } from '../shared/finance';
 import { cashRequestSections, cashRequestSignatories } from './finance';
 import { LIST_CAP, listReference, bracketed, totalLabel, bracketNote, listNotes, recordNamed, choice, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * BUDGET REQUESTS — project cash (model §5.2, 2026-10-07, the owner's call).
@@ -646,7 +647,7 @@ budgetRequestRoutes.get(
 
     await audit({ entityType: 'budget_request', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Budget Request', number: row.number, author: row.requestedBy.name, date: row.createdAt })));
     res.send(pdf);
   }),
 );

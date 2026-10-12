@@ -34,6 +34,7 @@ import { contactsOf } from '../shared/approvals';
 import { manilaDate, workingDayDate } from '../shared/day';
 import { planTasks } from '../shared/costingMath';
 import { LIST_CAP, listReference, totalLabel, namedInFilter, choice, bracketed, bracketNote, listNotes, sendListPdf, ratePct } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 const d = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -677,7 +678,7 @@ progressRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${report.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Progress Report', number: report.number, author: report.preparedBy.name, date: report.periodTo })));
     res.send(pdf);
   }),
 );
@@ -1208,7 +1209,7 @@ billingRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${billing.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Progress Billing', number: billing.number, author: raised?.actorName, date: billing.billingDate })));
     res.send(pdf);
   }),
 );

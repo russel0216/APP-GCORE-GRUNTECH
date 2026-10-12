@@ -40,6 +40,7 @@ import {
 } from '../shared/salesOrderTemplate';
 import { printableQuotation, quotationPrintData } from './sales';
 import { canSeeOrderCost, printableSalesOrder, salesOrderPrintData } from './salesOrders';
+import { contentDisposition, paperFileName, kindOfFile } from '../shared/paperName';
 
 /**
  * PDF Templates — the layout a designed document prints with (see
@@ -297,7 +298,7 @@ pdfTemplateRoutes.post(
 
     const pdf = await renderDesigned(design, data);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${doc.type.replace('_', '-')}-preview.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: `${kindOfFile(doc.type)} Template Preview`, author: currentUser(req).name, date: new Date() })));
     res.send(pdf);
   }),
 );

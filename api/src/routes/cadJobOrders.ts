@@ -31,6 +31,7 @@ import { registerAttachmentGuard, cadUpload, saveAttachment, attachmentPath, del
 import { dayKey } from '../shared/aftermarket';
 import { safeHttpUrl } from '../shared/partners';
 import { LIST_CAP, listReference, rangeNamed, namedInFilter, filterDay, dayOf, choice, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * CAD job orders — the design team's queue (2026-10-09, the owner's call:
@@ -1167,7 +1168,7 @@ cadJobOrderRoutes.get(
     });
     await audit({ entityType: 'cad_job_order', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'CAD Job Order', number: row.number, author: row.requestedBy.name, date: row.createdAt })));
     res.send(pdf);
   }),
 );

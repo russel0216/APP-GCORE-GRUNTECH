@@ -636,74 +636,83 @@ export function DataList<T>({
 
   return (
     <div>
-      <div className="list-toolbar">
-        {actions}
+      {/*
+        Three blocks on one line (2026-10-12, the owner's call: "when the space
+        for 1 line is not enough make it 2 lines, prioritise the first"): what
+        somebody came for, the chips — one block that fills the rest of the
+        line and wraps INSIDE itself, so its second line starts under its
+        first chip — and the ⋯ menu, which never leaves the first line.
+      */}
+      <div className="list-toolbar list-toolbar-main">
+        <div className="list-lead">
+          {actions}
 
-        <input
-          className="list-search"
-          type="search"
-          placeholder={searchPlaceholder}
-          aria-label="Search this list"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+          <input
+            className="list-search"
+            type="search"
+            placeholder={searchPlaceholder}
+            aria-label="Search this list"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
 
-        {scoped && (
-          <div className="scope-switch" role="group" aria-label="Whose records">
-            <button
-              type="button"
-              className={scope === 'mine' ? 'active' : ''}
-              aria-pressed={scope === 'mine'}
-              onClick={() => {
-                setScope('mine');
-                setPage(1);
-              }}
-            >
-              Mine
-            </button>
-            {teamScope && (
+          {scoped && (
+            <div className="scope-switch" role="group" aria-label="Whose records">
               <button
                 type="button"
-                className={scope === 'team' ? 'active' : ''}
-                aria-pressed={scope === 'team'}
+                className={scope === 'mine' ? 'active' : ''}
+                aria-pressed={scope === 'mine'}
                 onClick={() => {
-                  setScope('team');
+                  setScope('mine');
                   setPage(1);
                 }}
               >
-                Team
+                Mine
               </button>
-            )}
+              {teamScope && (
+                <button
+                  type="button"
+                  className={scope === 'team' ? 'active' : ''}
+                  aria-pressed={scope === 'team'}
+                  onClick={() => {
+                    setScope('team');
+                    setPage(1);
+                  }}
+                >
+                  Team
+                </button>
+              )}
+              <button
+                type="button"
+                className={scope === 'all' ? 'active' : ''}
+                aria-pressed={scope === 'all'}
+                onClick={() => {
+                  setScope('all');
+                  setPage(1);
+                }}
+              >
+                All
+              </button>
+            </div>
+          )}
+
+          {filters.length > 0 && (
             <button
               type="button"
-              className={scope === 'all' ? 'active' : ''}
-              aria-pressed={scope === 'all'}
-              onClick={() => {
-                setScope('all');
-                setPage(1);
-              }}
+              className="btn btn-sm list-filter-button"
+              aria-expanded={panel === 'filters'}
+              aria-controls={`${listKey}-filters`}
+              onClick={() => setPanel((p) => (p === 'filters' ? null : 'filters'))}
             >
-              All
+              Filters
+              {filterCount > 0 && (
+                <span className="list-filter-count" aria-label={`${filterCount} on`}>
+                  {filterCount}
+                </span>
+              )}
             </button>
-          </div>
-        )}
-
-        {filters.length > 0 && (
-          <button
-            type="button"
-            className="btn btn-sm list-filter-button"
-            aria-expanded={panel === 'filters'}
-            aria-controls={`${listKey}-filters`}
-            onClick={() => setPanel((p) => (p === 'filters' ? null : 'filters'))}
-          >
-            Filters
-            {filterCount > 0 && (
-              <span className="list-filter-count" aria-label={`${filterCount} on`}>
-                {filterCount}
-              </span>
-            )}
-          </button>
-        )}
+          )}
+        </div>
 
         {/*
           A filtered list used to look exactly like an empty one. Three rows out

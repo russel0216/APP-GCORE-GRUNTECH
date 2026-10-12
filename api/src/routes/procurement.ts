@@ -49,6 +49,7 @@ import {
   availableBudget,
   overBudgetIsBlocked,
 } from '../shared/inventory';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -2443,7 +2444,7 @@ purchaseOrderRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${po.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Purchase Order', number: po.number, author: po.createdBy.name, date: po.orderDate })));
     res.send(pdf);
   }),
 );
@@ -2524,7 +2525,7 @@ purchaseRequestRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${pr.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Purchase Request', number: pr.number, author: pr.requestedBy.name, date: pr.createdAt })));
     res.send(pdf);
   }),
 );

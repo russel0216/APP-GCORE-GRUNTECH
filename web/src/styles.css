@@ -1450,10 +1450,64 @@ small,
   filtered list used to look exactly like an empty one; three rows out of four
   hundred with nothing saying why is how people conclude data went missing.
 */
-/* The chips sit on the toolbar line, beside Filters (2026-10-12, the owner's call). */
-.list-toolbar .list-chips-inline {
+/*
+  The chips sit on the toolbar line, beside Filters (2026-10-12, the owner's
+  call), as ONE block that takes what is left of the line and wraps inside
+  itself: the first line is filled first, the chips that do not fit start a
+  second line under the first chip, and the search box keeps its width
+  rather than giving way. Each row of chips is a card button tall, padded so
+  a single row stands in the text box's band.
+*/
+.list-toolbar-main {
+  position: relative;
+  align-items: flex-start;
+  /* Room for the ⋯ menu, which is pinned to the first line's right end. */
+  padding-right: calc(var(--btn-h-sm) + var(--s-3));
+}
+
+.list-lead {
+  display: flex;
+  flex: 0 0 auto;
+  max-width: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: var(--field-h);
+}
+
+.list-lead .list-search {
+  /* Fixed, not shrinking: a shrinkable box is measured at its size attribute's width, and the block comes out short. */
+  flex: 0 0 280px;
+  max-width: 100%;
+}
+
+.list-toolbar-main .list-chips-inline {
+  flex: 1 1 0;
+  min-width: min(14rem, 100%);
   margin-bottom: 0;
-  flex: 0 1 auto;
+  row-gap: var(--s-1);
+  padding-block: calc((var(--field-h) - var(--btn-h-sm)) / 2);
+}
+
+.list-toolbar-main .list-chip {
+  box-sizing: border-box;
+  height: var(--btn-h-sm);
+  padding-block: 0;
+}
+
+.list-toolbar-main .list-tools {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: var(--field-h);
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .list-lead,
+  .list-lead .list-search {
+    flex: 1 1 100%;
+  }
 }
 
 .list-chips,

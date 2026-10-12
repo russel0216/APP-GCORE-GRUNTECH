@@ -66,6 +66,7 @@ import {
   type ApprovalSlot,
 } from '../shared/approvals';
 import { bracketNote, bracketed, LIST_CAP, listNotes, listReference, rangeNamed, recordNamed, scopeNamed, filterDay, choice, sendListPdf, totalLabel, ratePct } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * SALES ORDERS — SCORO's "Create invoice", under its real name here: the
@@ -1544,7 +1545,7 @@ salesOrderRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="SO-${order.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Sales Order', number: order.number, author: order.owner.name, date: order.orderDate })));
     res.send(pdf);
   }),
 );

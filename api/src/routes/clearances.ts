@@ -48,6 +48,7 @@ import {
   turnover,
 } from '../shared/clearance';
 import { LIST_CAP, listReference, choice, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Employee clearance — turnover of accountabilities before someone leaves.
@@ -924,7 +925,7 @@ clearanceRoutes.get(
 
     await audit({ entityType: 'clearance', entityId: head.id, action: 'EXPORTED', summary: `Printed ${head.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${head.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Employee Clearance', number: head.number, author: head.raisedBy.name, date: head.createdAt })));
     res.send(pdf);
   }),
 );

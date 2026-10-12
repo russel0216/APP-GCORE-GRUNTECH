@@ -42,6 +42,7 @@ import {
   postJobCost,
   releaseCommitment,
 } from '../shared/inventory';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 const D = (v: number | string | null | undefined) =>
   v === null || v === undefined ? new Prisma.Decimal(0) : new Prisma.Decimal(v);
@@ -1980,7 +1981,7 @@ stockIssueRoutes.get(
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${issue.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Stock Issue', number: issue.number, author: issue.issuedBy.name, date: issue.issueDate })));
     res.send(pdf);
   }),
 );

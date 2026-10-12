@@ -48,6 +48,7 @@ import { workingDaysBetween } from '../shared/day';
 import { valueRevision } from '../shared/pipeline';
 import { costingForJob, createJobRecord } from './jobs';
 import { LIST_CAP, listReference, totalLabel, rangeNamed, recordNamed, namedInFilter, filterDay, dayOf, choice, bracketed, bracketNote, listNotes, sendListPdf } from '../shared/listPaper';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Job orders — the PROJECT WORK ORDER (2026-10-09, the owner's call; a
@@ -1000,7 +1001,7 @@ jobOrderRoutes.get(
 
     await audit({ entityType: 'job_order', entityId: row.id, action: 'EXPORTED', summary: `Printed ${row.number}` }, req);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${row.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Job Order', number: row.number, author: row.requestedBy.name, date: row.createdAt })));
     res.send(pdf);
   }),
 );

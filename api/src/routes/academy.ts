@@ -47,6 +47,7 @@ import {
   sweepExpiryNotices,
   teamReadiness,
 } from '../shared/academy';
+import { contentDisposition, paperFileName } from '../shared/paperName';
 
 /**
  * Gruntech Academy — G-HR › Academy (item 13).
@@ -1172,7 +1173,7 @@ sessionRoutes.get(
       req,
     );
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${s.number}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition(paperFileName({ kind: 'Training Attendance Sheet', number: s.number, author: s.trainer.name, date: s.startsAt })));
     res.send(pdf);
   }),
 );

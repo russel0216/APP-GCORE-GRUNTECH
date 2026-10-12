@@ -111,6 +111,8 @@ import * as XLSX from '../../web/node_modules/xlsx/xlsx.mjs';
 import { readAppearance } from '../src/routes/appearance';
 import { contentStreams, pdfRuns, pdfText, runWidth, shown, type PdfRun } from './lib/paper';
 import { attachmentKind, fitImage } from '../src/shared/pdfAttachments';
+import { contentDisposition, kindOfFile, paperFileName } from '../src/shared/paperName';
+import { issueTicket, redeemTicket, ticketPath, TICKET_TTL_MS } from '../src/shared/printTickets';
 
 if (env.isProduction) {
   console.error('Refusing to run against a production database.');
@@ -2825,6 +2827,58 @@ async function main() {
     long?.rows.length === MAX_ROWS && long?.truncatedRows === true,
     `${long?.rows.length} ${long?.truncatedRows}`,
   );
+
+  // ── The name a paper is saved under, and the print ticket (2026-10-12) ────
+  console.log('\nPaper names and print tickets');
+  check(
+    'a paper is named <Kind> <Number> R<n> - <Author> - <the document\'s Manila day>',
+    paperFileName({ kind: 'Quotation', number: '0062602018', revision: 0, author: 'Carter Gasiong', date: new Date('2026-10-07T17:30:00Z') }) ===
+      'Quotation 0062602018 R0 - Carter Gasiong - 2026-10-08.pdf' &&
+      paperFileName({ kind: 'Sales Order', number: '4720', author: 'Carter Gasiong', date: '2026-05-30' }) ===
+        'Sales Order 4720 - Carter Gasiong - 2026-05-30.pdf',
+    paperFileName({ kind: 'Quotation', number: '0062602018', revision: 0, author: 'Carter Gasiong', date: new Date('2026-10-07T17:30:00Z') }),
+  );
+  const oddName = paperFileName({ kind: 'Purchase Order', number: 'PO/2026:01*', author: 'A  "B"  <C>|D', date: null });
+  check(
+    'a character a file system refuses becomes "-", spaces run as one, and a missing part drops out',
+    oddName === 'Purchase Order PO-2026-01- - A -B- -C--D.pdf' &&
+      paperFileName({ kind: 'Lead', number: 'GT-LD-1', author: null, date: undefined }) === 'Lead GT-LD-1.pdf',
+    oddName,
+  );
+  const longName = paperFileName({ kind: 'Quotation', number: 'X'.repeat(300), author: 'Someone', date: '2026-01-01' });
+  check('a name is kept under 150 characters before its extension', longName.length <= 154 && longName.endsWith('.pdf'), String(longName.length));
+  check(
+    "a list's old file name becomes its kind; a name outside ASCII travels whole in filename*",
+    kindOfFile('sales-forecast.pdf') === 'Sales Forecast' &&
+      contentDisposition('Lead 1 - Peñalosa.pdf') === `inline; filename="Lead 1 - Pe_alosa.pdf"; filename*=UTF-8''Lead%201%20-%20Pe%C3%B1alosa.pdf`,
+    contentDisposition('Lead 1 - Peñalosa.pdf'),
+  );
+  check(
+    'a ticket names an API path only, in one spelling, with any ticket parameter taken out',
+    ticketPath('/api/quotations/1/revisions/2/pdf?option=x&ticket=abc') === '/api/quotations/1/revisions/2/pdf?option=x' &&
+      ticketPath('/api/a/pdf?q=x%20y') === ticketPath('/api/a/pdf?q=x+y') &&
+      ticketPath('https://evil.example/api/a/pdf') === null && ticketPath('//evil.example/api/a') === null && ticketPath('/g-ops/x') === null,
+  );
+  {
+    const t0 = 1_800_000_000_000;
+    const paper = '/api/quotations/q1/revisions/r1/pdf';
+    const t = issueTicket('user1', paper, t0);
+    const other = redeemTicket(t, '/api/quotations/q2/revisions/r1/pdf', t0 + 1000);
+    const forgedUser = redeemTicket(t.replace('.user1.', '.user2.'), paper, t0 + 1000);
+    const late = redeemTicket(issueTicket('user1', paper, t0), paper, t0 + TICKET_TTL_MS + 1);
+    const first = redeemTicket(t, paper, t0 + 1000);
+    const again = redeemTicket(t, paper, t0 + 2000);
+    check(
+      'a ticket opens its own path once, for its own person, within two minutes — another path, another person, late or again are refused',
+      'userId' in first && first.userId === 'user1' &&
+        'refused' in other && other.refused === 'forged' &&
+        'refused' in forgedUser && forgedUser.refused === 'forged' &&
+        'refused' in late && late.refused === 'expired' &&
+        'refused' in again && again.refused === 'used' &&
+        'refused' in (redeemTicket('garbage', paper, t0) as object),
+      JSON.stringify({ first, other, forgedUser, late, again }),
+    );
+  }
 
   // ── Attachments printed behind a document (2026-10-12) ────────────────────
   console.log('\nAttachments on paper');
