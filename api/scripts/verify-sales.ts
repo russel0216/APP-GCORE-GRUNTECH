@@ -16,7 +16,7 @@ import { prisma } from '../src/prisma';
 import { env } from '../src/env';
 import { nextNumber, previewNext, employeeToken, parseNumber, renderPattern, FREE_NUMBER_TRIES } from '../src/shared/numbering';
 import { submitForApproval, act, pendingFor, pickWorkflow, routePreview } from '../src/shared/approvals';
-import { renderDocument } from '../src/shared/pdf';
+import { formatDateTime, renderDocument } from '../src/shared/pdf';
 import { resolveUser, canEditRecord, type ResolvedUser } from '../src/permissions/resolve';
 import { signToken } from '../src/auth/middleware';
 import {
@@ -310,10 +310,9 @@ async function main() {
 
   const sales = await makeUser('Verify Sales', 'sales@verifys.local', ['sales']);
   const manager = await makeUser('Verify Sales Manager', 'mgr@verifys.local', ['sales_manager', 'team_leader']);
-  // The CEO / President (the owner's routing sheet, 2026-10-11): the second
-  // signature on a quotation over ₱1,000,000. Also a Team Leader, so its own
-  // quotations prove the senior role's route wins.
-  const ceo = await makeUser('Verify CEO', 'ceo@verifys.local', ['executive', 'ceo', 'team_leader']);
+  // The CEO / President (the owner's routing sheet): the second signature on
+  // a quotation over ₱1,000,000 and the last on every sales order.
+  const ceo = await makeUser('Verify CEO', 'ceo@verifys.local', ['executive', 'ceo']);
   const other = await makeUser('Verify Other', 'other@verifys.local', ['sales']);
   // A team (2026-10-08) is the Industry on the employee record: Sales and
   // Other are on the Healthcare Industry Team, the manager has an employee
@@ -324,6 +323,9 @@ async function main() {
   for (const [u, n, team] of [[sales, EDITOR_TOKEN, teamHI.id], [other, 'E2', teamHI.id], [manager, 'E3', null]] as const) {
     await prisma.employee.create({ data: { employeeNo: `${TAG}-${n}`, firstName: 'Verify', lastName: `${TAG} ${n}`, userId: u.id, industryId: team } });
   }
+  // Sales reports to the manager, so their documents' Team Leader step is
+  // the manager whoever else on the database holds Team Leader.
+  await prisma.user.update({ where: { id: sales.id }, data: { supervisorId: manager.id } });
 
   const customer = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital`, createdById: sales.id },
@@ -3490,22 +3492,53 @@ async function main() {
       `${mgrCan} ${sellerCan} ${otherCan}`,
     );
 
-    // A Team Leader's own quotation goes to the CEO / President alone.
+    // ── The routing sheet of 2026-10-12: one route whoever prepared it ──
+    // A step the preparer holds they sign at submit, dated the submit instant
+    // — the same timestamp "Prepared by" prints.
+    const timesIn = (text: string, at: Date) => text.replace(/\s+/g, ' ').split(formatDateTime(at)).length - 1;
+    const paperOf = async (quotationId: string, revisionId: string, token: string) =>
+      pdfText(Buffer.from(await (await fetch(`${BASE}/quotations/${quotationId}/revisions/${revisionId}/pdf`, { headers: { Authorization: `Bearer ${token}` } })).arrayBuffer()));
+    type HeldRoute = { steps: { name: string; held?: boolean; approvers: { id: string; name: string }[] }[] } | null;
     const tlQuote = await http(managerToken, 'POST', '/quotations', {
       customerId: clinic.id,
       subject: `${TAG} Team leader's own`,
       lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 50_000 }],
     });
     const tlView = await http(managerToken, 'GET', `/quotations/${tlQuote.body.id}`);
-    const tlRoute = (tlView.body.approvalRoutes as { standard: Route } | null)?.standard;
+    const tlRoute = (tlView.body.approvalRoutes as { standard: HeldRoute } | null)?.standard;
     check(
-      'a Team Leader’s quotation goes to the CEO / President alone',
-      tlQuote.status === 201 && tlRoute?.steps.length === 1 && tlRoute.steps[0].approvers.some((p) => p.id === ceo.id) && !JSON.stringify(tlRoute).includes(manager.id),
+      'a Team Leader’s own quotation takes the one route — its Team Leader step is theirs, signed when they submit',
+      tlQuote.status === 201 && tlRoute?.steps.length === 1 && tlRoute.steps[0].held === true && tlRoute.steps[0].approvers.map((p) => p.id).join() === manager.id,
       `${tlQuote.status} ${JSON.stringify(tlRoute)}`,
     );
-    // The CEO / President's own needs nobody: Submit approves it at once, and
-    // the paper is signed by who prepared it alone. The CEO here also holds
-    // Team Leader — the senior role's route wins.
+    const tlRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(tlQuote.body.id) } });
+    const tlSubmit = await http(managerToken, 'POST', `/quotations/${tlQuote.body.id}/revisions/${tlRev.id}/submit`);
+    const tlReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: tlRev.id }, include: { actions: true } });
+    check(
+      'submitted, it is approved at once: the Team Leader step signed by the preparer, nobody else asked',
+      tlSubmit.status === 200 &&
+        tlReq.status === 'APPROVED' &&
+        (await statusOf(tlRev.id)) === 'APPROVED' &&
+        tlReq.actions.length === 1 &&
+        tlReq.actions[0].selfSigned &&
+        tlReq.actions[0].approverId === manager.id,
+      `${tlSubmit.status} ${tlReq.status} ${JSON.stringify(tlReq.actions)}`,
+    );
+    check('the signature is dated the submit instant itself', tlReq.actions[0]?.actedAt.getTime() === tlReq.createdAt.getTime());
+    const tlPaper = await paperOf(String(tlQuote.body.id), tlRev.id, managerToken);
+    check(
+      'its PDF prints Prepared by and the Team Leader step with ONE timestamp, nothing Pending',
+      timesIn(tlPaper, tlReq.createdAt) >= 2 && !tlPaper.includes('Pending'),
+      `${formatDateTime(tlReq.createdAt)} ×${timesIn(tlPaper, tlReq.createdAt)}`,
+    );
+
+    // The CEO on the SIT team: their quotation over a million waits on SIT's
+    // Team Leader (they report to nobody), and its CEO step is theirs.
+    const teamSIT = await prisma.industry.findUniqueOrThrow({ where: { code: 'SIT' } });
+    const sitLeader = await makeUser('Verify SIT Leader', 'sitlead@verifys.local', ['team_leader']);
+    for (const [u, n] of [[sitLeader, 'E4'], [ceo, 'E5']] as const) {
+      await prisma.employee.create({ data: { employeeNo: `${TAG}-${n}`, firstName: 'Verify', lastName: `${TAG} ${n}`, userId: u.id, industryId: teamSIT.id } });
+    }
     const ceoToken = signToken(ceo.id, ceo.email);
     const ceoQuote = await http(ceoToken, 'POST', '/quotations', {
       customerId: clinic.id,
@@ -3514,32 +3547,128 @@ async function main() {
     });
     const ceoRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(ceoQuote.body.id) } });
     const ceoView = await http(ceoToken, 'GET', `/quotations/${ceoQuote.body.id}`);
+    const ceoRoute = (ceoView.body.approvalRoutes as { standard: HeldRoute } | null)?.standard;
     check(
-      'the CEO / President’s quotation names no approver — the senior role’s route over the Team Leader’s',
-      ((ceoView.body.approvalRoutes as { standard: Route } | null)?.standard?.steps.length ?? -1) === 0,
-      JSON.stringify(ceoView.body.approvalRoutes),
+      'the CEO’s own quotation over a million: the Team Leader of their own team first, then the CEO step — theirs',
+      ceoRoute?.steps.length === 2 &&
+        !ceoRoute.steps[0].held &&
+        ceoRoute.steps[0].approvers.some((p) => p.id === sitLeader.id) &&
+        ceoRoute.steps[1].held === true,
+      JSON.stringify(ceoRoute),
+    );
+    check(
+      'with no "Reports to", the Team Leader step goes to the Team Leader on the preparer’s team, not to every one',
+      !!ceoRoute && !ceoRoute.steps[0].approvers.some((p) => p.id === manager.id),
+      JSON.stringify(ceoRoute?.steps[0]),
     );
     const ceoSubmit = await http(ceoToken, 'POST', `/quotations/${ceoQuote.body.id}/revisions/${ceoRev.id}/submit`);
-    const ceoReq = await prisma.approvalRequest.findFirst({ where: { documentType: 'quotation', documentId: ceoRev.id } });
+    const ceoReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: ceoRev.id }, include: { actions: true } });
     check(
-      'and Submit approves it at once — the request closed APPROVED, the revision approved',
-      ceoSubmit.status === 200 && ceoReq?.status === 'APPROVED' && (await statusOf(ceoRev.id)) === 'APPROVED',
-      `${ceoSubmit.status} ${ceoReq?.status} ${await statusOf(ceoRev.id)} ${ceoSubmit.text.slice(0, 120)}`,
+      'submitted, it waits on the Team Leader with the CEO step already signed, at the submit instant',
+      ceoSubmit.status === 200 &&
+        ceoReq.status === 'PENDING' &&
+        ceoReq.currentSequence === 1 &&
+        ceoReq.actions.length === 1 &&
+        ceoReq.actions[0].sequence === 2 &&
+        ceoReq.actions[0].selfSigned &&
+        ceoReq.actions[0].actedAt.getTime() === ceoReq.createdAt.getTime(),
+      `${ceoSubmit.status} ${ceoReq.status} ${ceoReq.currentSequence} ${JSON.stringify(ceoReq.actions)}`,
     );
-    const ceoPaper = pdfText(
-      Buffer.from(
-        await (await fetch(`${BASE}/quotations/${ceoQuote.body.id}/revisions/${ceoRev.id}/pdf`, { headers: { Authorization: `Bearer ${ceoToken}` } })).arrayBuffer(),
-      ),
+    const ceoHalf = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
+    check(
+      'halfway, its PDF prints the CEO once as preparer and once as approver under one timestamp, the Team Leader Pending',
+      timesIn(ceoHalf, ceoReq.createdAt) >= 2 && ceoHalf.includes('Pending') && ceoHalf.includes(sitLeader.name),
+      `${formatDateTime(ceoReq.createdAt)} ×${timesIn(ceoHalf, ceoReq.createdAt)}`,
     );
-    check('its PDF is signed by who prepared it alone, nothing Pending', ceoPaper.includes(ceo.name) && !ceoPaper.includes('Pending') && !ceoPaper.includes(manager.name));
+    const ceoCanAct = async (token: string) =>
+      ((await http(token, 'GET', `/approvals/history/quotation/${ceoRev.id}`)).body as unknown as { canAct?: boolean }[])[0]?.canAct;
+    const sitLeaderToken = signToken(sitLeader.id, sitLeader.email);
+    check(
+      'the Team Leader of the CEO’s team may decide it; the CEO and another team’s leader may not',
+      (await ceoCanAct(sitLeaderToken)) === true && (await ceoCanAct(ceoToken)) === false && (await ceoCanAct(managerToken)) === false,
+    );
+    await act({ requestId: ceoReq.id, userId: sitLeader.id, action: 'APPROVED' });
+    const ceoDone = await prisma.approvalRequest.findUniqueOrThrow({ where: { id: ceoReq.id } });
+    check(
+      'the Team Leader’s signature approves it — the CEO step, already signed, is not asked again',
+      ceoDone.status === 'APPROVED' && (await statusOf(ceoRev.id)) === 'APPROVED',
+      `${ceoDone.status} ${await statusOf(ceoRev.id)}`,
+    );
+    const ceoPaper = await paperOf(String(ceoQuote.body.id), ceoRev.id, ceoToken);
+    check(
+      'and the signed PDF keeps the one timestamp, nothing Pending',
+      timesIn(ceoPaper, ceoReq.createdAt) >= 2 && !ceoPaper.includes('Pending') && ceoPaper.includes(sitLeader.name),
+    );
 
-    // Admin › Approval Workflows: saving a role's route without mentioning
-    // its "Prepared by" keeps it that role's route.
+    // A stand-in: the approver's manager may decide the step from the
+    // document — never listed, never told, never queued.
+    const boss = await makeUser('Verify Boss', 'boss@verifys.local', []);
+    const bossToken = signToken(boss.id, boss.email);
+    await prisma.user.update({ where: { id: manager.id }, data: { supervisorId: boss.id } });
+    const standIn = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Stand-in`,
+      lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 60_000 }],
+    });
+    const standInRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(standIn.body.id) } });
+    const bossBefore = await http(bossToken, 'GET', `/quotations/${standIn.body.id}`);
+    check('a manager with no quotation right cannot open a draft that waits on nobody (403)', bossBefore.status === 403, String(bossBefore.status));
+    await http(salesToken, 'POST', `/quotations/${standIn.body.id}/revisions/${standInRev.id}/submit`);
+    const standInReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: standInRev.id, status: 'PENDING' } });
+    const standInHistory = await http(bossToken, 'GET', `/approvals/history/quotation/${standInRev.id}`);
+    const standInRow = (standInHistory.body as unknown as { canAct?: boolean; workflow: { steps: { approvers?: { id: string }[] }[] } }[])[0];
+    check(
+      'the Team Leader’s manager may decide it from the document (canAct), and is not listed as an approver',
+      standInRow?.canAct === true && !JSON.stringify(standInRow?.workflow.steps).includes(boss.id),
+      JSON.stringify(standInRow?.workflow.steps),
+    );
+    const bossQueue = await http(bossToken, 'GET', '/approvals/pending');
+    check('nor is it in their queue', bossQueue.status === 200 && !JSON.stringify(bossQueue.body).includes(standInReq.id));
+    const bossBell = await prisma.notification.count({ where: { userId: boss.id } });
+    check('nor were they told', bossBell === 0, String(bossBell));
+    const bossOpen = await http(bossToken, 'GET', `/quotations/${standIn.body.id}`);
+    const bossPdf = await fetch(`${BASE}/quotations/${standIn.body.id}/revisions/${standInRev.id}/pdf`, { headers: { Authorization: `Bearer ${bossToken}` } });
+    check('while it waits on them they may open it and its paper, with no quotation right', bossOpen.status === 200 && bossPdf.status === 200, `${bossOpen.status} ${bossPdf.status}`);
+    const otherOnStandIn = ((await http(otherToken, 'GET', `/approvals/history/quotation/${standInRev.id}`)).body as unknown as { canAct?: boolean }[])[0]?.canAct;
+    check('a bystander still may not decide it', otherOnStandIn === false, String(otherOnStandIn));
+    await act({ requestId: standInReq.id, userId: boss.id, action: 'APPROVED' });
+    const standInAction = await prisma.approvalAction.findFirstOrThrow({ where: { requestId: standInReq.id } });
+    check(
+      'their decision approves it, in their own name, recorded as standing in for the Team Leader',
+      (await statusOf(standInRev.id)) === 'APPROVED' && standInAction.approverId === boss.id && standInAction.onBehalfOfId === manager.id && !standInAction.selfSigned,
+      JSON.stringify(standInAction),
+    );
+    const standInTrail = await prisma.auditLog.findFirst({ where: { entityType: 'quotation', entityId: standInRev.id, action: 'APPROVED' }, orderBy: { at: 'desc' } });
+    check('the trail says whom they stood in for', !!standInTrail?.summary.includes(`standing in for ${manager.name}`), standInTrail?.summary);
+    const standInPaper = (await paperOf(String(standIn.body.id), standInRev.id, salesToken)).replace(/\s+/g, ' ');
+    check('the PDF names who really signed', standInPaper.includes(boss.name), standInPaper.slice(-300));
+    const bossAfter = await http(bossToken, 'GET', `/quotations/${standIn.body.id}`);
+    check('decided, the door closes again (403)', bossAfter.status === 403, String(bossAfter.status));
+    let selfStandIn = false;
+    await prisma.user.update({ where: { id: manager.id }, data: { supervisorId: sales.id } });
+    const loop = await http(salesToken, 'POST', '/quotations', {
+      customerId: clinic.id,
+      subject: `${TAG} Stand-in loop`,
+      lines: [{ group: `${TAG} Installation`, title: 'Oxygen plant', description: '', quantity: 1, unit: 'lot', unitPrice: 60_000 }],
+    });
+    const loopRev = await prisma.quotationRevision.findFirstOrThrow({ where: { quotationId: String(loop.body.id) } });
+    await http(salesToken, 'POST', `/quotations/${loop.body.id}/revisions/${loopRev.id}/submit`);
+    const loopReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'quotation', documentId: loopRev.id, status: 'PENDING' } });
+    try {
+      await act({ requestId: loopReq.id, userId: sales.id, action: 'APPROVED' });
+    } catch {
+      selfStandIn = true;
+    }
+    check('the requester never stands in for their own approver, even as that approver’s manager', selfStandIn);
+    await prisma.user.update({ where: { id: manager.id }, data: { supervisorId: null } });
+
+    // Admin › Approval Workflows: saving a route without mentioning its
+    // "Prepared by", its preparer's signature or its stand-ins keeps them.
     const admin = await makeUser('Verify Admin', 'admin@verifys.local', []);
     await prisma.user.update({ where: { id: admin.id }, data: { isSuperAdmin: true } });
     const adminToken = signToken(admin.id, admin.email);
     const route = await prisma.approvalWorkflow.findFirstOrThrow({
-      where: { documentType: 'quotation', isActive: true, requesterRole: { key: 'team_leader' } },
+      where: { documentType: 'quotation', isActive: true, name: 'Quotation — Team Leader' },
       include: { steps: { orderBy: { sequence: 'asc' } } },
     });
     const resaved = await http(adminToken, 'PUT', `/workflows/${route.id}`, {
@@ -3550,9 +3679,13 @@ async function main() {
       maxAmount: route.maxAmount == null ? null : Number(route.maxAmount),
       steps: route.steps.map((st) => ({ sequence: st.sequence, name: st.name, approverType: st.approverType, roleId: st.roleId, userId: st.userId })),
     });
+    const resavedRow = await prisma.approvalWorkflow.findUniqueOrThrow({ where: { id: route.id } });
     check(
-      'saving a role’s route in Admin without its "Prepared by" keeps it that role’s',
-      resaved.status === 200 && (await prisma.approvalWorkflow.findUniqueOrThrow({ where: { id: route.id } })).requesterRoleId === route.requesterRoleId,
+      'saving a route in Admin without its "Prepared by", preparer’s signature or stand-ins keeps them',
+      resaved.status === 200 &&
+        resavedRow.requesterRoleId === route.requesterRoleId &&
+        resavedRow.preparerSigns === route.preparerSigns &&
+        resavedRow.standIns === route.standIns,
       resaved.text.slice(0, 160),
     );
     const stepless = await http(adminToken, 'POST', '/workflows', { documentType: 'quotation', name: `${TAG} no steps`, isActive: false, steps: [] });
@@ -3720,20 +3853,22 @@ async function main() {
         soSteps[3].approvers.some((p) => p.id === ceo.id),
       soRoute.text.slice(0, 400),
     );
-    // By who prepares it (the owner's routing sheet, 2026-10-11): a Team
-    // Leader's order skips the team leader and keeps the CEO; the CEO /
-    // President's skips both — the senior role's route wins over Team Leader.
+    // One route whoever prepares it (the routing sheet of 2026-10-12): a Team
+    // Leader's own order has its Team Leader step signed at submit; the CEO's
+    // own its CEO step, the Team Leader of the CEO's team asked first.
     const tlSo = await routePreview('sales_order', 100_000, manager.id);
     const ceoSo = await routePreview('sales_order', 100_000, ceo.id);
+    const shape = (r: typeof tlSo) => r?.steps.map((st) => `${st.name}${st.held ? '*' : ''}`).join(' › ');
     check(
-      "a Team Leader's order goes to back support, the cost controller, then the CEO / President",
-      tlSo?.steps.map((st) => st.name).join(' › ') === 'Admin Back Support › Cost Controller › CEO / President',
-      tlSo?.steps.map((st) => st.name).join(' › '),
+      "a Team Leader's order: the four steps, their own Team Leader step theirs",
+      shape(tlSo) === 'Team Leader* › Admin Back Support › Cost Controller › CEO / President',
+      shape(tlSo),
     );
     check(
-      "the CEO / President's order goes to back support and the cost controller alone",
-      ceoSo?.steps.map((st) => st.name).join(' › ') === 'Admin Back Support › Cost Controller',
-      ceoSo?.steps.map((st) => st.name).join(' › '),
+      "the CEO / President's order: the four steps, the CEO step theirs, the Team Leader their team's",
+      shape(ceoSo) === 'Team Leader › Admin Back Support › Cost Controller › CEO / President*' &&
+        !!ceoSo?.steps[0].approvers.some((p) => p.id === sitLeader.id),
+      shape(ceoSo),
     );
     const submitted = await http(salesToken, 'POST', `/sales-orders/${so1Body.id}/submit`, {});
     check('submitting puts it with the team leader', submitted.status === 200 && submitted.body.status === 'PENDING_APPROVAL', submitted.text.slice(0, 120));
@@ -3800,6 +3935,44 @@ async function main() {
       'and the paper is A4 on its side — the cost columns are why it is landscape',
       soPdfBytes.toString('latin1').includes('/MediaBox [0 0 841.89 595.28]'),
     );
+    // The CEO's own order (the owner's example): it waits on the Team Leader
+    // of the CEO's team, back support and the cost controller; its CEO step
+    // is signed at submit, and its paper prints that and Prepared by under
+    // one timestamp.
+    const ceoOrder = await http(ceoToken, 'POST', '/sales-orders', { quotationId: String(ceoQuote.body.id), mode: 'all' });
+    const ceoOrderId = String(ceoOrder.body.id);
+    const ceoOrderSubmit = await http(ceoToken, 'POST', `/sales-orders/${ceoOrderId}/submit`, {});
+    const ceoOrderReq = await prisma.approvalRequest.findFirstOrThrow({ where: { documentType: 'sales_order', documentId: ceoOrderId, status: 'PENDING' }, include: { actions: true } });
+    check(
+      "the CEO's own order waits on the Team Leader with its CEO step signed at the submit instant",
+      ceoOrder.status === 201 &&
+        ceoOrderSubmit.status === 200 &&
+        ceoOrderReq.currentSequence === 1 &&
+        ceoOrderReq.actions.length === 1 &&
+        ceoOrderReq.actions[0].sequence === 4 &&
+        ceoOrderReq.actions[0].selfSigned &&
+        ceoOrderReq.actions[0].actedAt.getTime() === ceoOrderReq.createdAt.getTime(),
+      `${ceoOrder.status} ${ceoOrderSubmit.status} ${ceoOrderSubmit.text.slice(0, 120)}`,
+    );
+    for (const who of [sitLeader, backSupport]) await act({ requestId: ceoOrderReq.id, userId: who.id, action: 'APPROVED' });
+    check(
+      'two of the three others in, it still waits',
+      (await prisma.salesOrder.findUniqueOrThrow({ where: { id: ceoOrderId } })).status === 'PENDING_APPROVAL',
+    );
+    await act({ requestId: ceoOrderReq.id, userId: costController.id, action: 'APPROVED' });
+    check(
+      "the cost controller's signature issues it — the CEO step is already signed",
+      (await prisma.salesOrder.findUniqueOrThrow({ where: { id: ceoOrderId } })).status === 'ISSUED',
+    );
+    const ceoOrderPaper = pdfText(
+      Buffer.from(await (await fetch(`${BASE}/sales-orders/${ceoOrderId}/pdf`, { headers: { Authorization: `Bearer ${ceoToken}` } })).arrayBuffer()),
+    );
+    check(
+      'its paper prints Prepared by and the CEO step under one timestamp',
+      timesIn(ceoOrderPaper, ceoOrderReq.createdAt) >= 2 && !ceoOrderPaper.includes('Pending'),
+      `${formatDateTime(ceoOrderReq.createdAt)} ×${timesIn(ceoOrderPaper, ceoOrderReq.createdAt)}`,
+    );
+
     const soPdfOther = pdfText(
       Buffer.from(
         await (

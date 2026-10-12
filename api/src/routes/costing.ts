@@ -15,7 +15,7 @@ import {
   type ListQuery,
 } from '../http/kit';
 import { manilaDayStart, manilaMonthKey } from '../shared/day';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser } from '../permissions/resolve';
 import { notify } from '../shared/notifications';
 import { audit } from '../shared/audit';
@@ -26,6 +26,8 @@ import {
   contactOf,
   onApprovalSettled,
   pickWorkflow,
+  mayDecide,
+  preparedAt,
   slotSignatories,
   submitForApproval,
   type ApprovalSlot,
@@ -205,6 +207,17 @@ function present(costing: Record<string, unknown>, ranks?: Map<string, number>) 
 /** Someone with only view_own never sees another person's costing. */
 function onlyOwn(me: ReturnType<typeof currentUser>) {
   return !me.isSuperAdmin && !me.permissions.has('gops.costing.view_all');
+}
+
+/**
+ * A costing's visibility — `view_all`, or its author — and, for a caller with
+ * no costing right at all (`requireAnyOrDecider`) or anyone else, a stand-in
+ * or approver while it waits on them (`mayDecide`).
+ */
+async function assertCostingVisible(me: ReturnType<typeof currentUser>, costing: { id: string; ownerId: string }, deciderOnly: boolean) {
+  const visible = !deciderOnly && (!onlyOwn(me) || costing.ownerId === me.id);
+  if (visible || (await mayDecide(me.id, 'costing', [costing.id]))) return;
+  throw forbidden(deciderOnly ? 'You need one of: gops.costing.view_all, gops.costing.view_own' : 'This costing belongs to someone else');
 }
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -955,15 +968,12 @@ async function approvalConfigured(amount: number): Promise<boolean> {
 
 costingRoutes.get(
   '/:id',
-  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  requireAnyOrDecider('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const costing = await loadFull(req.params.id);
     if (!costing) throw notFound('Costing not found');
-
-    if (onlyOwn(me) && costing.ownerId !== me.id) {
-      throw forbidden('This costing belongs to someone else');
-    }
+    await assertCostingVisible(me, costing, res.locals.deciderOnly === true);
 
     const [ranks, company, configured] = await Promise.all([
       categoryRanks(),
@@ -1556,7 +1566,9 @@ costingRoutes.post(
       await prisma.costing.update({ where: { id: costing.id }, data: { status: 'DRAFT' } });
       throw err;
     }
-    res.json({ ok: true, status: 'PENDING_APPROVAL' });
+    // FINAL already when every step was the author's own (`preparerSigns`).
+    const after = await prisma.costing.findUnique({ where: { id: costing.id }, select: { status: true } });
+    res.json({ ok: true, status: after?.status ?? 'PENDING_APPROVAL' });
   }),
 );
 
@@ -1760,14 +1772,12 @@ const qty = (v: number) => (Number.isInteger(v) ? String(v) : String(Number(v.to
 
 costingRoutes.get(
   '/:id/pdf',
-  requireAny('gops.costing.view_all', 'gops.costing.view_own'),
+  requireAnyOrDecider('gops.costing.view_all', 'gops.costing.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const costing = await loadFull(req.params.id);
     if (!costing) throw notFound('Costing not found');
-    if (onlyOwn(me) && costing.ownerId !== me.id) {
-      throw forbidden('This costing belongs to someone else');
-    }
+    await assertCostingVisible(me, costing, res.locals.deciderOnly === true);
 
     const [ranks, currency] = await Promise.all([categoryRanks(), companyCurrency()]);
     const view = present(costing as unknown as Record<string, unknown>, ranks);
@@ -1905,7 +1915,7 @@ costingRoutes.get(
     // nobody will ever sign it.
     const [author, slots] = await Promise.all([contactOf(costing.ownerId), costingRouteSlots(costing)]);
     const signatories: Signatory[] = [
-      { role: 'Prepared by', name: costing.owner.name, ...author, at: costing.createdAt },
+      { role: 'Prepared by', name: costing.owner.name, ...author, at: preparedAt(slots) ?? costing.createdAt },
       ...(slots.length ? slotSignatories(slots) : costing.status === 'DRAFT' ? [{ role: 'Approved by' }] : []),
     ];
 

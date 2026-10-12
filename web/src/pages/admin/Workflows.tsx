@@ -28,6 +28,8 @@ interface Workflow {
   optionLabel: string | null;
   /** Set: the route for documents prepared by a holder of this role. */
   requesterRoleId: string | null;
+  preparerSigns: boolean;
+  standIns: boolean;
   steps: Step[];
   requestCount: number;
 }
@@ -133,6 +135,13 @@ export function Workflows() {
                   </span>
                 </div>
                 {w.optionLabel && <div className="faint">Offered as “{w.optionLabel}”</div>}
+                {(w.preparerSigns || w.standIns) && (
+                  <div className="faint">
+                    {[w.preparerSigns && 'The preparer signs the steps they hold', w.standIns && 'managers may stand in']
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </div>
+                )}
                 {w.requesterRoleId && (
                   <div className="faint">
                     Prepared by {roles.find((r) => r.id === w.requesterRoleId)?.name ?? 'a role'}
@@ -227,6 +236,8 @@ function WorkflowEditor({
   const [maxAmount, setMaxAmount] = useState(workflow?.maxAmount?.toString() ?? '');
   const [optionLabel, setOptionLabel] = useState(workflow?.optionLabel ?? '');
   const [requesterRoleId, setRequesterRoleId] = useState(workflow?.requesterRoleId ?? '');
+  const [preparerSigns, setPreparerSigns] = useState(workflow?.preparerSigns ?? false);
+  const [standIns, setStandIns] = useState(workflow?.standIns ?? false);
   const [steps, setSteps] = useState<Step[]>(
     workflow?.steps.map((s) => ({ ...s })) ?? [
       { sequence: 1, name: 'Approval', approverType: 'SUPERVISOR', roleId: null, userId: null },
@@ -268,6 +279,8 @@ function WorkflowEditor({
         maxAmount: maxAmount === '' ? null : Number(maxAmount),
         optionLabel: optionLabel.trim() || null,
         requesterRoleId: requesterRoleId || null,
+        preparerSigns,
+        standIns,
         steps: steps.map((s) => ({
           sequence: s.sequence,
           name: s.name,
@@ -364,6 +377,20 @@ function WorkflowEditor({
         </Field>
       </div>
 
+      <label className="checkbox">
+        <input type="checkbox" checked={preparerSigns} onChange={(e) => setPreparerSigns(e.target.checked)} />
+        <span>
+          The preparer signs the steps they hold
+          <span className="faint"> — a step whose role the preparer holds is signed when they submit, with the same time as Prepared by</span>
+        </span>
+      </label>
+      <label className="checkbox">
+        <input type="checkbox" checked={standIns} onChange={(e) => setStandIns(e.target.checked)} />
+        <span>
+          A manager may stand in
+          <span className="faint"> — whoever an approver reports to may decide the step from the document, without being listed or told</span>
+        </span>
+      </label>
       <label className="checkbox" style={{ marginBottom: 16 }}>
         <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
         <span>Active</span>

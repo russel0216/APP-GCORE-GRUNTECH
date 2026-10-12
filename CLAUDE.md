@@ -71,7 +71,11 @@ four databases and four copies of "customer".
    to the same `POST /approvals/:id/act`. Never add a module's own approve
    route.
 3. **A requester can never approve their own document.** Enforced in `act()`,
-   before the eligibility check, and for super admins too.
+   before the eligibility check, and for super admins too. The one thing
+   that looks like an exception is not a decision: on a route with
+   `preparerSigns` (2026-10-12) the ENGINE signs, at submit, the steps whose
+   role the preparer holds — never a button they press (see "The routing
+   sheet of 2026-10-12").
 4. **Cost posts only when every step has approved.** Overtime is the live
    example: supervisor *and* HR. Subscribe to the settled event; never post on an
    intermediate approval.
@@ -470,7 +474,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,786 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,824 assertions across twenty-two scripts** (counted 2026-10-12, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -499,9 +503,11 @@ and 4 on workspace for the views on the person's account, and 3 on
 foundation for the teams Back Support supports, and 2 on workspace for
 deleting a role, and one on accounts for the team picked on a user, and 3 on sales for
 the team picked on a quotation and followed by its sales order, and one
-on sales for old quotations taking their author's team):
+on sales for old quotations taking their author's team, and 16 on
+foundation and 22 on sales for the routing sheet of 2026-10-12 — the
+preparer's own signature, the stand-in and the team's leader):
 foundation
-327, masters 92, sales 533, costing 157, pipeline 92, calendar 96, numbering
+343, masters 92, sales 555, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -3047,10 +3053,87 @@ SCORO.
   "No group" is last. The pipeline CSV appends a Groups column. Verify
   scripts tag their test groups (`ZZSALES …`) and delete them by `key`.
 
-## Approval by who prepared it (2026-10-11)
+## Approval by who prepared it (2026-10-11; one route since 2026-10-12)
 
-The owner's routing sheet ("APPROVAL ROUTER — SALES ORDER AND QUOTATION"):
-the quotation's and the sales order's route depends on the PREPARER's role.
+The owner's routing sheet ("APPROVAL ROUTER — SALES ORDER AND QUOTATION").
+
+### The routing sheet of 2026-10-12 — what holds now
+
+The owner's updated sheet gives EVERY preparer (CEO / President, Team
+Leader, Industry Specialist) the same route: **Quotation** — Team Leader,
+and the CEO / President too over ₱1,000,000; **Sales order** — Team Leader,
+Admin Back Support, Cost Controller, CEO / President. The four routes keyed
+to a preparer's role (below, 2026-10-11) are in the seed's RETIRED list;
+`requesterRoleId`, `pickWorkflow`'s preparer logic and the "Prepared by"
+field stay as data an administrator may still use. Three rules came with it:
+
+- **The preparer signs the steps they hold, at submit, with the Prepared-by
+  timestamp** ("if a person holds the Team Leader, Technical Manager, they
+  appear the time stamp as one … the CEO … may create a quotation or sales
+  order, while on the last approval he will also approve").
+  `ApprovalWorkflow.preparerSigns` turns it on per route — seeded on the two
+  quotation routes, the sales order route and the costing route, once
+  (`seed.preparerSignsApplied`; an administrator who unticks it keeps it
+  unticked) — and NEVER engine-wide: a leave request or an expense claim
+  must not be signed by the HR or finance person who filed it. A step is
+  HELD (`holdsStep()` in `shared/approvals.ts`) when the requester holds the
+  role it names — a ROLE step's, or a SUPERVISOR step's fallback ("Team
+  Leader" is the `team_leader` role, whoever the preparer reports to) — or
+  is the person a USER step names; never a PROJECT_MANAGER or HR step.
+  `submitForApproval` writes, in the request's own transaction, one
+  `ApprovalAction { action: APPROVED, selfSigned: true, actedAt:
+  request.createdAt }` per held step, one APPROVED audit row each ("Team
+  Leader — Maria Santos, signed at submit (holds the step)"), and sets
+  `currentSequence` to the first step NOT held; every step held is approved
+  on submit (closed at that instant, settled through the same
+  subscribers). `act()` passes over a signed step when it moves on (the
+  CEO's own sales order settles on the Cost Controller's signature), and
+  rule 3 is untouched: nobody presses Approve on their own document.
+  **One timestamp**: `ApprovalSlot.selfSigned` marks such a slot, and
+  `preparedAt(slots)` is what "Prepared by" prints when there is one — the
+  quotation's, the sales order's and the costing's paper — so the two
+  signatures read the same instant; a draft's preview carries none and
+  keeps the document's own date. The route preview marks a held step
+  (`held`; `routePreview`, `routeBrief`), so "Submit for approval sends it
+  to …" says "You — signed when you submit" (`previewSteps()` in
+  `components/ApprovalStepper.tsx`, both pages), and where every step is
+  the preparer's: "No one else's approval needed — you hold Team Leader".
+  The Approval panel reads "Carter Gasiong · signed on submitting · …".
+- **A manager may stand in, unseen** ("in the event that the approver
+  cannot approve, the manager or the person they report to can approve …
+  don't show them in the approval"). `ApprovalWorkflow.standIns`, seeded
+  on the same four routes. `deciderFor(request, step, userId)` is the ONE
+  test `act()` and the panel's `canAct` both apply: never the requester; an
+  eligible approver; on a `standIns` route the "Reports to" of an eligible
+  approver (one level up), recorded as `ApprovalAction.onBehalfOfId`; else
+  a super admin. A stand-in is never listed (`namedApprovers`,
+  `historyFor`, the PDF's assigned names), never queued (`pendingFor`) and
+  never told — the document's own Approval panel is where they find the
+  buttons. Their decision is in their own name: the audit row says
+  "(standing in for …)", the panel "<name>, for <approver>", the paper
+  prints who really signed. **The read door**: a stand-in may hold no
+  right to the module, so the quotation, sales order and costing record
+  and PDF routes take `requireAnyOrDecider` (`auth/middleware.ts`) and let
+  in, through `mayDecide()`, whoever may decide the document's OPEN
+  request — only while it waits on them (decided, it is a 403 again).
+- **A Team Leader step's fallback is the preparer's TEAM's leader**: a
+  SUPERVISOR step naming a role, for a requester with no "Reports to",
+  goes to `leadersFor()` — the role's holders on the requester's team
+  (`Employee.industryId`), else every holder (never nobody; the requester
+  never counts as the team's leader). The CEO on SIT goes to SIT's Team
+  Leader, not to every one. The costing's Team Leader step now falls back
+  to `team_leader` too (it was `sales_manager`), through `previously`.
+
+Admin › Approval Workflows has both switches ("The preparer signs the steps
+they hold", "A manager may stand in"), each kept when a PUT leaves it out;
+`audit-workflows.ts` no longer reports a step routed to the raising role on
+a `preparerSigns` route, and knows Industry Specialists, Team Leaders and
+the CEO raise quotations and sales orders. verify-foundation (16) and
+verify-sales (22) pin it: the held step, its instant, the one timestamp on
+the quotation and the order paper, the CEO's quotation and order, the
+stand-in's door, queue, bell and trail, and both switches off.
+
+### As built on 2026-10-11 (the keyed routes, now retired)
 
 - **`ApprovalWorkflow.requesterRoleId`** ("Prepared by" in Admin › Approval
   Workflows; `onDelete: Restrict`). `pickWorkflow(type, amount, { option,
@@ -3708,13 +3791,17 @@ Cost Estimate" PDF) in G-CORE's own style.
   team leader, CTG" — step 1 ROLE `technical_manager` (**Technical
   Manager**, a seeded role that reads every costing), step 2 a SUPERVISOR
   step named **Team Leader** (the author's "Reports to", falling back to
-  `sales_manager` as the quotation's and the sales order's do), step 3
+  `team_leader` on the author's team since 2026-10-12 — it was
+  `sales_manager` — as the quotation's and the sales order's do), step 3
   "CEO (CTG)" ROLE `executive` — **CTG is the CEO's initials, Carter T.
   Gasiong**, so the step is the executive role like every other CEO step
   (a `ctg` role seeded for a few minutes is deleted by the seed where
   nobody holds it). The `project_engineer` role now raises and edits its
   own costings. "Costing — management approval" (one step, executive) is
   in the seed's RETIRED list; a costing pending on it finishes on it.
+  The route has `preparerSigns` and `standIns` (2026-10-12): a Technical
+  Manager's own costing is signed at step 1 when submitted, and its paper
+  prints that and Prepared by under one timestamp.
   **Assign Technical Manager in Admin › Users** — until somebody holds it,
   costings stall at step 1 and `audit-workflows.ts` says so (it also knows
   engineers raise costings).

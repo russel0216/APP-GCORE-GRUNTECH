@@ -1,7 +1,21 @@
 # Plan — approval router by the owner's sheet, stand-in approvers, one timestamp for a preparer who also signs
 
-Written 2026-10-12 for the next session (Opus 5.5). It is a plan, not a
-change: nothing below is built. Read `CLAUDE.md` first — "Never invent a second
+Written 2026-10-12 for the next session (Opus 5.5). **Built the same day**
+with the defaults below; CLAUDE.md ("The routing sheet of 2026-10-12") is
+the record of what holds. Where the build departs from this plan:
+
+- The preparer's signature and the stand-in are switched on PER ROUTE
+  (`ApprovalWorkflow.preparerSigns`, `standIns`), seeded on the quotation,
+  sales order and costing routes — not engine-wide as D2 said: engine-wide
+  would let an HR or finance person sign their own leave or expense claim.
+- "Prepared by" takes the submit instant only where the preparer signed a
+  step (`preparedAt(slots)`), on the quotation, sales order and costing
+  papers — not on every routed document (D3).
+- A held step is the ROLE the step names (a SUPERVISOR step's fallback
+  role included), so a Team Leader signs the "Team Leader" step of their
+  own quotation whoever they report to.
+
+The plan as written follows. Read `CLAUDE.md` first — "Never invent a second
 approval path" (rule 2), "A requester can never approve their own document"
 (rule 3), "Sign-offs say who really acted" (Paper, 2026-10-10) and "Approval by
 who prepared it (2026-10-11)" are the rules this plan changes or bends, and

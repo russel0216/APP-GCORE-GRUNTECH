@@ -23,11 +23,13 @@ const TYPICAL_REQUESTER: Record<string, string[]> = {
   purchase_request: ['project_engineer', 'project_manager', 'service_engineer', 'procurement'],
   // Project cash: the team asks, so engineers raise them as often as the PM.
   budget_request: ['project_manager', 'project_engineer'],
-  quotation: ['sales', 'sales_manager'],
-  sales_order: ['sales', 'sales_manager'],
+  // The routing sheet (2026-10-12): Industry Specialists, Team Leaders and
+  // the CEO / President all prepare them, on the one route.
+  quotation: ['industry_specialist', 'sales', 'team_leader', 'ceo', 'sales_manager'],
+  sales_order: ['industry_specialist', 'sales', 'team_leader', 'ceo', 'sales_manager'],
   // The costing route starts with an engineer (2026-10-09); sales and the
-  // project managers still cost work too.
-  costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager'],
+  // project managers still cost work too, and a Technical Manager may.
+  costing: ['project_engineer', 'sales', 'sales_manager', 'project_manager', 'technical_manager', 'team_leader'],
   purchase_order: ['procurement'],
   expense: ['employee', 'project_engineer', 'sales'],
   // A supplier's invoice arrives in finance, so finance keys it in. Routing a
@@ -75,6 +77,10 @@ async function main() {
 
   for (const wf of workflows) {
     const issues: string[] = [];
+    // On a route where the preparer signs the steps they hold
+    // (`preparerSigns`, 2026-10-12), a step routed to the role that raises
+    // the document is not a stall: its holder signs it on submitting.
+    const signsOwn = wf.preparerSigns;
 
     for (const step of wf.steps) {
       if (step.approverType === 'ROLE') {
@@ -88,7 +94,7 @@ async function main() {
         } else if (members.length === 1) {
           // One holder is only a problem if they are also the likely requester.
           const likely = TYPICAL_REQUESTER[wf.documentType] ?? [];
-          if (key && likely.includes(key)) {
+          if (key && likely.includes(key) && !signsOwn) {
             issues.push(
               `step ${step.sequence} "${step.name}" routes to ${step.role?.name} — the role that normally RAISES this document — and only ${members[0]} holds it, so they would be approving their own work`,
             );
@@ -97,7 +103,7 @@ async function main() {
 
         // The structural version of the same fault, independent of headcount.
         const likely = TYPICAL_REQUESTER[wf.documentType] ?? [];
-        if (step.sequence === 1 && key && likely.length === 1 && likely[0] === key) {
+        if (step.sequence === 1 && key && likely.length === 1 && likely[0] === key && !signsOwn) {
           issues.push(
             `step 1 routes to ${step.role?.name}, which is the only role that raises this document — nobody could ever approve it`,
           );
@@ -128,7 +134,7 @@ async function main() {
           issues.push(
             `step ${step.sequence} "${step.name}" routes to each requester's supervisor, but ${unsupervised} active user(s) have none — and the ${step.role.name} fallback is unheld, so their documents route to nobody`,
           );
-        } else if (fallback.length === 1 && (TYPICAL_REQUESTER[wf.documentType] ?? []).includes(step.role.key)) {
+        } else if (fallback.length === 1 && (TYPICAL_REQUESTER[wf.documentType] ?? []).includes(step.role.key) && !signsOwn) {
           issues.push(
             `step ${step.sequence} "${step.name}" falls back to ${step.role.name}, which only ${fallback[0]} holds — set their "Reports to", or a document they raise has nobody to approve it`,
           );

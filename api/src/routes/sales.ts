@@ -15,7 +15,7 @@ import {
   conflict,
   idsFilter,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord, resolveUser, type ResolvedUser } from '../permissions/resolve';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
@@ -30,6 +30,8 @@ import {
   cancelOpenRequest,
   contactOf,
   routeBrief,
+  mayDecide,
+  preparedAt,
   slotSignatories,
 } from '../shared/approvals';
 import {
@@ -1776,18 +1778,10 @@ quotationRoutes.get(
 
 quotationRoutes.get(
   '/:id',
-  requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
+  requireAnyOrDecider('gops.quotations.view_all', 'gops.quotations.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const quotation = await loadQuotation(req.params.id);
-    if (!quotation) throw notFound('Quotation not found');
-    if (
-      !me.isSuperAdmin &&
-      !me.permissions.has('gops.quotations.view_all') &&
-      quotation.ownerId !== me.id
-    ) {
-      throw forbidden('This quotation belongs to someone else');
-    }
+    const quotation = await printableQuotation(me, req.params.id, res.locals.deciderOnly === true);
 
     const showCost = canSeeQuotationCost(me, quotation.ownerId);
     const { customer, ...rest } = quotation;
@@ -3077,11 +3071,14 @@ type LoadedQuotation = NonNullable<Awaited<ReturnType<typeof loadQuotation>>>;
  * A quotation the caller may print: anyone with `view_all`, else its author.
  * The PDF route and the template editor's preview both come through here.
  */
-export async function printableQuotation(me: ResolvedUser, id: string): Promise<LoadedQuotation> {
+export async function printableQuotation(me: ResolvedUser, id: string, deciderOnly = false): Promise<LoadedQuotation> {
   const quotation = await loadQuotation(id);
   if (!quotation) throw notFound('Quotation not found');
-  if (!me.isSuperAdmin && !me.permissions.has('gops.quotations.view_all') && quotation.ownerId !== me.id) {
-    throw forbidden('This quotation belongs to someone else');
+  const visible = !deciderOnly && (me.isSuperAdmin || me.permissions.has('gops.quotations.view_all') || quotation.ownerId === me.id);
+  // A stand-in (or an approver) with no quotation right opens it while it
+  // waits on them, and only then (`requireAnyOrDecider`).
+  if (!visible && !(await mayDecide(me.id, 'quotation', quotation.revisions.map((r) => r.id)))) {
+    throw forbidden(deciderOnly ? 'You need one of: gops.quotations.view_all, gops.quotations.view_own' : 'This quotation belongs to someone else');
   }
   return quotation;
 }
@@ -3244,7 +3241,9 @@ export async function quotationPrintData(
       name: owner.name,
       position: owner.position ?? undefined,
       ...ownerContact,
-      at: revision.createdAt,
+      // The submit instant when the author signed a step of their own then
+      // (a Team Leader's own quotation): one timestamp for both (2026-10-12).
+      at: preparedAt(slots) ?? revision.createdAt,
     },
     ...(revision.importedUnchanged ? [] : slots.length ? slotSignatories(slots) : await unroutedApproval(revision)),
   ];
@@ -3261,9 +3260,9 @@ export async function quotationPrintData(
 
 quotationRoutes.get(
   '/:id/revisions/:revisionId/pdf',
-  requireAny('gops.quotations.view_all', 'gops.quotations.view_own'),
+  requireAnyOrDecider('gops.quotations.view_all', 'gops.quotations.view_own'),
   handler(async (req, res) => {
-    const quotation = await printableQuotation(currentUser(req), req.params.id);
+    const quotation = await printableQuotation(currentUser(req), req.params.id, res.locals.deciderOnly === true);
     const revision = quotation.revisions.find((r) => r.id === req.params.revisionId);
     if (!revision) throw notFound('Revision not found');
 

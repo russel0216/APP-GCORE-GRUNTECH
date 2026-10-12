@@ -45,6 +45,9 @@ import {
   cancelOpenRequest,
   approversForStep,
   supportersFor,
+  leadersFor,
+  deciderFor,
+  preparedAt,
   slotSignatories,
   contactOf,
   contactsOf,
@@ -738,6 +741,133 @@ async function main() {
     'the ROLE step reads it: a KAT preparer’s Back Support step leaves out the HIT supporter',
     viaStep.includes(bsKat.id) && !viaStep.includes(bsHit.id),
     JSON.stringify(viaStep),
+  );
+
+  // ── 4c. The routing sheet of 2026-10-12 ────────────────────────────────────
+  console.log('\nThe preparer signs what they hold; a manager may stand in');
+
+  // A SUPERVISOR step's fallback goes to the leaders on the preparer's team.
+  const roleA = await prisma.role.create({ data: { key: `${TAG}_rolea`, name: 'Verify Reviewer' } });
+  const roleB = await prisma.role.create({ data: { key: `${TAG}_roleb`, name: 'Verify Approver' } });
+  const leadKat = await makeUser('Verify Lead KAT', 'leadkat@verify.local', []);
+  const leadHit = await makeUser('Verify Lead HIT', 'leadhit@verify.local', []);
+  const katSeller = await makeUser('Verify KAT Seller', 'katseller@verify.local', []);
+  await prisma.employee.createMany({
+    data: [
+      { employeeNo: `${TAG}EMP2`, firstName: 'Verify', lastName: 'Lead KAT', userId: leadKat.id, industryId: kat.id },
+      { employeeNo: `${TAG}EMP3`, firstName: 'Verify', lastName: 'Lead HIT', userId: leadHit.id, industryId: hit.id },
+      { employeeNo: `${TAG}EMP4`, firstName: 'Verify', lastName: 'KAT Seller', userId: katSeller.id, industryId: kat.id },
+    ],
+  });
+  const leaders = [leadKat.id, leadHit.id];
+  check(
+    'no "Reports to": the Team Leader step goes to the leader on the preparer’s own team',
+    (await leadersFor(leaders, katSeller.id)).join() === leadKat.id,
+    JSON.stringify(await leadersFor(leaders, katSeller.id)),
+  );
+  check(
+    'a team with no leader, or a preparer with no team, goes to every leader — never to nobody',
+    (await leadersFor([leadHit.id], katSeller.id)).join() === leadHit.id && (await leadersFor(leaders, loner.id)).length === 2,
+  );
+  check('the preparer is never what makes a team led: a leader alone on their team falls back to all', (await leadersFor(leaders, leadKat.id)).length === 2);
+  await prisma.userRole.createMany({ data: [{ userId: leadKat.id, roleId: roleB.id }, { userId: leadHit.id, roleId: roleB.id }] });
+  const leaderStep = await approversForStep({ approverType: 'SUPERVISOR', roleId: roleB.id, userId: null } as unknown as ApprovalStep, katSeller.id);
+  check('the SUPERVISOR step reads it', leaderStep.join() === leadKat.id, JSON.stringify(leaderStep));
+  await prisma.userRole.deleteMany({ where: { roleId: roleB.id } });
+
+  // The preparer signs, at submit, the steps whose role they hold — only
+  // where the route says so — and a manager may stand in only where it says so.
+  const signer = await makeUser('Verify Signer', 'signer@verify.local', []);
+  const reviewer = await makeUser('Verify Reviewer', 'reviewer@verify.local', []);
+  const bossOf = await makeUser('Verify Boss', 'boss@verify.local', []);
+  const approverB = await makeUser('Verify Approver B', 'approverb@verify.local', [], bossOf.id);
+  await prisma.userRole.createMany({
+    data: [
+      { userId: signer.id, roleId: roleA.id },
+      { userId: reviewer.id, roleId: roleA.id },
+      { userId: approverB.id, roleId: roleB.id },
+    ],
+  });
+  const twoSteps = [
+    { sequence: 1, name: 'Reviewer', approverType: 'ROLE' as const, roleId: roleA.id },
+    { sequence: 2, name: 'Approver', approverType: 'ROLE' as const, roleId: roleB.id },
+  ];
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_sign_doc`, name: 'Verify — the preparer signs', preparerSigns: true, standIns: true, steps: { create: twoSteps } },
+  });
+  await prisma.approvalWorkflow.create({
+    data: { documentType: `${TAG}_nosign_doc`, name: 'Verify — nobody signs their own', steps: { create: twoSteps } },
+  });
+  const heldPreview = await routePreview(`${TAG}_sign_doc`, null, signer.id);
+  check(
+    'before submitting, the step the preparer holds is named as theirs',
+    heldPreview?.steps[0].held === true && heldPreview.steps[0].approvers.map((p) => p.id).join() === signer.id && heldPreview.steps[1].held === false,
+    JSON.stringify(heldPreview?.steps),
+  );
+  const signedReq = await submitForApproval({ documentType: `${TAG}_sign_doc`, documentId: `${TAG}-sign`, subject: `${SUBJECT} preparer signs`, requesterId: signer.id });
+  const signedActions = await prisma.approvalAction.findMany({ where: { requestId: signedReq.id } });
+  check(
+    'submitted, the held step is signed by the preparer at the submit instant, and the request waits on the next',
+    signedReq.status === 'PENDING' &&
+      signedReq.currentSequence === 2 &&
+      signedActions.length === 1 &&
+      signedActions[0].selfSigned &&
+      signedActions[0].approverId === signer.id &&
+      signedActions[0].actedAt.getTime() === signedReq.createdAt.getTime(),
+    JSON.stringify(signedActions),
+  );
+  const signedSlots = await approvalSlots(`${TAG}_sign_doc`, `${TAG}-sign`);
+  check(
+    'its slots carry the signature, and "Prepared by" takes the same instant',
+    signedSlots[0]?.selfSigned === true && signedSlots[0].name === signer.name && preparedAt(signedSlots)?.getTime() === signedReq.createdAt.getTime() && !signedSlots[1]?.name,
+  );
+  check('a draft’s preview carries no signature, so Prepared by keeps the document’s date', preparedAt(await approvalSlots(`${TAG}_sign_doc`, `${TAG}-sign-draft`, { amount: null, requesterId: signer.id })) === undefined);
+  const standInSays = await deciderFor({ ...signedReq, workflow: { standIns: true } }, (await prisma.approvalStep.findFirstOrThrow({ where: { workflow: { documentType: `${TAG}_sign_doc` }, sequence: 2 } })), bossOf.id);
+  check('the approver’s manager may decide the step, in their place', standInSays.may && standInSays.onBehalfOfId === approverB.id, JSON.stringify(standInSays));
+  check('but is not queued', !(await pendingFor(bossOf.id)).some((r) => r.id === signedReq.id));
+  const signedHistory = await historyFor(`${TAG}_sign_doc`, `${TAG}-sign`);
+  check(
+    'nor named as an approver',
+    !JSON.stringify(signedHistory[0]?.workflow?.steps ?? []).includes(bossOf.id) && JSON.stringify(signedHistory[0]?.workflow?.steps ?? []).includes(approverB.id),
+  );
+  await act({ requestId: signedReq.id, userId: bossOf.id, action: 'APPROVED' });
+  const standInAct = await prisma.approvalAction.findFirstOrThrow({ where: { requestId: signedReq.id, sequence: 2 } });
+  check(
+    'their decision settles it, in their name, standing in for the approver',
+    (await prisma.approvalRequest.findUniqueOrThrow({ where: { id: signedReq.id } })).status === 'APPROVED' && standInAct.approverId === bossOf.id && standInAct.onBehalfOfId === approverB.id,
+  );
+
+  const plainReq = await submitForApproval({ documentType: `${TAG}_nosign_doc`, documentId: `${TAG}-nosign`, subject: `${SUBJECT} nobody signs their own`, requesterId: signer.id });
+  check(
+    'where the route does not let the preparer sign, a step they hold waits on the others like any',
+    plainReq.status === 'PENDING' && plainReq.currentSequence === 1 && (await prisma.approvalAction.count({ where: { requestId: plainReq.id } })) === 0,
+  );
+  await act({ requestId: plainReq.id, userId: reviewer.id, action: 'APPROVED' });
+  await expectRejection(
+    'and where it allows no stand-in, the approver’s manager is refused',
+    () => act({ requestId: plainReq.id, userId: bossOf.id, action: 'APPROVED' }),
+    'not yours',
+  );
+  await expectRejection('nobody stands in for their own document', () => act({ requestId: plainReq.id, userId: signer.id, action: 'APPROVED' }), 'raised yourself');
+
+  // Every step the preparer's own: approved on submit, settled once.
+  await prisma.approvalWorkflow.create({
+    data: {
+      documentType: `${TAG}_mine_doc`,
+      name: 'Verify — all the preparer’s',
+      preparerSigns: true,
+      steps: { create: [{ sequence: 1, name: 'Reviewer', approverType: 'ROLE', roleId: roleA.id }] },
+    },
+  });
+  let settledMine = 0;
+  onApprovalSettled(`${TAG}_mine_doc`, async (_r, outcome) => {
+    if (outcome === 'APPROVED') settledMine += 1;
+  });
+  const mineReq = await submitForApproval({ documentType: `${TAG}_mine_doc`, documentId: `${TAG}-mine`, subject: `${SUBJECT} all mine`, requesterId: signer.id });
+  check(
+    'a route whose every step the preparer holds is approved on submit, closed at that instant, settled once',
+    mineReq.status === 'APPROVED' && mineReq.closedAt?.getTime() === mineReq.createdAt.getTime() && settledMine === 1,
+    `${mineReq.status} ${settledMine}`,
   );
 
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
@@ -2583,15 +2713,15 @@ async function main() {
   check('the headings row is found under the title rows (row 4)', sheet?.headerRow === 3, String(sheet?.headerRow));
   check(
     'a number reads as Excel shows it, through its own format, and aligns as a number',
-    sheet?.rows[4][3] === '12,500.00' && sheet?.kinds[4][3] === 'n',
-    `${sheet?.rows[4][3]} ${sheet?.kinds[4]}`,
+    sheet?.rows[4]?.[3] === '12,500.00' && sheet?.kinds[4]?.[3] === 'n',
+    `${sheet?.rows[4]?.[3]} ${sheet?.kinds[4]}`,
   );
   check(
     'a part number typed as text keeps its leading zeros and stays text',
-    sheet?.rows[5][0] === '00123' && sheet?.kinds[5][0] !== 'n',
+    sheet?.rows[5]?.[0] === '00123' && sheet?.kinds[5]?.[0] !== 'n',
   );
-  check('a date reads through its format', sheet?.rows[4][5] === '2026-06-01', sheet?.rows[4][5]);
-  check('a line break inside a cell survives', !!sheet?.rows[6][1].includes('\n'));
+  check('a date reads through its format', sheet?.rows[4]?.[5] === '2026-06-01', sheet?.rows[4]?.[5]);
+  check('a line break inside a cell survives', !!sheet?.rows[6]?.[1]?.includes('\n'));
   check(
     'a merged title spans its columns',
     !!sheet?.spans.some((s) => s.r === 0 && s.c === 0 && s.cols === 5),
@@ -2622,7 +2752,7 @@ async function main() {
   const fromXls = readWorkbook(new Uint8Array(xlsBytes), 'old price list.xls');
   check(
     'an old .xls reads the same',
-    fromXls.sheets[0]?.rows[4][3] === '12,500.00' && fromXls.sheets[0]?.headerRow === 3,
+    fromXls.sheets[0]?.rows[4]?.[3] === '12,500.00' && fromXls.sheets[0]?.headerRow === 3,
     fromXls.sheets[0]?.rows[4]?.join(' | '),
   );
 
@@ -2631,11 +2761,11 @@ async function main() {
   const csv = readWorkbook(csvBytes, 'rates.csv').sheets[0];
   check(
     'a CSV is read as written: zeros kept, UTF-8 and its BOM handled, numbers aligned',
-    csv?.rows[1][0] === '00123' &&
-      csv?.rows[1][1] === 'Señor fan ₱' &&
-      csv?.rows[1][2] === '1,250.00' &&
+    csv?.rows[1]?.[0] === '00123' &&
+      csv?.rows[1]?.[1] === 'Señor fan ₱' &&
+      csv?.rows[1]?.[2] === '1,250.00' &&
       csv?.kinds[1] === 'ssn' &&
-      csv?.rows[0][0] === 'Part' &&
+      csv?.rows[0]?.[0] === 'Part' &&
       csv?.headerRow === 0,
     JSON.stringify({ rows: csv?.rows, kinds: csv?.kinds }),
   );
@@ -2643,7 +2773,7 @@ async function main() {
   const ansi = new Uint8Array([...'Name\r\nPe'].map((ch) => ch.charCodeAt(0)).concat([0xf1], [...'alosa\r\n'].map((ch) => ch.charCodeAt(0))));
   check(
     'a CSV that is not UTF-8 is read as Windows-1252',
-    readWorkbook(ansi, 'old.csv').sheets[0]?.rows[1][0] === 'Peñalosa',
+    readWorkbook(ansi, 'old.csv').sheets[0]?.rows[1]?.[0] === 'Peñalosa',
     readWorkbook(ansi, 'old.csv').sheets[0]?.rows[1]?.[0],
   );
 

@@ -93,6 +93,36 @@ export function ApprovalStepper({ steps }: { steps: Step[] }) {
   );
 }
 
+// ── A route before anybody submits ───────────────────────────────────────────
+
+/** A route as a page previews it (`approvalRoutes` on a record): names only. */
+export interface PreviewRoute {
+  name: string;
+  /** `held`: the submitter holds this step and signs it on submitting. */
+  steps: { name: string; held?: boolean; approvers: { id: string; name: string }[] }[];
+}
+
+/**
+ * The steps "Submit for approval sends it to …" draws: who decides each, and
+ * a step the submitter holds as theirs, signed on submitting with the same
+ * time as Prepared by (2026-10-12) — one rule for the quotation and the sales
+ * order pages.
+ */
+export function previewSteps(route: PreviewRoute): Step[] {
+  return route.steps.map((st) => ({
+    label: st.name,
+    approver: st.held
+      ? 'You — signed when you submit'
+      : st.approvers.length
+        ? st.approvers.map((p) => p.name).join(' or ')
+        : 'Nobody — no one else holds this role',
+    status: 'WAITING',
+  }));
+}
+
+/** Every step is the submitter's own: Submit approves it at once. */
+export const allHeld = (route: PreviewRoute | null | undefined) => !!route?.steps.length && route.steps.every((st) => st.held);
+
 // ── The wired version ────────────────────────────────────────────────────────
 
 interface Action {
@@ -102,6 +132,10 @@ interface Action {
   comment: string | null;
   actedAt: string;
   approver: { id: string; name: string };
+  /** Signed by the preparer when they submitted — they hold this step. */
+  selfSigned?: boolean;
+  /** A stand-in's decision: the approver they decided in place of. */
+  onBehalfOf?: { id: string; name: string } | null;
 }
 
 interface WorkflowStep {
@@ -210,9 +244,14 @@ export function DocumentApproval({
   const steps: Step[] = workflowSteps.map((step) => {
     const acted = request.actions.find((a) => a.sequence === step.sequence);
     if (acted) {
+      const when = formatDateTime(new Date(acted.actedAt));
       return {
         label: step.name,
-        approver: `${acted.approver.name} · ${formatDateTime(new Date(acted.actedAt))}`,
+        approver: acted.selfSigned
+          ? `${acted.approver.name} · signed on submitting · ${when}`
+          : acted.onBehalfOf
+            ? `${acted.approver.name}, for ${acted.onBehalfOf.name} · ${when}`
+            : `${acted.approver.name} · ${when}`,
         // The action as taken. Folding RETURNED into APPROVED drew a document
         // sent back for changes with the tick of one that had passed.
         status: acted.action,

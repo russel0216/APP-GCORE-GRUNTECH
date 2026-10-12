@@ -965,12 +965,15 @@ async function main() {
       pl.funnel.length === 5,
       pl.funnel.map((f) => f.stage).join(', '),
     );
+    // Read off the script's own salesperson: the overall median is every
+    // decided quotation's on the database (imported ones are decided the day
+    // they were submitted), which this check must not depend on.
+    const zz = pl.people.find((x) => x.name === 'ZZ Seller');
     check(
       'a quotation decided 30 days after submission reports 30 days',
-      pl.totals.medianDaysToDecide === 30,
-      `got ${pl.totals.medianDaysToDecide}`,
+      zz?.medianDaysToDecide === 30,
+      `got ${zz?.medianDaysToDecide}`,
     );
-    const zz = pl.people.find((x) => x.name === 'ZZ Seller');
     check('the salesperson is credited with the win', (zz?.won ?? 0) >= 1, JSON.stringify(zz));
     check(
       'an open quotation is weighted by its own probability',

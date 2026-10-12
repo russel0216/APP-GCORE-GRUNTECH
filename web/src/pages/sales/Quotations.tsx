@@ -6,7 +6,7 @@ import { addDays, dayKeyOf, parseDay } from '../../lib/day';
 import { DataList, type BulkContext, type Column, type FilterDef } from '../../components/DataList';
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
-import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
+import { allHeld, ApprovalStepper, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { ActivityLog } from '../../components/ActivityLog';
 import { RecordHeader } from '../../components/RecordHeader';
 import { useConfirm } from '../../components/Confirm';
@@ -759,10 +759,7 @@ export interface QuotationDetail {
   approvalRoutes?: { standard: ApprovalRoute | null; options: { id: string; route: ApprovalRoute | null }[] } | null;
 }
 
-interface ApprovalRoute {
-  name: string;
-  steps: { name: string; approvers: { id: string; name: string }[] }[];
-}
+type ApprovalRoute = PreviewRoute;
 
 /**
  * The lines as the page shows them: a subheading is a wide heading row; every
@@ -1168,10 +1165,14 @@ export function QuotationDetail() {
           const options = quotation.approvalOptions ?? [];
           // A route with no steps: the preparer's role needs nobody (the
           // CEO / President's own quotation) — Submit approves it at once.
-          if (route && !route.steps.length && !options.length) {
+          if (route && (!route.steps.length || allHeld(route)) && !options.length) {
             return (
               <div className="card qd-route sales-card-gap" role="note">
-                <span className="qd-route-label">No approval needed — Submit for approval approves it at once</span>
+                <span className="qd-route-label">
+                  {route.steps.length
+                    ? `No one else's approval needed — you hold ${route.steps.map((st) => st.name).join(' and ')}, so Submit for approval approves it at once`
+                    : 'No approval needed — Submit for approval approves it at once'}
+                </span>
               </div>
             );
           }
@@ -1184,15 +1185,7 @@ export function QuotationDetail() {
               {!!route?.steps.length && (
                 <>
                   <span className="qd-route-label">Submit for approval sends it to</span>
-                  <ApprovalStepper
-                    steps={route.steps.map((st) => ({
-                      label: st.name,
-                      approver: st.approvers.length
-                        ? st.approvers.map((p) => p.name).join(' or ')
-                        : 'Nobody — no one else holds this role',
-                      status: 'WAITING',
-                    }))}
-                  />
+                  <ApprovalStepper steps={previewSteps(route)} />
                 </>
               )}
             </div>

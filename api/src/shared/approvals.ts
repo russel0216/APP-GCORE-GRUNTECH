@@ -230,7 +230,7 @@ export async function approversForStep(
           where: { roleId: step.roleId, user: { isActive: true } },
           select: { userId: true },
         });
-        return rows.map((r) => r.userId);
+        return leadersFor(rows.map((r) => r.userId), requesterId, tx);
       }
       return usersInRole('hr', tx);
     }
@@ -270,6 +270,124 @@ export async function supportersFor(holders: string[], requesterId: string, tx: 
   if (onTeam.length) return onTeam;
   const everyTeam = holders.filter((h) => !links.some((l) => l.userId === h));
   return everyTeam.length ? everyTeam : holders;
+}
+
+/**
+ * The holders of a SUPERVISOR step's fallback role who decide for a requester
+ * with no "Reports to": those on the requester's own team
+ * (`Employee.industryId`) — the CEO on SIT goes to SIT's Team Leader, not to
+ * every Team Leader (2026-10-12) — else every holder, so a document never
+ * stalls because the team has no leader. The requester is never the reason a
+ * team counts as led: a Team Leader alone on their team falls back to all.
+ */
+export async function leadersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+  if (!holders.length) return holders;
+  const requester = await tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } });
+  if (!requester?.industryId) return holders;
+  const onTeam = await tx.employee.findMany({
+    where: { userId: { in: holders.filter((h) => h !== requesterId) }, industryId: requester.industryId },
+    select: { userId: true },
+  });
+  const ids = new Set(onTeam.map((e) => e.userId));
+  const led = holders.filter((h) => ids.has(h));
+  return led.length ? led : holders;
+}
+
+/**
+ * Whether the requester HOLDS a step — the role it names (a ROLE step's, or a
+ * SUPERVISOR step's fallback: "Team Leader" on the quotation is the
+ * `team_leader` role), or the person a USER step names. On a route that lets
+ * the preparer sign (`ApprovalWorkflow.preparerSigns`) such a step is signed
+ * at submit, dated the submit instant (the owner's call, 2026-10-12: a Team
+ * Leader's own quotation, the CEO's own sales order, a Technical Manager's
+ * own costing). A PROJECT_MANAGER or HR step is never held: a PM's own
+ * request goes up (2026-10-07), and HR never signs its own filing.
+ */
+export async function holdsStep(step: ApprovalStep, requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<boolean> {
+  if (step.approverType === 'USER') return step.userId === requesterId;
+  if ((step.approverType === 'ROLE' || step.approverType === 'SUPERVISOR') && step.roleId) {
+    return !!(await tx.userRole.findFirst({
+      where: { userId: requesterId, roleId: step.roleId, user: { isActive: true } },
+      select: { userId: true },
+    }));
+  }
+  return false;
+}
+
+/** The sequences of a route the requester signs at submit — none unless the route lets the preparer sign. */
+export async function heldSequences(
+  workflow: { preparerSigns: boolean; steps: ApprovalStep[] },
+  requesterId: string,
+  tx: Prisma.TransactionClient = prisma,
+): Promise<Set<number>> {
+  const held = new Set<number>();
+  if (!workflow.preparerSigns) return held;
+  for (const step of workflow.steps) if (await holdsStep(step, requesterId, tx)) held.add(step.sequence);
+  return held;
+}
+
+/**
+ * Who may decide the step a PENDING request is at, and in whose place — the
+ * ONE test act() and the document's Approval panel (`canAct`) both apply.
+ *
+ * Never the requester (rule 3, super admins included). An eligible approver
+ * acts in their own right. On a route with `standIns`, the manager ("Reports
+ * to") of an eligible approver may decide it instead — `onBehalfOfId` is the
+ * report they stand in for (the owner's call, 2026-10-12: "the manager or the
+ * person they report to can approve … don't show them in the approval"), so
+ * nothing lists, tells or queues a stand-in; the decision names who really
+ * acted. One level up only. A super admin may act on anything, as before.
+ */
+export async function deciderFor(
+  request: ApprovalRequest & { workflow?: { standIns: boolean } | null },
+  step: ApprovalStep,
+  userId: string,
+  tx: Prisma.TransactionClient = prisma,
+): Promise<{ may: boolean; onBehalfOfId: string | null; reason?: 'own' }> {
+  if (request.requesterId === userId) return { may: false, onBehalfOfId: null, reason: 'own' };
+  const eligible = (await approversForStep(step, request.requesterId, tx, ctxOf(request))).filter((id) => id !== request.requesterId);
+  if (eligible.includes(userId)) return { may: true, onBehalfOfId: null };
+  if (request.workflow?.standIns && eligible.length) {
+    const report = await tx.user.findFirst({
+      where: { id: { in: eligible }, supervisorId: userId },
+      select: { id: true },
+      orderBy: { name: 'asc' },
+    });
+    if (report) {
+      const actor = await tx.user.findUnique({ where: { id: userId }, select: { isActive: true } });
+      if (actor?.isActive) return { may: true, onBehalfOfId: report.id };
+    }
+  }
+  const actor = await tx.user.findUnique({ where: { id: userId }, select: { isSuperAdmin: true } });
+  return { may: !!actor?.isSuperAdmin, onBehalfOfId: null };
+}
+
+/**
+ * Whether the user may decide an open approval request on any of these
+ * documents (`deciderFor`) — the one way a stand-in with no right to the
+ * module opens the record they are deciding (`requireAnyOrDecider`).
+ */
+export async function mayDecide(userId: string, documentType: string, documentIds: string[]): Promise<boolean> {
+  if (!documentIds.length) return false;
+  const open = await prisma.approvalRequest.findMany({
+    where: { documentType, documentId: { in: documentIds }, status: 'PENDING' },
+    include: { workflow: { include: { steps: true } } },
+  });
+  for (const request of open) {
+    const step = request.workflow?.steps.find((st) => st.sequence === request.currentSequence);
+    if (step && (await deciderFor(request, step, userId)).may) return true;
+  }
+  return false;
+}
+
+/**
+ * The instant "Prepared by" prints when the preparer also signed a step at
+ * submit: that step's own time, so the two print ONE timestamp on every paper
+ * (the owner's call, 2026-10-12). Undefined otherwise — the document's own
+ * date stands. A draft's preview never carries a self-signed slot.
+ */
+export function preparedAt(slots: ApprovalSlot[]): Date | undefined {
+  return slots.find((s) => s.selfSigned && s.at)?.at;
 }
 
 /** A person who decides a step: enough to name them on a page or a PDF. */
@@ -315,14 +433,30 @@ export async function routePreview(
   requesterId: string,
   optionId?: string | null,
   ctx: ApprovalContext = {},
-): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; approvers: StepPerson[] }[] } | null> {
+): Promise<{ workflowId: string; name: string; steps: { sequence: number; name: string; held: boolean; approvers: StepPerson[] }[] } | null> {
   const workflow = await pickWorkflow(documentType, amount, { option: optionId ?? null, requesterId });
   if (!workflow) return null;
+  // A step the preparer holds on a route that lets them sign is THEIRS: it is
+  // signed at submit, so it names them alone (`held`).
+  const held = await heldSequences(workflow, requesterId);
+  const self = held.size
+    ? await prisma.user.findUnique({
+        where: { id: requesterId },
+        select: { id: true, name: true, position: true, email: true, phone: true, employee: { select: { mobile: true } } },
+      })
+    : null;
+  const selfPerson: StepPerson[] = self
+    ? [{ id: self.id, name: self.name, position: self.position ?? undefined, phone: contactPhone(self), email: self.email }]
+    : [];
   return {
     workflowId: workflow.id,
     name: workflow.name,
     steps: await Promise.all(
-      workflow.steps.map(async (st) => ({ sequence: st.sequence, name: st.name, approvers: await namedApprovers(st, requesterId, prisma, ctx) })),
+      workflow.steps.map(async (st) =>
+        held.has(st.sequence)
+          ? { sequence: st.sequence, name: st.name, held: true, approvers: selfPerson }
+          : { sequence: st.sequence, name: st.name, held: false, approvers: await namedApprovers(st, requesterId, prisma, ctx) },
+      ),
     ),
   };
 }
@@ -330,7 +464,8 @@ export async function routePreview(
 /** A route as a page names it before anybody presses Submit: names only, never contact lines. */
 export interface RouteBrief {
   name: string;
-  steps: { name: string; approvers: { id: string; name: string }[] }[];
+  /** `held`: the preparer signs this step themselves, at submit. */
+  steps: { name: string; held: boolean; approvers: { id: string; name: string }[] }[];
 }
 
 /**
@@ -350,7 +485,7 @@ export async function routeBrief(
   return (
     route && {
       name: route.name,
-      steps: route.steps.map((st) => ({ name: st.name, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
+      steps: route.steps.map((st) => ({ name: st.name, held: st.held, approvers: st.approvers.map((p) => ({ id: p.id, name: p.name })) })),
     }
   );
 }
@@ -436,45 +571,73 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
     );
   }
 
+  // The steps the preparer holds, on a route that lets them sign
+  // (`preparerSigns`): signed at submit, dated the request's own instant, so
+  // "Prepared by" and those steps print one timestamp. The document waits
+  // only on the steps other people hold.
+  const held = await heldSequences(workflow, input.requesterId);
+  const open = workflow.steps.filter((st) => !held.has(st.sequence));
+
   // A step whose only eligible approver is the requester can never be acted on:
   // segregation of duties refuses self-approval, so the document would sit
   // pending forever with no error anywhere. This is the subtler cousin of "no
   // one holds this role" — there IS an approver set, it just contains only the
   // person who raised it. Caught here, at submission, while it can still be
   // fixed by changing the workflow rather than by wondering why nothing moved.
-  const firstStep = workflow.steps[0];
-  const firstApprovers = await approversForStep(firstStep, input.requesterId, prisma, {
-    jobId: input.jobId,
-    projectManagerId: input.projectManagerId,
-  });
-  if (firstApprovers.length && firstApprovers.every((id) => id === input.requesterId)) {
-    throw badRequest(
-      `"${workflow.name}" routes step 1 ("${firstStep.name}") only to you, and nobody may approve a document they raised. ` +
-        `Add another approver to that step in Admin › Approval Workflows.`,
-    );
-  }
-  if (!firstApprovers.length) {
-    throw badRequest(
-      `"${workflow.name}" routes step 1 ("${firstStep.name}") to nobody. ` +
-        `Check that someone holds that role in Admin › Approval Workflows.`,
-    );
+  // (A step the preparer signs themselves is not waiting on anybody.)
+  const firstStep = open[0];
+  if (firstStep) {
+    const firstApprovers = await approversForStep(firstStep, input.requesterId, prisma, {
+      jobId: input.jobId,
+      projectManagerId: input.projectManagerId,
+    });
+    if (firstApprovers.length && firstApprovers.every((id) => id === input.requesterId)) {
+      throw badRequest(
+        `"${workflow.name}" routes step ${firstStep.sequence} ("${firstStep.name}") only to you, and nobody may approve a document they raised. ` +
+          `Add another approver to that step in Admin › Approval Workflows.`,
+      );
+    }
+    if (!firstApprovers.length) {
+      throw badRequest(
+        `"${workflow.name}" routes step ${firstStep.sequence} ("${firstStep.name}") to nobody. ` +
+          `Check that someone holds that role in Admin › Approval Workflows.`,
+      );
+    }
   }
 
-  const request = await prisma.approvalRequest.create({
-    data: {
-      documentType: input.documentType,
-      documentId: input.documentId,
-      documentNumber: input.documentNumber ?? null,
-      subject: input.subject,
-      amount: input.amount != null ? new Prisma.Decimal(input.amount) : null,
-      link: input.link ?? null,
-      requesterId: input.requesterId,
-      jobId: input.jobId ?? null,
-      projectManagerId: input.projectManagerId ?? null,
-      workflowId: workflow.id,
-      currentSequence: workflow.steps[0].sequence,
-      status: 'PENDING',
-    },
+  const request = await prisma.$transaction(async (tx) => {
+    const created = await tx.approvalRequest.create({
+      data: {
+        documentType: input.documentType,
+        documentId: input.documentId,
+        documentNumber: input.documentNumber ?? null,
+        subject: input.subject,
+        amount: input.amount != null ? new Prisma.Decimal(input.amount) : null,
+        link: input.link ?? null,
+        requesterId: input.requesterId,
+        jobId: input.jobId ?? null,
+        projectManagerId: input.projectManagerId ?? null,
+        workflowId: workflow.id,
+        currentSequence: (firstStep ?? workflow.steps[workflow.steps.length - 1]).sequence,
+        status: firstStep ? 'PENDING' : 'APPROVED',
+      },
+    });
+    if (!held.size) return created;
+    await tx.approvalAction.createMany({
+      data: workflow.steps
+        .filter((st) => held.has(st.sequence))
+        .map((st) => ({
+          requestId: created.id,
+          stepId: st.id,
+          sequence: st.sequence,
+          approverId: input.requesterId,
+          action: 'APPROVED' as const,
+          selfSigned: true,
+          actedAt: created.createdAt,
+        })),
+    });
+    // Every step the preparer's own: approved on submit, closed at that instant.
+    return firstStep ? created : tx.approvalRequest.update({ where: { id: created.id }, data: { closedAt: created.createdAt } });
   });
 
   await audit({
@@ -484,6 +647,30 @@ export async function submitForApproval(input: SubmitInput): Promise<ApprovalReq
     summary: `Submitted for approval — ${workflow.name}`,
     actorId: input.requesterId,
   });
+  if (held.size) {
+    const preparer = await prisma.user.findUnique({ where: { id: input.requesterId }, select: { name: true } });
+    for (const st of workflow.steps.filter((x) => held.has(x.sequence))) {
+      await audit({
+        entityType: input.documentType,
+        entityId: input.documentId,
+        action: 'APPROVED',
+        summary: `${st.name} — ${preparer?.name ?? 'the preparer'}, signed at submit (holds the step)`,
+        actorId: input.requesterId,
+      });
+    }
+  }
+
+  if (!firstStep) {
+    await audit({
+      entityType: input.documentType,
+      entityId: input.documentId,
+      action: 'APPROVED',
+      summary: `Approved on submit — every step of ${workflow.name} is the preparer's own`,
+      actorId: input.requesterId,
+    });
+    await emitSettled(request, 'APPROVED');
+    return request;
+  }
 
   await notifyCurrentStep(request);
   return request;
@@ -549,18 +736,25 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     throw forbidden('You cannot approve a document you raised yourself');
   }
 
-  const eligible = await approversForStep(step, request.requesterId, prisma, ctxOf(request));
-  const actor = await prisma.user.findUnique({
-    where: { id: input.userId },
-    select: { isSuperAdmin: true, name: true },
-  });
+  // An eligible approver, a stand-in (their manager, on a route that allows
+  // one) or a super admin — `deciderFor`, the panel's own test.
+  const decider = await deciderFor(request, step, input.userId);
+  if (!decider.may) throw forbidden('This approval is not yours to act on');
+  const actor = await prisma.user.findUnique({ where: { id: input.userId }, select: { name: true } });
+  const stoodInFor = decider.onBehalfOfId
+    ? await prisma.user.findUnique({ where: { id: decider.onBehalfOfId }, select: { name: true } })
+    : null;
 
-  if (!eligible.includes(input.userId) && !actor?.isSuperAdmin) {
-    throw forbidden('This approval is not yours to act on');
-  }
-
+  // The next step nobody has signed: a step the preparer signed at submit is
+  // passed over, so the CEO's own sales order settles on the Cost
+  // Controller's signature.
+  const signed = new Set(
+    (await prisma.approvalAction.findMany({ where: { requestId: request.id, action: 'APPROVED' }, select: { sequence: true } })).map(
+      (a) => a.sequence,
+    ),
+  );
   const steps = request.workflow!.steps;
-  const next = steps[steps.findIndex((s) => s.sequence === step.sequence) + 1];
+  const next = steps.slice(steps.findIndex((s) => s.sequence === step.sequence) + 1).find((s) => !signed.has(s.sequence));
 
   const settled = await prisma.$transaction(async (tx) => {
     // Claimed, never simply written: the request must still be open at this
@@ -586,6 +780,7 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
         stepId: step.id,
         sequence: step.sequence,
         approverId: input.userId,
+        onBehalfOfId: decider.onBehalfOfId,
         action: input.action,
         comment: input.comment ?? null,
       },
@@ -597,7 +792,7 @@ export async function act(input: ActInput): Promise<ApprovalRequest> {
     entityType: request.documentType,
     entityId: request.documentId,
     action: input.action,
-    summary: `${step.name} — ${actor?.name ?? 'unknown'}${input.comment ? `: ${input.comment}` : ''}`,
+    summary: `${step.name} — ${actor?.name ?? 'unknown'}${stoodInFor ? ` (standing in for ${stoodInFor.name})` : ''}${input.comment ? `: ${input.comment}` : ''}`,
     actorId: input.userId,
   });
 
@@ -737,8 +932,8 @@ export async function historyFor(documentType: string, documentId: string) {
       requester: { select: { id: true, name: true } },
       workflow: { select: { name: true, steps: { orderBy: { sequence: 'asc' } } } },
       actions: {
-        include: { approver: { select: { id: true, name: true } } },
-        orderBy: { actedAt: 'asc' },
+        include: { approver: { select: { id: true, name: true } }, onBehalfOf: { select: { id: true, name: true } } },
+        orderBy: [{ actedAt: 'asc' }, { sequence: 'asc' }],
       },
     },
     orderBy: { createdAt: 'desc' },
@@ -827,6 +1022,8 @@ export interface ApprovalSlot {
   at?: Date;
   /** A step still open: who may yet sign it (never the requester). */
   assigned?: StepPerson[];
+  /** Signed by the preparer at submit (`preparerSigns`), at the submit instant. */
+  selfSigned?: boolean;
 }
 
 /**
@@ -905,6 +1102,7 @@ export async function approvalSlots(documentType: string, documentId: string, dr
           phone: contactPhone(a.approver),
           email: a.approver.email,
           at: a.actedAt,
+          ...(a.selfSigned ? { selfSigned: true } : {}),
         };
       }
       return open ? { step: st.name, assigned: await namedApprovers(st, request.requesterId, prisma, ctxOf(request)) } : null;

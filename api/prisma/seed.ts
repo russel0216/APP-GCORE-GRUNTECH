@@ -631,6 +631,10 @@ interface WorkflowSeed {
   optionLabel?: string;
   /** The route for documents prepared by a holder of this role (ApprovalWorkflow.requesterRoleId). */
   requesterRoleKey?: string;
+  /** The preparer signs at submit the steps they hold (ApprovalWorkflow.preparerSigns). */
+  preparerSigns?: boolean;
+  /** An approver's manager may decide a step in their place (ApprovalWorkflow.standIns). */
+  standIns?: boolean;
   steps: SeedStep[];
   /**
    * The steps this workflow was seeded with before a correction. A workflow
@@ -727,74 +731,52 @@ const WORKFLOWS: WorkflowSeed[] = [
     // management approval" (one step, the executive role) is RETIRED below:
     // a costing pending on it finishes on it. `previously` is the route as
     // it was seeded for a few minutes with a role of its own for CTG.
+    //
+    // Since 2026-10-12 the Team Leader step falls back to the Team Leader
+    // role, as the quotation's and the sales order's do (it was the sales
+    // managers), and the preparer signs the steps they hold: a Technical
+    // Manager's own costing is signed at step 1 when it is submitted.
     documentType: 'costing',
     name: 'Costing — technical manager, team leader, CTG',
+    preparerSigns: true,
+    standIns: true,
     steps: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
-      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
+      { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
     ],
     previously: [
       { sequence: 1, name: 'Technical Manager', approverType: 'ROLE', roleKey: 'technical_manager' },
       { sequence: 2, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'sales_manager' },
-      { sequence: 3, name: 'CTG', approverType: 'ROLE', roleKey: 'ctg' },
+      { sequence: 3, name: 'CEO (CTG)', approverType: 'ROLE', roleKey: 'executive' },
     ],
   },
-  // ── The owner's routing sheet (2026-10-11) ─────────────────────────────
-  // QUOTATION, by who prepared it: the CEO / President — no approval (a route
-  // with no steps, approved on submit); a Team Leader — the CEO / President;
-  // an Industry Specialist, and anyone else — their Team Leader ("Reports
-  // to", else a Team Leader role holder), and the CEO / President too above
-  // ₱1,000,000 (no longer an option to tick). The routes before it
-  // ("Quotation — sales manager", "… with the CEO") are RETIRED below.
-  {
-    documentType: 'quotation',
-    name: 'Quotation — prepared by the CEO / President: no approval',
-    requesterRoleKey: 'ceo',
-    steps: [],
-  },
-  {
-    documentType: 'quotation',
-    name: 'Quotation — prepared by a Team Leader: CEO / President',
-    requesterRoleKey: 'team_leader',
-    steps: [{ sequence: 1, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' }],
-  },
+  // ── The owner's routing sheet (2026-10-12) ─────────────────────────────
+  // ONE route per document, whoever prepared it. QUOTATION: the Team Leader
+  // ("Reports to", else a Team Leader on the preparer's own team, else any),
+  // and the CEO / President too above ₱1,000,000. SALES ORDER: Team Leader,
+  // Admin Back Support, Cost Controller, CEO / President. A preparer holding
+  // a step's role signs it at submit (`preparerSigns` — the Team Leader's own
+  // quotation, the CEO's own sales order), dated the submit instant, and an
+  // approver's manager may stand in (`standIns`). The routes keyed to the
+  // preparer's role (2026-10-11) are RETIRED below.
   {
     documentType: 'quotation',
     name: 'Quotation — Team Leader',
     maxAmount: 1_000_000,
+    preparerSigns: true,
+    standIns: true,
     steps: [{ sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' }],
   },
   {
     documentType: 'quotation',
     name: 'Quotation — Team Leader, then CEO / President over ₱1,000,000',
     minAmount: 1_000_000.01,
+    preparerSigns: true,
+    standIns: true,
     steps: [
       { sequence: 1, name: 'Team Leader', approverType: 'SUPERVISOR', roleKey: 'team_leader' },
       { sequence: 2, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
-    ],
-  },
-  // SALES ORDER, by who prepared it: the CEO / President — Admin Back
-  // Support, Cost Controller; a Team Leader — the same, then the CEO /
-  // President; an Industry Specialist, and anyone else — their Team Leader
-  // first (the general route below).
-  {
-    documentType: 'sales_order',
-    name: 'Sales Order — prepared by the CEO / President: back support, cost controller',
-    requesterRoleKey: 'ceo',
-    steps: [
-      { sequence: 1, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
-    ],
-  },
-  {
-    documentType: 'sales_order',
-    name: 'Sales Order — prepared by a Team Leader: back support, cost controller, CEO / President',
-    requesterRoleKey: 'team_leader',
-    steps: [
-      { sequence: 1, name: 'Admin Back Support', approverType: 'ROLE', roleKey: 'back_support' },
-      { sequence: 2, name: 'Cost Controller', approverType: 'ROLE', roleKey: 'cost_controller' },
-      { sequence: 3, name: 'CEO / President', approverType: 'ROLE', roleKey: 'ceo' },
     ],
   },
   {
@@ -809,6 +791,8 @@ const WORKFLOWS: WorkflowSeed[] = [
     // `previously` cannot update in place.
     documentType: 'sales_order',
     name: 'Sales Order — team leader, back support, cost controller, CEO',
+    preparerSigns: true,
+    standIns: true,
     // Since the routing sheet (2026-10-11) the general route — an Industry
     // Specialist's, or anyone's not keyed above: the Team Leader falls back
     // to the Team Leader role, the last step is the CEO / President role.
@@ -1148,6 +1132,12 @@ async function main() {
     // prepared it, the CEO a fixed step over ₱1,000,000 rather than an option.
     'Quotation — sales manager',
     'Quotation — over ₱1,000,000, with the CEO',
+    // The routing sheet of 2026-10-12: one route per document whoever
+    // prepared it; what the preparer holds, they sign at submit.
+    'Quotation — prepared by the CEO / President: no approval',
+    'Quotation — prepared by a Team Leader: CEO / President',
+    'Sales Order — prepared by the CEO / President: back support, cost controller',
+    'Sales Order — prepared by a Team Leader: back support, cost controller, CEO / President',
   ];
   for (const name of RETIRED) {
     const stale = await prisma.approvalWorkflow.findFirst({ where: { name, isActive: true } });
@@ -1232,6 +1222,8 @@ async function main() {
         maxAmount: seed.maxAmount ?? null,
         optionLabel: seed.optionLabel ?? null,
         requesterRoleId: seed.requesterRoleKey ? (roleByKey.get(seed.requesterRoleKey) ?? null) : null,
+        preparerSigns: seed.preparerSigns ?? false,
+        standIns: seed.standIns ?? false,
         steps: {
           create: seed.steps.map((s) => ({
             sequence: s.sequence,
@@ -1244,6 +1236,27 @@ async function main() {
     });
   }
   console.log(`  ✓ Approval workflows (${WORKFLOWS.length})`);
+
+  // The preparer's signature and the stand-in (2026-10-12) reach the seeded
+  // routes ONCE, marked by a setting: an administrator who later unticks
+  // either on a route keeps it unticked.
+  {
+    const MARK = 'seed.preparerSignsApplied';
+    if (!(await prisma.setting.findUnique({ where: { key: MARK } }))) {
+      let flagged = 0;
+      for (const seed of WORKFLOWS.filter((w) => w.preparerSigns || w.standIns)) {
+        const { count } = await prisma.approvalWorkflow.updateMany({
+          where: { documentType: seed.documentType, name: seed.name },
+          data: { preparerSigns: seed.preparerSigns ?? false, standIns: seed.standIns ?? false },
+        });
+        flagged += count;
+      }
+      await prisma.setting.create({
+        data: { key: MARK, value: { at: new Date().toISOString(), flagged }, description: 'seed: the preparer signs / stand-ins were applied to the seeded routes once' },
+      });
+      if (flagged) console.log(`  · The preparer signs the steps they hold on ${flagged} route(s); managers may stand in`);
+    }
+  }
 
   // Raising a quotation revision once superseded the last one without
   // withdrawing its approval request, which then sat in the approver's queue

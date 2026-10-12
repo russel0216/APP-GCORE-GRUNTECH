@@ -14,7 +14,7 @@ import {
   forbidden,
   idsFilter,
 } from '../http/kit';
-import { authenticate, require_, requireAny, currentUser } from '../auth/middleware';
+import { authenticate, require_, requireAny, requireAnyOrDecider, currentUser } from '../auth/middleware';
 import { can, canEditRecord } from '../permissions/resolve';
 import { documentAddress } from '../shared/customerAddress';
 import { audit } from '../shared/audit';
@@ -57,6 +57,8 @@ import {
   pickWorkflow,
   routeBrief,
   submitForApproval,
+  mayDecide,
+  preparedAt,
   slotSignatories,
   type ApprovalSlot,
 } from '../shared/approvals';
@@ -520,7 +522,7 @@ salesOrderRoutes.get(
 
 salesOrderRoutes.get(
   '/:id',
-  requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  requireAnyOrDecider('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
     const order = await prisma.salesOrder.findUnique({
@@ -537,9 +539,7 @@ salesOrderRoutes.get(
       },
     });
     if (!order) throw notFound('Sales order not found');
-    if (!me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all') && order.ownerId !== me.id) {
-      throw forbidden('This sales order is someone else’s');
-    }
+    await assertOrderVisible(me, order, res.locals.deciderOnly === true);
     const showCost = canSeeOrderCost(me, order.ownerId);
     // Approval (2026-10-07, the owner's call): a fixed approver and an
     // optional one, both data in Admin › Approval Workflows. With a route
@@ -1003,7 +1003,9 @@ salesOrderRoutes.post(
       throw err;
     }
     await audit({ entityType: 'sales_order', entityId: order.id, action: 'SUBMITTED', summary: `Sales order ${order.number} sent for approval` }, req);
-    res.json({ ok: true, status: 'PENDING_APPROVAL' });
+    // ISSUED already when every step was the preparer's own (`preparerSigns`).
+    const after = await prisma.salesOrder.findUnique({ where: { id: order.id }, select: { status: true } });
+    res.json({ ok: true, status: after?.status ?? 'PENDING_APPROVAL' });
   }),
 );
 
@@ -1144,13 +1146,22 @@ const PRINT_INCLUDE = {
 export type PrintableSalesOrder = Prisma.SalesOrderGetPayload<{ include: typeof PRINT_INCLUDE }>;
 
 /** The order, for printing: whoever prints it must be able to open it. */
-export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id: string): Promise<PrintableSalesOrder> {
+export async function printableSalesOrder(me: ReturnType<typeof currentUser>, id: string, deciderOnly = false): Promise<PrintableSalesOrder> {
   const order = await prisma.salesOrder.findUnique({ where: { id }, include: PRINT_INCLUDE });
   if (!order) throw notFound('Sales order not found');
-  if (!me.isSuperAdmin && !me.permissions.has('gops.sales_orders.view_all') && order.ownerId !== me.id) {
-    throw forbidden('This sales order is someone else\u2019s');
-  }
+  await assertOrderVisible(me, order, deciderOnly);
   return order;
+}
+
+/**
+ * The order's own visibility rule — `view_all`, or its author — and, for a
+ * caller with no order right at all (`requireAnyOrDecider`) or anyone else, a
+ * stand-in or approver while the order waits on them (`mayDecide`).
+ */
+async function assertOrderVisible(me: ReturnType<typeof currentUser>, order: { id: string; ownerId: string }, deciderOnly: boolean) {
+  const visible = !deciderOnly && (me.isSuperAdmin || me.permissions.has('gops.sales_orders.view_all') || order.ownerId === me.id);
+  if (visible || (await mayDecide(me.id, 'sales_order', [order.id]))) return;
+  throw forbidden(deciderOnly ? 'You need one of: gops.sales_orders.view_all, gops.sales_orders.view_own' : 'This sales order is someone else\u2019s');
 }
 
 /**
@@ -1365,7 +1376,8 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
       position: order.owner.position ?? undefined,
       phone: fields['owner.phone'] || undefined,
       email: order.owner.email ?? undefined,
-      at: order.createdAt,
+      // The submit instant when they signed a step of their own then (the CEO's own order).
+      at: preparedAt(slots) ?? order.createdAt,
     },
     ...(slots.length ? slotSignatories(slots) : await unroutedOrderSignoff(order)),
   ];
@@ -1381,10 +1393,10 @@ export async function salesOrderPrintData(order: PrintableSalesOrder, showCost: 
  */
 salesOrderRoutes.get(
   '/:id/pdf',
-  requireAny('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
+  requireAnyOrDecider('gops.sales_orders.view_all', 'gops.sales_orders.view_own'),
   handler(async (req, res) => {
     const me = currentUser(req);
-    const order = await printableSalesOrder(me, req.params.id);
+    const order = await printableSalesOrder(me, req.params.id, res.locals.deciderOnly === true);
     const showCost = canSeeOrderCost(me, order.ownerId);
     const { design } = await salesOrderDesign();
     const data = await salesOrderPrintData(order, showCost);

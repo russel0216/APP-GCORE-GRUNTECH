@@ -7,7 +7,7 @@ import { prisma } from '../prisma';
 import { handler, parseBody, listQuery, listResult, notFound, badRequest, forbidden } from '../http/kit';
 import { authenticate, currentUser } from '../auth/middleware';
 import { globalSearch, searchProviders, canSearch } from '../shared/search';
-import { act, approversForStep, contactOf, historyFor, pendingFor } from '../shared/approvals';
+import { act, contactOf, deciderFor, historyFor, pendingFor } from '../shared/approvals';
 import { audit } from '../shared/audit';
 import {
   upload,
@@ -149,10 +149,12 @@ approvalRoutes.get(
     const me = currentUser(req);
     const rows = await historyFor(req.params.documentType, req.params.documentId);
     // `canAct`: whether the viewer may decide the step a PENDING request is at
-    // — the rule act() applies (never the requester; an eligible approver or a
-    // super admin) — so the document's own page can offer the decision the
-    // notification sent them there for. The decision still goes through
-    // POST /approvals/:id/act, the one path.
+    // — `deciderFor`, the rule act() applies (never the requester; an eligible
+    // approver, a stand-in on a route that allows one, or a super admin) — so
+    // the document's own page can offer the decision the notification sent
+    // them there for. A stand-in is never listed; this is the one place they
+    // find the buttons. The decision still goes through POST
+    // /approvals/:id/act, the one path.
     res.json(
       await Promise.all(
         rows.map(async (r) => {
@@ -160,7 +162,10 @@ approvalRoutes.get(
           const step = await prisma.approvalStep.findFirst({
             where: { workflowId: r.workflowId ?? '', sequence: r.currentSequence },
           });
-          const canAct = !!step && (me.isSuperAdmin || (await approversForStep(step, r.requesterId)).includes(me.id));
+          const workflow = r.workflowId
+            ? await prisma.approvalWorkflow.findUnique({ where: { id: r.workflowId }, select: { standIns: true } })
+            : null;
+          const canAct = !!step && (await deciderFor({ ...r, workflow }, step, me.id)).may;
           return { ...r, canAct };
         }),
       ),

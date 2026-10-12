@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'r
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { ApprovalStepper, DocumentApproval } from '../../components/ApprovalStepper';
+import { ApprovalStepper, DocumentApproval, previewSteps, type PreviewRoute } from '../../components/ApprovalStepper';
 import { DataList, type Column, type FilterDef } from '../../components/DataList';
 import { yearStartKey } from '../../lib/listUrl';
 import { Stat, noTeamNote, teamCards, type TeamShare } from '../../components/charts';
@@ -116,10 +116,7 @@ export interface SalesOrderRow {
   createdAt: string;
 }
 
-interface ApprovalRoute {
-  name: string;
-  steps: { name: string; approvers: { id: string; name: string }[] }[];
-}
+type ApprovalRoute = PreviewRoute;
 
 interface SalesOrderDetailRow extends SalesOrderRow {
   lines: SoLine[];
@@ -602,13 +599,7 @@ export function SalesOrderDetail() {
           {!!route?.steps.length && (
             <>
               <span className="qd-route-label">Submit for approval sends it to</span>
-              <ApprovalStepper
-                steps={route.steps.map((st) => ({
-                  label: st.name,
-                  approver: st.approvers.length ? st.approvers.map((p) => p.name).join(' or ') : 'Nobody — no one else holds this role',
-                  status: 'WAITING',
-                }))}
-              />
+              <ApprovalStepper steps={previewSteps(route)} />
             </>
           )}
         </div>

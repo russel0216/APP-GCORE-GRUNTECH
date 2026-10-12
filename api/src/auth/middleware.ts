@@ -72,6 +72,22 @@ export function requireAny(...permissionKeys: string[]): RequestHandler {
   };
 }
 
+/**
+ * `requireAny`, except that a caller holding none of the keys is let through
+ * MARKED (`res.locals.deciderOnly`), for a record route that also admits whoever
+ * may decide the record's open approval — a stand-in, who holds no right to
+ * the module (2026-10-12). The handler must then prove that with
+ * `mayDecide()` (shared/approvals.ts) or refuse; nothing else changes for a
+ * caller who holds a key.
+ */
+export function requireAnyOrDecider(...permissionKeys: string[]): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(unauthorized());
+    res.locals.deciderOnly = !permissionKeys.some((k) => can(req.user!, k));
+    next();
+  };
+}
+
 export const requireSuperAdmin: RequestHandler = (req, _res, next) => {
   if (!req.user) return next(unauthorized());
   if (!req.user.isSuperAdmin) return next(forbidden('Super Admin only'));

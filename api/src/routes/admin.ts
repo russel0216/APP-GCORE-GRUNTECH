@@ -403,6 +403,10 @@ const workflowSchema = z.object({
   optionLabel: z.string().trim().max(120).optional().nullable(),
   /** Set: the route for documents prepared by a holder of this role. */
   requesterRoleId: z.string().optional().nullable(),
+  /** The preparer signs at submit the steps whose role they hold. */
+  preparerSigns: z.boolean().optional(),
+  /** An approver's manager may decide a step in their place. */
+  standIns: z.boolean().optional(),
   steps: z.array(stepSchema),
 });
 
@@ -450,6 +454,8 @@ workflowRoutes.post(
         maxAmount: body.maxAmount != null ? new Prisma.Decimal(body.maxAmount) : null,
         optionLabel: body.optionLabel || null,
         requesterRoleId: body.requesterRoleId || null,
+        preparerSigns: body.preparerSigns ?? false,
+        standIns: body.standIns ?? false,
         steps: {
           create: body.steps.map((s) => ({
             sequence: s.sequence,
@@ -507,6 +513,9 @@ workflowRoutes.put(
           ...(body.optionLabel !== undefined ? { optionLabel: body.optionLabel || null } : {}),
           // Absent: left as it is, the option's rule.
           ...(body.requesterRoleId !== undefined ? { requesterRoleId: body.requesterRoleId || null } : {}),
+          // Absent: left as they are, for the same reason.
+          ...(body.preparerSigns !== undefined ? { preparerSigns: body.preparerSigns } : {}),
+          ...(body.standIns !== undefined ? { standIns: body.standIns } : {}),
           steps: {
             create: body.steps.map((s) => ({
               sequence: s.sequence,
