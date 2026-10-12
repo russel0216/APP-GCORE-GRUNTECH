@@ -470,7 +470,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,785 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,786 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -498,9 +498,10 @@ the team the SCORO import tags its quotations with, and 4 on foundation
 and 4 on workspace for the views on the person's account, and 3 on
 foundation for the teams Back Support supports, and 2 on workspace for
 deleting a role, and one on accounts for the team picked on a user, and 3 on sales for
-the team picked on a quotation and followed by its sales order):
+the team picked on a quotation and followed by its sales order, and one
+on sales for old quotations taking their author's team):
 foundation
-327, masters 92, sales 532, costing 157, pipeline 92, calendar 96, numbering
+327, masters 92, sales 533, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 76, accounts 125. The
@@ -3119,7 +3120,14 @@ the quotation's and the sales order's route depends on the PREPARER's role.
   else the author's. **A sales order counts under its QUOTATION's team**:
   `salesOrderListWhere`'s Team view, its summary's team cards and "My
   team" read `quotation: quotationTeamWhere(…)` / `quotationTeamOf(o.
-  quotation)`, never the order's own author's team.
+  quotation)`, never the order's own author's team. **Old quotations take
+  their author's team** (2026-10-12, the owner's call: "set the team of old
+  quotations to the author's team"): `fillQuotationTeams()` in
+  `shared/team.ts`, run by the seed on EVERY deploy, fills `teamId` on a
+  quotation that has none from its author's `Employee.industryId` — never
+  touching a picked team or an import tag, claimed on `teamId: null`, one
+  audit row per team (`quotation` / `list`); an author with no team leaves
+  theirs open until one is set, and the next deploy fills them then.
 - **A role you made can be deleted** (2026-10-12, the owner's call: "allow
   me also to delete role created"): `DELETE /roles/:id`
   (`admin.roles.delete`, the Delete in the role modal's foot) takes it off

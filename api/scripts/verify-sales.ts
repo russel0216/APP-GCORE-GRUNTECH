@@ -78,7 +78,7 @@ import { upperText as webUpperText } from '../../web/src/lib/caps';
 import { deleteGroup, deletedGroupKeys, setDeletedGroupKeys } from '../src/shared/quotationGroups';
 import { documentAddress } from '../src/shared/customerAddress';
 import { salesOrderListSummary, salesOrderListWhere } from '../src/routes/salesOrders';
-import { quotationTeamWhere, teamMembers, teamOf } from '../src/shared/team';
+import { fillQuotationTeams, quotationTeamWhere, teamMembers, teamOf } from '../src/shared/team';
 // The same for the sales order's subscriber — act() below settles in this
 // process, and without it an approval would settle into the void.
 import '../src/routes/salesOrders';
@@ -328,6 +328,25 @@ async function main() {
   const customer = await prisma.customer.create({
     data: { code: `${TAG}-C1`, name: `${TAG} Hospital`, createdById: sales.id },
   });
+
+  // Old quotations take their author's team (2026-10-12): only those with no
+  // team, only from an author who has one; a picked team is never touched.
+  {
+    const kat = await prisma.industry.findUniqueOrThrow({ where: { code: 'KAT' } });
+    const mk = (n: string, ownerId: string, teamId: string | null) =>
+      prisma.quotation.create({ data: { number: `${TAG}-FILL${n}`, customerId: customer.id, ownerId, subject: `${TAG} Fill ${n}`, teamId } });
+    const [untagged, picked, teamless] = [await mk('1', other.id, null), await mk('2', other.id, kat.id), await mk('3', manager.id, null)];
+    await fillQuotationTeams();
+    const again = await fillQuotationTeams();
+    const after = await prisma.quotation.findMany({ where: { id: { in: [untagged.id, picked.id, teamless.id] } }, select: { id: true, teamId: true } });
+    const teamOfQ = (id: string) => after.find((q) => q.id === id)?.teamId ?? null;
+    check(
+      "an old quotation with no team takes its author's team; a picked team stays, and an author with none leaves it open",
+      teamOfQ(untagged.id) === teamHI.id && teamOfQ(picked.id) === kat.id && teamOfQ(teamless.id) === null && again === 0,
+      `${teamOfQ(untagged.id)} / ${teamOfQ(picked.id)} / ${teamOfQ(teamless.id)} / again ${again}`,
+    );
+    await prisma.quotation.deleteMany({ where: { id: { in: [untagged.id, picked.id, teamless.id] } } });
+  }
 
   // ── 1. The contract amount ─────────────────────────────────────────────────
   console.log('How the contract amount is reached');

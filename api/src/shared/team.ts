@@ -148,3 +148,37 @@ export async function teamShares(rows: { team: TeamRef; cents: number }[]): Prom
   }
   return [...byTeam.values(), ...(noTeam.count ? [noTeam] : [])].map((t) => ({ id: t.id, code: t.code, name: t.name, count: t.count, value: t.cents / 100 }));
 }
+
+/**
+ * Quotations raised before the team was stored on the quotation (2026-10-12,
+ * the owner's call: "set the team of old quotations to the author's team")
+ * take their author's team, so each keeps the team it counts under now even
+ * when its author later moves. Only a quotation with NO team is filled, and
+ * only from an author who has one — a team picked on a quotation, or the
+ * SCORO import's tag, is never touched. Run by the seed on every deploy, so
+ * an author given a team later has their untagged quotations filled then; a
+ * second run with nothing new fills none. One audit row per team filled.
+ */
+export async function fillQuotationTeams(): Promise<number> {
+  const teams = await prisma.industry.findMany({ select: { id: true, code: true } });
+  let filled = 0;
+  for (const team of teams) {
+    const where: Prisma.QuotationWhereInput = { teamId: null, owner: teamMembers(team.id) };
+    const ids = (await prisma.quotation.findMany({ where, select: { id: true } })).map((q) => q.id);
+    if (!ids.length) continue;
+    // Claimed on teamId still null, so a team picked meanwhile is kept.
+    const done = await prisma.quotation.updateMany({ where: { id: { in: ids }, teamId: null }, data: { teamId: team.id } });
+    if (!done.count) continue;
+    filled += done.count;
+    await prisma.auditLog.create({
+      data: {
+        entityType: 'quotation',
+        entityId: 'list',
+        action: 'UPDATED',
+        summary: `Set the team of ${done.count} older quotation(s) to their author's team ${team.code}`,
+        after: { teamId: team.id, quotationIds: ids },
+      },
+    });
+  }
+  return filled;
+}
