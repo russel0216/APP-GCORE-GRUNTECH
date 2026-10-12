@@ -410,6 +410,19 @@ async function main() {
   check('a password set by an administrator completes the invitation', setByHand.status === 200 && !twoRow.invitePending);
   check('and the link still out stops working', (await http(null, 'POST', '/auth/link', { token: secondLink })).status === 410);
 
+  // The team is chosen on Admin › Users too (2026-10-12): it lands on the employee.
+  const kat = await prisma.industry.findFirstOrThrow({ where: { code: 'KAT' }, select: { id: true } });
+  const setTeam = await http(adminT, 'PATCH', `/users/${twoId}`, { teamId: kat.id });
+  const twoEmp = await prisma.employee.findUniqueOrThrow({ where: { userId: twoId }, select: { industryId: true } });
+  const twoRead = await http(adminT, 'GET', `/users/${twoId}`);
+  const badTeam = await http(adminT, 'PATCH', `/users/${twoId}`, { teamId: 'nope' });
+  check(
+    'a team picked on the user lands on their employee record, reads back, and an unknown one is a 400',
+    setTeam.status === 200 && twoEmp.industryId === kat.id &&
+      (twoRead.body.employee as { industryId?: string } | null)?.industryId === kat.id && badTeam.status === 400,
+    `${setTeam.status} / ${twoEmp.industryId} / ${badTeam.status}`,
+  );
+
   const reset = await http(adminT, 'POST', `/users/${oneRow.id}/reset-link`);
   const resetLink = tokenOf((reset.body as { link?: string }).link);
   check('an administrator can issue a reset link', reset.status === 200 && String(reset.body.link).includes('/reset-password#token='));

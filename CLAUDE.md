@@ -470,7 +470,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,781 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,782 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -497,12 +497,12 @@ foundation for the sales lists' year-to-date default, and 5 on sales for
 the team the SCORO import tags its quotations with, and 4 on foundation
 and 4 on workspace for the views on the person's account, and 3 on
 foundation for the teams Back Support supports, and 2 on workspace for
-deleting a role):
+deleting a role, and one on accounts for the team picked on a user):
 foundation
 327, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
-insights 98, insights-brief 50, workspace 76, accounts 124. The
+insights 98, insights-brief 50, workspace 76, accounts 125. The
 verify scripts share
 `scripts/lib/paper.ts` for reading a PDF's text and checking a list's
 paper. A check must not depend on what the database
@@ -3092,6 +3092,17 @@ the quotation's and the sales order's route depends on the PREPARER's role.
   every team), else every holder — a document never stalls for want of a
   supporter. "Reports to" is untouched by it. Nothing set is the old rule:
   every holder.
+- **A person's TEAM is picked on Admin › Users too** (2026-10-12, the
+  owner's call: "on users edit allow selection of Team, particularly in
+  Team Leader Role and sales to categorize their quotation and sales order
+  by team"). The Details tab's "Team" select writes `teamId` through
+  `PATCH /users/:id` onto the linked EMPLOYEE's `industryId` — the one
+  place a team lives (`shared/team.ts`), so the quotation, lead and sales
+  order lists' team cards, the Team view and the forecast follow it with
+  nothing else changed. An unknown or switched-off team is a 400; a login
+  with no employee record cannot keep one (the select is disabled and the
+  PATCH says so); a change audits an `employee` UPDATED row. The user list
+  has a Team column.
 - **A role you made can be deleted** (2026-10-12, the owner's call: "allow
   me also to delete role created"): `DELETE /roles/:id`
   (`admin.roles.delete`, the Delete in the role modal's foot) takes it off

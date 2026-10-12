@@ -87,6 +87,7 @@ userRoutes.get(
           department: { select: { id: true, name: true } },
           supervisor: { select: { id: true, name: true } },
           roles: { select: { role: { select: { key: true, name: true } } } },
+          employee: { select: { industry: { select: { code: true, name: true } } } },
         },
         orderBy: orderBy(q, SORTABLE, { name: 'asc' }),
         skip: (q.page - 1) * q.pageSize,
@@ -97,7 +98,7 @@ userRoutes.get(
 
     res.json(
       listResult(
-        rows.map((r) => ({ ...r, roles: r.roles.map((x) => x.role) })),
+        rows.map(({ employee, ...r }) => ({ ...r, roles: r.roles.map((x) => x.role), team: employee?.industry ?? null })),
         total,
         q,
       ),
@@ -323,7 +324,7 @@ userRoutes.get(
       : null;
     const employee = await prisma.employee.findUnique({
       where: { userId: user.id },
-      select: { id: true, employeeNo: true, firstName: true, lastName: true },
+      select: { id: true, employeeNo: true, firstName: true, lastName: true, industryId: true },
     });
 
     res.json({
@@ -422,6 +423,12 @@ const updateSchema = z.object({
   roleIds: z.array(z.string()).optional(),
   /** Where they support in back admin — teams; empty is every team. */
   supportTeamIds: z.array(z.string()).max(50).optional(),
+  /**
+   * Their own TEAM — `Employee.industryId` on the linked employee, the team
+   * their quotations and sales orders count under (2026-10-12, the owner's
+   * call: "on users edit allow selection of Team"). Null clears it.
+   */
+  teamId: z.string().optional().nullable(),
   isActive: z.boolean().optional(),
   /** A password set by hand answers the invitation. */
   password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional(),
@@ -454,6 +461,25 @@ userRoutes.patch(
       const known = await prisma.industry.count({ where: { id: { in: body.supportTeamIds } } });
       if (known !== new Set(body.supportTeamIds).size) throw badRequest('supportTeamIds: a team was not found');
     }
+
+    // The team lives on the employee record (one place, `shared/team.ts`):
+    // a login with none has nowhere to keep it.
+    const linked =
+      body.teamId !== undefined
+        ? await prisma.employee.findUnique({
+            where: { userId: req.params.id },
+            select: { id: true, industryId: true, industry: { select: { code: true } } },
+          })
+        : null;
+    let newTeam: { id: string; code: string } | null = null;
+    if (body.teamId !== undefined) {
+      if (!linked) throw badRequest('teamId: this login has no employee record to keep a team on — add one in HR › Employees');
+      if (body.teamId && body.teamId !== linked.industryId) {
+        newTeam = await prisma.industry.findFirst({ where: { id: body.teamId, isActive: true }, select: { id: true, code: true } });
+        if (!newTeam) throw badRequest('teamId: that team was not found or is switched off');
+      }
+    }
+    const teamChanged = !!linked && body.teamId !== undefined && (body.teamId || null) !== linked.industryId;
 
     const data: Prisma.UserUpdateInput = {};
     if (body.name !== undefined) data.name = body.name;
@@ -494,8 +520,25 @@ userRoutes.patch(
           data: [...new Set(body.supportTeamIds)].map((industryId) => ({ userId: req.params.id, industryId })),
         });
       }
+      if (teamChanged && linked) {
+        await tx.employee.update({ where: { id: linked.id }, data: { industryId: body.teamId || null } });
+      }
       return tx.user.update({ where: { id: req.params.id }, data, select: publicUser });
     });
+
+    if (teamChanged && linked) {
+      await audit(
+        {
+          entityType: 'employee',
+          entityId: linked.id,
+          action: 'UPDATED',
+          summary: `Team ${linked.industry?.code ?? 'none'} → ${newTeam?.code ?? 'none'} (from Admin › Users)`,
+          before: { industryId: linked.industryId },
+          after: { industryId: body.teamId || null },
+        },
+        req,
+      );
+    }
 
     await audit(
       {

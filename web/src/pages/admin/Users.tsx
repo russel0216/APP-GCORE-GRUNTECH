@@ -45,6 +45,8 @@ interface UserRow {
   roles: { key: string; name: string }[];
   department: { id: string; name: string } | null;
   supervisor: { id: string; name: string } | null;
+  /** The team on their employee record (`Employee.industryId`). */
+  team?: { code: string; name: string } | null;
 }
 
 /** The single-user endpoint returns role ids (the list only needs key + name). */
@@ -55,7 +57,7 @@ type UserDetail = Omit<UserRow, 'roles'> & {
   supportTeams: { industryId: string }[];
   /** The invitation in flight, while it is pending. */
   invite: { sentAt: string; expiresAt: string; live: boolean } | null;
-  employee: { id: string; employeeNo: string; firstName: string; lastName: string } | null;
+  employee: { id: string; employeeNo: string; firstName: string; lastName: string; industryId: string | null } | null;
 };
 
 /**
@@ -162,6 +164,7 @@ export function Users() {
         ),
     },
     { key: 'department', label: 'Department', render: (u) => u.department?.name ?? '—' },
+    { key: 'team', label: 'Team', render: (u) => (u.team ? <span title={u.team.name}>{u.team.code}</span> : '—') },
     { key: 'supervisor', label: 'Reports to', render: (u) => u.supervisor?.name ?? '—' },
     {
       key: 'isActive',
@@ -307,6 +310,7 @@ function UserEditor({
     departmentId: '',
     roleIds: [] as string[],
     supportTeamIds: [] as string[],
+    teamId: '',
     isActive: true,
   });
   const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
@@ -345,6 +349,7 @@ function UserEditor({
           departmentId: u.department?.id ?? '',
           roleIds: u.roles.map((r) => r.id),
           supportTeamIds: (u.supportTeams ?? []).map((t) => t.industryId),
+          teamId: u.employee?.industryId ?? '',
           isActive: u.isActive,
         });
         setOverrides(Object.fromEntries(u.overrides.map((o) => [o.key, o.effect])));
@@ -365,6 +370,7 @@ function UserEditor({
         departmentId: form.departmentId || null,
         roleIds: form.roleIds,
         supportTeamIds: form.supportTeamIds,
+        ...(detail?.employee ? { teamId: form.teamId || null } : {}),
         isActive: form.isActive,
         ...(form.password ? { password: form.password } : {}),
       };
@@ -499,6 +505,29 @@ function UserEditor({
                     {d.name}
                   </option>
                 ))}
+              </select>
+            </Field>
+            <Field
+              label="Team"
+              hint={
+                detail?.employee
+                  ? 'Their quotations, leads and sales orders count under this team — the team cards, the Team view and the forecast. Team Leaders and sales need one.'
+                  : 'This login has no employee record, so it cannot keep a team — add one in HR › Employees.'
+              }
+            >
+              <select
+                value={form.teamId}
+                disabled={!detail?.employee}
+                onChange={(e) => setForm({ ...form, teamId: e.target.value })}
+              >
+                <option value="">— no team —</option>
+                {teams
+                  .filter((t) => t.isActive || t.id === form.teamId)
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.code} — {t.name}
+                    </option>
+                  ))}
               </select>
             </Field>
             <Field label="New password" htmlFor="user-password" hint="Leave blank to keep the current password">
