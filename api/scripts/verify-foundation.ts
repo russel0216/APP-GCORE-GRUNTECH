@@ -44,6 +44,7 @@ import {
   historyFor,
   cancelOpenRequest,
   approversForStep,
+  supportersFor,
   slotSignatories,
   contactOf,
   contactsOf,
@@ -202,6 +203,7 @@ async function cleanup() {
   });
   const ids = users.map((u) => u.id);
   if (ids.length) {
+    await prisma.employee.deleteMany({ where: { userId: { in: ids } } });
     await prisma.approvalAction.deleteMany({ where: { approverId: { in: ids } } });
     await prisma.approvalRequest.deleteMany({ where: { requesterId: { in: ids } } });
     await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
@@ -693,6 +695,50 @@ async function main() {
   );
   const plainFallback = await approversForStep(supervisorElse(null), salesHead.id);
   check('a supervisor step naming no role still falls back to HR', plainFallback.includes(hrPerson.id) && !plainFallback.includes(salesHead.id));
+
+  // Back Support decides for the teams it supports (2026-10-12): the
+  // holders on the preparer's team, else those naming no team, else all.
+  const [kat, hit] = await Promise.all(
+    ['KAT', 'HIT'].map((code) => prisma.industry.findFirstOrThrow({ where: { code }, select: { id: true } })),
+  );
+  const preparer = await makeUser('Verify Preparer', 'preparer@verify.local', ['sales'], salesHead.id);
+  await prisma.employee.create({
+    data: { employeeNo: `${TAG}EMP1`, firstName: 'Verify', lastName: 'Preparer', userId: preparer.id, industryId: kat.id },
+  });
+  const loner = await makeUser('Verify Loner', 'loner@verify.local', ['sales']);
+  const bsKat = await makeUser('Verify BS KAT', 'bskat@verify.local', ['back_support']);
+  const bsHit = await makeUser('Verify BS HIT', 'bshit@verify.local', ['back_support']);
+  const bsAll = await makeUser('Verify BS All', 'bsall@verify.local', ['back_support']);
+  await prisma.userSupportTeam.createMany({
+    data: [
+      { userId: bsKat.id, industryId: kat.id },
+      { userId: bsHit.id, industryId: hit.id },
+    ],
+  });
+  const three = [bsKat.id, bsHit.id, bsAll.id];
+  const forKat = await supportersFor(three, preparer.id);
+  const forNoTeam = await supportersFor(three, loner.id);
+  const onlyHit = await supportersFor([bsHit.id], preparer.id);
+  check(
+    'Back Support goes to whoever supports the preparer’s team — not their own manager’s choice',
+    forKat.join() === bsKat.id,
+    JSON.stringify(forKat),
+  );
+  check(
+    'a preparer with no team goes to the Back Support naming no team; nobody on the team never stalls it',
+    forNoTeam.join() === bsAll.id && onlyHit.join() === bsHit.id,
+    `${JSON.stringify(forNoTeam)} / ${JSON.stringify(onlyHit)}`,
+  );
+  const backRole = await prisma.role.findUniqueOrThrow({ where: { key: 'back_support' } });
+  const viaStep = await approversForStep(
+    { approverType: 'ROLE', roleId: backRole.id, userId: null } as unknown as ApprovalStep,
+    preparer.id,
+  );
+  check(
+    'the ROLE step reads it: a KAT preparer’s Back Support step leaves out the HIT supporter',
+    viaStep.includes(bsKat.id) && !viaStep.includes(bsHit.id),
+    JSON.stringify(viaStep),
+  );
 
   // ── 5. Amount bands pick the workflow ──────────────────────────────────────
   console.log('\nApproval thresholds');

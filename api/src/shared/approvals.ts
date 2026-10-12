@@ -212,9 +212,11 @@ export async function approversForStep(
       if (!step.roleId) return [];
       const rows = await tx.userRole.findMany({
         where: { roleId: step.roleId, user: { isActive: true } },
-        select: { userId: true },
+        select: { userId: true, role: { select: { key: true } } },
       });
-      return rows.map((r) => r.userId);
+      const holders = rows.map((r) => r.userId);
+      if (!rows.length || !TEAM_SCOPED_ROLES.includes(rows[0].role.key)) return holders;
+      return supportersFor(holders, requesterId, tx);
     }
 
     case 'SUPERVISOR': {
@@ -239,6 +241,35 @@ export async function approversForStep(
     default:
       return [];
   }
+}
+
+/**
+ * Roles whose step goes to the holders who SUPPORT the requester's team
+ * (2026-10-12, the owner's call: "in admin back support, even they are
+ * reporting to specific manager, allow me to set where they support in back
+ * admin"). Each holder's teams are `UserSupportTeam` rows, set in Admin ›
+ * Users; the reporting line ("Reports to") is untouched by it.
+ */
+export const TEAM_SCOPED_ROLES = ['back_support'];
+
+/**
+ * The holders of a team-scoped role who decide for this requester: those
+ * supporting the requester's team (`Employee.industryId`), else those who
+ * name no team (they support every team), else every holder — a document
+ * never stalls because nobody was set for its team. A requester with no team
+ * goes to the holders who name none, else every holder.
+ */
+export async function supportersFor(holders: string[], requesterId: string, tx: Prisma.TransactionClient = prisma): Promise<string[]> {
+  if (!holders.length) return holders;
+  const [requester, links] = await Promise.all([
+    tx.employee.findUnique({ where: { userId: requesterId }, select: { industryId: true } }),
+    tx.userSupportTeam.findMany({ where: { userId: { in: holders } }, select: { userId: true, industryId: true } }),
+  ]);
+  const team = requester?.industryId ?? null;
+  const onTeam = team ? holders.filter((h) => links.some((l) => l.userId === h && l.industryId === team)) : [];
+  if (onTeam.length) return onTeam;
+  const everyTeam = holders.filter((h) => !links.some((l) => l.userId === h));
+  return everyTeam.length ? everyTeam : holders;
 }
 
 /** A person who decides a step: enough to name them on a page or a PDF. */

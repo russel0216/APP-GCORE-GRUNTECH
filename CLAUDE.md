@@ -470,7 +470,7 @@ four databases and four copies of "customer".
 cd api && for s in foundation masters sales costing pipeline calendar numbering partners delivery chain hr plantilla meetings evaluations academy finance aftermarket cad insights insights-brief workspace accounts; do npx tsx scripts/verify-$s.ts; done
 ```
 
-**3,776 assertions across twenty-two scripts** (counted 2026-10-11, after
+**3,779 assertions across twenty-two scripts** (counted 2026-10-11, after
 the one dress, the sign-off and money rules, the printed lists, the
 permission trim, the face clock-in upgrade and its review, the liveness
 check, the SCORO archive's removal, which took verify-archive and two
@@ -495,9 +495,10 @@ line_comment, and 24 on workspace for the Help box's tickets and who
 receives them, and one on sales for a row the database refuses, and 2 on
 foundation for the sales lists' year-to-date default, and 5 on sales for
 the team the SCORO import tags its quotations with, and 4 on foundation
-and 4 on workspace for the views on the person's account):
+and 4 on workspace for the views on the person's account, and 3 on
+foundation for the teams Back Support supports):
 foundation
-324, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
+327, masters 92, sales 529, costing 157, pipeline 92, calendar 96, numbering
 79, partners 120, delivery 145, chain 197, hr 431, plantilla 123, meetings
 97, evaluations 152, academy 120, finance 317, aftermarket 259, cad 100,
 insights 98, insights-brief 50, workspace 74, accounts 124. The
@@ -3077,6 +3078,19 @@ the quotation's and the sales order's route depends on the PREPARER's role.
   Support, Cost Controller; Team Leader — the same, then CEO / President;
   anyone else — Team Leader, Admin Back Support, Cost Controller, CEO /
   President (the general route, corrected in place through `previously`).
+- **Back Support decides for the TEAMS it supports** (2026-10-12, the
+  owner's call: "in admin back support, even they are reporting to
+  specific manager, allow me to set where they support in back admin").
+  `UserSupportTeam` (user × Industry/team), set as "Supports teams (Back
+  Support)" on Admin › Users' Access tab when the role is ticked (`PATCH
+  /users/:id { supportTeamIds }`, an unknown team a 400, audited with the
+  user). A ROLE step whose role is in `TEAM_SCOPED_ROLES`
+  (`shared/approvals.ts`, `back_support` only) goes through
+  `supportersFor()`: the holders supporting the PREPARER's team
+  (`Employee.industryId`), else the holders naming no team (they support
+  every team), else every holder — a document never stalls for want of a
+  supporter. "Reports to" is untouched by it. Nothing set is the old rule:
+  every holder.
 - **Assign the roles in Admin › Users**: until somebody holds Team Leader
   (for anyone with no "Reports to") and CEO / President, those steps route
   to nobody and `audit-workflows.ts` says so.

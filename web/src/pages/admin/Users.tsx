@@ -18,6 +18,9 @@ import { LinkDelivery, type Delivery } from '../../components/LinkDelivery';
 import { OrgChart } from './OrgChart';
 import { NewPersonModal } from '../masters/Employees';
 
+/** Roles whose approval step goes by the teams a holder supports — `TEAM_SCOPED_ROLES` in shared/approvals.ts. */
+const TEAM_SCOPED_ROLES = ['back_support'];
+
 interface Role {
   id: string;
   key: string;
@@ -48,6 +51,8 @@ interface UserRow {
 type UserDetail = Omit<UserRow, 'roles'> & {
   roles: { id: string; key: string; name: string }[];
   overrides: { key: string; effect: 'ALLOW' | 'DENY' }[];
+  /** The teams they support on a team-scoped approval step (Back Support). */
+  supportTeams: { industryId: string }[];
   /** The invitation in flight, while it is pending. */
   invite: { sentAt: string; expiresAt: string; live: boolean } | null;
   employee: { id: string; employeeNo: string; firstName: string; lastName: string } | null;
@@ -301,8 +306,10 @@ function UserEditor({
     supervisorId: '',
     departmentId: '',
     roleIds: [] as string[],
+    supportTeamIds: [] as string[],
     isActive: true,
   });
+  const [teams, setTeams] = useState<{ id: string; code: string; name: string; isActive: boolean }[]>([]);
   const [detail, setDetail] = useState<UserDetail | null>(null);
   /** The link just issued — shown until the administrator is done with it. */
   const [issued, setIssued] = useState<{ delivery: Delivery; kind: 'invite' | 'reset' } | null>(null);
@@ -312,6 +319,10 @@ function UserEditor({
       .get<{ rows: UserRow[] }>('/users?pageSize=200')
       .then((r) => setPeople(r.rows))
       .catch(() => setPeople([]));
+    api
+      .get<{ id: string; code: string; name: string; isActive: boolean }[]>('/reference/industries')
+      .then(setTeams)
+      .catch(() => setTeams([]));
     api
       .get<PermissionCatalog>('/roles/permission-catalog')
       .then(setCatalog)
@@ -333,6 +344,7 @@ function UserEditor({
           supervisorId: u.supervisor?.id ?? '',
           departmentId: u.department?.id ?? '',
           roleIds: u.roles.map((r) => r.id),
+          supportTeamIds: (u.supportTeams ?? []).map((t) => t.industryId),
           isActive: u.isActive,
         });
         setOverrides(Object.fromEntries(u.overrides.map((o) => [o.key, o.effect])));
@@ -352,6 +364,7 @@ function UserEditor({
         supervisorId: form.supervisorId || null,
         departmentId: form.departmentId || null,
         roleIds: form.roleIds,
+        supportTeamIds: form.supportTeamIds,
         isActive: form.isActive,
         ...(form.password ? { password: form.password } : {}),
       };
@@ -536,6 +549,35 @@ function UserEditor({
               ))}
             </div>
           </Field>
+
+          {roles.some((r) => TEAM_SCOPED_ROLES.includes(r.key) && form.roleIds.includes(r.id)) && (
+            <Field
+              label="Supports teams (Back Support)"
+              hint="Where they support in back admin: a Back Support approval goes to whoever supports the preparer's team, whoever their own manager is. None ticked supports every team."
+            >
+              <div className="row">
+                {teams
+                  .filter((t) => t.isActive || form.supportTeamIds.includes(t.id))
+                  .map((t) => (
+                    <label key={t.id} className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={form.supportTeamIds.includes(t.id)}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            supportTeamIds: e.target.checked
+                              ? [...form.supportTeamIds, t.id]
+                              : form.supportTeamIds.filter((x) => x !== t.id),
+                          })
+                        }
+                      />
+                      <span title={t.name}>{t.code}</span>
+                    </label>
+                  ))}
+              </div>
+            </Field>
+          )}
 
           <hr className="rule" />
 

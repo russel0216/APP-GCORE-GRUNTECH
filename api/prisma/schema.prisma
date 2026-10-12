@@ -137,6 +137,8 @@ model User {
   cadComments        CadComment[]      @relation("CadCommentAuthor")
   helpTickets        HelpTicket[]      @relation("HelpTicketRaiser")
   helpTicketReplies  HelpTicketReply[] @relation("HelpTicketReplyAuthor")
+  /// The teams this person supports on a team-scoped approval step (Back Support).
+  supportTeams       UserSupportTeam[]
 
   quoteLinesProvided   QuotationItem[]  @relation("QuoteLineProvider")
   soLinesProvided      SalesOrderLine[] @relation("SoLineProvider")
@@ -668,6 +670,7 @@ model Industry {
   employees Employee[]
   /// Quotations tagged with this team (the SCORO import, 2026-10-12).
   quotationsTagged Quotation[] @relation("QuotationTeam")
+  supporters       UserSupportTeam[]
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 }
@@ -4466,4 +4469,18 @@ model HelpTicketReply {
   createdAt DateTime          @default(now())
 
   @@index([ticketId, createdAt])
+}
+
+/// Where a Back Support person supports (2026-10-12, the owner's call: "even
+/// they are reporting to specific manager, allow me to set where they support
+/// in back admin"). A team-scoped ROLE step goes to the holders who support the
+/// requester's team; nobody set means every holder, as before.
+model UserSupportTeam {
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  industryId String
+  industry   Industry @relation(fields: [industryId], references: [id], onDelete: Cascade)
+
+  @@id([userId, industryId])
+  @@index([industryId])
 }

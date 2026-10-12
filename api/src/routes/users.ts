@@ -44,6 +44,8 @@ const publicUser = {
   createdAt: true,
   /** Attachment id of the account picture — the org chart draws it. */
   photoPath: true,
+  /** The teams they support on a team-scoped approval step (Back Support). */
+  supportTeams: { select: { industryId: true } },
 } as const;
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -418,6 +420,8 @@ const updateSchema = z.object({
   supervisorId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   roleIds: z.array(z.string()).optional(),
+  /** Where they support in back admin — teams; empty is every team. */
+  supportTeamIds: z.array(z.string()).max(50).optional(),
   isActive: z.boolean().optional(),
   /** A password set by hand answers the invitation. */
   password: z.string().min(8, 'Use at least 8 characters').max(128, 'Use at most 128 characters').optional(),
@@ -444,6 +448,11 @@ userRoutes.patch(
     // Don't let an admin deactivate themselves and lock the door behind them.
     if (body.isActive === false && req.params.id === me.id) {
       throw badRequest('You cannot deactivate your own account');
+    }
+
+    if (body.supportTeamIds?.length) {
+      const known = await prisma.industry.count({ where: { id: { in: body.supportTeamIds } } });
+      if (known !== new Set(body.supportTeamIds).size) throw badRequest('supportTeamIds: a team was not found');
     }
 
     const data: Prisma.UserUpdateInput = {};
@@ -477,6 +486,12 @@ userRoutes.patch(
         await tx.userRole.deleteMany({ where: { userId: req.params.id } });
         await tx.userRole.createMany({
           data: body.roleIds.map((roleId) => ({ userId: req.params.id, roleId })),
+        });
+      }
+      if (body.supportTeamIds) {
+        await tx.userSupportTeam.deleteMany({ where: { userId: req.params.id } });
+        await tx.userSupportTeam.createMany({
+          data: [...new Set(body.supportTeamIds)].map((industryId) => ({ userId: req.params.id, industryId })),
         });
       }
       return tx.user.update({ where: { id: req.params.id }, data, select: publicUser });
