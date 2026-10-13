@@ -807,9 +807,8 @@ launcher as the way out) — never a stale phase sentence.
   a bucket on two phases is a 400. On the sheet each phase has a "Value"
   select (Spread / Declared / From cost) with a `TickPicker` of buckets,
   and typing a figure in a spread phase declares it. The preload's
-  PURCHASE OF EQUIPMENT takes Equipment and PURCHASE OF MATERIALS takes
-  Materials (`valueFrom` codes in `SCOPE_PRELOAD`) — phases of their own
-  since 2026-10-13 (the owner's call), so each bills on its own line.
+  PLANNING & ENGINEERING takes Materials and Equipment (`valueFrom` codes
+  in `SCOPE_PRELOAD`), its purchase tasks being where that money goes.
 - **No Opportunity entity.** The requirements treat the opportunity as the lead
   until a quotation exists, so the pipeline is a view over leads + quotations.
   Do not introduce a third record to keep in step.
@@ -4191,12 +4190,10 @@ Cost Estimate" PDF) in G-CORE's own style.
   Contingency 6).
 - **A new sheet opens on the owner's scope of work** (2026-10-13,
   `SCOPE_OF_WORK_PRELOADED.xlsx`): `SCOPE_PRELOAD` in
-  `shared/scopePreload.ts` — PLANNING & ENGINEERING, PURCHASE OF
-  EQUIPMENT, PURCHASE OF MATERIALS (the sheet's two purchase tasks as
-  phases of their own, the owner's call the same day), SITE PREPARATION,
+  `shared/scopePreload.ts` — PLANNING & ENGINEERING, SITE PREPARATION,
   DELIVERY, UNLOADING & PLACEMENT, INSTALLATION & INTEGRATION (main work),
   TESTING & COMMISSIONING (`TESTING_COMMISSIONING`), HAND OVER & CLOSURE
-  (`TURNOVER`), fifteen tasks under the eight, each one working day to start
+  (`TURNOVER`), fifteen tasks under them, each one working day to start
   with — sent by `GET /costings/suggest/lists` as `scopePreload` and
   loaded by `/new` once; every phase and task stays removable. A template
   chosen on a new sheet REPLACES the preload while nobody has touched it
