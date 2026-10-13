@@ -872,6 +872,12 @@ launcher as the way out) — never a stale phase sentence.
 - **The S-curve's three lines share a time basis** — billed is plotted against
   the period its progress report covers, not the date the billing was raised.
   Otherwise comparing the lines is meaningless.
+- **The S-curve's date scale is labelled by TIME** (2026-10-13, the owner's
+  report: the labels overlapped): `curveTicks()` in `web/src/lib/sCurve.ts`,
+  DOM-free — the first and last dates always, evenly spaced dates between,
+  a label within 56 chart units of another dropped (the last date wins),
+  the year added when the span crosses one. Never one label per point:
+  progress reports cluster. verify-delivery pins it.
 
 ## Phase 6 notes worth carrying forward
 

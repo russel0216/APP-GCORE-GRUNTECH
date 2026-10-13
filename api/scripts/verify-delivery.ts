@@ -18,6 +18,7 @@ import { financeSettings, refreshSettlement, settleable, addDays, dayKey } from 
 import { signToken } from '../src/auth/middleware';
 import { budgetPosition, sCurve, renewalTerm } from '../src/routes/jobs';
 import { statusLabel } from '../src/shared/pdf';
+import { curveTicks } from '../../web/src/lib/sCurve';
 // Side-effect import: registers the budget_request approval subscriber.
 import '../src/routes/budgetRequests';
 import {
@@ -782,6 +783,22 @@ async function main() {
 
   const curve = await sCurve(job.id);
   check('the curve has points', curve.length > 2, `${curve.length}`);
+  // The date scale (2026-10-13, the owner's report: the labels overlapped).
+  // The screenshot's project: Oct 13 to Jan 11, its reports clustered in January.
+  const geometry = { left: 44, width: 660 };
+  const ticks = curveTicks('2026-10-13', '2027-01-11', geometry);
+  const gaps = ticks.slice(1).map((t, i) => t.x - ticks[i].x);
+  check(
+    'S-curve ticks: by time across the span, the first and last dates labelled, no two closer than 56 units',
+    ticks[0].label === "Oct 13 '26" && ticks[ticks.length - 1].label === "Jan 11 '27" && ticks.length >= 3 && gaps.every((g) => g >= 56),
+    ticks.map((t) => `${t.label}@${t.x.toFixed(0)}`).join(' '),
+  );
+  const short = curveTicks('2026-01-06', '2026-01-08', { left: 44, width: 40 });
+  check(
+    'a span too narrow for two labels prints the first alone, never two on one spot',
+    short.length === 1 && short[0].label === 'Jan 6',
+    short.map((t) => t.label).join(),
+  );
   check('planned rises to 100%', money(curve[curve.length - 1].planned, 100), String(curve[curve.length - 1].planned));
 
   const withActual = curve.filter((p) => p.actual !== null);
